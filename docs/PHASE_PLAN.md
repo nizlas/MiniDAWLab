@@ -92,6 +92,8 @@ It must be treated as:
 - basic app scaffold for a JUCE-based desktop app
 - audio device initialization sufficient for playback
 - load/open a single audio file
+- a file loading / import component responsible for turning a file path
+  into a loaded clip, separate from playback
 - represent one clip in a timeline-oriented way
 - simple waveform display
 - transport controls: play / stop / pause
@@ -119,6 +121,24 @@ It must be treated as:
 - background analysis pipelines
 - advanced persistence
 - undo/redo framework
+
+### Phase 1 Playback Assumptions
+
+For Phase 1 only, the following strategy choices are fixed:
+
+- The loaded audio file is assumed to be short enough to be held fully
+  decoded in memory. Streaming from disk is deferred.
+- File loading is synchronous on the message thread. An asynchronous
+  loading model is deferred.
+- The loaded file's sample rate must match the active audio device sample
+  rate. If it does not, the file is rejected with a user-visible error and
+  the session state remains unchanged. Resampling is explicitly deferred
+  and must not be introduced implicitly to make mismatched files play.
+- The loaded file's channel count is used as-is; no upmix or downmix logic
+  is introduced in Phase 1.
+
+These are strategy choices, not architectural ones. They must be revisited
+when a later phase changes the loading or playback path.
 
 ### Expected Value
 

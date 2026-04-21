@@ -45,6 +45,29 @@ Transport state must have a clear source of truth.
 
 Playback position, play/pause/stop intent, and seek state must not be duplicated across multiple unrelated objects without explicit justification.
 
+The transport source of truth for Phase 1 is a single object named `Transport`,
+owned at the application composition level. The exact top-level class
+arrangement that instantiates and owns it is an implementation choice.
+
+`Transport` holds:
+
+- the playback intent (playing / paused / stopped),
+- the authoritative playhead position in samples,
+- any pending seek request.
+
+Writers are constrained:
+
+- playback intent is written only by non-realtime code in response to user
+  actions,
+- the authoritative playhead position is written only by `PlaybackEngine`
+  from inside the audio callback,
+- a seek is expressed as a pending seek request written by non-realtime code;
+  `PlaybackEngine` consumes it at the start of its next callback and applies
+  it to the playhead.
+
+No other component may mutate these fields. UI components read transport
+state but do not own or mutate it.
+
 ### File loading is separate from playback
 
 File import, file opening, and audio decoding concerns must be separated from playback control and playback execution.
@@ -96,6 +119,31 @@ In particular, avoid placing the following into the realtime path unless documen
 
 If threading or background work is introduced, the synchronization model must be explicitly explained first.
 
+### Phase 1 cross-thread model
+
+Phase 1 runs user-visible code on the message thread (UI and file loading)
+and runs playback on the audio-callback thread (`PlaybackEngine`). Transport
+state is read and written across these two threads.
+
+The cross-thread model is constrained as follows:
+
+- communication of transport state between the message thread and the audio
+  callback must be lock-free and non-blocking,
+- the audio callback is the only writer of the authoritative playhead
+  position,
+- the message thread may request a seek, but the audio callback applies it;
+  the message thread never writes the authoritative playhead directly,
+- the audio-callback path must not take mutexes, wait on condition variables,
+  allocate, or use any other blocking synchronization.
+
+The exact lock-free primitives used to realize this model (for example
+atomic variables, single-producer flags, or equivalent mechanisms) are an
+implementation choice, not a steering-level constraint, as long as the
+properties above hold.
+
+If later phases introduce richer transport state (for example loop regions
+or tempo), this section must be revisited before that state is added.
+
 ## Phase 1 Intended Conceptual Split
 
 Phase 1 should aim toward a clear conceptual split such as:
@@ -111,6 +159,12 @@ Phase 1 should aim toward a clear conceptual split such as:
 
 - **Domain/session layer**  
   Concepts such as loaded clip, timeline placement, and session state.
+
+- **File loading / import concept**  
+  Responsibility for turning a file path into a loaded clip, with no
+  knowledge of transport, engine, or UI. This is a concept, not a
+  subsystem: in Phase 1 it may be a single small class. It must not own
+  clips, playback state, or transport.
 
 - **UI layer**  
   Waveform display, transport controls, playhead display, and user interaction.
