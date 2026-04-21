@@ -1,0 +1,172 @@
+# Architecture Principles
+
+This document defines the architecture envelope for MiniDAWLab.
+
+The agent is not allowed to invent architecture outside this envelope.  
+It may only implement within the structure, constraints, and scope explicitly documented here and in the other steering documents.
+
+## Core Principle
+
+The agent is a constrained implementer, not architect-in-chief.
+
+Architecture must be made explicit in documents before it is implemented in code.
+
+If architectural gaps, ambiguities, or risks are discovered, the correct action is to update the steering documents first, then reassess implementation.
+
+## Phase 1 Architectural Framing
+
+Phase 1 must **not** be treated as “just a WAV player”.
+
+It must be treated as:
+
+**a small timeline/playback engine that currently happens to support one audio clip**
+
+This means the design must support a logical growth path toward:
+
+- multiple clips
+- multiple tracks
+- clearer transport ownership
+- separation of playback, file loading, waveform generation, and UI
+- future routing and mixer-related expansion
+
+However, that future growth path must be supported **without introducing premature subsystems** outside the current phase scope.
+
+## Core Separation Requirements
+
+### UI and engine separation
+
+UI must not own audio engine logic.
+
+UI may display state and invoke high-level actions, but it must not become the hidden owner of playback behavior, transport truth, decoding flow, or engine decisions.
+
+### Clear transport source of truth
+
+Transport state must have a clear source of truth.
+
+Playback position, play/pause/stop intent, and seek state must not be duplicated across multiple unrelated objects without explicit justification.
+
+### File loading is separate from playback
+
+File import, file opening, and audio decoding concerns must be separated from playback control and playback execution.
+
+Opening a file must not implicitly blur boundaries between:
+- file loading
+- clip/session state
+- transport behavior
+- audio output behavior
+
+### Waveform rendering is separate from playback
+
+Waveform generation/rendering must be separated from playback logic.
+
+A waveform view may depend on audio file or clip information, but waveform-related code must not become entangled with transport execution or audio callback behavior.
+
+### Avoid hidden singletons
+
+No hidden singletons unless explicitly justified in documents.
+
+Global or effectively global state should be avoided unless there is a documented architectural reason.
+
+### Clear ownership and lifetimes
+
+Ownership and lifetimes must be explicit.
+
+It should always be reasonably clear:
+- what owns what
+- which objects are long-lived
+- which objects are phase-local or view-local
+- which references are non-owning
+- where destruction order matters
+
+## Audio-Thread Safety Principles
+
+The audio callback is a constrained environment.
+
+Do not move logic into the audio callback unless explicitly justified.
+
+In particular, avoid placing the following into the realtime path unless documented and justified:
+
+- file loading
+- decoding setup
+- UI work
+- waveform generation
+- allocation-heavy behavior
+- hidden synchronization that may block
+- state mutation whose thread-safety model is unclear
+
+If threading or background work is introduced, the synchronization model must be explicitly explained first.
+
+## Phase 1 Intended Conceptual Split
+
+Phase 1 should aim toward a clear conceptual split such as:
+
+- **App / composition layer**  
+  Top-level assembly and wiring.
+
+- **Transport / playback control layer**  
+  High-level playback intent and position control.
+
+- **Engine layer**  
+  Audio-device-facing and playback-facing behavior.
+
+- **Domain/session layer**  
+  Concepts such as loaded clip, timeline placement, and session state.
+
+- **UI layer**  
+  Waveform display, transport controls, playhead display, and user interaction.
+
+This is a conceptual split, not a forced early over-abstraction.  
+The implementation may remain small, but responsibilities must remain visible.
+
+## Scaling Constraint
+
+The architecture must work for one clip now **without poisoning the path** toward multiple clips and tracks later.
+
+That means Phase 1 must avoid designs that only work because there is exactly one clip, if those designs would create painful refactoring later.
+
+Examples of risky patterns:
+
+- UI object secretly owning transport truth
+- playback state embedded only in a waveform component
+- clip identity and transport identity being treated as the same thing
+- file import directly constructing playback behavior with no separable model
+- one-off logic that assumes only one future track or one future clip forever
+
+## Anti-Scope-Creep Rule
+
+Do not add architectural concepts that are not explicitly needed for the current phase.
+
+In particular, do not introduce major subsystems for:
+- plugin hosting
+- mixer/routing frameworks
+- background asset pipelines
+- generalized track graphs
+- advanced persistence systems
+- undo frameworks
+- multi-threaded job systems
+
+unless those are explicitly added to the steering documents first.
+
+## Modern C++ Principle
+
+Modern C++ should be used when it improves correctness, clarity, maintainability, or architectural fit.
+
+Do not avoid newer language features merely because they are newer.
+
+However:
+- do not use advanced features for their own sake
+- do not hide simple ownership or flow behind unnecessary cleverness
+- prefer readable and learnable code
+- explain less obvious choices briefly where that materially helps understanding
+
+## Required Architectural Questions Before Implementation
+
+Before implementation of a phase, the following questions must be answered:
+
+1. What is the source of truth for transport state?
+2. What owns the loaded audio file or clip model?
+3. What code is responsible for playback versus file import versus waveform display?
+4. What assumptions are being made because Phase 1 only supports one clip?
+5. Which decisions are intentionally deferred, and why is that safe?
+
+If these questions cannot be answered clearly, the architecture docs must be updated before implementation proceeds.
