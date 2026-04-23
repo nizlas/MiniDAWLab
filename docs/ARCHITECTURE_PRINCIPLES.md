@@ -121,9 +121,8 @@ If threading or background work is introduced, the synchronization model must be
 
 ### Phase 1 cross-thread model
 
-Phase 1 runs user-visible code on the message thread (UI and file loading)
-and runs playback on the audio-callback thread (`PlaybackEngine`). Transport
-state is read and written across these two threads.
+Phase 1 uses the message thread for UI and synchronous file loading, and uses the audio-callback thread for playback (`PlaybackEngine`).
+Transport state is read and written across these two threads.
 
 The cross-thread model is constrained as follows:
 
@@ -211,7 +210,8 @@ However:
 - do not use advanced features for their own sake
 - do not hide simple ownership or flow behind unnecessary cleverness
 - prefer readable and learnable code
-- explain less obvious choices briefly where that materially helps understanding
+
+**Pedagogical visibility:** Responsibility, ownership, lifetime, and thread or realtime constraints must be **visible in the code** for central types and files—not only in external prose. A reader who knows C++ but not this codebase or JUCE should be able to orient themselves from class and file-level documentation, from the thread/realtime markers on the audio path, and from **readable method bodies** (top-down intent in non-trivial methods and callback reachability), without reverse-engineering intent from implementation details. The **exact** rules (six tiers: file header, class doc, method doc, audio-thread markers, JUCE-usage notes, **body readability**; plus bounded **readability refactors** during documentation passes where listed in `docs/IMPLEMENTATION_GUIDE.md`), anti-patterns, and the hard validation gate are defined in `docs/IMPLEMENTATION_GUIDE.md` under **In-Code Documentation Requirements**. That section is part of the architecture envelope for how implementation is expressed; it is not optional commentary.
 
 ## Required Architectural Questions Before Implementation
 

@@ -30,6 +30,24 @@ For every completed phase, explicitly ask:
 6. What is still weak, provisional, or risky?
 7. What steering-document updates, if any, are now needed before proceeding?
 
+## Code Documentation (in-code rubric)
+
+In addition to the questions above, every completed phase that adds or changes **central** hand-written source (see `docs/IMPLEMENTATION_GUIDE.md`, **In-Code Documentation Requirements**) must pass the following **hard** gate. A phase is not successful if it leaves new or meaningfully changed central files in violation of the six tiers without an explicit, reviewed exception.
+
+Ask explicitly, for this phase’s delta:
+
+1. **File headers** — Does every new or meaningfully changed central `*.h` / `*.cpp` file in scope have a file header that states the file’s role, threading expectations, and how it fits the architecture?
+
+2. **Class documentation** — Does every new or changed **public** class in scope have a class-level doc block covering responsibility, ownership/lifetime, and thread rules (and deliberate non-responsibilities where that avoids confusion)?
+
+3. **Method and function documentation** — Does every **non-trivial** public method and every **thread-sensitive** or audio-path-related function in scope have a contract comment, including which thread may call it and, where applicable, realtime constraints?
+
+4. **Audio thread** — For every function that runs on or is only for the audio device callback, is there an explicit audio-thread marker and a one-line statement of what must not happen on that path (unless a named steering exception applies)?
+
+5. **Body readability** — For every new or meaningfully changed non-trivial public method and every audio-path function in scope, can a C++-fluent reader who does not know JUCE and does not know this codebase follow the main path *top-down* from comments and local names alone, without having to reverse-engineer pointer arithmetic, channel indexing, or buffer-tail handling to understand intent? Is chunking and naming used as a *readability* tool (not a formulaic ritual), and are any refactors in `docs/IMPLEMENTATION_GUIDE.md` under **Readability refactors allowed during documentation passes** listed in the commit and within those bounds?
+
+If the answer to any of these is *no* for a file that the phase created or substantively edited, the phase is not complete until the gap is fixed or a documented exception is approved; silent drift is not acceptable.
+
 ## Required Validation Output
 
 Every phase review should produce the following:
@@ -171,3 +189,4 @@ A phase is considered successful only when:
 - its responsibility split is explainable
 - its known weaknesses are explicitly stated
 - it leaves a credible path to the next phase without hidden architectural debt
+- **in-code documentation:** it passes the **Code Documentation (in-code rubric)** gate (all six tiers, including body readability) for every central file the phase added or meaningfully changed

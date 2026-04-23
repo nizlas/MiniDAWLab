@@ -207,9 +207,10 @@ However:
 - do not optimize for cleverness
 - do not hide ownership or flow behind unnecessary abstraction
 - prefer readable, learnable, explainable code
-- briefly explain less obvious constructs when that materially helps understanding
 
 The goal is modern, clear, robust, and learnable C++.
+
+**In-code documentation is mandatory, not optional.** The steering documents define a **six-tier** rubric for central source files: (1) file header, (2) class documentation, (3) method/function documentation for non-trivial and thread-sensitive entry points, (4) explicit **audio-thread** markers on the realtime path, (5) one-line **JUCE-usage notes** where a JUCE API would be opaque to someone who does not know the framework, and (6) **body readability** — method bodies for non-trivial and audio-path code must be followable top-down from comments and role-named locals; chunking and optional small private helpers (when they genuinely help) are means to that end, not a formula. Where a branch's or operation's meaning in system or product terms is not obvious from names and structure (for example, the Phase 1 mono-to-stereo rule, or why a buffer tail is cleared), add a short **in-body explanatory comment** that states the meaning in plain language — not a narration of the C++. The full rules, the allowance for **readability refactors** during documentation passes, anti-patterns, exemptions, and the **hard validation gate** (a phase is not complete if changed central files violate the rubric) are in `docs/IMPLEMENTATION_GUIDE.md` under **In-Code Documentation Requirements**. Read and apply that section before and during implementation; do not rely on ad hoc “a short comment if something is weird.”
 
 ---
 
@@ -224,11 +225,12 @@ Prefer:
 - top-down readability
 - intent-first naming
 - visible responsibility boundaries
-- short local explanations for non-obvious architectural or realtime-audio choices
 
-A newcomer should be able to understand the high-level system structure without opening every low-level implementation file.
+A newcomer who knows C++ but not JUCE should be able to read **file headers**, **class doc comments**, and **audio-thread markers** and understand the role of each central component, who owns what, and what must not run on the audio callback, without spelunking the whole tree.
 
 Prefer names that describe **role in the system** rather than only low-level mechanism.
+
+The concrete requirements are not “short local explanations when you remember”: they are the **six-tier** rubric (including **body readability**) and validation gate in `docs/IMPLEMENTATION_GUIDE.md` → **In-Code Documentation Requirements**, cross-checked in `docs/VALIDATION_CHECKLIST.md` under **Code Documentation (in-code rubric)**.
 
 ---
 

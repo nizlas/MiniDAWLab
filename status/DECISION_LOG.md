@@ -173,3 +173,41 @@ Rationale:
 Notes:
 - Phase 1 uses a simple full-width clip coordinate model.
 - More advanced timeline semantics belong to later phases.
+    
+## 2026-04-25 — Phase 1 documentation retrofit completed
+
+Decision:
+- The existing Phase 1 codebase was retrofitted to the strengthened six-tier in-code documentation rubric.
+- This included the clarified body-readability rule and the bounded readability-refactor allowance.
+- The retrofit was completed before continuing with Phase 2 code work.
+
+Rationale:
+- The earlier documentation level was not sufficiently pedagogical for a reader browsing the codebase.
+- File headers, class/method comments, and technical labels alone were not enough.
+- Central method bodies also needed plain-language in-body explanatory comments where branch meaning would otherwise be hidden behind low-level mechanics.
+
+Notes:
+- The retrofit was intended to preserve behavior.
+- The purpose was to improve pedagogical readability, not to change architecture or functionality.
+- The strengthened documentation standard now serves as the baseline for subsequent Phase 2 implementation work.
+
+## 2026-04-25 — Phase 2 resumed after documentation retrofit
+
+Decision:
+- Phase 2 planning remains the active next step after the completed Phase 1 documentation retrofit.
+- The approved Phase 2 scope is still:
+  - multiple clips on one timeline
+  - explicit clip start positions
+  - overlap allowed
+  - front-most covering clip wins
+  - add clip at current playhead
+  - clamp at timeline end
+
+Rationale:
+- The documentation retrofit was completed to ensure the existing codebase is readable enough before building further on top of it.
+- With that baseline in place, Phase 2 can now proceed under the strengthened documentation rubric.
+
+Notes:
+- Phase 2 implementation order remains the previously approved step sequence.
+- No Phase 2 code changes were part of the documentation retrofit itself.
+- The next executable Phase 2 step is the approved steering/document update for Phase 2 semantics before new code changes begin.

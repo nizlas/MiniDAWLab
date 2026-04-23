@@ -1,8 +1,39 @@
 #pragma once
 
+// =============================================================================
+// Transport.h / Transport.cpp  —  single source of truth for playback control (see ARCHITECTURE)
+// =============================================================================
+//
+// ROLE IN THE APP
+//   Answers three questions for the rest of the program: (1) Should we be playing, paused, or
+//   stopped? (2) Where is the playhead (sample index in Phase 1: index into the one loaded clip)?
+//   (3) Did the user request a seek that the audio thread has not applied yet?
+//
+// ARCHITECTURAL PLACE
+//   UI and non-realtime code call the public request* and read* methods. Only PlaybackEngine,
+//   on the audio device callback thread, may advance the playhead or consume seeks (via the
+//   private audioThread_* API). That split keeps one writer for the authoritative playhead and
+//   avoids mutexes on the realtime path — state is std::atomic-based.
+//
+// THREAD MODEL (plain language)
+//   • Message / UI thread: user clicks Play, Pause, Stop, seek on waveform → requestPlaybackIntent,
+//     requestSeek. UI reads the playhead for drawing with readPlayheadSamplesForUi (read-only).
+//   • Audio thread: at the start of each block, apply pending seek; read intent and playhead;
+//     after rendering, advance playhead by samples actually played (PlaybackEngine does that).
+//   • Never: UI writing the playhead directly. Never: audio thread decoding files.
+//
+// KEY COLLABORATORS
+//   • PlaybackEngine (friend): only caller of audioThread_*.
+//   • Session: separate; Transport does not know about clips.
+//
+// FILE PAIRING
+//   Declarations here; definitions in Transport.cpp, including why each atomic uses its
+//   memory_order (see Transport.cpp file header).
+
 #include <atomic>
 #include <cstdint>
 
+// User-facing transport mode. Stored as uint32_t inside Transport for std::atomic compatibility.
 enum class PlaybackIntent : std::uint32_t
 {
     Stopped = 0,
@@ -10,7 +41,26 @@ enum class PlaybackIntent : std::uint32_t
     Paused = 2,
 };
 
-// Phase 1 transport source of truth (see docs/ARCHITECTURE_PRINCIPLES.md).
+// ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+// Responsibility: own the atomic fields that represent playback *intent* (Stopped / Playing /
+// Paused), the authoritative *playhead* sample index, and a *pending seek* (target index +
+// flag). The UI requests changes; the audio callback is the only writer of the playhead and
+// the consumer of seek requests, via the private `audioThread_*` API (see PlaybackEngine).
+//
+// Lifetime / ownership: a single instance owned at app composition level; outlives the audio
+// callback registration. No heap ownership of clips or files.
+//
+// Threading: public methods and `readPlayheadSamplesForUi` are for any non-callback thread
+// (typically the message / UI thread). `audioThread_*` is only for the audio device callback
+// (PlaybackEngine is a `friend` so no other type can call them).
+//
+// Not responsible for: clip content, file decoding, or waveform (Session and UI own those).
+//
+// In-body comments in Transport.cpp state product meaning at control points (seek apply,
+// playhead advance rules) where the atomic mechanics alone would not carry that meaning.
+// ---------------------------------------------------------------------------
 class PlaybackEngine;
 class Transport
 {
@@ -23,24 +73,35 @@ public:
     Transport(Transport&&) = delete;
     Transport& operator=(Transport&&) = delete;
 
-    // Message thread / non-realtime: playback intent (play / pause / stop).
+    // Contract: set user-facing transport mode. Store is release-ordered so the next audio
+    // block can observe the new intent. Thread: not the audio callback.
     void requestPlaybackIntent(PlaybackIntent intent) noexcept;
 
-    // Message thread / non-realtime: queue seek; audio callback applies it.
+    // Contract: record seek target and set seek-pending. The playhead is updated only when
+    // the audio thread runs `audioThread_beginBlock` (next block). Thread: not the callback.
     void requestSeek(std::int64_t sampleIndex) noexcept;
 
-    // Message thread / UI: lock-free read of authoritative playhead (sample index). Not a second
-    // source of truth; PlaybackEngine remains the only writer of the playhead value.
+    // Contract: read the playhead the callback last published (acquire-ordered w.r.t. playhead
+    // stores from the audio thread). Thread: any non-callback; safe for UI repaint timers.
     [[nodiscard]] std::int64_t readPlayheadSamplesForUi() const noexcept;
 
 private:
     friend class PlaybackEngine;
 
-    // Audio callback only — call in this order: beginBlock, read playhead/intent, render,
-    // then advancePlayheadIfPlaying with the number of timeline samples actually consumed.
+    // [Audio thread] If the UI set seek-pending, clear it and set the playhead to the target.
+    // Call once at the start of each output block, before reading playhead for rendering.
     void audioThread_beginBlock() noexcept;
+
+    // [Audio thread] Current playhead sample index in the active clip (Phase 1). Call after
+    // `audioThread_beginBlock` so a pending seek is visible. Relaxed: synchronized by beginBlock.
     [[nodiscard]] std::int64_t audioThread_loadPlayhead() const noexcept;
+
+    // [Audio thread] Current playback intent. Acquire load: pairs with release stores on the
+    // UI path so we see a coherent intent for this block.
     [[nodiscard]] PlaybackIntent audioThread_loadIntent() const noexcept;
+
+    // [Audio thread] If intent is Playing, add `deltaSamples` to the playhead (the number of
+    // *source* sample frames output this block). No-op for non-Playing or non-positive delta.
     void audioThread_advancePlayheadIfPlaying(std::int64_t deltaSamples) noexcept;
 
     std::atomic<std::uint32_t> intent_;
