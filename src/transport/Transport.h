@@ -6,7 +6,9 @@
 //
 // ROLE IN THE APP
 //   Answers three questions for the rest of the program: (1) Should we be playing, paused, or
-//   stopped? (2) Where is the playhead (sample index in Phase 1: index into the one loaded clip)?
+//   stopped? (2) Where is the playhead? In Phase 1 / this Step-4 handoff, that is still a
+//   *clip-relative* sample index (0 .. end of the material), matching what PlaybackEngine and the
+//   waveform use; a later step migrates the same field to a session-timeline-absolute index.
 //   (3) Did the user request a seek that the audio thread has not applied yet?
 //
 // ARCHITECTURAL PLACE
@@ -92,7 +94,8 @@ private:
     // Call once at the start of each output block, before reading playhead for rendering.
     void audioThread_beginBlock() noexcept;
 
-    // [Audio thread] Current playhead sample index in the active clip (Phase 1). Call after
+    // [Audio thread] Read cursor into the *current* playback range (clip-relative in Phase 1; same
+    // numeric line used by the engine and waveform for seek/display). Call after
     // `audioThread_beginBlock` so a pending seek is visible. Relaxed: synchronized by beginBlock.
     [[nodiscard]] std::int64_t audioThread_loadPlayhead() const noexcept;
 

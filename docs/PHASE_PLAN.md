@@ -172,25 +172,48 @@ After implementation, provide:
 
 ### Goal
 
-Extend the design from one clip to multiple clips on a timeline without collapsing the architectural separation established in Phase 1.
+Extend the design from one clip to multiple clips on a single session timeline without collapsing the architectural separation established in Phase 1.
+
+### Agreed Phase 2 semantics (steering)
+
+- **Placed clips:** more than one decoded clip may exist in session state; each has an explicit
+  **start sample** on the **session timeline** (device samples, same rate rules as Phase 1).
+- **Add placement:** the primary UI path adds a clip at the **current playhead** (read once
+  from `Transport` on the non-realtime path at add time), not an arbitrary free placement UI.
+- **Overlap:** clips may overlap in time. **Front-to-back** order is **owned by `Session`**
+  (index 0 = front-most, “on top”); the UI is a read-only consumer of that order, not the
+  source of truth.
+- **Newest on top (Phase 2 default):** the clip added most recently is **front-most** for
+  overlap resolution unless a later phase introduces reordering.
+- **Playback (not mixing):** at each timeline instant, at most one clip is audible: the
+  **front-most clip that covers** that instant (stacked-events style). Underlying clips are
+  heard only where not covered. This is **not** summing overlapping audio.
+- **Playhead meaning:** the transport playhead is **timeline-absolute** (sample index along
+  the session timeline, from 0 to the end of the placed material), not an offset inside “the
+  one clip” as in Phase 1.
+- **Timeline length and end behavior:** `timelineLengthSamples` is **derived** (e.g. from the
+  maximum of `startSample + numSamples` over placed clips). When playback reaches the end,
+  behavior matches the Phase 1 **clamp-at-end** intent: **silence**, playhead does not advance
+  past the end, consistent guidance for re-starting playback.
+- **Threading:** session changes continue to be published to the audio path via an
+  **immutable atomic snapshot** (generalizing the Phase 1 `shared_ptr` handoff), with **no
+  mutex, allocation, or blocking** in the callback when reading that snapshot.
 
 ### In Scope
 
-- support for more than one clip in session/timeline state
-- clip placement logic appropriate to the documented scope
-- playback behavior that remains understandable with multiple clips
-- UI changes necessary to show multiple clips
-- validation that transport/state ownership remains clear
+- more than one clip in session state with per-clip **placement** and **order** as above
+- session-owned ordering and a coverage-based playback rule (front-most covers)
+- transport and UI that treat the playhead as **timeline-absolute** and seek/click on that
+  same axis
+- UI sufficient to add clips, show **multiple** clips on a shared visual timeline, and keep
+  transport ownership clear
+- validation that the separation of UI, transport, engine, and session is preserved
 
 ### Out of Scope
 
-- multiple tracks
-- mixer
-- routing graph
-- sends / buses
-- MIDI
-- recording
-- plugin hosting
+- multiple tracks, mixer, routing graph, sends / buses, MIDI, recording, plugin hosting
+- drag-and-drop placement, moving clips after placement, trim, split, fade, or full editing
+- mixing overlapping clips as a **sum** (this phase is “top clip wins by region”, not a mixer)
 - advanced editing toolset
 
 ### Expected Value
@@ -199,9 +222,10 @@ The architecture proves that Phase 1 was not a dead-end single-file design.
 
 ### Key Risks
 
-- one-clip assumptions hidden in state ownership
-- waveform/playback coupling becoming more tangled
-- transport truth becoming duplicated
+- one-clip or clip-local playhead assumptions surviving into code paths that must be timeline-absolute
+- **Session**-owned order silently migrating into UI paint order or the waveform as canonical
+- summing overlaps by habit (DAW default) instead of the agreed **topmost-covers** rule
+- transport truth duplicated or diverging as timeline length and seek clamps evolve
 - premature generalization into full DAW subsystems
 
 ---

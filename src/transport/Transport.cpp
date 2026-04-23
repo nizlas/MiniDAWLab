@@ -47,6 +47,9 @@ void Transport::requestPlaybackIntent(PlaybackIntent intent) noexcept
 
 void Transport::requestSeek(std::int64_t sampleIndex) noexcept
 {
+    // System meaning: the user chose a new listening position; we do not move the read cursor
+    // here on the message thread. We only record the target and mark work for the *next* audio
+    // block so the callback applies seek and playback from one coherent pair (Transport contract).
     seekTargetSamples_.store(sampleIndex, std::memory_order_relaxed);
     // Release: pair with the pending flag so the engine never sees "pending" without a target.
     seekPending_.store(true, std::memory_order_release);
@@ -90,8 +93,9 @@ void Transport::audioThread_advancePlayheadIfPlaying(std::int64_t deltaSamples) 
 {
     if (deltaSamples <= 0)
     {
-        // No samples were produced from the clip for this block (e.g. not Playing or at end) —
-        // the timeline position should not move.
+        // Product: the engine did not advance the read cursor this block (Paused/Stopped, no
+        // clip, or already at end — caller passes 0 in those cases), so the stored playhead must
+        // not change either.
         return;
     }
 

@@ -28,7 +28,9 @@ target_sources(MiniDAWLab PRIVATE
     src/Main.cpp
     src/transport/Transport.cpp
     src/domain/AudioClip.cpp
+    src/domain/PlacedClip.cpp
     src/domain/Session.cpp
+    src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
     src/engine/PlaybackEngine.cpp
     src/ui/ClipWaveformView.cpp

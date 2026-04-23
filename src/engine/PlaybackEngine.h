@@ -27,7 +27,9 @@
 //
 // THREADING (which methods on which thread)
 //   See comments on each public override: two are message-thread (device lifecycle) and one is
-//   audio-thread (per block). Private members are only read from those entry points in Phase 1.
+//   audio-thread (per block). The callback’s body is the central realtime path: it holds to the
+//   body-readability tier (in-body plain-language at branches) so JUCE buffer layout and channel
+//   indexing are not the only place “what the user hears” is defined.
 //
 // JUCE: AudioIODeviceCallback is the interface the audio device uses; see .cpp for the
 //      implementation body and a plain-language walkthrough of the buffer fill.

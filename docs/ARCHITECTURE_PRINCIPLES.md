@@ -68,6 +68,28 @@ Writers are constrained:
 No other component may mutate these fields. UI components read transport
 state but do not own or mutate it.
 
+### Phase 2 playhead and session (one timeline, multiple clips)
+
+Phase 2 reuses the same `Transport` fields. The **meaning** of `playheadSamples` changes
+from “sample index in the one loaded clip” to a **timeline-absolute** index on the
+**session timeline**: sample `0` is the start of the timeline, and the playhead runs in the
+same address space that placement and the waveform use (until a later phase introduces
+more complex timebases).
+
+**`Session` owns** the set of **placed** clips, each with a **start sample** on that timeline
+and a deterministic **front-to-back** order for overlap. The UI and waveform are **read-only
+consumers**; they do not own clip order. For Phase 2, **newest added is front-most** (index 0)
+unless steering documents are updated.
+
+**Coverage playback:** for each output instant, only the **front-most** placed clip that
+**covers** that timeline position is audible in that range (stacked “events” mental model;
+**not** summing overlapping material into a bus).
+
+**Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
+session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**
+reads on the hot path; the exact snapshot type is an implementation choice consistent with
+`docs/PHASE_PLAN.md` and `status/DECISION_LOG.md`.
+
 ### File loading is separate from playback
 
 File import, file opening, and audio decoding concerns must be separated from playback control and playback execution.
