@@ -1,36 +1,37 @@
 #pragma once
 
 // =============================================================================
-// ClipWaveformView  —  picture of the clip + playhead; no audio, no transport ownership
+// ClipWaveformView  —  session-timeline *events* + playhead (message thread only)
 // =============================================================================
 //
 // ROLE IN THE ARCHITECTURE
-//   presentation only: read Session to know *what* to draw, read Transport::readPlayheadSamplesForUi
-//   to know *where* the playhead is. It never subscribes to PlaybackEngine and never touches
-//   audio buffers on the device thread — that separation is explicit in ARCHITECTURE_PRINCIPLES.
+//   Read-only view: `Session` snapshot and derived timeline length, `Transport` for playhead.
+//   No `PlaybackEngine`, no device-side audio. ARCHITECTURE_PRINCIPLES: presentation separate from
+//   playback; UI does not own transport truth (only calls `requestSeek` for user click).
 //
-// COORDINATE SYSTEM (Phase 1)
-//   The clip spans the full width of the view. sample index 0 is the left edge, last sample
-//   the right. Playhead x = (playhead / numSamples) * width. Click-to-seek uses the same mapping
-//   in reverse and calls Transport::requestSeek (the audio thread will apply the seek).
+// PRESENTATION (DAW / Cubase direction, Phase 2)
+//   **Each** `PlacedClip` row: one event **frame**; **peaks** are drawn in timeline regions that are
+//   *not* covered in session time by any row in front of it (index `< r` in the snapshot / paint
+//   stack). In **covered** regions on a back row, no readable peak sketch. The overlap *hint* (dark
+//   wash + very thin diagonals) is drawn on **whichever** row is the **local** topmost in time over
+//   at least one **older** row (higher index): not “row 0 only,” but the row that is visually on
+//   top in that x-range. **No** global “always dim because behind somewhere.” Same `Transport` axis,
+//   view only.
 //
 // THREADING
-//   juce::Component methods (paint, mouseDown) and juce::Timer::timerCallback run on the
-//   [Message thread] (JUCE rule). A timer at ~20 Hz calls repaint() so the playhead line moves
-//   without the audio code telling the UI “each sample”.
+//   juce::Component and Timer: [Message thread] only. Timer repaints; no audio path.
 //
 // NOT RESPONSIBLE FOR
-//   Decoding, changing clip data, or owning Transport/Session (references only). Peaks are a
-//   visual simplification, not a metering pipeline.
+//   File decode, session mutation, clip ordering (Session owns that), or clip selection/trim.
 //
-// ClipWaveformView.cpp uses plain-language notes next to the seek mapping, the peak precompute,
-// and the playhead line so the “picture” and the transport stay mentally aligned with the engine.
+// See: ClipWaveformView.cpp (paint pipeline, overlap handling, JUCE `Graphics` notes).
 // =============================================================================
 
 #include "domain/Session.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cstdint>
 #include <vector>
 
 class Transport;
@@ -38,28 +39,54 @@ class Transport;
 class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
-    // [Message thread] session/transport outlive the view; used for read-only queries.
+    // [Message thread] session/transport outlive the view; read-only; never mutates `Session`.
     ClipWaveformView(Session& session, Transport& transport);
     ~ClipWaveformView() override;
 
-    // [Message thread] JUCE: full redraw; uses rebuildPeaksIfNeeded, then draws peaks + playhead.
+    // [Message thread] Paints: background, back→front one **event** per `PlacedClip` (peaks in
+    // *uncovered* time only), then the same overlap shading (per row, where that row is locally
+    // topmost over something behind), then playhead. No audio thread.
     void paint(juce::Graphics& g) override;
 
-    // [Message thread] Map x → sample index → requestSeek. Does not set playhead directly.
+    // [Message thread] Mouse x → session timeline index → `Transport::requestSeek` (applied next
+    // audio block by `PlaybackEngine`, not here).
     void mouseDown(const juce::MouseEvent& e) override;
 
 private:
-    // [Message thread] Timer tick: schedule repaint; paint reads the latest playhead.
     void timerCallback() override;
 
-    // [Message thread] Rebuilds peaks_ (max per column) when clip or width changes; O(columns*range).
+    // [Message thread] Rebuilds per-clip `peaks` when snapshot identity or view width changes.
+    // O(view width) per clip, bounded columns — same contract as before.
     void rebuildPeaksIfNeeded();
+
+    // [Message thread] A timeline sample t is *covered* (for painting a lower row r) if any row
+    // with a lower index in the snapshot — drawn later, “in front” — owns that half-open sample.
+    // Used only to **suppress** underlap peak columns locally; not transport truth.
+    bool isTimelineSampleCoveredByPriorRows(int row, std::int64_t t) const;
+
+    // [Message thread] Half-open [L,R) intervals in session time where this row is the *minimum
+    // index* covering t (it wins the paint stack) and some row with higher index also covers t —
+    // the only regions where the overlap *hint* belongs on *this* event. View-only; merged output.
+    void computeLocalOverlapShadeHalfOpenIntervalsForRow(
+        int row,
+        std::vector<std::pair<std::int64_t, std::int64_t>>& outMerged) const;
 
     Session& session_;
     Transport& transport_;
-    const AudioClip* lastClip_ = nullptr;
+
+    // Snapshot `shared_ptr` raw address — a new publish yields a new `const SessionSnapshot` and
+    // a different pointer, so the cache key stays correct without touching Session.
+    const void* lastSnapshotKey_ = nullptr;
     int lastWidth_ = 0;
-    std::vector<float> peaks_;
+
+    // One `TimelineStrip` per snapshot row, index aligned with `getPlacedClip(i)` (0 = front).
+    struct TimelineStrip
+    {
+        std::int64_t startOnTimeline = 0;
+        int materialNumSamples = 0;
+        std::vector<float> peaks;
+    };
+    std::vector<TimelineStrip> clipStrips_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ClipWaveformView)
 };

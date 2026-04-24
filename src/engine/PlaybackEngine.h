@@ -12,7 +12,8 @@
 //   Implements juce::AudioIODeviceCallback. The audio device invokes this object on a high-
 //   priority thread to fill output buffers. This class is the *only* bridge from our domain
 //   (which sample to play) to the hardware (float arrays per channel). It advances Transport’s
-//   playhead to match samples actually delivered.
+//   playhead (timeline-absolute) to match *timeline* samples advanced while Playing, including
+//   silence in gaps, per Phase 2 coverage (front‑most clip that covers at each tick; no mixing).
 //
 // OWNERSHIP AND LIFETIME
 //   Does not own Transport or Session. The application (Main) constructs all three and
@@ -27,7 +28,9 @@
 //
 // THREADING (which methods on which thread)
 //   See comments on each public override: two are message-thread (device lifecycle) and one is
-//   audio-thread (per block). Private members are only read from those entry points in Phase 1.
+//   audio-thread (per block). The callback’s body is the central realtime path: it holds to the
+//   body-readability tier (in-body plain-language at branches) so JUCE buffer layout and channel
+//   indexing are not the only place “what the user hears” is defined.
 //
 // JUCE: AudioIODeviceCallback is the interface the audio device uses; see .cpp for the
 //      implementation body and a plain-language walkthrough of the buffer fill.
@@ -50,10 +53,10 @@ public:
     PlaybackEngine(PlaybackEngine&&) = delete;
     PlaybackEngine& operator=(PlaybackEngine&&) = delete;
 
-    // [Audio thread] Realtime: fill `outputChannelData` with at most one clip pass; no decode,
-    // I/O, locks, or UI. PlaybackEngine.cpp walks the flow and adds in-body plain-language notes
-    // at branches (mono-to-stereo, end-of-clip, extra outputs) so product meaning is visible
-    // beside the buffer logic.
+    // [Audio thread] Realtime: fill `outputChannelData` using session **coverage** (first / front
+    // `PlacedClip` in order that covers each timeline position; gaps = silence, no sum at overlaps).
+    // No decode, I/O, locks, or UI; no new heap use on the hot path beyond the snapshot pointer copy.
+    // See .cpp for coverage runs, mono→stereo, and transport advance.
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                           int numInputChannels,
                                           float* const* outputChannelData,

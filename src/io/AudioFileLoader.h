@@ -17,7 +17,7 @@
 //   Not a long-lived service — static methods, no singleton. Not responsible for resampling
 //   (Phase 1: reject mismatch), not responsible for multiple clips, not responsible for async I/O.
 //
-// See: AudioClip (output), Session::replaceClipFromFile (typical caller).
+// See: AudioClip (output), Session::addClipFromFileAtPlayhead (typical caller).
 //
 // AudioFileLoader.cpp walks each decision (missing file, format, rate mismatch, size limits) in
 // plain language next to the JUCE API calls; that is the pedagogical map for *why* a load failed.

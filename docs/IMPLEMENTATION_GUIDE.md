@@ -256,11 +256,34 @@ These tiers are **mandatory** for the scope described. Trivial one-line getters 
 - Where a body has multiple conceptual steps, split it into logical chunks (typically 3–15 lines each) and precede each chunk with a 1–3 line plain-language comment that states *intent* (why this chunk exists and what it does in domain terms), not a line-by-line narration of syntax.
 - Where a short body already reads top-down clearly with good names and a single leading comment, that is sufficient — do not insert chunk breaks just to hit a cadence.
 - Use local names that describe the role of the value, not only its low-level mechanism. Prefer `monoSource`, `framesToPlay`, `blockSize`, `playheadOffsetInSamples`, `outChannel` over `src`, `advance`, `n`, `offset`, `out`.
-- If a dense or repeated block still requires reverse-engineering after naming and chunk comments, consider a small private helper under **Readability refactors allowed during documentation passes** below; that is an option, not an obligation. Do not extract helpers just to satisfy the rubric formally.
+- If a dense or repeated block still requires reverse-engineering after naming and chunk comments, consider a small private helper under 
+
+**Readability refactors allowed during documentation passes** below; that is an option, not an obligation. Do not extract helpers just to satisfy the rubric formally.
 - Where the meaning of a branch or operation in *system or product terms* is not obvious from names and structure, add a short **in-body explanatory comment** (typically 1–2 lines) that states that meaning in plain language. Examples of the level intended: "Phase 1 mono-to-stereo special case: duplicate the mono clip channel to left and right.", "Copy only the playable part of the clip for this block.", "Clear the unused tail so the device buffer is fully defined.", "Pending seek is applied here so playhead and audio stay aligned for this block." These comments explain *what this code means for the system*, not what the C++ does; pointer arithmetic, channel indexing, buffer-tail handling, and JUCE-specific mechanics are the typical triggers.
 - Narration that only restates C++ syntax or re-describes the identifier name does not count as a chunk comment and violates the rubric.
 
 **What an in-body explanatory comment is (and is not).** It is a short plain-language statement of a branch's or operation's role in the system or product — a domain- or rule-level sentence such as "this is the Phase 1 mono-to-stereo rule" or "we clear the tail so the device buffer is fully defined." It is *not* a restatement of the call being made, not a narration of pointer arithmetic or loop indices, and not a substitute for the method-level doc comment (which describes the *contract*). These comments are additive to chunk labels and role-named locals; they are required whenever a reader who knows C++ but not JUCE and not this codebase could not otherwise understand what a branch means in system or product terms. Use them sparingly and where they actually help; do not paraphrase obvious code.
+
+### Examples and anti-examples are normative
+
+When body readability is reviewed, both positive examples and anti-examples are part of the rule.
+
+A method body does **not** satisfy this rule merely because it has:
+- a strong file header
+- better variable names
+- structural chunk labels
+- or short technical comments
+
+The rule is satisfied only when important branches are explained in plain language at the level of system/product meaning where needed.
+
+**Anti-example**
+- "Mono-to-stereo branch."  
+  This is too weak if the reader still has to decode low-level code details to understand what the rule means.
+
+**Acceptable example**
+- "Phase 1 mono-to-stereo product rule: a mono clip should be heard on both left and right speakers on a stereo device, so we duplicate the same mono source channel to outputs 0 and 1."
+
+Reviewers should reject documentation that is formally commented but still requires the reader to infer branch meaning from low-level mechanics.
 
 ### Readability refactors allowed during documentation passes
 
@@ -293,6 +316,17 @@ The following are **exempt** from the file-header and class/method doc tiers unl
 ### Validation gate (hard)
 
 A phase is **not** considered complete for validation purposes if any **central source file** that was **added or meaningfully changed** in that phase is left in violation of the six tiers above. Touching a file in passing (for example, a one-line import path fix) should either bring the file up to the rubric for the parts of the file in scope, or the phase report must explicitly list the file and justify minimal touch—but **new** or **substantially extended** code must comply fully.
+
+### Documentation-pass review output
+
+A documentation pass is not reviewable from summary alone.
+
+For each documentation slice, the implementation report must include:
+- the full text of at least one central updated method body
+- at least one branch example that demonstrates improved plain-language readability
+- a brief note explaining what system/product meaning is now explicit that previously had to be inferred from mechanics
+
+A summary of “comments were improved” or “body readability was strengthened” is not sufficient on its own.
 
 ## Escalation Rule
 

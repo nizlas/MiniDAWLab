@@ -6,7 +6,10 @@
 //
 // ROLE IN THE APP
 //   Answers three questions for the rest of the program: (1) Should we be playing, paused, or
-//   stopped? (2) Where is the playhead (sample index in Phase 1: index into the one loaded clip)?
+//   stopped? (2) Where is the playhead? It is a *session-timeline-absolute* sample index (from 0
+//   to the derived end of placed material); PlaybackEngine maps it into each clip’s buffer. Step 4
+//   data shape; Step 5 reinterprets the same `playheadSamples_` value accordingly (one clip at
+//   start 0 stays numerically the same 0..length case).
 //   (3) Did the user request a seek that the audio thread has not applied yet?
 //
 // ARCHITECTURAL PLACE
@@ -45,9 +48,10 @@ enum class PlaybackIntent : std::uint32_t
 // Transport
 // ---------------------------------------------------------------------------
 // Responsibility: own the atomic fields that represent playback *intent* (Stopped / Playing /
-// Paused), the authoritative *playhead* sample index, and a *pending seek* (target index +
-// flag). The UI requests changes; the audio callback is the only writer of the playhead and
-// the consumer of seek requests, via the private `audioThread_*` API (see PlaybackEngine).
+// Paused), the authoritative *playhead* (session-timeline-absolute sample index; see file header),
+// and a *pending seek* (target index + flag). The UI requests changes; the audio callback is the
+// only writer of the playhead and the consumer of seek requests, via the private `audioThread_*`
+// API (see PlaybackEngine).
 //
 // Lifetime / ownership: a single instance owned at app composition level; outlives the audio
 // callback registration. No heap ownership of clips or files.
@@ -81,8 +85,8 @@ public:
     // the audio thread runs `audioThread_beginBlock` (next block). Thread: not the callback.
     void requestSeek(std::int64_t sampleIndex) noexcept;
 
-    // Contract: read the playhead the callback last published (acquire-ordered w.r.t. playhead
-    // stores from the audio thread). Thread: any non-callback; safe for UI repaint timers.
+    // Contract: read the playhead the callback last published (timeline-absolute; acquire-ordered
+    // w.r.t. playhead stores from the audio thread). Thread: any non-callback; safe for UI.
     [[nodiscard]] std::int64_t readPlayheadSamplesForUi() const noexcept;
 
 private:
@@ -92,7 +96,7 @@ private:
     // Call once at the start of each output block, before reading playhead for rendering.
     void audioThread_beginBlock() noexcept;
 
-    // [Audio thread] Current playhead sample index in the active clip (Phase 1). Call after
+    // [Audio thread] Timeline-absolute read cursor (see file header). Call after
     // `audioThread_beginBlock` so a pending seek is visible. Relaxed: synchronized by beginBlock.
     [[nodiscard]] std::int64_t audioThread_loadPlayhead() const noexcept;
 
@@ -100,8 +104,9 @@ private:
     // UI path so we see a coherent intent for this block.
     [[nodiscard]] PlaybackIntent audioThread_loadIntent() const noexcept;
 
-    // [Audio thread] If intent is Playing, add `deltaSamples` to the playhead (the number of
-    // *source* sample frames output this block). No-op for non-Playing or non-positive delta.
+    // [Audio thread] If intent is Playing, add `deltaSamples` to the playhead: timeline samples
+    // *consumed* as clip audio this block (0 when no material played). No-op for non-Playing or
+    // non-positive delta.
     void audioThread_advancePlayheadIfPlaying(std::int64_t deltaSamples) noexcept;
 
     std::atomic<std::uint32_t> intent_;

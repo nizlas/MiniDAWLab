@@ -6,14 +6,14 @@
 //
 // ROLE
 //   A value object: one contiguous float buffer per channel, sample count, and a text label
-//   (e.g. file path) for error messages. Session holds a const snapshot; PlaybackEngine reads
-//   through Session. Phases that add “clip on a timeline with an offset” will add placement
+//   (e.g. file path) for error messages. Session publishes a const `SessionSnapshot`; PlaybackEngine
+//   reads clip material through Session. Phases that add “clip on a timeline with an offset” will add placement
 //   *outside* this type; AudioClip is only the audio *material*.
 //
 // THREADING
 //   Not synchronized inside — const after construction. Safe to read from any thread if you
-//   hold a const reference or shared_ptr to const AudioClip that outlives the read. Session
-//   provides the latter on the right threads.
+//   hold a const reference or shared_ptr to const AudioClip that outlives the read. Session’s
+//   published snapshot carries that shared_ptr on the right threads.
 //
 // NOT RESPONSIBLE FOR
 //   Device sample rate policy (loader enforces match), playhead, or routing.

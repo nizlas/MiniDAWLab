@@ -211,3 +211,39 @@ Notes:
 - Phase 2 implementation order remains the previously approved step sequence.
 - No Phase 2 code changes were part of the documentation retrofit itself.
 - The next executable Phase 2 step is the approved steering/document update for Phase 2 semantics before new code changes begin.
+
+---
+
+## 2026-04-23 — Phase 2 steering: timeline, overlap, and session ordering (docs)
+
+Decision:
+
+- The transport **playhead** is **timeline-absolute** in Phase 2: a single session timeline in
+  device samples (same field as Phase 1; semantics extended), not a position inside a single
+  loaded clip.
+- **`Session` owns** the **ordered** list of placed clips and the **front-to-back** (overlap)
+  order. The UI and waveform must not be the source of that order; they reflect `Session` only.
+- **Newest added is front-most** in Phase 2: the most recently added clip is index 0 / on top
+  for overlap, until a later phase adds explicit reordering.
+- **Multiple clips** may **overlap** in time. **Audibility** is **not** a mix sum: at each
+  instant, the **front-most clip that covers** that timeline position is the one heard there;
+  other clips are audible only in **uncovered** regions (stacked-events behavior).
+- **Add clip** uses the current playhead: placement **start sample** = playhead at add time
+  (read on the non-realtime path as specified in the phase plan), not a separate placement UI.
+- **End of session timeline** uses **derived** length from placements; at end, behavior stays
+  aligned with the **clamp at end, silence, no spurious advance** product intent (generalized
+  from single-clip end behavior).
+- **Callback path** continues to use an **atomic immutable snapshot** of session state, not
+  per-block heap allocation or mutexing for session reads, consistent with the Phase 1
+  cross-thread model.
+
+Rationale:
+
+- Locks the previously approved Phase 2 plan into steering documents so implementation cannot
+  drift (e.g. into implicit mixing, clip-local playhead, or UI-owned ordering) without a
+  documented change.
+
+Notes:
+
+- Recorded in `docs/PHASE_PLAN.md` (Phase 2) and `docs/ARCHITECTURE_PRINCIPLES.md` (Phase 2
+  subsection) as part of Phase 2 Step 3. No code changes in this step.

@@ -3,103 +3,129 @@
 // =============================================================================
 //
 // ROLE IN THE ARCHITECTURE
-//   This is the only class registered with JUCE as the audio "callback". The OS / sound card
-//   calls it repeatedly to ask: "here is an output buffer of N samples per channel; fill it."
-//   We copy samples from the decoded clip in Session and move the playhead in Transport. We
-//   do not open files, decode, draw the UI, or own clip memory — that is other layers' jobs.
+//   JUCE’s audio callback. We fill the device’s float buffers from `PlacedClip` data via the
+//   immutable `SessionSnapshot` and advance `Transport`’s playhead. No file decode, no UI.
 //
-// WHERE THIS FILE SITS
-//   App (Main)  →  AudioDeviceManager.addAudioCallback(PlaybackEngine*)
-//                     →  each block:  this file runs on the realtime audio thread
-//   This file  →  Session::loadClipForAudioThread()  (read-only snapshot of the clip)
-//   This file  →  Transport::audioThread_*         (seek apply, read playhead, advance playhead)
+// PHASE 2 COVERAGE (this file’s product story)
+//   The session keeps **overlapping** events on a single timeline, ordered **front to back** in
+//   the snapshot (index 0 = front / newest). At each **timeline** instant, the **first** row that
+//   covers that instant is what you hear: **not** a mix of all overlapping material. A clip behind
+//   the front is audible only in **gaps** where no row in front of it covers. Gaps on the line
+//   between clips (no row covers) are **silence**; the playhead still advances in real time, up to
+//   the **derived** session end (then clamp, same as Phase 1 end intent).
 //
-// WHAT PLAYBACKENGINE IS NOT ALLOWED TO DO (by project rules + realtime safety)
-//   • Load or decode files (would block; belongs on the message thread).
-//   • Touch GUI (wrong thread; would stall audio).
-//   • Act as the source of truth for the playhead — Transport is; we only *advance* it to match
-//     how many source samples we actually output this block.
+// WHERE THIS SITS
+//   `Session` publish → acquire-load of `const SessionSnapshot` (refcount) here; `Transport` seek
+//   apply, playhead read/advance. See ARCHITECTURE_PRINCIPLES (Phase 2, snapshot handoff).
 //
-// WHAT IT IS RESPONSIBLE FOR
-//   • Converting the current Transport state (intent, playhead after seek) + current clip
-//     into interleaved JUCE output buffers: silence, clip PCM, or a mix of copy+silence per rule
-//     below. Advancing the playhead by the number of *source* samples consumed when Playing.
-//
-// THREADING
-//   • audioDeviceIOCallbackWithContext  →  [Audio thread] only. Hot path. No locks, no allocs
-//     of unbounded size; JUCE’s FloatVectorOperations is a fixed-size float buffer op.
-//   • audioDeviceAboutToStart / Stopped  →  [Message thread] (JUCE calls them around stream life).
-//   • Constructor / destructor  →  [Message thread] (owned by the app, not the callback).
-//
-// -----------------------------------------------------------------------------
-// END-TO-END FLOW OF THE CALLBACK (see the callback body: plain-language notes at each phase)
-// -----------------------------------------------------------------------------
-//   Step 1 — Apply a pending user seek: Transport applies message-thread seek requests here at
-//            block start so playhead and audio stay aligned.
-//   Step 2 — Read clip snapshot, playback intent, and playhead. If no clip or not Playing, we
-//            will only output silence, but we still do Step 1 for consistency.
-//   Step 3 — Compute framesToPlay (see next section). This is how many *clip* sample frames
-//            we will copy this block, before padding with silence in each channel.
-//   Step 4 — For each hardware output channel: copy or clear. Mono special case: duplicate one
-//            clip channel to left and right when the device is stereo.
-//   Step 5 — Tell Transport to advance the playhead by framesToPlay when intent is Playing.
-//
-// -----------------------------------------------------------------------------
-// WHY framesToPlay OFTEN DIFFERS FROM numSamples
-//   numSamples is how many sample *frames* the device wants for *each* channel this block
-//   (e.g. 256). That is the block size of the *device*, not the remaining length of the file.
-//   The playhead is a position in the clip (0 .. clip length). If 80 samples of clip are left
-//   until the end, we can only *play* 80 frames of audio from the buffer; we set
-//   framesToPlay = min(numSamples, remaining). The playhead then advances by 80, not 256.
-//   If we are not Playing, or there is no clip, framesToPlay stays 0.
-//
-// -----------------------------------------------------------------------------
-// WHY WE CLEAR THE TAIL OF EACH OUTPUT CHANNEL (dest + framesToPlay .. + numSamples)
-//   The device still expects a full numSamples frame count per channel. We only *wrote* audio
-//   in the first framesToPlay positions (e.g. end of clip, or not playing). The rest of the
-//   buffer is uninitialized garbage unless we fill it. So we zero the remainder, or the whole
-//   buffer when we output no audio. FloatVectorOperations::clear does that in one go per span.
-//
-// -----------------------------------------------------------------------------
-// MONO FILE → STEREO OUTPUT (Phase 1 product rule, not generic mixing)
-//   Many mono files should be heard on both speakers. If the clip has 1 channel and the device
-//   has at least 2 output channels, we copy the same mono channel to output 0 and 1. Other
-//   output indices stay silent unless we add more rules later. If clip has more channels than
-//   the device, extra clip channels are ignored; if device has more outputs than clip channels,
-//   those outputs are silenced. (See the loop branches in Step 4.)
-//
-// JUCE TYPES used here (if you are new to JUCE)
-//   • AudioIODeviceCallbackContext — per-block metadata; we ignore it in Phase 1 (output only).
-//   • FloatVectorOperations::copy / clear — treat like memset/memcpy for float arrays, often
-//     optimized. Not magic: we still size them explicitly (framesToPlay, numSamples).
-//   • jmin — two-argument minimum, here to bound advance by (block size, remaining clip).
+// REALTIME
+//   [Audio thread] only in the callback. No allocation on this path beyond the existing `shared_ptr`
+//   acquire; all scratch decisions use stack and fixed loops over clip count.
 // =============================================================================
 
 #include "engine/PlaybackEngine.h"
 
+#include "domain/AudioClip.h"
 #include "domain/Session.h"
+#include "domain/SessionSnapshot.h"
 #include "transport/Transport.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include <cstdint>
+#include <limits>
+
 namespace
 {
-// Product meaning: the sound card still expects a *full* block per channel every callback. We
-// may have fewer *clip* samples to play (end of file or partial block) — we copy the real audio
-// first, then zero the rest so the driver never receives uninitialized memory. Realtime: no heap;
-// JUCE::FloatVectorOperations is a fixed-size bulk float op (see file header for JUCE note).
-void copyClipRunThenSilenceTail(float* outputDest,
-                                 const float* sourceAtOffset,
-                                 int frameCount,
-                                 int deviceBlockSize)
-{
-    juce::FloatVectorOperations::copy(outputDest, sourceAtOffset, frameCount);
-    if (frameCount < deviceBlockSize)
+    // The **front-most** (smallest) snapshot index that covers timeline sample `t`, or -1 (gap
+    // or before/after all material). This is the approved “topmost event wins” rule for overlaps.
+    [[nodiscard]] int findCoveringRowIndex(
+        const SessionSnapshot& snap, const std::int64_t t) noexcept
     {
-        juce::FloatVectorOperations::clear(outputDest + frameCount,
-                                           deviceBlockSize - frameCount);
+        const int n = snap.getNumPlacedClips();
+        for (int i = 0; i < n; ++i)
+        {
+            const PlacedClip& p = snap.getPlacedClip(i);
+            const std::int64_t s = p.getStartSample();
+            const std::int64_t e = s + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
+            if (t >= s && t < e)
+            {
+                return i;
+            }
+        }
+        return -1;
     }
-}
+
+    // Smallest timeline position *strictly* after `t` where which clip (if any) is “on top” can
+    // change. That is always a clip start, clip end, or the exclusive session end: coverage only
+    // flips on those points — so a whole device block is filled in a small number of constant runs
+    // without a per-sample search.
+    [[nodiscard]] std::int64_t minBoundaryStrictlyAfter(
+        const SessionSnapshot& snap, const std::int64_t t, const std::int64_t timelineEnd) noexcept
+    {
+        std::int64_t m = std::numeric_limits<std::int64_t>::max();
+        const int n = snap.getNumPlacedClips();
+        for (int i = 0; i < n; ++i)
+        {
+            const PlacedClip& p = snap.getPlacedClip(i);
+            const std::int64_t s = p.getStartSample();
+            const std::int64_t e = s + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
+            if (s > t)
+            {
+                m = juce::jmin(m, s);
+            }
+            if (e > t)
+            {
+                m = juce::jmin(m, e);
+            }
+        }
+        if (timelineEnd > t)
+        {
+            m = juce::jmin(m, timelineEnd);
+        }
+        if (m == std::numeric_limits<std::int64_t>::max())
+        {
+            m = timelineEnd;
+        }
+        return m;
+    }
+
+    // [Audio thread] Copy `run` frames from a single clip at `offInMaterial` into each device row,
+    // starting at `outFrame0` — **only** the run; no `clear` to `numSamples` end (this callback may
+    // write more runs to the same buffer later; full buffer is zeroed first).
+    void copyClipRunToOutputs(const AudioClip& clip,
+                              int offInMaterial,
+                              int run,
+                              int outFrame0,
+                              int numOutChannels,
+                              float* const* outputChannelData) noexcept
+    {
+        const int numSourceChannels = clip.getNumChannels();
+        const juce::AudioBuffer<float>& buf = clip.getAudio();
+
+        for (int outChannel = 0; outChannel < numOutChannels; ++outChannel)
+        {
+            float* d = outputChannelData[outChannel];
+            if (d == nullptr)
+            {
+                continue;
+            }
+            float* const dest = d + outFrame0;
+            const bool duplicateMono = (numSourceChannels == 1 && numOutChannels >= 2
+                                        && (outChannel == 0 || outChannel == 1));
+            if (duplicateMono)
+            {
+                juce::FloatVectorOperations::copy(
+                    dest, buf.getReadPointer(0) + offInMaterial, run);
+            }
+            else if (outChannel < numSourceChannels)
+            {
+                juce::FloatVectorOperations::copy(
+                    dest, buf.getReadPointer(outChannel) + offInMaterial, run);
+            }
+            // Else: more device outputs than file channels -> leave silent (pre-cleared).
+        }
+    }
 } // namespace
 
 PlaybackEngine::PlaybackEngine(Transport& transport, Session& session)
@@ -110,99 +136,105 @@ PlaybackEngine::PlaybackEngine(Transport& transport, Session& session)
 
 PlaybackEngine::~PlaybackEngine() = default;
 
-// [Message thread] Invoked when the device is about to start streaming. Phase 1: nothing to
-// cache (we could read sample rate here in a later phase). Kept as a no-op for wiring clarity.
+// [Message thread]
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     juce::ignoreUnused(device);
 }
 
-// [Message thread] Invoked when streaming stops. Phase 1: no-op.
+// [Message thread]
 void PlaybackEngine::audioDeviceStopped() {}
 
-// [Audio thread] Called once per audio block by JUCE. Must not: decode, show UI, take locks, or
-// allocate heap in a way that would violate realtime expectations. session_.loadClipForAudioThread()
-// does an atomic load of a shared_ptr (refcount) — the agreed cross-thread handoff for the clip.
+// [Audio thread] Fills the output block: coverage runs + Transport advance. See file header.
 void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
-                                                      int numInputChannels,
-                                                      float* const* outputChannelData,
-                                                      int numOutputChannels,
-                                                      int numSamples,
-                                                      const juce::AudioIODeviceCallbackContext& context)
+                                                     int numInputChannels,
+                                                     float* const* outputChannelData,
+                                                     int numOutputChannels,
+                                                     int numSamples,
+                                                     const juce::AudioIODeviceCallbackContext& context)
 {
     juce::ignoreUnused(inputChannelData, numInputChannels, context);
 
-    // Seeks are queued on the message thread; we apply them at the *start* of the first block
-    // that runs after that, so the playhead and the samples we read below stay in agreement.
+    const int deviceBlockSizeInFrames = numSamples;
     transport_.audioThread_beginBlock();
 
-    const auto clip = session_.loadClipForAudioThread();
-    const auto intent = transport_.audioThread_loadIntent();
-    const std::int64_t playhead = transport_.audioThread_loadPlayhead();
+    const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
+    const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
+    std::int64_t t = transport_.audioThread_loadPlayhead();
 
-    const int clipLengthInSamples = clip != nullptr ? clip->getNumSamples() : 0;
-
-    // How many *source* frames we can emit this block, and (when Playing) how far the playhead
-    // will move: bounded by the device block size and by how many samples are left in the clip.
-    // If we are not Playing, or there is no clip, or the playhead is already past the end, this
-    // stays zero and we only output silence.
-    int framesToPlay = 0;
-    if (clip != nullptr && intent == PlaybackIntent::Playing && playhead < clipLengthInSamples
-        && numSamples > 0)
+    // Full silence default; runs below overwrite [0, R) when Playing.
+    for (int ch = 0; ch < numOutputChannels; ++ch)
     {
-        const std::int64_t remainingInClip =
-            static_cast<std::int64_t>(clipLengthInSamples) - playhead;
-        framesToPlay =
-            static_cast<int>(juce::jmin(static_cast<std::int64_t>(numSamples), remainingInClip));
-    }
-
-    const int playheadOffsetInSamples = static_cast<int>(playhead);
-
-    for (int outChannel = 0; outChannel < numOutputChannels; ++outChannel)
-    {
-        float* const dest = outputChannelData[outChannel];
-        if (dest == nullptr)
-            continue;
-
-        if (clip == nullptr || framesToPlay <= 0)
+        if (float* row = outputChannelData[ch])
         {
-            // Nothing to play for this block (no clip, wrong transport mode, or already at end):
-            // the product rule is a full block of digital silence, not a shorter buffer.
-            juce::FloatVectorOperations::clear(dest, numSamples);
-            continue;
-        }
-
-        const int numSourceChannels = clip->getNumChannels();
-        const bool duplicateMonoToStereo = (numSourceChannels == 1 && numOutputChannels >= 2
-                                            && (outChannel == 0 || outChannel == 1));
-
-        if (duplicateMonoToStereo)
-        {
-            // Phase 1 mono-to-stereo product rule: the file decoded to one channel, but a
-            // typical sound card has separate left and right outputs. We duplicate that single
-            // channel to the first *two* device outputs so the user hears the clip in the
-            // center, not panned to one side. This is an explicit upmix, not a general mixer;
-            // other outputs on multi-output devices are still silenced in the branch below.
-            const float* const mono = clip->getAudio().getReadPointer(0);
-            copyClipRunThenSilenceTail(dest, mono + playheadOffsetInSamples, framesToPlay,
-                                       numSamples);
-        }
-        else if (outChannel < numSourceChannels)
-        {
-            // One clip channel maps one-to-one to a device output (stereo or multichannel file).
-            const float* const channelSource = clip->getAudio().getReadPointer(outChannel);
-            copyClipRunThenSilenceTail(dest, channelSource + playheadOffsetInSamples, framesToPlay,
-                                       numSamples);
-        }
-        else
-        {
-            // The device has more output channels than this clip: Phase 1 does not downmix,
-            // duplicate, or route the clip to “extra” speakers — they stay silent.
-            juce::FloatVectorOperations::clear(dest, numSamples);
+            juce::FloatVectorOperations::clear(row, numSamples);
         }
     }
 
-    // Move the timeline playhead by exactly how many *source* samples we just played, but only
-    // while the user has left transport in Playing (Paused/Stopped: leave the playhead where it is).
-    transport_.audioThread_advancePlayheadIfPlaying(static_cast<std::int64_t>(framesToPlay));
+    if (sessionSnap == nullptr || sessionSnap->isEmpty() || deviceBlockSizeInFrames <= 0
+        || playbackIntent != PlaybackIntent::Playing)
+    {
+        // Not playing, or no material: the buffer stays silent; playhead is not moved this block.
+        transport_.audioThread_advancePlayheadIfPlaying(0);
+        return;
+    }
+
+    const std::int64_t timelineEnd = sessionSnap->getDerivedTimelineLengthSamples();
+    if (t >= timelineEnd)
+    {
+        // Past the derived end: silence for the full block, no advance (clamp-at-end, same as
+        // one-clip at end of file; user must seek to hear again).
+        transport_.audioThread_advancePlayheadIfPlaying(0);
+        return;
+    }
+
+    // Snapshot where this block *started* on the timeline: advance matches how far we really move
+    // in session time, including through gaps (same R samples whether they are silence or clip).
+    const std::int64_t t0 = t;
+
+    // How many **timeline** samples this block is allowed to render: cannot extend past
+    // `timelineEnd` (exclusive); shorter runs still zero-pad the rest of the device block.
+    const std::int64_t canDo = juce::jmin(
+        static_cast<std::int64_t>(deviceBlockSizeInFrames), timelineEnd - t0);
+    const int R = static_cast<int>(canDo);
+    if (R <= 0)
+    {
+        transport_.audioThread_advancePlayheadIfPlaying(0);
+        return;
+    }
+
+    // --- One or more *runs* [t, t+run) of constant "who wins" at every sample, each filled from
+    //     at most one clip (or left silent if the run is a gap on the line). `nextB - t` is
+    //     always the maximum length in which the winning row cannot change, because coverage only
+    //     flips on clip start/end and session end. This is the phase-2 *stacking* model without
+    //     ever summing overlapping material. ---
+    int out0 = 0;
+    while (out0 < R)
+    {
+        const int row = findCoveringRowIndex(*sessionSnap, t);
+        const std::int64_t nextB = minBoundaryStrictlyAfter(*sessionSnap, t, timelineEnd);
+        jassert(nextB > t);
+        int run = static_cast<int>(juce::jmin(
+            static_cast<std::int64_t>(R - out0), nextB - t));
+        jassert(run > 0);
+
+        if (row >= 0)
+        {
+            const PlacedClip& p = sessionSnap->getPlacedClip(row);
+            const AudioClip& c = p.getAudioClip();
+            // Offset into this clip’s `AudioBuffer` (material index 0 = first file sample) for the
+            // first timeline sample `t` in this run.
+            const int off = static_cast<int>(t - p.getStartSample());
+            jassert(off >= 0 && off + run <= c.getNumSamples());
+            copyClipRunToOutputs(c, off, run, out0, numOutputChannels, outputChannelData);
+        }
+        // `row < 0`: gap (no `PlacedClip` covers) — that span stays cleared (digital silence here).
+
+        t += run;
+        out0 += run;
+    }
+
+    jassert(out0 == R);
+    jassert(t - t0 == static_cast<std::int64_t>(R));
+    transport_.audioThread_advancePlayheadIfPlaying(static_cast<std::int64_t>(R));
 }

@@ -1,41 +1,48 @@
 #pragma once
 
 // =============================================================================
-// Session — which clip is loaded for playback (domain); no transport, no UI
+// Session — message-thread owner of the *current* immutable session snapshot; no transport, no UI
 // =============================================================================
 //
 // ROLE IN THE ARCHITECTURE
-//   Holds “the current clip” as an immutable AudioClip in memory, or nothing. PlaybackEngine
-//   reads it on the audio thread; the UI reads it on the message thread for the waveform. File
-//   loading and decode are *not* here — AudioFileLoader produces an AudioClip; this class only
-//   swaps in the result atomically.
+//   `Session` is the **sole publisher** of the timeline answer for playback: an atomic pointer to
+//   a `const SessionSnapshot` that replaces the earlier “one `const AudioClip`” field. The
+//   **audio thread** does not “open the session for editing” — it only **acquire**‑loads the
+//   shared_ptr and reads placements + PCM. The **message thread** (file chooser, future editors)
+//   **release**‑stores a **new** snapshot after decode succeeds, or points at the **shared empty**
+//   snapshot on clear, using the same lock-free `shared_ptr` idiom as Phase 1 with a larger
+//   immutable value type. That is how the steering “immutable atomic snapshot” handoff is
+//   realized in code: no mutex on the hot path, no half-published session graph.
+//
+// RELATION TO `PlacedClip` / `SessionSnapshot` / `AudioClip`
+//   `AudioFileLoader` still produces `AudioClip` only. `Session` assembles *snapshots* that wrap
+//   that material in `PlacedClip` rows (start time on the session timeline) inside a
+//   `SessionSnapshot`. Separation keeps decode concerns out of the snapshot type and leaves
+//   placement policy in one place (`Session` / future session commands) rather than inside PCM.
 //
 // THREAD MODEL
-//   • replaceClipFromFile / clearClip: [Message thread] only in Phase 1. They may block (decode).
-//   • loadClipForAudioThread: [Audio thread] safe — atomic load of std::shared_ptr<const AudioClip>
-//     (acquire), refcount bump, no decode. Also legal from the message thread for UI snapshots.
-//   • getCurrentClip: convenience for UI; not a different truth than loadClipForAudioThread.
+//   • addClipFromFileAtPlayhead / clearClip: [Message thread]; decode may block on load.
+//   • loadSessionSnapshotForAudioThread: [Audio thread] or [Message thread] — acquire-load;
+//     refcount only on the hot path; no decode.
+//   • getCurrentClip: [Message thread] **bridge** API — front clip’s `AudioClip` only; the
+//     timeline **view** uses `loadSessionSnapshotForAudioThread` + `getPlacedClips` (Step 7).
 //
 // OWNERSHIP
-//   Session owns the atomic<shared_ptr<const AudioClip>>. It does not own Transport. Lifetimes:
-//   application creates Session and keeps it alive for the app lifetime; clips are replaced, not
-//   owned from outside.
+//   `Session` owns `std::atomic<std::shared_ptr<const SessionSnapshot>>` only. It does not own
+//   `Transport` or the audio device. Clip PCM lifetime is through `shared_ptr` inside the snapshot.
 //
-// NOT RESPONSIBLE FOR
-//   Playhead position, play/pause, or opening files (UI does open; loader decodes; we store).
-//
-// In-body comments in Session.cpp state product meaning at the atomic publish path (failed load
-// vs successful swap, what “clear” means for playback) next to the mechanics.
-//
-// See also: AudioClip, AudioFileLoader, PlaybackEngine (reader on audio thread).
+// In-body: `Session.cpp` explains failure vs success at the atomic store and what “empty” means.
+// See also: `SessionSnapshot`, `PlacedClip`, `AudioFileLoader`, `PlaybackEngine`, `status/DECISION_LOG.md`.
 // =============================================================================
 
-#include "domain/AudioClip.h"
+#include "domain/SessionSnapshot.h"
 
 #include <juce_core/juce_core.h>
 
 #include <atomic>
 #include <memory>
+
+class AudioClip;
 
 class Session
 {
@@ -48,21 +55,31 @@ public:
     Session(Session&&) = delete;
     Session& operator=(Session&&) = delete;
 
-    // [Message thread] Decode and replace the current clip, or return error and keep old clip.
-    juce::Result replaceClipFromFile(const juce::File& file, double deviceSampleRate);
+    // [Message thread] Decode file → on success, append to *current* session by prepending a new
+    // `PlacedClip` at `startSampleOnTimeline` (Phase 2: **newest** = index 0). On failure, **do not**
+    // replace the pointer — the last known-good snapshot remains.
+    juce::Result addClipFromFileAtPlayhead(const juce::File& file,
+                                         double deviceSampleRate,
+                                         std::int64_t startSampleOnTimeline);
 
-    // [Message thread] Remove the current clip (release store to empty).
+    // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
+    // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.
     void clearClip() noexcept;
 
-    // [Message thread] Raw pointer to current clip; same data as a snapshot from load, shorter
-    // lifetime — do not use across threads for logic that needs atomicity; for UI it matches
-    // what you will paint after a message-thread load.
+    // [Message thread] Front clip’s `AudioClip` (index 0); **bridge** for legacy call sites.
+    // `ClipWaveformView` reads the full snapshot for multi-clip layout (Step 7).
     [[nodiscard]] const AudioClip* getCurrentClip() const noexcept;
 
-    // [Audio thread] and [Message thread] Lock-free share of the current clip; refcount only on
-    // the hot path. No decode.
-    [[nodiscard]] std::shared_ptr<const AudioClip> loadClipForAudioThread() const noexcept;
+    // [Message thread] Derived session timeline extent (max of start+length over placed clips);
+    // matches transport playhead + seek + end-of-content clamp. Zero when empty.
+    [[nodiscard]] std::int64_t getTimelineLengthSamples() const noexcept;
+
+    // [Audio thread] and [Message thread] Acquire the current `SessionSnapshot` pointer; no
+    // decode, no session mutation. This is the main handoff the engine uses each block.
+    [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
 
 private:
-    mutable std::atomic<std::shared_ptr<const AudioClip>> clip_;
+    // Current world picture for the audio thread: always either the shared empty snapshot or a
+    // user-built snapshot; swapped only from the message thread, read with acquire from any thread.
+    mutable std::atomic<std::shared_ptr<const SessionSnapshot>> sessionSnapshot_;
 };

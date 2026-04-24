@@ -25,7 +25,7 @@
 //   callback, which we do not call from here.
 //
 // NESTED TYPES
-//   TransportControlsContent  —  buttons + waveform; opens files via FileChooser, calls Session.
+//   TransportControlsContent  —  buttons + waveform; FileChooser → read playhead, Session add-clip.
 //   MainWindow  —  juce::DocumentWindow shell around the content.
 //
 // Method bodies in this file add plain-language notes next to start/stop order and the async
@@ -107,8 +107,8 @@ public:
 
 private:
     // [Message thread only] Child component: file chooser, transport buttons, ClipWaveformView.
-    // Holds non-owning refs; MainWindow and application own lifetime. load path: FileChooser
-    // (async) → session.replaceClipFromFile with sample rate from getCurrentAudioDevice.
+    // Holds non-owning refs; MainWindow and application own lifetime. Add path: FileChooser
+    // (async) → `Transport::readPlayheadSamplesForUi` once, then `addClipFromFileAtPlayhead`.
     class TransportControlsContent : public juce::Component
     {
     public:
@@ -120,17 +120,17 @@ private:
             , deviceManager(deviceManagerIn)
             , waveformView(sessionIn, transportIn)
         {
-            openButton.onClick = [this] { openFileClicked(); };
+            addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
             playButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Playing); };
             pauseButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Paused); };
-            // Stop: user expectation is "playback off *and* playhead back to the start" for
-            // this small UI — we queue both the intent and a seek to sample 0 (applied next block).
+            // Stop: user expectation is "playback off *and* playhead back to the start" of the
+            // session timeline — we queue both the intent and a seek to session sample 0 (next block).
             stopButton.onClick = [this] {
                 transport.requestPlaybackIntent(PlaybackIntent::Stopped);
                 transport.requestSeek(0);
             };
 
-            addAndMakeVisible(openButton);
+            addAndMakeVisible(addClipButton);
             addAndMakeVisible(playButton);
             addAndMakeVisible(pauseButton);
             addAndMakeVisible(stopButton);
@@ -144,7 +144,7 @@ private:
             auto row = area.removeFromTop(32);
             const int buttonWidth = juce::jmax(48, row.getWidth() / 4);
 
-            openButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             playButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             pauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
@@ -152,21 +152,21 @@ private:
         }
 
     private:
-        // [Message thread] Presents a native file dialog; when the user picks a file, decodes
-        // into session if sample rate matches the active device. juce::FileChooser::launchAsync
-        // returns on the message thread in the callback lambda.
-        void openFileClicked()
+        // [Message thread] Presents a native file dialog; on success, new clip is placed on the
+        // **session** timeline at the current `Transport` playhead (read once, here, not on audio).
+        void addClipAtPlayheadClicked()
         {
             const auto fileChooserFlags = juce::FileBrowserComponent::openMode
                                           | juce::FileBrowserComponent::canSelectFiles;
 
             auto chooser = std::make_shared<juce::FileChooser>(
-                "Open audio file",
+                "Add audio at playhead",
                 juce::File{},
                 "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3");
 
-            // JUCE: the dialog is async; this lambda runs on the *message* thread when the user
-            // dismisses the picker. No decoding happens until we explicitly call replaceClipFromFile.
+            // JUCE: async dialog; the lambda runs on the *message* thread when the user dismisses
+            // the picker. We record playhead and decode in this callback — the agreed “at add
+            // time” read for placement (not the audio thread).
             chooser->launchAsync(fileChooserFlags, [this, chooser](const juce::FileChooser& fc) {
                 juce::ignoreUnused(chooser);
 
@@ -187,10 +187,14 @@ private:
                     return;
                 }
 
-                // Phase 1: loader must match the *running* device rate; we use it as the contract
-                // for AudioFileLoader::loadFromFile, not a hard-coded constant.
+                // Snapshot once: this value becomes `PlacedClip::startSampleOnTimeline` for the
+                // new row (see Session / `PHASE_PLAN` add-at-playhead).
+                const std::int64_t startSampleOnTimeline = transport.readPlayheadSamplesForUi();
+
+                // Loader must match the *running* device rate (Phase 1 contract).
                 const double sampleRate = device->getCurrentSampleRate();
-                const juce::Result loadResult = session.replaceClipFromFile(file, sampleRate);
+                const juce::Result loadResult =
+                    session.addClipFromFileAtPlayhead(file, sampleRate, startSampleOnTimeline);
 
                 if (!loadResult.wasOk())
                 {
@@ -201,8 +205,8 @@ private:
                 }
                 else
                 {
-                    // New clip is in session — redraw the waveform; playhead/transport unchanged
-                    // until the user hits play or seek.
+                    // New **front** clip is in the snapshot; waveform still shows one buffer;
+                    // playhead/transport are unchanged (user plays or seeks next).
                     waveformView.repaint();
                 }
             });
@@ -212,7 +216,7 @@ private:
         Session& session;
         juce::AudioDeviceManager& deviceManager;
 
-        juce::TextButton openButton{ "Open..." };
+        juce::TextButton addClipButton{ "Add clip..." };
         juce::TextButton playButton{ "Play" };
         juce::TextButton pauseButton{ "Pause" };
         juce::TextButton stopButton{ "Stop" };
