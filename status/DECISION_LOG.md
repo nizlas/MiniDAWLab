@@ -7,6 +7,25 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-24 — Phase 2 move ordering on committed single-clip move (steering)
+
+Decision (see `docs/PHASE_PLAN.md`, late Phase 2 extension):
+
+- When a **single** placed clip `M` is **moved** and the move is **committed**, order is decided **only** from the **end-state** of the session: whether `M` overlaps any **other** placed clip after the new placement. No `N_before`, no per-drag state, no reorder during in-flight drag.
+- If, after the commit, `M` overlaps **no** other clip: **promote `M` to index 0** (remove `M` from its current position, insert at front, shift others that were above `M` down by one).
+- If, after the commit, `M` overlaps **one or more** other clips: **preserve `M`’s list ordinal** (no reorder from this move).
+- **Selection** does not reorder. **Only** a committed move end-state may reorder, and **only** `M` is reordered.
+
+Rationale:
+- Aligns with reference DAW behavior (isolated release ≈ “reset to front”; overlapping release ≈ keep stack order) without session bookkeeping of drag path.
+- Keeps a single, inspectable decision from one snapshot: overlap emptiness in the committed state.
+
+Notes:
+- Implementation (selection, drag, `Session`/`SessionSnapshot` move API) is **not** implied by this log entry; it requires an explicit follow-up approved step.
+- “Newest on top” for **new** clips remains the separate default in `PHASE_PLAN.md`; this decision governs **moved** clips only, once that extension exists.
+
+---
+
 ## 2026-04-24 — Phase 1 playback assumptions
 
 Decision:

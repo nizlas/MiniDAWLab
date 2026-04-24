@@ -211,10 +211,32 @@ Extend the design from one clip to multiple clips on a single session timeline w
 
 ### Out of Scope
 
+- trim, split, fade, or full editing
 - multiple tracks, mixer, routing graph, sends / buses, MIDI, recording, plugin hosting
-- drag-and-drop placement, moving clips after placement, trim, split, fade, or full editing
 - mixing overlapping clips as a **sum** (this phase is “top clip wins by region”, not a mixer)
 - advanced editing toolset
+
+For a possible late Phase 2 extension, minimal single-lane event interaction may be allowed if explicitly approved:
+
+- **clip selection**
+- **moving clips** on the existing single timeline (placement change only, no new editing tools)
+
+**Steering: overlap order when a clip is moved (committed end-state only).**  
+`Session` owns the ordered list of placed clips; index 0 = front-most. The rule applies only when a move is **committed** (e.g. pointer released with a new position). It does **not** depend on drag history, prior overlap sets, or intermediate positions.
+
+Let `M` be the single clip that was moved. After the move is committed, let **N** be the set of *other* placed clips that **overlap** `M` in time (the committed end-state only).
+
+- If **N** is **empty** — `M` overlaps **no** other clip — **promote `M` to index 0**: remove `M` from its current list position and re-insert it at the front; clips that were above `M` in the list shift down by one. There is still exactly one index 0.
+- If **N** is **non-empty** — `M` still overlaps one or more other clips — **preserve `M`’s current ordinal** (its position in the list is unchanged by this move).
+
+**Interaction constraints (non-negotiable for this rule):**
+- **Selection** never changes front/back order.
+- **Drag in-flight** never reorders; only the **committed** move end-state may change order.
+- Only **`M`** is reordered; no other clip’s list position is changed by a move of `M`.
+
+**Explicit non-goals** for this extension: multi-clip move, keyboard modifiers for bring-to-front, ripple, snapping, trim/split/fades, cross-track drag/drop, or broader DAW-style editing semantics.
+
+**Gating:** implementing selection/move and applying this rule in code is a **separate, explicitly approved** step; this document does not by itself authorize that implementation.
 
 ### Expected Value
 

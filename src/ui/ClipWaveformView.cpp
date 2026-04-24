@@ -4,8 +4,10 @@
 //
 // ROLE
 //   Fills a list from `loadSessionSnapshotForAudioThread()`: for each `PlacedClip` row, draw the
-//   event **envelope** and a peak sketch in material columns whose **center** falls in session
-//   time *not* covered by any row in front (lower index in the snapshot, painted later). **Covered**
+//   event **envelope** and a peak sketch; single-lane **selection** (UI-local) and **drag to move**
+//   (committed via `Session::moveClip` only) sit on the same view — ordering policy is not here.
+//   In material columns whose **center** falls in session time *not* covered by any row in front
+//   (lower index in the snapshot, painted later). **Covered**
 //   time on a back row: no readable peaks; the overlying event shows through after back→front order.
 //   A **post-pass** per row applies the same overlap *hint* (tint + thin diagonals) only in session
 //   time where *that* row is the local top and an older row still underlaps — view only. Session
@@ -31,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -50,6 +53,8 @@ namespace
     constexpr float kEventCorner = 2.5f;
     constexpr float kEventVerticalMargin = 4.0f;
     constexpr float kWaveInset = 2.0f; // keep waveform off the 1px border so the frame reads first
+    // Horizontal delta below which a mousedown+move is treated as a click (no `Session::moveClip`).
+    constexpr float kDragThresholdPx = 3.0f;
 
     // All rows share the same event chrome. **Product:** a clip that is only *partly* covered in
     // time should not read as a permanently “muted track” in its **uncovered** tails — the rule is
@@ -233,10 +238,10 @@ void ClipWaveformView::timerCallback()
     repaint();
 }
 
-// [Message thread] User seeks by timeline position. **Product:** the horizontal position under the
-// cursor is the same **fraction of view width** as the playhead line (and as `getTimelineLength…`)
-// so clicking and the moving line use one mental model. Only `requestSeek` — we do not own the
-// playhead value. See `Transport`.
+// [Message thread] Click: front-most hit test → select; empty timeline → clear selection and seek
+// to match the **same** x→sample map as the playhead line. Drag (same gesture) is handled in
+// `mouseDrag` / `mouseUp`; `Session::moveClip` runs **only** on commit — ordering policy stays in
+// `SessionSnapshot::withClipMoved`, not here.
 void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -263,8 +268,115 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         timelineLength,
         static_cast<std::int64_t>(std::llround((double)t * (double)timelineLength)));
 
+    if (const std::optional<PlacedClipId> hit = hitTestFrontmostPlacedIdAtSessionSample(snap, target))
+    {
+        selectedPlacedId_ = *hit;
+        mouseDownPlacedId_ = *hit;
+        clickDownX_ = e.position.x;
+        dragMovementBeyondThreshold_ = false;
+        for (int i = 0; i < snap->getNumPlacedClips(); ++i)
+        {
+            if (snap->getPlacedClip(i).getId() == *hit)
+            {
+                clickDownStartSample_ = snap->getPlacedClip(i).getStartSample();
+                break;
+            }
+        }
+        tentativeStartOnTimeline_ = clickDownStartSample_;
+        repaint();
+        return;
+    }
+
+    selectedPlacedId_.reset();
+    mouseDownPlacedId_.reset();
+    dragMovementBeyondThreshold_ = false;
     transport_.requestSeek(target);
     repaint();
+}
+
+void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
+{
+    if (!mouseDownPlacedId_.has_value())
+    {
+        return;
+    }
+    const std::int64_t timelineLength = session_.getTimelineLengthSamples();
+    if (timelineLength <= 0)
+    {
+        return;
+    }
+    const juce::Rectangle<float> b = getLocalBounds().toFloat();
+    if (b.getWidth() <= 0.0f)
+    {
+        return;
+    }
+    const float dx = e.position.x - clickDownX_;
+    if (std::abs(dx) >= kDragThresholdPx)
+    {
+        dragMovementBeyondThreshold_ = true;
+    }
+    const double deltaS = (static_cast<double>(dx) * static_cast<double>(timelineLength))
+                          / static_cast<double>(b.getWidth());
+    tentativeStartOnTimeline_ = juce::jmax(
+        static_cast<std::int64_t>(0), clickDownStartSample_ + static_cast<std::int64_t>(std::llround(deltaS)));
+    repaint();
+}
+
+// [Message thread] Commit: one `Session::moveClip` if the user actually dragged; selection does
+// not by itself call into `Session` (no reorder on select).
+void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
+{
+    juce::ignoreUnused(e);
+    if (mouseDownPlacedId_.has_value() && dragMovementBeyondThreshold_)
+    {
+        session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
+    }
+    mouseDownPlacedId_.reset();
+    dragMovementBeyondThreshold_ = false;
+    repaint();
+}
+
+void ClipWaveformView::clearSelectionIfIdMissing(
+    const std::shared_ptr<const SessionSnapshot>& snap)
+{
+    if (!selectedPlacedId_.has_value())
+    {
+        return;
+    }
+    if (snap == nullptr || snap->isEmpty())
+    {
+        selectedPlacedId_.reset();
+        return;
+    }
+    for (int i = 0; i < snap->getNumPlacedClips(); ++i)
+    {
+        if (snap->getPlacedClip(i).getId() == *selectedPlacedId_)
+        {
+            return;
+        }
+    }
+    selectedPlacedId_.reset();
+}
+
+std::optional<PlacedClipId> ClipWaveformView::hitTestFrontmostPlacedIdAtSessionSample(
+    const std::shared_ptr<const SessionSnapshot>& snap, const std::int64_t timelineSample) const
+{
+    if (snap == nullptr || snap->isEmpty())
+    {
+        return std::nullopt;
+    }
+    for (int i = 0; i < snap->getNumPlacedClips(); ++i)
+    {
+        const PlacedClip& p = snap->getPlacedClip(i);
+        const std::int64_t a0 = p.getStartSample();
+        const std::int64_t a1
+            = a0 + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
+        if (a0 < a1 && timelineSample >= a0 && timelineSample < a1)
+        {
+            return p.getId();
+        }
+    }
+    return std::nullopt;
 }
 
 // [Message thread] Fills `clipStrips_` with per-row peak columns so `paint` only maps numbers to x.
@@ -286,9 +398,13 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     lastSnapshotKey_ = snap.get();
     lastWidth_ = w;
     clipStrips_.clear();
+    clearSelectionIfIdMissing(snap);
 
     if (snap == nullptr || snap->isEmpty())
     {
+        selectedPlacedId_.reset();
+        mouseDownPlacedId_.reset();
+        dragMovementBeyondThreshold_ = false;
         return;
     }
 
@@ -309,6 +425,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         TimelineStrip strip;
         const PlacedClip& placed = snap->getPlacedClip(i);
         const AudioClip& ac = placed.getAudioClip();
+        strip.clipId = placed.getId();
         strip.startOnTimeline = placed.getStartSample();
         strip.materialNumSamples = ac.getNumSamples();
 
@@ -525,9 +642,14 @@ void ClipWaveformView::paint(juce::Graphics& g)
             continue;
         }
 
-        const float ex0 = sessionSampleToX(strip.startOnTimeline);
+        const bool paintDragPreview = dragMovementBeyondThreshold_ && mouseDownPlacedId_.has_value()
+                                      && strip.clipId == *mouseDownPlacedId_;
+        const std::int64_t startForDraw
+            = paintDragPreview ? tentativeStartOnTimeline_ : strip.startOnTimeline;
+
+        const float ex0 = sessionSampleToX(startForDraw);
         const float ex1 = sessionSampleToX(
-            strip.startOnTimeline + static_cast<std::int64_t>(strip.materialNumSamples));
+            startForDraw + static_cast<std::int64_t>(strip.materialNumSamples));
         const float x0 = juce::jmin(ex0, ex1);
         const float x1 = juce::jmax(ex0, ex1);
         juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
@@ -536,6 +658,11 @@ void ClipWaveformView::paint(juce::Graphics& g)
         g.fillRoundedRectangle(eventRect, kEventCorner);
         g.setColour(eventBodyBorder());
         g.drawRoundedRectangle(eventRect, kEventCorner, kEventStroke);
+        if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
+        {
+            g.setColour(juce::Colour(0xff9eb8d8).withAlpha(0.95f));
+            g.drawRoundedRectangle(eventRect, kEventCorner, 1.2f);
+        }
 
         juce::Rectangle<float> inner = eventRect.reduced(1.0f + kWaveInset, 1.0f + kWaveInset * 0.5f);
         if (inner.getWidth() < 1.0f || inner.getHeight() < 1.0f)
@@ -568,7 +695,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
             // Midpoint in material [s0, s1) for a coarse “is this column under something in front?” test.
             const int sMid = (s0 + s1) / 2;
             const std::int64_t tOnTimeline
-                = strip.startOnTimeline + static_cast<std::int64_t>(juce::jlimit(0, ns - 1, sMid));
+                = startForDraw + static_cast<std::int64_t>(juce::jlimit(0, ns - 1, sMid));
             if (isTimelineSampleCoveredByPriorRows(row, tOnTimeline))
             {
                 continue;
@@ -597,9 +724,13 @@ void ClipWaveformView::paint(juce::Graphics& g)
         {
             continue;
         }
-        const float rex0 = sessionSampleToX(stripR.startOnTimeline);
+        const bool rowDragPreview = dragMovementBeyondThreshold_ && mouseDownPlacedId_.has_value()
+                                    && stripR.clipId == *mouseDownPlacedId_;
+        const std::int64_t startHatch
+            = rowDragPreview ? tentativeStartOnTimeline_ : stripR.startOnTimeline;
+        const float rex0 = sessionSampleToX(startHatch);
         const float rex1 = sessionSampleToX(
-            stripR.startOnTimeline + static_cast<std::int64_t>(stripR.materialNumSamples));
+            startHatch + static_cast<std::int64_t>(stripR.materialNumSamples));
         const float rxl = juce::jmin(rex0, rex1);
         const float rxr = juce::jmax(rex0, rex1);
         juce::Rectangle<float> rowEventRect{ rxl, eventTrackY.getY(), juce::jmax(1.0f, rxr - rxl),

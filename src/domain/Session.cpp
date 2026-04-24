@@ -54,14 +54,35 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     // `startSampleOnTimeline` was read on this thread (typically from `Transport` once, at add
     // time) — the clip is spliced in as the new front (newest) row; the prior snapshot, if any, is
     // copied in order behind it.
+    const PlacedClipId newId = nextPlacedClipId_++;
+    jassert(newId != kInvalidPlacedClipId);
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
-    const std::shared_ptr<const SessionSnapshot> next =
-        SessionSnapshot::withClipAddedAsNewest(*current, material, startSampleOnTimeline);
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withClipAddedAsNewest(
+        *current, newId, material, startSampleOnTimeline);
     jassert(next != nullptr);
     // Release: make this snapshot the one future acquires see; old snapshot is kept alive by any
     // in-flight callback/UI read until their shared_ptrs drop.
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
     return juce::Result::ok();
+}
+
+void Session::moveClip(const PlacedClipId id, const std::int64_t newStartSampleOnTimeline) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->isEmpty())
+    {
+        return;
+    }
+    // The snapshot factory alone applies “isolated → promote to 0, else keep ordinal” — this
+    // class only publishes, same as `addClipFromFileAtPlayhead`.
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withClipMoved(*current, id, newStartSampleOnTimeline);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
 void Session::clearClip() noexcept

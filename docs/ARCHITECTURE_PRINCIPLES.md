@@ -90,6 +90,9 @@ session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock
 reads on the hot path; the exact snapshot type is an implementation choice consistent with
 `docs/PHASE_PLAN.md` and `status/DECISION_LOG.md`.
 
+**Session-owned overlap order — how it may change:**  
+Front-to-back order of placed clips is **session state**, not UI state. Any change to that order must be expressed as an **explicit, named** `Session` (or `SessionSnapshot`) operation — for example, adding a clip, or, when a gated move feature exists, a dedicated move that applies the **committed end-state** rule in `docs/PHASE_PLAN.md`. **Selection, hover, and in-flight drags** must not silently reorder clips. A later phase may add concrete APIs; the principle is: **no order mutation as a side effect of general UI state.**
+
 ### File loading is separate from playback
 
 File import, file opening, and audio decoding concerns must be separated from playback control and playback execution.

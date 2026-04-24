@@ -36,6 +36,11 @@
 
 class AudioClip;
 
+// Stable per-placement identity for UI (selection, move) and for `SessionSnapshot::withClipMoved`.
+// 0 = invalid / unused; `Session` assigns monotonic ids on the message thread.
+using PlacedClipId = std::uint64_t;
+inline constexpr PlacedClipId kInvalidPlacedClipId = 0;
+
 // ---------------------------------------------------------------------------
 // PlacedClip — owns shared material + timeline start (no transport, no UI)
 // ---------------------------------------------------------------------------
@@ -46,9 +51,13 @@ class PlacedClip
 {
 public:
     // [Message thread, during load / when building a snapshot] `material` must be non-null
-    // (jassert in .cpp). `startSampleOnTimeline` is in device samples; Step 6 sets it from the
-    // playhead at add time.
-    PlacedClip(std::shared_ptr<const AudioClip> material, std::int64_t startSampleOnTimeline) noexcept;
+    // (jassert in .cpp). `id` is assigned once by `Session` for each new row and kept across moves
+    // (see `withClipMoved`); it must be non-zero. `startSampleOnTimeline` is in device samples.
+    PlacedClip(PlacedClipId id,
+              std::shared_ptr<const AudioClip> material,
+              std::int64_t startSampleOnTimeline) noexcept;
+
+    [[nodiscard]] PlacedClipId getId() const noexcept { return id_; }
 
     [[nodiscard]] const AudioClip& getAudioClip() const noexcept;
 
@@ -60,7 +69,12 @@ public:
     // or sharing semantics without copying PCM.
     [[nodiscard]] std::shared_ptr<const AudioClip> getMaterial() const noexcept { return material_; }
 
+    // Same id and material, new start — used by `SessionSnapshot::withClipMoved` only; keeps
+    // identity stable when only placement changes.
+    [[nodiscard]] PlacedClip withStartSampleOnTimeline(std::int64_t newStartSampleOnTimeline) const noexcept;
+
 private:
+    PlacedClipId id_ = kInvalidPlacedClipId;
     std::shared_ptr<const AudioClip> material_;
     std::int64_t startSampleOnTimeline_ = 0;
 };

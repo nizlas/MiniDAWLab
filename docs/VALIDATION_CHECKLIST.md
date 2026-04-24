@@ -148,6 +148,16 @@ For every phase, explicitly ask:
 
 Deferred decisions are acceptable only if they are visible and intentionally contained.
 
+## Phase 2 late extension: single-lane selection and move
+
+When validating the **minimal single-lane** selection + single-clip drag step (`docs/PHASE_PLAN.md` late extension), check at least the following in addition to the general phase checks:
+
+- **Selection is UI-only:** no `PlacedClipId` / selection in `SessionSnapshot` after a click; only a committed `Session::moveClip` changes the published snapshot.
+- **Hit test:** the front-most (lowest snapshot index) event under the pointer wins when clips overlap; empty timeline click still seeks and clears selection.
+- **No reorder in-flight or on select:** only `SessionSnapshot::withClipMoved` applies the committed end-state rule (isolated end → promote to index 0; still overlapping → preserve ordinal). Drag preview does not publish the session.
+- **Commit threshold:** a tiny pointer jitter without crossing the movement threshold does not call `moveClip`.
+- **Playback and transport** unchanged: `PlaybackEngine` still reads the snapshot handoff; no new mixing rule.
+
 ## Phase 1 Validation Checklist
 
 For Phase 1 specifically, validate all of the following:

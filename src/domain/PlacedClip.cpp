@@ -25,14 +25,24 @@
 
 #include <juce_core/juce_core.h>
 
-PlacedClip::PlacedClip(std::shared_ptr<const AudioClip> material,
-                      std::int64_t startSampleOnTimeline) noexcept
-    : material_(std::move(material))
+PlacedClip::PlacedClip(const PlacedClipId id,
+                      std::shared_ptr<const AudioClip> material,
+                      const std::int64_t startSampleOnTimeline) noexcept
+    : id_(id)
+    , material_(std::move(material))
     , startSampleOnTimeline_(startSampleOnTimeline)
 {
     // Failing this means someone tried to build a `PlacedClip` without real PCM — the snapshot
     // should not be published in that state (see `SessionSnapshot::withSinglePlacedClip`).
     jassert(material_ != nullptr);
+    jassert(id_ != kInvalidPlacedClipId);
+}
+
+PlacedClip PlacedClip::withStartSampleOnTimeline(const std::int64_t newStartSampleOnTimeline) const noexcept
+{
+    jassert(material_ != nullptr);
+    jassert(id_ != kInvalidPlacedClipId);
+    return PlacedClip(id_, material_, newStartSampleOnTimeline);
 }
 
 const AudioClip& PlacedClip::getAudioClip() const noexcept

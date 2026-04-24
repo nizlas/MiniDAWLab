@@ -22,7 +22,9 @@
 //   juce::Component and Timer: [Message thread] only. Timer repaints; no audio path.
 //
 // NOT RESPONSIBLE FOR
-//   File decode, session mutation, clip ordering (Session owns that), or clip selection/trim.
+//   File decode, or ordering *policy* (Session / SessionSnapshot). The view **invokes** `Session
+//   ::moveClip` on committed drag; it does not decide promote-vs-preserve. Transport truth stays in
+//   `Transport`.
 //
 // See: ClipWaveformView.cpp (paint pipeline, overlap handling, JUCE `Graphics` notes).
 // =============================================================================
@@ -32,6 +34,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 class Transport;
@@ -48,12 +51,13 @@ class Transport;
 // Threading: [Message thread] for construction, `paint`, mouse, and timer. Never called from the
 // audio callback.
 //
-// Not responsible for: file decode, session mutation, or selecting which clip the user is “editing.”
+// Not responsible for: file decode, clip ordering *rules*, or transport ownership.
 // ---------------------------------------------------------------------------
 class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
-    // [Message thread] session/transport outlive the view; read-only; never mutates `Session`.
+    // [Message thread] session/transport outlive the view. Selection is UI-only; a committed move
+    // calls `Session::moveClip` (message thread), not ad-hoc snapshot edits.
     ClipWaveformView(Session& session, Transport& transport);
     ~ClipWaveformView() override;
 
@@ -62,9 +66,11 @@ public:
     // topmost over something behind), then playhead. No audio thread.
     void paint(juce::Graphics& g) override;
 
-    // [Message thread] Mouse x → session timeline index → `Transport::requestSeek` (applied next
-    // audio block by `PlaybackEngine`, not here).
+    // [Message thread] Click on *event* → select; click on *empty timeline* → clear selection and
+    // seek. Drag on event → in-flight move preview; release → `Session::moveClip` (commit).
     void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     // [Message thread] Timer: schedules full `repaint` at a low fixed rate (see .cpp); playhead is sampled in
@@ -87,6 +93,15 @@ private:
         int row,
         std::vector<std::pair<std::int64_t, std::int64_t>>& outMerged) const;
 
+    // [Message thread] **Front-most first** (lowest index `i` in the snapshot) whose [start, end)
+    // half-open range contains `timelineSample` — same mental model as paint z-order. No y-test in
+    // single-lane Phase 2.
+    std::optional<PlacedClipId> hitTestFrontmostPlacedIdAtSessionSample(
+        const std::shared_ptr<const SessionSnapshot>& snap, std::int64_t timelineSample) const;
+
+    // [Message thread] If the selected id no longer exists in the snapshot, clear selection.
+    void clearSelectionIfIdMissing(const std::shared_ptr<const SessionSnapshot>& snap);
+
     Session& session_;
     Transport& transport_;
 
@@ -98,11 +113,23 @@ private:
     // Cached paint inputs: one entry per `getPlacedClip(i)` row (0 = front / newest in snapshot).
     struct TimelineStrip
     {
+        PlacedClipId clipId{ kInvalidPlacedClipId };
         std::int64_t startOnTimeline = 0;
         int materialNumSamples = 0;
         std::vector<float> peaks;
     };
     std::vector<TimelineStrip> clipStrips_;
+
+    // UI-local selection; never published in `SessionSnapshot` (see `PHASE_PLAN` / `ARCHITECTURE_…`).
+    std::optional<PlacedClipId> selectedPlacedId_;
+
+    // In-flight single-clip drag: preview uses `tentativeStartOnTimeline_` for the event rect only
+    // after a movement threshold. Commit calls `Session::moveClip` on mouse up.
+    std::optional<PlacedClipId> mouseDownPlacedId_;
+    float clickDownX_ = 0.0f;
+    std::int64_t clickDownStartSample_ = 0;
+    std::int64_t tentativeStartOnTimeline_ = 0;
+    bool dragMovementBeyondThreshold_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ClipWaveformView)
 };

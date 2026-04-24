@@ -32,6 +32,8 @@
 //     timeline snapshot shape.
 //   • `withClipAddedAsNewest` (Step 6) prepends a new row at index 0, shifting existing rows down
 //     in index — newest front-most, matching Phase 2 ordering (see `PHASE_PLAN`).
+//   • `withClipMoved` (late Phase 2): one clip’s timeline start and optional promotion to index 0
+//     (committed end-state rule in `PHASE_PLAN`); the **only** place that ordering rule is applied.
 //
 // See also: `Session`, `PlacedClip`, `PlaybackEngine`, `docs/ARCHITECTURE_PRINCIPLES.md` (Phase 2
 //   snapshot), `status/DECISION_LOG.md` (2026-04-23 Phase 2 steering).
@@ -64,16 +66,30 @@ public:
     // [Message thread] Build a *new* snapshot with exactly one row (Step 4 load path: same
     // audible result as old single-clip publish, new container shape). Null material yields
     // empty via the same shared empty object — defensive; normal callers pass decoded clips.
+    // `newClipId` must be non-zero (assigned by `Session` when building the new front row).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withSinglePlacedClip(
-        std::shared_ptr<const AudioClip> material, std::int64_t startSampleOnTimeline) noexcept;
+        std::shared_ptr<const AudioClip> material,
+        std::int64_t startSampleOnTimeline,
+        PlacedClipId newClipId) noexcept;
 
     // [Message thread] Build a *new* snapshot: `material` is placed at `startSampleOnTimeline` and
     // becomes index 0 (front-most, newest). Previous rows are copied in order *after* it.
-    // Empty `previous` is the same as a single-clip add. Null `material` → shared empty.
+    // `newClipId` identifies the new row. Empty `previous` is the same as a single-clip add. Null
+    // `material` → shared empty.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipAddedAsNewest(
         const SessionSnapshot& previous,
+        PlacedClipId newClipId,
         std::shared_ptr<const AudioClip> material,
         std::int64_t startSampleOnTimeline) noexcept;
+
+    // [Message thread] Move one clip to `newStartSampleOnTimeline` (clamped to >= 0). **Ordering**
+    // (committed-move end-state rule, `PHASE_PLAN.md`): if after placement it overlaps no other
+    // clip, that clip is promoted to index 0; otherwise its list ordinal is unchanged. Only
+    // `movedId` is reordered. Unknown id → no-op copy of `previous` (jassert in debug).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipMoved(
+        const SessionSnapshot& previous,
+        PlacedClipId movedId,
+        std::int64_t newStartSampleOnTimeline) noexcept;
 
     [[nodiscard]] bool isEmpty() const noexcept { return placedClips_.empty(); }
 

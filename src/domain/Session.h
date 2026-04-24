@@ -35,6 +35,7 @@
 // See also: `SessionSnapshot`, `PlacedClip`, `AudioFileLoader`, `PlaybackEngine`, `status/DECISION_LOG.md`.
 // =============================================================================
 
+#include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
 
 #include <juce_core/juce_core.h>
@@ -71,6 +72,11 @@ public:
                                          double deviceSampleRate,
                                          std::int64_t startSampleOnTimeline);
 
+    // [Message thread] Move one placed clip in **timeline sample** space. Ordering (promote to 0
+    // if isolated) is **only** in `SessionSnapshot::withClipMoved` — the UI does not implement
+    // policy. Invalid or unknown id: no publish (see factory jasserts).
+    void moveClip(PlacedClipId id, std::int64_t newStartSampleOnTimeline) noexcept;
+
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.
     void clearClip() noexcept;
@@ -88,6 +94,10 @@ public:
     [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
 
 private:
+    // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
+    // so a long edit session does not reuse ids while UI might still hold an old `PlacedClipId`.
+    PlacedClipId nextPlacedClipId_ = 1;
+
     // Current world picture for the audio thread: always either the shared empty snapshot or a
     // user-built snapshot; swapped only from the message thread, read with acquire from any thread.
     mutable std::atomic<std::shared_ptr<const SessionSnapshot>> sessionSnapshot_;
