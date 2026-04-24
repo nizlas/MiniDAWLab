@@ -11,6 +11,12 @@
 //   The constructor and accessor guard against null `shared_ptr` in debug (jassert). Product path
 //   always supplies material from a successful decode; a null pointer would mean a bug in the
 //   publisher, not a recoverable user error here.
+//
+// PEDAGOGICAL NOTE
+//   This file is intentionally **small**: all “what time is this clip on?” meaning lives in
+//   `startSampleOnTimeline` once; the heavy work is snapshot assembly (`SessionSnapshot`) and
+//   reading (`PlaybackEngine`, `ClipWaveformView`). Reading this .cpp should confirm object **shape**,
+//   not re-derive timeline rules.
 // =============================================================================
 
 #include "domain/PlacedClip.h"
@@ -32,5 +38,6 @@ PlacedClip::PlacedClip(std::shared_ptr<const AudioClip> material,
 const AudioClip& PlacedClip::getAudioClip() const noexcept
 {
     jassert(material_ != nullptr);
+    // Same const buffer the audio thread reads through the snapshot — no per-call load, no copy.
     return *material_;
 }

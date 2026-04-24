@@ -36,6 +36,20 @@
 
 class Transport;
 
+// ---------------------------------------------------------------------------
+// ClipWaveformView — multi-clip timeline *view* (Session snapshot + Transport playhead)
+// ---------------------------------------------------------------------------
+// Responsibility: turn the current `SessionSnapshot` into rectangles + downsampled peaks and a
+// playhead line. Owns no audio, no `Transport` truth, no clip ordering: it **reads** published
+// state only. Phase 2: per-row z-order (index 0 = newest) matches engine coverage **semantics** in
+// spirit (top row wins) but the **shading** rules are a **separate** product choice for legibility
+// (see .cpp: local topmost + underlap hint).
+//
+// Threading: [Message thread] for construction, `paint`, mouse, and timer. Never called from the
+// audio callback.
+//
+// Not responsible for: file decode, session mutation, or selecting which clip the user is “editing.”
+// ---------------------------------------------------------------------------
 class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
@@ -53,6 +67,8 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
 
 private:
+    // [Message thread] Timer: schedules full `repaint` at a low fixed rate (see .cpp); playhead is sampled in
+    // `paint` so the line tracks `Transport` without storing a cached position on the view.
     void timerCallback() override;
 
     // [Message thread] Rebuilds per-clip `peaks` when snapshot identity or view width changes.
@@ -79,7 +95,7 @@ private:
     const void* lastSnapshotKey_ = nullptr;
     int lastWidth_ = 0;
 
-    // One `TimelineStrip` per snapshot row, index aligned with `getPlacedClip(i)` (0 = front).
+    // Cached paint inputs: one entry per `getPlacedClip(i)` row (0 = front / newest in snapshot).
     struct TimelineStrip
     {
         std::int64_t startOnTimeline = 0;

@@ -87,6 +87,9 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewest(
 
 std::int64_t SessionSnapshot::getDerivedTimelineLengthSamples() const noexcept
 {
+    // Product: one **exclusive** end index for “session time” (device samples) shared by
+    // `Transport` seek range, the waveform view’s x-axis, and `PlaybackEngine`’s “past end”
+    // check — the maximum of (placement start + material length) over all rows; empty → 0.
     std::int64_t maxEnd = 0;
     for (const PlacedClip& p : placedClips_)
     {

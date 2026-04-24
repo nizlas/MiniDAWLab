@@ -231,6 +231,119 @@ The **code** is part of the documentation. A reader who knows C++ but does not a
 - Comments must not narrate syntax ("increment the counter", "assign to x") or restate the identifier name without adding information.
 - A TODO or FIXME is not a substitute for a class or method contract where the rubric below requires one.
 
+### Pedagogical explanation is the default for central code
+
+For central source files, pedagogical explanation is the default, not a special extra added only for unusually difficult code.
+
+The implementer must assume that a reader needs help understanding:
+- why a function exists
+- what role a helper plays
+- what a branch means in system/product terms
+- why a particular rendering/playback/transport rule exists
+- what is deliberately being communicated or suppressed
+
+Do not optimize for the minimum comment level that can be defended formally.
+Optimize for immediate human understanding.
+
+If a helper, branch, or local block would be clearer to a human with a short plain-language explanation, that explanation should be present.
+
+### Minimum-defensible documentation is not sufficient
+
+Documentation is not considered adequate merely because a reviewer can technically reconstruct the meaning from code, names, and a few comments.
+
+The standard is higher:
+important logic should be understandable without substantial reverse-engineering.
+
+If a human reader would still need to mentally simulate control flow, decode coordinate math, or infer product meaning from low-level operations, the documentation is still insufficient even if comments are present.
+
+### How central code should read
+
+Central code should read top-down like an explanation of the system, not like a puzzle with technical comments attached.
+
+For a non-trivial central method or helper, a reader should be able to understand, in order:
+- why this function exists
+- what role it plays in the system
+- what the main phases of the function are
+- what each important branch means in system/product terms
+- what important coordinate-space, time-space, or state-space distinctions are being preserved
+- what is deliberately not being done, where that would otherwise be easy to misread
+
+This usually requires, where relevant:
+- a short role comment before the function
+- conceptual chunking inside the body
+- role-describing local names
+- plain-language comments for important branches and transformations
+- explicit explanation when the code moves between different spaces or interpretations (for example material space vs timeline space, visible vs covered regions, transport state vs rendered state)
+
+The goal is not “some comments”.
+The goal is that a reader does not need substantial reverse-engineering to understand the function.
+
+A function is still under-documented if the reader must mentally reconstruct the architecture, infer product meaning from math or framework calls, or simulate control flow in detail before the role of the code becomes clear.
+
+### Example of the intended pedagogical level
+
+The intended standard is not merely that comments exist, but that a central function becomes understandable top-down without substantial reverse-engineering.
+
+Too weak:
+- brief technical labels
+- unexplained short local names
+- comments that only describe mechanics
+- no clear statement of why the function exists
+- no clear separation of conceptual phases
+- no explicit explanation of important distinctions such as material-space vs timeline-space or visible vs covered regions
+
+Acceptable:
+- the function first states its role in the system
+- the body is divided into meaningful conceptual chunks
+- local names describe the role of the values
+- comments explain the system/product meaning of important branches
+- comments explain important transformations between spaces or interpretations
+- a reader can understand why the function exists and how it fits into the system without reconstructing that meaning from low-level operations
+
+Example sketch (illustrative only, not a required exact style):
+
+```cpp
+// [Message thread] Build a cheap drawing cache for the current snapshot.
+// This function does not decide playback or overlap coverage.
+// Its only job is to turn clip material into a small set of peak columns
+// that paint() can draw quickly.
+void rebuildPeaksIfNeeded()
+{
+    const auto snapshot = session_.loadSessionSnapshotForAudioThread();
+    const int componentWidth = juce::jmax(1, getWidth());
+
+    // If the immutable snapshot and width are unchanged, the existing cache is still valid.
+    if (snapshot.get() == lastSnapshotKey_ && componentWidth == lastWidth_)
+    {
+        return;
+    }
+
+    lastSnapshotKey_ = snapshot.get();
+    lastWidth_ = componentWidth;
+    clipStrips_.clear();
+
+    // No snapshot content means there is nothing to draw.
+    if (snapshot == nullptr || snapshot->isEmpty())
+    {
+        return;
+    }
+
+    const std::int64_t timelineEndExclusive = snapshot->getDerivedTimelineLengthSamples();
+    if (timelineEndExclusive <= 0)
+    {
+        return;
+    }
+
+    // Build one cached strip per placed clip.
+    for (int clipIndex = 0; clipIndex < snapshot->getNumPlacedClips(); ++clipIndex)
+    {
+        // ...
+        // Important: peak extraction happens in material space [0, N).
+        // Timeline placement is handled later in paint() using startOnTimeline.
+        // ...
+    }
+}
+
 ### The six documentation tiers
 
 These tiers are **mandatory** for the scope described. Trivial one-line getters or obvious accessors do not need a method-level comment unless the contract is non-obvious (for example, realtime safety). Tier 6 applies to method *bodies*; its detailed rules and the allowance for small readability refactors are in **Readable method bodies** and **Readability refactors allowed during documentation passes** below.
@@ -264,6 +377,22 @@ These tiers are **mandatory** for the scope described. Trivial one-line getters 
 
 **What an in-body explanatory comment is (and is not).** It is a short plain-language statement of a branch's or operation's role in the system or product — a domain- or rule-level sentence such as "this is the Phase 1 mono-to-stereo rule" or "we clear the tail so the device buffer is fully defined." It is *not* a restatement of the call being made, not a narration of pointer arithmetic or loop indices, and not a substitute for the method-level doc comment (which describes the *contract*). These comments are additive to chunk labels and role-named locals; they are required whenever a reader who knows C++ but not JUCE and not this codebase could not otherwise understand what a branch means in system or product terms. Use them sparingly and where they actually help; do not paraphrase obvious code.
 
+### Internal helpers are not “lower standard” code
+
+Internal helper functions in central files must meet the same pedagogical standard as larger methods when they carry meaningful system/product behavior.
+
+A helper is in this category if it:
+- implements a visible UI rule
+- implements playback, transport, ordering, coverage, overlap, or visibility behavior
+- performs mapping between timeline/domain state and rendered output
+- encodes a rule that would otherwise be hidden behind math, buffer logic, or framework calls
+
+Such helpers must explain in plain language:
+- why they exist
+- what user-visible or system-visible rule they implement
+- what they are intentionally not doing, if that is easy to misread
+
+
 ### Examples and anti-examples are normative
 
 When body readability is reviewed, both positive examples and anti-examples are part of the rule.
@@ -284,6 +413,29 @@ The rule is satisfied only when important branches are explained in plain langua
 - "Phase 1 mono-to-stereo product rule: a mono clip should be heard on both left and right speakers on a stereo device, so we duplicate the same mono source channel to outputs 0 and 1."
 
 Reviewers should reject documentation that is formally commented but still requires the reader to infer branch meaning from low-level mechanics.
+
+### New central files and important internal helpers are not exempt
+
+The documentation bar applies immediately to **new central files** introduced in a phase.
+A new domain, engine, UI, transport, or session file under `src/` must not be treated as “too new”, “too small”, or “obviously understandable” as a reason to defer pedagogical documentation to a later step.
+
+If a phase introduces a new central concept, the file(s) that define and implement that concept must already explain:
+- why the concept exists
+- how it fits into the architecture
+- what it owns or represents
+- how it participates in ownership, lifetime, and threading
+- what is transitional or phase-specific about its current role, if applicable
+
+Likewise, an internal helper function is **not** exempt merely because it is:
+- in an anonymous namespace
+- `static`
+- private
+- short
+- or only used from one method
+
+If that helper carries important **system/product meaning** that would otherwise remain hidden behind rendering/math/buffer mechanics, it must still be documented in plain language at the level needed for a reader to understand why it exists and what role it plays.
+
+Reviewers should reject documentation that is strong only on large public methods while leaving new central files or important internal helpers under-explained.
 
 ### Readability refactors allowed during documentation passes
 
@@ -327,6 +479,19 @@ For each documentation slice, the implementation report must include:
 - a brief note explaining what system/product meaning is now explicit that previously had to be inferred from mechanics
 
 A summary of “comments were improved” or “body readability was strengthened” is not sufficient on its own.
+
+### Documentation-pass review output
+
+A documentation pass is not reviewable from summary alone.
+
+For each documentation slice, the implementation report must include:
+- the full text of at least one central updated method body
+- at least one updated branch or helper example that demonstrates improved plain-language readability
+- a brief note explaining what system/product meaning is now explicit that previously had to be inferred from mechanics
+
+A summary such as “documentation was improved”, “comments were added”, or “body readability was strengthened” is not sufficient on its own.
+
+If a new central file was introduced or substantially changed in the slice, the report should preferentially include an example from that file.
 
 ## Escalation Rule
 

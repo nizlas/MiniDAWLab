@@ -11,6 +11,11 @@
 //   time where *that* row is the local top and an older row still underlaps — view only. Session
 //   samples → x match the playhead.
 //
+// PEDAGOGICAL GOAL
+//   A reader should **not** have to mentally simulate the full JUCE paint order to learn **why**
+//   a row skips a peak column, or which interval math feeds the hatch. The helpers and branches
+//   below state the **user-visible** rule in plain language first; mechanics follow.
+//
 // THREADING
 //   `paint` / `mouseDown` / `timerCallback` are [Message thread] only. JUCE `Graphics` API here is
 //   single-threaded UI drawing — not a substitute for a waveform cache on the audio thread.
@@ -29,18 +34,27 @@
 #include <utility>
 #include <vector>
 
+// Anonymous helpers: all **session-timeline** intervals are half-open [a, b) in device samples,
+// matching `PlacedClip` placement + `PlaybackEngine` / `Transport` usage. They exist only to
+// keep **paint** decisions (where to draw peaks vs overlap tint) consistent and cheap — **not** to
+// duplicate engine mixing rules; this file never writes transport or the session.
 namespace
 {
+    // Cap: each clip’s peak vector could otherwise grow to one column per *sample*; we only need
+    // pixel-resolution sketching, not analytics-grade peaks (see `rebuildPeaksIfNeeded` span rule).
     constexpr int kMaxPeakColumnsPerClip = 2000;
+    // Compromise: often enough to feel “live” on the playhead line without repainting the whole
+    // view on every frame (full rate would be overkill for this teaching codebase).
     constexpr int kPlayheadUpdateHz = 20;
     // Visual scale for rounded corners so events read as “blocks” on the timeline, not as raw bars.
     constexpr float kEventCorner = 2.5f;
     constexpr float kEventVerticalMargin = 4.0f;
     constexpr float kWaveInset = 2.0f; // keep waveform off the 1px border so the frame reads first
 
-    // All rows share the same event chrome. “Behind” is **not** a dimmer default for the whole
-    // event — in uncovered time, a lower row is painted like any visible clip; covered spans are
-    // occluded by rows drawn later, not by a different palette choice here.
+    // All rows share the same event chrome. **Product:** a clip that is only *partly* covered in
+    // time should not read as a permanently “muted track” in its **uncovered** tails — the rule is
+    // local, not a global style by snapshot index. Covered spans are *occluded* by a newer row’s
+    // paint, not by a different palette in this function.
     juce::Colour eventBodyFill()
     {
         return juce::Colour(0xff343c4d);
@@ -54,12 +68,16 @@ namespace
     // Peak bar opacity for any row, whenever that column is not covered by a prior row in time.
     constexpr float kWaveformPeakAlpha = 0.9f;
 
-    // Merges half-open [a,b) intervals on the **session** time line so adjacent/adjoining
-    // overlaps (same visual band on the front) are drawn once.
+    // Merges **overlapping or touching** half-open [a,b) intervals: [0,5) and [5,8) become [0,8)
+    // (same *union* in continuous time, since 5 is not included twice). **Why:** the hatch and
+    // interval tricks below assume “one closed-open segment per connected region” — otherwise
+    // we would double-tint or double-count a boundary at a sample where one clip ends and another
+    // could begin. Used after “union of row spans” and after intersecting visible×behind.
     void mergeNonOverlapping(std::vector<std::pair<std::int64_t, std::int64_t>>& inOut)
     {
         if (inOut.size() < 2)
         {
+            // 0 or 1 interval: already a canonical list; nothing to coalesce.
             return;
         }
         std::sort(inOut.begin(), inOut.end());
@@ -72,6 +90,8 @@ namespace
             }
             else
             {
+                // Disjoint from the run at `w`: that connected component is **finished**; the next
+                // interval starts a new merged piece at the new write index.
                 ++w;
                 inOut[w] = inOut[r];
             }
@@ -79,7 +99,12 @@ namespace
         inOut.resize(w + 1);
     }
 
-    // [a,b) \ mergedUnion : half-open; merged is sorted, disjoint, from mergeNonOverlapping.
+    // Answers: "If this row’s *event* runs from session `a` to `b`, on which sub-ranges is it
+    // *still* the topmost **painted** layer?" Subtract the merged union of all **newer** clips
+    // (rows with smaller index) — those sweeps are drawn later and **cover** the older paint.
+    // The algorithm is plain interval subtraction: walk left to right, emit gaps between
+    // occluders, tail out from `cur` to `b`. **Not** the engine’s audibility rule; **only** the
+    // z-order of rectangles in this view.
     void subtractOpenFromMerged(
         const std::int64_t a,
         const std::int64_t b,
@@ -101,14 +126,17 @@ namespace
         {
             if (iv.second <= cur)
             {
+                // This occluder is entirely to the left of our cursor: already “cut out,” skip.
                 continue;
             }
             if (iv.first >= b)
             {
+                // All remaining union pieces start at or after `b` — the rest of [a,b) is **free**.
                 break;
             }
             if (iv.first > cur)
             {
+                // The gap before the next **covering** interval starts — a visible strip of *this* row.
                 out.push_back({ cur, std::min(iv.first, b) });
             }
             cur = std::max(cur, iv.second);
@@ -119,13 +147,18 @@ namespace
         }
         if (cur < b)
         {
+            // Trailing **visible** segment after the last occluder that met [a,b) — the right tail
+            // of the row with nothing newer drawn on top.
             out.push_back({ cur, b });
         }
     }
 
-    // [Message thread] Overlap: restrained **darker** wash + **very fine** diagonals; caller
-    // supplies merged [L,R) in session time **already** clipped to the *local* top event’s area.
-    // Style unchanged; no vertical “end of underlap” lines.
+    // Paints the **agreed** overlap *hint* (tint + fine diagonals) for each **merged** session
+    // [L,R) where the caller has already decided this row is the *local* top over something
+    // older. **Intentionally not** a second waveform: the user is told *that* more material
+    // exists in time, not what it looks like. `ToX` must be the **same** linear map as the
+    // playhead and event body so a sample and a pixel line up. **Not doing:** L/R “fence” lines
+    // at the underlap end — the event border from paint order is enough.
     template <typename ToX>
     void drawFrontOverlapShadeAndHatch(
         juce::Graphics& g,
@@ -147,6 +180,8 @@ namespace
             }
             const float xl = sessionSampleToX(L);
             const float xr = sessionSampleToX(R);
+            // Intersect the sample span with the **row’s** inner rect so a tiny mismatch or
+            // subpixel rounding cannot paint outside the card (hint stays “on” the event).
             const float a = juce::jmax(frontInner.getX(), juce::jmin(xl, xr));
             const float b = juce::jmin(frontInner.getRight(), juce::jmax(xl, xr));
             if (b - a < 0.5f)
@@ -158,8 +193,11 @@ namespace
             g.fillRect(band);
 
             juce::Graphics::ScopedSaveState gsave(g);
+            // JUCE: clip to the overlap band so fill + hatching do not spill into adjacent time.
             g.reduceClipRegion(band.toNearestInt());
-            // Sparse diagonals: “something else exists here” without a second wave trace.
+            // Sparse diagonals: “something else exists here” without a second wave trace. Step is
+            // in **screen pixels** so hatch density stays stable when the window (not the session)
+            // is resized — we are not tying line spacing to sample count.
             g.setColour(juce::Colour(0xff8eb0d4).withAlpha(0.14f));
             const float step = 7.0f;
             const float h = band.getHeight();
@@ -175,24 +213,30 @@ ClipWaveformView::ClipWaveformView(Session& session, Transport& transport)
     : session_(session)
     , transport_(transport)
 {
+    // JUCE: this component receives click-to-seek; we do not need hits on non-existent child widgets.
     setInterceptsMouseClicks(true, false);
     startTimerHz(kPlayheadUpdateHz);
 }
 
 ClipWaveformView::~ClipWaveformView()
 {
+    // JUCE: `Timer` must be stopped before destruction so the message loop never calls back in.
     stopTimer();
 }
 
-// [Message thread]
+// [Message thread] Throttled repaints: **contract** is “eventually consistent” playhead line —
+// we do not try to match every host audio callback; `paint` re-reads `readPlayheadSamplesForUi` so
+// the line stays aligned with the transport the user already trusts for audio, without a second
+// playhead copy stored on the view.
 void ClipWaveformView::timerCallback()
 {
-    // Timer tick only **schedules** repaints: we do not recompute peaks here, but we do re-read
-    // the latest playhead in `paint` so the line tracks transport without coupling to the callback.
     repaint();
 }
 
-// [Message thread] User seeks by timeline position: same mapping as the playhead line, no transport ownership.
+// [Message thread] User seeks by timeline position. **Product:** the horizontal position under the
+// cursor is the same **fraction of view width** as the playhead line (and as `getTimelineLength…`)
+// so clicking and the moving line use one mental model. Only `requestSeek` — we do not own the
+// playhead value. See `Transport`.
 void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -223,7 +267,11 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     repaint();
 }
 
-// [Message thread] Rebuilds downsampled peaks in **material** 0..N-1; `paint` places them in **timeline** space.
+// [Message thread] Fills `clipStrips_` with per-row peak columns so `paint` only maps numbers to x.
+// **What we compute:** a max absolute sample in each *material* sub-range [s0,s1), roughly one
+// column per **pixel** this clip’s duration spans in the current view (capped) — the sketch
+// coarsens when zoomed out, not a full PCM trace. O(rows × columns × samples per column) when the
+// snapshot or width **changes** (cached by raw snapshot pointer + width).
 void ClipWaveformView::rebuildPeaksIfNeeded()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -231,6 +279,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
 
     if (snap.get() == lastSnapshotKey_ && w == lastWidth_)
     {
+        // Same immutable snapshot and same layout width: peaks still valid; avoid rescans.
         return;
     }
 
@@ -253,6 +302,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     clipStrips_.reserve((size_t)n);
     const float wfloat = static_cast<float>(w);
 
+    // Per clip: resample the PCM to `colCount` peak magnitudes in **material** [0, N), then
+    // `paint` maps those columns to **timeline** x using `startOnTimeline` — not done here.
     for (int i = 0; i < n; ++i)
     {
         TimelineStrip strip;
@@ -276,6 +327,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         }
 
         const int ns = strip.materialNumSamples;
+        // How many horizontal **pixels** this clip occupies if the full session is `w` wide — drives
+        // column count so we do not build thousands of columns for a one-pixel sliver.
         const float spanPx = wfloat
                              * static_cast<float>(static_cast<double>(ns) / static_cast<double>(timelineEndExcl));
         const int colCount = juce::jmax(1, juce::jmin(kMaxPeakColumnsPerClip, (int)std::ceil((double)spanPx)));
@@ -286,6 +339,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
             const int s0 = (col * ns) / colCount;
             const int s1 = ((col + 1) * ns) / colCount;
             float peak = 0.0f;
+            // Same *loudness* idea as a simple DAW trace: for this **column**, take the max |sample|
+            // across channels (Phase 1 stereo / mono path — not a LUFS meter).
             for (int s = s0; s < s1; ++s)
             {
                 for (int c = 0; c < numCh; ++c)
@@ -300,6 +355,11 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     }
 }
 
+// [Message thread] **Paint rule, not the mix rule:** if any *newer* `PlacedClip` (smaller index `k`
+// than this row) **covers** timeline sample `t`, a peak bar for `row` at that time would be drawn
+// *under* that newer row’s event and would read as a false second trace — we return true to **skip**
+// drawing that bar. `PlaybackEngine` decides what you *hear* (first covering row in snapshot order);
+// here we only mirror **JUCE** z-order: lower index = painted later = on top.
 bool ClipWaveformView::isTimelineSampleCoveredByPriorRows(int row, const std::int64_t t) const
 {
     for (int k = 0; k < row; ++k)
@@ -311,7 +371,6 @@ bool ClipWaveformView::isTimelineSampleCoveredByPriorRows(int row, const std::in
         }
         const std::int64_t a = s.startOnTimeline;
         const std::int64_t b = a + static_cast<std::int64_t>(s.materialNumSamples);
-        // System: one continuous clip event on the device timeline, half-open [a, b).
         if (t >= a && t < b)
         {
             return true;
@@ -320,6 +379,11 @@ bool ClipWaveformView::isTimelineSampleCoveredByPriorRows(int row, const std::in
     return false;
 }
 
+// [Message thread] **Phases of the rule (read top-down):** (1) take this row’s full span in session
+// time. (2) **Subtract** the union of all *newer* rows (smaller index) to get where this event is
+// still the **top** paint. (3) **Intersect** with the union of *older* rows (larger index) to keep
+// only times when something is genuinely **stacked under** this card. (4) merge for one hatch pass.
+// If either (2) or (3) is empty, there is no “underlap story” to tell for this row on screen.
 void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     const int row,
     std::vector<std::pair<std::int64_t, std::int64_t>>& outMerged) const
@@ -335,10 +399,12 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     {
         return;
     }
+    // --- Phase A: this row’s [ar, br) — the full horizontal extent of its event body. ---
     const std::int64_t ar = sr.startOnTimeline;
     const std::int64_t br = ar + static_cast<std::int64_t>(sr.materialNumSamples);
 
-    // “In front of” this row: lower index = painted later, occludes. Union of k < row.
+    // --- Phase B: union of all rows **newer** than `row` (indices k < row) — they paint *after* this
+    //     row, so they **erase** our peek at [ar, br) in those sub-ranges. ---
     std::vector<std::pair<std::int64_t, std::int64_t>> uFront;
     uFront.reserve((size_t)juce::jmax(0, row));
     for (int k = 0; k < row; ++k)
@@ -354,14 +420,18 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     }
     mergeNonOverlapping(uFront);
 
+    // --- Phase C: visible = row span **minus** newer-row union — the times this row is the **top** face. ---
     std::vector<std::pair<std::int64_t, std::int64_t>> visible;
     subtractOpenFromMerged(ar, br, uFront, visible);
     if (visible.empty())
     {
+        // Fully covered: every sample in [ar,br) has a newer clip on top, so we never show an
+        // overlap *hint* on *this* row’s event (it is invisible).
         return;
     }
 
-    // “Behind” in snapshot order: higher index = older = drawn under this row. Union of j > row.
+    // --- Phase D: union of all rows **older** than `row` (j > row) — material still **exists in the
+    //     session** under the stack; we will only mark times where (C) and (D) both apply. ---
     std::vector<std::pair<std::int64_t, std::int64_t>> uBack;
     uBack.reserve((size_t)juce::jmax(0, n - row - 1));
     for (int j = row + 1; j < n; ++j)
@@ -378,11 +448,12 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     mergeNonOverlapping(uBack);
     if (uBack.empty())
     {
+        // No older clips in the project at this row: nothing is “under” to signal.
         return;
     }
 
-    // Product: t where this row is the *minimum* index active (wins) and an older row still
-    // contributes — the only time this row should carry the overlap *hint* on *its* event body.
+    // --- Phase E: (visible as top) ∩ (older content exists) — the only **honest** underlap; merge
+    //     again so the hatch iterator never double-hits. ---
     for (const auto& vis : visible)
     {
         for (const auto& ub : uBack)
@@ -398,11 +469,20 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     mergeNonOverlapping(outMerged);
 }
 
-// [Message thread] Full paint: one **event** per clip row, then the playhead on top (always last).
+// [Message thread] **Paint pipeline in five beats (scan top-down in this function):**
+//   (0) Rebuild downsampled peaks if snapshot or view width changed.
+//   (1) One shared linear **session sample → x** (same as playhead).
+//   (2) Draw every row’s event **chassis** + peak bars (high row index first → low index last so
+//       the newest clip’s paint wins on overlaps).
+//   (3) Overlap *hint* pass per row (same order) — tint and hatch only on rows that the interval
+//       math says deserve it (tint + thin diagonals).
+//   (4) Playhead on top (always) so the line is never lost behind events.
 void ClipWaveformView::paint(juce::Graphics& g)
 {
+    // (0) see `rebuildPeaksIfNeeded` — cheap no-op on steady state.
     rebuildPeaksIfNeeded();
 
+    // JUCE: default window background, slightly darkened so events read as “cards” (pure chrome).
     g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
 
     const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
@@ -418,7 +498,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
         return;
     }
 
-    // --- 1) Shared mapping: session sample → view X (identical to the playhead math below) ---
+    // --- (1) Shared mapping: device sample on the `Session` line → x in **this** `Component` ---
     const double wPx = (double)bounds.getWidth();
     const double tlenD = (double)timelineLength;
     const auto sessionSampleToX = [&](const std::int64_t s) {
@@ -431,10 +511,11 @@ void ClipWaveformView::paint(juce::Graphics& g)
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
 
-    // --- 2) Back → front: same event chrome for every row. Peak columns are skipped only when the
-    //     column’s **center** sample lies in time covered by a *prior* row (lower index = painted
-    //     on top in a later iteration). **Do not** dim an entire back row: uncovered tails are full
-    //     read like a foreground clip. ---
+    // --- (2) Event bodies + inner peaks, **back to front in snapshot** (largest index → 0). The
+    //     *last* iteration (`row==0`) is the **newest** clip — it clobbers any shared pixels from
+    //     older rows. Peak columns: skip when the **center** material sample, mapped to the
+    //     session line, is already covered by a *newer* row so we do not show a *readable* under-wave.
+    //     Uncovered tails of older clips still get a full-height sketch. ---
     constexpr float kEventStroke = 1.0f;
     for (int row = numRows - 1; row >= 0; --row)
     {
@@ -500,9 +581,9 @@ void ClipWaveformView::paint(juce::Graphics& g)
         }
     }
 
-    // --- 3b) Same shade+hatch *style* as before, but on **each** row r where that row is the
-    //     **local** top (no lower index on that t) and at least one **older** index j>r still
-    //     covers t. (Draw r = n-1..0 so the newest row’s pass remains last in z.)
+    // --- (3) Same shade+hatch *style* for every row the interval function marks. **Order r = n-1…0**:
+    //     the **newest** row’s pass (`r==0`) is **last** so if a pixel is somehow shared, the front
+    //     card’s hint is what you see (matches the mental “top clip” model).
     for (int r = numRows - 1; r >= 0; --r)
     {
         const TimelineStrip& stripR = clipStrips_[(size_t)r];
@@ -531,7 +612,9 @@ void ClipWaveformView::paint(juce::Graphics& g)
         }
     }
 
-    // --- 4) Playhead on top: always the same `Transport` / seek coordinate line as in earlier steps. ---
+    // --- (4) Playhead: read transport (authoritative) and clamp to [0, `timelineLength`] so a
+    //     transient or resize cannot draw the line off the view — **display** safety only, not a
+    //     new transport contract.
     const std::int64_t ph = transport_.readPlayheadSamplesForUi();
     const std::int64_t phClamped
         = juce::jlimit(static_cast<std::int64_t>(0), timelineLength, ph);

@@ -44,6 +44,15 @@
 
 class AudioClip;
 
+// ---------------------------------------------------------------------------
+// Session — sole publisher of `std::shared_ptr<const SessionSnapshot>` to readers (engine + UI)
+// ---------------------------------------------------------------------------
+// Responsibility: after decode (or on clear), **release**-store a new immutable snapshot; readers
+// **acquire**-load. Ordering rules are documented in `Session.cpp` at each `atomic_store` / load.
+// Does not own `Transport` or the audio device. Clip **ordering** in the snapshot (newest at 0) is
+// defined when building snapshots, not in this class’s public API text — see
+// `SessionSnapshot::withClipAddedAsNewest`.
+// ---------------------------------------------------------------------------
 class Session
 {
 public:
