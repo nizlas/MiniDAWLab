@@ -81,6 +81,8 @@ and a deterministic **front-to-back** order for overlap. The UI and waveform are
 consumers**; they do not own clip order. For Phase 2, **newest added is front-most** (index 0)
 unless steering documents are updated.
 
+**Where the user seeks:** With a **minimal timeline ruler** above the event lane, **seek** is requested from that strip only (same session sample axis as the playhead). The **event lane** handles clip selection and move; it does not seek on empty background. `Transport` remains the only seek/playhead owner.
+
 **Coverage playback:** for each output instant, only the **front-most** placed clip that
 **covers** that timeline position is audible in that range (stacked “events” mental model;
 **not** summing overlapping material into a bus).

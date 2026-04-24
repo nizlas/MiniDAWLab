@@ -25,7 +25,7 @@
 //   callback, which we do not call from here.
 //
 // NESTED TYPES
-//   TransportControlsContent  —  buttons + waveform; FileChooser → read playhead, Session add-clip.
+//   TransportControlsContent  —  buttons + timeline ruler + lane; FileChooser → read playhead, Session add-clip.
 //   MainWindow  —  juce::DocumentWindow shell around the content.
 //
 // Method bodies in this file add plain-language notes next to start/stop order and the async
@@ -39,6 +39,7 @@
 #include "engine/PlaybackEngine.h"
 #include "transport/Transport.h"
 #include "ui/ClipWaveformView.h"
+#include "ui/TimelineRulerView.h"
 
 // ---------------------------------------------------------------------------
 // MiniDAWLabApplication — process-wide singleton, owns top-level subsystems
@@ -106,7 +107,7 @@ public:
     void systemRequestedQuit() override { quit(); }
 
 private:
-    // [Message thread only] Child component: file chooser, transport buttons, ClipWaveformView.
+    // [Message thread only] Child component: file chooser, transport buttons, timeline ruler, lane.
     // Holds non-owning refs; MainWindow and application own lifetime. Add path: FileChooser
     // (async) → `Transport::readPlayheadSamplesForUi` once, then `addClipFromFileAtPlayhead`.
     class TransportControlsContent : public juce::Component
@@ -118,6 +119,7 @@ private:
             : transport(transportIn)
             , session(sessionIn)
             , deviceManager(deviceManagerIn)
+            , rulerView(sessionIn, transportIn, deviceManagerIn)
             , waveformView(sessionIn, transportIn)
         {
             addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
@@ -134,10 +136,11 @@ private:
             addAndMakeVisible(playButton);
             addAndMakeVisible(pauseButton);
             addAndMakeVisible(stopButton);
+            addAndMakeVisible(rulerView);
             addAndMakeVisible(waveformView);
         }
 
-        // [Message thread] Layout: one row of buttons, remainder for waveform.
+        // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
         void resized() override
         {
             auto area = getLocalBounds().reduced(8);
@@ -148,6 +151,8 @@ private:
             playButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             pauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            constexpr int kTimelineRulerHeight = 20;
+            rulerView.setBounds(area.removeFromTop(kTimelineRulerHeight));
             waveformView.setBounds(area);
         }
 
@@ -221,6 +226,7 @@ private:
         juce::TextButton pauseButton{ "Pause" };
         juce::TextButton stopButton{ "Stop" };
 
+        TimelineRulerView rulerView;
         ClipWaveformView waveformView;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)

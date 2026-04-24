@@ -7,6 +7,25 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-24 — Phase 2 minimal timeline ruler (seek on ruler strip)
+
+Decision:
+
+- **Seek** (click and drag) is on **`TimelineRulerView` only**; the event lane is for **selection and clip move**. Empty **lane** background **clears selection** and does **not** call `requestSeek`.
+- Ticks: **unlabeled** marks at **round seconds** in session time, with **adaptive** step (1s, 5s, …) so long timelines stay legible. **No** mm:ss text, no bar/beat, no zoom, no markers, no loop, no snap.
+- Ruler and lane share the **same linear** session-sample ↔ x mapping and **identical** horizontal bounds from `Main` layout. Playhead: short marker in the ruler, full-height line in the lane, both from `readPlayheadSamplesForUi` + the same clamp to `[0, timelineLength]`.
+- `AudioDeviceManager` is read in the **ruler** on the message thread for **tick spacing only** (seconds from samples for drawing).
+
+Rationale:
+
+- Restores a DAW-like place for playhead/seek without overloading the event lane (which also handles drag).
+
+Notes:
+
+- Does not add a shared “timeline model” class; transport/session contracts stay unchanged.
+
+---
+
 ## 2026-04-24 — Phase 2 move ordering on committed single-clip move (steering)
 
 Decision (see `docs/PHASE_PLAN.md`, late Phase 2 extension):

@@ -238,6 +238,9 @@ Let `M` be the single clip that was moved. After the move is committed, let **N*
 
 **Gating:** implementing selection/move and applying this rule in code is a **separate, explicitly approved** step; this document does not by itself authorize that implementation.
 
+**Minimal timeline ruler (seek affordance, optional late Phase 2 follow-up).**  
+A thin **time bar** may sit **above** the single event lane. **Seek** (click and drag) uses only this bar: it maps x to the same session-timeline sample space as the playhead and calls `Transport::requestSeek`. The lane stays for **selection and clip move**; empty background in the lane **does not** seek. Ticks are **unlabeled** marks at **round seconds** of session time, with **adaptive density** so a long session stays readable. **Not in scope** for this strip: time labels, zoom, tempo/bar/beat, markers, loop/cycle, snapping, keyboard seek shortcuts, or a shared “timeline view model” beyond layout alignment.
+
 ### Expected Value
 
 The architecture proves that Phase 1 was not a dead-end single-file design.

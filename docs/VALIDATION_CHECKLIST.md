@@ -153,10 +153,22 @@ Deferred decisions are acceptable only if they are visible and intentionally con
 When validating the **minimal single-lane** selection + single-clip drag step (`docs/PHASE_PLAN.md` late extension), check at least the following in addition to the general phase checks:
 
 - **Selection is UI-only:** no `PlacedClipId` / selection in `SessionSnapshot` after a click; only a committed `Session::moveClip` changes the published snapshot.
-- **Hit test:** the front-most (lowest snapshot index) event under the pointer wins when clips overlap; empty timeline click still seeks and clears selection.
+- **Hit test:** the front-most (lowest snapshot index) event under the pointer wins when clips overlap; empty **lane** background clears selection and does **not** seek (seek is on the timeline ruler only).
 - **No reorder in-flight or on select:** only `SessionSnapshot::withClipMoved` applies the committed end-state rule (isolated end → promote to index 0; still overlapping → preserve ordinal). Drag preview does not publish the session.
 - **Commit threshold:** a tiny pointer jitter without crossing the movement threshold does not call `moveClip`.
 - **Playback and transport** unchanged: `PlaybackEngine` still reads the snapshot handoff; no new mixing rule.
+
+## Phase 2 late extension: minimal timeline ruler
+
+When validating the **minimal timeline ruler** strip (`TimelineRulerView` above the lane, `docs/PHASE_PLAN.md`):
+
+- **Ruler-only seek:** `Transport::requestSeek` is driven from the ruler (mouse down/drag on the strip), not from empty background clicks in `ClipWaveformView`.
+- **Empty lane click:** still clears selection; does not move the playhead.
+- **Same x↔sample map:** ruler and lane have the same width under the same parent insets; playhead line in the lane and playhead marker in the ruler stay aligned.
+- **Ticks:** second-grid marks only, no text labels; step coarsens (1s → 5s → …) when the timeline is long or the window is narrow.
+- **No new domain contracts:** `Session` / `SessionSnapshot` / `Transport` / `PlaybackEngine` behavior unchanged—only UI wiring and presentation.
+- **Sample rate in ruler:** used only to place ticks in “seconds of session time,” not to redefine transport.
+- **Stop:** still seeks playhead to session sample 0; ruler and lane both show 0.
 
 ## Phase 1 Validation Checklist
 

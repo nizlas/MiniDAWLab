@@ -7,7 +7,7 @@
 // ROLE IN THE ARCHITECTURE
 //   Read-only view: `Session` snapshot and derived timeline length, `Transport` for playhead.
 //   No `PlaybackEngine`, no device-side audio. ARCHITECTURE_PRINCIPLES: presentation separate from
-//   playback; UI does not own transport truth (only calls `requestSeek` for user click).
+//   playback; UI does not own transport truth. Seek is not initiated here; use `TimelineRulerView`.
 //
 // PRESENTATION (DAW / Cubase direction, Phase 2)
 //   **Each** `PlacedClip` row: one event **frame**; **peaks** are drawn in timeline regions that are
@@ -66,8 +66,8 @@ public:
     // topmost over something behind), then playhead. No audio thread.
     void paint(juce::Graphics& g) override;
 
-    // [Message thread] Click on *event* → select; click on *empty timeline* → clear selection and
-    // seek. Drag on event → in-flight move preview; release → `Session::moveClip` (commit).
+    // [Message thread] Click on *event* → select; click on *empty lane* → clear selection (seek is
+    // on `TimelineRulerView` only). Drag on event → in-flight move preview; release → `Session::moveClip` (commit).
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;

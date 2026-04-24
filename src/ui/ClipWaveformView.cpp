@@ -218,7 +218,7 @@ ClipWaveformView::ClipWaveformView(Session& session, Transport& transport)
     : session_(session)
     , transport_(transport)
 {
-    // JUCE: this component receives click-to-seek; we do not need hits on non-existent child widgets.
+    // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
     startTimerHz(kPlayheadUpdateHz);
 }
@@ -238,9 +238,9 @@ void ClipWaveformView::timerCallback()
     repaint();
 }
 
-// [Message thread] Click: front-most hit test → select; empty timeline → clear selection and seek
-// to match the **same** x→sample map as the playhead line. Drag (same gesture) is handled in
-// `mouseDrag` / `mouseUp`; `Session::moveClip` runs **only** on commit — ordering policy stays in
+// [Message thread] Click: front-most hit test → select; empty lane → clear selection only (seek
+// uses `TimelineRulerView`). Drag (same gesture) is handled in `mouseDrag` / `mouseUp`;
+// `Session::moveClip` runs **only** on commit — ordering policy stays in
 // `SessionSnapshot::withClipMoved`, not here.
 void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 {
@@ -290,7 +290,6 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     selectedPlacedId_.reset();
     mouseDownPlacedId_.reset();
     dragMovementBeyondThreshold_ = false;
-    transport_.requestSeek(target);
     repaint();
 }
 
