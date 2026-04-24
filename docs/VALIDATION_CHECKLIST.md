@@ -170,6 +170,19 @@ When validating the **minimal timeline ruler** strip (`TimelineRulerView` above 
 - **Sample rate in ruler:** used only to place ticks in “seconds of session time,” not to redefine transport.
 - **Stop:** still seeks playhead to session sample 0; ruler and lane both show 0.
 
+## Phase 3: minimal multi-track (domain + lanes + sum)
+
+When validating the **minimal multi-track** step (`docs/PHASE_PLAN.md` Phase 3, `status/DECISION_LOG.md`):
+
+- **Default track:** a fresh session has exactly one track; new clips go there until the user adds another track.
+- **Add track:** appends a new empty track; the new track becomes **active**; **Add clip** places on the active track.
+- **Multiple tracks:** can load/place clips on different tracks; all tracks share one timeline and transport playhead.
+- **Playback sum:** with clips on more than one track (non-overlapping or staggered in time), you hear the **sum** of both contributions when both are “on” in device time. **Within** a single track, overlapping clips are still **not** summed; front-most still wins there.
+- **Within-track move:** `Session::moveClip` and committed drag still apply **only** on the track that owns the moved clip; **no** API or UI path drags a clip to another track in this step.
+- **Ruler / playhead / stop / seek:** unchanged transport semantics; ruler strip and playhead line stay aligned with stacked lanes (same insets/width as before).
+- **No mixer UI:** no per-track faders, meters, sends, or buses; summing is engine-only.
+- **Steering:** `docs/PHASE_PLAN.md`, `docs/ARCHITECTURE_PRINCIPLES.md`, and this checklist stay consistent with per-track coverage + across-track sum + no cross-track move.
+
 ## Phase 1 Validation Checklist
 
 For Phase 1 specifically, validate all of the following:

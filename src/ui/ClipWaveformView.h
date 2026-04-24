@@ -30,14 +30,20 @@
 // =============================================================================
 
 #include "domain/Session.h"
+#include "domain/Track.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
 class Transport;
+class ClipWaveformView;
+
+// [Message thread] At the start of a lane `mouseDown`, clear selection on **other** lanes only.
+using PeerLaneInteraction = std::function<void(ClipWaveformView&)>;
 
 // ---------------------------------------------------------------------------
 // ClipWaveformView — multi-clip timeline *view* (Session snapshot + Transport playhead)
@@ -56,10 +62,18 @@ class Transport;
 class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
-    // [Message thread] session/transport outlive the view. Selection is UI-only; a committed move
-    // calls `Session::moveClip` (message thread), not ad-hoc snapshot edits.
-    ClipWaveformView(Session& session, Transport& transport);
+    // [Message thread] session/transport outlive the view. `trackId` scopes this lane to one
+    // `Track` in the snapshot. `onBeginMouseDown` clears peer lane selection; pass `{}` for none.
+    ClipWaveformView(Session& session,
+                     Transport& transport,
+                     TrackId trackId,
+                     PeerLaneInteraction onBeginMouseDown = {});
     ~ClipWaveformView() override;
+
+    [[nodiscard]] TrackId getTrackId() const noexcept { return trackId_; }
+
+    // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
+    void clearSelectionOnly();
 
     // [Message thread] Paints: background, back→front one **event** per `PlacedClip` (peaks in
     // *uncovered* time only), then the same overlap shading (per row, where that row is locally
@@ -93,15 +107,17 @@ private:
         int row,
         std::vector<std::pair<std::int64_t, std::int64_t>>& outMerged) const;
 
-    // [Message thread] **Front-most first** (lowest index `i` in the snapshot) whose [start, end)
-    // half-open range contains `timelineSample` — same mental model as paint z-order. No y-test in
-    // single-lane Phase 2.
+    // [Message thread] **Front-most first** in **this** track (lowest index `i` in that lane) whose
+    // [start, end) half-open range contains `timelineSample` — same paint z-order. No y-test.
     std::optional<PlacedClipId> hitTestFrontmostPlacedIdAtSessionSample(
-        const std::shared_ptr<const SessionSnapshot>& snap, std::int64_t timelineSample) const;
+        const std::shared_ptr<const SessionSnapshot>& snap, int trackIndex, std::int64_t timelineSample) const;
 
     // [Message thread] If the selected id no longer exists in the snapshot, clear selection.
     void clearSelectionIfIdMissing(const std::shared_ptr<const SessionSnapshot>& snap);
 
+    // Which `Track` this lane paints; overlap + paint order are **only** within this list.
+    TrackId trackId_ = kInvalidTrackId;
+    PeerLaneInteraction onBeginMouseDown_;
     Session& session_;
     Transport& transport_;
 

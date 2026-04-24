@@ -37,6 +37,7 @@
 
 #include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
+#include "domain/Track.h"
 
 #include <juce_core/juce_core.h>
 
@@ -72,9 +73,23 @@ public:
                                          double deviceSampleRate,
                                          std::int64_t startSampleOnTimeline);
 
+    // [Message thread] Append a new **empty** track and make it the active track for
+    // `addClipFromFileAtPlayhead` (newest = front within that track when a clip is added).
+    void addTrack() noexcept;
+
+    // [Message thread] `activeTrackId_` is the lane that receives the next "Add clip" (see
+    // `addClipFromFileAtPlayhead`); it becomes the new id after `addTrack()`.
+    [[nodiscard]] TrackId getActiveTrackId() const noexcept;
+
+    // [Message thread] How many `Track` rows exist in the current snapshot (UI lane count).
+    [[nodiscard]] int getNumTracks() const noexcept;
+    // [Message thread] The id of the i-th `Track` in snapshot order, or `kInvalidTrackId` if out
+    // of range.
+    [[nodiscard]] TrackId getTrackIdAtIndex(int index) const noexcept;
+
     // [Message thread] Move one placed clip in **timeline sample** space. Ordering (promote to 0
-    // if isolated) is **only** in `SessionSnapshot::withClipMoved` — the UI does not implement
-    // policy. Invalid or unknown id: no publish (see factory jasserts).
+    // if isolated) is **only** in `SessionSnapshot::withClipMoved` **within the clip’s own track** —
+    // the UI does not implement policy. Invalid or unknown id: no publish (see factory jasserts).
     void moveClip(PlacedClipId id, std::int64_t newStartSampleOnTimeline) noexcept;
 
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
@@ -97,6 +112,11 @@ private:
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
     // so a long edit session does not reuse ids while UI might still hold an old `PlacedClipId`.
     PlacedClipId nextPlacedClipId_ = 1;
+    // [Message thread] Monotonic `TrackId` for the **next** `addTrack` (default session already has
+    // track 1).
+    TrackId nextTrackId_ = 2;
+    // [Message thread] `addClipFromFileAtPlayhead` places on this lane (default 1; `addTrack` updates).
+    TrackId activeTrackId_ = 1;
 
     // Current world picture for the audio thread: always either the shared empty snapshot or a
     // user-built snapshot; swapped only from the message thread, read with acquire from any thread.

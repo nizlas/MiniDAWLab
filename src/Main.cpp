@@ -38,8 +38,8 @@
 #include "domain/Session.h"
 #include "engine/PlaybackEngine.h"
 #include "transport/Transport.h"
-#include "ui/ClipWaveformView.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/TrackLanesView.h"
 
 // ---------------------------------------------------------------------------
 // MiniDAWLabApplication — process-wide singleton, owns top-level subsystems
@@ -120,9 +120,13 @@ private:
             , session(sessionIn)
             , deviceManager(deviceManagerIn)
             , rulerView(sessionIn, transportIn, deviceManagerIn)
-            , waveformView(sessionIn, transportIn)
+            , trackLanesView(sessionIn, transportIn)
         {
             addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
+            addTrackButton.onClick = [this] {
+                session.addTrack();
+                trackLanesView.syncTracksFromSession();
+            };
             playButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Playing); };
             pauseButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Paused); };
             // Stop: user expectation is "playback off *and* playhead back to the start" of the
@@ -133,11 +137,12 @@ private:
             };
 
             addAndMakeVisible(addClipButton);
+            addAndMakeVisible(addTrackButton);
             addAndMakeVisible(playButton);
             addAndMakeVisible(pauseButton);
             addAndMakeVisible(stopButton);
             addAndMakeVisible(rulerView);
-            addAndMakeVisible(waveformView);
+            addAndMakeVisible(trackLanesView);
         }
 
         // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
@@ -145,15 +150,16 @@ private:
         {
             auto area = getLocalBounds().reduced(8);
             auto row = area.removeFromTop(32);
-            const int buttonWidth = juce::jmax(48, row.getWidth() / 4);
+            const int buttonWidth = juce::jmax(48, row.getWidth() / 5);
 
             addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            addTrackButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             playButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             pauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             constexpr int kTimelineRulerHeight = 20;
             rulerView.setBounds(area.removeFromTop(kTimelineRulerHeight));
-            waveformView.setBounds(area);
+            trackLanesView.setBounds(area);
         }
 
     private:
@@ -210,9 +216,9 @@ private:
                 }
                 else
                 {
-                    // New **front** clip is in the snapshot; waveform still shows one buffer;
-                    // playhead/transport are unchanged (user plays or seeks next).
-                    waveformView.repaint();
+                    // New **front** clip is on the active track; playhead/transport are unchanged.
+                    trackLanesView.syncTracksFromSession();
+                    trackLanesView.repaint();
                 }
             });
         }
@@ -222,12 +228,13 @@ private:
         juce::AudioDeviceManager& deviceManager;
 
         juce::TextButton addClipButton{ "Add clip..." };
+        juce::TextButton addTrackButton{ "Add track" };
         juce::TextButton playButton{ "Play" };
         juce::TextButton pauseButton{ "Pause" };
         juce::TextButton stopButton{ "Stop" };
 
         TimelineRulerView rulerView;
-        ClipWaveformView waveformView;
+        TrackLanesView trackLanesView;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)
     };

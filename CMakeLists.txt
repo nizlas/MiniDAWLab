@@ -29,12 +29,14 @@ target_sources(MiniDAWLab PRIVATE
     src/transport/Transport.cpp
     src/domain/AudioClip.cpp
     src/domain/PlacedClip.cpp
+    src/domain/Track.cpp
     src/domain/Session.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
     src/engine/PlaybackEngine.cpp
     src/ui/ClipWaveformView.cpp
     src/ui/TimelineRulerView.cpp
+    src/ui/TrackLanesView.cpp
 )
 
 target_compile_definitions(MiniDAWLab

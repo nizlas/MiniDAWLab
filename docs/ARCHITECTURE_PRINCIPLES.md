@@ -83,9 +83,11 @@ unless steering documents are updated.
 
 **Where the user seeks:** With a **minimal timeline ruler** above the event lane, **seek** is requested from that strip only (same session sample axis as the playhead). The **event lane** handles clip selection and move; it does not seek on empty background. `Transport` remains the only seek/playhead owner.
 
-**Coverage playback:** for each output instant, only the **front-most** placed clip that
-**covers** that timeline position is audible in that range (stacked “events” mental model;
-**not** summing overlapping material into a bus).
+**Coverage playback (Phase 2, per track):** on a **single** track, only the **front-most** placed clip that
+**covers** that timeline position is audible in that lane (stacked “events” mental model;
+**not** summing overlapping clips **on the same track**).
+
+**Phase 3 minimal multi-track:** `SessionSnapshot` holds an ordered list of **tracks**; each track has its own front-to-back clip list and the same overlap rule as Phase 2 **within that lane**. For the same timeline instant, output is the **sum** of what each track would produce on its own (not a mixer UI, no per-track gain). Cross-track clip moves are out of scope until explicitly added.
 
 **Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
 session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**

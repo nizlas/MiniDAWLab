@@ -285,3 +285,32 @@ Notes:
 
 - Recorded in `docs/PHASE_PLAN.md` (Phase 2) and `docs/ARCHITECTURE_PRINCIPLES.md` (Phase 2
   subsection) as part of Phase 2 Step 3. No code changes in this step.
+
+---
+
+## 2026-04-25 — Phase 3 minimal multi-track: domain, summing, UI lanes
+
+Decision:
+
+- **Tracks** are a first-class domain concept (`Track` / `TrackId`). **`SessionSnapshot`** is an
+  **ordered list of tracks**; each track owns an ordered `PlacedClip` list.
+- **Within a track**, overlap and audibility follow the same rule as Phase 2: **front-most
+  covering** clip wins; overlapping clips on the same track are **not** summed.
+- **Across** tracks, output is the **arithmetic sum** of each track’s (mono→stereo) per-block
+  contribution. This is **not** a mixer, routing graph, or per-track fader; it is the minimal
+  extension of Phase 2 coverage to multiple lanes.
+- **Session** starts with **one** default track. **Add track** appends a new empty track. New
+  clips are placed on the **active** track (the track most recently created by **Add track**;
+  at session start, that is the default track).
+- **UI:** vertically stacked **one** waveform lane per track; **no** cross-track clip drag in
+  this step (move/selection remain within the lane of the front-most hit clip).
+
+Rationale:
+
+- Establishes real multi-lane state and audition without importing mixer complexity or
+  cross-lane edit semantics that would need separate steering.
+
+Notes:
+
+- See `docs/PHASE_PLAN.md` (Phase 3) and `docs/ARCHITECTURE_PRINCIPLES.md` (Phase 2/3
+  playback wording). Cross-track moves and mixer surfaces remain explicitly out of scope.

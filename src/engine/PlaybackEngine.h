@@ -13,7 +13,7 @@
 //   priority thread to fill output buffers. This class is the *only* bridge from our domain
 //   (which sample to play) to the hardware (float arrays per channel). It advances Transport’s
 //   playhead (timeline-absolute) to match *timeline* samples advanced while Playing, including
-//   silence in gaps, per Phase 2 coverage (front‑most clip that covers at each tick; no mixing).
+//   silence in gaps. Phase 3: per-track coverage (Phase 2 rule in each lane) plus **sum** across lanes.
 //
 // OWNERSHIP AND LIFETIME
 //   Does not own Transport or Session. The application (Main) constructs all three and
@@ -53,8 +53,9 @@ public:
     PlaybackEngine(PlaybackEngine&&) = delete;
     PlaybackEngine& operator=(PlaybackEngine&&) = delete;
 
-    // [Audio thread] Realtime: fill `outputChannelData` using session **coverage** (first / front
-    // `PlacedClip` in order that covers each timeline position; gaps = silence, no sum at overlaps).
+    // [Audio thread] Realtime: fill `outputChannelData` using **per-track** coverage (front-most
+    // `PlacedClip` in each lane that covers each timeline position; gaps = silence **in that lane**).
+    // **Across** tracks, samples are **added** into the same output (minimal sum, not a mixer).
     // No decode, I/O, locks, or UI; no new heap use on the hot path beyond the snapshot pointer copy.
     // See .cpp for coverage runs, mono→stereo, and transport advance.
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,

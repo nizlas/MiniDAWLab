@@ -28,6 +28,8 @@
 #include "ui/ClipWaveformView.h"
 
 #include "domain/AudioClip.h"
+#include "domain/SessionSnapshot.h"
+#include "domain/Track.h"
 #include "transport/Transport.h"
 
 #include <algorithm>
@@ -214,13 +216,26 @@ namespace
     }
 } // namespace
 
-ClipWaveformView::ClipWaveformView(Session& session, Transport& transport)
-    : session_(session)
+ClipWaveformView::ClipWaveformView(
+    Session& session,
+    Transport& transport,
+    const TrackId trackId,
+    PeerLaneInteraction onBeginMouseDown)
+    : trackId_(trackId)
+    , onBeginMouseDown_(std::move(onBeginMouseDown))
+    , session_(session)
     , transport_(transport)
 {
+    jassert(trackId_ != kInvalidTrackId);
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
     startTimerHz(kPlayheadUpdateHz);
+}
+
+void ClipWaveformView::clearSelectionOnly()
+{
+    selectedPlacedId_.reset();
+    repaint();
 }
 
 ClipWaveformView::~ClipWaveformView()
@@ -244,12 +259,20 @@ void ClipWaveformView::timerCallback()
 // `SessionSnapshot::withClipMoved`, not here.
 void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 {
+    if (onBeginMouseDown_)
+    {
+        onBeginMouseDown_(*this);
+    }
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
-    if (snap == nullptr || snap->isEmpty())
+    if (snap == nullptr)
     {
         return;
     }
-
+    const int tIdx = snap->findTrackIndexById(trackId_);
+    if (tIdx < 0)
+    {
+        return;
+    }
     const std::int64_t timelineLength = session_.getTimelineLengthSamples();
     if (timelineLength <= 0)
     {
@@ -268,17 +291,19 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         timelineLength,
         static_cast<std::int64_t>(std::llround((double)t * (double)timelineLength)));
 
-    if (const std::optional<PlacedClipId> hit = hitTestFrontmostPlacedIdAtSessionSample(snap, target))
+    if (const std::optional<PlacedClipId> hit
+        = hitTestFrontmostPlacedIdAtSessionSample(snap, tIdx, target))
     {
         selectedPlacedId_ = *hit;
         mouseDownPlacedId_ = *hit;
         clickDownX_ = e.position.x;
         dragMovementBeyondThreshold_ = false;
-        for (int i = 0; i < snap->getNumPlacedClips(); ++i)
+        const auto& tr = snap->getTrack(tIdx);
+        for (int i = 0; i < tr.getNumPlacedClips(); ++i)
         {
-            if (snap->getPlacedClip(i).getId() == *hit)
+            if (tr.getPlacedClip(i).getId() == *hit)
             {
-                clickDownStartSample_ = snap->getPlacedClip(i).getStartSample();
+                clickDownStartSample_ = tr.getPlacedClip(i).getStartSample();
                 break;
             }
         }
@@ -342,14 +367,21 @@ void ClipWaveformView::clearSelectionIfIdMissing(
     {
         return;
     }
-    if (snap == nullptr || snap->isEmpty())
+    if (snap == nullptr)
     {
         selectedPlacedId_.reset();
         return;
     }
-    for (int i = 0; i < snap->getNumPlacedClips(); ++i)
+    const int tIdx = snap->findTrackIndexById(trackId_);
+    if (tIdx < 0)
     {
-        if (snap->getPlacedClip(i).getId() == *selectedPlacedId_)
+        selectedPlacedId_.reset();
+        return;
+    }
+    const Track& tr = snap->getTrack(tIdx);
+    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+    {
+        if (tr.getPlacedClip(i).getId() == *selectedPlacedId_)
         {
             return;
         }
@@ -358,15 +390,18 @@ void ClipWaveformView::clearSelectionIfIdMissing(
 }
 
 std::optional<PlacedClipId> ClipWaveformView::hitTestFrontmostPlacedIdAtSessionSample(
-    const std::shared_ptr<const SessionSnapshot>& snap, const std::int64_t timelineSample) const
+    const std::shared_ptr<const SessionSnapshot>& snap,
+    const int trackIndex,
+    const std::int64_t timelineSample) const
 {
-    if (snap == nullptr || snap->isEmpty())
+    if (snap == nullptr || trackIndex < 0 || trackIndex >= snap->getNumTracks())
     {
         return std::nullopt;
     }
-    for (int i = 0; i < snap->getNumPlacedClips(); ++i)
+    const Track& tr = snap->getTrack(trackIndex);
+    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
     {
-        const PlacedClip& p = snap->getPlacedClip(i);
+        const PlacedClip& p = tr.getPlacedClip(i);
         const std::int64_t a0 = p.getStartSample();
         const std::int64_t a1
             = a0 + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
@@ -399,7 +434,22 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     clipStrips_.clear();
     clearSelectionIfIdMissing(snap);
 
-    if (snap == nullptr || snap->isEmpty())
+    if (snap == nullptr)
+    {
+        selectedPlacedId_.reset();
+        mouseDownPlacedId_.reset();
+        dragMovementBeyondThreshold_ = false;
+        return;
+    }
+    const int tIdx = snap->findTrackIndexById(trackId_);
+    if (tIdx < 0)
+    {
+        selectedPlacedId_.reset();
+        mouseDownPlacedId_.reset();
+        dragMovementBeyondThreshold_ = false;
+        return;
+    }
+    if (snap->isEmpty())
     {
         selectedPlacedId_.reset();
         mouseDownPlacedId_.reset();
@@ -413,7 +463,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         return;
     }
 
-    const int n = snap->getNumPlacedClips();
+    const auto& tr = snap->getTrack(tIdx);
+    const int n = tr.getNumPlacedClips();
     clipStrips_.reserve((size_t)n);
     const float wfloat = static_cast<float>(w);
 
@@ -422,7 +473,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     for (int i = 0; i < n; ++i)
     {
         TimelineStrip strip;
-        const PlacedClip& placed = snap->getPlacedClip(i);
+        const PlacedClip& placed = tr.getPlacedClip(i);
         const AudioClip& ac = placed.getAudioClip();
         strip.clipId = placed.getId();
         strip.startOnTimeline = placed.getStartSample();

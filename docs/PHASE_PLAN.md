@@ -263,20 +263,22 @@ Introduce multiple tracks while preserving understandable state ownership and av
 
 ### In Scope
 
-- track-level session representation
-- clip-to-track association
-- UI representation sufficient to make tracks visible and understandable
-- playback behavior extended to track-aware structure
+- track-level session representation (`Track` / `TrackId` in the domain; `SessionSnapshot` as an ordered list of tracks)
+- clip-to-track association (each track owns an ordered `PlacedClip` list; same within-track overlap rule as Phase 2)
+- UI: one horizontal lane per track (stacked vertically), default track on launch, **Add track** control, new clips go to the **active** track (last track created)
+- playback: **sum** across tracks of each lane’s Phase-2-style coverage (no cross-track “who wins” — both are audible; overlapping clips on the **same** track are still not summed)
 - validation of scaling from single-track assumptions
 
 ### Out of Scope
 
-- full mixer
+- full mixer, per-track faders, meters, master bus processing
+- cross-track drag / clip move between lanes (explicitly deferred)
 - sends / buses
 - plugin hosting
 - MIDI instrument hosting
 - recording workflows
 - complex editing tools
+- trim, fade, clip gain (still out)
 
 ### Expected Value
 
