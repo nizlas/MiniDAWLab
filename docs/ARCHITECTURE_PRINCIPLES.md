@@ -68,6 +68,12 @@ Writers are constrained:
 No other component may mutate these fields. UI components read transport
 state but do not own or mutate it.
 
+**Project load:** Restoring a saved playhead position is expressed only as
+`Transport::requestSeek` after a new session snapshot is published. The
+project file may record `playheadSamples` and `deviceSampleRateAtSave`, but
+`Transport` is not populated from a snapshot; it remains the sole owner of
+the live playhead and seek pending state.
+
 ### Phase 2 playhead and session (one timeline, multiple clips)
 
 Phase 2 reuses the same `Transport` fields. The **meaning** of `playheadSamples` changes

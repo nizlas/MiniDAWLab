@@ -42,6 +42,10 @@ public:
 
     const juce::String& getSourceDescription() const noexcept { return sourceDescription_; }
 
+    // Absolute path of the file last decoded into this clip (`AudioFileLoader` passes
+    // `juce::File::getFullPathName()`). Used for project save/load, not a display title.
+    const juce::String& getSourceFilePath() const noexcept { return sourceDescription_; }
+
 private:
     juce::AudioBuffer<float> samples_;
     double sourceSampleRate_;

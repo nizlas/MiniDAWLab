@@ -119,6 +119,16 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSingleEmptyTrack(
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v)});
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(std::vector<Track> tracks) noexcept
+{
+    if (tracks.empty())
+    {
+        jassert(false);
+        return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot(std::move(tracks)));
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSinglePlacedClip(
     std::shared_ptr<const AudioClip> material,
     const std::int64_t startSampleOnTimeline,

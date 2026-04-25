@@ -551,6 +551,10 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         return;
     }
 
+    juce::Logger::writeToLog(
+        juce::String("[CLIMPORT] STAGE:peaks:rebuild:begin trackId=") + juce::String(trackId_)
+        + " widthPx=" + juce::String(w) + " snapKey=" + juce::String::toHexString((juce::pointer_sized_int)(snap.get())));
+
     lastSnapshotKey_ = snap.get();
     lastWidth_ = w;
     clipStrips_.clear();
@@ -558,6 +562,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
 
     if (snap == nullptr)
     {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=null_snap trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
         mouseDownPlacedId_.reset();
         dragMovementBeyondThreshold_ = false;
@@ -566,6 +572,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     const int tIdx = snap->findTrackIndexById(trackId_);
     if (tIdx < 0)
     {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=no_track trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
         mouseDownPlacedId_.reset();
         dragMovementBeyondThreshold_ = false;
@@ -573,6 +581,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     }
     if (snap->isEmpty())
     {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=empty_session trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
         mouseDownPlacedId_.reset();
         dragMovementBeyondThreshold_ = false;
@@ -582,6 +592,9 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     const std::int64_t timelineEndExcl = snap->getDerivedTimelineLengthSamples();
     if (timelineEndExcl <= 0)
     {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=timeline_length_zero trackId=")
+            + juce::String(trackId_));
         return;
     }
 
@@ -642,6 +655,9 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
 
         clipStrips_.push_back(std::move(strip));
     }
+    juce::Logger::writeToLog(
+        juce::String("[CLIMPORT] STAGE:peaks:rebuild:done trackId=") + juce::String(trackId_) + " stripsOnLane="
+        + juce::String((int)clipStrips_.size()));
 }
 
 // [Message thread] **Paint rule, not the mix rule:** if any *newer* `PlacedClip` (smaller index `k`

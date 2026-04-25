@@ -127,6 +127,8 @@ private:
                 session.addTrack();
                 trackLanesView.syncTracksFromSession();
             };
+            saveProjectButton.onClick = [this] { saveProjectClicked(); };
+            loadProjectButton.onClick = [this] { loadProjectClicked(); };
             playButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Playing); };
             pauseButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Paused); };
             // Stop: user expectation is "playback off *and* playhead back to the start" of the
@@ -138,6 +140,8 @@ private:
 
             addAndMakeVisible(addClipButton);
             addAndMakeVisible(addTrackButton);
+            addAndMakeVisible(saveProjectButton);
+            addAndMakeVisible(loadProjectButton);
             addAndMakeVisible(playButton);
             addAndMakeVisible(pauseButton);
             addAndMakeVisible(stopButton);
@@ -150,10 +154,12 @@ private:
         {
             auto area = getLocalBounds().reduced(8);
             auto row = area.removeFromTop(32);
-            const int buttonWidth = juce::jmax(48, row.getWidth() / 5);
+            const int buttonWidth = juce::jmax(48, row.getWidth() / 7);
 
             addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             addTrackButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            saveProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            loadProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             playButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             pauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
@@ -169,6 +175,14 @@ private:
         // **session** timeline at the current `Transport` playhead (read once, here, not on audio).
         void addClipAtPlayheadClicked()
         {
+            if (importInFlight_)
+            {
+                juce::Logger::writeToLog(
+                    juce::String("[CLIMPORT] STAGE:ui:ignored_second_add_while_chooser_in_flight"));
+                return;
+            }
+            importInFlight_ = true;
+
             const auto fileChooserFlags = juce::FileBrowserComponent::openMode
                                           | juce::FileBrowserComponent::canSelectFiles;
 
@@ -182,17 +196,29 @@ private:
             // time” read for placement (not the audio thread).
             chooser->launchAsync(fileChooserFlags, [this, chooser](const juce::FileChooser& fc) {
                 juce::ignoreUnused(chooser);
+                struct ClearImportInFlight
+                {
+                    bool& b;
+                    explicit ClearImportInFlight(bool& ref) noexcept
+                        : b(ref)
+                    {
+                    }
+                    ~ClearImportInFlight() { b = false; }
+                } clearImport{importInFlight_};
 
                 const juce::File file = fc.getResult();
                 if (!file.existsAsFile())
                 {
                     // Cancel or empty selection — not an error, keep the current session.
+                    juce::Logger::writeToLog(
+                        juce::String("[CLIMPORT] STAGE:ui:chooser_dismissed_cancel_or_no_file"));
                     return;
                 }
 
                 juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
                 if (device == nullptr)
                 {
+                    juce::Logger::writeToLog("[CLIMPORT] STAGE:ui:fail no_audio_device");
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon,
                         "Audio",
@@ -200,6 +226,8 @@ private:
                     return;
                 }
 
+                juce::Logger::writeToLog(
+                    juce::String("[CLIMPORT] STAGE:ui:chooser_ok file=") + file.getFullPathName());
                 // Snapshot once: this value becomes `PlacedClip::startSampleOnTimeline` for the
                 // new row (see Session / `PHASE_PLAN` add-at-playhead).
                 const std::int64_t startSampleOnTimeline = transport.readPlayheadSamplesForUi();
@@ -211,6 +239,8 @@ private:
 
                 if (!loadResult.wasOk())
                 {
+                    juce::Logger::writeToLog(
+                        juce::String("[CLIMPORT] STAGE:ui:session_add_failed err=") + loadResult.getErrorMessage());
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon,
                         "Could not open file",
@@ -218,9 +248,116 @@ private:
                 }
                 else
                 {
+                    juce::Logger::writeToLog(
+                        juce::String("[CLIMPORT] STAGE:ui:sync:begin file=") + file.getFileName());
                     // New **front** clip is on the active track; playhead/transport are unchanged.
                     trackLanesView.syncTracksFromSession();
                     trackLanesView.repaint();
+                    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:ui:sync:done file=") + file.getFileName());
+                }
+            });
+        }
+
+        void saveProjectClicked()
+        {
+            juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Save project",
+                    "No active audio device; cannot include device sample rate in the project file.");
+                return;
+            }
+            const double sampleRate = device->getCurrentSampleRate();
+
+            const auto fileChooserFlags = juce::FileBrowserComponent::saveMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>(
+                "Save project",
+                juce::File{},
+                "*.mdlproj");
+            chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
+                juce::ignoreUnused(chooser);
+                juce::File f = fc.getResult();
+                if (f.getFullPathName().isEmpty())
+                {
+                    return;
+                }
+                if (!f.hasFileExtension("mdlproj"))
+                {
+                    f = f.getSiblingFile(f.getFileName() + ".mdlproj");
+                }
+                const juce::Result r = session.saveProjectToFile(transport, f, sampleRate);
+                if (!r.wasOk())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
+                }
+            });
+        }
+
+        void loadProjectClicked()
+        {
+            juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Load project",
+                    "No active audio device; cannot match sample rate to decode project clips.");
+                return;
+            }
+            const double sampleRate = device->getCurrentSampleRate();
+
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>(
+                "Load project",
+                juce::File{},
+                "*.mdlproj");
+            chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
+                juce::ignoreUnused(chooser);
+                const juce::File f = fc.getResult();
+                if (!f.existsAsFile())
+                {
+                    return;
+                }
+                juce::StringArray skipped;
+                juce::String infoNote;
+                const juce::Result r
+                    = session.loadProjectFromFile(transport, f, sampleRate, skipped, infoNote);
+                if (!r.wasOk())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
+                    return;
+                }
+                trackLanesView.syncTracksFromSession();
+                rulerView.repaint();
+                trackLanesView.repaint();
+                if (infoNote.isNotEmpty() || skipped.size() > 0)
+                {
+                    juce::String body;
+                    if (infoNote.isNotEmpty())
+                    {
+                        body = infoNote;
+                    }
+                    if (skipped.size() > 0)
+                    {
+                        if (body.isNotEmpty())
+                        {
+                            body << "\n\n";
+                        }
+                        body << "Could not load " + juce::String(skipped.size())
+                             + (skipped.size() == 1 ? " file:" : " files:") + "\n\n";
+                        for (int i = 0; i < skipped.size(); ++i)
+                        {
+                            body << skipped[i] << (i < skipped.size() - 1 ? "\n" : "");
+                        }
+                    }
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
                 }
             });
         }
@@ -229,8 +366,13 @@ private:
         Session& session;
         juce::AudioDeviceManager& deviceManager;
 
+        /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
+        bool importInFlight_ = false;
+
         juce::TextButton addClipButton{ "Add clip..." };
         juce::TextButton addTrackButton{ "Add track" };
+        juce::TextButton saveProjectButton{ "Save project…" };
+        juce::TextButton loadProjectButton{ "Load project…" };
         juce::TextButton playButton{ "Play" };
         juce::TextButton pauseButton{ "Pause" };
         juce::TextButton stopButton{ "Stop" };

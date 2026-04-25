@@ -29,6 +29,7 @@
 //   `withTrackReordered` — move one `Track` row in the session’s **track list** order; each track’s
 //     `PlacedClip` list and `name_` are unchanged; audio summing is order-independent. No-op
 //     if the track is not found or `destIndex` equals the current index.
+//   `withTracks` — **load-only:** replace the session with a full pre-built track list (one publish).
 //   `withSinglePlacedClip` — transitional: one track, one clip.
 //
 // See also: `Track`, `PlacedClip`, `Session`, `PlaybackEngine`, `docs/ARCHITECTURE_PRINCIPLES.md`.
@@ -101,6 +102,12 @@ public:
         const SessionSnapshot& previous,
         TrackId movedTrackId,
         int destIndex) noexcept;
+
+    // [Message thread] **Load-only:** publish a full track list in one step (e.g. project open).
+    // Does not add clips incrementally. `tracks` must be non-empty; on empty, falls back to one
+    // default empty track in debug (`jassert`); callers should not pass an empty vector.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTracks(
+        std::vector<Track> tracks) noexcept;
 
     [[nodiscard]] bool isEmpty() const noexcept;
     [[nodiscard]] int getNumTracks() const noexcept

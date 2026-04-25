@@ -7,6 +7,20 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-25 — Phase 3 minimal project save / load (`.mdlproj` v1)
+
+Decision:
+
+- On-disk format: **JSON v1** (`io/ProjectFile`) with per-clip **absolute** `sourcePath` (same string as `AudioFileLoader` / `AudioClip::getSourceFilePath()`).
+- **Load** builds a full `std::vector<Track>` and publishes **one** `SessionSnapshot` through `SessionSnapshot::withTracks` and a **single** `atomic_store` — not `addTrack` / `addClipFromFileAtPlayhead` chains.
+- **Transport** stays the only owner of playhead state: after load, `requestSeek` with saved playhead **clamped** to the loaded session extent.
+- **Partial load:** per-clip decode failures add `path - reason` lines; if JSON is invalid, **no** session swap.
+- **Monotonic ids:** `nextPlacedClipId_` / `nextTrackId_` = `max(file value, max id present in file + 1)`.
+
+Rationale: embryo persistence without inventing a full DAW project system; keeps the add-clip and load paths clearly separate.
+
+---
+
 ## 2026-04-24 — Phase 2 minimal timeline ruler (seek on ruler strip)
 
 Decision:

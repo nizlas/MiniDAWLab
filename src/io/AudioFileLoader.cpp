@@ -27,7 +27,10 @@
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <new>
 
 juce::Result AudioFileLoader::loadFromFile(const juce::File& file,
                                            double requiredDeviceSampleRate,
@@ -81,19 +84,52 @@ juce::Result AudioFileLoader::loadFromFile(const juce::File& file,
     }
 
     const int numSamples = static_cast<int>(lengthInSamples);
-    juce::AudioBuffer<float> buffer(numChannels, numSamples);
+    const std::uint64_t approxBytes
+        = static_cast<std::uint64_t>(numChannels) * static_cast<std::uint64_t>(numSamples)
+          * static_cast<std::uint64_t>(sizeof(float));
+    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:decode:entry file=") + file.getFullPathName()
+                              + " ch=" + juce::String(numChannels) + " samples=" + juce::String(numSamples)
+                              + " approxBufferBytes=" + juce::String(approxBytes));
 
-    if (!reader->read(buffer.getArrayOfWritePointers(), numChannels, 0, numSamples))
+    try
     {
-        // Decode step failed after the header looked valid — report as a read error, not a silent clip.
-        return juce::Result::fail("Failed to read sample data from file.");
+        juce::AudioBuffer<float> buffer(numChannels, numSamples);
+
+        if (!reader->read(buffer.getArrayOfWritePointers(), numChannels, 0, numSamples))
+        {
+            // Decode step failed after the header looked valid — report as a read error, not a silent clip.
+            return juce::Result::fail("Failed to read sample data from file.");
+        }
+
+        // Success: the buffer becomes an immutable AudioClip. `sourceDescription` / `getSourceFilePath`
+        // is the file’s absolute path (used for errors and project save/load).
+        outClip = std::make_unique<AudioClip>(
+            std::move(buffer),
+            reader->sampleRate,
+            file.getFullPathName());
+    }
+    catch (const std::bad_alloc&)
+    {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:decode:fail OOM/alloc for ") + file.getFullPathName());
+        return juce::Result::fail(
+            "Out of memory while decoding audio (allocation failed). Try a smaller or shorter file.");
+    }
+    catch (const std::exception& e)
+    {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:decode:fail std::exception: ") + e.what() + " file="
+            + file.getFullPathName());
+        return juce::Result::fail(
+            juce::String("Exception while decoding: ") + e.what() + " (" + file.getFileName() + ")");
+    }
+    catch (...)
+    {
+        juce::Logger::writeToLog(
+            juce::String("[CLIMPORT] STAGE:decode:fail unknown for ") + file.getFullPathName());
+        return juce::Result::fail("Unknown exception while decoding: " + file.getFileName());
     }
 
-    // Success: the buffer becomes an immutable AudioClip; filename is kept for on-screen errors.
-    outClip = std::make_unique<AudioClip>(
-        std::move(buffer),
-        reader->sampleRate,
-        file.getFullPathName());
-
+    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:decode:ok file=") + file.getFullPathName());
     return juce::Result::ok();
 }

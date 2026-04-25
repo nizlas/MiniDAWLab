@@ -33,6 +33,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/Session.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
+    src/io/ProjectFile.cpp
     src/engine/PlaybackEngine.cpp
     src/ui/ClipWaveformView.cpp
     src/ui/ForbiddenCursor.cpp

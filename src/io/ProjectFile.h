@@ -1,0 +1,47 @@
+#pragma once
+
+// =============================================================================
+// ProjectFile — v1 JSON encode/decode for minimal project persistence (io layer)
+// =============================================================================
+// `sourcePath` is the absolute on-disk path last used to decode the clip
+// (AudioClip::getSourceFilePath, derived from the loader at load time). Not relative paths.
+// =============================================================================
+
+#include "domain/PlacedClip.h"
+#include "domain/Track.h"
+
+#include <juce_core/juce_core.h>
+
+#include <cstdint>
+#include <vector>
+
+struct ProjectFileClipV1
+{
+    PlacedClipId id = kInvalidPlacedClipId;
+    std::int64_t startSample = 0;
+    juce::String sourcePath;
+};
+
+struct ProjectFileTrackV1
+{
+    TrackId id = kInvalidTrackId;
+    juce::String name;
+    std::vector<ProjectFileClipV1> clips;
+};
+
+// Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
+struct ProjectFileV1
+{
+    static constexpr int kCurrentVersion = 1;
+
+    int version = kCurrentVersion;
+    PlacedClipId nextPlacedClipId = 1;
+    TrackId nextTrackId = 2;
+    TrackId activeTrackId = 1;
+    std::int64_t playheadSamples = 0;
+    double deviceSampleRateAtSave = 0.0;
+    std::vector<ProjectFileTrackV1> tracks;
+};
+
+[[nodiscard]] juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data);
+[[nodiscard]] juce::Result readProjectFile(const juce::File& file, ProjectFileV1& outData);

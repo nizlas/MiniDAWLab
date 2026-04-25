@@ -177,6 +177,7 @@ When validating the **minimal multi-track** step (`docs/PHASE_PLAN.md` Phase 3, 
 - **Default track:** a fresh session has exactly one track; new clips go there until the user adds another track.
 - **Add track:** appends a new empty track; the new track becomes **active**; **Add clip** places on the active track.
 - **Multiple tracks:** can load/place clips on different tracks; all tracks share one timeline and transport playhead.
+- **Minimal project file (v1):** save writes absolute audio source paths and session metadata; load decodes into one new `SessionSnapshot` (single publish), skips broken clips with a user-visible list, and seeks via `Transport` only. Corrupt or wrong-version project files do not replace the current session.
 - **Playback sum:** with clips on more than one track (non-overlapping or staggered in time), you hear the **sum** of both contributions when both are “on” in device time. **Within** a single track, overlapping clips are still **not** summed; front-most still wins there.
 - **Within-track move:** `Session::moveClip` and committed drag still apply on the track that owns the moved clip (end-state rule in that lane only).
 

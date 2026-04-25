@@ -297,6 +297,15 @@ Introduce multiple tracks while preserving understandable state ownership and av
 - **In scope:** **Drag** from a **track header** (not the event lane) to **reorder** the session’s `Track` list; **`Session::moveTrack`** + **`SessionSnapshot::withTrackReordered`** publish a new snapshot. **No** per-track `PlacedClip` change (each track’s clip list and name are **unchanged**). A single **insert line** is drawn in **`TrackLanesView::paintOverChildren`** only (green = real reorder, red = no-op, nothing in invalid area). **Invalid** = pointer **outside** `TrackLanesView` or **x ≥ header width** (lane / event area); **forbidden** cursor (shared with invalid cross-lane **clip** drop) on the **source** header. **`activeTrackId_` is not written** on reorder; the highlight follows that **id** to its new row. **No** ghost track, no mixer, no keyboard reorder.
 - **Out of scope (reorder step):** rename, delete, resize, collapse, mute, solo, faders, clip drag changes, `Transport` or playback changes, persistence.
 
+### Phase 3 late extension: minimal project save / load (`.mdlproj` v1)
+
+- **In scope:** JSON v1 on disk with tracks (id, name), placed clips (id, `startSample` on the session timeline, **absolute** `sourcePath` from `AudioClip::getSourceFilePath`), `nextPlacedClipId` / `nextTrackId` / `activeTrackId`, `playheadSamples` and `deviceSampleRateAtSave` as transport/session metadata. **Save** and **load** are **message-thread** operations in `io/ProjectFile` + `Session::saveProjectToFile` / `loadProjectFromFile`.
+- **Load path:** build a full `std::vector<Track>` and publish **one** `SessionSnapshot` via a single `atomic_store` — **not** by chaining `addTrack` / `addClipFromFileAtPlayhead`. `SessionSnapshot::withTracks` is the load-only constructor path.
+- **Transport:** `Transport` remains the sole owner of playhead state; after a successful load, the UI calls `transport.requestSeek` with the saved value **clamped** to the loaded session’s derived extent. **No** playhead in the audio snapshot.
+- **Partial load:** missing files or decode/rate failures skip that clip, append a line to a user-visible list (path + reason), and still apply the new snapshot if JSON parse and structure were valid. **Invalid JSON or wrong version: no** session change.
+- **Id seeds after load:** `max(storedNext, maxIdInFile + 1)` for placed clips and tracks so monotonic ids never collide with restored rows.
+- **Out of scope:** a full DAW project format, relative/media paths, async decode, embedded audio, or undo.
+
 ### Expected Value
 
 The project begins to resemble a real timeline-based audio application rather than a clip demo.

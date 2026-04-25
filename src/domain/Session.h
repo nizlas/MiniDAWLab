@@ -45,6 +45,7 @@
 #include <memory>
 
 class AudioClip;
+class Transport;
 
 // ---------------------------------------------------------------------------
 // Session — sole publisher of `std::shared_ptr<const SessionSnapshot>` to readers (engine + UI)
@@ -122,6 +123,24 @@ public:
     // [Audio thread] and [Message thread] Acquire the current `SessionSnapshot` pointer; no
     // decode, no session mutation. This is the main handoff the engine uses each block.
     [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
+
+    // [Message thread] Write minimal project v1 (tracks, clip placements, absolute source paths,
+    // monotonic id seeds, active track, playhead and device rate metadata). `transport` is read
+    // for the playhead only (single owner of playhead state).
+    [[nodiscard]] juce::Result saveProjectToFile(
+        Transport& transport, const juce::File& file, double deviceSampleRate);
+
+    // [Message thread] Parse and decode in one new snapshot, single `atomic_store` on success.
+    // `Transport&` is used only to `requestSeek` after publish (clamped; playhead is not read from
+    // the file for anything else). Clips that fail to load are skipped; each becomes one line in
+    // `outSkippedClipDetails` (path + reason). `outInfoNote` is non-empty e.g. when device rate at
+    // save differs from `deviceSampleRate` (user-visible context for partial load).
+    [[nodiscard]] juce::Result loadProjectFromFile(
+        Transport& transport,
+        const juce::File& file,
+        double deviceSampleRate,
+        juce::StringArray& outSkippedClipDetails,
+        juce::String& outInfoNote);
 
 private:
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
