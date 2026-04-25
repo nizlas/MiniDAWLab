@@ -8,8 +8,9 @@
 //   Sits in the main layout **below** `TimelineRulerView`. When `Session` publishes a snapshot
 //   with N tracks, this component ensures N child lanes, each created with a stable `TrackId` and
 //   the same session-wide x -> sample map as the ruler. It wires a small callback so selecting a
-//   clip in one lane clears selection in the others — **no** cross-track drag (clips stay in their
-//   track for moves).
+//   clip in one lane clears selection in the others. **Cross-track drag:** `ClipWaveformLaneHost`
+//   callbacks resolve which lane is under the pointer, set a **single** drop ghost on that lane, and
+//   clear ghosts — **no** track-type predicate; “valid lane” is geometric only.
 //
 // See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`.
 // =============================================================================
@@ -48,6 +49,12 @@ private:
     // [Message thread] Match `std::vector` size and `TrackId` order to the session snapshot; id-
     // order changes (not in this project) would rebuild every lane.
     void rebuildChildLanesIfNeeded();
+
+    // [Message thread] Screen point → which child `ClipWaveformView` (lane) that point falls in, or
+    // `nullptr` if outside this view’s bounds (e.g. over the ruler or chrome).
+    [[nodiscard]] ClipWaveformView* findLaneAtScreenPosition(juce::Point<int> screenPos);
+    void setGhostOnLaneImpl(ClipWaveformView* target, std::int64_t startSample, std::int64_t lengthSamples);
+    void clearAllGhostsImpl();
 
     Session& session_;
     Transport& transport_;

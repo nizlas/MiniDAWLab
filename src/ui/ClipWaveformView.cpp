@@ -5,7 +5,9 @@
 // ROLE
 //   Fills a list from `loadSessionSnapshotForAudioThread()`: for each `PlacedClip` row, draw the
 //   event **envelope** and a peak sketch; single-lane **selection** (UI-local) and **drag to move**
-//   (committed via `Session::moveClip` only) sit on the same view — ordering policy is not here.
+//   (committed via `Session::moveClip` / `Session::moveClipToTrack` only) sit on the same view —
+//   ordering policy is not here. **Invalid cross-lane drop** uses a small custom *forbidden* cursor
+//   (JUCE has no portable system no-drop); restore still uses the standard arrow.
 //   In material columns whose **center** falls in session time *not* covered by any row in front
 //   (lower index in the snapshot, painted later). **Covered**
 //   time on a back row: no readable peaks; the overlying event shows through after back→front order.
@@ -38,6 +40,36 @@
 #include <optional>
 #include <utility>
 #include <vector>
+
+// ---------------------------------------------------------------------------
+// Invalid-drop cursor (JUCE [Message thread] only; no `StandardCursorType` for no-drop on all hosts)
+// ---------------------------------------------------------------------------
+namespace
+{
+    juce::MouseCursor forbiddenNoDropMouseCursor()
+    {
+        static const juce::MouseCursor cursor = [] {
+            // 32x32, transparent background; JUCE may downscale on some systems per `MouseCursor`
+            // constructor docs.
+            constexpr int kSize = 32;
+            juce::Image img(juce::Image::ARGB, kSize, kSize, true);
+            juce::Graphics g(img);
+            g.fillAll(juce::Colours::transparentBlack);
+            const float cx = kSize * 0.5f;
+            const float cy = kSize * 0.5f;
+            const float radius = 12.0f;
+            g.setColour(juce::Colours::white);
+            g.fillEllipse(cx - radius, cy - radius, 2.0f * radius, 2.0f * radius);
+            g.setColour(juce::Colour(0xffd42828));
+            g.drawEllipse(cx - radius, cy - radius, 2.0f * radius, 2.0f * radius, 2.2f);
+            const float inset = radius * 0.68f;
+            g.setColour(juce::Colour(0xffc01010));
+            g.drawLine(cx - inset, cy - inset, cx + inset, cy + inset, 3.0f);
+            return juce::MouseCursor(img, kSize / 2, kSize / 2);
+        }();
+        return cursor;
+    }
+} // namespace
 
 // Anonymous helpers: all **session-timeline** intervals are half-open [a, b) in device samples,
 // matching `PlacedClip` placement + `PlaybackEngine` / `Transport` usage. They exist only to
@@ -220,9 +252,9 @@ ClipWaveformView::ClipWaveformView(
     Session& session,
     Transport& transport,
     const TrackId trackId,
-    PeerLaneInteraction onBeginMouseDown)
+    ClipWaveformLaneHost laneHost)
     : trackId_(trackId)
-    , onBeginMouseDown_(std::move(onBeginMouseDown))
+    , laneHost_(std::move(laneHost))
     , session_(session)
     , transport_(transport)
 {
@@ -230,6 +262,47 @@ ClipWaveformView::ClipWaveformView(
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
     startTimerHz(kPlayheadUpdateHz);
+}
+
+void ClipWaveformView::setDragGhost(const std::int64_t startSampleOnTimeline, const std::int64_t lengthSamples)
+{
+    hasDragGhost_ = true;
+    dragGhostStartOnTimeline_ = startSampleOnTimeline;
+    dragGhostLengthSamples_ = juce::jmax(static_cast<std::int64_t>(0), lengthSamples);
+    repaint();
+}
+
+void ClipWaveformView::clearDragGhost()
+{
+    if (!hasDragGhost_)
+    {
+        return;
+    }
+    hasDragGhost_ = false;
+    repaint();
+}
+
+void ClipWaveformView::setInvalidDropCursor()
+{
+    if (cursorOverriddenForInvalidDrop_)
+    {
+        return;
+    }
+    // `juce::MouseCursor::StandardCursorType` has no portable no-drop; use a one-off 32x32 *forbidden*
+    // icon (see anonymous `forbiddenNoDropMouseCursor` in this .cpp). Restore: `NormalCursor` below.
+    setMouseCursor(forbiddenNoDropMouseCursor());
+    cursorOverriddenForInvalidDrop_ = true;
+}
+
+void ClipWaveformView::restoreNormalCursorAfterInvalidDrop()
+{
+    if (!cursorOverriddenForInvalidDrop_)
+    {
+        return;
+    }
+    setMouseCursor(
+        juce::MouseCursor(juce::MouseCursor::StandardCursorType::NormalCursor));
+    cursorOverriddenForInvalidDrop_ = false;
 }
 
 void ClipWaveformView::clearSelectionOnly()
@@ -240,6 +313,7 @@ void ClipWaveformView::clearSelectionOnly()
 
 ClipWaveformView::~ClipWaveformView()
 {
+    restoreNormalCursorAfterInvalidDrop();
     // JUCE: `Timer` must be stopped before destruction so the message loop never calls back in.
     stopTimer();
 }
@@ -259,9 +333,9 @@ void ClipWaveformView::timerCallback()
 // `SessionSnapshot::withClipMoved`, not here.
 void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 {
-    if (onBeginMouseDown_)
+    if (laneHost_.onBeginMouseDown)
     {
-        onBeginMouseDown_(*this);
+        laneHost_.onBeginMouseDown(*this);
     }
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     if (snap == nullptr)
@@ -304,6 +378,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
             if (tr.getPlacedClip(i).getId() == *hit)
             {
                 clickDownStartSample_ = tr.getPlacedClip(i).getStartSample();
+                mouseDownMaterialNumSamples_ = tr.getPlacedClip(i).getAudioClip().getNumSamples();
                 break;
             }
         }
@@ -343,17 +418,92 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
                           / static_cast<double>(b.getWidth());
     tentativeStartOnTimeline_ = juce::jmax(
         static_cast<std::int64_t>(0), clickDownStartSample_ + static_cast<std::int64_t>(std::llround(deltaS)));
+
+    const bool canCrossLane = static_cast<bool>(laneHost_.findLaneAtScreen)
+                              && static_cast<bool>(laneHost_.setGhostOnLane)
+                              && static_cast<bool>(laneHost_.clearAllGhosts);
+    if (!canCrossLane)
+    {
+        repaint();
+        return;
+    }
+    if (!dragMovementBeyondThreshold_)
+    {
+        if (laneHost_.clearAllGhosts)
+        {
+            laneHost_.clearAllGhosts();
+        }
+        restoreNormalCursorAfterInvalidDrop();
+        repaint();
+        return;
+    }
+
+    auto* const lane
+        = laneHost_.findLaneAtScreen(juce::Point<int>(e.getScreenX(), e.getScreenY()));
+    if (lane == nullptr)
+    {
+        if (laneHost_.clearAllGhosts)
+        {
+            laneHost_.clearAllGhosts();
+        }
+        setInvalidDropCursor();
+    }
+    else if (lane == this)
+    {
+        if (laneHost_.clearAllGhosts)
+        {
+            laneHost_.clearAllGhosts();
+        }
+        restoreNormalCursorAfterInvalidDrop();
+    }
+    else
+    {
+        if (laneHost_.setGhostOnLane)
+        {
+            laneHost_.setGhostOnLane(
+                lane, tentativeStartOnTimeline_, static_cast<std::int64_t>(mouseDownMaterialNumSamples_));
+        }
+        restoreNormalCursorAfterInvalidDrop();
+    }
     repaint();
 }
 
-// [Message thread] Commit: one `Session::moveClip` if the user actually dragged; selection does
-// not by itself call into `Session` (no reorder on select).
+// [Message thread] Commit: `Session::moveClip` (same lane) or `Session::moveClipToTrack` (other
+// lane) if the user actually dragged. Pointer outside the lane stack on release cancels: no
+// publish. Clears cross-lane ghosts and restores invalid-drop cursor on the source lane.
 void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
 {
-    juce::ignoreUnused(e);
+    if (laneHost_.clearAllGhosts)
+    {
+        laneHost_.clearAllGhosts();
+    }
+    restoreNormalCursorAfterInvalidDrop();
+
     if (mouseDownPlacedId_.has_value() && dragMovementBeyondThreshold_)
     {
-        session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
+        const bool canCrossLane = static_cast<bool>(laneHost_.findLaneAtScreen);
+        if (!canCrossLane)
+        {
+            session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
+        }
+        else
+        {
+            auto* const lane
+                = laneHost_.findLaneAtScreen(juce::Point<int>(e.getScreenX(), e.getScreenY()));
+            if (lane == nullptr)
+            {
+                // Cancel — no `Session` publish
+            }
+            else if (lane == this)
+            {
+                session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
+            }
+            else
+            {
+                session_.moveClipToTrack(
+                    *mouseDownPlacedId_, tentativeStartOnTimeline_, lane->getTrackId());
+            }
+        }
     }
     mouseDownPlacedId_.reset();
     dragMovementBeyondThreshold_ = false;
@@ -677,6 +827,22 @@ void ClipWaveformView::paint(juce::Graphics& g)
     const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
+
+    // --- (1b) Cross-lane **drop ghost** on a target lane (not the overlap underlap hint).
+    if (hasDragGhost_ && dragGhostLengthSamples_ > 0)
+    {
+        const float gs0 = sessionSampleToX(dragGhostStartOnTimeline_);
+        const float gs1
+            = sessionSampleToX(dragGhostStartOnTimeline_ + dragGhostLengthSamples_);
+        const float gLeft = juce::jmin(gs0, gs1);
+        const float gRight = juce::jmax(gs0, gs1);
+        juce::Rectangle<float> ghostRect{ gLeft, eventTrackY.getY(), juce::jmax(1.0f, gRight - gLeft),
+                                            eventTrackY.getHeight() };
+        g.setColour(juce::Colour(0xff5a7a9a).withAlpha(0.28f));
+        g.fillRoundedRectangle(ghostRect, kEventCorner);
+        g.setColour(juce::Colour(0xffa0b8d8).withAlpha(0.5f));
+        g.drawRoundedRectangle(ghostRect, kEventCorner, 1.0f);
+    }
 
     // --- (2) Event bodies + inner peaks, **back to front in snapshot** (largest index → 0). The
     //     *last* iteration (`row==0`) is the **newest** clip — it clobbers any shared pixels from

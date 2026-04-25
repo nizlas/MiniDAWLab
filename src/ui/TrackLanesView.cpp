@@ -62,7 +62,8 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             jassert(false);
             continue;
         }
-        auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, [this](ClipWaveformView& sender) {
+        ClipWaveformLaneHost host;
+        host.onBeginMouseDown = [this](ClipWaveformView& sender) {
             for (auto& u : lanes_)
             {
                 if (u.get() != &sender)
@@ -70,9 +71,61 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     u->clearSelectionOnly();
                 }
             }
-        });
+        };
+        host.findLaneAtScreen = [this](const juce::Point<int> screenPos) -> ClipWaveformView* {
+            return findLaneAtScreenPosition(screenPos);
+        };
+        host.setGhostOnLane
+            = [this](ClipWaveformView* target, const std::int64_t start, const std::int64_t len) {
+                  setGhostOnLaneImpl(target, start, len);
+              };
+        host.clearAllGhosts = [this] { clearAllGhostsImpl(); };
+        auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, std::move(host));
         addAndMakeVisible(*ptr);
         lanes_.push_back(std::move(ptr));
+    }
+}
+
+ClipWaveformView* TrackLanesView::findLaneAtScreenPosition(const juce::Point<int> screenPos)
+{
+    const juce::Point<int> local = getLocalPoint(nullptr, screenPos);
+    if (!getLocalBounds().contains(local))
+    {
+        return nullptr;
+    }
+    for (auto& u : lanes_)
+    {
+        if (u->getBounds().contains(local))
+        {
+            return u.get();
+        }
+    }
+    return nullptr;
+}
+
+void TrackLanesView::setGhostOnLaneImpl(
+    ClipWaveformView* const target,
+    const std::int64_t startSample,
+    const std::int64_t lengthSamples)
+{
+    for (auto& u : lanes_)
+    {
+        if (u.get() == target)
+        {
+            u->setDragGhost(startSample, lengthSamples);
+        }
+        else
+        {
+            u->clearDragGhost();
+        }
+    }
+}
+
+void TrackLanesView::clearAllGhostsImpl()
+{
+    for (auto& u : lanes_)
+    {
+        u->clearDragGhost();
     }
 }
 

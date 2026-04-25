@@ -272,13 +272,20 @@ Introduce multiple tracks while preserving understandable state ownership and av
 ### Out of Scope
 
 - full mixer, per-track faders, meters, master bus processing
-- cross-track drag / clip move between lanes (explicitly deferred)
 - sends / buses
 - plugin hosting
 - MIDI instrument hosting
 - recording workflows
 - complex editing tools
 - trim, fade, clip gain (still out)
+
+### Phase 3 late extension: cross-track clip drag
+
+- **In scope:** drag an existing `PlacedClip` from one lane to another; commit on **mouse up**; session publishes **one** new snapshot. **No** track type / format compatibility — “valid target” is any lane in the `TrackLanesView` stack (geometric hit only).
+- **Target ordering:** the dropped clip becomes **front-most (index 0)** on the destination track, matching the “newest = front” add-clip path.
+- **Active track** (`Session::activeTrackId_`): **unchanged** by a cross-track drop; only **Add track** and **Clear** reset it.
+- **Within-track** committed drag still uses `Session::moveClip` / `SessionSnapshot::withClipMoved` (end-state rule in that track only). **Cross-lane** commit uses `Session::moveClipToTrack` / `SessionSnapshot::withClipMovedToTrack` (separate, named API).
+- **UI:** a translucent **ghost** appears **only** on the lane under the pointer while dragging **after** the movement threshold, except when that lane is the **source** (the source lane already shows the live drag preview; no duplicate ghost). **Outside every lane,** all ghosts are cleared; **invalid-drop** feedback uses a **non-default** cursor (implementation picks the closest JUCE `MouseCursor` to “not here” on the current platform) on the **source** component; the cursor is restored on re-entering any lane and unconditionally on `mouseUp`. Releasing the pointer **outside all lanes** is a **no-op** (no `Session` publish). **Not in scope:** undo/redo, multi-clip move, snap-to-grid, per-track “can accept clip” type checks.
 
 ### Expected Value
 

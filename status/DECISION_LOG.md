@@ -313,4 +313,38 @@ Rationale:
 Notes:
 
 - See `docs/PHASE_PLAN.md` (Phase 3) and `docs/ARCHITECTURE_PRINCIPLES.md` (Phase 2/3
-  playback wording). Cross-track moves and mixer surfaces remain explicitly out of scope.
+  playback wording). **Cross-track move** is covered by the 2026-04-25 late-extension entry
+  below. Mixer surfaces remain out of scope for Phase 3.
+
+---
+
+## 2026-04-25 — Phase 3 late extension: cross-track clip drag
+
+Decision:
+
+- **Cross-track** reassignment of an existing `PlacedClip` is a **named** command: **`Session
+  ::moveClipToTrack`**, building **`SessionSnapshot::withClipMovedToTrack`**. The clip is **removed
+  from its source track** and **inserted as front-most (index 0)** on the **target** track, with
+  **`PlacedClipId` and `AudioClip` identity preserved.**
+- **Within-track** move remains **`Session::moveClip` / `SessionSnapshot::withClipMoved`** (same
+  committed end-state policy as before, **in one lane** only). The two session APIs are **not
+  merged** into a single optional-parameter overload.
+- **Active track** (where **Add clip** goes) is **not** changed by a cross-track drop. Only **Add
+  track** and **Clear** (reset) change `activeTrackId_` in the current design.
+- **Valid drop target** is **geometric** only: any child lane in **`TrackLanesView`**. There is **no
+  per-track “type / compatibility”** field or predicate in this step.
+- **UI:** A **ghost** (translucent placeholder) is drawn **only** on the lane under the pointer
+  after the same movement threshold as within-track move, **except** the source lane does **not**
+  get a second ghost (it already shows the in-flight move). **Outside every lane,** all ghosts
+  are cleared; the **source** component sets a **non-default** “invalid drop” cursor until
+  re-entering a lane or **mouse up** (cursor always restored on release). **Mouse up outside all
+  lanes** cancels: **no** snapshot publish.
+
+Rationale:
+
+- Preserves a single-snapshot, lock-free handoff, explicit session commands, and clear separation
+  from a future per-track-typed lane model.
+
+Notes:
+
+- `PlaybackEngine` is unchanged. Not in scope: undo/redo, multi-clip drag, snap, mixer.

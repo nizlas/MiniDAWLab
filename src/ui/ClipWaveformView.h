@@ -23,8 +23,8 @@
 //
 // NOT RESPONSIBLE FOR
 //   File decode, or ordering *policy* (Session / SessionSnapshot). The view **invokes** `Session
-//   ::moveClip` on committed drag; it does not decide promote-vs-preserve. Transport truth stays in
-//   `Transport`.
+//   ::moveClip` / `Session::moveClipToTrack` on committed drag; it does not decide promote-vs-
+//   preserve. Transport truth stays in `Transport`.
 //
 // See: ClipWaveformView.cpp (paint pipeline, overlap handling, JUCE `Graphics` notes).
 // =============================================================================
@@ -45,6 +45,18 @@ class ClipWaveformView;
 // [Message thread] At the start of a lane `mouseDown`, clear selection on **other** lanes only.
 using PeerLaneInteraction = std::function<void(ClipWaveformView&)>;
 
+// [Message thread] Optional cross-lane coordination from `TrackLanesView`: find which lane is under
+// a screen point, show a **single** drag ghost on that lane, clear all ghosts. Empty `std::function`
+// = same-lane-only behavior (legacy).
+struct ClipWaveformLaneHost
+{
+    PeerLaneInteraction onBeginMouseDown;
+    std::function<ClipWaveformView*(juce::Point<int> screenPos)> findLaneAtScreen;
+    std::function<void(ClipWaveformView* target, std::int64_t startSample, std::int64_t lengthSamples)>
+        setGhostOnLane;
+    std::function<void()> clearAllGhosts;
+};
+
 // ---------------------------------------------------------------------------
 // ClipWaveformView — multi-clip timeline *view* (Session snapshot + Transport playhead)
 // ---------------------------------------------------------------------------
@@ -63,17 +75,22 @@ class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
     // [Message thread] session/transport outlive the view. `trackId` scopes this lane to one
-    // `Track` in the snapshot. `onBeginMouseDown` clears peer lane selection; pass `{}` for none.
+    // `Track` in the snapshot. `laneHost` is normally from `TrackLanesView` (cross-lane ghost +
+    // drop find). Default = only within-lane `moveClip` on drag commit.
     ClipWaveformView(Session& session,
                      Transport& transport,
                      TrackId trackId,
-                     PeerLaneInteraction onBeginMouseDown = {});
+                     ClipWaveformLaneHost laneHost = {});
     ~ClipWaveformView() override;
 
     [[nodiscard]] TrackId getTrackId() const noexcept { return trackId_; }
 
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();
+
+    // [Message thread] Cross-lane drag ghost (one lane at a time); called by `TrackLanesView` only.
+    void setDragGhost(std::int64_t startSampleOnTimeline, std::int64_t lengthSamples);
+    void clearDragGhost();
 
     // [Message thread] Paints: background, back→front one **event** per `PlacedClip` (peaks in
     // *uncovered* time only), then the same overlap shading (per row, where that row is locally
@@ -115,9 +132,15 @@ private:
     // [Message thread] If the selected id no longer exists in the snapshot, clear selection.
     void clearSelectionIfIdMissing(const std::shared_ptr<const SessionSnapshot>& snap);
 
+    // [Message thread] Invalid-drop cursor on the **source** lane when the pointer leaves the lane
+    // stack during a drag; custom *forbidden* glyph (see .cpp), not a JUCE `StandardCursorType`.
+    // Always restored with `NormalCursor` on re-entry to a lane and on `mouseUp`.
+    void setInvalidDropCursor();
+    void restoreNormalCursorAfterInvalidDrop();
+
     // Which `Track` this lane paints; overlap + paint order are **only** within this list.
     TrackId trackId_ = kInvalidTrackId;
-    PeerLaneInteraction onBeginMouseDown_;
+    ClipWaveformLaneHost laneHost_;
     Session& session_;
     Transport& transport_;
 
@@ -146,6 +169,14 @@ private:
     std::int64_t clickDownStartSample_ = 0;
     std::int64_t tentativeStartOnTimeline_ = 0;
     bool dragMovementBeyondThreshold_ = false;
+    std::int64_t mouseDownMaterialNumSamples_ = 0;
+
+    // Drop ghost (this component may be the non-source lane showing a placeholder only).
+    bool hasDragGhost_ = false;
+    std::int64_t dragGhostStartOnTimeline_ = 0;
+    std::int64_t dragGhostLengthSamples_ = 0;
+
+    bool cursorOverriddenForInvalidDrop_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ClipWaveformView)
 };

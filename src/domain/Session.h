@@ -92,6 +92,13 @@ public:
     // the UI does not implement policy. Invalid or unknown id: no publish (see factory jasserts).
     void moveClip(PlacedClipId id, std::int64_t newStartSampleOnTimeline) noexcept;
 
+    // [Message thread] Move a clip to a **different** `TrackId` as front-most in that track (see
+    // `SessionSnapshot::withClipMovedToTrack`). **Does not** change `activeTrackId_` (Add clip
+    // target). Same-track moves must use `moveClip` only — this path is a no-op if the clip
+    // already lives on `targetTrackId` (defensive, see .cpp).
+    void moveClipToTrack(
+        PlacedClipId id, std::int64_t newStartSampleOnTimeline, TrackId targetTrackId) noexcept;
+
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.
     void clearClip() noexcept;

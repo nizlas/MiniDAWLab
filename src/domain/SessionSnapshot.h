@@ -22,6 +22,9 @@
 //     lane, index 0 of that track).
 //   `withClipMoved` — move one `PlacedClip` in **its** track; committed end-state rule only among
 //     clips on that track.
+//   `withClipMovedToTrack` — move one `PlacedClip` to **another** track: remove from source lane,
+//     insert as **index 0** (front-most) on the target; identity preserved. Not for same source
+//     and target track — use `withClipMoved` in that case.
 //   `withSinglePlacedClip` — transitional: one track, one clip.
 //
 // See also: `Track`, `PlacedClip`, `Session`, `PlaybackEngine`, `docs/ARCHITECTURE_PRINCIPLES.md`.
@@ -76,6 +79,15 @@ public:
         const SessionSnapshot& previous,
         PlacedClipId movedId,
         std::int64_t newStartSampleOnTimeline) noexcept;
+
+    // [Message thread] Remove `movedId` from its current track, insert that row at index 0 of
+    // `targetTrackId` with timeline start `newStartSampleOnTimeline` (clamped in .cpp). Source and
+    // target must be **different** tracks; if equal, the factory is a no-op (debug jassert).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipMovedToTrack(
+        const SessionSnapshot& previous,
+        PlacedClipId movedId,
+        std::int64_t newStartSampleOnTimeline,
+        TrackId targetTrackId) noexcept;
 
     [[nodiscard]] bool isEmpty() const noexcept;
     [[nodiscard]] int getNumTracks() const noexcept

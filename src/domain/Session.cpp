@@ -126,6 +126,52 @@ void Session::moveClip(const PlacedClipId id, const std::int64_t newStartSampleO
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::moveClipToTrack(
+    const PlacedClipId id,
+    const std::int64_t newStartSampleOnTimeline,
+    const TrackId targetTrackId) noexcept
+{
+    if (id == kInvalidPlacedClipId || targetTrackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->isEmpty())
+    {
+        return;
+    }
+    TrackId ownerTrackId = kInvalidTrackId;
+    for (int t = 0; t < current->getNumTracks(); ++t)
+    {
+        const Track& tr = current->getTrack(t);
+        for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+        {
+            if (tr.getPlacedClip(i).getId() == id)
+            {
+                ownerTrackId = tr.getId();
+                break;
+            }
+        }
+        if (ownerTrackId != kInvalidTrackId)
+        {
+            break;
+        }
+    }
+    if (ownerTrackId == kInvalidTrackId)
+    {
+        return;
+    }
+    if (ownerTrackId == targetTrackId)
+    {
+        // Same track: `withClipMovedToTrack` is not used; UI should call `moveClip` instead.
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withClipMovedToTrack(
+        *current, id, newStartSampleOnTimeline, targetTrackId);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::clearClip() noexcept
 {
     // “No file”: one **empty** default track (id 1), same as a fresh `Session` — not the shared

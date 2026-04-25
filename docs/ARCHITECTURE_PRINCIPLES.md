@@ -87,7 +87,9 @@ unless steering documents are updated.
 **covers** that timeline position is audible in that lane (stacked “events” mental model;
 **not** summing overlapping clips **on the same track**).
 
-**Phase 3 minimal multi-track:** `SessionSnapshot` holds an ordered list of **tracks**; each track has its own front-to-back clip list and the same overlap rule as Phase 2 **within that lane**. For the same timeline instant, output is the **sum** of what each track would produce on its own (not a mixer UI, no per-track gain). Cross-track clip moves are out of scope until explicitly added.
+**Phase 3 minimal multi-track:** `SessionSnapshot` holds an ordered list of **tracks**; each track has its own front-to-back clip list and the same overlap rule as Phase 2 **within that lane**. For the same timeline instant, output is the **sum** of what each track would produce on its own (not a mixer UI, no per-track gain).
+
+**Phase 3 late extension — cross-track clip move:** A clip may be moved to another track with **`Session::moveClipToTrack`** and **`SessionSnapshot::withClipMovedToTrack`**, which reassign the existing `PlacedClipId` to the target track at a new timeline start, inserting the row as **front-most (index 0)** on that track. This is a distinct, named command from **within-track** **`Session::moveClip`** (committed end-state rule only in the clip’s current lane). **No** per-track “compatibility / type” predicate in the current project — “valid target lane” is purely geometric. **`Session::moveClipToTrack` does not change** which track is **active** for **Add clip** — only **`Session::addTrack`** and **`Session::clearClip`** (reset) do.
 
 **Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
 session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**
@@ -95,7 +97,7 @@ reads on the hot path; the exact snapshot type is an implementation choice consi
 `docs/PHASE_PLAN.md` and `status/DECISION_LOG.md`.
 
 **Session-owned overlap order — how it may change:**  
-Front-to-back order of placed clips is **session state**, not UI state. Any change to that order must be expressed as an **explicit, named** `Session` (or `SessionSnapshot`) operation — for example, adding a clip, or, when a gated move feature exists, a dedicated move that applies the **committed end-state** rule in `docs/PHASE_PLAN.md`. **Selection, hover, and in-flight drags** must not silently reorder clips. A later phase may add concrete APIs; the principle is: **no order mutation as a side effect of general UI state.**
+Front-to-back order of placed clips is **session state**, not UI state. Any change to that order must be expressed as an **explicit, named** `Session` (or `SessionSnapshot`) operation — for example, adding a clip, **`Session::moveClip`** (within a track, end-state rule in `docs/PHASE_PLAN.md`), or **`Session::moveClipToTrack`** (to another track, **front-most insertion** on the destination; **no** ad-hoc per-track “type” gate in the current codebase). **Selection, hover, and in-flight drags** must not silently reorder clips. The principle is: **no order mutation as a side effect of general UI state.**
 
 ### File loading is separate from playback
 

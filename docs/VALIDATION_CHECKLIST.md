@@ -178,10 +178,21 @@ When validating the **minimal multi-track** step (`docs/PHASE_PLAN.md` Phase 3, 
 - **Add track:** appends a new empty track; the new track becomes **active**; **Add clip** places on the active track.
 - **Multiple tracks:** can load/place clips on different tracks; all tracks share one timeline and transport playhead.
 - **Playback sum:** with clips on more than one track (non-overlapping or staggered in time), you hear the **sum** of both contributions when both are “on” in device time. **Within** a single track, overlapping clips are still **not** summed; front-most still wins there.
-- **Within-track move:** `Session::moveClip` and committed drag still apply **only** on the track that owns the moved clip; **no** API or UI path drags a clip to another track in this step.
+- **Within-track move:** `Session::moveClip` and committed drag still apply on the track that owns the moved clip (end-state rule in that lane only).
+
+## Phase 3 late extension: cross-track clip drag
+
+When validating **cross-track drag** (`docs/PHASE_PLAN.md` Phase 3 late extension, `status/DECISION_LOG.md`):
+
+- **Domain:** `SessionSnapshot::withClipMovedToTrack` removes the row from the source track and inserts the **same** `PlacedClipId` at index **0** on the target track with the committed timeline start. **`Session::moveClipToTrack` does not change `activeTrackId_`.**
+- **Within-track vs cross-track:** same-lane release still calls **`Session::moveClip`** only; different-lane release calls **`Session::moveClipToTrack`**. No **track-type / compatibility** checks — any lane in the stack is a valid target (geometric hit only).
+- **Drop outside all lanes:** **no** `Session` publish on `mouseUp` (cancel); clip unchanged.
+- **Ghost:** shown **only** on the lane under the pointer **after** the movement threshold, and **not** duplicated on the source lane (source already shows the live drag preview). **Outside every lane,** no ghost anywhere.
+- **Invalid-drop cursor:** when outside all lanes (after threshold), source lane shows a **non-default** cursor until re-entering a lane or **`mouseUp`** (cursor always restored on release).
+- **Playback / transport / engine:** unchanged; no mixer / undo / snap / multi-select introduced.
 - **Ruler / playhead / stop / seek:** unchanged transport semantics; ruler strip and playhead line stay aligned with stacked lanes (same insets/width as before).
 - **No mixer UI:** no per-track faders, meters, sends, or buses; summing is engine-only.
-- **Steering:** `docs/PHASE_PLAN.md`, `docs/ARCHITECTURE_PRINCIPLES.md`, and this checklist stay consistent with per-track coverage + across-track sum + no cross-track move.
+- **Steering:** `docs/PHASE_PLAN.md`, `docs/ARCHITECTURE_PRINCIPLES.md`, and this checklist stay consistent with per-track coverage + across-track sum + the Phase 3 late extension on cross-track drag (if implemented).
 
 ## Phase 1 Validation Checklist
 

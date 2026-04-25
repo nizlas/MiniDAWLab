@@ -6,6 +6,8 @@
 //   Build **new** const snapshots on the message thread; the audio path acquire-loads and reads
 //   tracks and placements only. Multi-track: each factory leaves `Track` as the unit of
 //   *local* front-to-back order; the committed-move rule never compares clips on different tracks.
+//   `withClipMovedToTrack` is the one-shot structural move: one row, source ≠ target, insert at 0
+//   on the destination track (identity preserved).
 // =============================================================================
 
 #include "domain/SessionSnapshot.h"
@@ -248,6 +250,90 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
     {
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
+    const SessionSnapshot& previous,
+    const PlacedClipId movedId,
+    const std::int64_t newStartSampleOnTimeline,
+    const TrackId targetTrackId) noexcept
+{
+    if (movedId == kInvalidPlacedClipId || targetTrackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    const int targetIdx = previous.findTrackIndexById(targetTrackId);
+    if (targetIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    int sourceIdx = -1;
+    int sourceRow = -1;
+    for (int t = 0; t < previous.getNumTracks(); ++t)
+    {
+        const Track& tr = previous.getTrack(t);
+        for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+        {
+            if (tr.getPlacedClip(i).getId() == movedId)
+            {
+                sourceIdx = t;
+                sourceRow = i;
+                break;
+            }
+        }
+        if (sourceIdx >= 0)
+        {
+            break;
+        }
+    }
+    if (sourceIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    if (sourceIdx == targetIdx)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    const PlacedClip& raw = previous.getTrack(sourceIdx).getPlacedClip(sourceRow);
+    const std::int64_t clamped
+        = juce::jmax(std::int64_t{0}, newStartSampleOnTimeline);
+    PlacedClip moved = raw.withStartSampleOnTimeline(clamped);
+
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        if (i == sourceIdx)
+        {
+            const Track& t = previous.getTrack(i);
+            std::vector<PlacedClip> v = t.getPlacedClips();
+            v.erase(v.begin() + sourceRow);
+            out.emplace_back(t.getId(), std::move(v));
+        }
+        else if (i == targetIdx)
+        {
+            const Track& t = previous.getTrack(i);
+            const std::vector<PlacedClip>& oldC = t.getPlacedClips();
+            std::vector<PlacedClip> v;
+            v.reserve(oldC.size() + 1U);
+            v.push_back(std::move(moved));
+            for (const PlacedClip& p : oldC)
+            {
+                v.push_back(p);
+            }
+            out.emplace_back(t.getId(), std::move(v));
+        }
+        else
+        {
+            const Track& t = previous.getTrack(i);
+            out.emplace_back(t.getId(), t.getPlacedClips());
+        }
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
 }
