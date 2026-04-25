@@ -283,9 +283,14 @@ Introduce multiple tracks while preserving understandable state ownership and av
 
 - **In scope:** drag an existing `PlacedClip` from one lane to another; commit on **mouse up**; session publishes **one** new snapshot. **No** track type / format compatibility — “valid target” is any lane in the `TrackLanesView` stack (geometric hit only).
 - **Target ordering:** the dropped clip becomes **front-most (index 0)** on the destination track, matching the “newest = front” add-clip path.
-- **Active track** (`Session::activeTrackId_`): **unchanged** by a cross-track drop; only **Add track** and **Clear** reset it.
+- **Active track** (`Session::activeTrackId_`): **unchanged** by a cross-track drop. The user sets it with **Add track**, **Clear** (reset), or **`Session::setActiveTrack`** (e.g. header click; no snapshot publish).
 - **Within-track** committed drag still uses `Session::moveClip` / `SessionSnapshot::withClipMoved` (end-state rule in that track only). **Cross-lane** commit uses `Session::moveClipToTrack` / `SessionSnapshot::withClipMovedToTrack` (separate, named API).
 - **UI:** a translucent **ghost** appears **only** on the lane under the pointer while dragging **after** the movement threshold, except when that lane is the **source** (the source lane already shows the live drag preview; no duplicate ghost). **Outside every lane,** all ghosts are cleared; **invalid-drop** feedback uses a **non-default** cursor (implementation picks the closest JUCE `MouseCursor` to “not here” on the current platform) on the **source** component; the cursor is restored on re-entering any lane and unconditionally on `mouseUp`. Releasing the pointer **outside all lanes** is a **no-op** (no `Session` publish). **Not in scope:** undo/redo, multi-clip move, snap-to-grid, per-track “can accept clip” type checks.
+
+### Phase 3 late extension: minimal track headers (left column)
+
+- **In scope:** a **fixed-width header** to the **left** of each stacked lane, showing the track’s **name** (stored on **`Track`** in the domain; default `"Track <id>"` from **`Session`** when the track is created). **Active** track is **highlighted** in the header. **Click** on a header calls **`Session::setActiveTrack(TrackId)`** — this **may not** `atomic_store` a new `SessionSnapshot`; `activeTrackId_` remains **message-thread-only** state on **`Session`**. **Add clip** still targets the **active** track. **Ruler** is inset left by the same width as the header column so the ruler’s x ↔ sample map matches the **lane** strip only (not the header column).
+- **Out of scope:** rename UI, faders, pan, mute, solo, meters, track delete/reorder, drop-on-header, any change to **playback** or to **cross-track / within-track** move semantics, putting **`activeTrackId_`** in **`SessionSnapshot`**.
 
 ### Expected Value
 

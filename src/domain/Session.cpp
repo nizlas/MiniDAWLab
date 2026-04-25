@@ -23,7 +23,7 @@
 #include <utility>
 
 Session::Session()
-    : sessionSnapshot_(SessionSnapshot::withSingleEmptyTrack(TrackId{1}))
+    : sessionSnapshot_(SessionSnapshot::withSingleEmptyTrack(TrackId{1}, juce::String("Track 1")))
 {
     // One default **track** (empty lane) so the first “Add clip” and the Phase 1 bridge clip query
     // still make sense. `activeTrackId_` / `nextTrackId_` are set in the header (first track = 1).
@@ -76,7 +76,9 @@ void Session::addTrack() noexcept
     }
     const TrackId newId = nextTrackId_++;
     jassert(newId != kInvalidTrackId);
-    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTrackAdded(*current, newId);
+    const juce::String newName = juce::String("Track ") + juce::String(newId);
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackAdded(*current, newId, newName);
     if (next == nullptr)
     {
         jassert(false);
@@ -89,6 +91,20 @@ void Session::addTrack() noexcept
 TrackId Session::getActiveTrackId() const noexcept
 {
     return activeTrackId_;
+}
+
+void Session::setActiveTrack(const TrackId id) noexcept
+{
+    if (id == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
+    if (s == nullptr || s->findTrackIndexById(id) < 0)
+    {
+        return;
+    }
+    activeTrackId_ = id;
 }
 
 int Session::getNumTracks() const noexcept
@@ -176,7 +192,8 @@ void Session::clearClip() noexcept
 {
     // “No file”: one **empty** default track (id 1), same as a fresh `Session` — not the shared
     // *zero-track* `createEmpty` singleton.
-    const std::shared_ptr<const SessionSnapshot> empty = SessionSnapshot::withSingleEmptyTrack(TrackId{1});
+    const std::shared_ptr<const SessionSnapshot> empty
+        = SessionSnapshot::withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     std::atomic_store_explicit(&sessionSnapshot_, empty, std::memory_order_release);
     nextTrackId_ = 2;
     activeTrackId_ = 1;

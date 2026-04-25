@@ -22,6 +22,8 @@
 
 #include "domain/PlacedClip.h"
 
+#include <juce_core/juce_core.h>
+
 #include <cstdint>
 #include <vector>
 
@@ -35,11 +37,13 @@ inline constexpr TrackId kInvalidTrackId = 0;
 class Track
 {
 public:
-    // [Message thread, snapshot build] `id` must be non-zero. `placedClips` is front = newest for
+    // [Message thread, snapshot build] `id` must be non-zero. `name` is user-facing label (e.g.
+    // "Track 1"); set by `Session` when building snapshots. `placedClips` is front = newest for
     // this lane only; ownership of shared `AudioClip` follows `PlacedClip` as before.
-    explicit Track(TrackId id, std::vector<PlacedClip> placedClips) noexcept;
+    explicit Track(TrackId id, juce::String name, std::vector<PlacedClip> placedClips) noexcept;
 
     [[nodiscard]] TrackId getId() const noexcept { return id_; }
+    [[nodiscard]] const juce::String& getName() const noexcept { return name_; }
     [[nodiscard]] int getNumPlacedClips() const noexcept;
     [[nodiscard]] const PlacedClip& getPlacedClip(int index) const;
     [[nodiscard]] const std::vector<PlacedClip>& getPlacedClips() const noexcept
@@ -49,5 +53,6 @@ public:
 
 private:
     TrackId id_ = kInvalidTrackId;
+    juce::String name_;
     std::vector<PlacedClip> placedClips_;
 };

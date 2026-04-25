@@ -329,8 +329,9 @@ Decision:
 - **Within-track** move remains **`Session::moveClip` / `SessionSnapshot::withClipMoved`** (same
   committed end-state policy as before, **in one lane** only). The two session APIs are **not
   merged** into a single optional-parameter overload.
-- **Active track** (where **Add clip** goes) is **not** changed by a cross-track drop. Only **Add
-  track** and **Clear** (reset) change `activeTrackId_` in the current design.
+- **Active track** (where **Add clip** goes) is **not** changed by a cross-track drop. The user
+  changes `activeTrackId_` via **Add track**, **Clear** (reset), or **`Session::setActiveTrack`**
+  (e.g. header click; no snapshot publish) — a cross-track drop is **not** one of these.
 - **Valid drop target** is **geometric** only: any child lane in **`TrackLanesView`**. There is **no
   per-track “type / compatibility”** field or predicate in this step.
 - **UI:** A **ghost** (translucent placeholder) is drawn **only** on the lane under the pointer
@@ -348,3 +349,33 @@ Rationale:
 Notes:
 
 - `PlaybackEngine` is unchanged. Not in scope: undo/redo, multi-clip drag, snap, mixer.
+
+---
+
+## 2026-04-25 — Phase 3 late extension: minimal track headers (name on `Track`, active on `Session`)
+
+Decision:
+
+- **`Track::getName()`** is the user-visible label, stored in the **domain** and carried through
+  **`SessionSnapshot`** factories. **`Session`** assigns defaults when **creating** tracks (e.g.
+  `"Track 1"`, `"Track 2"`, …) — the UI does **not** format names from list position.
+- **Add-clip target** remains **`Session::activeTrackId_`**. The user can change the active track
+  with **`Session::setActiveTrack(TrackId)`** (e.g. header click). That call **must not** publish a
+  new **`SessionSnapshot`**; **`activeTrackId_` is not in the snapshot** and is not read on the
+  audio path.
+- **UI:** `TrackLanesView` shows a **fixed-width** left column (`TrackHeaderView` per track); **`Main`**
+  insets **`TimelineRulerView`** by the same width so the **lane** x ↔ session-sample map matches
+  the **ruler** in the **timeline** area. Headers are **not** cross-track drop targets (only child
+  **`ClipWaveformView`** lanes are, via existing hit-test).
+
+Rationale:
+
+- Single source of truth for the displayed name; **rename** later is a new **`Session`**
+  command + factory without changing list-index assumptions.
+
+Out of scope for this step:
+
+- Rename **UI**, faders, mute/solo, track delete/reorder, drop-on-header behaviour, **any**
+  playback or snapshot-factory change beyond name **copy-through**.
+
+---

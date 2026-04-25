@@ -5,6 +5,7 @@
 #include "ui/TrackLanesView.h"
 
 #include "ui/ClipWaveformView.h"
+#include "ui/TrackHeaderView.h"
 #include "domain/Session.h"
 #include "domain/Track.h"
 #include "transport/Transport.h"
@@ -34,10 +35,11 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     const int n = session_.getNumTracks();
     if (n <= 0)
     {
+        headers_.clear();
         lanes_.clear();
         return;
     }
-    bool need = ((int)lanes_.size() != n);
+    bool need = ((int)lanes_.size() != n || (int)headers_.size() != n);
     if (!need)
     {
         for (int i = 0; i < n; ++i)
@@ -53,6 +55,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     {
         return;
     }
+    headers_.clear();
     lanes_.clear();
     for (int i = 0; i < n; ++i)
     {
@@ -62,6 +65,9 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             jassert(false);
             continue;
         }
+        auto head = std::make_unique<TrackHeaderView>(session_, tid, [this] { repaint(); });
+        addAndMakeVisible(*head);
+        headers_.push_back(std::move(head));
         ClipWaveformLaneHost host;
         host.onBeginMouseDown = [this](ClipWaveformView& sender) {
             for (auto& u : lanes_)
@@ -139,11 +145,15 @@ void TrackLanesView::resized()
         return;
     }
     const int totalH = area.getHeight();
+    const int w = area.getWidth();
+    const int leftW = juce::jmin(kTrackHeaderWidth, w);
     int y = 0;
     for (int i = 0; i < n; ++i)
     {
         const int hh = (i == n - 1) ? (totalH - y) : juce::jmax(1, totalH / n);
-        lanes_[(size_t)i]->setBounds(area.getX(), y, area.getWidth(), hh);
+        juce::Rectangle row(area.getX(), y, w, hh);
+        headers_[(size_t)i]->setBounds(row.removeFromLeft(leftW));
+        lanes_[(size_t)i]->setBounds(row);
         y += hh;
     }
 }

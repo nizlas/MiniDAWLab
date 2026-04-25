@@ -16,8 +16,9 @@
 //   callback, lock-free `shared_ptr` handoff.
 //
 // FACTORIES (see .cpp)
-//   `withSingleEmptyTrack` — one lane, no clips (default session *shape* after clear / startup).
-//   `withTrackAdded` — append a new empty track.
+//   `withSingleEmptyTrack` — one lane, no clips (default session *shape* after clear / startup;
+//     `trackName` is the new `Track`’s `getName()`).
+//   `withTrackAdded` — append a new empty track (caller supplies `newTrackName` for the new lane).
 //   `withClipAddedAsNewestOnTargetTrack` — prepend a clip on a given `TrackId` (newest in that
 //     lane, index 0 of that track).
 //   `withClipMoved` — move one `PlacedClip` in **its** track; committed end-state rule only among
@@ -49,7 +50,7 @@ public:
     // [Message thread] One empty lane (e.g. default session and after clear) — *not* the same
     // object as `createEmpty()` (zero tracks); see `Session` usage.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withSingleEmptyTrack(
-        TrackId trackId) noexcept;
+        TrackId trackId, juce::String trackName) noexcept;
 
     // [Message thread] `newClipId` must be non-zero. Null material or invalid id defends to
     // `createEmpty()` in debug where noted in .cpp.
@@ -71,7 +72,8 @@ public:
     // already present in `previous`.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackAdded(
         const SessionSnapshot& previous,
-        TrackId newTrackId) noexcept;
+        TrackId newTrackId,
+        juce::String newTrackName) noexcept;
 
     // [Message thread] Only affects the track that contains `movedId` — same committed-move policy
     // as pre-track `withClipMoved`, but overlap is computed only **within that track**.

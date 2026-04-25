@@ -78,8 +78,12 @@ public:
     void addTrack() noexcept;
 
     // [Message thread] `activeTrackId_` is the lane that receives the next "Add clip" (see
-    // `addClipFromFileAtPlayhead`); it becomes the new id after `addTrack()`.
+    // `addClipFromFileAtPlayhead`); it becomes the new id after `addTrack()`. **Does not** publish
+    // a new snapshot — UI-only / command targeting; keep separate from `SessionSnapshot`.
     [[nodiscard]] TrackId getActiveTrackId() const noexcept;
+    // [Message thread] Make `id` the add-clip target if it exists in the current snapshot. No-op if
+    // unknown. **No** `sessionSnapshot_` republish; audio thread is unaffected.
+    void setActiveTrack(TrackId id) noexcept;
 
     // [Message thread] How many `Track` rows exist in the current snapshot (UI lane count).
     [[nodiscard]] int getNumTracks() const noexcept;

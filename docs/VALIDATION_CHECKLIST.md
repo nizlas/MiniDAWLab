@@ -194,6 +194,16 @@ When validating **cross-track drag** (`docs/PHASE_PLAN.md` Phase 3 late extensio
 - **No mixer UI:** no per-track faders, meters, sends, or buses; summing is engine-only.
 - **Steering:** `docs/PHASE_PLAN.md`, `docs/ARCHITECTURE_PRINCIPLES.md`, and this checklist stay consistent with per-track coverage + across-track sum + the Phase 3 late extension on cross-track drag (if implemented).
 
+## Phase 3 late extension: minimal track headers
+
+When validating **track headers** (`docs/PHASE_PLAN.md` Phase 3 late extension, `status/DECISION_LOG.md`):
+
+- **Names:** `Track::getName()` is the **display** name; the UI does not derive names from list index. Default names come from **Session** when building snapshots (`"Track 1"`, etc.).
+- **Active track:** `Session::getActiveTrackId` / `Session::setActiveTrack`; **setActiveTrack** does **not** publish a new `SessionSnapshot` (no `atomic_store` on that path). Clicking a header makes that track the add-clip target; **Add track** and **Clear** still reset/choose active as before.
+- **Layout:** the timeline ruler and the **lane** waveform area share the **same** content width: the main layout insets the ruler by the same left column width as the track header strip, so the playhead line still aligns with the ruler at the same x in the **lane** area.
+- **Cross-track drag:** a pointer over a **header** is not a valid lane; behaviour matches “outside all lanes” for ghost/invalid-cursor. No drop-on-header.
+- **Not in scope:** rename field editing, mixer controls, or playback changes.
+
 ## Phase 1 Validation Checklist
 
 For Phase 1 specifically, validate all of the following:

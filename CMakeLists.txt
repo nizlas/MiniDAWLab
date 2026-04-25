@@ -37,6 +37,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/ClipWaveformView.cpp
     src/ui/TimelineRulerView.cpp
     src/ui/TrackLanesView.cpp
+    src/ui/TrackHeaderView.cpp
 )
 
 target_compile_definitions(MiniDAWLab

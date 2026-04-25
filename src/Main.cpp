@@ -158,7 +158,9 @@ private:
             pauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             constexpr int kTimelineRulerHeight = 20;
-            rulerView.setBounds(area.removeFromTop(kTimelineRulerHeight));
+            auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
+            timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
+            rulerView.setBounds(timelineRow);
             trackLanesView.setBounds(area);
         }
 

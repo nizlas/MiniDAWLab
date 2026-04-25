@@ -8,8 +8,9 @@
 
 #include <utility>
 
-Track::Track(const TrackId id, std::vector<PlacedClip> placedClips) noexcept
+Track::Track(const TrackId id, juce::String name, std::vector<PlacedClip> placedClips) noexcept
     : id_(id)
+    , name_(std::move(name))
     , placedClips_(std::move(placedClips))
 {
     jassert(id_ != kInvalidTrackId);

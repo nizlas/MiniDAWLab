@@ -10,9 +10,10 @@
 //   the same session-wide x -> sample map as the ruler. It wires a small callback so selecting a
 //   clip in one lane clears selection in the others. **Cross-track drag:** `ClipWaveformLaneHost`
 //   callbacks resolve which lane is under the pointer, set a **single** drop ghost on that lane, and
-//   clear ghosts — **no** track-type predicate; “valid lane” is geometric only.
+//   clear ghosts — **no** track-type predicate; “valid lane” is geometric only (the header strip
+//   is not a lane — pointer over a header is not a valid drop).
 //
-// See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`.
+// See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`, `TrackHeaderView`.
 // =============================================================================
 
 #include "domain/Track.h"
@@ -24,6 +25,7 @@
 #include <vector>
 
 class ClipWaveformView;
+class TrackHeaderView;
 class Session;
 class Transport;
 
@@ -33,6 +35,10 @@ class Transport;
 class TrackLanesView : public juce::Component
 {
 public:
+    // Width of the left name/active strip. `Main` insets the timeline ruler by the same value so
+    // the ruler’s x <-> session-sample map matches the lane area.
+    static constexpr int kTrackHeaderWidth = 120;
+
     ~TrackLanesView() override;
 
     // [Message thread] `session` / `transport` outlive this view. Rebuilds child lanes in `resized`
@@ -58,6 +64,7 @@ private:
 
     Session& session_;
     Transport& transport_;
+    std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
