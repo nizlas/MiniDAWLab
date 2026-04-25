@@ -188,6 +188,37 @@ void Session::moveClipToTrack(
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::moveTrack(const TrackId movedTrackId, const int destIndex) noexcept
+{
+    if (movedTrackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->getNumTracks() == 0)
+    {
+        return;
+    }
+    const int s = current->findTrackIndexById(movedTrackId);
+    if (s < 0)
+    {
+        return;
+    }
+    if (destIndex < 0 || destIndex >= current->getNumTracks())
+    {
+        return;
+    }
+    if (s == destIndex)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackReordered(*current, movedTrackId, destIndex);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    // `activeTrackId_` is intentionally unchanged — UI highlights by id.
+}
+
 void Session::clearClip() noexcept
 {
     // “No file”: one **empty** default track (id 1), same as a fresh `Session` — not the shared

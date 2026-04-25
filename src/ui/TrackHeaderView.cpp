@@ -1,26 +1,31 @@
 // =============================================================================
-// TrackHeaderView.cpp
+// TrackHeaderView.cpp  —  `mouseDown` activates track; drag after threshold → `TrackLanesView` host
 // =============================================================================
 
 #include "ui/TrackHeaderView.h"
 
+#include "ui/ForbiddenCursor.h"
 #include "domain/Session.h"
 
 #include <juce_core/juce_core.h>
 
 namespace
 {
-    // Ignore obvious drags so lane drag logic is unchanged.
-    constexpr float kMaxClickMovePx = 8.0f;
-}
+    // Same order-of-magnitude as `ClipWaveformView` drag start so click vs drag stays consistent.
+    constexpr float kHeaderDragThresholdPx = 3.0f;
+} // namespace
 
 TrackHeaderView::TrackHeaderView(
-    Session& session, const TrackId trackId, std::function<void()> onActiveChanged) noexcept
+    Session& session, const TrackId trackId, std::function<void()> onActiveChanged, TrackHeaderDragHost dragHost) noexcept
     : session_(session)
     , trackId_(trackId)
     , onActiveChanged_(std::move(onActiveChanged))
+    , dragHost_(std::move(dragHost))
 {
     jassert(trackId_ != kInvalidTrackId);
+    jassert(dragHost_.onHeaderDragBegan != nullptr);
+    jassert(dragHost_.onHeaderDragMoved != nullptr);
+    jassert(dragHost_.onHeaderDragEnded != nullptr);
 }
 
 void TrackHeaderView::paint(juce::Graphics& g)
@@ -50,15 +55,50 @@ void TrackHeaderView::paint(juce::Graphics& g)
         label, b.reduced(8, 0).withTrimmedLeft(active ? 6 : 4), juce::Justification::centredLeft, 1);
 }
 
-void TrackHeaderView::mouseUp(const juce::MouseEvent& e)
+void TrackHeaderView::mouseDown(const juce::MouseEvent& e)
 {
-    if (e.getDistanceFromDragStart() > kMaxClickMovePx)
-    {
-        return;
-    }
+    juce::ignoreUnused(e);
+    headerDragInProgress_ = false;
+    // DAW-like: the pressed header’s track becomes active immediately (before any drag threshold).
     session_.setActiveTrack(trackId_);
     if (onActiveChanged_ != nullptr)
     {
         onActiveChanged_();
     }
+}
+
+void TrackHeaderView::mouseDrag(const juce::MouseEvent& e)
+{
+    if (e.getDistanceFromDragStart() > kHeaderDragThresholdPx)
+    {
+        if (!headerDragInProgress_)
+        {
+            headerDragInProgress_ = true;
+            dragHost_.onHeaderDragBegan(trackId_, this);
+        }
+        const juce::Point<int> screen(e.getScreenX(), e.getScreenY());
+        dragHost_.onHeaderDragMoved(trackId_, screen);
+    }
+}
+
+void TrackHeaderView::mouseUp(const juce::MouseEvent& e)
+{
+    if (headerDragInProgress_)
+    {
+        dragHost_.onHeaderDragEnded(trackId_);
+        headerDragInProgress_ = false;
+        return;
+    }
+    juce::ignoreUnused(e);
+    // Active track was set on `mouseDown`; no separate click-up activation.
+}
+
+void TrackHeaderView::setSourceForbiddenForHeaderDrag() noexcept
+{
+    setMouseCursor(getForbiddenNoDropMouseCursor());
+}
+
+void TrackHeaderView::restoreSourceCursorAfterHeaderDrag() noexcept
+{
+    setMouseCursor(juce::MouseCursor(juce::MouseCursor::StandardCursorType::NormalCursor));
 }

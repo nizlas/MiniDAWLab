@@ -204,6 +204,14 @@ When validating **track headers** (`docs/PHASE_PLAN.md` Phase 3 late extension, 
 - **Cross-track drag:** a pointer over a **header** is not a valid lane; behaviour matches “outside all lanes” for ghost/invalid-cursor. No drop-on-header.
 - **Not in scope:** rename field editing, mixer controls, or playback changes.
 
+## Phase 3 late extension: track reorder (header drag)
+
+When validating **track reorder** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
+
+- **Domain:** `Session::moveTrack` / `SessionSnapshot::withTrackReordered` only change the **order** of `Track` rows; **no** change to any `PlacedClip` list inside a track. **`activeTrackId_`** is **not** assigned in `moveTrack`.
+- **UI:** drag starts on a **header** only; **invalid** = outside `TrackLanesView` or **x ≥ kTrackHeaderWidth** (lane area) — **forbidden** cursor, **no** insert line; release = no publish. **Green** line = real reorder; **red** = no-op; line only in **`TrackLanesView::paintOverChildren`**. **Forbidden** cursor uses the same helper as invalid **clip** cross-lane drop (`ForbiddenCursor`).
+- **Separation:** clip drag / cross-track clip drag is unchanged; header drag does not use lane hit-test for “valid drop”.
+
 ## Phase 1 Validation Checklist
 
 For Phase 1 specifically, validate all of the following:

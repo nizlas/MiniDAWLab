@@ -93,6 +93,8 @@ unless steering documents are updated.
 
 **Phase 3 late extension — track headers (UI):** each **`Track`** carries a **display name** in the **domain** (`Track::getName()`), set when the snapshot is built (e.g. default `"Track 1"`, `"Track 2"`, … from **`Session`**, not from UI list indices). The **add-clip target** is **`Session::activeTrackId_`**, a **message-thread** field; it is **not** in **`SessionSnapshot`** and **does not** require a snapshot republish when the user **clicks a header** to call **`Session::setActiveTrack`**. The timeline ruler and lane area share the **same** horizontal x ↔ session-sample range: the main layout insets the ruler by the **same** fixed width as the left header column so alignment matches pre-header behaviour in the lane strip.
 
+**Phase 3 late extension — track reorder (header drag):** **Row order** of **`Track`s** in **`SessionSnapshot`** is changed only by a **named** command **`Session::moveTrack` / `SessionSnapshot::withTrackReordered`**, not by in-flight UI. Each **`Track`’s** internal **`PlacedClip`** list is **unchanged**; engine **sum** across tracks is the same. **`activeTrackId_`** is **not** reassigned on reorder; the same **id** appears on a different row. The gesture is **header-only**; in-flight feedback (insert line) is **UI-local**; invalid cursor uses the same **forbidden** glyph as an **invalid** cross-lane **clip** drop, via one shared **UI** helper, not a second cursor implementation.
+
 **Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
 session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**
 reads on the hot path; the exact snapshot type is an implementation choice consistent with

@@ -375,7 +375,37 @@ Rationale:
 
 Out of scope for this step:
 
-- Rename **UI**, faders, mute/solo, track delete/reorder, drop-on-header behaviour, **any**
-  playback or snapshot-factory change beyond name **copy-through**.
+- Rename **UI**, faders, mute/solo, track delete, drop-on-header behaviour, **any**
+  playback or snapshot-factory change beyond name **copy-through** (see **track reorder** entry
+  below for row order).
+
+---
+
+## 2026-04-25 — Phase 3 late extension: track reorder by header drag
+
+Decision:
+
+- **Row order** of tracks in **`SessionSnapshot`** changes only via **`Session::moveTrack`** →
+  **`SessionSnapshot::withTrackReordered`**. Each **`Track`** value (id, name, `PlacedClip` list) is
+  **moved** as a unit; **no** clip-level factory is involved and **no** `PlacedClip` order changes
+  **within** a lane.
+- **`activeTrackId_` is not changed** by **`moveTrack`**; the UI highlights the same id on its new row.
+- **UI:** drag threshold on **`TrackHeaderView`**; **`TrackLanesView`** owns in-flight state, **snaps**
+  the pointer to the nearest **gap** (0..N), maps to **`destIndex`** with
+  `dest = (k <= s) ? k : (k - 1)` (with **`s`** from **`findTrackIndexById`**, not a cached index).
+  **Insert line** is drawn only in **`paintOverChildren`**. **Invalid** = outside the view or
+  **x** in the lane (non-header) column — no line, **forbidden** cursor; **`getForbiddenNoDropMouseCursor`**
+  is a **shared** implementation with invalid **clip** cross-lane drop (`ForbiddenCursor.h` / `.cpp`),
+  not a second ad-hoc image in `TrackHeaderView`.
+
+Rationale:
+
+- One explicit session command, same snapshot pattern as clip moves, no playback semantics change
+  (sum is commutative in track order).
+
+Out of scope:
+
+- Ghost track view, keyboard reorder, track delete, mixer, **any** change to **clip** drag
+  behaviour, rename, resize.
 
 ---

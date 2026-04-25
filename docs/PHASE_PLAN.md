@@ -290,7 +290,12 @@ Introduce multiple tracks while preserving understandable state ownership and av
 ### Phase 3 late extension: minimal track headers (left column)
 
 - **In scope:** a **fixed-width header** to the **left** of each stacked lane, showing the track’s **name** (stored on **`Track`** in the domain; default `"Track <id>"` from **`Session`** when the track is created). **Active** track is **highlighted** in the header. **Click** on a header calls **`Session::setActiveTrack(TrackId)`** — this **may not** `atomic_store` a new `SessionSnapshot`; `activeTrackId_` remains **message-thread-only** state on **`Session`**. **Add clip** still targets the **active** track. **Ruler** is inset left by the same width as the header column so the ruler’s x ↔ sample map matches the **lane** strip only (not the header column).
-- **Out of scope:** rename UI, faders, pan, mute, solo, meters, track delete/reorder, drop-on-header, any change to **playback** or to **cross-track / within-track** move semantics, putting **`activeTrackId_`** in **`SessionSnapshot`**.
+- **Out of scope (headers step):** rename UI, faders, pan, mute, solo, meters, track delete, drop-on-header, any change to **playback** or to **cross-track / within-track** move semantics, putting **`activeTrackId_`** in **`SessionSnapshot`**.
+
+### Phase 3 late extension: track reorder (header drag)
+
+- **In scope:** **Drag** from a **track header** (not the event lane) to **reorder** the session’s `Track` list; **`Session::moveTrack`** + **`SessionSnapshot::withTrackReordered`** publish a new snapshot. **No** per-track `PlacedClip` change (each track’s clip list and name are **unchanged**). A single **insert line** is drawn in **`TrackLanesView::paintOverChildren`** only (green = real reorder, red = no-op, nothing in invalid area). **Invalid** = pointer **outside** `TrackLanesView` or **x ≥ header width** (lane / event area); **forbidden** cursor (shared with invalid cross-lane **clip** drop) on the **source** header. **`activeTrackId_` is not written** on reorder; the highlight follows that **id** to its new row. **No** ghost track, no mixer, no keyboard reorder.
+- **Out of scope (reorder step):** rename, delete, resize, collapse, mute, solo, faders, clip drag changes, `Transport` or playback changes, persistence.
 
 ### Expected Value
 

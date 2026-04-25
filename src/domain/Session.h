@@ -103,6 +103,10 @@ public:
     void moveClipToTrack(
         PlacedClipId id, std::int64_t newStartSampleOnTimeline, TrackId targetTrackId) noexcept;
 
+    // [Message thread] Reorder the **track list** only. Each track’s clips and name are unchanged.
+    // **Does not** change `activeTrackId_` (add-clip target follows the same id in the new row).
+    void moveTrack(TrackId movedTrackId, int destIndex) noexcept;
+
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.
     void clearClip() noexcept;

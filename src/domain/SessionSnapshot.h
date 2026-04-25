@@ -26,6 +26,9 @@
 //   `withClipMovedToTrack` — move one `PlacedClip` to **another** track: remove from source lane,
 //     insert as **index 0** (front-most) on the target; identity preserved. Not for same source
 //     and target track — use `withClipMoved` in that case.
+//   `withTrackReordered` — move one `Track` row in the session’s **track list** order; each track’s
+//     `PlacedClip` list and `name_` are unchanged; audio summing is order-independent. No-op
+//     if the track is not found or `destIndex` equals the current index.
 //   `withSinglePlacedClip` — transitional: one track, one clip.
 //
 // See also: `Track`, `PlacedClip`, `Session`, `PlaybackEngine`, `docs/ARCHITECTURE_PRINCIPLES.md`.
@@ -90,6 +93,14 @@ public:
         PlacedClipId movedId,
         std::int64_t newStartSampleOnTimeline,
         TrackId targetTrackId) noexcept;
+
+    // [Message thread] Reorder tracks only: the track named by `movedTrackId` ends at `destIndex`
+    // in the resulting vector, where `0 <= destIndex < getNumTracks()`. Defensive: same snapshot if
+    // the id is not found, `destIndex` is out of range, or it equals the current index (no-op).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackReordered(
+        const SessionSnapshot& previous,
+        TrackId movedTrackId,
+        int destIndex) noexcept;
 
     [[nodiscard]] bool isEmpty() const noexcept;
     [[nodiscard]] int getNumTracks() const noexcept

@@ -6,8 +6,8 @@
 //   Fills a list from `loadSessionSnapshotForAudioThread()`: for each `PlacedClip` row, draw the
 //   event **envelope** and a peak sketch; single-lane **selection** (UI-local) and **drag to move**
 //   (committed via `Session::moveClip` / `Session::moveClipToTrack` only) sit on the same view —
-//   ordering policy is not here. **Invalid cross-lane drop** uses a small custom *forbidden* cursor
-//   (JUCE has no portable system no-drop); restore still uses the standard arrow.
+//   ordering policy is not here. **Invalid cross-lane drop** uses `getForbiddenNoDropMouseCursor`
+//   (`ForbiddenCursor.h` / `.cpp`); restore still uses the standard arrow.
 //   In material columns whose **center** falls in session time *not* covered by any row in front
 //   (lower index in the snapshot, painted later). **Covered**
 //   time on a back row: no readable peaks; the overlying event shows through after back→front order.
@@ -29,6 +29,7 @@
 
 #include "ui/ClipWaveformView.h"
 
+#include "ui/ForbiddenCursor.h"
 #include "domain/AudioClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -41,35 +42,7 @@
 #include <utility>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// Invalid-drop cursor (JUCE [Message thread] only; no `StandardCursorType` for no-drop on all hosts)
-// ---------------------------------------------------------------------------
-namespace
-{
-    juce::MouseCursor forbiddenNoDropMouseCursor()
-    {
-        static const juce::MouseCursor cursor = [] {
-            // 32x32, transparent background; JUCE may downscale on some systems per `MouseCursor`
-            // constructor docs.
-            constexpr int kSize = 32;
-            juce::Image img(juce::Image::ARGB, kSize, kSize, true);
-            juce::Graphics g(img);
-            g.fillAll(juce::Colours::transparentBlack);
-            const float cx = kSize * 0.5f;
-            const float cy = kSize * 0.5f;
-            const float radius = 12.0f;
-            g.setColour(juce::Colours::white);
-            g.fillEllipse(cx - radius, cy - radius, 2.0f * radius, 2.0f * radius);
-            g.setColour(juce::Colour(0xffd42828));
-            g.drawEllipse(cx - radius, cy - radius, 2.0f * radius, 2.0f * radius, 2.2f);
-            const float inset = radius * 0.68f;
-            g.setColour(juce::Colour(0xffc01010));
-            g.drawLine(cx - inset, cy - inset, cx + inset, cy + inset, 3.0f);
-            return juce::MouseCursor(img, kSize / 2, kSize / 2);
-        }();
-        return cursor;
-    }
-} // namespace
+// See `getForbiddenNoDropMouseCursor` in `ForbiddenCursor.cpp` (shared with `TrackHeaderView`).
 
 // Anonymous helpers: all **session-timeline** intervals are half-open [a, b) in device samples,
 // matching `PlacedClip` placement + `PlaybackEngine` / `Transport` usage. They exist only to
@@ -288,9 +261,8 @@ void ClipWaveformView::setInvalidDropCursor()
     {
         return;
     }
-    // `juce::MouseCursor::StandardCursorType` has no portable no-drop; use a one-off 32x32 *forbidden*
-    // icon (see anonymous `forbiddenNoDropMouseCursor` in this .cpp). Restore: `NormalCursor` below.
-    setMouseCursor(forbiddenNoDropMouseCursor());
+    // `juce::MouseCursor::StandardCursorType` has no portable no-drop; use `ForbiddenCursor.cpp`.
+    setMouseCursor(getForbiddenNoDropMouseCursor());
     cursorOverriddenForInvalidDrop_ = true;
 }
 

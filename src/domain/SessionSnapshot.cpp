@@ -7,7 +7,8 @@
 //   tracks and placements only. Multi-track: each factory leaves `Track` as the unit of
 //   *local* front-to-back order; the committed-move rule never compares clips on different tracks.
 //   `withClipMovedToTrack` is the one-shot structural move: one row, source ≠ target, insert at 0
-//   on the destination track (identity preserved).
+//   on the destination track (identity preserved). `withTrackReordered` reorders whole `Track` rows
+//   (ids, names, per-track clip lists unchanged).
 // =============================================================================
 
 #include "domain/SessionSnapshot.h"
@@ -341,6 +342,46 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
         }
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
+    const SessionSnapshot& previous,
+    const TrackId movedTrackId,
+    const int destIndex) noexcept
+{
+    const int n = previous.getNumTracks();
+    if (movedTrackId == kInvalidTrackId || n <= 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    if (destIndex < 0 || destIndex >= n)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    const int s = previous.findTrackIndexById(movedTrackId);
+    if (s < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    if (s == destIndex)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+    }
+    std::vector<Track> v;
+    v.reserve((size_t)n);
+    for (int i = 0; i < n; ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        v.emplace_back(t.getId(), t.getName(), t.getPlacedClips());
+    }
+    const Track moved(
+        v[(size_t)s].getId(), v[(size_t)s].getName(), v[(size_t)s].getPlacedClips());
+    v.erase(v.begin() + s);
+    v.insert(v.begin() + destIndex, moved);
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v)});
 }
 
 bool SessionSnapshot::isEmpty() const noexcept

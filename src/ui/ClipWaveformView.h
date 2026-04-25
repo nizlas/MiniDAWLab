@@ -133,7 +133,8 @@ private:
     void clearSelectionIfIdMissing(const std::shared_ptr<const SessionSnapshot>& snap);
 
     // [Message thread] Invalid-drop cursor on the **source** lane when the pointer leaves the lane
-    // stack during a drag; custom *forbidden* glyph (see .cpp), not a JUCE `StandardCursorType`.
+    // stack during a drag; `getForbiddenNoDropMouseCursor` (`ForbiddenCursor.h`), not a JUCE
+    // `StandardCursorType` no-drop.
     // Always restored with `NormalCursor` on re-entry to a lane and on `mouseUp`.
     void setInvalidDropCursor();
     void restoreNormalCursorAfterInvalidDrop();
