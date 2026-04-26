@@ -143,9 +143,10 @@ private:
 
     // [Message thread] Trim hover: bottom-right handle cue and resize cursor; no session publish.
     void updateTrimHoverAndCursor(juce::Point<float> localPosition) noexcept;
-    // Which clip shows the static trim **cue** (anywhere on the event) / handle (resize cursor only).
+    // Which clip shows the static trim **cue** (on event body) / per-edge handle (resize on that edge only).
     std::optional<PlacedClipId> hoverEventTrimCueId_;
-    std::optional<PlacedClipId> hoverTrimHandleId_;
+    std::optional<PlacedClipId> hoverLeftTrimHandleId_;
+    std::optional<PlacedClipId> hoverRightTrimHandleId_;
 
     // Which `Track` this lane paints; overlap + paint order are **only** within this list.
     TrackId trackId_ = kInvalidTrackId;
@@ -166,25 +167,33 @@ private:
     {
         PlacedClipId clipId{ kInvalidPlacedClipId };
         std::int64_t startOnTimeline = 0;
+        // Effective audible length V; material indices for PCM are [L, L + V).
+        std::int64_t leftTrimSamples = 0;
         // Effective (placement) span: right-edge trim shortens the audible/painted region; not material size.
         int materialNumSamples = 0;
         std::vector<float> peaks;
     };
     std::vector<TimelineStrip> clipStrips_;
+    std::uint64_t lastPeaksFingerprint_ = 0;
 
     // UI-local selection; never published in `SessionSnapshot` (see `PHASE_PLAN` / `ARCHITECTURE_…`).
     std::optional<PlacedClipId> selectedPlacedId_;
 
-    // Move vs. right-edge trim: trim never calls `Session::moveClip`; it uses `setClipRightEdgeVisibleLength`.
-    enum class PointerLaneMode { None, MoveClip, TrimRight };
+    // Move vs. trim: trim never calls `Session::moveClip`.
+    enum class PointerLaneMode { None, MoveClip, TrimRight, TrimLeft };
     PointerLaneMode pointerLaneMode_ = PointerLaneMode::None;
-    // Right-edge trim in flight (separate from move preview).
+    // Trim in flight (separate from move preview).
     std::optional<PlacedClipId> trimPlacedId_;
-    std::int64_t trimStartSample_ = 0;
+    std::int64_t trimStartSample_ = 0; // S0 (left edge of event on timeline)
+    // Right trim: [0, M - L) tail length for view mapping. Left trim: origin L0 at mousedown.
     int trimMaterialNumSamples_ = 0;
+    std::int64_t trimOriginLeft_ = 0;
     std::int64_t trimClickDownVisibleLen_ = 0;
-    std::int64_t trimRightEdgeToMouseOffsetSamples_ = 0; // (start+visible) - sampleAt(clickX)
+    std::int64_t trimRightEdgeToMouseOffsetSamples_ = 0; // (start+visible) - sampleAt(clickX) [right trim]
+    std::int64_t trimMouseOffsetToTimelineAtClick_ = 0;  // sampleAt(click) - S0 [left trim]
     std::int64_t trimPreviewVisibleLen_ = 0;
+    std::int64_t trimPreviewLeft_ = 0;    // Lp (left trim preview)
+    std::int64_t trimPreviewStart_ = 0;   // Sp
 
     // In-flight single-clip drag: preview uses `tentativeStartOnTimeline_` for the event rect only
     // after a movement threshold. Commit calls `Session::moveClip` on mouse up.

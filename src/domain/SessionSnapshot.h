@@ -111,6 +111,12 @@ public:
         PlacedClipId id,
         std::int64_t newVisibleLengthSamples) noexcept;
 
+    // [Message thread] Left-edge trim (non-destructive). Unknown id: debug jassert, same snapshot.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipLeftEdgeTrimmed(
+        const SessionSnapshot& previous,
+        PlacedClipId id,
+        std::int64_t newLeftTrimSamples) noexcept;
+
     // [Message thread] **Load-only:** publish a full pre-built track list in one step (e.g. project
     // open). Does not add clips incrementally. `tracks` must be non-empty. Stored arrangement extent
     // is 0 (use `withTracks` overload for v3 load).

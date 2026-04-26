@@ -24,6 +24,10 @@ namespace
             {
                 co->setProperty("visibleLengthSamples", static_cast<std::int64_t>(c.visibleLengthSamples));
             }
+            if (c.leftTrimSamples > 0)
+            {
+                co->setProperty("leftTrimSamples", static_cast<std::int64_t>(c.leftTrimSamples));
+            }
             clipVars.add(juce::var(co.get()));
         }
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
@@ -91,6 +95,12 @@ namespace
         {
             out.visibleLengthSamples
                 = static_cast<std::int64_t>(static_cast<double>(vlen));
+        }
+        out.leftTrimSamples = 0;
+        const juce::var& ltr = v.getProperty("leftTrimSamples", {});
+        if (ltr.isInt64() || ltr.isInt() || ltr.isDouble())
+        {
+            out.leftTrimSamples = static_cast<std::int64_t>(static_cast<double>(ltr));
         }
         return juce::Result::ok();
     }
@@ -176,9 +186,9 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
     const int ver = (int)static_cast<double>(root["version"]);
-    if (ver < 1 || ver > 3)
+    if (ver < 1 || ver > 4)
     {
-        return juce::Result::fail("Unsupported project version (supported: 1–3).");
+        return juce::Result::fail("Unsupported project version (supported: 1–4).");
     }
 
     out.version = ver;

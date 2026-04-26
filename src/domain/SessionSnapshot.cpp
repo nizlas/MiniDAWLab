@@ -478,6 +478,59 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRightEdgeTrimmed
         std::move(out), previous.arrangementExtentSamples_});
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
+    const SessionSnapshot& previous,
+    const PlacedClipId id,
+    const std::int64_t newLeftTrimSamples) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
+                                                                         previous.arrangementExtentSamples_});
+    }
+    bool any = false;
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int ti = 0; ti < previous.getNumTracks(); ++ti)
+    {
+        const Track& t = previous.getTrack(ti);
+        const std::vector<PlacedClip>& oldC = t.getPlacedClips();
+        std::vector<PlacedClip> v;
+        v.reserve(oldC.size());
+        bool rowChanged = false;
+        for (const PlacedClip& p : oldC)
+        {
+            if (p.getId() == id)
+            {
+                v.push_back(p.withLeftEdgeTrim(newLeftTrimSamples));
+                any = true;
+                rowChanged = true;
+            }
+            else
+            {
+                v.push_back(p);
+            }
+        }
+        if (rowChanged)
+        {
+            out.emplace_back(t.getId(), t.getName(), std::move(v));
+        }
+        else
+        {
+            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips());
+        }
+    }
+    if (!any)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
+                                                                         previous.arrangementExtentSamples_});
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_});
+}
+
 bool SessionSnapshot::isEmpty() const noexcept
 {
     for (const Track& t : tracks_)

@@ -12,21 +12,16 @@
 //   `PlacedClip` entries later without conflating “what the bytes are” with “at what time they
 //   begin.”
 //
-// WHY “PLACEMENT” IS SEPARATE FROM `AudioClip`
-//   The same `AudioClip` could theoretically be instanced on the timeline in more than one place
-//   in a later phase; even before that, keeping start time in `PlacedClip` makes `SessionSnapshot`
-//   a single immutable struct that the audio thread can read top-down: ordered placements, no
-//   hidden offsets inside the material type.
+// Left-edge trim: `leftTrimSamples_` = L — non-destructive offset into the material; audible
+//   material is the half-open range [L, L + V) in *file* indices; the timeline event is
+//   [S, S + V) in session samples, with invariants S + L + V and L + V along material unchanged
+//   across a left trim gesture.
 //
 // THREADING
 //   Immutable value after construction. The audio thread never mutates a `PlacedClip`; it receives
 //   a `const SessionSnapshot` that contains copies/references to placements built on the message
 //   thread. Lifetime: keep the owning `std::shared_ptr<const SessionSnapshot>` (or a `PlacedClip`
 //   that lives within it) alive for the read.
-//
-// Step 4–5: timeline-absolute playhead. Step 6: add-at-playhead sets `startSampleOnTimeline` from
-//   a **non-audio** read of `Transport` at add time; new rows are *front* (index 0, newest) in
-//   `SessionSnapshot` (see `SessionSnapshot::withClipAddedAsNewest`).
 //
 // See also: `SessionSnapshot`, `Session`, `AudioClip`, `docs/PHASE_PLAN.md` (Phase 2 semantics).
 // =============================================================================
@@ -53,8 +48,8 @@ public:
     // [Message thread, during load / when building a snapshot] `material` must be non-null
     // (jassert in .cpp). `id` is assigned once by `Session` for each new row and kept across moves
     // (see `withClipMoved`); it must be non-zero. `startSampleOnTimeline` is in device samples.
-    // `visibleLengthSamplesOnDiskOrDefault` = -1 means "use full decoded material length" (and is
-    // the default for the 3-arg form). A positive value is clamped to [1, material] on construction.
+    // `visibleLengthSamplesOnDiskOrDefault` = -1 means "use full decoded material from L onward"
+    // (length M - L). A positive value is the audible V, clamped to [1, M - L].
     PlacedClip(PlacedClipId id,
               std::shared_ptr<const AudioClip> material,
               std::int64_t startSampleOnTimeline) noexcept;
@@ -62,34 +57,47 @@ public:
               std::shared_ptr<const AudioClip> material,
               std::int64_t startSampleOnTimeline,
               std::int64_t visibleLengthSamplesOnDiskOrDefault) noexcept;
+    // Full placement: L = left trim in material [0, M-1], last arg = right-trim / visible V or -1
+    // for "use M - L".
+    PlacedClip(PlacedClipId id,
+              std::shared_ptr<const AudioClip> material,
+              std::int64_t startSampleOnTimeline,
+              std::int64_t leftTrimSamples,
+              std::int64_t visibleLengthSamplesOnDiskOrDefault) noexcept;
 
     [[nodiscard]] PlacedClipId getId() const noexcept { return id_; }
 
     [[nodiscard]] const AudioClip& getAudioClip() const noexcept;
 
     // **Placement span** on the session timeline and for playback / overlap (non-destructive: PCM is
-    // unchanged; this may be shorter than `getMaterialLengthSamples()` after right-edge trim).
+    // unchanged; this may be shorter than remaining material (M - L) after right-edge trim).
     [[nodiscard]] std::int64_t getEffectiveLengthSamples() const noexcept;
-    // Full decoded buffer length in `getAudioClip()` (material retained after trim).
+    // Full decoded buffer length in `getAudioClip()`.
     [[nodiscard]] int getMaterialLengthSamples() const noexcept;
+    // Non-destructive left edge: samples skipped at the start of the file (audible file range is
+    // [L, L + getEffectiveLengthSamples())).
+    [[nodiscard]] std::int64_t getLeftTrimSamples() const noexcept { return leftTrimSamples_; }
 
-    // Sample index on the *session* timeline where this clip’s first sample is heard (not an
-    // offset *inside* the `AudioClip` buffer — that is still 0..length-1 for the PCM itself).
+    // Sample index on the *session* timeline where this clip’s first **heard** sample begins.
     [[nodiscard]] std::int64_t getStartSample() const noexcept { return startSampleOnTimeline_; }
 
     // Shared ownership of the same const material the snapshot holds; use when you need lifetime
     // or sharing semantics without copying PCM.
     [[nodiscard]] std::shared_ptr<const AudioClip> getMaterial() const noexcept { return material_; }
 
-    // Same id, material, and visible length, new start — used by `SessionSnapshot::withClipMoved`.
+    // Same id, material, L, and visible length, new start — used by `SessionSnapshot::withClipMoved`.
     [[nodiscard]] PlacedClip withStartSampleOnTimeline(std::int64_t newStartSampleOnTimeline) const noexcept;
-    // Right-edge trim only: same start and material; `newVisibleLength` clamped to [1, materialLen].
+    // Right-edge trim only: same start, L, and material; new V clamped to [1, M - L].
     [[nodiscard]] PlacedClip withRightEdgeVisibleLength(std::int64_t newVisibleLength) const noexcept;
+    // Left-edge trim: L' clamped so V' >= 1 and S' >= 0; S and V follow invariants.
+    [[nodiscard]] PlacedClip withLeftEdgeTrim(std::int64_t newLeftTrimSamples) const noexcept;
 
 private:
     PlacedClipId id_ = kInvalidPlacedClipId;
     std::shared_ptr<const AudioClip> material_;
     std::int64_t startSampleOnTimeline_ = 0;
-    // Half-open [0, visibleLengthSamples_) in **material** indices is audible; never mutates PCM.
+    // Half-open [L, L + visibleLengthSamples_) in **material** indices is audible; V =
+    // visibleLengthSamples_.
+    std::int64_t leftTrimSamples_ = 0;
     std::int64_t visibleLengthSamples_ = 0;
 };

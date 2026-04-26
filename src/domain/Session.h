@@ -108,6 +108,9 @@ public:
     // [0, material) on the `PlacedClip` only; PCM unchanged). One snapshot publish; no lane reorder.
     void setClipRightEdgeVisibleLength(PlacedClipId id, std::int64_t newVisibleLengthSamples) noexcept;
 
+    // [Message thread] Non-destructive left-edge trim (material offset L); one snapshot publish.
+    void setClipLeftEdgeTrim(PlacedClipId id, std::int64_t newLeftTrimSamples) noexcept;
+
     // [Message thread] Reorder the **track list** only. Each track’s clips and name are unchanged.
     // **Does not** change `activeTrackId_` (add-clip target follows the same id in the new row).
     void moveTrack(TrackId movedTrackId, int destIndex) noexcept;

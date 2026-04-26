@@ -302,6 +302,23 @@ void Session::setClipRightEdgeVisibleLength(
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::setClipLeftEdgeTrim(const PlacedClipId id, const std::int64_t newLeftTrimSamples) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->isEmpty())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withClipLeftEdgeTrimmed(*current, id, newLeftTrimSamples);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::moveTrack(const TrackId movedTrackId, const int destIndex) noexcept
 {
     if (movedTrackId == kInvalidTrackId)
@@ -452,8 +469,12 @@ juce::Result Session::saveProjectToFile(Transport& transport,
             }
             const int matN = p.getMaterialLengthSamples();
             const std::int64_t eff = p.getEffectiveLengthSamples();
+            const std::int64_t ltrim = p.getLeftTrimSamples();
+            const std::int64_t fullTail
+                = (matN > 0) ? (static_cast<std::int64_t>(matN) - ltrim) : std::int64_t{0};
+            c.leftTrimSamples = ltrim;
             c.visibleLengthSamples
-                = (matN > 0 && eff < static_cast<std::int64_t>(matN)) ? eff : 0;
+                = (matN > 0 && eff < fullTail) ? eff : 0;
             tr.clips.push_back(std::move(c));
         }
         out.tracks.push_back(std::move(tr));
@@ -521,14 +542,22 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                 continue;
             }
             const std::shared_ptr<const AudioClip> material(std::move(loaded));
+            const int matN = material->getNumSamples();
+            const std::int64_t lRaw = cDto.leftTrimSamples;
+            const std::int64_t l
+                = (matN > 0) ? juce::jlimit(std::int64_t{0},
+                                            static_cast<std::int64_t>(matN) - 1,
+                                            lRaw)
+                             : 0;
             if (cDto.visibleLengthSamples > 0)
             {
                 placed.emplace_back(
-                    cDto.id, material, cDto.startSample, cDto.visibleLengthSamples);
+                    cDto.id, material, cDto.startSample, l, cDto.visibleLengthSamples);
             }
             else
             {
-                placed.emplace_back(cDto.id, material, cDto.startSample);
+                placed.emplace_back(
+                    cDto.id, material, cDto.startSample, l, static_cast<std::int64_t>(-1));
             }
         }
         built.emplace_back(trDto.id, trDto.name, std::move(placed));

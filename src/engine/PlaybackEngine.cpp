@@ -200,10 +200,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 const PlacedClip& p = lane[(size_t)row];
                 const AudioClip& c = p.getAudioClip();
-                const int off = static_cast<int>(t - p.getStartSample());
+                const std::int64_t rel = t - p.getStartSample();
+                jassert(rel >= 0);
+                jassert(rel + static_cast<std::int64_t>(run) <= p.getEffectiveLengthSamples());
+                const int off = static_cast<int>(rel + p.getLeftTrimSamples());
                 jassert(off >= 0);
-                jassert(static_cast<std::int64_t>(off) + static_cast<std::int64_t>(run)
-                        <= p.getEffectiveLengthSamples());
                 jassert(off + run <= c.getNumSamples());
                 addClipRunToOutputs(c, off, run, out0, numOutputChannels, outputChannelData);
             }
