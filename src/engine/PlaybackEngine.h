@@ -41,6 +41,7 @@
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
+class CountInClickOutput;
 class RecorderService;
 class Session;
 class Transport;
@@ -51,7 +52,9 @@ public:
     // Contract: retain non-owning references; Main must outlive the engine and unregister the
     // callback before destroy. Thread: Main / message thread.
     // `recorder` may be null; if non-null, it must outlive this engine (destroy engine before recorder).
-    PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder = nullptr);
+    // `countIn` is optional: short count-in metronome clicks to device outputs only (no session/recorder).
+    PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder = nullptr,
+                  CountInClickOutput* countIn = nullptr);
     ~PlaybackEngine() override;
 
     PlaybackEngine(const PlaybackEngine&) = delete;
@@ -82,4 +85,5 @@ private:
     Transport& transport_;
     Session& session_;
     RecorderService* const recorder_;
+    CountInClickOutput* const countIn_;
 };

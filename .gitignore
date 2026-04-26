@@ -1,5 +1,6 @@
 # Build tree
 build/
+dist/
 
 # Prerequisites
 *.d

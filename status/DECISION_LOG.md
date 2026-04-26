@@ -7,6 +7,18 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-26 — Windows shipping: zip + Inno Setup, bundled VC++ x64 redist, no file association (this slice)
+
+**Scope:** packaging scripts, Inno script, and docs only — no runtime/audio/project code changes, no static CRT / CMake switch in this step.
+
+**Distribution:** `scripts\package-windows.ps1` stages **`dist\MiniDAWLab-<version>\`**, copies the **Release** `MiniDAWLab.exe` plus `README.md` / `PROJECT_BRIEF.md` when present, parses the version from **`CMakeLists.txt`**, and writes **`dist\MiniDAWLab-<version>.zip`**. The **Microsoft Visual C++ 2015-2022 Redistributable (x64)** is downloaded **once** to **`dist\vendor\vc_redist.x64.exe`** (official `https://aka.ms/vc14/vc_redist.x64.exe`) and **embedded** in the Windows installer (no [Inno Download Plugin](https://mitrichsoftware.wordpress.com/2019/11/10/inno-download-plugin/), no per-install download).
+
+**Installer:** **`installer\MiniDAWLab.iss`** (Inno Setup 6) — Start Menu shortcut always, **optional** desktop icon via a standard **Tasks/Icons** checkbox; run **`vc_redist.x64.exe /install /quiet /norestart`** during setup; small optional “launch when finished” **Run** entry. **No** `.dalproj` / project-file association in this slice (can be added later with explicit product decision).
+
+**Automation:** If **`ISCC.exe`** is on `PATH` or in the default “Inno Setup 6” install path, the packaging script runs the compiler and emits **`dist\MiniDAWLab-<version>-Setup.exe`**. Otherwise the zip and staged tree are still produced; the user compiles the `.iss` manually (see `installer\README.md`).
+
+---
+
 ## 2026-04-26 — Project as folder (`.dalproj`) + `Audio/` for new takes
 
 **Scope:** save/load UX, recording output path, docs only — no `ProjectFileV1` schema change, no file migration.

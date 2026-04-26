@@ -42,12 +42,15 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 
 #include "domain/Session.h"
+#include "engine/CountInClickOutput.h"
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
+
+#include <optional>
 
 namespace
 {
@@ -184,7 +187,9 @@ public:
         // (only while `isRecording()`; see `PlaybackEngine` gate). Input channel count comes from
         // device init below.
         recorderService = std::make_unique<RecorderService>();
-        playbackEngine = std::make_unique<PlaybackEngine>(*transport, *session, recorderService.get());
+        countInOutput_ = std::make_unique<CountInClickOutput>();
+        playbackEngine = std::make_unique<PlaybackEngine>(
+            *transport, *session, recorderService.get(), countInOutput_.get());
 
         // JUCE: open the default audio device before we register the engine. Prefer **1 input, 2
         // outputs** (mono in for future record path; stereo out unchanged). If the default device
@@ -209,7 +214,8 @@ public:
             *transport,
             *session,
             deviceManager,
-            *recorderService);
+            *recorderService,
+            *countInOutput_);
     }
 
     // [Message thread] Reverse of initialise; see file header.
@@ -229,6 +235,7 @@ public:
         // After callback removal, drop engine (it held `recorderService.get()` for audio thread) then
         // the recorder, then the rest. `RecorderService` is independent of Transport/Session.
         playbackEngine.reset();
+        countInOutput_.reset();
         recorderService.reset();
         session.reset();
         transport.reset();
@@ -246,11 +253,13 @@ private:
         TransportControlsContent(Transport& transportIn,
                                  Session& sessionIn,
                                  juce::AudioDeviceManager& deviceManagerIn,
-                                 RecorderService& recorderIn)
+                                 RecorderService& recorderIn,
+                                 CountInClickOutput& countInClicksIn)
             : transport(transportIn)
             , session(sessionIn)
             , deviceManager(deviceManagerIn)
             , recorder_(recorderIn)
+            , countInClicks_(countInClicksIn)
             , timelineViewport_()
             , rulerView(sessionIn, transportIn, deviceManagerIn, timelineViewport_)
             , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn)
@@ -286,12 +295,17 @@ private:
                 keyDiagLabel_.setJustificationType(juce::Justification::centredLeft);
                 keyDiagLabel_.setText("key: —", juce::dontSendNotification);
             }
+            countInStatusLabel_.setFont(juce::FontOptions(12.0f));
+            countInStatusLabel_.setJustificationType(juce::Justification::centredLeft);
+            addAndMakeVisible(countInStatusLabel_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);
             syncViewportFromSession();
         }
+
+        ~TransportControlsContent() override { cancelCountIn(); }
 
         // [Message thread] Invoked only from `MainWindow` shortcut router (not from child
         // `keyPressed` — avoids duplicate `numpadRecordToggled` on one physical keypress).
@@ -323,6 +337,8 @@ private:
             {
                 keyDiagLabel_.setBounds(row.removeFromRight(300).reduced(2, 0));
             }
+            constexpr int kCountInLabelWidth = 140;
+            countInStatusLabel_.setBounds(row.removeFromRight(kCountInLabelWidth).reduced(4, 0));
             const int buttonWidth = juce::jmax(48, row.getWidth() / 6);
 
             addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
@@ -339,6 +355,17 @@ private:
         }
 
     private:
+        struct CountInTimer final : juce::Timer
+        {
+            explicit CountInTimer(TransportControlsContent& o)
+                : owner(o)
+            {
+            }
+            void timerCallback() override { owner.onCountInTimerTick(); }
+            TransportControlsContent& owner;
+        };
+        friend struct CountInTimer;
+
         void timerCallback() override { updatePlayPauseButtonFromTransport(); }
 
         // [Message thread] Transport intent: Playing → Paused, else (Stopped or Paused) → Playing.
@@ -358,6 +385,11 @@ private:
 
         void togglePlayPauseFromUi()
         {
+            if (isCountInActive())
+            {
+                cancelCountIn();
+                return;
+            }
             if (recorder_.isRecording())
             {
                 stopRecordingAndCommitFromUi("play_pause");
@@ -369,6 +401,11 @@ private:
         // [Message thread] Stop button: normal stop+seek, or end recording and commit (then seek 0).
         void stopOrSeekFromStopButton()
         {
+            if (isCountInActive())
+            {
+                cancelCountIn();
+                return;
+            }
             if (recorder_.isRecording())
             {
                 stopRecordingAndCommitFromUi("stop");
@@ -734,6 +771,12 @@ private:
                 stopRecordingAndCommitFromUi("numpad_*");
                 return;
             }
+            if (isCountInActive())
+            {
+                cancelCountIn();
+                juce::Logger::writeToLog("[Rec] count-in cancelled (numpad_*)");
+                return;
+            }
 
             const TrackId armed = recorder_.getArmedTrackId();
             if (armed == kInvalidTrackId)
@@ -799,12 +842,113 @@ private:
                     juce::AlertWindow::WarningIcon, "Audio", "Invalid device sample rate.");
                 return;
             }
-            const std::int64_t ph = transport.readPlayheadSamplesForUi();
             BeginRecordingRequest req;
             req.takeFile = takeWav;
             req.targetTrackId = armed;
-            req.recordingStartSample = ph;
+            // Filled in `completeCountInAndStartRecording` from the playhead at the moment
+            // `beginRecording` runs (after 8 count-in clicks + 375 ms silent tail).
+            req.recordingStartSample = 0;
             req.sampleRate = sr;
+            // Count-in: no `beginRecording` until clicks + post-click delay; Session not touched before.
+            startCountInAfterValidation(std::move(req));
+        }
+
+        [[nodiscard]] bool isCountInActive() const noexcept { return pendingCountIn_.has_value(); }
+
+        void cancelCountIn()
+        {
+            if (countInTimer_ != nullptr)
+            {
+                countInTimer_->stopTimer();
+            }
+            countInAwaitingPostClickDelay_ = false;
+            pendingCountIn_.reset();
+            countInClicks_.cancel();
+            countInStatusLabel_.setText({}, juce::dontSendNotification);
+            juce::Logger::writeToLog("[Rec] count-in cancelled");
+        }
+
+        void onCountInTimerTick()
+        {
+            if (!pendingCountIn_.has_value())
+            {
+                if (countInTimer_ != nullptr)
+                {
+                    countInTimer_->stopTimer();
+                }
+                return;
+            }
+            // After the 8th click, one more interval of silence, then `beginRecording` (no 9th click).
+            if (countInAwaitingPostClickDelay_)
+            {
+                countInAwaitingPostClickDelay_ = false;
+                if (countInTimer_ != nullptr)
+                {
+                    countInTimer_->stopTimer();
+                }
+                completeCountInAndStartRecording();
+                return;
+            }
+            // Cubase-like: tick tock tock tock | tick tock tock tock; 375 ms per step; first click
+            // one interval after * so the keydown is not on-mic. Extra 375 ms after last click
+            // before arming the recorder (reduces headphone bleed from the final click).
+            static constexpr int kClicks = 8;
+            ++countInBeat_;
+            if (countInBeat_ < 1 || countInBeat_ > kClicks)
+            {
+                if (countInTimer_ != nullptr)
+                {
+                    countInTimer_->stopTimer();
+                }
+                return;
+            }
+            const bool useTick = (countInBeat_ == 1 || countInBeat_ == 5);
+            if (useTick)
+            {
+                countInClicks_.triggerTick();
+            }
+            else
+            {
+                countInClicks_.triggerTock();
+            }
+            countInStatusLabel_.setText("Count-in: " + juce::String(countInBeat_) + "/"
+                                        + juce::String(kClicks),
+                                        juce::dontSendNotification);
+            if (countInBeat_ == kClicks)
+            {
+                countInAwaitingPostClickDelay_ = true;
+                countInStatusLabel_.setText("Get ready…", juce::dontSendNotification);
+            }
+        }
+
+        void startCountInAfterValidation(BeginRecordingRequest&& req)
+        {
+            countInClicks_.prepare(req.sampleRate);
+            pendingCountIn_ = std::move(req);
+            countInBeat_ = 0;
+            countInAwaitingPostClickDelay_ = false;
+            if (countInTimer_ == nullptr)
+            {
+                countInTimer_ = std::make_unique<CountInTimer>(*this);
+            }
+            // First audible click is after kCountInIntervalMs, not on keydown.
+            countInStatusLabel_.setText("Count-in…", juce::dontSendNotification);
+            static constexpr int kCountInIntervalMs = 375;
+            countInTimer_->startTimer(kCountInIntervalMs);
+            juce::Logger::writeToLog(
+                "[Rec] count-in started (8 clicks, 375 ms, +375 ms pre-roll before record)");
+        }
+
+        void completeCountInAndStartRecording()
+        {
+            if (!pendingCountIn_.has_value())
+            {
+                return;
+            }
+            BeginRecordingRequest req = *pendingCountIn_;
+            req.recordingStartSample = transport.readPlayheadSamplesForUi();
+            pendingCountIn_.reset();
+            countInStatusLabel_.setText({}, juce::dontSendNotification);
             if (!recorder_.beginRecording(req))
             {
                 juce::String err = recorder_.getLastError();
@@ -825,6 +969,13 @@ private:
         Session& session;
         juce::AudioDeviceManager& deviceManager;
         RecorderService& recorder_;
+        CountInClickOutput& countInClicks_;
+        std::optional<BeginRecordingRequest> pendingCountIn_;
+        int countInBeat_ = 0;
+        /// True after the 8th click: next timer fire ends count-in and starts `beginRecording`.
+        bool countInAwaitingPostClickDelay_ = false;
+        std::unique_ptr<CountInTimer> countInTimer_;
+        juce::Label countInStatusLabel_;
 
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
         bool importInFlight_ = false;
@@ -854,7 +1005,8 @@ private:
                    Transport& transport,
                    Session& session,
                    juce::AudioDeviceManager& deviceManager,
-                   RecorderService& recorderService)
+                   RecorderService& recorderService,
+                   CountInClickOutput& countInClicks)
             : DocumentWindow(
                   name,
                   juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
@@ -863,7 +1015,8 @@ private:
         {
             setUsingNativeTitleBar(true);
             setContentOwned(
-                new TransportControlsContent(transport, session, deviceManager, recorderService),
+                new TransportControlsContent(
+                    transport, session, deviceManager, recorderService, countInClicks),
                 true);
             setResizable(true, true);
             setResizeLimits(320, 240, 10000, 10000);
@@ -953,8 +1106,10 @@ private:
 
     std::unique_ptr<Transport> transport;
     std::unique_ptr<Session> session;
-    /// Phase 4: recording capture (not user-wired in this file yet); engine holds non-owning `get()`.
+    // Phase 4: recording capture (not user-wired in this file yet); engine holds non-owning `get()`.
     std::unique_ptr<RecorderService> recorderService;
+    /// Count-in metronome clicks to device only; coordinator state lives in `TransportControlsContent`.
+    std::unique_ptr<CountInClickOutput> countInOutput_;
     std::unique_ptr<PlaybackEngine> playbackEngine;
     juce::AudioDeviceManager deviceManager;
     std::unique_ptr<MainWindow> mainWindow;

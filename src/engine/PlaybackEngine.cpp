@@ -23,6 +23,7 @@
 
 #include "engine/PlaybackEngine.h"
 
+#include "engine/CountInClickOutput.h"
 #include "engine/RecorderService.h"
 #include "domain/AudioClip.h"
 #include "domain/PlacedClip.h"
@@ -120,10 +121,12 @@ namespace
     }
 } // namespace
 
-PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder)
+PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder,
+                                 CountInClickOutput* countIn)
     : transport_(transport)
     , session_(session)
     , recorder_(recorder)
+    , countIn_(countIn)
 {
 }
 
@@ -171,6 +174,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         {
             juce::FloatVectorOperations::clear(row, numSamples);
         }
+    }
+    if (countIn_ != nullptr)
+    {
+        countIn_->audioThread_mixInto(outputChannelData, numOutputChannels, numSamples);
     }
 
     if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0

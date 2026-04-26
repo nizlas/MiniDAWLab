@@ -61,6 +61,21 @@ JUCE places the executable under the build tree, for example:
 - After **Release** preset:  
   `.\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe`
 
+### Windows packaging (Release zip + optional Inno Setup)
+
+From the repository root, after a Release build (or let the script build for you):
+
+```powershell
+.\scripts\package-windows.ps1
+```
+
+This reads the version from `CMakeLists.txt` (`project(MiniDAWLab VERSION …)`), stages `dist\MiniDAWLab-<version>\` (executable plus bundled docs), ensures `dist\vendor\vc_redist.x64.exe` exists (downloaded once from Microsoft), writes `dist\MiniDAWLab-<version>.zip`, and **if** [Inno Setup 6](https://jrsoftware.org/isinfo.php)’s `ISCC.exe` is on `PATH` or in the default install location, compiles `installer\MiniDAWLab.iss` to **`dist\MiniDAWLab-<version>-Setup.exe`**.
+
+- Skip the build step (only if `build\ninja-release\…\Release\MiniDAWLab.exe` already exists): `.\scripts\package-windows.ps1 -SkipBuild`
+- Override the version string (advanced): `.\scripts\package-windows.ps1 -Version 0.1.0`
+
+Details and hand compilation: [installer/README.md](installer/README.md).
+
 ### Notes
 
 - The top-level `project()` enables **C and CXX** because JUCE brings in C sources; this avoids CMake configure errors with recent CMake versions.
