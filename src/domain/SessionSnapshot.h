@@ -103,11 +103,30 @@ public:
         TrackId movedTrackId,
         int destIndex) noexcept;
 
-    // [Message thread] **Load-only:** publish a full track list in one step (e.g. project open).
-    // Does not add clips incrementally. `tracks` must be non-empty; on empty, falls back to one
-    // default empty track in debug (`jassert`); callers should not pass an empty vector.
+    // [Message thread] Right-edge **trim** (non-destructive window on material). Replaces the
+    // `PlacedClip` with matching id; **does not** reorder the lane. Unknown id: debug jassert, same
+    // snapshot. Split/cut use different factories.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipRightEdgeTrimmed(
+        const SessionSnapshot& previous,
+        PlacedClipId id,
+        std::int64_t newVisibleLengthSamples) noexcept;
+
+    // [Message thread] **Load-only:** publish a full pre-built track list in one step (e.g. project
+    // open). Does not add clips incrementally. `tracks` must be non-empty. Stored arrangement extent
+    // is 0 (use `withTracks` overload for v3 load).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTracks(
         std::vector<Track> tracks) noexcept;
+
+    // [Message thread] **Load-only:** like `withTracks` but sets persisted `arrangementExtentSamples`
+    // (0 = as-if absent; `getArrangementExtentSamples` still floored by derived content end).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTracks(
+        std::vector<Track> tracks,
+        std::int64_t arrangementExtentSamples) noexcept;
+
+    // [Message thread] Same tracks, new **stored** arrangement extent (e.g. `Session::setArrangementExtentSamples`).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withArrangementExtent(
+        const SessionSnapshot& previous,
+        std::int64_t newArrangementExtentSamples) noexcept;
 
     [[nodiscard]] bool isEmpty() const noexcept;
     [[nodiscard]] int getNumTracks() const noexcept
@@ -121,8 +140,21 @@ public:
 
     [[nodiscard]] std::int64_t getDerivedTimelineLengthSamples() const noexcept;
 
+    // Where **clips** end on the session timeline; independent of the navigable / playable extent.
+    // Same as the historical “logical timeline length” used before arrangement extent.
+    // Stored arrangement may be 0: effective = max(stored, content end).
+    [[nodiscard]] std::int64_t getArrangementExtentSamples() const noexcept;
+
+    // Raw persisted value (message-thread use for `Session::setArrangementExtentSamples` monotonic
+    // rule; audio should use `getArrangementExtentSamples()`).
+    [[nodiscard]] std::int64_t getStoredArrangementExtentSamples() const noexcept
+    {
+        return arrangementExtentSamples_;
+    }
+
 private:
-    explicit SessionSnapshot(std::vector<Track> tracks) noexcept;
+    explicit SessionSnapshot(std::vector<Track> tracks, std::int64_t arrangementExtentSamples) noexcept;
 
     std::vector<Track> tracks_;
+    std::int64_t arrangementExtentSamples_ = 0;
 };

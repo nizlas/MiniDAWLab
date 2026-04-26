@@ -53,13 +53,25 @@ public:
     // [Message thread, during load / when building a snapshot] `material` must be non-null
     // (jassert in .cpp). `id` is assigned once by `Session` for each new row and kept across moves
     // (see `withClipMoved`); it must be non-zero. `startSampleOnTimeline` is in device samples.
+    // `visibleLengthSamplesOnDiskOrDefault` = -1 means "use full decoded material length" (and is
+    // the default for the 3-arg form). A positive value is clamped to [1, material] on construction.
     PlacedClip(PlacedClipId id,
               std::shared_ptr<const AudioClip> material,
               std::int64_t startSampleOnTimeline) noexcept;
+    PlacedClip(PlacedClipId id,
+              std::shared_ptr<const AudioClip> material,
+              std::int64_t startSampleOnTimeline,
+              std::int64_t visibleLengthSamplesOnDiskOrDefault) noexcept;
 
     [[nodiscard]] PlacedClipId getId() const noexcept { return id_; }
 
     [[nodiscard]] const AudioClip& getAudioClip() const noexcept;
+
+    // **Placement span** on the session timeline and for playback / overlap (non-destructive: PCM is
+    // unchanged; this may be shorter than `getMaterialLengthSamples()` after right-edge trim).
+    [[nodiscard]] std::int64_t getEffectiveLengthSamples() const noexcept;
+    // Full decoded buffer length in `getAudioClip()` (material retained after trim).
+    [[nodiscard]] int getMaterialLengthSamples() const noexcept;
 
     // Sample index on the *session* timeline where this clip’s first sample is heard (not an
     // offset *inside* the `AudioClip` buffer — that is still 0..length-1 for the PCM itself).
@@ -69,12 +81,15 @@ public:
     // or sharing semantics without copying PCM.
     [[nodiscard]] std::shared_ptr<const AudioClip> getMaterial() const noexcept { return material_; }
 
-    // Same id and material, new start — used by `SessionSnapshot::withClipMoved` only; keeps
-    // identity stable when only placement changes.
+    // Same id, material, and visible length, new start — used by `SessionSnapshot::withClipMoved`.
     [[nodiscard]] PlacedClip withStartSampleOnTimeline(std::int64_t newStartSampleOnTimeline) const noexcept;
+    // Right-edge trim only: same start and material; `newVisibleLength` clamped to [1, materialLen].
+    [[nodiscard]] PlacedClip withRightEdgeVisibleLength(std::int64_t newVisibleLength) const noexcept;
 
 private:
     PlacedClipId id_ = kInvalidPlacedClipId;
     std::shared_ptr<const AudioClip> material_;
     std::int64_t startSampleOnTimeline_ = 0;
+    // Half-open [0, visibleLengthSamples_) in **material** indices is audible; never mutates PCM.
+    std::int64_t visibleLengthSamples_ = 0;
 };

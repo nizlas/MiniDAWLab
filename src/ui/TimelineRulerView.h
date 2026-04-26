@@ -5,7 +5,8 @@
 // =============================================================================
 //
 // ROLE IN THE ARCHITECTURE
-//   User points on the **session** timeline (same sample space as `Session::getTimelineLengthSamples`
+    //   User points on the **session** timeline (same sample space as
+    //   `Session::getArrangementExtentSamples` / `Transport` playhead)
 //   and `Transport`’s playhead) without clicking the event lane. **Seek** is implemented only here:
 //   `Transport::requestSeek` on press and drag. The event lane (`ClipWaveformView`) stays focused on
 //   selection and clip drag; it does not seek on empty background.
@@ -29,6 +30,7 @@
 // =============================================================================
 
 #include "domain/Session.h"
+#include "ui/TimelineViewportModel.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -50,7 +52,10 @@ class TimelineRulerView : public juce::Component, private juce::Timer
 public:
     // [Message thread] `session` / `transport` outlive this view. `deviceManager` is only sampled
     // in `paint` for the running device’s sample rate (tick placement in seconds).
-    TimelineRulerView(Session& session, Transport& transport, juce::AudioDeviceManager& deviceManager);
+    TimelineRulerView(Session& session,
+                      Transport& transport,
+                      juce::AudioDeviceManager& deviceManager,
+                      TimelineViewportModel& timelineViewport);
 
     ~TimelineRulerView() override;
 
@@ -60,17 +65,21 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseWheelMove(
+        const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
 private:
     // [Message thread] Low-rate `repaint` so the ruler playhead matches the lane’s animated line
     // without a cached playhead value on the view.
     void timerCallback() override;
 
-    // [Message thread] Same x→session-sample mapping as `ClipWaveformView` for the playhead: linear
-    // over the component width, clamped to [0, `timelineLength`]. `positionX` is in **local** coords
-    // (0 .. width) so it matches JUCE’s `e.position` when the event is for this component.
+    // [Message thread] Map local x to session sample: linear over width for
+    // [visibleStart, visibleStart+visibleLength). Clamps the result to [0, seekClampHi].
     [[nodiscard]] static std::int64_t xToSessionSampleClamped(
-        const float positionX, const float widthPx, const std::int64_t timelineLength) noexcept;
+        const float positionX,
+        const float widthPx,
+        const std::int64_t visibleStart,
+        const std::int64_t visibleLength) noexcept;
 
     // [Message thread] Shared by mouse down/drag: map local x to sample and `requestSeek`.
     void applySeekForLocalX(float x) noexcept;
@@ -78,6 +87,7 @@ private:
     Session& session_;
     Transport& transport_;
     juce::AudioDeviceManager& deviceManager_;
+    TimelineViewportModel& timelineViewport_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimelineRulerView)
 };

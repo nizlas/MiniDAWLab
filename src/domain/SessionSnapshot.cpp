@@ -66,8 +66,7 @@ namespace
         }
         const PlacedClip& m = clips[(size_t)movedIndex];
         const std::int64_t m0 = m.getStartSample();
-        const std::int64_t m1 = m0
-                                + static_cast<std::int64_t>(m.getAudioClip().getNumSamples());
+        const std::int64_t m1 = m0 + m.getEffectiveLengthSamples();
         bool overlapWithAnyOther = false;
         for (int j = 0; j < (int)clips.size(); ++j)
         {
@@ -77,8 +76,7 @@ namespace
             }
             const PlacedClip& o = clips[(size_t)j];
             const std::int64_t o0 = o.getStartSample();
-            const std::int64_t o1
-                = o0 + static_cast<std::int64_t>(o.getAudioClip().getNumSamples());
+            const std::int64_t o1 = o0 + o.getEffectiveLengthSamples();
             if (rangesOverlapHalfOpen(m0, m1, o0, o1))
             {
                 overlapWithAnyOther = true;
@@ -95,14 +93,16 @@ namespace
     }
 } // namespace
 
-SessionSnapshot::SessionSnapshot(std::vector<Track> tracks) noexcept
+SessionSnapshot::SessionSnapshot(std::vector<Track> tracks, const std::int64_t arrangementExtentSamples) noexcept
     : tracks_(std::move(tracks))
+    , arrangementExtentSamples_(juce::jmax(std::int64_t{0}, arrangementExtentSamples))
 {
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::createEmpty() noexcept
 {
-    static const auto empty = std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::vector<Track>{}});
+    static const auto empty
+        = std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::vector<Track>{}, 0});
     return empty;
 }
 
@@ -116,17 +116,24 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSingleEmptyTrack(
     }
     std::vector<Track> v;
     v.emplace_back(trackId, std::move(trackName), std::vector<PlacedClip>{});
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v), 0});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(std::vector<Track> tracks) noexcept
+{
+    return withTracks(std::move(tracks), 0);
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
+    std::vector<Track> tracks, const std::int64_t arrangementExtentSamples) noexcept
 {
     if (tracks.empty())
     {
         jassert(false);
         return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     }
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot(std::move(tracks)));
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(tracks), arrangementExtentSamples));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSinglePlacedClip(
@@ -147,7 +154,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSinglePlacedClip(
     lane.emplace_back(newClipId, std::move(material), startSampleOnTimeline);
     std::vector<Track> v;
     v.emplace_back(TrackId{1}, juce::String("Track 1"), std::move(lane));
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v), 0});
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withArrangementExtent(
+    const SessionSnapshot& previous, const std::int64_t newArrangementExtentSamples) noexcept
+{
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        previous.tracks_, newArrangementExtentSamples});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnTargetTrack(
@@ -176,14 +190,15 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
             targetTrackId,
             juce::String("Track ") + juce::String(targetTrackId),
             std::move(lane));
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v)});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v), 0});
     }
     const int tIdx = previous.findTrackIndexById(targetTrackId);
     if (tIdx < 0)
     {
         jassert(false);
         // Defensive: copy as no-op
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -208,7 +223,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
             out.emplace_back(t.getId(), t.getName(), std::move(v));
         }
     }
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
@@ -224,7 +240,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
     if (previous.findTrackIndexById(newTrackId) >= 0)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks() + 1U);
@@ -234,7 +251,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         out.emplace_back(t.getId(), t.getName(), t.getPlacedClips());
     }
     out.emplace_back(newTrackId, std::move(newTrackName), std::vector<PlacedClip>{});
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
@@ -245,7 +263,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
     if (movedId == kInvalidPlacedClipId)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -265,9 +284,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
     if (!anyFound)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
@@ -279,13 +300,15 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
     if (movedId == kInvalidPlacedClipId || targetTrackId == kInvalidTrackId)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     const int targetIdx = previous.findTrackIndexById(targetTrackId);
     if (targetIdx < 0)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     int sourceIdx = -1;
     int sourceRow = -1;
@@ -309,12 +332,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
     if (sourceIdx < 0)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     if (sourceIdx == targetIdx)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     const PlacedClip& raw = previous.getTrack(sourceIdx).getPlacedClip(sourceRow);
     const std::int64_t clamped
@@ -351,7 +376,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
             out.emplace_back(t.getId(), t.getName(), t.getPlacedClips());
         }
     }
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(out)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
@@ -363,22 +389,26 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
     if (movedTrackId == kInvalidTrackId || n <= 0)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     if (destIndex < 0 || destIndex >= n)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     const int s = previous.findTrackIndexById(movedTrackId);
     if (s < 0)
     {
         jassert(false);
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     if (s == destIndex)
     {
-        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_});
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_});
     }
     std::vector<Track> v;
     v.reserve((size_t)n);
@@ -391,7 +421,61 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
         v[(size_t)s].getId(), v[(size_t)s].getName(), v[(size_t)s].getPlacedClips());
     v.erase(v.begin() + s);
     v.insert(v.begin() + destIndex, moved);
-    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v)});
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(v), previous.arrangementExtentSamples_});
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRightEdgeTrimmed(
+    const SessionSnapshot& previous,
+    const PlacedClipId id,
+    const std::int64_t newVisibleLengthSamples) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
+                                                                         previous.arrangementExtentSamples_});
+    }
+    bool any = false;
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int ti = 0; ti < previous.getNumTracks(); ++ti)
+    {
+        const Track& t = previous.getTrack(ti);
+        const std::vector<PlacedClip>& oldC = t.getPlacedClips();
+        std::vector<PlacedClip> v;
+        v.reserve(oldC.size());
+        bool rowChanged = false;
+        for (const PlacedClip& p : oldC)
+        {
+            if (p.getId() == id)
+            {
+                v.push_back(p.withRightEdgeVisibleLength(newVisibleLengthSamples));
+                any = true;
+                rowChanged = true;
+            }
+            else
+            {
+                v.push_back(p);
+            }
+        }
+        if (rowChanged)
+        {
+            out.emplace_back(t.getId(), t.getName(), std::move(v));
+        }
+        else
+        {
+            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips());
+        }
+    }
+    if (!any)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
+                                                                         previous.arrangementExtentSamples_});
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_});
 }
 
 bool SessionSnapshot::isEmpty() const noexcept
@@ -436,8 +520,7 @@ std::int64_t SessionSnapshot::getDerivedTimelineLengthSamples() const noexcept
         for (int i = 0; i < t.getNumPlacedClips(); ++i)
         {
             const PlacedClip& p = t.getPlacedClip(i);
-            const std::int64_t end = p.getStartSample()
-                                     + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
+            const std::int64_t end = p.getStartSample() + p.getEffectiveLengthSamples();
             if (end > maxEnd)
             {
                 maxEnd = end;
@@ -445,4 +528,9 @@ std::int64_t SessionSnapshot::getDerivedTimelineLengthSamples() const noexcept
         }
     }
     return maxEnd;
+}
+
+std::int64_t SessionSnapshot::getArrangementExtentSamples() const noexcept
+{
+    return juce::jmax(arrangementExtentSamples_, getDerivedTimelineLengthSamples());
 }

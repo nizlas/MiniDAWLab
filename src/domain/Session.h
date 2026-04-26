@@ -104,6 +104,10 @@ public:
     void moveClipToTrack(
         PlacedClipId id, std::int64_t newStartSampleOnTimeline, TrackId targetTrackId) noexcept;
 
+    // [Message thread] Non-destructive right-edge **trim** (shorter or longer `visible` window in
+    // [0, material) on the `PlacedClip` only; PCM unchanged). One snapshot publish; no lane reorder.
+    void setClipRightEdgeVisibleLength(PlacedClipId id, std::int64_t newVisibleLengthSamples) noexcept;
+
     // [Message thread] Reorder the **track list** only. Each track’s clips and name are unchanged.
     // **Does not** change `activeTrackId_` (add-clip target follows the same id in the new row).
     void moveTrack(TrackId movedTrackId, int destIndex) noexcept;
@@ -116,9 +120,24 @@ public:
     // `ClipWaveformView` reads the full snapshot for multi-clip layout (Step 7).
     [[nodiscard]] const AudioClip* getCurrentClip() const noexcept;
 
-    // [Message thread] Derived session timeline extent (max of start+length over placed clips);
-    // matches transport playhead + seek + end-of-content clamp. Zero when empty.
-    [[nodiscard]] std::int64_t getTimelineLengthSamples() const noexcept;
+    // [Message thread] **Content end** — max of (start+length) over placed clips (derived). Zero
+    // with no material. For backward compat, `getTimelineLengthSamples()` is an alias; prefer
+    // `getContentEndSamples()`.
+    [[nodiscard]] std::int64_t getContentEndSamples() const noexcept;
+    // Deprecated: use `getContentEndSamples()`.
+    [[nodiscard]] std::int64_t getTimelineLengthSamples() const noexcept
+    {
+        return getContentEndSamples();
+    }
+
+    // [Message thread] **Arrangement** extent (playable / navigable): max of stored snapshot
+    // `arrangementExtentSamples` and `getContentEndSamples()`. Also used by the audio engine run-end.
+    [[nodiscard]] std::int64_t getArrangementExtentSamples() const noexcept;
+    // Raw stored floor on the snapshot (for default seeding: do not clobber a loaded v3 value).
+    [[nodiscard]] std::int64_t getStoredArrangementExtentSamples() const noexcept;
+    // [Message thread] Grow-only stored arrangement extent; publishes a new snapshot. No-op if
+    // `v` is not greater than the current stored value.
+    void setArrangementExtentSamples(std::int64_t v) noexcept;
 
     // [Audio thread] and [Message thread] Acquire the current `SessionSnapshot` pointer; no
     // decode, no session mutation. This is the main handoff the engine uses each block.

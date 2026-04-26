@@ -45,7 +45,7 @@ namespace
         {
             const PlacedClip& p = lane[(size_t)i];
             const std::int64_t s = p.getStartSample();
-            const std::int64_t e = s + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
+            const std::int64_t e = s + p.getEffectiveLengthSamples();
             if (t >= s && t < e)
             {
                 return i;
@@ -64,7 +64,7 @@ namespace
         {
             const PlacedClip& p = lane[(size_t)i];
             const std::int64_t s = p.getStartSample();
-            const std::int64_t e = s + static_cast<std::int64_t>(p.getAudioClip().getNumSamples());
+            const std::int64_t e = s + p.getEffectiveLengthSamples();
             if (s > t)
             {
                 m = juce::jmin(m, s);
@@ -158,15 +158,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     }
 
-    if (sessionSnap == nullptr || sessionSnap->isEmpty() || deviceBlockSizeInFrames <= 0
+    if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0
         || playbackIntent != PlaybackIntent::Playing)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
         return;
     }
 
-    const std::int64_t timelineEnd = sessionSnap->getDerivedTimelineLengthSamples();
-    if (t0 >= timelineEnd)
+    const std::int64_t timelineEnd = sessionSnap->getArrangementExtentSamples();
+    if (timelineEnd <= 0 || t0 >= timelineEnd)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
         return;
@@ -201,7 +201,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 const PlacedClip& p = lane[(size_t)row];
                 const AudioClip& c = p.getAudioClip();
                 const int off = static_cast<int>(t - p.getStartSample());
-                jassert(off >= 0 && off + run <= c.getNumSamples());
+                jassert(off >= 0);
+                jassert(static_cast<std::int64_t>(off) + static_cast<std::int64_t>(run)
+                        <= p.getEffectiveLengthSamples());
+                jassert(off + run <= c.getNumSamples());
                 addClipRunToOutputs(c, off, run, out0, numOutputChannels, outputChannelData);
             }
             t += run;

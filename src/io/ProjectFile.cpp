@@ -20,6 +20,10 @@ namespace
             co->setProperty("id", static_cast<std::int64_t>(c.id));
             co->setProperty("startSample", c.startSample);
             co->setProperty("sourcePath", c.sourcePath);
+            if (c.visibleLengthSamples > 0)
+            {
+                co->setProperty("visibleLengthSamples", static_cast<std::int64_t>(c.visibleLengthSamples));
+            }
             clipVars.add(juce::var(co.get()));
         }
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
@@ -81,6 +85,13 @@ namespace
             err = "Clip missing sourcePath.";
             return juce::Result::fail(err);
         }
+        out.visibleLengthSamples = 0;
+        const juce::var& vlen = v.getProperty("visibleLengthSamples", {});
+        if (vlen.isInt64() || vlen.isInt() || vlen.isDouble())
+        {
+            out.visibleLengthSamples
+                = static_cast<std::int64_t>(static_cast<double>(vlen));
+        }
         return juce::Result::ok();
     }
 } // namespace
@@ -89,7 +100,7 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
 {
     if (data.version != ProjectFileV1::kCurrentVersion)
     {
-        return juce::Result::fail("Internal error: only version 1 is supported for writing.");
+        return juce::Result::fail("Internal error: only the current project version is supported for writing.");
     }
 
     juce::Array<juce::var> trackVars;
@@ -105,6 +116,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     root->setProperty("activeTrackId", static_cast<std::int64_t>(data.activeTrackId));
     root->setProperty("playheadSamples", data.playheadSamples);
     root->setProperty("deviceSampleRateAtSave", data.deviceSampleRateAtSave);
+    if (data.version >= 3)
+    {
+        root->setProperty("arrangementExtentSamples", data.arrangementExtentSamples);
+    }
     root->setProperty("tracks", juce::var(trackVars));
 
     const juce::String text = juce::JSON::toString(juce::var(root.get()), true);
@@ -161,10 +176,9 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
     const int ver = (int)static_cast<double>(root["version"]);
-    if (ver != ProjectFileV1::kCurrentVersion)
+    if (ver < 1 || ver > 3)
     {
-        return juce::Result::fail("Unsupported project version (expected "
-                                  + juce::String(ProjectFileV1::kCurrentVersion) + ").");
+        return juce::Result::fail("Unsupported project version (supported: 1–3).");
     }
 
     out.version = ver;
@@ -214,6 +228,17 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
     else
     {
         return juce::Result::fail("Project missing or invalid deviceSampleRateAtSave.");
+    }
+
+    out.arrangementExtentSamples = 0;
+    if (ver >= 3)
+    {
+        const juce::var& aex = root.getProperty("arrangementExtentSamples", {});
+        if (aex.isInt64() || aex.isInt() || aex.isDouble())
+        {
+            out.arrangementExtentSamples
+                = static_cast<std::int64_t>(static_cast<double>(aex));
+        }
     }
 
     const juce::var& tracksVar = root["tracks"];

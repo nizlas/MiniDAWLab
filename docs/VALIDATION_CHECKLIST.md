@@ -177,7 +177,7 @@ When validating the **minimal multi-track** step (`docs/PHASE_PLAN.md` Phase 3, 
 - **Default track:** a fresh session has exactly one track; new clips go there until the user adds another track.
 - **Add track:** appends a new empty track; the new track becomes **active**; **Add clip** places on the active track.
 - **Multiple tracks:** can load/place clips on different tracks; all tracks share one timeline and transport playhead.
-- **Minimal project file (v1):** save writes absolute audio source paths and session metadata; load decodes into one new `SessionSnapshot` (single publish), skips broken clips with a user-visible list, and seeks via `Transport` only. Corrupt or wrong-version project files do not replace the current session.
+- **Minimal project file (v1 / v2):** save writes **v2** with the same absolute paths and session metadata; optional per-clip `visibleLengthSamples` when a clip is right-trimmed (0 = full). Load accepts **v1** and **v2**; load decodes into one new `SessionSnapshot` (single publish), skips broken clips with a user-visible list, and seeks via `Transport` only. Corrupt or unsupported project files do not replace the current session.
 - **Playback sum:** with clips on more than one track (non-overlapping or staggered in time), you hear the **sum** of both contributions when both are “on” in device time. **Within** a single track, overlapping clips are still **not** summed; front-most still wins there.
 - **Within-track move:** `Session::moveClip` and committed drag still apply on the track that owns the moved clip (end-state rule in that lane only).
 
@@ -212,6 +212,38 @@ When validating **track reorder** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md
 - **Domain:** `Session::moveTrack` / `SessionSnapshot::withTrackReordered` only change the **order** of `Track` rows; **no** change to any `PlacedClip` list inside a track. **`activeTrackId_`** is **not** assigned in `moveTrack`.
 - **UI:** drag starts on a **header** only; **invalid** = outside `TrackLanesView` or **x ≥ kTrackHeaderWidth** (lane area) — **forbidden** cursor, **no** insert line; release = no publish. **Green** line = real reorder; **red** = no-op; line only in **`TrackLanesView::paintOverChildren`**. **Forbidden** cursor uses the same helper as invalid **clip** cross-lane drop (`ForbiddenCursor`).
 - **Separation:** clip drag / cross-track clip drag is unchanged; header drag does not use lane hit-test for “valid drop”.
+
+## Phase 3 late extension: non-destructive right-edge trim
+
+When validating **right-edge trim** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
+
+- **PCM:** decoded `AudioClip` length is unchanged by trim; extending the right edge back toward the material end **restores** audio.
+- **Domain:** trim state lives on **`PlacedClip`** (effective length only), not on **`AudioClip`**. **`SessionSnapshot::withClipRightEdgeTrimmed`** does **not** promote or reorder clips in the lane.
+- **Engine / timeline / overlap:** coverage, derived session length, and within-lane overlap math use **`getEffectiveLengthSamples()`** (or equivalent); playback still uses `off = t - startSample` and caps the run by the effective length.
+- **UI:** right-edge handle is distinct from move and cross-lane drag; trim does not call **`moveClip`** / **`moveClipToTrack`**.
+- **Project:** **v1** files still load; save produces **v2**; trim round-trips when visible length is not full.
+
+## Phase 3 late extension: visible timeline span (UI viewport)
+
+When validating the **visible span** / `TimelineViewportModel` step (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
+
+- **Stability after trim (inward):** the ruler + lane do **not** rescale; only the event’s right edge moves. Empty space to the right of the last audible sample may appear when `visibleEnd` is larger than the new derived end.
+- **Extend trim outward:** the interaction stays consistent with the same x–sample scale as before the trim (no “world jump” on commit). Seek/playhead, move, and trim preview use the same `visibleEnd` in both `TimelineRulerView` and `ClipWaveformView`.
+- **Seek:** the ruler maps x across the full width to [0, `visibleEnd`); the value passed to `Transport::requestSeek` is clamped to the **derived** session end, so clicks in the empty tail cannot seek past playable material.
+- **Growth:** add clip, add track, a move that extends the derived end, or project load with a **longer** session can increase `visibleEnd`; a load that is **shorter** than the current `visibleEnd` does not shrink the span (no automatic visual rescale down).
+- **Not in session:** `TimelineViewportModel` is not in `.mdlproj` and is not on the audio path.
+
+## Phase 3 late extension: arrangement extent + pannable viewport (v3)
+
+When validating **arrangement extent**, **pan**, and **v3** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
+
+- **Separates:** `getContentEndSamples()` = clip-derived end; `getArrangementExtentSamples()` = navigable/ playable; viewport = `visibleStart` + `visibleLength` (UI only, not in file).
+- **Trim / move:** `arrangementExtentSamples_` in the snapshot is **unchanged** on trim, move, or track reorder; no extent reset in any factory.
+- **Playback:** in a gap or past the last clip (but before extent), the engine outputs **silence**; playhead advances; stops at `getArrangementExtentSamples()`.
+- **Seek / ruler** maps x across the lane to `[visibleStart, visibleStart+visibleLength)`; `requestSeek` is clamped to **arrangement** extent, so empty tail to extent is seekable.
+- **Default seed:** with no material and no stored extent, first `sync` after device rate is known extends arrangement to 60s and sets visible length to 30s; opening a v1/v2 project with clips does **not** apply the 60s path (stored 0, content>0, effective = content end only).
+- **Save / load v3** round-trips `arrangementExtentSamples`; v1/v2 still load; save yields v3.
+- **Wheel** on ruler and lane area pans; trim/move drag in progress blocks pan on `TrackLanesView`.
 
 ## Phase 1 Validation Checklist
 

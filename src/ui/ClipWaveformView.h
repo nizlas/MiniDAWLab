@@ -40,6 +40,7 @@
 #include <vector>
 
 class Transport;
+class TimelineViewportModel;
 class ClipWaveformView;
 
 // [Message thread] At the start of a lane `mouseDown`, clear selection on **other** lanes only.
@@ -74,16 +75,20 @@ struct ClipWaveformLaneHost
 class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
-    // [Message thread] session/transport outlive the view. `trackId` scopes this lane to one
-    // `Track` in the snapshot. `laneHost` is normally from `TrackLanesView` (cross-lane ghost +
-    // drop find). Default = only within-lane `moveClip` on drag commit.
+    // [Message thread] session/transport/timelineViewport outlive the view. `trackId` scopes this
+    // lane to one `Track` in the snapshot. `laneHost` is normally from `TrackLanesView` (cross-lane
+    // ghost + drop find). Default = only within-lane `moveClip` on drag commit.
     ClipWaveformView(Session& session,
                      Transport& transport,
                      TrackId trackId,
+                     TimelineViewportModel& timelineViewport,
                      ClipWaveformLaneHost laneHost = {});
     ~ClipWaveformView() override;
 
     [[nodiscard]] TrackId getTrackId() const noexcept { return trackId_; }
+
+    // [Message thread] True while a move or trim is active (block timeline wheel pan in parent).
+    [[nodiscard]] bool isTimelineEditGestureInProgress() const noexcept;
 
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();
@@ -102,6 +107,8 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
 
 private:
     // [Message thread] Timer: schedules full `repaint` at a low fixed rate (see .cpp); playhead is sampled in
@@ -124,11 +131,6 @@ private:
         int row,
         std::vector<std::pair<std::int64_t, std::int64_t>>& outMerged) const;
 
-    // [Message thread] **Front-most first** in **this** track (lowest index `i` in that lane) whose
-    // [start, end) half-open range contains `timelineSample` — same paint z-order. No y-test.
-    std::optional<PlacedClipId> hitTestFrontmostPlacedIdAtSessionSample(
-        const std::shared_ptr<const SessionSnapshot>& snap, int trackIndex, std::int64_t timelineSample) const;
-
     // [Message thread] If the selected id no longer exists in the snapshot, clear selection.
     void clearSelectionIfIdMissing(const std::shared_ptr<const SessionSnapshot>& snap);
 
@@ -139,22 +141,32 @@ private:
     void setInvalidDropCursor();
     void restoreNormalCursorAfterInvalidDrop();
 
+    // [Message thread] Trim hover: bottom-right handle cue and resize cursor; no session publish.
+    void updateTrimHoverAndCursor(juce::Point<float> localPosition) noexcept;
+    // Which clip shows the static trim **cue** (anywhere on the event) / handle (resize cursor only).
+    std::optional<PlacedClipId> hoverEventTrimCueId_;
+    std::optional<PlacedClipId> hoverTrimHandleId_;
+
     // Which `Track` this lane paints; overlap + paint order are **only** within this list.
     TrackId trackId_ = kInvalidTrackId;
     ClipWaveformLaneHost laneHost_;
     Session& session_;
     Transport& transport_;
+    TimelineViewportModel& timelineViewport_;
 
     // Snapshot `shared_ptr` raw address — a new publish yields a new `const SessionSnapshot` and
     // a different pointer, so the cache key stays correct without touching Session.
     const void* lastSnapshotKey_ = nullptr;
     int lastWidth_ = 0;
+    std::int64_t lastVisibleStartForPeaks_ = 0;
+    std::int64_t lastVisibleLengthForPeaks_ = 0;
 
     // Cached paint inputs: one entry per `getPlacedClip(i)` row (0 = front / newest in snapshot).
     struct TimelineStrip
     {
         PlacedClipId clipId{ kInvalidPlacedClipId };
         std::int64_t startOnTimeline = 0;
+        // Effective (placement) span: right-edge trim shortens the audible/painted region; not material size.
         int materialNumSamples = 0;
         std::vector<float> peaks;
     };
@@ -163,6 +175,17 @@ private:
     // UI-local selection; never published in `SessionSnapshot` (see `PHASE_PLAN` / `ARCHITECTURE_…`).
     std::optional<PlacedClipId> selectedPlacedId_;
 
+    // Move vs. right-edge trim: trim never calls `Session::moveClip`; it uses `setClipRightEdgeVisibleLength`.
+    enum class PointerLaneMode { None, MoveClip, TrimRight };
+    PointerLaneMode pointerLaneMode_ = PointerLaneMode::None;
+    // Right-edge trim in flight (separate from move preview).
+    std::optional<PlacedClipId> trimPlacedId_;
+    std::int64_t trimStartSample_ = 0;
+    int trimMaterialNumSamples_ = 0;
+    std::int64_t trimClickDownVisibleLen_ = 0;
+    std::int64_t trimRightEdgeToMouseOffsetSamples_ = 0; // (start+visible) - sampleAt(clickX)
+    std::int64_t trimPreviewVisibleLen_ = 0;
+
     // In-flight single-clip drag: preview uses `tentativeStartOnTimeline_` for the event rect only
     // after a movement threshold. Commit calls `Session::moveClip` on mouse up.
     std::optional<PlacedClipId> mouseDownPlacedId_;
@@ -170,7 +193,8 @@ private:
     std::int64_t clickDownStartSample_ = 0;
     std::int64_t tentativeStartOnTimeline_ = 0;
     bool dragMovementBeyondThreshold_ = false;
-    std::int64_t mouseDownMaterialNumSamples_ = 0;
+    // Effective span at mousedown (cross-lane ghost, same-lane move); not always full material.
+    std::int64_t mouseDownEffectiveNumSamples_ = 0;
 
     // Drop ghost (this component may be the non-source lane showing a placeholder only).
     bool hasDragGhost_ = false;

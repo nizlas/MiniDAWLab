@@ -101,6 +101,8 @@ unless steering documents are updated.
 
 **Phase 3 late extension — track reorder (header drag):** **Row order** of **`Track`s** in **`SessionSnapshot`** is changed only by a **named** command **`Session::moveTrack` / `SessionSnapshot::withTrackReordered`**, not by in-flight UI. Each **`Track`’s** internal **`PlacedClip`** list is **unchanged**; engine **sum** across tracks is the same. **`activeTrackId_`** is **not** reassigned on reorder; the same **id** appears on a different row. The gesture is **header-only**; in-flight feedback (insert line) is **UI-local**; invalid cursor uses the same **forbidden** glyph as an **invalid** cross-lane **clip** drop, via one shared **UI** helper, not a second cursor implementation.
 
+**Phase 3 late extension — non-destructive right-edge trim:** **`AudioClip`** PCM is never shortened. **`PlacedClip`** holds the **placement window** (effective length) on that material. **`SessionSnapshot::withClipRightEdgeTrimmed`** replaces one row by id without changing lane order (not split, not “cut”). Playback offset in the material remains from sample **0**; the audible region is bounded by the effective length. **Timeline** extent, **overlap** resolution, the **engine** coverage test, and **waveform** paint span use **effective** length, not `getAudioClip().getNumSamples()` alone for placement.
+
 **Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
 session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**
 reads on the hot path; the exact snapshot type is an implementation choice consistent with

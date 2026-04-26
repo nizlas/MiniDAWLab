@@ -28,26 +28,76 @@
 PlacedClip::PlacedClip(const PlacedClipId id,
                       std::shared_ptr<const AudioClip> material,
                       const std::int64_t startSampleOnTimeline) noexcept
+    : PlacedClip(id, std::move(material), startSampleOnTimeline, static_cast<std::int64_t>(-1))
+{
+}
+
+PlacedClip::PlacedClip(const PlacedClipId id,
+                      std::shared_ptr<const AudioClip> material,
+                      const std::int64_t startSampleOnTimeline,
+                      const std::int64_t visibleLengthSamplesOnDiskOrDefault) noexcept
     : id_(id)
     , material_(std::move(material))
     , startSampleOnTimeline_(startSampleOnTimeline)
 {
-    // Failing this means someone tried to build a `PlacedClip` without real PCM — the snapshot
-    // should not be published in that state (see `SessionSnapshot::withSinglePlacedClip`).
     jassert(material_ != nullptr);
     jassert(id_ != kInvalidPlacedClipId);
+    const int matN = material_->getNumSamples();
+    if (matN <= 0)
+    {
+        visibleLengthSamples_ = 0;
+        return;
+    }
+    const std::int64_t cap = static_cast<std::int64_t>(matN);
+    if (visibleLengthSamplesOnDiskOrDefault <= 0)
+    {
+        visibleLengthSamples_ = cap;
+    }
+    else
+    {
+        visibleLengthSamples_
+            = juce::jlimit(std::int64_t{1}, cap, visibleLengthSamplesOnDiskOrDefault);
+    }
 }
 
 PlacedClip PlacedClip::withStartSampleOnTimeline(const std::int64_t newStartSampleOnTimeline) const noexcept
 {
     jassert(material_ != nullptr);
     jassert(id_ != kInvalidPlacedClipId);
-    return PlacedClip(id_, material_, newStartSampleOnTimeline);
+    return PlacedClip(id_, material_, newStartSampleOnTimeline, visibleLengthSamples_);
+}
+
+PlacedClip PlacedClip::withRightEdgeVisibleLength(const std::int64_t newVisibleLength) const noexcept
+{
+    jassert(material_ != nullptr);
+    jassert(id_ != kInvalidPlacedClipId);
+    if (material_ == nullptr)
+    {
+        return *this;
+    }
+    const int matN = material_->getNumSamples();
+    if (matN <= 0)
+    {
+        return *this;
+    }
+    const std::int64_t cap = static_cast<std::int64_t>(matN);
+    const std::int64_t clamped = juce::jlimit(std::int64_t{1}, cap, newVisibleLength);
+    return PlacedClip(id_, material_, startSampleOnTimeline_, clamped);
 }
 
 const AudioClip& PlacedClip::getAudioClip() const noexcept
 {
     jassert(material_ != nullptr);
-    // Same const buffer the audio thread reads through the snapshot — no per-call load, no copy.
     return *material_;
+}
+
+std::int64_t PlacedClip::getEffectiveLengthSamples() const noexcept
+{
+    return visibleLengthSamples_;
+}
+
+int PlacedClip::getMaterialLengthSamples() const noexcept
+{
+    jassert(material_ != nullptr);
+    return material_->getNumSamples();
 }

@@ -20,6 +20,9 @@ struct ProjectFileClipV1
     PlacedClipId id = kInvalidPlacedClipId;
     std::int64_t startSample = 0;
     juce::String sourcePath;
+    // v2: 0 = full material (read path uses `PlacedClip` default); if >0, right-edge **visible** span
+    // in samples (clamped to material on load). Omitted in v1 JSON; treated as 0.
+    std::int64_t visibleLengthSamples = 0;
 };
 
 struct ProjectFileTrackV1
@@ -32,7 +35,7 @@ struct ProjectFileTrackV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 1;
+    static constexpr int kCurrentVersion = 3;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -40,6 +43,9 @@ struct ProjectFileV1
     TrackId activeTrackId = 1;
     std::int64_t playheadSamples = 0;
     double deviceSampleRateAtSave = 0.0;
+    // v3: effective arrangement extent in samples (optional in JSON; 0 = treat as “absent / floor
+    // from content only” on load — see `SessionSnapshot::withTracks`).
+    std::int64_t arrangementExtentSamples = 0;
     std::vector<ProjectFileTrackV1> tracks;
 };
 

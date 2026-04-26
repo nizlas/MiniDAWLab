@@ -7,6 +7,37 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-26 — Phase 3 arrangement extent + pannable viewport (`.mdlproj` v3)
+
+Decision:
+
+- **`SessionSnapshot::arrangementExtentSamples_`** — [Message thread] persisted **stored** floor; **`getArrangementExtentSamples()`** = `max(stored, getDerivedTimelineLengthSamples())`. Propagated unchanged by all clip/track factories; **`withArrangementExtent`** and **`withTracks(tracks, extent)`** are the only ways to set / load a new stored value. **`Session::setArrangementExtentSamples`** republishes via `withArrangementExtent` (monotonic **non-decreasing** on stored). **`PlaybackEngine`** uses **`getArrangementExtentSamples()`** for `timelineEnd` (play silence in gaps; stop at extent).
+- **`TimelineViewportModel` (`src/ui/`)** — [Message thread] **`visibleStartSamples_` + `visibleLengthSamples_`**, not grow-only `visibleEnd`. `panBySamples`, `clampToExtent`, `setVisibleLengthIfUnset`. **Not** in session or on disk.
+- **Composition root (`Main` / `TransportControlsContent`)** — seeds **60s** arrangement and **30s** visible length when **stored==0** and **content==0**; `clampToExtent` after session-affecting actions; `syncViewportFromSession` on load / add.
+- **Seek / playhead (UI):** `Session::getArrangementExtentSamples()`. `Session::getContentEndSamples()` / deprecated **`getTimelineLengthSamples()`** = derived clip end. Ruler and lanes: linear map on **[visibleStart, visibleStart+length)**. Playhead line only if **inside** the visible window.
+- **Project file v3:** `arrangementExtentSamples` optional at root; **save** writes **effective** extent. **read** 1—3.
+
+Rationale: DAW-like navigable/ playable extent distinct from “where clips end”; silent playback in empty time; no trim-induced rescaling (unchanged with pan denominator).
+
+**Out of this step:** scroll bars, follow-playhead, zoom control, persisting `visibleStart` / `visibleLength` in the file, loop.
+
+---
+
+## 2026-04-26 — Phase 3 visible timeline span (UI-only viewport) — superseded
+
+Decision:
+
+- **`TimelineViewportModel` (`src/ui/`)** — [Message thread] stores `visibleEndSamples` (at least 1) as the **shared** horizontal map extent for the ruler and waveforms. **Not** in `Session` or `SessionSnapshot`. **Grow-only** `ensureCovers(derivedEnd)`; never shrinks when the logical/derived end drops (e.g. right-edge trim), so the x-axis does not jump.
+- **Composition root (`Main` / `TransportControlsContent`)** owns one instance, wires `setOnVisibleRangeChanged` to repaint ruler + `TrackLanesView`, and calls `ensureCoversWithSession` after load, add clip, add track, and after clip move / trim from UI so the viewport can expand when the session grows.
+- **`TimelineRulerView` / `ClipWaveformView`:** x mapping and in-flight move/trim use `getVisibleEndSamples()`. **Playhead and seek** still clamp to **`Session::getTimelineLengthSamples()`** (derived logical end); ruler applies seek then `jmin` to logical before `Transport::requestSeek`.
+- **Peak cache:** `rebuildPeaksIfNeeded` keys off snapshot + width + `visibleEnd` so resampling runs when the visible span changes without a new snapshot.
+
+Rationale: prevent trim from feeling like a global “resize the timeline”; decouple presentation from derived length without new transport semantics.
+
+**Out of scope (this step):** scroll, zoom, `visibleStart`, persisting the viewport, bar/beat grid.
+
+---
+
 ## 2026-04-25 — Phase 3 minimal project save / load (`.mdlproj` v1)
 
 Decision:
@@ -421,5 +452,39 @@ Out of scope:
 
 - Ghost track view, keyboard reorder, track delete, mixer, **any** change to **clip** drag
   behaviour, rename, resize.
+
+---
+
+## Non-destructive right-edge trim (PlacedClip visible length)
+
+Date: 2026-04-26
+
+Context:
+
+- Need a **minimal** way to shorten the **heard** region of a clip without mutating PCM or
+  conflating with split/cut.
+
+Decision:
+
+- **`PlacedClip`** stores **`visibleLengthSamples_`** (effective / audible span from material
+  sample 0), with **`getEffectiveLengthSamples()`**, **`getMaterialLengthSamples()`**, and
+  **`withRightEdgeVisibleLength`**. **`AudioClip`** is never trimmed.
+- **`SessionSnapshot::withClipRightEdgeTrimmed`** replaces one **`PlacedClip`** by id; **no** lane
+  reorder. **`Session::setClipRightEdgeVisibleLength`** publishes one snapshot.
+- **PlaybackEngine**, **overlap** in **`moveOneClipInLane`**, **`getDerivedTimelineLengthSamples`**, and
+  **ClipWaveformView** use effective length for span; engine material offset formula unchanged except
+  the effective-length cap.
+- **Project file:** writers use **v2** (`ProjectFileV1::kCurrentVersion == 2`); optional
+  **`visibleLengthSamples`** per clip (0 = full on read / omitted on write when full). Readers
+  accept **v1** and **v2**.
+
+Rationale:
+
+- Non-destructive editing, one source of truth for “how long this placement is” on the timeline,
+  and clear separation from future split/cut features.
+
+Out of scope:
+
+- Left-edge trim, slip, fades, split, slip-on-timeline material offset inside the buffer.
 
 ---

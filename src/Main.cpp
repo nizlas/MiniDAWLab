@@ -39,6 +39,7 @@
 #include "engine/PlaybackEngine.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
 
 // ---------------------------------------------------------------------------
@@ -119,12 +120,18 @@ private:
             : transport(transportIn)
             , session(sessionIn)
             , deviceManager(deviceManagerIn)
-            , rulerView(sessionIn, transportIn, deviceManagerIn)
-            , trackLanesView(sessionIn, transportIn)
+            , timelineViewport_()
+            , rulerView(sessionIn, transportIn, deviceManagerIn, timelineViewport_)
+            , trackLanesView(sessionIn, transportIn, timelineViewport_)
         {
+            timelineViewport_.setOnVisibleRangeChanged([this] {
+                rulerView.repaint();
+                trackLanesView.repaint();
+            });
             addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
             addTrackButton.onClick = [this] {
                 session.addTrack();
+                syncViewportFromSession();
                 trackLanesView.syncTracksFromSession();
             };
             saveProjectButton.onClick = [this] { saveProjectClicked(); };
@@ -147,6 +154,7 @@ private:
             addAndMakeVisible(stopButton);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
+            syncViewportFromSession();
         }
 
         // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
@@ -171,6 +179,29 @@ private:
         }
 
     private:
+        // [Message thread] Seed default arrangement + visible length once sample rate is known;
+        // clamp the pan window to the current arrangement extent.
+        void syncViewportFromSession()
+        {
+            juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
+            if (dev != nullptr)
+            {
+                const double sr = dev->getCurrentSampleRate();
+                if (sr > 0.0)
+                {
+                    if (session.getStoredArrangementExtentSamples() == 0
+                        && session.getContentEndSamples() == 0)
+                    {
+                        session.setArrangementExtentSamples(
+                            (std::int64_t)std::llround(60.0 * sr));
+                    }
+                    timelineViewport_.setVisibleLengthIfUnset(
+                        (std::int64_t)std::llround(30.0 * sr));
+                }
+            }
+            timelineViewport_.clampToExtent(session.getArrangementExtentSamples());
+        }
+
         // [Message thread] Presents a native file dialog; on success, new clip is placed on the
         // **session** timeline at the current `Transport` playhead (read once, here, not on audio).
         void addClipAtPlayheadClicked()
@@ -251,6 +282,7 @@ private:
                     juce::Logger::writeToLog(
                         juce::String("[CLIMPORT] STAGE:ui:sync:begin file=") + file.getFileName());
                     // New **front** clip is on the active track; playhead/transport are unchanged.
+                    syncViewportFromSession();
                     trackLanesView.syncTracksFromSession();
                     trackLanesView.repaint();
                     juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:ui:sync:done file=") + file.getFileName());
@@ -333,6 +365,7 @@ private:
                         juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
                     return;
                 }
+                syncViewportFromSession();
                 trackLanesView.syncTracksFromSession();
                 rulerView.repaint();
                 trackLanesView.repaint();
@@ -377,6 +410,8 @@ private:
         juce::TextButton pauseButton{ "Pause" };
         juce::TextButton stopButton{ "Stop" };
 
+        /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).
+        TimelineViewportModel timelineViewport_;
         TimelineRulerView rulerView;
         TrackLanesView trackLanesView;
 

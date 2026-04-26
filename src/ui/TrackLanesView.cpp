@@ -5,6 +5,7 @@
 #include "ui/TrackLanesView.h"
 
 #include "ui/ClipWaveformView.h"
+#include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
@@ -13,13 +14,15 @@
 
 #include <juce_core/juce_core.h>
 
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
-TrackLanesView::TrackLanesView(Session& session, Transport& transport)
+TrackLanesView::TrackLanesView(Session& session, Transport& transport, TimelineViewportModel& timelineViewport)
     : session_(session)
     , transport_(transport)
+    , timelineViewport_(timelineViewport)
 {
     syncTracksFromSession();
 }
@@ -96,7 +99,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                   setGhostOnLaneImpl(target, start, len);
               };
         host.clearAllGhosts = [this] { clearAllGhostsImpl(); };
-        auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, std::move(host));
+        auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, timelineViewport_, std::move(host));
         addAndMakeVisible(*ptr);
         lanes_.push_back(std::move(ptr));
     }
@@ -298,6 +301,7 @@ void TrackLanesView::endHeaderTrackDrag(const TrackId movedId)
     if (commit)
     {
         session_.moveTrack(movedId, headerTrackDragDestIndex_);
+        timelineViewport_.clampToExtent(session_.getArrangementExtentSamples());
         syncTracksFromSession();
     }
 
@@ -365,4 +369,41 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
     }
     const int lineW = juce::jmin(kTrackHeaderWidth, getWidth());
     g.fillRect(0, yy, lineW, 2);
+}
+
+void TrackLanesView::mouseWheelMove(
+    const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    juce::ignoreUnused(e);
+    for (const auto& lane : lanes_)
+    {
+        if (lane != nullptr && lane->isTimelineEditGestureInProgress())
+        {
+            return;
+        }
+    }
+    const std::int64_t arr = session_.getArrangementExtentSamples();
+    if (arr <= 0)
+    {
+        return;
+    }
+    const std::int64_t vlen = timelineViewport_.getVisibleLengthSamples();
+    if (vlen <= 0)
+    {
+        return;
+    }
+    const std::int64_t step = juce::jmax(
+        std::int64_t{1},
+        juce::jlimit(
+            std::int64_t{0},
+            static_cast<std::int64_t>(std::numeric_limits<int>::max()),
+            vlen / 8));
+    const double d = (wheel.isReversed ? -wheel.deltaY : wheel.deltaY);
+    if (d == 0.0)
+    {
+        return;
+    }
+    const std::int64_t panDelta = (d > 0.0) ? step : -step;
+    timelineViewport_.panBySamples(panDelta, arr);
+    repaint();
 }

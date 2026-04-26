@@ -32,6 +32,7 @@ class ClipWaveformView;
 class TrackHeaderView;
 class Session;
 class Transport;
+class TimelineViewportModel;
 
 // ---------------------------------------------------------------------------
 // TrackLanesView — vertical stack of per-track event lanes
@@ -45,12 +46,14 @@ public:
 
     ~TrackLanesView() override;
 
-    // [Message thread] `session` / `transport` outlive this view. Rebuilds child lanes in `resized`
-    // to match the current `SessionSnapshot` track list.
-    TrackLanesView(Session& session, Transport& transport);
+    // [Message thread] `session` / `transport` / `timelineViewport` outlive this view. Rebuilds
+    // child lanes in `resized` to match the current `SessionSnapshot` track list.
+    TrackLanesView(Session& session, Transport& transport, TimelineViewportModel& timelineViewport);
 
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
+    void mouseWheelMove(
+        const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
     // [Message thread] `Main` can call this after `Session::addTrack` so a new `ClipWaveformView`
     // is created before layout without waiting for a user resize.
@@ -78,6 +81,7 @@ private:
 
     Session& session_;
     Transport& transport_;
+    TimelineViewportModel& timelineViewport_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
 
