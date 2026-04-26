@@ -100,23 +100,60 @@ namespace
         return false;
     }
 
-    [[nodiscard]] juce::File makeUniqueTakeWavInTakesDir(const juce::File& takesDir)
+    [[nodiscard]] juce::File makeUniqueTakeWavInProjectAudioDir(const juce::File& audioDir)
     {
         const juce::String t = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
-        juce::File f = takesDir.getChildFile("take_" + t + ".wav");
+        juce::File f = audioDir.getChildFile("take_" + t + ".wav");
         if (!f.existsAsFile())
         {
             return f;
         }
         for (int i = 1; i < 10000; ++i)
         {
-            f = takesDir.getChildFile("take_" + t + "_" + juce::String(i) + ".wav");
+            f = audioDir.getChildFile("take_" + t + "_" + juce::String(i) + ".wav");
             if (!f.existsAsFile())
             {
                 return f;
             }
         }
-        return takesDir.getChildFile("take_" + t + "_9999.wav");
+        return audioDir.getChildFile("take_" + t + "_9999.wav");
+    }
+
+    // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
+    // `projectFile` = `<projectFolder>/<projectName>.dalproj`.
+    [[nodiscard]] juce::String firstTimeSaveConflictMessage(
+        const juce::File& projectFolder,
+        const juce::File& projectFile)
+    {
+        if (projectFile.existsAsFile())
+        {
+            return "A project file already exists at:\n" + projectFile.getFullPathName()
+                   + "\n\nChoose a different name or delete the existing file first.";
+        }
+        if (projectFolder.exists() && !projectFolder.isDirectory())
+        {
+            return "Cannot create the project folder; a file already exists at:\n"
+                   + projectFolder.getFullPathName();
+        }
+        if (projectFolder.isDirectory())
+        {
+            juce::Array<juce::File> files;
+            projectFolder.findChildFiles(files, juce::File::findFiles, false);
+            for (const auto& c : files)
+            {
+                const juce::String n = c.getFileName();
+                if (n.endsWithIgnoreCase(".dalproj") || n.endsWithIgnoreCase(".mdlproj"))
+                {
+                    if (!(c == projectFile))
+                    {
+                        return "The project folder already contains a different project file:\n"
+                               + c.getFullPathName()
+                               + "\n\nChoose a different folder or name.";
+                    }
+                }
+            }
+        }
+        return {};
     }
 } // namespace
 
@@ -486,24 +523,79 @@ private:
             }
             const double sampleRate = device->getCurrentSampleRate();
 
+            // Normal save: no chooser. Explicit "Save As" / "New project" is deferred.
+            if (session.hasKnownProjectFile())
+            {
+                const juce::Result r
+                    = session.saveProjectToFile(transport, session.getCurrentProjectFile(), sampleRate);
+                if (!r.wasOk())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
+                }
+                return;
+            }
+
+            // First-time save: DAW-style `<Parent>/<ProjectName>/<ProjectName>.dalproj`
             const auto fileChooserFlags = juce::FileBrowserComponent::saveMode
                                           | juce::FileBrowserComponent::canSelectFiles;
             auto chooser = std::make_shared<juce::FileChooser>(
-                "Save project",
+                "Save project as…",
                 juce::File{},
-                "*.mdlproj");
+                "*.dalproj");
             chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
                 juce::ignoreUnused(chooser);
-                juce::File f = fc.getResult();
-                if (f.getFullPathName().isEmpty())
+                juce::File userPick = fc.getResult();
+                if (userPick.getFullPathName().isEmpty())
                 {
                     return;
                 }
-                if (!f.hasFileExtension("mdlproj"))
+                if (!userPick.hasFileExtension("dalproj"))
                 {
-                    f = f.getSiblingFile(f.getFileName() + ".mdlproj");
+                    userPick = userPick.getSiblingFile(
+                        userPick.getFileNameWithoutExtension() + ".dalproj");
                 }
-                const juce::Result r = session.saveProjectToFile(transport, f, sampleRate);
+                const juce::String projectName = userPick.getFileNameWithoutExtension();
+                if (projectName.isEmpty())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Save project",
+                        "Invalid project name.");
+                    return;
+                }
+                const juce::File parentDir = userPick.getParentDirectory();
+                const juce::File projectFolder = parentDir.getChildFile(projectName);
+                const juce::File projectFile
+                    = projectFolder.getChildFile(projectName + ".dalproj");
+                {
+                    const juce::String conflict = firstTimeSaveConflictMessage(projectFolder, projectFile);
+                    if (conflict.isNotEmpty())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "Save project", conflict);
+                        return;
+                    }
+                }
+                if (!projectFolder.isDirectory() && !projectFolder.createDirectory())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Save project",
+                        "Could not create the project folder:\n" + projectFolder.getFullPathName());
+                    return;
+                }
+                {
+                    const juce::String conflict2
+                        = firstTimeSaveConflictMessage(projectFolder, projectFile);
+                    if (conflict2.isNotEmpty())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "Save project", conflict2);
+                        return;
+                    }
+                }
+                const juce::Result r = session.saveProjectToFile(transport, projectFile, sampleRate);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -530,7 +622,7 @@ private:
             auto chooser = std::make_shared<juce::FileChooser>(
                 "Load project",
                 juce::File{},
-                "*.mdlproj");
+                "*.dalproj;*.mdlproj");
             chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
                 juce::ignoreUnused(chooser);
                 const juce::File f = fc.getResult();
@@ -668,22 +760,22 @@ private:
                 juce::Logger::writeToLog("[Rec] start blocked: empty project file path");
                 return;
             }
-            juce::File takesDir = projectFile.getParentDirectory().getChildFile("takes");
-            if (takesDir.getFullPathName().isEmpty())
+            juce::File audioDir = session.getCurrentProjectFolder().getChildFile("Audio");
+            if (audioDir.getFullPathName().isEmpty())
             {
-                juce::Logger::writeToLog("[Rec] start blocked: could not build takes/ path");
+                juce::Logger::writeToLog("[Rec] start blocked: could not build Audio/ path");
                 return;
             }
-            if (!takesDir.isDirectory() && !takesDir.createDirectory())
+            if (!audioDir.isDirectory() && !audioDir.createDirectory())
             {
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::AlertWindow::WarningIcon,
                     "Recording",
-                    "Could not create the project takes folder: " + takesDir.getFullPathName());
-                juce::Logger::writeToLog("[Rec] start blocked: createDirectory takes/ failed");
+                    "Could not create the project Audio folder: " + audioDir.getFullPathName());
+                juce::Logger::writeToLog("[Rec] start blocked: createDirectory Audio/ failed");
                 return;
             }
-            const juce::File takeWav = makeUniqueTakeWavInTakesDir(takesDir);
+            const juce::File takeWav = makeUniqueTakeWavInProjectAudioDir(audioDir);
             juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
             if (dev == nullptr)
             {

@@ -168,6 +168,11 @@ bool Session::hasKnownProjectFile() const noexcept
     return currentProjectFile_.getFullPathName().isNotEmpty();
 }
 
+juce::File Session::getCurrentProjectFolder() const noexcept
+{
+    return currentProjectFile_.getParentDirectory();
+}
+
 juce::Result Session::addRecordedTakeAtSample(
     const juce::File& file,
     const double deviceSampleRate,

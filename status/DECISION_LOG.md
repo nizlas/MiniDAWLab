@@ -7,6 +7,22 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-26 — Project as folder (`.dalproj`) + `Audio/` for new takes
+
+**Scope:** save/load UX, recording output path, docs only — no `ProjectFileV1` schema change, no file migration.
+
+**Layout:** First-time **Save project** uses a DAW-like layout: **`<ParentChosen>/<ProjectName>/<ProjectName>.dalproj`**. After a project file is known, **Save project** writes to that file **without a chooser** (normal save). A separate explicit **Save As** / **New project** action is **deferred**.
+
+**Extension:** New projects use **`.dalproj`**. **Load** accepts **`.dalproj` and `.mdlproj`** (legacy). Existing `.mdlproj` files and clips whose `sourcePath` points at old **`takes/`** WAVs continue to load; **no** automatic copy/move.
+
+**Recording:** New takes are written to **`<projectFolder>/Audio/`** (not `takes/`). `Session::getCurrentProjectFolder()` is `getCurrentProjectFile().getParentDirectory()`.
+
+**First-time save collisions (conservative):** If the target **`<ProjectName>.dalproj`** already exists, or if **`<Parent>/<ProjectName>/`** already contains **any** other `*.dalproj` / `*.mdlproj` that is not exactly the intended file path, **abort** with an alert — **no** silent overwrite and **no** confirmation dialog in this slice.
+
+**Non-goals:** App / CMake rename (DAL branding), installer, file association, relative paths in the project file.
+
+---
+
 ## 2026-04-26 — Phase 4 minimal mono recording (steering; implementation pending)
 
 **Scope:** steering/validation only in this log entry. No `RecorderService` or device re-init in code until implementation begins.

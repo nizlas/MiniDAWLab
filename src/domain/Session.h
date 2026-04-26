@@ -156,8 +156,10 @@ public:
     [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
 
     // [Message thread] Last successfully **saved** or **loaded** project file (empty if never set).
-    // Used by the app for project-relative paths (e.g. takes/). Not part of the snapshot.
+    // Used by the app for project-relative paths (e.g. `Audio/`). Not part of the snapshot.
     [[nodiscard]] juce::File getCurrentProjectFile() const noexcept { return currentProjectFile_; }
+    // [Message thread] Parent directory of `getCurrentProjectFile()`; empty if no project file.
+    [[nodiscard]] juce::File getCurrentProjectFolder() const noexcept;
     // [Message thread] True if the user has a known on-disk project (save or load completed).
     [[nodiscard]] bool hasKnownProjectFile() const noexcept;
 

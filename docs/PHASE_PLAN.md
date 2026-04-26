@@ -431,7 +431,7 @@ On stop, the implementation **must** deliver a complete **RecordedTakeResult** (
 ### Unsaved project
 
 - If there is **no** saved project file (path **unknown**): **refuse** to start recording with a **visible** message (e.g. *“Save the project before recording.”*). **Do not** start transport, **do not** create **orphan** WAVs in a global store, **do not** create an **empty** committed `PlacedClip`.
-- If the project is saved, takes live under **`<parentOfProjectFile>/takes/`** (or the agreed `takes/` subfolder next to the `.mdlproj` / project file on disk — exact layout is implementation, **absolute** paths on clips remain the persistence rule).
+- If the project is saved, **new** recorded audio is written under **`<projectFolder>/Audio/`** (the project folder is the parent directory of the `.dalproj` / legacy `.mdlproj` file). Older projects may still reference absolute paths under **`takes/`** or elsewhere; those clips **load unchanged** — there is **no** automatic migration of files in this slice. **Absolute** `sourcePath` persistence in the project file is unchanged.
 
 ### Deferred (document for later; not in this slice)
 

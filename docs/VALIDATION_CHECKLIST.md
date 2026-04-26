@@ -281,6 +281,17 @@ For Phase 1 specifically, validate all of the following:
 - the implementation is not merely a “WAV player” disguised as architecture
 - the result can plausibly grow toward multiple clips without fundamental redesign
 
+## Project save / load / recording paths (manual)
+
+After changes to project folder layout, `.dalproj` / `.mdlproj`, or `Audio/`:
+
+- **Save (known project):** With a project already saved or loaded, **Save project** writes **without a file dialog** to the current project file.
+- **Save (first time):** With no known project file, **Save project** runs **Save as…** and creates **`<Parent>/<ProjectName>/<ProjectName>.dalproj`**. Re-saving then uses normal save.
+- **Collisions:** Saving into a folder that already contains another `*.dalproj` or `*.mdlproj` (other than the intended file), or when the target `.dalproj` already exists, shows an alert and **does not** overwrite.
+- **Load:** **Load project** accepts **`.dalproj` and `.mdlproj`**; legacy projects still open.
+- **Recording:** New takes go to **`<projectFolder>/Audio/`**. Loading a project whose clips reference old **`takes/`** paths still plays (absolute paths unchanged).
+- **Schema:** `ProjectFileV1` JSON fields are unchanged; only paths and UX differ.
+
 ## Failure Rule
 
 If validation reveals that the implementation:
