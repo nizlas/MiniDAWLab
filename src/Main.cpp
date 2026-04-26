@@ -40,6 +40,8 @@
 
 #include <JuceHeader.h>
 #include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_gui_basics/juce_gui_basics.h>
 
 #include "domain/Session.h"
 #include "engine/CountInClickOutput.h"
@@ -49,6 +51,8 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
+#include "audio/AudioDeviceInfo.h"
+#include "io/ProjectAudioImport.h"
 
 #include <optional>
 
@@ -166,7 +170,7 @@ namespace
 class MiniDAWLabApplication : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "MiniDAWLab"; }
+    const juce::String getApplicationName() override { return "Danielssons Audio Lab"; }
 
     const juce::String getApplicationVersion() override
     {
@@ -191,19 +195,25 @@ public:
         playbackEngine = std::make_unique<PlaybackEngine>(
             *transport, *session, recorderService.get(), countInOutput_.get());
 
-        // JUCE: open the default audio device before we register the engine. Prefer **1 input, 2
-        // outputs** (mono in for future record path; stereo out unchanged). If the default device
-        // cannot provide an input, fall back to output-only so existing playback is not broken.
-        juce::String audioInitError = deviceManager.initialiseWithDefaultDevices(1, 2);
-        if (audioInitError.isNotEmpty())
+        // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present
+        // (Stage 2); else pick defaults. Prefer **1 input, 2 outputs**; fall back to output-only.
+        juce::String audioInitError;
         {
-            juce::Logger::writeToLog(
-                juce::String{"[Audio] 1-in/2-out not available: "} + audioInitError
-                + " — retrying output-only (0 in / 2 out). Input capture disabled until a suitable device exists.");
-            audioInitError = deviceManager.initialiseWithDefaultDevices(0, 2);
+            const juce::File settingsFile = mini_daw::getAudioSettingsFile();
+            const auto saved = mini_daw::loadAudioSettingsXmlIfAny(settingsFile);
+            audioInitError = deviceManager.initialise(1, 2, saved.get(), true);
+            if (audioInitError.isNotEmpty())
+            {
+                juce::Logger::writeToLog(
+                    juce::String{"[Audio] 1-in/2-out (with saved state) not available: "} + audioInitError
+                    + " — retrying output-only (0 in / 2 out). Input capture disabled until a suitable device exists.");
+                audioInitError = deviceManager.initialiseWithDefaultDevices(0, 2);
+            }
         }
         jassert(audioInitError.isEmpty());
         juce::ignoreUnused(audioInitError);
+        juce::Logger::writeToLog(
+            juce::String{"[Audio]\n"} + mini_daw::describeActiveAudioDeviceMultiLine(deviceManager));
 
         // After this line, the audio thread can call our PlaybackEngine; keep UI after so we do
         // not paint or load files before the device exists.
@@ -247,7 +257,9 @@ private:
     // [Message thread only] Child component: file chooser, transport buttons, timeline ruler, lane.
     // Holds non-owning refs; MainWindow and application own lifetime. Add path: FileChooser
     // (async) → `Transport::readPlayheadSamplesForUi` once, then `addClipFromFileAtPlayhead`.
-    class TransportControlsContent : public juce::Component, private juce::Timer
+    class TransportControlsContent : public juce::Component,
+                                     public juce::ChangeListener,
+                                     private juce::Timer
     {
     public:
         TransportControlsContent(Transport& transportIn,
@@ -281,6 +293,7 @@ private:
             // Stop: "playback off + playhead to start" when idle; if recording, finalize/commit first
             // so RecorderService is never left recording while transport is Stopped.
             stopButton.onClick = [this] { stopOrSeekFromStopButton(); };
+            audioSettingsButton.onClick = [this] { showAudioSettingsDialog(); };
 
             addAndMakeVisible(addClipButton);
             addAndMakeVisible(addTrackButton);
@@ -288,6 +301,7 @@ private:
             addAndMakeVisible(loadProjectButton);
             addAndMakeVisible(playPauseButton);
             addAndMakeVisible(stopButton);
+            addAndMakeVisible(audioSettingsButton);
             if (kShowKeyDiagnostic)
             {
                 addAndMakeVisible(keyDiagLabel_);
@@ -300,12 +314,17 @@ private:
             addAndMakeVisible(countInStatusLabel_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
+            deviceManager.addChangeListener(this);
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);
             syncViewportFromSession();
         }
 
-        ~TransportControlsContent() override { cancelCountIn(); }
+        ~TransportControlsContent() override
+        {
+            deviceManager.removeChangeListener(this);
+            cancelCountIn();
+        }
 
         // [Message thread] Invoked only from `MainWindow` shortcut router (not from child
         // `keyPressed` — avoids duplicate `numpadRecordToggled` on one physical keypress).
@@ -339,7 +358,7 @@ private:
             }
             constexpr int kCountInLabelWidth = 140;
             countInStatusLabel_.setBounds(row.removeFromRight(kCountInLabelWidth).reduced(4, 0));
-            const int buttonWidth = juce::jmax(48, row.getWidth() / 6);
+            const int buttonWidth = juce::jmax(48, row.getWidth() / 7);
 
             addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             addTrackButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
@@ -347,6 +366,7 @@ private:
             loadProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             playPauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            audioSettingsButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             constexpr int kTimelineRulerHeight = 20;
             auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
             timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
@@ -365,6 +385,51 @@ private:
             TransportControlsContent& owner;
         };
         friend struct CountInTimer;
+
+        void changeListenerCallback(juce::ChangeBroadcaster* source) override
+        {
+            juce::ignoreUnused(source);
+            // Multi-line device detail is logged once at app init; on change, persist is best-effort.
+            mini_daw::trySaveAudioDeviceState(deviceManager, mini_daw::getAudioSettingsFile());
+        }
+
+        void showAudioSettingsDialog()
+        {
+            if (recorder_.isRecording() || isCountInActive())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Audio Settings",
+                    "Audio settings cannot be changed while recording or count-in is active.");
+                return;
+            }
+            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+            {
+                transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+                updatePlayPauseButtonFromTransport();
+            }
+            auto* selector = new juce::AudioDeviceSelectorComponent(
+                deviceManager,
+                0,
+                2,
+                2,
+                2,
+                false,
+                false,
+                false,
+                false);
+            selector->setSize(600, 480);
+            juce::DialogWindow::LaunchOptions opt;
+            opt.content.setOwned(selector);
+            opt.dialogTitle = "Audio Settings";
+            opt.dialogBackgroundColour
+                = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId);
+            opt.componentToCentreAround = this;
+            opt.escapeKeyTriggersCloseButton = true;
+            opt.useNativeTitleBar = true;
+            opt.resizable = true;
+            opt.launchAsync();
+        }
 
         void timerCallback() override { updatePlayPauseButtonFromTransport(); }
 
@@ -463,6 +528,14 @@ private:
         // **session** timeline at the current `Transport` playhead (read once, here, not on audio).
         void addClipAtPlayheadClicked()
         {
+            if (!session.hasKnownProjectFile())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Add clip",
+                    "Save the project before importing audio.");
+                return;
+            }
             if (importInFlight_)
             {
                 juce::Logger::writeToLog(
@@ -522,8 +595,35 @@ private:
 
                 // Loader must match the *running* device rate (Phase 1 contract).
                 const double sampleRate = device->getCurrentSampleRate();
-                const juce::Result loadResult =
-                    session.addClipFromFileAtPlayhead(file, sampleRate, startSampleOnTimeline);
+
+                const juce::File audioDir = mini_daw::getProjectAudioDir(session.getCurrentProjectFolder());
+                juce::File pathToUse;
+                const juce::Result importRes
+                    = mini_daw::importAudioIntoProjectAudioDir(file, audioDir, pathToUse);
+                if (!importRes.wasOk())
+                {
+                    juce::Logger::writeToLog(
+                        juce::String{"[CLIMPORT] STAGE:ui:copy_fail reason="} + importRes.getErrorMessage());
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Could not import audio",
+                        importRes.getErrorMessage());
+                    return;
+                }
+                if (file == pathToUse)
+                {
+                    juce::Logger::writeToLog(
+                        juce::String{"[CLIMPORT] STAGE:ui:copy_ok dest=(already in Audio/) "}
+                        + pathToUse.getFullPathName());
+                }
+                else
+                {
+                    juce::Logger::writeToLog(
+                        juce::String{"[CLIMPORT] STAGE:ui:copy_ok dest="} + pathToUse.getFullPathName());
+                }
+
+                const juce::Result loadResult
+                    = session.addClipFromFileAtPlayhead(pathToUse, sampleRate, startSampleOnTimeline);
 
                 if (!loadResult.wasOk())
                 {
@@ -537,12 +637,13 @@ private:
                 else
                 {
                     juce::Logger::writeToLog(
-                        juce::String("[CLIMPORT] STAGE:ui:sync:begin file=") + file.getFileName());
+                        juce::String("[CLIMPORT] STAGE:ui:sync:begin file=") + pathToUse.getFileName());
                     // New **front** clip is on the active track; playhead/transport are unchanged.
                     syncViewportFromSession();
                     trackLanesView.syncTracksFromSession();
                     trackLanesView.repaint();
-                    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:ui:sync:done file=") + file.getFileName());
+                    juce::Logger::writeToLog(
+                        juce::String("[CLIMPORT] STAGE:ui:sync:done file=") + pathToUse.getFileName());
                 }
             });
         }
@@ -975,6 +1076,7 @@ private:
         /// True after the 8th click: next timer fire ends count-in and starts `beginRecording`.
         bool countInAwaitingPostClickDelay_ = false;
         std::unique_ptr<CountInTimer> countInTimer_;
+        /// Count-in / recording line (no always-visible audio device debug; use Audio...).
         juce::Label countInStatusLabel_;
 
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
@@ -986,6 +1088,7 @@ private:
         juce::TextButton loadProjectButton{ "Load Project..." };
         juce::TextButton playPauseButton{ "Play" };
         juce::TextButton stopButton{ "Stop" };
+        juce::TextButton audioSettingsButton{ "Audio..." };
         juce::Label keyDiagLabel_;
 
         /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).

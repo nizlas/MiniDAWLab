@@ -1,9 +1,9 @@
 ; MiniDAWLab — Inno Setup 6. Compile from repository root, or via scripts\package-windows.ps1
 ;   "ISCC.exe" /DAppVersion=0.1.0 "installer\MiniDAWLab.iss"
-; Staged payload: dist\MiniDAWLab-{#AppVersion}\ (created by package-windows.ps1)
+; Staged payload: dist\DanielssonsAudioLab-{#AppVersion}\ (created by package-windows.ps1)
 ; Embeds: dist\vendor\vc_redist.x64.exe (official Microsoft x64 redistributable)
 
-#define AppName "MiniDAWLab"
+#define AppName "Danielssons Audio Lab"
 ; Default matches CMake project(); override: /DAppVersion=x.y.z
 #define AppVersion "0.1.0"
 
@@ -16,7 +16,7 @@ AppPublisher=MiniDAWLab
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=..\dist
-OutputBaseFilename=MiniDAWLab-{#AppVersion}-Setup
+OutputBaseFilename=DanielssonsAudioLab-{#AppVersion}-Setup
 Compression=lzma2/ultra
 SolidCompression=yes
 WizardStyle=modern
@@ -34,7 +34,7 @@ Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "A
 
 [Files]
 ; Release payload and docs (staged by package-windows.ps1)
-Source: "..\dist\MiniDAWLab-{#AppVersion}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "..\dist\DanielssonsAudioLab-{#AppVersion}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 ; Microsoft Visual C++ 2015-2022 Redistributable (x64) — run silently before first launch
 Source: "..\dist\vendor\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 

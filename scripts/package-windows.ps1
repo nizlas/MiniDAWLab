@@ -8,11 +8,11 @@
 .DESCRIPTION
   - Parses the project version from the top-level CMakeLists.txt (project(MiniDAWLab VERSION …)).
   - Optionally invokes scripts\build-windows.ps1 -Config Release (default: on).
-  - Copies MiniDAWLab.exe and optional docs into dist\MiniDAWLab-<version>\.
+  - Copies MiniDAWLab.exe and optional docs into dist\DanielssonsAudioLab-<version>\.
   - Ensures dist\vendor\vc_redist.x64.exe from https://aka.ms/vc14/vc_redist.x64.exe (one-time).
-  - Writes dist\MiniDAWLab-<version>.zip
+  - Writes dist\DanielssonsAudioLab-<version>.zip
   - If ISCC is found, runs: ISCC /DAppVersion=<version> installer\MiniDAWLab.iss
-    Output: dist\MiniDAWLab-<version>-Setup.exe (see installer\MiniDAWLab.iss)
+    Output: dist\DanielssonsAudioLab-<version>-Setup.exe (see installer\MiniDAWLab.iss)
 #>
 param(
     [Parameter(Mandatory = $false)]
@@ -22,6 +22,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# User-facing app name is "Danielssons Audio Lab" (Main.cpp / installer AppName). Bundle/zip/setup
+# filenames use an ASCII token; executable and CMake target remain MiniDAWLab.
+$packageBundleName = 'DanielssonsAudioLab'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $cmakeLists = Join-Path $repoRoot 'CMakeLists.txt'
@@ -43,8 +47,8 @@ $vendorDir = Join-Path $distRoot 'vendor'
 $vcUrl = 'https://aka.ms/vc14/vc_redist.x64.exe'
 $vcName = 'vc_redist.x64.exe'
 $vcPath = Join-Path $vendorDir $vcName
-$stageDir = Join-Path $distRoot "MiniDAWLab-$Version"
-$zipPath = Join-Path $distRoot "MiniDAWLab-$Version.zip"
+$stageDir = Join-Path $distRoot "$packageBundleName-$Version"
+$zipPath = Join-Path $distRoot "$packageBundleName-$Version.zip"
 
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot 'build-windows.ps1') -Config Release
@@ -98,7 +102,7 @@ foreach ($f in $readmes) {
 
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-# includeBaseDirectory: true → one top-level folder in the zip (matches dist\MiniDAWLab-<ver>\)
+# includeBaseDirectory: true → one top-level folder in the zip (matches dist\DanielssonsAudioLab-<ver>\)
 [IO.Compression.ZipFile]::CreateFromDirectory($stageDir, $zipPath, [IO.Compression.CompressionLevel]::Optimal, $true)
 Write-Host "Wrote: $zipPath" -ForegroundColor Green
 
@@ -133,7 +137,7 @@ if ($iscc) {
     if ($p.ExitCode -ne 0) {
         Write-Error "ISCC failed with exit code $($p.ExitCode)."
     }
-    $setup = Join-Path $distRoot "MiniDAWLab-$Version-Setup.exe"
+    $setup = Join-Path $distRoot "$packageBundleName-$Version-Setup.exe"
     if (Test-Path -LiteralPath $setup) {
         Write-Host "Wrote: $setup" -ForegroundColor Green
     } else {

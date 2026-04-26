@@ -7,15 +7,51 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-27 — Windows packaging artifacts: `DanielssonsAudioLab-*` (exe/target unchanged)
+
+**Scope:** [package-windows.ps1](scripts/package-windows.ps1), [MiniDAWLab.iss](installer/MiniDAWLab.iss), docs — no `src/**`, no CMake target rename, **`MiniDAWLab.exe`** and installer payload unchanged.
+
+**Names:** Staged folder, zip, and Inno **`OutputBaseFilename`** use the ASCII token **`DanielssonsAudioLab-<version>`** (e.g. `dist\DanielssonsAudioLab-0.1.0.zip`, `dist\DanielssonsAudioLab-0.1.0-Setup.exe`). **Visible** installer strings remain **Danielssons Audio Lab** (`AppName`, shortcuts). The installed binary is still **`{app}\MiniDAWLab.exe`**.
+
+**Prior:** Artifacts were named `MiniDAWLab-<version>.*`; the Inno `[Files]` `Source` path must stay aligned with the staging directory created by the packaging script.
+
+---
+
+## 2026-04-26 — Add clip: copy imports into `<ProjectFolder>/Audio/` (copy-only, no migration)
+
+**Scope:** [io/ProjectAudioImport](src/io/ProjectAudioImport.cpp) + [Main.cpp](src/Main.cpp) add-clip path + [CMake](CMakeLists.txt) — **not** `Session`, `SessionSnapshot`, `PlacedClip`, `AudioFileLoader`, `ProjectFile` schema, `RecorderService`, `PlaybackEngine`, `Transport`, recording/count-in, audio device settings, or packaging.
+
+**Trigger:** **Add clip…** (external file chooser) only. **Unsaved** project: alert *"Save the project before importing audio."* and **no** clip, **no** chooser result processed as import.
+
+**Policy:** If the pick is **already in** `Audio/`, use that path (no second copy). Otherwise **copy** into `Audio/` with a unique name: `name.ext`, `name_1.ext`, `name_2.ext`, … (legal stem; empty stem → `clip`). The clip’s material references the path under `Audio/`. **Copy-only:** the original file elsewhere on disk is **not** deleted, moved, or modified.
+
+**Legacy:** Project files that still reference **external** `sourcePath` values **load as before**; no automatic “collect media” or relink pass.
+
+---
+
+## 2026-04-26 — Audio Settings dialog: `AudioDeviceSelectorComponent` + per-user XML persistence (Stage 2)
+
+**Scope:** [Main.cpp](src/Main.cpp) composition root, [AudioDeviceInfo](src/audio/AudioDeviceInfo.h) persistence helpers, [CMake](CMakeLists.txt) link to `juce_audio_utils` only — no `RecorderService`, `PlaybackEngine` render path, `Session` / `SessionSnapshot`, `ProjectFile`, `Transport`, count-in, packaging, or project load/save.
+
+**UI:** A transport-row **"Audio…"** button opens a modal **`juce::DialogWindow` + `juce::AudioDeviceSelectorComponent`** (no custom selector). **MIDI** UI off (`false`, `false`). Input channel range **0..2**, output **2..2**; `showChannelsAsStereoPairs` **false**. **ASIO** / `JUCE_ASIO` not enabled in this slice (WASAPI/DirectSound only unless the user’s JUCE build already lists ASIO).
+
+**Behaviour:** The dialog is **blocked** while `RecorderService::isRecording()` or count-in is active, with: *"Audio settings cannot be changed while recording or count-in is active."* If transport is **Playing**, it is set to **Stopped** before the dialog so device teardown does not fight playback. The live status line still comes from [describeActiveAudioDeviceOneLine](src/audio/AudioDeviceInfo.cpp) and **updates** on `AudioDeviceManager` `ChangeBroadcaster`.
+
+**Persistence:** On every device broadcast, [trySaveAudioDeviceState](src/audio/AudioDeviceInfo.cpp) calls **`createStateXml()`**; if null, no-op; write failures are **log-only** (status label still refreshes). File: **`%APPDATA%\MiniDAWLab\audio-device.xml`**. On startup, **`initialise(1, 2, savedXml, true)`**; existing **output-only** fallback if init fails, unchanged in spirit from Stage 1.
+
+**Recording path:** Mono capture from **`inputChannelData[0]`** in [PlaybackEngine](src/engine/PlaybackEngine.cpp) is **unchanged**; the selector only chooses *which* device and which channels the host exposes.
+
+---
+
 ## 2026-04-26 — Windows shipping: zip + Inno Setup, bundled VC++ x64 redist, no file association (this slice)
 
 **Scope:** packaging scripts, Inno script, and docs only — no runtime/audio/project code changes, no static CRT / CMake switch in this step.
 
-**Distribution:** `scripts\package-windows.ps1` stages **`dist\MiniDAWLab-<version>\`**, copies the **Release** `MiniDAWLab.exe` plus `README.md` / `PROJECT_BRIEF.md` when present, parses the version from **`CMakeLists.txt`**, and writes **`dist\MiniDAWLab-<version>.zip`**. The **Microsoft Visual C++ 2015-2022 Redistributable (x64)** is downloaded **once** to **`dist\vendor\vc_redist.x64.exe`** (official `https://aka.ms/vc14/vc_redist.x64.exe`) and **embedded** in the Windows installer (no [Inno Download Plugin](https://mitrichsoftware.wordpress.com/2019/11/10/inno-download-plugin/), no per-install download).
+**Distribution:** `scripts\package-windows.ps1` stages **`dist\DanielssonsAudioLab-<version>\`**, copies the **Release** `MiniDAWLab.exe` plus `README.md` / `PROJECT_BRIEF.md` when present, parses the version from **`CMakeLists.txt`**, and writes **`dist\DanielssonsAudioLab-<version>.zip`**. The **Microsoft Visual C++ 2015-2022 Redistributable (x64)** is downloaded **once** to **`dist\vendor\vc_redist.x64.exe`** (official `https://aka.ms/vc14/vc_redist.x64.exe`) and **embedded** in the Windows installer (no [Inno Download Plugin](https://mitrichsoftware.wordpress.com/2019/11/10/inno-download-plugin/), no per-install download).
 
 **Installer:** **`installer\MiniDAWLab.iss`** (Inno Setup 6) — Start Menu shortcut always, **optional** desktop icon via a standard **Tasks/Icons** checkbox; run **`vc_redist.x64.exe /install /quiet /norestart`** during setup; small optional “launch when finished” **Run** entry. **No** `.dalproj` / project-file association in this slice (can be added later with explicit product decision).
 
-**Automation:** If **`ISCC.exe`** is on `PATH` or in the default “Inno Setup 6” install path, the packaging script runs the compiler and emits **`dist\MiniDAWLab-<version>-Setup.exe`**. Otherwise the zip and staged tree are still produced; the user compiles the `.iss` manually (see `installer\README.md`).
+**Automation:** If **`ISCC.exe`** is on `PATH` or in the default “Inno Setup 6” install path, the packaging script runs the compiler and emits **`dist\DanielssonsAudioLab-<version>-Setup.exe`**. Otherwise the zip and staged tree are still produced; the user compiles the `.iss` manually (see `installer\README.md`).
 
 ---
 

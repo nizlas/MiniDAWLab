@@ -25,6 +25,7 @@ juce_generate_juce_header(MiniDAWLab)
 target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_sources(MiniDAWLab PRIVATE
+    src/audio/AudioDeviceInfo.cpp
     src/Main.cpp
     src/transport/Transport.cpp
     src/domain/AudioClip.cpp
@@ -33,6 +34,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/Session.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
+    src/io/ProjectAudioImport.cpp
     src/io/ProjectFile.cpp
     src/engine/CountInClickOutput.cpp
     src/engine/PlaybackEngine.cpp
@@ -56,6 +58,7 @@ target_compile_definitions(MiniDAWLab
 target_link_libraries(MiniDAWLab
     PRIVATE
         juce::juce_audio_devices
+        juce::juce_audio_utils
         juce::juce_audio_formats
         juce::juce_gui_extra
         juce::juce_recommended_config_flags
