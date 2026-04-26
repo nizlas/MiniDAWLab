@@ -28,6 +28,11 @@
 #include <memory>
 #include <vector>
 
+namespace juce
+{
+    class AudioDeviceManager;
+} // namespace juce
+
 class ClipWaveformView;
 class TrackHeaderView;
 class Session;
@@ -46,9 +51,13 @@ public:
 
     ~TrackLanesView() override;
 
-    // [Message thread] `session` / `transport` / `timelineViewport` outlive this view. Rebuilds
-    // child lanes in `resized` to match the current `SessionSnapshot` track list.
-    TrackLanesView(Session& session, Transport& transport, TimelineViewportModel& timelineViewport);
+    // [Message thread] `session` / `transport` / `timelineViewport` / `deviceManager` outlive this
+    // view. Rebuilds child lanes in `resized` to match the current `SessionSnapshot` track list.
+    TrackLanesView(
+        Session& session,
+        Transport& transport,
+        TimelineViewportModel& timelineViewport,
+        juce::AudioDeviceManager& deviceManager);
 
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
@@ -82,6 +91,7 @@ private:
     Session& session_;
     Transport& transport_;
     TimelineViewportModel& timelineViewport_;
+    juce::AudioDeviceManager& deviceManager_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
 

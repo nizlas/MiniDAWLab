@@ -12,17 +12,28 @@
 #include "domain/Track.h"
 #include "transport/Transport.h"
 
+#include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_core/juce_core.h>
 
-#include <limits>
+#include <cmath>
 #include <memory>
 #include <utility>
 #include <vector>
 
-TrackLanesView::TrackLanesView(Session& session, Transport& transport, TimelineViewportModel& timelineViewport)
+namespace
+{
+    constexpr double kSppMin = 0.1;
+} // namespace
+
+TrackLanesView::TrackLanesView(
+    Session& session,
+    Transport& transport,
+    TimelineViewportModel& timelineViewport,
+    juce::AudioDeviceManager& deviceManager)
     : session_(session)
     , transport_(transport)
     , timelineViewport_(timelineViewport)
+    , deviceManager_(deviceManager)
 {
     syncTracksFromSession();
 }
@@ -169,6 +180,11 @@ void TrackLanesView::resized()
         lanes_[(size_t)i]->setBounds(row);
         y += hh;
     }
+    const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+    if (tw > 0)
+    {
+        timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
+    }
 }
 
 void TrackLanesView::beginHeaderTrackDrag(const TrackId movedId, TrackHeaderView& sourceView)
@@ -301,7 +317,13 @@ void TrackLanesView::endHeaderTrackDrag(const TrackId movedId)
     if (commit)
     {
         session_.moveTrack(movedId, headerTrackDragDestIndex_);
-        timelineViewport_.clampToExtent(session_.getArrangementExtentSamples());
+        {
+            const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+            if (tw > 0)
+            {
+                timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
+            }
+        }
         syncTracksFromSession();
     }
 
@@ -374,7 +396,6 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
 void TrackLanesView::mouseWheelMove(
     const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
-    juce::ignoreUnused(e);
     for (const auto& lane : lanes_)
     {
         if (lane != nullptr && lane->isTimelineEditGestureInProgress())
@@ -387,23 +408,49 @@ void TrackLanesView::mouseWheelMove(
     {
         return;
     }
-    const std::int64_t vlen = timelineViewport_.getVisibleLengthSamples();
-    if (vlen <= 0)
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
     {
         return;
     }
-    const std::int64_t step = juce::jmax(
-        std::int64_t{1},
-        juce::jlimit(
-            std::int64_t{0},
-            static_cast<std::int64_t>(std::numeric_limits<int>::max()),
-            vlen / 8));
     const double d = (wheel.isReversed ? -wheel.deltaY : wheel.deltaY);
     if (d == 0.0)
     {
         return;
     }
-    const std::int64_t panDelta = (d > 0.0) ? step : -step;
-    timelineViewport_.panBySamples(panDelta, arr);
+    if (e.mods.isCtrlDown())
+    {
+        if (e.position.x < (float)kTrackHeaderWidth)
+        {
+            return;
+        }
+        const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+        if (tw <= 0)
+        {
+            return;
+        }
+        const double w = (double)tw;
+        const double x = (double)e.position.x - (double)kTrackHeaderWidth;
+        const double factor = std::pow(0.85, d);
+        const double sppMax
+            = juce::jmax(1.0, (double)juce::jmax(std::int64_t{1}, arr) / w);
+        timelineViewport_.zoomAroundSample(factor, x, w, arr, kSppMin, sppMax);
+        repaint();
+        return;
+    }
+    const int twPan = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+    if (twPan <= 0)
+    {
+        return;
+    }
+    const double wPan = (double)twPan;
+    const double panNotchPx = juce::jmax(1.0, wPan / 8.0);
+    const std::int64_t step = (d > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
+                                       : -((std::int64_t)std::llround(panNotchPx * spp));
+    if (step == 0)
+    {
+        return;
+    }
+    timelineViewport_.panBySamples(step, wPan, arr);
     repaint();
 }

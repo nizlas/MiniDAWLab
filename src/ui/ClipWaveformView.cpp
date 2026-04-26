@@ -30,6 +30,7 @@
 #include "ui/ClipWaveformView.h"
 
 #include "ui/ForbiddenCursor.h"
+#include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "domain/AudioClip.h"
 #include "domain/SessionSnapshot.h"
@@ -88,35 +89,34 @@ namespace
         return juce::jmax(visLen, spanToMat);
     }
 
+    // Delegates to `TimelineRulerView` so lane + ruler share one mapping (samples-per-pixel, or
+    // `spanSamples` for trim extended span).
     [[nodiscard]] float sessionSampleToLocalX(
         const std::int64_t s,
         const juce::Rectangle<float>& b,
         const std::int64_t visStart,
         const std::int64_t mapSpan) noexcept
     {
-        if (mapSpan <= 0)
-        {
-            return b.getX();
-        }
-        return static_cast<float>(
-            b.getX()
-            + (double)(s - visStart) * (double)b.getWidth() / (double)mapSpan);
+        return TimelineRulerView::sessionSampleToLocalXForSpan(s, b, visStart, mapSpan);
     }
 
-    // Same **column** budget rule as `rebuildPeaksIfNeeded` for a given **visible** material length.
+    // Same **column** budget as `rebuildPeaksIfNeeded`: material span in **pixels** = lane width
+    // times the fraction of the **current visible window** (in samples) that `visibleMaterialSamples`
+    // would occupy. Use `getVisibleLengthSamples` for the denominator — **not** full arrangement
+    // length — or trim preview gets far too many narrow columns.
     [[nodiscard]] int peakColumnCountForVisibleLength(
         const float viewWidthPx,
         const int visibleMaterialSamples,
-        const std::int64_t sessionTimelineEndExcl) noexcept
+        const std::int64_t visibleWindowSamples) noexcept
     {
         if (viewWidthPx <= 0.0f || visibleMaterialSamples <= 0)
         {
             return 1;
         }
-        const std::int64_t tEx = juce::jmax(std::int64_t{1}, sessionTimelineEndExcl);
+        const std::int64_t vW = juce::jmax(std::int64_t{1}, visibleWindowSamples);
         const float spanPx
             = viewWidthPx
-              * (float)(static_cast<double>(visibleMaterialSamples) / static_cast<double>(tEx));
+              * (float)(static_cast<double>(visibleMaterialSamples) / static_cast<double>(vW));
         return juce::jmax(1, juce::jmin(kMaxPeakColumnsPerClip, (int)std::ceil((double)spanPx)));
     }
 
@@ -136,7 +136,7 @@ namespace
         const juce::Rectangle<float>& b,
         const juce::Rectangle<float>& eventTrackY,
         const std::int64_t visStart,
-        const std::int64_t visLen) noexcept
+        const double samplesPerPixel) noexcept
     {
         LanePixelHit r;
         if (snap == nullptr || tIdx < 0)
@@ -147,11 +147,10 @@ namespace
         {
             return r;
         }
-        if (visLen <= 0)
+        if (samplesPerPixel <= 0.0)
         {
             return r;
         }
-        const std::int64_t mapW = juce::jmax(std::int64_t{1}, visLen);
         const Track& tr = snap->getTrack(tIdx);
         const int n = tr.getNumPlacedClips();
         for (int i = 0; i < n; ++i)
@@ -163,8 +162,10 @@ namespace
             {
                 continue;
             }
-            const float ex0 = sessionSampleToLocalX(a0, b, visStart, mapW);
-            const float ex1 = sessionSampleToLocalX(a1, b, visStart, mapW);
+            const float ex0
+                = TimelineRulerView::sessionSampleToLocalX(a0, b.getX(), visStart, samplesPerPixel);
+            const float ex1
+                = TimelineRulerView::sessionSampleToLocalX(a1, b.getX(), visStart, samplesPerPixel);
             const float x0 = juce::jmin(ex0, ex1);
             const float x1 = juce::jmax(ex0, ex1);
             if (x1 - x0 < 0.5f)
@@ -217,8 +218,10 @@ namespace
             {
                 continue;
             }
-            const float ex0 = sessionSampleToLocalX(a0, b, visStart, mapW);
-            const float ex1 = sessionSampleToLocalX(a1, b, visStart, mapW);
+            const float ex0
+                = TimelineRulerView::sessionSampleToLocalX(a0, b.getX(), visStart, samplesPerPixel);
+            const float ex1
+                = TimelineRulerView::sessionSampleToLocalX(a1, b.getX(), visStart, samplesPerPixel);
             const float x0 = juce::jmin(ex0, ex1);
             const float x1 = juce::jmax(ex0, ex1);
             juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
@@ -508,17 +511,21 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         return;
     }
     const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
-
+    const double spp = timelineViewport_.getSamplesPerPixel();
     const juce::Rectangle<float> b = getLocalBounds().toFloat();
     if (b.getWidth() <= 0.0f)
     {
         return;
     }
+    if (spp <= 0.0)
+    {
+        return;
+    }
+    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples((double)b.getWidth());
 
     const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, kEventVerticalMargin);
     const LanePixelHit ph
-        = hitPlacedInLaneAtPixels(snap, tIdx, e.position, b, eventTrackY, visStart, visLen);
+        = hitPlacedInLaneAtPixels(snap, tIdx, e.position, b, eventTrackY, visStart, spp);
     if (ph.kind == LanePixelHitKind::TrimHandle)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
@@ -584,12 +591,13 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
             return;
         }
         const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
-        const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
         const juce::Rectangle<float> b = getLocalBounds().toFloat();
         if (b.getWidth() <= 0.0f)
         {
             return;
         }
+        const std::int64_t visLen
+            = timelineViewport_.getVisibleLengthSamples((double)b.getWidth());
         const std::int64_t mapLen = trimViewMappingSpan(
             visStart, visLen, trimStartSample_, trimMaterialNumSamples_);
         const double mapLenD = (double)juce::jmax(std::int64_t{1}, mapLen);
@@ -617,9 +625,13 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
     {
         return;
     }
-    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
     const juce::Rectangle<float> b = getLocalBounds().toFloat();
     if (b.getWidth() <= 0.0f)
+    {
+        return;
+    }
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
     {
         return;
     }
@@ -628,8 +640,7 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
     {
         dragMovementBeyondThreshold_ = true;
     }
-    const double deltaS = (static_cast<double>(dx) * static_cast<double>(visLen))
-                          / static_cast<double>(b.getWidth());
+    const double deltaS = (double)dx * spp;
     tentativeStartOnTimeline_ = juce::jmax(
         static_cast<std::int64_t>(0), clickDownStartSample_ + static_cast<std::int64_t>(std::llround(deltaS)));
 
@@ -698,7 +709,10 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
         if (trimPlacedId_.has_value() && trimPreviewVisibleLen_ != trimClickDownVisibleLen_)
         {
             session_.setClipRightEdgeVisibleLength(*trimPlacedId_, trimPreviewVisibleLen_);
-            timelineViewport_.clampToExtent(session_.getArrangementExtentSamples());
+            {
+                const double tw = (double)juce::jmax(1, getWidth());
+                timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
+            }
         }
         trimPlacedId_.reset();
         pointerLaneMode_ = PointerLaneMode::None;
@@ -715,7 +729,10 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
         if (!canCrossLane)
         {
             session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
-            timelineViewport_.clampToExtent(session_.getArrangementExtentSamples());
+            {
+                const double tw = (double)juce::jmax(1, getWidth());
+                timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
+            }
         }
         else
         {
@@ -728,13 +745,19 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
             else if (lane == this)
             {
                 session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
-                timelineViewport_.clampToExtent(session_.getArrangementExtentSamples());
+                {
+                    const double tw = (double)juce::jmax(1, getWidth());
+                    timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
+                }
             }
             else
             {
                 session_.moveClipToTrack(
                     *mouseDownPlacedId_, tentativeStartOnTimeline_, lane->getTrackId());
-                timelineViewport_.clampToExtent(session_.getArrangementExtentSamples());
+                {
+                    const double tw = (double)juce::jmax(1, getWidth());
+                    timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
+                }
             }
         }
     }
@@ -786,7 +809,8 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     const int w = juce::jmax(1, getWidth());
     const std::int64_t vStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t vLen = timelineViewport_.getVisibleLengthSamples();
+    const std::int64_t vLen
+        = timelineViewport_.getVisibleLengthSamples((double)w);
 
     if (snap.get() == lastSnapshotKey_ && w == lastWidth_ && vStart == lastVisibleStartForPeaks_
         && vLen == lastVisibleLengthForPeaks_)
@@ -884,7 +908,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         // column count so we do not build thousands of columns for a one-pixel sliver. Uses
         // `TimelineViewportModel`, not the derived length alone, so trim does not change scale.
         const std::int64_t visSpan
-            = juce::jmax(std::int64_t{1}, timelineViewport_.getVisibleLengthSamples());
+            = juce::jmax(std::int64_t{1}, timelineViewport_.getVisibleLengthSamples((double)w));
         const float spanPx = wfloat
                              * static_cast<float>(static_cast<double>(ns) / static_cast<double>(visSpan));
         const int colCount = juce::jmax(1, juce::jmin(kMaxPeakColumnsPerClip, (int)std::ceil((double)spanPx)));
@@ -1056,15 +1080,17 @@ void ClipWaveformView::paint(juce::Graphics& g)
         return;
     }
     const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
-    const double vlenD = (double)juce::jmax(std::int64_t{1}, visLen);
-
-    // --- (1) Shared mapping: session sample → x in this component (matches `TimelineRulerView`).
-    // ---
     const double wPx = (double)bounds.getWidth();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
+    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples(wPx);
+    // --- (1) Shared mapping: session sample → x (matches `TimelineRulerView` samples-per-pixel).
+    // ---
     const auto sessionSampleToX = [&](const std::int64_t s) {
-        return static_cast<float>(
-            bounds.getX() + wPx * ((double)(s - visStart) / vlenD));
+        return TimelineRulerView::sessionSampleToLocalX(s, bounds.getX(), visStart, spp);
     };
 
     const int numRows = (int)clipStrips_.size();
@@ -1072,7 +1098,6 @@ void ClipWaveformView::paint(juce::Graphics& g)
         = session_.loadSessionSnapshotForAudioThread();
     const int paintTrackIdx
         = (paintSnap != nullptr) ? paintSnap->findTrackIndexById(trackId_) : -1;
-    const std::int64_t endForPeakColumns = juce::jmax(std::int64_t{1}, arrLen);
     const float wfloatForPeaks = static_cast<float>(juce::jmax(1, getWidth()));
     // Vertical event stack: a bit of margin from the view edge; silent audio still has the same rect.
     const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
@@ -1127,14 +1152,24 @@ void ClipWaveformView::paint(juce::Graphics& g)
             = paintDragPreview ? tentativeStartOnTimeline_ : strip.startOnTimeline;
         // While trimming, map x using room up to the full **material** end so the handle can
         // extend the visible region in view. Denominator is the view span plus material extent.
-        const std::int64_t xMapLen
-            = rowTrim ? trimViewMappingSpan(
-                  visStart, visLen, trimStartSample_, trimMaterialNumSamples_)
-                      : visLen;
-        const std::int64_t mapW = juce::jmax(std::int64_t{1}, xMapLen);
-        const float ex0 = sessionSampleToLocalX(startForDraw, bounds, visStart, mapW);
-        const float ex1 = sessionSampleToLocalX(
-            startForDraw + static_cast<std::int64_t>(nsForDraw), bounds, visStart, mapW);
+        float ex0;
+        float ex1;
+        if (rowTrim)
+        {
+            const std::int64_t xMapLen
+                = trimViewMappingSpan(visStart, visLen, trimStartSample_, trimMaterialNumSamples_);
+            const std::int64_t mapW = juce::jmax(std::int64_t{1}, xMapLen);
+            ex0 = sessionSampleToLocalX(startForDraw, bounds, visStart, mapW);
+            ex1 = sessionSampleToLocalX(
+                startForDraw + static_cast<std::int64_t>(nsForDraw), bounds, visStart, mapW);
+        }
+        else
+        {
+            ex0 = TimelineRulerView::sessionSampleToLocalX(
+                startForDraw, bounds.getX(), visStart, spp);
+            ex1 = TimelineRulerView::sessionSampleToLocalX(
+                startForDraw + static_cast<std::int64_t>(nsForDraw), bounds.getX(), visStart, spp);
+        }
         const float x0 = juce::jmin(ex0, ex1);
         const float x1 = juce::jmax(ex0, ex1);
         juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
@@ -1179,7 +1214,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
                     if (numCh > 0)
                     {
                         const int colCount
-                            = peakColumnCountForVisibleLength(wfloatForPeaks, ns, endForPeakColumns);
+                            = peakColumnCountForVisibleLength(wfloatForPeaks, ns, visLen);
                         const float runW = inner.getWidth();
                         if (runW >= 0.5f)
                         {
@@ -1308,15 +1343,27 @@ void ClipWaveformView::paint(juce::Graphics& g)
               && stripR.clipId == *mouseDownPlacedId_;
         const std::int64_t startHatch
             = rowDragPreview ? tentativeStartOnTimeline_ : stripR.startOnTimeline;
-        const std::int64_t mapH
-            = rowTrimH
-                  ? trimViewMappingSpan(
-                        visStart, visLen, trimStartSample_, trimMaterialNumSamples_)
-                  : visLen;
-        const std::int64_t mapHW = juce::jmax(std::int64_t{1}, mapH);
-        const float rex0 = sessionSampleToLocalX(startHatch, bounds, visStart, mapHW);
-        const float rex1 = sessionSampleToLocalX(
-            startHatch + static_cast<std::int64_t>(juce::jmax(0, nsH)), bounds, visStart, mapHW);
+        float rex0;
+        float rex1;
+        if (rowTrimH)
+        {
+            const std::int64_t mapH = trimViewMappingSpan(
+                visStart, visLen, trimStartSample_, trimMaterialNumSamples_);
+            const std::int64_t mapHW = juce::jmax(std::int64_t{1}, mapH);
+            rex0 = sessionSampleToLocalX(startHatch, bounds, visStart, mapHW);
+            rex1 = sessionSampleToLocalX(
+                startHatch + static_cast<std::int64_t>(juce::jmax(0, nsH)), bounds, visStart, mapHW);
+        }
+        else
+        {
+            rex0
+                = TimelineRulerView::sessionSampleToLocalX(startHatch, bounds.getX(), visStart, spp);
+            rex1 = TimelineRulerView::sessionSampleToLocalX(
+                startHatch + static_cast<std::int64_t>(juce::jmax(0, nsH)),
+                bounds.getX(),
+                visStart,
+                spp);
+        }
         const float rxl = juce::jmin(rex0, rex1);
         const float rxr = juce::jmax(rex0, rex1);
         juce::Rectangle<float> rowEventRect{ rxl, eventTrackY.getY(), juce::jmax(1.0f, rxr - rxl),
@@ -1408,9 +1455,13 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
     }
     const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, kEventVerticalMargin);
     const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
     const LanePixelHit ph
-        = hitPlacedInLaneAtPixels(snap, tIdx, pos, b, eventTrackY, visStart, visLen);
+        = hitPlacedInLaneAtPixels(snap, tIdx, pos, b, eventTrackY, visStart, spp);
     if (ph.kind == LanePixelHitKind::TrimHandle)
     {
         hoverEventTrimCueId_ = ph.id;

@@ -60,6 +60,7 @@ public:
     ~TimelineRulerView() override;
 
     void paint(juce::Graphics& g) override;
+    void resized() override;
 
     // [Message thread] Map local x to session timeline sample and `requestSeek` (press + drag scrub).
     void mouseDown(const juce::MouseEvent& e) override;
@@ -68,18 +69,31 @@ public:
     void mouseWheelMove(
         const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
+    // [Message thread] Shared with `TrackLanesView` (timeline column) and `ClipWaveformView`: one
+    // **samples-per-pixel** contract for the visible window.
+    [[nodiscard]] static std::int64_t xToSessionSampleClamped(
+        float positionX,
+        float widthPx,
+        std::int64_t visibleStart,
+        double samplesPerPixel) noexcept;
+    /// `originX` + (s - visStart) / samplesPerPixel
+    [[nodiscard]] static float sessionSampleToLocalX(
+        std::int64_t s,
+        float originX,
+        std::int64_t visibleStart,
+        double samplesPerPixel) noexcept;
+    /// Map when a **span** of `spanSamples` (not the normal visible length) covers full width, e.g.
+    /// right-edge trim preview extended past the visible end.
+    [[nodiscard]] static float sessionSampleToLocalXForSpan(
+        std::int64_t s,
+        const juce::Rectangle<float>& b,
+        std::int64_t visibleStart,
+        std::int64_t spanSamples) noexcept;
+
 private:
     // [Message thread] Low-rate `repaint` so the ruler playhead matches the lane’s animated line
     // without a cached playhead value on the view.
     void timerCallback() override;
-
-    // [Message thread] Map local x to session sample: linear over width for
-    // [visibleStart, visibleStart+visibleLength). Clamps the result to [0, seekClampHi].
-    [[nodiscard]] static std::int64_t xToSessionSampleClamped(
-        const float positionX,
-        const float widthPx,
-        const std::int64_t visibleStart,
-        const std::int64_t visibleLength) noexcept;
 
     // [Message thread] Shared by mouse down/drag: map local x to sample and `requestSeek`.
     void applySeekForLocalX(float x) noexcept;

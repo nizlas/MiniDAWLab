@@ -23,7 +23,6 @@
 
 #include <cmath>
 #include <cstdint>
-#include <limits>
 
 namespace
 {
@@ -41,6 +40,9 @@ namespace
 
     // Ruler playhead: short vertical at the top so the hairline in the lane has a “handle” in time.
     constexpr float kPlayheadMarkerLengthPx = 7.0f;
+
+    // Minimum / maximum **samples per pixel** at zoom in/out.
+    constexpr double kSppMin = 0.1;
 } // namespace
 
 TimelineRulerView::TimelineRulerView(Session& session,
@@ -61,6 +63,15 @@ TimelineRulerView::~TimelineRulerView()
     stopTimer();
 }
 
+void TimelineRulerView::resized()
+{
+    const double w = (double)getWidth();
+    if (w > 0.0)
+    {
+        timelineViewport_.clampToExtent(w, session_.getArrangementExtentSamples());
+    }
+}
+
 void TimelineRulerView::timerCallback()
 {
     repaint();
@@ -70,17 +81,42 @@ std::int64_t TimelineRulerView::xToSessionSampleClamped(
     const float positionX,
     const float widthPx,
     const std::int64_t visibleStart,
-    const std::int64_t visibleLength) noexcept
+    const double samplesPerPixel) noexcept
 {
-    if (widthPx <= 0.0f || visibleLength <= 0)
+    if (widthPx <= 0.0f || samplesPerPixel <= 0.0 || !std::isfinite(samplesPerPixel))
     {
         return visibleStart;
     }
-    const float t = juce::jlimit(0.0f, 1.0f, positionX / widthPx);
-    const std::int64_t vlm1 = juce::jmax(std::int64_t{0}, visibleLength - 1);
-    return visibleStart
-           + static_cast<std::int64_t>(std::llround(
-               (double)t * static_cast<double>(vlm1)));
+    const double xcl = juce::jlimit(0.0, (double)widthPx, (double)positionX);
+    return visibleStart + (std::int64_t)std::llround(xcl * samplesPerPixel);
+}
+
+float TimelineRulerView::sessionSampleToLocalX(
+    const std::int64_t s,
+    const float originX,
+    const std::int64_t visibleStart,
+    const double samplesPerPixel) noexcept
+{
+    if (samplesPerPixel <= 0.0 || !std::isfinite(samplesPerPixel))
+    {
+        return originX;
+    }
+    return originX
+           + (float)(((double)(s - visibleStart)) / (double)samplesPerPixel);
+}
+
+float TimelineRulerView::sessionSampleToLocalXForSpan(
+    const std::int64_t s,
+    const juce::Rectangle<float>& b,
+    const std::int64_t visibleStart,
+    const std::int64_t spanSamples) noexcept
+{
+    if (spanSamples <= 0)
+    {
+        return b.getX();
+    }
+    return b.getX()
+           + (float)(((double)(s - visibleStart) * (double)b.getWidth()) / (double)spanSamples);
 }
 
 void TimelineRulerView::applySeekForLocalX(const float x) noexcept
@@ -96,8 +132,12 @@ void TimelineRulerView::applySeekForLocalX(const float x) noexcept
         return;
     }
     const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
-    const std::int64_t s = xToSessionSampleClamped(x, w, visStart, visLen);
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
+    const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
     const std::int64_t seekTarget
         = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
     transport_.requestSeek(seekTarget);
@@ -142,13 +182,17 @@ void TimelineRulerView::paint(juce::Graphics& g)
     {
         return;
     }
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
     const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples();
     const double wPx = (double)bounds.getWidth();
-    const double visD = (double)juce::jmax(std::int64_t{1}, visLen);
-    // **Same** linear map as `ClipWaveformView::paint` for ticks + playhead: sample s → x.
+    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples(wPx);
+    // **Same** samples-per-pixel map as `ClipWaveformView::paint` for ticks + playhead: sample s → x.
     const auto sessionSampleToX = [&](const std::int64_t s) {
-        return (float)(bounds.getX() + wPx * ((double)(s - visStart) / visD));
+        return sessionSampleToLocalX(s, bounds.getX(), visStart, spp);
     };
 
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
@@ -156,17 +200,15 @@ void TimelineRulerView::paint(juce::Graphics& g)
 
     if (sampleRate > 0.0)
     {
-        // --- Ticks: round **seconds** only; step widens when the same 1s grid would pack tighter
-        //     than `kMinTickSpacingPx`. Product: a readable rhythm of marks, not a label strip.
-        const double spanSec = (double)arrLen / sampleRate;
-        if (spanSec > 0.0)
+        // --- Ticks: seconds step chosen by on-screen **pixels per second** = sampleRate / spp
+        //     (stable across window resize; only the count of on-screen tick marks changes).
+        const double pxPerSec = sampleRate / spp;
+        if (pxPerSec > 0.0)
         {
-            // First candidate whose tick spacing in pixels meets the minimum; if even 1s is too
-            // dense, fall through to coarser steps until one fits.
             int stepSec = kStepCandidatesSec[kNumStepCandidates - 1];
             for (int candidate : kStepCandidatesSec)
             {
-                const double spacingPx = ((double)candidate * wPx) / spanSec;
+                const double spacingPx = (double)candidate * pxPerSec;
                 if (spacingPx >= (double)kMinTickSpacingPx)
                 {
                     stepSec = candidate;
@@ -227,30 +269,43 @@ void TimelineRulerView::paint(juce::Graphics& g)
 void TimelineRulerView::mouseWheelMove(
     const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
-    juce::ignoreUnused(e);
     const std::int64_t arr = session_.getArrangementExtentSamples();
     if (arr <= 0)
     {
         return;
     }
-    const std::int64_t vlen = timelineViewport_.getVisibleLengthSamples();
-    if (vlen <= 0)
+    const double w = (double)getWidth();
+    if (w <= 0.0)
     {
         return;
     }
-    const std::int64_t step = juce::jmax(
-        std::int64_t{1},
-        juce::jlimit(
-            std::int64_t{0},
-            static_cast<std::int64_t>(std::numeric_limits<int>::max()),
-            vlen / 8));
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
     const double d = (wheel.isReversed ? -wheel.deltaY : wheel.deltaY);
     if (d == 0.0)
     {
         return;
     }
-    // Positive `d` = wheel away (typical) → pan right; negative → pan left.
-    const std::int64_t panDelta = (d > 0.0) ? step : -step;
-    timelineViewport_.panBySamples(panDelta, arr);
+    if (e.mods.isCtrlDown())
+    {
+        const double x = (double)e.position.x;
+        const double factor = std::pow(0.85, d);
+        const double sppMax = juce::jmax(1.0, (double)juce::jmax(std::int64_t{1}, arr) / w);
+        timelineViewport_.zoomAroundSample(
+            factor, x, w, arr, kSppMin, sppMax);
+        repaint();
+        return;
+    }
+    const double panNotchPx = juce::jmax(1.0, w / 8.0);
+    const std::int64_t step = (d > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
+                                       : -((std::int64_t)std::llround(panNotchPx * spp));
+    if (step == 0)
+    {
+        return;
+    }
+    timelineViewport_.panBySamples(step, w, arr);
     repaint();
 }

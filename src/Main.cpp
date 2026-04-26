@@ -122,7 +122,7 @@ private:
             , deviceManager(deviceManagerIn)
             , timelineViewport_()
             , rulerView(sessionIn, transportIn, deviceManagerIn, timelineViewport_)
-            , trackLanesView(sessionIn, transportIn, timelineViewport_)
+            , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn)
         {
             timelineViewport_.setOnVisibleRangeChanged([this] {
                 rulerView.repaint();
@@ -179,8 +179,8 @@ private:
         }
 
     private:
-        // [Message thread] Seed default arrangement + visible length once sample rate is known;
-        // clamp the pan window to the current arrangement extent.
+        // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
+        // clamp the pan window to the current arrangement extent (when ruler width is known).
         void syncViewportFromSession()
         {
             juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
@@ -193,13 +193,21 @@ private:
                         && session.getContentEndSamples() == 0)
                     {
                         session.setArrangementExtentSamples(
-                            (std::int64_t)std::llround(60.0 * sr));
+                            (std::int64_t)std::llround(3600.0 * sr));
                     }
-                    timelineViewport_.setVisibleLengthIfUnset(
-                        (std::int64_t)std::llround(30.0 * sr));
+                    // Default: 10 pixels per second of session time; visible **length in samples** is
+                    // derived as `round(rulerWidthPx * (sr/10))` and grows/shrinks with window width.
+                    constexpr double kDefaultPixelsPerSecond = 10.0;
+                    timelineViewport_.setSamplesPerPixelIfUnset(sr / kDefaultPixelsPerSecond);
                 }
             }
-            timelineViewport_.clampToExtent(session.getArrangementExtentSamples());
+            {
+                const double rw = (double)rulerView.getWidth();
+                if (rw > 0.0)
+                {
+                    timelineViewport_.clampToExtent(rw, session.getArrangementExtentSamples());
+                }
+            }
         }
 
         // [Message thread] Presents a native file dialog; on success, new clip is placed on the
@@ -404,8 +412,8 @@ private:
 
         juce::TextButton addClipButton{ "Add clip..." };
         juce::TextButton addTrackButton{ "Add track" };
-        juce::TextButton saveProjectButton{ "Save project…" };
-        juce::TextButton loadProjectButton{ "Load project…" };
+        juce::TextButton saveProjectButton{ "Save Project..." };
+        juce::TextButton loadProjectButton{ "Load Project..." };
         juce::TextButton playButton{ "Play" };
         juce::TextButton pauseButton{ "Pause" };
         juce::TextButton stopButton{ "Stop" };

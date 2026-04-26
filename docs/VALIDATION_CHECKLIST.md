@@ -227,23 +227,23 @@ When validating **right-edge trim** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.
 
 When validating the **visible span** / `TimelineViewportModel` step (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
 
-- **Stability after trim (inward):** the ruler + lane do **not** rescale; only the event’s right edge moves. Empty space to the right of the last audible sample may appear when `visibleEnd` is larger than the new derived end.
-- **Extend trim outward:** the interaction stays consistent with the same x–sample scale as before the trim (no “world jump” on commit). Seek/playhead, move, and trim preview use the same `visibleEnd` in both `TimelineRulerView` and `ClipWaveformView`.
-- **Seek:** the ruler maps x across the full width to [0, `visibleEnd`); the value passed to `Transport::requestSeek` is clamped to the **derived** session end, so clicks in the empty tail cannot seek past playable material.
-- **Growth:** add clip, add track, a move that extends the derived end, or project load with a **longer** session can increase `visibleEnd`; a load that is **shorter** than the current `visibleEnd` does not shrink the span (no automatic visual rescale down).
-- **Not in session:** `TimelineViewportModel` is not in `.mdlproj` and is not on the audio path.
+- **Scale vs span:** the model stores **`samplesPerPixel`**; **visible length in samples** = `getVisibleLengthSamples(widthPx)` = `round(widthPx * samplesPerPixel)` and is not stored. **Resize** with fixed zoom: events keep the same horizontal scale (wider window ⇒ more time visible, not fatter events).
+- **Stability after trim (inward):** the ruler + lane do **not** change `samplesPerPixel` on session edits; only the event’s right edge moves. The derived visible span can still extend past the last clip; empty tail is normal.
+- **Extend trim outward:** same `samplesPerPixel` before and after the commit. Trim preview that extends the mapping span still uses `sessionSampleToLocalXForSpan` when needed.
+- **Only** `setSamplesPerPixelIfUnset` and **`zoomAroundSample`** change the zoom state after the one-time seed. **Pan** only changes `visibleStart`. **Not in session:** `TimelineViewportModel` is not in `.mdlproj` and is not on the audio path.
 
 ## Phase 3 late extension: arrangement extent + pannable viewport (v3)
 
-When validating **arrangement extent**, **pan**, and **v3** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
+When validating **arrangement extent**, **pan**, **zoom**, and **v3** (`docs/PHASE_PLAN.md`, `status/DECISION_LOG.md`):
 
-- **Separates:** `getContentEndSamples()` = clip-derived end; `getArrangementExtentSamples()` = navigable/ playable; viewport = `visibleStart` + `visibleLength` (UI only, not in file).
+- **Separates:** `getContentEndSamples()` = clip-derived end; `getArrangementExtentSamples()` = navigable/ playable; viewport = `visibleStart` + **derived** visible length from `widthPx` and `getSamplesPerPixel()` (UI only, not in file).
 - **Trim / move:** `arrangementExtentSamples_` in the snapshot is **unchanged** on trim, move, or track reorder; no extent reset in any factory.
 - **Playback:** in a gap or past the last clip (but before extent), the engine outputs **silence**; playhead advances; stops at `getArrangementExtentSamples()`.
-- **Seek / ruler** maps x across the lane to `[visibleStart, visibleStart+visibleLength)`; `requestSeek` is clamped to **arrangement** extent, so empty tail to extent is seekable.
-- **Default seed:** with no material and no stored extent, first `sync` after device rate is known extends arrangement to 60s and sets visible length to 30s; opening a v1/v2 project with clips does **not** apply the 60s path (stored 0, content>0, effective = content end only).
+- **Seek / ruler** maps with `s = visStart + round(x * samplesPerPixel)` (same as lanes’ timeline column, header subtracted). `requestSeek` is clamped to **arrangement** extent, so empty tail to extent is seekable.
+- **Default seed:** with no material and no stored extent, first `sync` after device rate is known extends arrangement to **1 hour (3600s)** in samples and seeds **`samplesPerPixel = sampleRate / 10`**. Opening a v1/v2 project with clips does **not** apply that empty-session path (stored 0, content>0, effective = content end from clips).
 - **Save / load v3** round-trips `arrangementExtentSamples`; v1/v2 still load; save yields v3.
-- **Wheel** on ruler and lane area pans; trim/move drag in progress blocks pan on `TrackLanesView`.
+- **Plain wheel** pan uses `round((width/8) * samplesPerPixel)` sample steps. **`Ctrl+wheel` zoom** is **mouse-centered** on **pixel** `x` in the timeline column; `spp` in `[0.1, max(1, ext/width)]`. Trim/move drag in progress blocks **all** wheel handling on `TrackLanesView` (no pan or zoom during gesture).
+- **Ruler and lanes** stay aligned: `TimelineRulerView` static mappers; one `TimelineViewportModel`; ruler width matches lane **timeline** width in `Main` layout. **Tick count** increases when widening the window; **tick step (seconds)** only changes when zooming.
 
 ## Phase 1 Validation Checklist
 

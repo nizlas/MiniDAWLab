@@ -488,3 +488,36 @@ Out of scope:
 - Left-edge trim, slip, fades, split, slip-on-timeline material offset inside the buffer.
 
 ---
+
+## Mouse-centered timeline zoom (Ctrl+wheel) and default extent
+
+Date: 2026-04-26
+
+Context:
+
+- Need a **real** default navigable span (user feels “two window widths” is too small) and **Cubase-like**
+  **Ctrl+wheel** zoom with the point under the pointer staying visually fixed.
+
+Decision:
+
+- **Default empty session (no material, no stored extent):** seed **arrangement extent** to **1 hour** of
+  samples and `setSamplesPerPixelIfUnset(sampleRate / 10)` in `Main` (default **10 px/s**; visible length
+  in samples = `round(widthPx * samplesPerPixel)` and grows with window width at fixed zoom).
+- **Correction (same date):** zoom state is **`samplesPerPixel_`**, not a stored visible length. Resize
+  changes how much time is on screen, not the scale. **`Ctrl+wheel`** calls
+  `zoomAroundSample(factor, pointerXPx, widthPx, ext, sppMin, sppMax)` with `sAtPointer = visStart
+  + round(xPx * spp)` and `visStart' = sAtPointer - round(xPx * spp')`; `spp` clamped to `[0.1,
+  max(1, ext/width)]`. **Plain wheel** pan uses `round((width/8) * samplesPerPixel)` sample steps.
+- **Mapping:** `TimelineRulerView::xToSessionSampleClamped` / `sessionSampleToLocalX` (shared with lanes):
+  `s = visStart + round(x * spp)`.
+
+Rationale:
+
+- Resizing no longer “shrinks the world” by forcing a constant sample count into a smaller pixel count;
+  **samplesPerPixel** is the only zoom state.
+
+Out of scope:
+
+- Key bindings other than `Ctrl+wheel`, vertical zoom, persisting the viewport, fit-to-content.
+
+---
