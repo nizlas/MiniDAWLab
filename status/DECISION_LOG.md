@@ -7,6 +7,34 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-26 — Phase 4 minimal mono recording (steering; implementation pending)
+
+**Scope:** steering/validation only in this log entry. No `RecorderService` or device re-init in code until implementation begins.
+
+**Transport ownership (approved):** The **root / main application composition** (typically **`MainComponent`** in this codebase, or the equivalent app root that hosts transport UI) **coordinates** numpad `*`, `Transport` (`requestPlaybackIntent`, playhead read), and the recording service. A **`RecorderService` (or equivalent) must not call `Transport` and must not own play/stop/seek policy.** Sequence when starting: **(1)** read playhead, **(2)** `beginRecording` on the message thread, **(3)** only if that succeeds, `requestPlaybackIntent(Playing)` (auto-start playback on record, per product choice). Stopping: **`requestPlaybackIntent(Stopped)` first**, then finalize take on non-realtime path, then publish `SessionSnapshot` only after the take file is closed and loadable.
+
+**Audio callback — SPSC-style contract (approved):** The path from the audio device callback that **pushes** input samples and lightweight preview data into a recorder must be **realtime-safe in the SPSC sense**: in the callback, **no** lock, **no** allocation, **no** block, **no** wait, **no** `Session` / `SessionSnapshot` access, **no** UI state mutation. Disk I/O, `juce::AudioFormatWriter`, and `Session` publish happen on other threads. **Stated** as SPSC (single-producer, single-consumer) for the work done in the callback — not a claim of full lock-free C++ for every line of the program.
+
+**FIFO overrun (approved):** Initial mono **sample** ring capacity = next power of two **≥** `deviceSampleRate * 5` (≈5 s). If a block does not fit: **do not** block the audio thread; **accept** what fits; count the rest as **dropped**; **intended** take duration in samples (and user-visible “recorded length”) **includes** the full logical block; **dropped** samples are written as **silence** in the finalized WAV (or an equivalent explicit “silence fill” for that span). **Do not** silently shorten the file. **Separate** `droppedSampleCount`. After stop/finalize, **warn** if `droppedSampleCount > 0` (e.g. *“Recording overrun: N samples were replaced with silence.”*). **`RecordedTakeResult` (or equivalent)** must carry: finalized file, target `TrackId`, `recordingStartSample`, **intended** sample count, sample rate, `droppedSampleCount`.
+
+**Stop/finalize order (approved):** (1) `requestPlaybackIntent(Stopped)`; (2) clear recording so the next callback no longer **pushes**; (3) signal writer, drain FIFO + any pending **silence** for overruns, flush/close WAV, join writer; (4) return complete **RecordedTakeResult**; (5) **only then** create `PlacedClip` and **publish** a new `SessionSnapshot`.
+
+**Preview peaks (approved):** **Single** consumer per app tick (e.g. `TrackLanesView` or one owner); **drain** once; forward only to the **recording** lane. Other `ClipWaveformView` instances must not race to `drain…`.
+
+**Non-destructive take on non-empty track (approved):** No move/split/trim/delete/mute/overwrite/take-lanes/comping in this slice. New clip is a normal `PlacedClip` at `recordingStartSample`. Overlaps with existing clips: **unchanged** topmost-wins semantics.
+
+**Engine exclusion while recording (approved):** While recording is **active** (testable from engine, e.g. atomic `recording` + `recordingTrackId` readable from `PlaybackEngine` **without** `Session` mutation), **skip** mixing the **armed/recording** track; other tracks unchanged; existing clips on that track stay **visible** in the UI; **not** a persisted mute in `Session` / `SessionSnapshot`.
+
+**Device scope (steering, implementation when coding):** Mono, input channel 0 only; `initialiseWithDefaultDevices(1, 2)` when device init is changed; no full audio settings UI; no SRC; no software/direct monitoring in this slice. **Latency compensation deferred** — document: hook is input push in callback + `juce::AudioIODevice` input/output latency readouts for a future pass.
+
+**Unsaved project (approved):** Recording requires a **known** on-disk project path. If unsaved: **fail** with a **visible** hint (*“Save the project before recording.”*); **no** transport start, **no** orphan take files in a global app directory, **no** empty committed clip.
+
+**Explicit non-goals in this slice:** mixer, pan, sends, groups, split/cut, fades, plugin processing, full Cubase-like audio settings.
+
+Rationale: preserves immutable `SessionSnapshot` handoff, keeps disk off the real-time path, and makes overrun and coordination **explicit** before first line of record code.
+
+---
+
 ## 2026-04-26 — Phase 3 arrangement extent + pannable viewport (`.mdlproj` v3)
 
 Decision:

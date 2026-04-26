@@ -335,8 +335,122 @@ The project begins to resemble a real timeline-based audio application rather th
 - hidden future mixer architecture sneaking in without documentation
 
 ---
+## Phase 4 — Simple Audio Recording
 
-## Phase 4 — Basic Mixer Direction
+**Phase order:** This phase is **before** [Phase 5 — Basic Mixer Direction](#phase-5--basic-mixer-direction). Recording and capture are validated on the existing timeline and snapshot model before introducing mixer-facing structure.
+
+### Goal
+
+Add the first minimal **mono** audio **input** recording while preserving the existing timeline, `Session` / `SessionSnapshot` immutability, and **realtime-safe** audio-callback rules.
+
+The goal is not a Cubase-like recording system, but a narrow slice: arm a track, start/stop from **numpad `*`**, write a take to disk, and commit a normal `PlacedClip` on the **armed** track at the playhead, with a **UI-only** growing waveform preview that disappears after commit.
+
+### In Scope
+
+- **Track header UI:** a record-arm control (e.g. **R**), plus a simple **audio** track type indicator (icon); track type may remain “audio” only for this slice. **Add / select active track** behavior stays consistent with the current `Session` model (`getActiveTrackId` / `setActiveTrack` for add-clip target; arming is separate and may be a single **armed** track for recording only).
+- **One armed recording track** (initially): arming a second track clears the first.
+- **Mono** recording from the **first / default** input channel only (input **0** in device buffer terms for this slice).
+- **Numpad `*`** to **toggle** record run: see **Command and Transport coordination** below.
+- **Recording start time** = current **playhead** (session sample) at the moment a successful `beginRecording` is accepted, on the **armed** track.
+- **Takes** written under **`<projectDir>/takes/`** as finalized **WAV** (or the project’s chosen lossless container), with **absolute** `sourcePath` on the new clip (same persistence story as other clips). **Take files:** mono **24-bit linear PCM** at the project/device sample rate (typical **48 kHz**; no 16-bit fallback in `RecorderService`).
+- **On successful stop/finalize:** a **`RecordedTakeResult`**-style outcome (message-thread struct; exact name in code TBD) holds: finalized file, target **TrackId**, `recordingStartSample`, **intended** sample count, sample rate, and **dropped / overrun** sample count. Only **after** the take file is finalized on disk: create the `PlacedClip` (L = 0, visible length = recorded sample count) and **publish** a new `SessionSnapshot` via the existing atomic handoff. **Placed clip** = normal timeline clip; playback uses the existing engine path.
+- **Temporary** realtime **min/max (peak) preview** for the in-flight take: **one consumer** (see **Preview peaks**); **not** a row in `SessionSnapshot`; same **x↔session-sample** mapping as [TimelineRulerView](src/ui/TimelineRulerView.h) and committed clips; may **overlap** existing events visually; does **not** change existing clips in the model.
+- **Explicit** failure or empty-input handling in product terms where reasonable (e.g. no input device, zero channels) — *implementation detail* may still produce a valid silent take of the intended length if the device opens.
+
+### Out of Scope (this slice; do not smuggle in)
+
+- **Mixer, pan, sends, groups, routing matrix**, or **Basic Mixer** (Phase 5) work.
+- **Split / cut, fades, crossfades, comping, take lanes, punch** overwrite, destructive overwrite of existing clips, **mute in Session** for “recording mutes track”, or any **new** overlap policy.
+- **Stereo / multichannel** record, **multiple** simultaneous armed tracks, **input routing UI**, full **device/settings** dialog, **software/direct monitoring**, **sample-rate conversion**, **latency compensation** (see **Deferred** for where latency will matter later).
+- **Plugin** processing on the record path.
+- **Orphan** take files in a global app directory when the project is **unsaved** (see **Project file precondition**).
+
+### Command and Transport coordination (root / main composition)
+
+- **Root or main content component** (composition root) **coordinates** numpad `*`, **Transport**, and the recording service. It is the only place that sequences **read playhead** → **begin** → **set intent** to **Playing** (after successful begin), and **stop intent** → **stop/finalize** → **Session publish**.
+- A **`RecorderService`** (or equivalent name) may **own** arm state, SPSC ring(s), background writer, and take file I/O, but **must not** call `Transport` directly and **must not** own **transport semantics** (play/stop/seek are not embedded inside the recorder for this slice).
+- Suggested start sequence when **armed** and **not** recording, and the project is saved to a **known path** (see preconditions):
+  1. Read `Transport::readPlayheadSamplesForUi()` for `recordingStartSample`.
+  2. `beginRecording(...)` on the message thread. If it **fails**, do **not** change transport, do not create a clip, do not write orphan files.
+  3. If `beginRecording` **succeeds**, then `Transport::requestPlaybackIntent(Playing)` (or equivalent) so the playhead advances with capture (aligned with the approved “auto-start playback on record” product choice for this project).
+- Suggested **stop** sequence:
+  1. `Transport::requestPlaybackIntent(Stopped)` (or **Paused** only if the project explicitly standardizes on that — default here is **Stopped** to match a clear “record pass ended”).
+  2. `recording_` / equivalent cleared so the **next** audio callback no longer **pushes** new input to the SPSC path.
+  3. **Signal** writer, **drain** FIFO and any **silence** segments written for overruns, **flush/close** WAV, **join** writer.
+  4. Assemble **RecordedTakeResult** (file on disk, track id, start sample, **intended** length, `sr`, `droppedSamples`).
+  5. **Only then** `Session::addRecordedTake` / `addClip...` (exact API TBD) to decode + publish. **If** `droppedSamples > 0`, show a user-visible **warning** (e.g. “Recording overrun: N samples were replaced with silence.”).
+- The exact class names and method names are **implementation** details; the **order** and **invariants** above are **steering**.
+
+### Realtime SPSC path (audio callback)
+
+- The **push** from `PlaybackEngine::audioDeviceIOCallback...` (or a thin helper) into the recorder **must** follow a **realtime-safe, single-producer / single-consumer (SPSC)**-style contract for the work done **in the callback**:
+  - **No** `Session` or `SessionSnapshot` access
+  - **No** **locks**, **allocations**, **blocking**, **waits** (except a named, documented `signal` that is provably non-blocking on supported platforms)
+  - **No** direct **UI** mutation
+- A **separate** non-realtime thread (writer) may own `juce::AudioFormatWriter`, disk, and `Session` is **not** touched from the audio thread.
+
+### FIFO capacity and overrun (steering, before coding)
+
+- **Initial** mono **sample** ring capacity: **next power of two** **≥** `currentDeviceSampleRate * 5` (≈ **5 s** of audio at the device rate).
+- If a callback block **does not** fully fit: **never block** the audio thread. **Write** the prefix that **fits**; the remainder is counted as **dropped/overrun** samples.
+- **Intended** timeline duration: the take’s **length in samples** (and any UI counter of “how long you’ve been recording”) **includes** the full block’s logical length; **dropped** samples are **not** a silent **shorten** of the file.
+- **Missing** samples are represented in the final WAV (or in the result metadata) as **equivalent silence** (or a single **corrupted/flag** field while **preserving** duration — default steering is **silence** for simplicity). **After stop**, surface a **warning** if any samples were filled as silence due to overrun.
+- Maintain **`droppedSampleCount`** (or equivalent) **separate** from the **intended** sample count.
+
+### Stop / finalize and `RecordedTakeResult` (invariants)
+
+On stop, the implementation **must** deliver a complete **RecordedTakeResult** (or equivalent) containing at least:
+
+- Finalized take **file** path / `juce::File`
+- **Target** `TrackId` (armed track at record start, unless explicitly revised in a later doc)
+- **`recordingStartSample`**
+- **Intended** recorded sample count (including silence substituted for overruns)
+- **Sample rate** used for the take
+- **`droppedSampleCount`** (0 if clean)
+
+**Session** snapshot with the new `PlacedClip` is published **only** after the take file is **closed** and **available** for the same `AudioFileLoader` path used by other clips.
+
+### Preview peaks (single owner)
+
+- **Only one** place may **drain** preview peak / min-max data per tick (e.g. `TrackLanesView` timer or a single “recording overlay” owner). **Only** the **recording** lane (or a dedicated sub-view for that track) should receive drained blocks. **Non-recording** `ClipWaveformView` instances must **not** call `drain…` in parallel (no races).
+
+### Non-destructive recording onto a non-empty track
+
+- **Do not** as part of this slice: move, split, trim, delete, mute, overwrite, or add take lanes. The new clip is **appended** in product terms as a **new** `PlacedClip` on the **armed** track at `recordingStartSample` with a length of **N** intended samples. If it **overlaps** existing clips in time, **existing** front-to-back / topmost-wins overlap semantics (as in Phases 2–3) **apply unchanged**; no recording-specific override.
+
+### Engine behavior during active recording (transient; not Session)
+
+- While **recording is active** (atomic flag in engine-readable view), the **armed / recording** track is **excluded** from **playback** mixing in `PlaybackEngine` (skip that track’s clip contributions). **Other** tracks play **unchanged**. **Existing** clips on the recording **track** remain **visible** in the UI (read from the published snapshot) but **no audio** is mixed from that track for the **duration of recording** only. This is **not** a **mute** written into `Session` or `SessionSnapshot` and must not persist after stop.
+
+### Device / input scope (implementation)
+
+- **Mono**; **one** input channel; **no** input routing UI.
+- When the device is opened in code, **1 input, 2 outputs** (e.g. `initialiseWithDefaultDevices(1, 2)`) is the **intended** change — **in implementation**, not a steering rewrite of the whole device model.
+- **No** new full **audio settings** window for this slice. **No SRC**; record at the **current** device / project **sample rate** as today’s loader and engine assume.
+
+### Unsaved project
+
+- If there is **no** saved project file (path **unknown**): **refuse** to start recording with a **visible** message (e.g. *“Save the project before recording.”*). **Do not** start transport, **do not** create **orphan** WAVs in a global store, **do not** create an **empty** committed `PlacedClip`.
+- If the project is saved, takes live under **`<parentOfProjectFile>/takes/`** (or the agreed `takes/` subfolder next to the `.mdlproj` / project file on disk — exact layout is implementation, **absolute** paths on clips remain the persistence rule).
+
+### Deferred (document for later; not in this slice)
+
+- **Input/output latency** and **round-trip** alignment: the natural hook is the **input push** in the audio callback and the **playhead** position; future compensation would adjust **start position** and/or **written** data using `juce::AudioIODevice` latency getters — **not** implemented here.
+- **Software monitoring** / direct monitoring, **meters** as a first-class bus (meter-only UI is optional later).
+
+### Expected Value
+
+The project gains a first **real** record → commit → play loop while keeping **snapshot immutability** and a **verifiable** realtime path. The phase is intentionally narrow enough to validate **file lifetime**, **overrun** reporting, and **transient** engine exclusion **before** Phase 5 (Basic Mixer Direction) mixer work.
+
+---
+
+## Phase 5 — Basic Mixer Direction
+
+### Preconditions
+
+- Basic playback and editing are stable.
+- Simple mono recording is implemented without violating snapshot immutability or audio-thread safety.
+- Recorded clips behave like normal timeline clips after being committed.
 
 ### Goal
 
@@ -362,7 +476,12 @@ The project gains a controlled first step toward practical mix behavior without 
 
 ---
 
-## Phase 5 — Routing, Sends, and Groups
+## Phase 6 — Routing, Sends, and Groups
+
+### Preconditions
+
+- Basic mixer-facing concepts exist.
+- Recording remains separated from routing complexity unless explicitly approved.
 
 ### Goal
 
@@ -387,7 +506,7 @@ The architecture begins to support the real workflow needs described in the brie
 
 ---
 
-## Phase 6 — MIDI Clips and Piano-Roll Direction
+## Phase 7 — MIDI Clips and Piano-Roll Direction
 
 ### Goal
 

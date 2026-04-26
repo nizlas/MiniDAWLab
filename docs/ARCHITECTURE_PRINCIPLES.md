@@ -103,6 +103,8 @@ unless steering documents are updated.
 
 **Phase 3 late extension — non-destructive right-edge trim:** **`AudioClip`** PCM is never shortened. **`PlacedClip`** holds the **placement window** (effective length) on that material. **`SessionSnapshot::withClipRightEdgeTrimmed`** replaces one row by id without changing lane order (not split, not “cut”). Playback offset in the material remains from sample **0**; the audible region is bounded by the effective length. **Timeline** extent, **overlap** resolution, the **engine** coverage test, and **waveform** paint span use **effective** length, not `getAudioClip().getNumSamples()` alone for placement.
 
+**Phase 4 — minimal mono input recording (steering reference):** The **application root** (e.g. `MainComponent`) **coordinates** numpad `*`, `Transport` intents, playhead for record placement, and begin/stop of capture; a **`RecorderService` (or equivalent) must not** call **`Transport`** or own transport policy. The audio callback is limited to **realtime-safe** handoff to an SPSC-style buffer; take files, `AudioFormatWriter`, and new **`PlacedClip` / `SessionSnapshot`** work happen **off** the callback, in the order documented in `docs/PHASE_PLAN.md` (Phase 4) and `status/DECISION_LOG.md`. While recording, the **engine** may **skip mixing** the recording track (transient only; not a session mute). See Phase 4 for device scope, FIFO overrun rules, unsaved-project refusal, and deferred latency compensation.
+
 **Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
 session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**
 reads on the hot path; the exact snapshot type is an implementation choice consistent with

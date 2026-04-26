@@ -3,12 +3,14 @@
 // =============================================================================
 //
 // ROLE
-//   This is the "composition root" for MiniDAWLab: it creates Transport, Session, and
-//   PlaybackEngine, connects them to juce::AudioDeviceManager, and shows the one window. It does
+//   This is the "composition root" for MiniDAWLab: it creates Transport, Session,
+//   `RecorderService` (optional Phase 4 capture; not wired to UI yet), and `PlaybackEngine`,
+//   connects them to juce::AudioDeviceManager, and shows the one window. It does
 //   not implement playback math or file decoding — that lives in the engine / session / io layers.
 //
 // STARTUP ORDER (see initialise) — read before changing tear order
-//   1. transport, session, playbackEngine  (non-owning refs: engine points at transport+session)
+//   1. transport, session, recorderService, playbackEngine  (non-owning: engine points at
+//      transport+session+recorder; recorder does not own Transport/Session)
 //   2. deviceManager.initialiseWithDefaultDevices  —  opens default audio I/O
 //   3. addAudioCallback(playbackEngine)  —  the engine will now receive audioDeviceIO* calls
 //   4. main window with TransportControlsContent  —  UI can load files and send Transport commands
@@ -17,7 +19,7 @@
 //   1. destroy main window
 //   2. removeAudioCallback(playbackEngine)
 //   3. closeAudioDevice
-//   4. destroy playbackEngine, session, transport
+//   4. destroy playbackEngine, then recorderService, then session, transport
 //
 // THREADING
 //   juce::JUCEApplication::initialise / shutdown and all UI (buttons, file chooser, paint) are
@@ -37,6 +39,7 @@
 
 #include "domain/Session.h"
 #include "engine/PlaybackEngine.h"
+#include "engine/RecorderService.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
@@ -65,7 +68,10 @@ public:
         // in dependency order and tear down in reverse in shutdown.
         transport = std::make_unique<Transport>();
         session = std::make_unique<Session>();
-        playbackEngine = std::make_unique<PlaybackEngine>(*transport, *session);
+        // Phase 4: owned by the app; `PlaybackEngine` gets a non-owning pointer for input push
+        // only. Opening input channels for recording is a later step — device may stay (0, 2) for now.
+        recorderService = std::make_unique<RecorderService>();
+        playbackEngine = std::make_unique<PlaybackEngine>(*transport, *session, recorderService.get());
 
         // JUCE: open the default audio device before we register the engine — otherwise the
         // callback would have nowhere to go and sample rate for file load would be unknown.
@@ -99,8 +105,10 @@ public:
 
         deviceManager.closeAudioDevice();
 
-        // Safe to drop engine then session/transport: nothing references them from audio anymore.
+        // After callback removal, drop engine (it held `recorderService.get()` for audio thread) then
+        // the recorder, then the rest. `RecorderService` is independent of Transport/Session.
         playbackEngine.reset();
+        recorderService.reset();
         session.reset();
         transport.reset();
     }
@@ -462,6 +470,8 @@ private:
 
     std::unique_ptr<Transport> transport;
     std::unique_ptr<Session> session;
+    /// Phase 4: recording capture (not user-wired in this file yet); engine holds non-owning `get()`.
+    std::unique_ptr<RecorderService> recorderService;
     std::unique_ptr<PlaybackEngine> playbackEngine;
     juce::AudioDeviceManager deviceManager;
     std::unique_ptr<MainWindow> mainWindow;

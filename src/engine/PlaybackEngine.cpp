@@ -23,6 +23,7 @@
 
 #include "engine/PlaybackEngine.h"
 
+#include "engine/RecorderService.h"
 #include "domain/AudioClip.h"
 #include "domain/PlacedClip.h"
 #include "domain/Session.h"
@@ -119,9 +120,10 @@ namespace
     }
 } // namespace
 
-PlaybackEngine::PlaybackEngine(Transport& transport, Session& session)
+PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder)
     : transport_(transport)
     , session_(session)
+    , recorder_(recorder)
 {
 }
 
@@ -141,7 +143,16 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                      int numSamples,
                                                      const juce::AudioIODeviceCallbackContext& context)
 {
-    juce::ignoreUnused(inputChannelData, numInputChannels, context);
+    juce::ignoreUnused(context);
+
+    // [Audio thread] Phase 4: route mono input[0] to the recorder SPSC path when active; does not
+    // access Session, Transport (beyond the existing tail of this function), or UI. No-op if not
+    // recording, no input device, or `recorder_` is null.
+    if (recorder_ != nullptr && numInputChannels > 0 && numSamples > 0
+        && inputChannelData != nullptr && inputChannelData[0] != nullptr)
+    {
+        recorder_->pushInputBlock(inputChannelData[0], numSamples);
+    }
 
     const int deviceBlockSizeInFrames = numSamples;
     transport_.audioThread_beginBlock();

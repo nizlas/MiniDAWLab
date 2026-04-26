@@ -120,6 +120,14 @@ The following risks must be checked explicitly after each relevant phase.
 - Was any new abstraction introduced without clear need?
 - Was future-proofing pushed too far relative to the current phase?
 
+### Recording (when Phase 4 or later touches input)
+
+- Does the recorder or service **own** `Transport` or call it directly, instead of the app root (`MainComponent` or equivalent) coordinating?
+- Is there any **lock / allocate / block / wait / `Session` / `SessionSnapshot` / UI** access on the audio-thread push path?
+- Are FIFO overruns **counted** and **surfaced** after stop, with timeline duration preserved (silence fill or explicit corruption flag), not a shorter file with no notice?
+- Is **`SessionSnapshot` published only after** the take file is finalized and `RecordedTakeResult` is complete?
+- Is preview/peak data **drained in one place** so non-recording waveform views do not race?
+
 ## Plausible Wrong Implementations Check
 
 For every phase, explicitly ask:
@@ -244,6 +252,21 @@ When validating **arrangement extent**, **pan**, **zoom**, and **v3** (`docs/PHA
 - **Save / load v3** round-trips `arrangementExtentSamples`; v1/v2 still load; save yields v3.
 - **Plain wheel** pan uses `round((width/8) * samplesPerPixel)` sample steps. **`Ctrl+wheel` zoom** is **mouse-centered** on **pixel** `x` in the timeline column; `spp` in `[0.1, max(1, ext/width)]`. Trim/move drag in progress blocks **all** wheel handling on `TrackLanesView` (no pan or zoom during gesture).
 - **Ruler and lanes** stay aligned: `TimelineRulerView` static mappers; one `TimelineViewportModel`; ruler width matches lane **timeline** width in `Main` layout. **Tick count** increases when widening the window; **tick step (seconds)** only changes when zooming.
+
+## Phase 4: simple audio recording (minimal mono)
+
+When validating **simple mono input recording** (`docs/PHASE_PLAN.md` Phase 4, `status/DECISION_LOG.md` 2026-04-26 — Phase 4 minimal mono recording):
+
+- **Coordinator vs recorder:** numpad `*`, `Transport` (`requestPlaybackIntent`, playhead read), and record arm/target track selection are **coordinated** from the app root (e.g. `MainComponent`). A **`RecorderService` (or equivalent) does not** call `Transport` or own play/stop/seek policy.
+- **Audio callback (SPSC-style path):** the callback path that **pushes** input/preview to the recorder performs **no** lock, allocation, block, wait, `Session` / `SessionSnapshot` access, or UI state mutation. Disk, WAV writer, and snapshot publish are **off** the callback.
+- **FIFO capacity:** initial mono **sample** ring is **at least** `next_pow2(deviceSampleRate * 5)` (≈5 s). On overrun, the audio thread **never** blocks: **accept** what fits; count the rest as **dropped**; **intended** take length in samples (timeline duration) is **not** shortened. Missing samples become **silence in the final WAV** (or an equivalent explicit mark) and are reflected in **`droppedSampleCount`**. `recordedSamples_` / intended duration **include** inserted silence. After stop, **warn** if any samples were dropped. No silent file shortening.
+- **Stop / finalize order:** (1) `requestPlaybackIntent(Stopped)`; (2) **stop** pushing from the callback; (3) **signal** writer, **drain** FIFO and pending silence/dropout; **flush/close** WAV; **join** writer; (4) return a **complete** `RecordedTakeResult` (or equivalent) with: finalized file, **target** `TrackId`, **`recordingStartSample`**, **intended** sample count, **sample rate**, **`droppedSampleCount`**; (5) **only then** create the `PlacedClip` and **publish** `SessionSnapshot`.
+- **Preview peaks:** **one** consumer per tick (e.g. `TrackLanesView`) **drains** preview data and forwards it **only** to the **recording** lane. Non-recording **`ClipWaveformView`** instances do **not** call `drain…` in parallel.
+- **Non-destructive on a busy track:** no move, split, trim, delete, mute, overwrite, take lanes, comping, or punch. A new `PlacedClip` at `recordingStartSample`; if it **overlaps** existing clips, **existing** topmost-wins overlap behavior applies **unchanged**.
+- **Engine during record:** the **armed / recording** track is **omitted** from **playback** mixing; **other** tracks play. Existing clips on that track **stay visible**; this is **transient** engine state only — **not** a `Session` / `SessionSnapshot` mute.
+- **Device scope (when implemented):** **mono**; **input channel 0** only; device init will move to **`initialiseWithDefaultDevices(1, 2)`**; **no** new audio settings UI, **no** SRC, **no** software/direct monitoring in this slice. Latency compensation is **deferred** (document the future hook: callback input + `juce::AudioIODevice` latency getters).
+- **Unsaved project:** with **no** saved on-disk project path, recording **fails** with a **visible** message (e.g. *“Save the project before recording.”*). **No** transport start, **no** orphan take file, **no** empty committed clip.
+- **Narrow slice:** no mixer, pan, sends, routing matrix, split/cut, fades, plugin processing, or full Cubase-like audio settings in this phase.
 
 ## Phase 1 Validation Checklist
 

@@ -35,6 +35,7 @@ target_sources(MiniDAWLab PRIVATE
     src/io/AudioFileLoader.cpp
     src/io/ProjectFile.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/RecorderService.cpp
     src/ui/ClipWaveformView.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
