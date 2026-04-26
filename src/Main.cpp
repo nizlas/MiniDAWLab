@@ -11,7 +11,8 @@
 // STARTUP ORDER (see initialise) — read before changing tear order
 //   1. transport, session, recorderService, playbackEngine  (non-owning: engine points at
 //      transport+session+recorder; recorder does not own Transport/Session)
-//   2. deviceManager.initialiseWithDefaultDevices  —  opens default audio I/O
+//   2. deviceManager.initialiseWithDefaultDevices  —  **1 in / 2 out** when possible; falls back
+//      to output-only (0, 2) with a log if the system cannot open an input (playback still works).
 //   3. addAudioCallback(playbackEngine)  —  the engine will now receive audioDeviceIO* calls
 //   4. main window with TransportControlsContent  —  UI can load files and send Transport commands
 //
@@ -32,6 +33,9 @@
 //
 // Method bodies in this file add plain-language notes next to start/stop order and the async
 // file dialog path so the composition root is navigable, not just listed.
+// `TransportControlsContent` also hosts the recording coordinator (`numpadRecordToggled`); the
+// **shortcut** to invoke it is handled only in `MainWindow` as a single `KeyListener` on the
+// window (JUCE key dispatch walks from focus → parent; content-only listeners are not always hit).
 // =============================================================================
 
 #include <JuceHeader.h>
@@ -44,6 +48,77 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
+
+namespace
+{
+    // Temporary: show last key in a small local label (transport row). Leave `false` in normal use.
+    constexpr bool kShowKeyDiagnostic = false;
+
+    // JUCE (Windows) uses e.g. VK_* | 0x10000 for numpad keys; `KeyPress::numberPadMultiply` matches
+    // that, but some paths deliver VK_MULTIPLY (0x6A) without the high bit — match both.
+    [[nodiscard]] bool isNumpadMultiplyKey(const juce::KeyPress& k) noexcept
+    {
+        if (k == juce::KeyPress::numberPadMultiply)
+        {
+            return true;
+        }
+        constexpr int kVkMultiply = 0x6A; // winuser.h VK_MULTIPLY
+        if ((k.getKeyCode() & 0xffff) == kVkMultiply)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    // Numpad * or (for laptops) top-row * character (e.g. Shift+8) — not used for all keys with `*`
+    // in text outside this narrow set (handled only at MainWindow).
+    [[nodiscard]] bool isRecordToggleShortcut(const juce::KeyPress& k) noexcept
+    {
+        if (isNumpadMultiplyKey(k))
+        {
+            return true;
+        }
+        if (k.getTextCharacter() == juce_wchar{ '*' })
+        {
+            return true;
+        }
+        return false;
+    }
+
+    // Unmodified Space → play/pause toggle (not recording). Ctrl/Cmd/Alt+Space are ignored here.
+    [[nodiscard]] bool isSpacePlayPauseShortcut(const juce::KeyPress& k) noexcept
+    {
+        const juce::ModifierKeys m = k.getModifiers();
+        if (m.isCommandDown() || m.isCtrlDown() || m.isAltDown())
+        {
+            return false;
+        }
+        if (k.getKeyCode() == 32 || k.getTextCharacter() == juce_wchar{ ' ' })
+        {
+            return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] juce::File makeUniqueTakeWavInTakesDir(const juce::File& takesDir)
+    {
+        const juce::String t = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
+        juce::File f = takesDir.getChildFile("take_" + t + ".wav");
+        if (!f.existsAsFile())
+        {
+            return f;
+        }
+        for (int i = 1; i < 10000; ++i)
+        {
+            f = takesDir.getChildFile("take_" + t + "_" + juce::String(i) + ".wav");
+            if (!f.existsAsFile())
+            {
+                return f;
+            }
+        }
+        return takesDir.getChildFile("take_" + t + "_9999.wav");
+    }
+} // namespace
 
 // ---------------------------------------------------------------------------
 // MiniDAWLabApplication — process-wide singleton, owns top-level subsystems
@@ -61,7 +136,7 @@ public:
     bool moreThanOneInstanceAllowed() override { return true; }
 
     // [Message thread] Wires the stack described in the file header. jassert on empty init error
-    // in debug: device must open for Phase 1 playback to make sense.
+    // in debug: some audio output must open for playback; input is optional (see device init).
     void initialise(const juce::String&) override
     {
         // Domain objects first: the engine only holds references; safe because we create them
@@ -69,14 +144,22 @@ public:
         transport = std::make_unique<Transport>();
         session = std::make_unique<Session>();
         // Phase 4: owned by the app; `PlaybackEngine` gets a non-owning pointer for input push
-        // only. Opening input channels for recording is a later step — device may stay (0, 2) for now.
+        // (only while `isRecording()`; see `PlaybackEngine` gate). Input channel count comes from
+        // device init below.
         recorderService = std::make_unique<RecorderService>();
         playbackEngine = std::make_unique<PlaybackEngine>(*transport, *session, recorderService.get());
 
-        // JUCE: open the default audio device before we register the engine — otherwise the
-        // callback would have nowhere to go and sample rate for file load would be unknown.
-        const juce::String audioInitError =
-            deviceManager.initialiseWithDefaultDevices(0, 2);
+        // JUCE: open the default audio device before we register the engine. Prefer **1 input, 2
+        // outputs** (mono in for future record path; stereo out unchanged). If the default device
+        // cannot provide an input, fall back to output-only so existing playback is not broken.
+        juce::String audioInitError = deviceManager.initialiseWithDefaultDevices(1, 2);
+        if (audioInitError.isNotEmpty())
+        {
+            juce::Logger::writeToLog(
+                juce::String{"[Audio] 1-in/2-out not available: "} + audioInitError
+                + " — retrying output-only (0 in / 2 out). Input capture disabled until a suitable device exists.");
+            audioInitError = deviceManager.initialiseWithDefaultDevices(0, 2);
+        }
         jassert(audioInitError.isEmpty());
         juce::ignoreUnused(audioInitError);
 
@@ -88,7 +171,8 @@ public:
             getApplicationName(),
             *transport,
             *session,
-            deviceManager);
+            deviceManager,
+            *recorderService);
     }
 
     // [Message thread] Reverse of initialise; see file header.
@@ -119,19 +203,22 @@ private:
     // [Message thread only] Child component: file chooser, transport buttons, timeline ruler, lane.
     // Holds non-owning refs; MainWindow and application own lifetime. Add path: FileChooser
     // (async) → `Transport::readPlayheadSamplesForUi` once, then `addClipFromFileAtPlayhead`.
-    class TransportControlsContent : public juce::Component
+    class TransportControlsContent : public juce::Component, private juce::Timer
     {
     public:
         TransportControlsContent(Transport& transportIn,
                                  Session& sessionIn,
-                                 juce::AudioDeviceManager& deviceManagerIn)
+                                 juce::AudioDeviceManager& deviceManagerIn,
+                                 RecorderService& recorderIn)
             : transport(transportIn)
             , session(sessionIn)
             , deviceManager(deviceManagerIn)
+            , recorder_(recorderIn)
             , timelineViewport_()
             , rulerView(sessionIn, transportIn, deviceManagerIn, timelineViewport_)
-            , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn)
+            , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn)
         {
+            setWantsKeyboardFocus(true);
             timelineViewport_.setOnVisibleRangeChanged([this] {
                 rulerView.repaint();
                 trackLanesView.repaint();
@@ -144,25 +231,50 @@ private:
             };
             saveProjectButton.onClick = [this] { saveProjectClicked(); };
             loadProjectButton.onClick = [this] { loadProjectClicked(); };
-            playButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Playing); };
-            pauseButton.onClick = [this] { transport.requestPlaybackIntent(PlaybackIntent::Paused); };
-            // Stop: user expectation is "playback off *and* playhead back to the start" of the
-            // session timeline — we queue both the intent and a seek to session sample 0 (next block).
-            stopButton.onClick = [this] {
-                transport.requestPlaybackIntent(PlaybackIntent::Stopped);
-                transport.requestSeek(0);
-            };
+            playPauseButton.onClick = [this] { togglePlayPauseFromUi(); };
+            // Stop: "playback off + playhead to start" when idle; if recording, finalize/commit first
+            // so RecorderService is never left recording while transport is Stopped.
+            stopButton.onClick = [this] { stopOrSeekFromStopButton(); };
 
             addAndMakeVisible(addClipButton);
             addAndMakeVisible(addTrackButton);
             addAndMakeVisible(saveProjectButton);
             addAndMakeVisible(loadProjectButton);
-            addAndMakeVisible(playButton);
-            addAndMakeVisible(pauseButton);
+            addAndMakeVisible(playPauseButton);
             addAndMakeVisible(stopButton);
+            if (kShowKeyDiagnostic)
+            {
+                addAndMakeVisible(keyDiagLabel_);
+                keyDiagLabel_.setFont(juce::FontOptions(11.0f));
+                keyDiagLabel_.setJustificationType(juce::Justification::centredLeft);
+                keyDiagLabel_.setText("key: —", juce::dontSendNotification);
+            }
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
+            updatePlayPauseButtonFromTransport();
+            startTimerHz(10);
             syncViewportFromSession();
+        }
+
+        // [Message thread] Invoked only from `MainWindow` shortcut router (not from child
+        // `keyPressed` — avoids duplicate `numpadRecordToggled` on one physical keypress).
+        void invokeRecordToggleFromWindowShortcut() { numpadRecordToggled(); }
+        // [Message thread] Space: when recording, commit (source tag `space`); else same as Play/Pause.
+        void invokePlayPauseToggleFromWindowShortcut()
+        {
+            if (recorder_.isRecording())
+            {
+                stopRecordingAndCommitFromUi("space");
+                return;
+            }
+            togglePlayPauseTransportOnly();
+        }
+        void setKeyDiagnosticLine(const juce::String& line)
+        {
+            if (kShowKeyDiagnostic)
+            {
+                keyDiagLabel_.setText(line, juce::dontSendNotification);
+            }
         }
 
         // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
@@ -170,14 +282,17 @@ private:
         {
             auto area = getLocalBounds().reduced(8);
             auto row = area.removeFromTop(32);
-            const int buttonWidth = juce::jmax(48, row.getWidth() / 7);
+            if (kShowKeyDiagnostic)
+            {
+                keyDiagLabel_.setBounds(row.removeFromRight(300).reduced(2, 0));
+            }
+            const int buttonWidth = juce::jmax(48, row.getWidth() / 6);
 
             addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             addTrackButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             saveProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             loadProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-            playButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-            pauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            playPauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             constexpr int kTimelineRulerHeight = 20;
             auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
@@ -187,6 +302,58 @@ private:
         }
 
     private:
+        void timerCallback() override { updatePlayPauseButtonFromTransport(); }
+
+        // [Message thread] Transport intent: Playing → Paused, else (Stopped or Paused) → Playing.
+        // If a take is in progress, the button stops/commits (never Paused+recording).
+        void togglePlayPauseTransportOnly()
+        {
+            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+            {
+                transport.requestPlaybackIntent(PlaybackIntent::Paused);
+            }
+            else
+            {
+                transport.requestPlaybackIntent(PlaybackIntent::Playing);
+            }
+            updatePlayPauseButtonFromTransport();
+        }
+
+        void togglePlayPauseFromUi()
+        {
+            if (recorder_.isRecording())
+            {
+                stopRecordingAndCommitFromUi("play_pause");
+                return;
+            }
+            togglePlayPauseTransportOnly();
+        }
+
+        // [Message thread] Stop button: normal stop+seek, or end recording and commit (then seek 0).
+        void stopOrSeekFromStopButton()
+        {
+            if (recorder_.isRecording())
+            {
+                stopRecordingAndCommitFromUi("stop");
+            }
+            else
+            {
+                transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+            }
+            transport.requestSeek(0);
+            updatePlayPauseButtonFromTransport();
+        }
+
+        void updatePlayPauseButtonFromTransport()
+        {
+            const bool playing = transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+            const juce::String t = playing ? "Pause" : "Play";
+            if (t != playPauseButton.getButtonText())
+            {
+                playPauseButton.setButtonText(t);
+            }
+        }
+
         // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
         // clamp the pan window to the current arrangement extent (when ruler width is known).
         void syncViewportFromSession()
@@ -411,9 +578,161 @@ private:
             });
         }
 
+        // [Message thread] One path to end a take: stop transport first, then finalize, then commit.
+        // Call only when `recorder_.isRecording()`; no-op if not.
+        void stopRecordingAndCommitFromUi(const char* sourceContext)
+        {
+            if (!recorder_.isRecording())
+            {
+                return;
+            }
+            if (sourceContext != nullptr)
+            {
+                juce::Logger::writeToLog(
+                    juce::String{"[Rec] stop/commit source="} + sourceContext);
+            }
+
+            transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+            updatePlayPauseButtonFromTransport();
+            const RecordedTakeResult r = recorder_.stopRecordingAndFinalize();
+            if (!r.success)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Recording",
+                    r.errorMessage.isNotEmpty() ? r.errorMessage : "Could not finalize recording.");
+                juce::Logger::writeToLog(
+                    juce::String{"[Rec] stop/finalize failed: "} + r.errorMessage);
+                return;
+            }
+            if (r.droppedSampleCount > 0)
+            {
+                const juce::String w = "Recording overrun: " + juce::String(r.droppedSampleCount)
+                                        + (r.droppedSampleCount == 1 ? " sample was" : " samples were")
+                                        + " replaced with silence.";
+                juce::Logger::writeToLog(juce::String{"[Rec] "} + w);
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon, "Recording", w);
+            }
+            const juce::Result ar = session.addRecordedTakeAtSample(
+                r.takeFile,
+                r.sampleRate,
+                r.recordingStartSample,
+                r.targetTrackId,
+                r.intendedSampleCount);
+            if (!ar.wasOk())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "Session", ar.getErrorMessage());
+                juce::Logger::writeToLog(
+                    juce::String{"[Rec] addRecordedTakeAtSample failed: "} + ar.getErrorMessage());
+            }
+            else
+            {
+                syncViewportFromSession();
+            }
+            rulerView.repaint();
+            trackLanesView.repaint();
+        }
+
+        void numpadRecordToggled()
+        {
+            if (recorder_.isRecording())
+            {
+                stopRecordingAndCommitFromUi("numpad_*");
+                return;
+            }
+
+            const TrackId armed = recorder_.getArmedTrackId();
+            if (armed == kInvalidTrackId)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Recording",
+                    "Arm a track for recording (use the R control on a track header) first.");
+                juce::Logger::writeToLog("[Rec] start blocked: no armed track");
+                return;
+            }
+            if (!session.hasKnownProjectFile())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Recording",
+                    "Save the project before recording.");
+                juce::Logger::writeToLog("[Rec] start blocked: project not saved to disk");
+                return;
+            }
+            juce::File projectFile = session.getCurrentProjectFile();
+            if (projectFile.getFullPathName().isEmpty())
+            {
+                juce::Logger::writeToLog("[Rec] start blocked: empty project file path");
+                return;
+            }
+            juce::File takesDir = projectFile.getParentDirectory().getChildFile("takes");
+            if (takesDir.getFullPathName().isEmpty())
+            {
+                juce::Logger::writeToLog("[Rec] start blocked: could not build takes/ path");
+                return;
+            }
+            if (!takesDir.isDirectory() && !takesDir.createDirectory())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Recording",
+                    "Could not create the project takes folder: " + takesDir.getFullPathName());
+                juce::Logger::writeToLog("[Rec] start blocked: createDirectory takes/ failed");
+                return;
+            }
+            const juce::File takeWav = makeUniqueTakeWavInTakesDir(takesDir);
+            juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
+            if (dev == nullptr)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "Audio", "No active audio device.");
+                return;
+            }
+            if (dev->getActiveInputChannels().countNumberOfSetBits() < 1)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Audio",
+                    "No input channel is active. Enable an input in your audio device, then try again.");
+                juce::Logger::writeToLog("[Rec] start blocked: no active input channels");
+                return;
+            }
+            const double sr = dev->getCurrentSampleRate();
+            if (sr <= 0.0)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "Audio", "Invalid device sample rate.");
+                return;
+            }
+            const std::int64_t ph = transport.readPlayheadSamplesForUi();
+            BeginRecordingRequest req;
+            req.takeFile = takeWav;
+            req.targetTrackId = armed;
+            req.recordingStartSample = ph;
+            req.sampleRate = sr;
+            if (!recorder_.beginRecording(req))
+            {
+                juce::String err = recorder_.getLastError();
+                if (err.isEmpty())
+                {
+                    err = "beginRecording failed";
+                }
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "Recording", err);
+                juce::Logger::writeToLog(juce::String{"[Rec] beginRecording failed: "} + err);
+                return;
+            }
+            transport.requestPlaybackIntent(PlaybackIntent::Playing);
+            updatePlayPauseButtonFromTransport();
+        }
+
         Transport& transport;
         Session& session;
         juce::AudioDeviceManager& deviceManager;
+        RecorderService& recorder_;
 
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
         bool importInFlight_ = false;
@@ -422,9 +741,9 @@ private:
         juce::TextButton addTrackButton{ "Add track" };
         juce::TextButton saveProjectButton{ "Save Project..." };
         juce::TextButton loadProjectButton{ "Load Project..." };
-        juce::TextButton playButton{ "Play" };
-        juce::TextButton pauseButton{ "Pause" };
+        juce::TextButton playPauseButton{ "Play" };
         juce::TextButton stopButton{ "Stop" };
+        juce::Label keyDiagLabel_;
 
         /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).
         TimelineViewportModel timelineViewport_;
@@ -434,14 +753,16 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)
     };
 
-    // [Message thread] Top-level JUCE window: title bar, resize, content is TransportControlsContent.
-    class MainWindow : public juce::DocumentWindow
+    // [Message thread] Top-level JUCE window: one `juce::KeyListener` on **this** so shortcuts are
+    // always visited in `ComponentPeer::handleKeyPress` (including when focus is null → peer root).
+    class MainWindow : public juce::DocumentWindow, public juce::KeyListener
     {
     public:
         MainWindow(const juce::String& name,
                    Transport& transport,
                    Session& session,
-                   juce::AudioDeviceManager& deviceManager)
+                   juce::AudioDeviceManager& deviceManager,
+                   RecorderService& recorderService)
             : DocumentWindow(
                   name,
                   juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
@@ -450,13 +771,26 @@ private:
         {
             setUsingNativeTitleBar(true);
             setContentOwned(
-                new TransportControlsContent(transport, session, deviceManager),
+                new TransportControlsContent(transport, session, deviceManager, recorderService),
                 true);
             setResizable(true, true);
             setResizeLimits(320, 240, 10000, 10000);
             centreWithSize(640, 400);
+            addKeyListener(this);
+            if (juce::Component* c = getContentComponent())
+            {
+                c->setWantsKeyboardFocus(true);
+            }
+            juce::MessageManager::callAsync([this] {
+                if (juce::Component* c = getContentComponent())
+                {
+                    c->grabKeyboardFocus();
+                }
+            });
             setVisible(true);
         }
+
+        ~MainWindow() override { removeKeyListener(this); }
 
         // [Message thread] User clicked the window close: end the application.
         void closeButtonPressed() override
@@ -464,7 +798,64 @@ private:
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
 
+        void activeWindowStatusChanged() override
+        {
+            juce::DocumentWindow::activeWindowStatusChanged();
+            if (isActiveWindow())
+            {
+                juce::MessageManager::callAsync([this] {
+                    if (juce::Component* c = getContentComponent())
+                    {
+                        c->grabKeyboardFocus();
+                    }
+                });
+            }
+        }
+
+        bool keyPressed(const juce::KeyPress& key, juce::Component* originating) override
+        {
+            juce::ignoreUnused(originating);
+            if (kShowKeyDiagnostic)
+            {
+                if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                {
+                    tcc->setKeyDiagnosticLine(
+                        juce::String{"0x" } + juce::String::toHexString((juce::uint32)key.getKeyCode())
+                        + " ch=0x" + juce::String::toHexString((juce::uint32)key.getTextCharacter()) + " "
+                        + key.getTextDescription());
+                }
+            }
+            return routeShortcut(key);
+        }
+
     private:
+        [[nodiscard]] bool routeShortcut(const juce::KeyPress& key)
+        {
+            if (isRecordToggleShortcut(key))
+            {
+                if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                {
+                    tcc->invokeRecordToggleFromWindowShortcut();
+                    juce::Logger::writeToLog(
+                        juce::String{"[Shortcut] record toggle: "} + key.getTextDescription());
+                    return true;
+                }
+                return false;
+            }
+            if (isSpacePlayPauseShortcut(key))
+            {
+                if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                {
+                    tcc->invokePlayPauseToggleFromWindowShortcut();
+                    juce::Logger::writeToLog(
+                        juce::String{"[Shortcut] play/pause: "} + key.getTextDescription());
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        }
+
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
     };
 

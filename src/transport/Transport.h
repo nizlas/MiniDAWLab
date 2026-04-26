@@ -81,6 +81,11 @@ public:
     // block can observe the new intent. Thread: not the audio callback.
     void requestPlaybackIntent(PlaybackIntent intent) noexcept;
 
+    // [Message / UI] Last intent the UI published (or initial Stopped), acquire-ordered with
+    // `requestPlaybackIntent` / `readPlayheadSamplesForUi` — for labels and shortcuts, not the
+    // audio callback; use `audioThread_loadIntent` only on the device thread.
+    [[nodiscard]] PlaybackIntent readPlaybackIntentForUi() const noexcept;
+
     // Contract: record seek target and set seek-pending. The playhead is updated only when
     // the audio thread runs `audioThread_beginBlock` (next block). Thread: not the callback.
     void requestSeek(std::int64_t sampleIndex) noexcept;

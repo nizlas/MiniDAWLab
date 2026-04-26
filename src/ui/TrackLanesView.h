@@ -21,9 +21,11 @@
 // =============================================================================
 
 #include "domain/Track.h"
+#include "engine/RecorderService.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -42,7 +44,10 @@ class TimelineViewportModel;
 // ---------------------------------------------------------------------------
 // TrackLanesView — vertical stack of per-track event lanes
 // ---------------------------------------------------------------------------
-class TrackLanesView : public juce::Component
+// Drains `RecorderService` preview-peak SPSC **once** (this timer) so lanes do not compete for the
+// same preview FIFO. Passes a copy to the one lane whose `TrackId` matches the active take.
+// ---------------------------------------------------------------------------
+class TrackLanesView : public juce::Component, private juce::Timer
 {
 public:
     // Width of the left name/active strip. `Main` insets the timeline ruler by the same value so
@@ -51,13 +56,15 @@ public:
 
     ~TrackLanesView() override;
 
-    // [Message thread] `session` / `transport` / `timelineViewport` / `deviceManager` outlive this
-    // view. Rebuilds child lanes in `resized` to match the current `SessionSnapshot` track list.
+    // [Message thread] `session` / `transport` / `timelineViewport` / `deviceManager` / `recorder`
+    // outlive this view. Rebuilds child lanes in `resized` to match the current `SessionSnapshot`
+    // track list.
     TrackLanesView(
         Session& session,
         Transport& transport,
         TimelineViewportModel& timelineViewport,
-        juce::AudioDeviceManager& deviceManager);
+        juce::AudioDeviceManager& deviceManager,
+        RecorderService& recorder);
 
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
@@ -69,6 +76,11 @@ public:
     void syncTracksFromSession();
 
 private:
+    void timerCallback() override;
+
+    // [Message thread] When not recording, clears accumulated preview; when recording, drains the
+    // FIFO to `recordingPreviewPeaks_` and updates the matching lane’s overlay.
+    void updateRecordingPreviewOverlaysFromRecorder();
     // [Message thread] Match `std::vector` size and `TrackId` order to the session snapshot; id-
     // order changes (not in this project) would rebuild every lane.
     void rebuildChildLanesIfNeeded();
@@ -92,8 +104,13 @@ private:
     Transport& transport_;
     TimelineViewportModel& timelineViewport_;
     juce::AudioDeviceManager& deviceManager_;
+    RecorderService& recorder_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
+
+    // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
+    // while recording as `drainNextPreviewBlock` returns data. Not session state.
+    std::vector<RecordingPreviewPeakBlock> recordingPreviewPeaksAccum_;
 
     // Header-drag reorder (UI only until commit)
     bool headerTrackDragActive_ = false;

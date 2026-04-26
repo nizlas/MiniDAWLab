@@ -74,6 +74,15 @@ public:
                                          double deviceSampleRate,
                                          std::int64_t startSampleOnTimeline);
 
+    // [Message thread] Decode `file` and prepend a clip on `targetTrackId` (not `activeTrackId`).
+    // L = 0, V = `intendedVisibleLengthSamples` (clamped in `PlacedClip` to material). Publishes
+    // a new snapshot on success.
+    juce::Result addRecordedTakeAtSample(const juce::File& file,
+                                      double deviceSampleRate,
+                                      std::int64_t startSampleOnTimeline,
+                                      TrackId targetTrackId,
+                                      std::int64_t intendedVisibleLengthSamples);
+
     // [Message thread] Append a new **empty** track and make it the active track for
     // `addClipFromFileAtPlayhead` (newest = front within that track when a clip is added).
     void addTrack() noexcept;
@@ -146,6 +155,12 @@ public:
     // decode, no session mutation. This is the main handoff the engine uses each block.
     [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
 
+    // [Message thread] Last successfully **saved** or **loaded** project file (empty if never set).
+    // Used by the app for project-relative paths (e.g. takes/). Not part of the snapshot.
+    [[nodiscard]] juce::File getCurrentProjectFile() const noexcept { return currentProjectFile_; }
+    // [Message thread] True if the user has a known on-disk project (save or load completed).
+    [[nodiscard]] bool hasKnownProjectFile() const noexcept;
+
     // [Message thread] Write minimal project v1 (tracks, clip placements, absolute source paths,
     // monotonic id seeds, active track, playhead and device rate metadata). `transport` is read
     // for the playhead only (single owner of playhead state).
@@ -177,4 +192,6 @@ private:
     // Current world picture for the audio thread: always either the shared empty snapshot or a
     // user-built snapshot; swapped only from the message thread, read with acquire from any thread.
     mutable std::atomic<std::shared_ptr<const SessionSnapshot>> sessionSnapshot_;
+
+    juce::File currentProjectFile_;
 };

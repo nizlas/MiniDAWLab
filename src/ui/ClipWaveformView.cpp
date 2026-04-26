@@ -345,6 +345,52 @@ namespace
 
     // Peak bar opacity for any row, whenever that column is not covered by a prior row in time.
     constexpr float kWaveformPeakAlpha = 0.9f;
+    // Display only: does **not** affect audio, files, or session data. Applied to peak→pixels mapping.
+    constexpr float kWaveformDisplayGain = 3.0f;
+
+    // Normalized [0,1] peak (material / trim preview) → symmetric half-height in px; clamped to
+    // `inner` so the bar never draws outside the event body.
+    [[nodiscard]] float displayHalfHeightForNormalizedPeak(
+        const float peak01,
+        const float halfDraw,
+        const juce::Rectangle<float>& inner,
+        const float midY) noexcept
+    {
+        const float p = juce::jlimit(0.0f, 1.0f, peak01);
+        const float raw = p * kWaveformDisplayGain * halfDraw;
+        const float cap = juce::jmin(juce::jmax(0.0f, midY - inner.getY()),
+                                     juce::jmax(0.0f, inner.getBottom() - midY));
+        return juce::jmin(raw, cap);
+    }
+
+    // Min/max in approximately [-1,1] (preview blocks, committed path uses symmetric bars above).
+    // Clamps vertical span to `inner` after display gain; purely visual.
+    void fillMinMaxPeakRectClamped(
+        juce::Graphics& g,
+        const float minS,
+        const float maxS,
+        const float halfDraw,
+        const juce::Rectangle<float>& inner,
+        const float midY,
+        const float bx0,
+        const float segW,
+        const juce::Colour& colour)
+    {
+        const float sMin = juce::jlimit(-1.0f, 1.0f, minS);
+        const float sMax = juce::jlimit(-1.0f, 1.0f, maxS);
+        float yTop = midY - sMax * kWaveformDisplayGain * halfDraw;
+        float yBot = midY - sMin * kWaveformDisplayGain * halfDraw;
+        float yHi = juce::jmin(yTop, yBot);
+        float yLo = juce::jmax(yTop, yBot);
+        yHi = juce::jmax(yHi, inner.getY());
+        yLo = juce::jmin(yLo, inner.getBottom());
+        if (yLo <= yHi)
+        {
+            return;
+        }
+        g.setColour(colour);
+        g.fillRect(bx0, yHi, juce::jmax(1.0f, segW), yLo - yHi);
+    }
 
     // Merges **overlapping or touching** half-open [a,b) intervals: [0,5) and [5,8) become [0,8)
     // (same *union* in continuous time, since 5 is not included twice). **Why:** the hatch and
@@ -525,6 +571,31 @@ void ClipWaveformView::clearDragGhost()
         return;
     }
     hasDragGhost_ = false;
+    repaint();
+}
+
+void ClipWaveformView::setRecordingPreviewOverlay(
+    const std::int64_t startSampleOnTimeline,
+    const std::int64_t lengthSamples,
+    const std::vector<RecordingPreviewPeakBlock>& peakBlocks)
+{
+    recordingPreviewActive_ = true;
+    recordingPreviewStartSample_ = startSampleOnTimeline;
+    recordingPreviewLengthSamples_ = juce::jmax(std::int64_t{0}, lengthSamples);
+    recordingPreviewPeaks_ = peakBlocks;
+    repaint();
+}
+
+void ClipWaveformView::clearRecordingPreviewOverlay()
+{
+    if (!recordingPreviewActive_)
+    {
+        return;
+    }
+    recordingPreviewActive_ = false;
+    recordingPreviewStartSample_ = 0;
+    recordingPreviewLengthSamples_ = 0;
+    recordingPreviewPeaks_.clear();
     repaint();
 }
 
@@ -1257,14 +1328,15 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     mergeNonOverlapping(outMerged);
 }
 
-// [Message thread] **Paint pipeline in five beats (scan top-down in this function):**
+// [Message thread] **Paint pipeline (scan top-down in this function):**
 //   (0) Rebuild downsampled peaks if snapshot or view width changed.
 //   (1) One shared linear **session sample → x** (same as playhead).
 //   (2) Draw every row’s event **chassis** + peak bars (high row index first → low index last so
 //       the newest clip’s paint wins on overlaps).
 //   (3) Overlap *hint* pass per row (same order) — tint and hatch only on rows that the interval
 //       math says deserve it (tint + thin diagonals).
-//   (4) Playhead on top (always) so the line is never lost behind events.
+//   (3b) Optional live **recording** preview (not session state) — after (3), before playhead.
+//   (4) Playhead on top (always) so the line is never lost behind events or the recording card.
 void ClipWaveformView::paint(juce::Graphics& g)
 {
     // (0) see `rebuildPeaksIfNeeded` — cheap no-op on steady state.
@@ -1471,7 +1543,8 @@ void ClipWaveformView::paint(juce::Graphics& g)
                                 }
                                 peak = juce::jlimit(0.0f, 1.0f, peak);
                                 const float xj = inner.getX() + (float)j * segW;
-                                const float h = peak * halfDraw;
+                                const float h
+                                    = displayHalfHeightForNormalizedPeak(peak, halfDraw, inner, midY);
                                 g.setColour(juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
                                 g.fillRect(xj, midY - h, juce::jmax(1.0f, segW), h * 2.0f);
                             }
@@ -1506,7 +1579,8 @@ void ClipWaveformView::paint(juce::Graphics& g)
                         }
 
                         const float xj = inner.getX() + (float)j * segW;
-                        const float h = strip.peaks[(size_t)j] * halfDraw;
+                        const float h = displayHalfHeightForNormalizedPeak(
+                            strip.peaks[(size_t)j], halfDraw, inner, midY);
                         g.setColour(juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
                         g.fillRect(xj, midY - h, juce::jmax(1.0f, segW), h * 2.0f);
                     }
@@ -1642,6 +1716,69 @@ void ClipWaveformView::paint(juce::Graphics& g)
         if (rowInner.getWidth() >= 1.0f && rowInner.getHeight() >= 1.0f)
         {
             drawFrontOverlapShadeAndHatch(g, rowInner, olap, sessionSampleToX);
+        }
+    }
+
+    // --- (3b) Live recording preview (UI only; not in `SessionSnapshot`): growing body + preview
+    //     min/max blocks; **after** committed events + overlap hatch, **before** playhead.
+    if (recordingPreviewActive_)
+    {
+        const std::int64_t span0 = recordingPreviewStartSample_;
+        const std::int64_t rawLen = recordingPreviewLengthSamples_;
+        const std::int64_t span1
+            = span0 + (rawLen > 0 ? rawLen : 1); // at least one sample of width when length is still 0
+        if (span1 > span0)
+        {
+            float rx0 = TimelineRulerView::sessionSampleToLocalX(span0, bounds.getX(), visStart, spp);
+            float rx1 = TimelineRulerView::sessionSampleToLocalX(span1, bounds.getX(), visStart, spp);
+            const float xl = juce::jmin(rx0, rx1);
+            const float xr = juce::jmax(rx0, rx1);
+            juce::Rectangle<float> recRect{ xl, eventTrackY.getY(), juce::jmax(1.0f, xr - xl),
+                                            eventTrackY.getHeight() };
+            g.setColour(juce::Colour(0xff2f6a4a).withAlpha(0.30f));
+            g.fillRoundedRectangle(recRect, kEventCorner);
+            g.setColour(juce::Colour(0xff8ae8b0).withAlpha(0.48f));
+            g.drawRoundedRectangle(recRect, kEventCorner, 1.0f);
+
+            juce::Rectangle<float> innerRec
+                = recRect.reduced(1.0f + kWaveInset, 1.0f + kWaveInset * 0.5f);
+            if (innerRec.getWidth() >= 0.5f && innerRec.getHeight() >= 1.0f)
+            {
+                std::int64_t acc = 0;
+                for (const auto& b : recordingPreviewPeaks_)
+                {
+                    if (b.numSourceSamples <= 0)
+                    {
+                        continue;
+                    }
+                    const std::int64_t seg0 = span0 + acc;
+                    const std::int64_t seg1 = seg0 + static_cast<std::int64_t>(b.numSourceSamples);
+                    acc += static_cast<std::int64_t>(b.numSourceSamples);
+                    const float sx0 = TimelineRulerView::sessionSampleToLocalX(
+                        seg0, bounds.getX(), visStart, spp);
+                    const float sx1 = TimelineRulerView::sessionSampleToLocalX(
+                        seg1, bounds.getX(), visStart, spp);
+                    const float segLeft = juce::jmin(sx0, sx1);
+                    const float segRight = juce::jmax(sx0, sx1);
+                    const float bx0 = juce::jmax(innerRec.getX(), segLeft);
+                    const float bx1 = juce::jmin(innerRec.getRight(), segRight);
+                    const float segW = juce::jmax(1.0f, bx1 - bx0);
+                    if (segW < 0.5f)
+                    {
+                        continue;
+                    }
+                    fillMinMaxPeakRectClamped(
+                        g,
+                        b.minSample,
+                        b.maxSample,
+                        halfDraw,
+                        innerRec,
+                        midY,
+                        bx0,
+                        segW,
+                        juce::Colour(0xffc8ffe0).withAlpha(0.88f));
+                }
+            }
         }
     }
 

@@ -23,22 +23,76 @@
 namespace
 {
     constexpr double kSppMin = 0.1;
+    // Match `ClipWaveformView` playhead refresh so preview drain + repaints stay in the same ballpark.
+    constexpr int kRecordingPreviewTimerHz = 20;
 } // namespace
 
 TrackLanesView::TrackLanesView(
     Session& session,
     Transport& transport,
     TimelineViewportModel& timelineViewport,
-    juce::AudioDeviceManager& deviceManager)
+    juce::AudioDeviceManager& deviceManager,
+    RecorderService& recorder)
     : session_(session)
     , transport_(transport)
     , timelineViewport_(timelineViewport)
     , deviceManager_(deviceManager)
+    , recorder_(recorder)
 {
     syncTracksFromSession();
+    startTimerHz(kRecordingPreviewTimerHz);
 }
 
-TrackLanesView::~TrackLanesView() = default;
+TrackLanesView::~TrackLanesView()
+{
+    stopTimer();
+}
+
+void TrackLanesView::timerCallback()
+{
+    updateRecordingPreviewOverlaysFromRecorder();
+}
+
+void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
+{
+    if (!recorder_.isRecording())
+    {
+        recordingPreviewPeaksAccum_.clear();
+        for (auto& u : lanes_)
+        {
+            if (u != nullptr)
+            {
+                u->clearRecordingPreviewOverlay();
+            }
+        }
+        return;
+    }
+
+    RecordingPreviewPeakBlock blk;
+    while (recorder_.drainNextPreviewBlock(blk))
+    {
+        recordingPreviewPeaksAccum_.push_back(blk);
+    }
+
+    const TrackId recTid = recorder_.getRecordingTrackId();
+    const std::int64_t recStart = recorder_.getRecordingStartSample();
+    const std::int64_t recLen = recorder_.getRecordedSampleCount();
+    for (auto& u : lanes_)
+    {
+        if (u == nullptr)
+        {
+            continue;
+        }
+        if (u->getTrackId() == recTid)
+        {
+            u->setRecordingPreviewOverlay(recStart, recLen, recordingPreviewPeaksAccum_);
+        }
+        else
+        {
+            u->clearRecordingPreviewOverlay();
+        }
+    }
+}
 
 void TrackLanesView::syncTracksFromSession()
 {
@@ -88,8 +142,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             = [this](const TrackId id, const juce::Point<int> p) { updateHeaderTrackDrag(id, p); };
         dragHost.onHeaderDragEnded
             = [this](const TrackId id) { endHeaderTrackDrag(id); };
-        auto head
-            = std::make_unique<TrackHeaderView>(session_, tid, [this] { repaint(); }, std::move(dragHost));
+        const auto onArm = [this] {
+            for (auto& h : headers_)
+            {
+                h->repaint();
+            }
+        };
+        auto head = std::make_unique<TrackHeaderView>(
+            session_, recorder_, tid, [this] { repaint(); }, onArm, std::move(dragHost));
         addAndMakeVisible(*head);
         headers_.push_back(std::move(head));
         ClipWaveformLaneHost host;

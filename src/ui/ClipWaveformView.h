@@ -31,6 +31,7 @@
 
 #include "domain/Session.h"
 #include "domain/Track.h"
+#include "engine/RecorderService.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -96,6 +97,14 @@ public:
     // [Message thread] Cross-lane drag ghost (one lane at a time); called by `TrackLanesView` only.
     void setDragGhost(std::int64_t startSampleOnTimeline, std::int64_t lengthSamples);
     void clearDragGhost();
+
+    // [Message thread] Live recording preview only (not `SessionSnapshot`). `TrackLanesView` owns
+    // draining + passes a copy here for the armed track while `RecorderService::isRecording()`.
+    void setRecordingPreviewOverlay(
+        std::int64_t startSampleOnTimeline,
+        std::int64_t lengthSamples,
+        const std::vector<RecordingPreviewPeakBlock>& peakBlocks);
+    void clearRecordingPreviewOverlay();
 
     // [Message thread] Paints: background, back→front one **event** per `PlacedClip` (peaks in
     // *uncovered* time only), then the same overlap shading (per row, where that row is locally
@@ -211,6 +220,12 @@ private:
     std::int64_t dragGhostLengthSamples_ = 0;
 
     bool cursorOverriddenForInvalidDrop_ = false;
+
+    // UI-only live take preview (see `setRecordingPreviewOverlay`); cleared when recording stops.
+    bool recordingPreviewActive_ = false;
+    std::int64_t recordingPreviewStartSample_ = 0;
+    std::int64_t recordingPreviewLengthSamples_ = 0;
+    std::vector<RecordingPreviewPeakBlock> recordingPreviewPeaks_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ClipWaveformView)
 };

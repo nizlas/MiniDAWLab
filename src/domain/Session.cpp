@@ -163,6 +163,73 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     return juce::Result::ok();
 }
 
+bool Session::hasKnownProjectFile() const noexcept
+{
+    return currentProjectFile_.getFullPathName().isNotEmpty();
+}
+
+juce::Result Session::addRecordedTakeAtSample(
+    const juce::File& file,
+    const double deviceSampleRate,
+    const std::int64_t startSampleOnTimeline,
+    const TrackId targetTrackId,
+    const std::int64_t intendedVisibleLengthSamples)
+{
+    if (targetTrackId == kInvalidTrackId)
+    {
+        return juce::Result::fail("Invalid target track for recorded take");
+    }
+    if (intendedVisibleLengthSamples <= 0)
+    {
+        return juce::Result::fail("Recorded take has no length");
+    }
+    std::unique_ptr<AudioClip> loaded;
+    const juce::Result loadResult = AudioFileLoader::loadFromFile(file, deviceSampleRate, loaded);
+    if (!loadResult.wasOk())
+    {
+        return loadResult;
+    }
+    jassert(loaded != nullptr);
+    const std::shared_ptr<const AudioClip> material(std::move(loaded));
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return juce::Result::fail("Internal error: no session snapshot.");
+    }
+    if (current->findTrackIndexById(targetTrackId) < 0)
+    {
+        return juce::Result::fail("Target track does not exist.");
+    }
+    const PlacedClipId newId = nextPlacedClipId_++;
+    jassert(newId != kInvalidPlacedClipId);
+    try
+    {
+        const std::shared_ptr<const SessionSnapshot> next
+            = SessionSnapshot::withClipAddedAsNewestOnTargetTrack(
+                *current, newId, material, startSampleOnTimeline, targetTrackId, 0, intendedVisibleLengthSamples);
+        if (next == nullptr)
+        {
+            return juce::Result::fail("Internal error: could not add recorded take to session.");
+        }
+        std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    }
+    catch (const std::bad_alloc&)
+    {
+        return juce::Result::fail(
+            "Out of memory while adding the recorded take.");
+    }
+    catch (const std::exception& e)
+    {
+        return juce::Result::fail(
+            juce::String("Exception while adding recorded take: ") + e.what());
+    }
+    catch (...)
+    {
+        return juce::Result::fail("Unknown exception while adding recorded take.");
+    }
+    return juce::Result::ok();
+}
+
 void Session::addTrack() noexcept
 {
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
@@ -484,7 +551,12 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     {
         return juce::Result::fail("Session has no tracks to save.");
     }
-    return writeProjectFile(file, out);
+    const juce::Result wr = writeProjectFile(file, out);
+    if (wr.wasOk())
+    {
+        currentProjectFile_ = file;
+    }
+    return wr;
 }
 
 juce::Result Session::loadProjectFromFile(Transport& transport,
@@ -588,6 +660,8 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     }
 
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+
+    currentProjectFile_ = file;
 
     const std::int64_t tlen = next->getArrangementExtentSamples();
     const std::int64_t hi = juce::jmax(std::int64_t{0}, tlen);

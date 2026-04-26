@@ -72,6 +72,16 @@ public:
         std::int64_t startSampleOnTimeline,
         TrackId targetTrackId) noexcept;
 
+    // Same as above but with explicit L / V for recorded takes (L often 0; V = visible window).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipAddedAsNewestOnTargetTrack(
+        const SessionSnapshot& previous,
+        PlacedClipId newClipId,
+        std::shared_ptr<const AudioClip> material,
+        std::int64_t startSampleOnTimeline,
+        TrackId targetTrackId,
+        std::int64_t leftTrimSamples,
+        std::int64_t visibleLengthSamples) noexcept;
+
     // [Message thread] Append an empty track at the end. `newTrackId` must be non-zero and not
     // already present in `previous`.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackAdded(

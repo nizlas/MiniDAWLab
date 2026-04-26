@@ -145,11 +145,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 {
     juce::ignoreUnused(context);
 
-    // [Audio thread] Phase 4: route mono input[0] to the recorder SPSC path when active; does not
-    // access Session, Transport (beyond the existing tail of this function), or UI. No-op if not
-    // recording, no input device, or `recorder_` is null.
-    if (recorder_ != nullptr && numInputChannels > 0 && numSamples > 0
-        && inputChannelData != nullptr && inputChannelData[0] != nullptr)
+    // [Audio thread] Phase 4: route mono input[0] to the recorder SPSC path only while `isRecording()`
+    // and valid input pointers; does not access Session. `pushInputBlock` still no-ops if not recording
+    // — this call site avoids touching the recorder SPSC at all when idle.
+    if (recorder_ != nullptr
+        && recorder_->isRecording()
+        && numInputChannels > 0
+        && numSamples > 0
+        && inputChannelData != nullptr
+        && inputChannelData[0] != nullptr)
     {
         recorder_->pushInputBlock(inputChannelData[0], numSamples);
     }
@@ -195,6 +199,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
     {
         const Track& tr = sessionSnap->getTrack(ti);
+        if (recorder_ != nullptr && recorder_->isRecording() && tr.getId() == recorder_->getRecordingTrackId())
+        {
+            // Transient: do not play existing clips on the track being recorded; other tracks mix as usual.
+            continue;
+        }
         const std::vector<PlacedClip>& lane = tr.getPlacedClips();
         std::int64_t t = t0;
         int out0 = 0;

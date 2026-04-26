@@ -45,6 +45,11 @@ void Transport::requestPlaybackIntent(PlaybackIntent intent) noexcept
     intent_.store(static_cast<std::uint32_t>(intent), std::memory_order_release);
 }
 
+PlaybackIntent Transport::readPlaybackIntentForUi() const noexcept
+{
+    return static_cast<PlaybackIntent>(intent_.load(std::memory_order_acquire));
+}
+
 void Transport::requestSeek(std::int64_t sampleIndex) noexcept
 {
     // System meaning: a new position on the *session timeline* (not an offset inside one buffer by
