@@ -6,6 +6,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <cmath>
 #include <cstdint>
 #include <unordered_set>
 
@@ -34,6 +35,11 @@ namespace
         to->setProperty("id", static_cast<std::int64_t>(t.id));
         to->setProperty("name", t.name);
         to->setProperty("clips", juce::var(clipVars));
+        constexpr double kUnityChannelFaderOmitEpsilon = 1.0e-6;
+        if (std::fabs((double)t.channelFaderGain - 1.0) > kUnityChannelFaderOmitEpsilon)
+        {
+            to->setProperty("channelFaderGain", (double)t.channelFaderGain);
+        }
         return juce::var(to.get());
     }
 
@@ -186,9 +192,9 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
     const int ver = (int)static_cast<double>(root["version"]);
-    if (ver < 1 || ver > 4)
+    if (ver < 1 || ver > 5)
     {
-        return juce::Result::fail("Unsupported project version (supported: 1–4).");
+        return juce::Result::fail("Unsupported project version (supported: 1–5).");
     }
 
     out.version = ver;
@@ -286,6 +292,16 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         if (trk.name.isEmpty())
         {
             trk.name = "Track " + juce::String(trk.id);
+        }
+        trk.channelFaderGain = kTrackChannelVolumeUnityGain;
+        if (ver >= 5)
+        {
+            const juce::var& gv = tv.getProperty("channelFaderGain", {});
+            if (gv.isDouble() || gv.isInt() || gv.isInt64())
+            {
+                trk.channelFaderGain = juce::jlimit(
+                    0.0f, kTrackChannelFaderGainMax, (float)(double)gv);
+            }
         }
 
         const juce::var& clipsV = tv.getProperty("clips", {});

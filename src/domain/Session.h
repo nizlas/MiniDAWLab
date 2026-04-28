@@ -124,6 +124,10 @@ public:
     // **Does not** change `activeTrackId_` (add-clip target follows the same id in the new row).
     void moveTrack(TrackId movedTrackId, int destIndex) noexcept;
 
+    // [Message thread] Mixer channel volume: linear gain at the channel-fader point (see `Track`).
+    // Clamped to [0, kTrackChannelFaderGainMax]; 0 = fader at −∞ (not a separate mute flag).
+    void setTrackChannelFaderGain(TrackId trackId, float linearGain) noexcept;
+
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.
     void clearClip() noexcept;

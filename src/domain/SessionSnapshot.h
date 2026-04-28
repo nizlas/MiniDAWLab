@@ -127,6 +127,13 @@ public:
         PlacedClipId id,
         std::int64_t newLeftTrimSamples) noexcept;
 
+    // [Message thread] Replace one track's `channelFaderGain`; other tracks unchanged. Unknown id: no-op
+    // snapshotcopy of `previous` (debug jassert).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackChannelFaderGain(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        float channelFaderGainLinear) noexcept;
+
     // [Message thread] **Load-only:** publish a full pre-built track list in one step (e.g. project
     // open). Does not add clips incrementally. `tracks` must be non-empty. Stored arrangement extent
     // is 0 (use `withTracks` overload for v3 load).

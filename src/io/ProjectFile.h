@@ -32,12 +32,14 @@ struct ProjectFileTrackV1
     TrackId id = kInvalidTrackId;
     juce::String name;
     std::vector<ProjectFileClipV1> clips;
+    // v5: linear gain at channel-fader point (mixer). Omitted in JSON when ~ unity (see writer).
+    float channelFaderGain = kTrackChannelVolumeUnityGain;
 };
 
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 4;
+    static constexpr int kCurrentVersion = 5;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

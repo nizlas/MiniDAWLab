@@ -42,6 +42,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/ClipWaveformView.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
+    src/ui/InspectorView.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
     src/ui/TrackHeaderView.cpp

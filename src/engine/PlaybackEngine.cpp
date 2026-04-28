@@ -9,8 +9,10 @@
 // PHASE 3 (minimal multi-track): **Within each track**, Phase 2 still applies: overlapping clips
 //   are ordered; the **smallest** index in that **lane** that covers a timeline instant wins for
 //   *that* lane. **Across** tracks, the audible samples for each lane for the same time window are
-//   **added** into the device buffer — a minimal sum, not a mixer, sends, or loudness control.
-//   (Unbounded sum may clip; no normalization in this step.)
+//   **added** into the device buffer — a minimal sum (no mixer UI). Each track contributes after
+//   multiplying by its `Track::channelFaderGain` (mixer channel volume at the fader point; not
+//   clip/pre-gain — see `Track`). Future post-fader taps or inserts may need per-track staging buffers;
+//   not implemented — gain is applied at track-output merge into the device buffer today.
 //
 // WHERE THIS SITS
 //   `Session` publish → acquire-load of `const SessionSnapshot` (refcount) here; `Transport` seek
@@ -92,7 +94,8 @@ namespace
                              int run,
                              int outFrame0,
                              int numOutChannels,
-                             float* const* outputChannelData) noexcept
+                             float* const* outputChannelData,
+                             float trackGain) noexcept
     {
         const int numSourceChannels = clip.getNumChannels();
         const juce::AudioBuffer<float>& buf = clip.getAudio();
@@ -109,13 +112,13 @@ namespace
                                         && (outChannel == 0 || outChannel == 1));
             if (duplicateMono)
             {
-                juce::FloatVectorOperations::add(
-                    dest, buf.getReadPointer(0) + offInMaterial, run);
+                juce::FloatVectorOperations::addWithMultiply(
+                    dest, buf.getReadPointer(0) + offInMaterial, trackGain, run);
             }
             else if (outChannel < numSourceChannels)
             {
-                juce::FloatVectorOperations::add(
-                    dest, buf.getReadPointer(outChannel) + offInMaterial, run);
+                juce::FloatVectorOperations::addWithMultiply(
+                    dest, buf.getReadPointer(outChannel) + offInMaterial, trackGain, run);
             }
         }
     }
@@ -211,6 +214,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             // Transient: do not play existing clips on the track being recorded; other tracks mix as usual.
             continue;
         }
+        const float trackGain = tr.getChannelFaderGain();
+        if (trackGain <= 0.0f)
+        {
+            continue;
+        }
         const std::vector<PlacedClip>& lane = tr.getPlacedClips();
         std::int64_t t = t0;
         int out0 = 0;
@@ -233,7 +241,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 const int off = static_cast<int>(rel + p.getLeftTrimSamples());
                 jassert(off >= 0);
                 jassert(off + run <= c.getNumSamples());
-                addClipRunToOutputs(c, off, run, out0, numOutputChannels, outputChannelData);
+                addClipRunToOutputs(c, off, run, out0, numOutputChannels, outputChannelData, trackGain);
             }
             t += run;
             out0 += run;

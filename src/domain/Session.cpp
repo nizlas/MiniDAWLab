@@ -422,6 +422,24 @@ void Session::moveTrack(const TrackId movedTrackId, const int destIndex) noexcep
     // `activeTrackId_` is intentionally unchanged — UI highlights by id.
 }
 
+void Session::setTrackChannelFaderGain(const TrackId trackId, float linearGain) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->findTrackIndexById(trackId) < 0)
+    {
+        return;
+    }
+    linearGain = juce::jlimit(0.0f, kTrackChannelFaderGainMax, linearGain);
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackChannelFaderGain(*current, trackId, linearGain);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::clearClip() noexcept
 {
     // “No file”: one **empty** default track (id 1), same as a fresh `Session` — not the shared
@@ -528,6 +546,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         ProjectFileTrackV1 tr;
         tr.id = t.getId();
         tr.name = t.getName();
+        tr.channelFaderGain = t.getChannelFaderGain();
         for (int j = 0; j < t.getNumPlacedClips(); ++j)
         {
             const PlacedClip& p = t.getPlacedClip(j);
@@ -637,7 +656,11 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                     cDto.id, material, cDto.startSample, l, static_cast<std::int64_t>(-1));
             }
         }
-        built.emplace_back(trDto.id, trDto.name, std::move(placed));
+        built.emplace_back(
+            trDto.id,
+            trDto.name,
+            std::move(placed),
+            juce::jlimit(0.0f, kTrackChannelFaderGainMax, trDto.channelFaderGain));
     }
 
     if (built.empty())

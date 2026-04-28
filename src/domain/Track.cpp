@@ -8,13 +8,21 @@
 
 #include <utility>
 
-Track::Track(const TrackId id, juce::String name, std::vector<PlacedClip> placedClips) noexcept
+Track::Track(const TrackId id,
+             juce::String name,
+             std::vector<PlacedClip> placedClips,
+             const float channelFaderGain) noexcept
     : id_(id)
     , name_(std::move(name))
     , placedClips_(std::move(placedClips))
+    , channelFaderGain_(juce::jlimit(0.0f, kTrackChannelFaderGainMax, channelFaderGain))
 {
     jassert(id_ != kInvalidTrackId);
 }
+
+Track::Track(const TrackId id, juce::String name, std::vector<PlacedClip> placedClips) noexcept
+    : Track(id, std::move(name), std::move(placedClips), kTrackChannelVolumeUnityGain)
+{}
 
 int Track::getNumPlacedClips() const noexcept
 {

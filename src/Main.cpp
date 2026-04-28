@@ -51,6 +51,7 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
+#include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
 #include "io/ProjectAudioImport.h"
 
@@ -275,6 +276,7 @@ private:
             , timelineViewport_()
             , rulerView(sessionIn, transportIn, deviceManagerIn, timelineViewport_)
             , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn)
+            , inspectorView_(sessionIn)
         {
             setWantsKeyboardFocus(true);
             timelineViewport_.setOnVisibleRangeChanged([this] {
@@ -286,6 +288,7 @@ private:
                 session.addTrack();
                 syncViewportFromSession();
                 trackLanesView.syncTracksFromSession();
+                inspectorView_.refreshFromSession();
             };
             saveProjectButton.onClick = [this] { saveProjectClicked(); };
             loadProjectButton.onClick = [this] { loadProjectClicked(); };
@@ -312,6 +315,7 @@ private:
             countInStatusLabel_.setFont(juce::FontOptions(12.0f));
             countInStatusLabel_.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(countInStatusLabel_);
+            addAndMakeVisible(inspectorView_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
             deviceManager.addChangeListener(this);
@@ -368,6 +372,9 @@ private:
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             audioSettingsButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             constexpr int kTimelineRulerHeight = 20;
+            constexpr int kInspectorWidth = 90;
+            auto inspectorCol = area.removeFromLeft(kInspectorWidth).reduced(0, 0);
+            inspectorView_.setBounds(inspectorCol);
             auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
             timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
             rulerView.setBounds(timelineRow);
@@ -431,7 +438,11 @@ private:
             opt.launchAsync();
         }
 
-        void timerCallback() override { updatePlayPauseButtonFromTransport(); }
+        void timerCallback() override
+        {
+            updatePlayPauseButtonFromTransport();
+            inspectorView_.refreshFromSession();
+        }
 
         // [Message thread] Transport intent: Playing → Paused, else (Stopped or Paused) → Playing.
         // If a take is in progress, the button stops/commits (never Paused+recording).
@@ -780,6 +791,7 @@ private:
                 }
                 syncViewportFromSession();
                 trackLanesView.syncTracksFromSession();
+                inspectorView_.refreshFromSession();
                 rulerView.repaint();
                 trackLanesView.repaint();
                 if (infoNote.isNotEmpty() || skipped.size() > 0)
@@ -1095,6 +1107,7 @@ private:
         TimelineViewportModel timelineViewport_;
         TimelineRulerView rulerView;
         TrackLanesView trackLanesView;
+        InspectorView inspectorView_;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)
     };

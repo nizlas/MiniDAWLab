@@ -7,6 +7,18 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-28 — Active-track Inspector channel fader + `ProjectFile` v5 (`channelFaderGain`)
+
+**Scope:** `Track` / `Session` / `SessionSnapshot`, [PlaybackEngine](src/engine/PlaybackEngine.cpp), [InspectorView](src/ui/InspectorView.cpp), [ProjectFile](src/io/ProjectFile.cpp) — **not** recording path, clip import, per-track lane headers.
+
+**Mix point:** Gain is applied at the simplified **track-output sum** into the main stereo buffer (`addWithMultiply` per clip run). Post-fader inserts, sends, or flexible routing **may later require explicit per-track channel buffers** — **not implemented** in this slice.
+
+**Persisted field:** `ProjectFileTrackV1.channelFaderGain` — linear amplitude, **`0`** = minimum fader (**−∞** on the −60…+6 dB slider UI, not a separate mute). Unity **omitted when writing v5** when `abs(g - 1) ≤ 1e-6`; load clamps to `[0, kTrackChannelFaderGainMax]`. Pre-v5 tracks default **unity** on load.
+
+**UI:** [InspectorView](src/ui/InspectorView.h) horizontal dB slider, numeric **"-∞ dB"** at bottom stop, reset **0 dB** / unity gain.
+
+---
+
 ## 2026-04-27 — Windows packaging artifacts: `DanielssonsAudioLab-*` (exe/target unchanged)
 
 **Scope:** [package-windows.ps1](scripts/package-windows.ps1), [MiniDAWLab.iss](installer/MiniDAWLab.iss), docs — no `src/**`, no CMake target rename, **`MiniDAWLab.exe`** and installer payload unchanged.
