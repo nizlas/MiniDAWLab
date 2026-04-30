@@ -83,6 +83,22 @@ public:
                                       TrackId targetTrackId,
                                       std::int64_t intendedVisibleLengthSamples);
 
+    // [Message thread] Attach a placement using existing decoded material (non-destructive trims).
+    // Used when cycle-recording commits multiple passes into one WAV; callers share one AudioClip.
+    [[nodiscard]] juce::Result addPlacedClipFromExistingMaterial(std::shared_ptr<const AudioClip> material,
+                                                                  std::int64_t startSampleOnTimeline,
+                                                                  std::int64_t leftTrimSamples,
+                                                                  std::int64_t visibleLengthSamples,
+                                                                  TrackId targetTrackId);
+
+    [[nodiscard]] juce::Result addPlacedClipFromExistingMaterial(std::shared_ptr<const AudioClip> material,
+                                                                  std::int64_t startSampleOnTimeline,
+                                                                  std::int64_t leftTrimSamples,
+                                                                  std::int64_t visibleLengthSamples,
+                                                                  TrackId targetTrackId,
+                                                                  std::int64_t materialWindowStartSamples,
+                                                                  std::int64_t materialWindowEndExclusiveSamples);
+
     // [Message thread] Append a new **empty** track and make it the active track for
     // `addClipFromFileAtPlayhead` (newest = front within that track when a clip is added).
     void addTrack() noexcept;
@@ -154,6 +170,14 @@ public:
     // [Message thread] Grow-only stored arrangement extent; publishes a new snapshot. No-op if
     // `v` is not greater than the current stored value.
     void setArrangementExtentSamples(std::int64_t v) noexcept;
+
+    // [Message thread] Timeline locator samples (Cubase-style markers). Clamped to
+    // `getArrangementExtentSamples()`; `right == 0` means right locator unset. No swap/normalize
+    // between L/R; playback does **not** use locators yet.
+    void setLeftLocatorAtSample(std::int64_t s) noexcept;
+    void setRightLocatorAtSample(std::int64_t s) noexcept;
+    [[nodiscard]] std::int64_t getLeftLocatorSamples() const noexcept;
+    [[nodiscard]] std::int64_t getRightLocatorSamples() const noexcept;
 
     // [Audio thread] and [Message thread] Acquire the current `SessionSnapshot` pointer; no
     // decode, no session mutation. This is the main handoff the engine uses each block.

@@ -106,6 +106,16 @@ public:
         const std::vector<RecordingPreviewPeakBlock>& peakBlocks);
     void clearRecordingPreviewOverlay();
 
+    // Cycle OD: stacked completed-pass previews (same [L,R) window each) + current-pass overlay on top.
+    void setRecordingCyclePassPreviewLayers(
+        const std::vector<std::vector<RecordingPreviewPeakBlock>>& completedPassesOlderFirst,
+        std::int64_t loopLeftSample,
+        std::int64_t passWindowSamples,
+        std::int64_t currentStartSampleOnTimeline,
+        std::int64_t currentVisibleLengthSamples,
+        const std::vector<RecordingPreviewPeakBlock>& currentPeaks);
+    void clearRecordingCyclePassPreviewLayers() noexcept;
+
     // [Message thread] Paints: background, back→front one **event** per `PlacedClip` (peaks in
     // *uncovered* time only), then the same overlap shading (per row, where that row is locally
     // topmost over something behind), then playhead. No audio thread.
@@ -226,6 +236,11 @@ private:
     std::int64_t recordingPreviewStartSample_ = 0;
     std::int64_t recordingPreviewLengthSamples_ = 0;
     std::vector<RecordingPreviewPeakBlock> recordingPreviewPeaks_;
+
+    bool recordingCycleBehindLayersActive_ = false;
+    std::vector<std::vector<RecordingPreviewPeakBlock>> recordingCycleBehindPasses_;
+    std::int64_t recordingCycleLoopAnchorL_ = 0;
+    std::int64_t recordingCyclePassWindowLenSamples_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ClipWaveformView)
 };

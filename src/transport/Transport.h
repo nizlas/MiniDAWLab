@@ -94,8 +94,32 @@ public:
     // w.r.t. playhead stores from the audio thread). Thread: any non-callback; safe for UI.
     [[nodiscard]] std::int64_t readPlayheadSamplesForUi() const noexcept;
 
+    // Cycle/loop armed state (Cubase-like). Transient — not persisted. UI sets via release;
+    // PlaybackEngine reads on the audio thread with acquire — see audioThread_loadCycleEnabled.
+    void requestCycleEnabled(bool enabled) noexcept;
+    [[nodiscard]] bool readCycleEnabledForUi() const noexcept;
+
+    // [Message / UI] Wrapped loop counter incremented by PlaybackEngine once per audible wrap when
+    // cycle playback is armed. Acquire-ordered vs audio-thread release increments.
+    [[nodiscard]] std::uint32_t readCycleWrapCountForUi() const noexcept;
+
 private:
     friend class PlaybackEngine;
+
+    // [Audio thread] Acquire load — pairs with UI release stores on requestCycleEnabled.
+    [[nodiscard]] bool audioThread_loadCycleEnabled() const noexcept;
+
+    // [Audio thread] Direct playhead overwrite for cycle-loop resolution (exclusive with
+    // audioThread_advancePlayheadIfPlaying in any block where the engine sets a definitive end
+    // position via this method). Release store so UI readPlayheadSamplesForUi is coherent.
+    void audioThread_storePlayheadOnWrap(std::int64_t timelineSample) noexcept;
+
+    // [Audio thread] One increment per audible loop wrap while cycle playback wraps (same places as
+    // wrap playhead stores — message thread observes via readCycleWrapCountForUi).
+    void audioThread_signalCycleWrap() noexcept;
+
+    // [Audio thread] Relaxed counter read — for rare wrap diagnostics only (PlaybackEngine Debug).
+    [[nodiscard]] std::uint32_t audioThread_relaxedLoadWrapPassCount() const noexcept;
 
     // [Audio thread] If the UI set seek-pending, clear it and set the playhead to the target.
     // Call once at the start of each output block, before reading playhead for rendering.
@@ -118,4 +142,6 @@ private:
     std::atomic<std::int64_t> playheadSamples_;
     std::atomic<bool> seekPending_;
     std::atomic<std::int64_t> seekTargetSamples_;
+    std::atomic<bool> cycleEnabled_;
+    std::atomic<std::uint32_t> wrapPassCount_;
 };

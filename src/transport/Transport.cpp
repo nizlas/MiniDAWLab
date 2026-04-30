@@ -34,6 +34,8 @@ Transport::Transport()
     , playheadSamples_(0)
     , seekPending_(false)
     , seekTargetSamples_(0)
+    , cycleEnabled_(false)
+    , wrapPassCount_(0)
 {
 }
 
@@ -64,6 +66,41 @@ std::int64_t Transport::readPlayheadSamplesForUi() const noexcept
 {
     // Acquire: observe playhead stores from the callback as a coherent position for painting.
     return playheadSamples_.load(std::memory_order_acquire);
+}
+
+void Transport::requestCycleEnabled(const bool enabled) noexcept
+{
+    cycleEnabled_.store(enabled, std::memory_order_release);
+}
+
+bool Transport::readCycleEnabledForUi() const noexcept
+{
+    return cycleEnabled_.load(std::memory_order_acquire);
+}
+
+std::uint32_t Transport::readCycleWrapCountForUi() const noexcept
+{
+    return wrapPassCount_.load(std::memory_order_acquire);
+}
+
+bool Transport::audioThread_loadCycleEnabled() const noexcept
+{
+    return cycleEnabled_.load(std::memory_order_acquire);
+}
+
+void Transport::audioThread_storePlayheadOnWrap(const std::int64_t timelineSample) noexcept
+{
+    playheadSamples_.store(timelineSample, std::memory_order_release);
+}
+
+void Transport::audioThread_signalCycleWrap() noexcept
+{
+    wrapPassCount_.fetch_add(1u, std::memory_order_release);
+}
+
+std::uint32_t Transport::audioThread_relaxedLoadWrapPassCount() const noexcept
+{
+    return wrapPassCount_.load(std::memory_order_relaxed);
 }
 
 // [Audio thread]

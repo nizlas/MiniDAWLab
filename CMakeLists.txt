@@ -34,6 +34,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/Session.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
     src/io/ProjectAudioImport.cpp
     src/io/ProjectFile.cpp
     src/engine/CountInClickOutput.cpp

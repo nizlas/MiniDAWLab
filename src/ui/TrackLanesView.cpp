@@ -25,6 +25,44 @@ namespace
     constexpr double kSppMin = 0.1;
     // Match `ClipWaveformView` playhead refresh so preview drain + repaints stay in the same ballpark.
     constexpr int kRecordingPreviewTimerHz = 20;
+
+    // Move up to `maxSamples` front-most source samples from `from` into `out` (may split a block).
+    void peelPeakBlocksBySampleCount(std::vector<RecordingPreviewPeakBlock>& from,
+                                     std::vector<RecordingPreviewPeakBlock>& out,
+                                     const std::int64_t maxSamples)
+    {
+        out.clear();
+        if (maxSamples <= 0)
+        {
+            return;
+        }
+        std::int64_t taken = 0;
+        while (taken < maxSamples && !from.empty())
+        {
+            RecordingPreviewPeakBlock blk = from.front();
+            if (blk.numSourceSamples <= 0)
+            {
+                from.erase(from.begin());
+                continue;
+            }
+            const std::int64_t need = maxSamples - taken;
+            const std::int64_t n = static_cast<std::int64_t>(blk.numSourceSamples);
+            if (n <= need)
+            {
+                out.push_back(blk);
+                taken += n;
+                from.erase(from.begin());
+            }
+            else
+            {
+                RecordingPreviewPeakBlock head = blk;
+                head.numSourceSamples = static_cast<int>(need);
+                out.push_back(head);
+                from.front().numSourceSamples -= static_cast<int>(need);
+                taken += need;
+            }
+        }
+    }
 } // namespace
 
 TrackLanesView::TrackLanesView(
@@ -46,6 +84,7 @@ TrackLanesView::TrackLanesView(
 TrackLanesView::~TrackLanesView()
 {
     stopTimer();
+    clearCycleRecordingPreviewContext();
 }
 
 void TrackLanesView::timerCallback()
@@ -58,6 +97,8 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
     if (!recorder_.isRecording())
     {
         recordingPreviewPeaksAccum_.clear();
+        cycleRecordingCompletedPassPeaks_.clear();
+        cyclePreviewActive_ = false;
         for (auto& u : lanes_)
         {
             if (u != nullptr)
@@ -75,8 +116,34 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
     }
 
     const TrackId recTid = recorder_.getRecordingTrackId();
-    const std::int64_t recStart = recorder_.getRecordingStartSample();
-    const std::int64_t recLen = recorder_.getRecordedSampleCount();
+
+    std::int64_t recStart = recorder_.getRecordingStartSample();
+    std::int64_t recLen = recorder_.getRecordedSampleCount();
+
+    const std::uint32_t wrapNow = transport_.readCycleWrapCountForUi();
+
+    if (cyclePreviewActive_)
+    {
+        const std::int64_t passLen = cyclePreviewLocR_ - cyclePreviewLocL_;
+        if (passLen > 0)
+        {
+            while (cyclePreviewLastSeenWrap_ < wrapNow)
+            {
+                std::vector<RecordingPreviewPeakBlock> onePass;
+                peelPeakBlocksBySampleCount(recordingPreviewPeaksAccum_, onePass, passLen);
+                cycleRecordingCompletedPassPeaks_.push_back(std::move(onePass));
+                ++cyclePreviewLastSeenWrap_;
+            }
+            const std::uint32_t baseline = cyclePreviewWrapBaseline_;
+            const std::uint64_t deltaWraps
+                = (wrapNow >= baseline) ? static_cast<std::uint64_t>(wrapNow - baseline) : 0u;
+            const std::int64_t completed = static_cast<std::int64_t>(deltaWraps);
+            const std::int64_t offsetInPass = recLen - completed * passLen;
+            recStart = cyclePreviewLocL_;
+            recLen = juce::jlimit(std::int64_t{ 0 }, passLen, offsetInPass);
+        }
+    }
+
     for (auto& u : lanes_)
     {
         if (u == nullptr)
@@ -85,13 +152,49 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
         }
         if (u->getTrackId() == recTid)
         {
-            u->setRecordingPreviewOverlay(recStart, recLen, recordingPreviewPeaksAccum_);
+            const std::int64_t passLen = cyclePreviewLocR_ - cyclePreviewLocL_;
+            if (cyclePreviewActive_ && passLen > 0)
+            {
+                u->setRecordingCyclePassPreviewLayers(
+                    cycleRecordingCompletedPassPeaks_,
+                    cyclePreviewLocL_,
+                    passLen,
+                    recStart,
+                    recLen,
+                    recordingPreviewPeaksAccum_);
+            }
+            else
+            {
+                u->setRecordingPreviewOverlay(recStart, recLen, recordingPreviewPeaksAccum_);
+            }
         }
         else
         {
             u->clearRecordingPreviewOverlay();
         }
     }
+}
+
+void TrackLanesView::setCycleRecordingPreviewContext(
+    const bool active,
+    const std::int64_t loopLeftSample,
+    const std::int64_t loopRightSample,
+    const std::uint32_t wrapPassCountBaselineAtRecordingStart) noexcept
+{
+    cyclePreviewActive_ = active;
+    cyclePreviewLocL_ = loopLeftSample;
+    cyclePreviewLocR_ = loopRightSample;
+    cyclePreviewWrapBaseline_ = wrapPassCountBaselineAtRecordingStart;
+    cyclePreviewLastSeenWrap_ = wrapPassCountBaselineAtRecordingStart;
+    recordingPreviewPeaksAccum_.clear();
+    cycleRecordingCompletedPassPeaks_.clear();
+}
+
+void TrackLanesView::clearCycleRecordingPreviewContext() noexcept
+{
+    cyclePreviewActive_ = false;
+    recordingPreviewPeaksAccum_.clear();
+    cycleRecordingCompletedPassPeaks_.clear();
 }
 
 void TrackLanesView::syncTracksFromSession()

@@ -5,11 +5,12 @@
 // =============================================================================
 //
 // ROLE IN THE ARCHITECTURE
-    //   User points on the **session** timeline (same sample space as
-    //   `Session::getArrangementExtentSamples` / `Transport` playhead)
-//   and `Transport`’s playhead) without clicking the event lane. **Seek** is implemented only here:
-//   `Transport::requestSeek` on press and drag. The event lane (`ClipWaveformView`) stays focused on
-//   selection and clip drag; it does not seek on empty background.
+//   User points on the **session** timeline (same sample space as
+//   `Session::getArrangementExtentSamples` / `Transport`) without clicking the event lane.
+//   **Seek** uses `Transport::requestSeek` on press and drag on the **lower** half; **Ctrl** sets
+//   the **left** locator, **Alt** sets the **right**. The **upper** half (no modifier) toggles
+//   **cycle** visualization (transient on `Transport`) when not blocked during record/count-in.
+//   The event lane (`ClipWaveformView`) stays focused on
 //
 // PRESENTATION
 //   Plain tick marks at **round seconds** (device sample rate → seconds for layout only). Density
@@ -36,6 +37,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <cstdint>
+#include <functional>
 
 class Transport;
 
@@ -50,12 +52,13 @@ class Transport;
 class TimelineRulerView : public juce::Component, private juce::Timer
 {
 public:
-    // [Message thread] `session` / `transport` outlive this view. `deviceManager` is only sampled
-    // in `paint` for the running device’s sample rate (tick placement in seconds).
+    // [Message thread] Optional: when set, upper-half cycle toggle is suppressed (e.g. recording
+    // or count-in). Must be safe to call synchronously from ruler mouse handlers.
     TimelineRulerView(Session& session,
                       Transport& transport,
                       juce::AudioDeviceManager& deviceManager,
-                      TimelineViewportModel& timelineViewport);
+                      TimelineViewportModel& timelineViewport,
+                      std::function<bool()> isUiInputBlockedByRecording = {});
 
     ~TimelineRulerView() override;
 
@@ -97,11 +100,15 @@ private:
 
     // [Message thread] Shared by mouse down/drag: map local x to sample and `requestSeek`.
     void applySeekForLocalX(float x) noexcept;
+    void applyLeftLocatorForLocalX(float x) noexcept;
+    void applyRightLocatorForLocalX(float x) noexcept;
+    void tryToggleCycleEnabled() noexcept;
 
     Session& session_;
     Transport& transport_;
     juce::AudioDeviceManager& deviceManager_;
     TimelineViewportModel& timelineViewport_;
+    std::function<bool()> isUiInputBlockedByRecording_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimelineRulerView)
 };

@@ -29,6 +29,13 @@ namespace
             {
                 co->setProperty("leftTrimSamples", static_cast<std::int64_t>(c.leftTrimSamples));
             }
+            if (c.hasMaterialWindowInFile)
+            {
+                co->setProperty("materialWindowStartSamples", static_cast<std::int64_t>(c.materialWindowStartSamples));
+                co->setProperty(
+                    "materialWindowEndExclusiveSamples",
+                    static_cast<std::int64_t>(c.materialWindowEndExclusiveSamples));
+            }
             clipVars.add(juce::var(co.get()));
         }
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
@@ -66,7 +73,10 @@ namespace
     }
 
     [[nodiscard]] juce::Result clipFromVar(
-        const juce::var& v, ProjectFileClipV1& out, juce::String& err)
+        const juce::var& v,
+        ProjectFileClipV1& out,
+        juce::String& err,
+        const int fileVersion)
     {
         if (!v.isObject())
         {
@@ -108,6 +118,22 @@ namespace
         {
             out.leftTrimSamples = static_cast<std::int64_t>(static_cast<double>(ltr));
         }
+        out.materialWindowStartSamples = 0;
+        out.materialWindowEndExclusiveSamples = 0;
+        out.hasMaterialWindowInFile = false;
+        if (fileVersion >= 7)
+        {
+            const juce::var& mws = v.getProperty("materialWindowStartSamples", {});
+            const juce::var& mwe = v.getProperty("materialWindowEndExclusiveSamples", {});
+            if ((mws.isInt64() || mws.isInt() || mws.isDouble())
+                && (mwe.isInt64() || mwe.isInt() || mwe.isDouble()))
+            {
+                out.materialWindowStartSamples = static_cast<std::int64_t>(static_cast<double>(mws));
+                out.materialWindowEndExclusiveSamples
+                    = static_cast<std::int64_t>(static_cast<double>(mwe));
+                out.hasMaterialWindowInFile = true;
+            }
+        }
         return juce::Result::ok();
     }
 } // namespace
@@ -135,6 +161,17 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     if (data.version >= 3)
     {
         root->setProperty("arrangementExtentSamples", data.arrangementExtentSamples);
+    }
+    if (data.version >= 6)
+    {
+        if (data.leftLocatorSamples != 0)
+        {
+            root->setProperty("leftLocatorSamples", data.leftLocatorSamples);
+        }
+        if (data.rightLocatorSamples != 0)
+        {
+            root->setProperty("rightLocatorSamples", data.rightLocatorSamples);
+        }
     }
     root->setProperty("tracks", juce::var(trackVars));
 
@@ -192,9 +229,11 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
     const int ver = (int)static_cast<double>(root["version"]);
-    if (ver < 1 || ver > 5)
+    if (ver < 1 || ver > ProjectFileV1::kCurrentVersion)
     {
-        return juce::Result::fail("Unsupported project version (supported: 1–5).");
+        return juce::Result::fail(juce::String("Unsupported project version (supported: 1–")
+                                  + juce::String(ProjectFileV1::kCurrentVersion)
+                                  + ").");
     }
 
     out.version = ver;
@@ -257,6 +296,22 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
 
+    out.leftLocatorSamples = 0;
+    out.rightLocatorSamples = 0;
+    if (ver >= 6)
+    {
+        const juce::var& ll = root.getProperty("leftLocatorSamples", {});
+        if (ll.isInt64() || ll.isInt() || ll.isDouble())
+        {
+            out.leftLocatorSamples = static_cast<std::int64_t>(static_cast<double>(ll));
+        }
+        const juce::var& rl = root.getProperty("rightLocatorSamples", {});
+        if (rl.isInt64() || rl.isInt() || rl.isDouble())
+        {
+            out.rightLocatorSamples = static_cast<std::int64_t>(static_cast<double>(rl));
+        }
+    }
+
     const juce::var& tracksVar = root["tracks"];
     if (!tracksVar.isArray())
     {
@@ -313,7 +368,7 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 for (const juce::var& cv : *clipArr)
                 {
                     ProjectFileClipV1 c;
-                    const juce::Result cr = clipFromVar(cv, c, err);
+                    const juce::Result cr = clipFromVar(cv, c, err, ver);
                     if (cr.failed())
                     {
                         return juce::Result::fail(err);

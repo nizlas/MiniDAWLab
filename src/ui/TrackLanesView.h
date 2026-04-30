@@ -75,6 +75,14 @@ public:
     // is created before layout without waiting for a user resize.
     void syncTracksFromSession();
 
+    // Cycle recording preview: overlay spans [L, L+visible) per pass only; resets when playback wraps.
+    void setCycleRecordingPreviewContext(bool active,
+                                         std::int64_t loopLeftSample,
+                                         std::int64_t loopRightSample,
+                                         std::uint32_t wrapPassCountBaselineAtRecordingStart) noexcept;
+
+    void clearCycleRecordingPreviewContext() noexcept;
+
 private:
     void timerCallback() override;
 
@@ -111,6 +119,16 @@ private:
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
     // while recording as `drainNextPreviewBlock` returns data. Not session state.
     std::vector<RecordingPreviewPeakBlock> recordingPreviewPeaksAccum_;
+
+    // Cycle recording: one peak-block vector per completed loop pass (oldest first). View-only;
+    // cleared when recording stops or cycle preview context clears.
+    std::vector<std::vector<RecordingPreviewPeakBlock>> cycleRecordingCompletedPassPeaks_;
+
+    bool cyclePreviewActive_ = false;
+    std::int64_t cyclePreviewLocL_ = 0;
+    std::int64_t cyclePreviewLocR_ = 0;
+    std::uint32_t cyclePreviewWrapBaseline_ = 0;
+    std::uint32_t cyclePreviewLastSeenWrap_ = 0;
 
     // Header-drag reorder (UI only until commit)
     bool headerTrackDragActive_ = false;

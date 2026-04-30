@@ -44,9 +44,12 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "domain/Session.h"
+#include "domain/AudioClip.h"
 #include "engine/CountInClickOutput.h"
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
+#include "io/AudioFileLoader.h"
+#include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
@@ -55,12 +58,104 @@
 #include "audio/AudioDeviceInfo.h"
 #include "io/ProjectAudioImport.h"
 
+#include <algorithm>
+#include <memory>
 #include <optional>
+#include <vector>
 
 namespace
 {
     // Temporary: show last key in a small local label (transport row). Leave `false` in normal use.
     constexpr bool kShowKeyDiagnostic = false;
+
+    // Temporary: log + on-screen line for keys reaching MainWindow::routeShortcut. Leave `false` in
+    // normal use (no extra layout row; `if constexpr` strips the UI).
+    constexpr bool kShowShortcutDiagnostics = false;
+
+    [[nodiscard]] juce::String hex8(const juce::uint32 x)
+    {
+        return juce::String::toHexString(x).toUpperCase();
+    }
+
+    // [ShortcutDiag] Lines are parseable tokens for correlating WM/JUCE conversions with matchers.
+    void logShortcutRouterKey(const juce::KeyPress& key)
+    {
+        if (!kShowShortcutDiagnostics)
+        {
+            return;
+        }
+        const int kc = key.getKeyCode();
+        const int lowWord = kc & 0xffff;
+        const juce_wchar tc = key.getTextCharacter();
+        const juce::uint32 kcU = static_cast<juce::uint32>(kc);
+        const juce::uint32 tcU = static_cast<juce::uint32>(static_cast<juce::uint16>(tc));
+        const juce::uint32 lowU = static_cast<juce::uint32>(lowWord) & 0xffffu;
+
+        const juce::ModifierKeys mods = key.getModifiers();
+        const juce::uint32 modRaw = static_cast<juce::uint32>(mods.getRawFlags());
+
+        const int canonNp1 = juce::KeyPress::numberPad1;
+        const int canonMul = juce::KeyPress::numberPadMultiply;
+        const juce::uint32 canonNp1U = static_cast<juce::uint32>(canonNp1);
+        const juce::uint32 canonMulU = static_cast<juce::uint32>(canonMul);
+
+        juce::String msg;
+        msg += "[ShortcutDiag] ";
+        msg += "keyCode=";
+        msg += juce::String(kc);
+        msg += " (0x";
+        msg += hex8(kcU);
+        msg += ") lowWord=";
+        msg += juce::String(lowWord);
+        msg += " (0x";
+        msg += hex8(lowU);
+        msg += ") textChar=";
+        msg += juce::String(static_cast<int>(tcU & 0xffffu));
+        msg += " (0x";
+        msg += hex8(tcU);
+        msg += ") np1Canon=";
+        msg += juce::String(canonNp1);
+        msg += " (0x";
+        msg += hex8(canonNp1U);
+        msg += ") mulCanon=";
+        msg += juce::String(canonMul);
+        msg += " (0x";
+        msg += hex8(canonMulU);
+        msg += ") modShift=";
+        msg += mods.isShiftDown() ? juce::String("Y") : juce::String("n");
+        msg += " modCtrl=";
+        msg += mods.isCtrlDown() ? juce::String("Y") : juce::String("n");
+        msg += " modAlt=";
+        msg += mods.isAltDown() ? juce::String("Y") : juce::String("n");
+        msg += " modCmd=";
+        msg += mods.isCommandDown() ? juce::String("Y") : juce::String("n");
+        msg += " modRaw=0x";
+        msg += hex8(modRaw);
+        msg += " desc=\"";
+        msg += key.getTextDescription();
+        msg += "\"";
+        juce::Logger::writeToLog(msg);
+    }
+
+    // Single-line caption for temporary on-screen shortcut diagnostic (transport area).
+    [[nodiscard]] juce::String makeShortcutDiagVisibleCaption(const juce::KeyPress& key)
+    {
+        const int kc = key.getKeyCode();
+        const int lowWord = kc & 0xffff;
+        const juce_wchar tc = key.getTextCharacter();
+        const auto kcU = static_cast<juce::uint32>(kc);
+        const auto tcU = static_cast<juce::uint32>(static_cast<juce::uint16>(tc));
+        const auto lowU = static_cast<juce::uint32>(lowWord) & 0xffffu;
+
+        juce::String cap;
+        cap << "[ShortcutDiag ui] ";
+        cap << "keyCode=" << juce::String(kc) << " (0x" << hex8(kcU) << ") ";
+        cap << "lowWord=" << juce::String(lowWord) << " (0x" << hex8(lowU) << ") ";
+        cap << "textChar=" << juce::String(static_cast<int>(tcU & 0xffffu)) << " (0x"
+            << hex8(tcU) << ") ";
+        cap << "desc=\"" << key.getTextDescription() << "\"";
+        return cap;
+    }
 
     // JUCE (Windows) uses e.g. VK_* | 0x10000 for numpad keys; `KeyPress::numberPadMultiply` matches
     // that, but some paths deliver VK_MULTIPLY (0x6A) without the high bit — match both.
@@ -75,6 +170,73 @@ namespace
         {
             return true;
         }
+        return false;
+    }
+
+    // Jump-to-left-locator shortcut: matches numpad 1, top-row "1", and (Windows) numpad-with-NumLock-off
+    // which is often delivered as End (VK_END 0x23), e.g. raw keyCode 0x10023, desc "end".
+    // For now the dedicated End key (navigation cluster) also triggers the same action.
+    [[nodiscard]] bool isNumpad1Shortcut(const juce::KeyPress& k) noexcept
+    {
+        if (k == juce::KeyPress::numberPad1)
+        {
+            return true;
+        }
+
+        const int canonNumpad1Code = juce::KeyPress::numberPad1;
+        const int raw = k.getKeyCode();
+        if (raw == canonNumpad1Code)
+        {
+            return true;
+        }
+        // Same virtual key as JUCE’s numpad 1, but high bits may differ (platform extended flags).
+        if ((raw & 0xffff) == (canonNumpad1Code & 0xffff))
+        {
+            return true;
+        }
+
+        constexpr int kVkNumpad1 = 0x61; // winuser.h VK_NUMPAD1
+        if (((raw & 0xffff) == kVkNumpad1) || raw == kVkNumpad1)
+        {
+            return true;
+        }
+
+        if (k.getTextCharacter() == juce_wchar{ '1' })
+        {
+            return true;
+        }
+
+        constexpr int kAsciiDigit1 = 49; // 0x31 main-row
+        if (((raw & 0xffff) == kAsciiDigit1) || raw == kAsciiDigit1)
+        {
+            return true;
+        }
+
+        // NumLock off: numpad "1" is often VK_END (0x23); JUCE may use extended keyCode e.g. 0x10023.
+        if (k == juce::KeyPress::endKey)
+        {
+            return true;
+        }
+        const int canonEnd = juce::KeyPress::endKey;
+        if (raw == canonEnd)
+        {
+            return true;
+        }
+        if ((raw & 0xffff) == (canonEnd & 0xffff))
+        {
+            return true;
+        }
+        constexpr int kVkEnd = 0x23; // winuser.h VK_END
+        if (((raw & 0xffff) == kVkEnd) || raw == kVkEnd)
+        {
+            return true;
+        }
+        constexpr int kObservedEndExtended = 0x10023; // e.g. numpad-1-as-End on Windows/JUCE (65571 decimal)
+        if (raw == kObservedEndExtended)
+        {
+            return true;
+        }
+
         return false;
     }
 
@@ -125,6 +287,132 @@ namespace
             }
         }
         return audioDir.getChildFile("take_" + t + "_9999.wav");
+    }
+
+    // Offline split (after cycle OD finalize): independent mono 24‑bit WAVs in `Audio/`.
+    [[nodiscard]] juce::File makeUniqueCyclePassWavInProjectAudioDir(
+        const juce::File& audioDir,
+        const juce::String& batchStamp,
+        const int sliceIndex)
+    {
+        juce::File f = audioDir.getChildFile(
+            juce::String("cycle_pass_") + batchStamp + "_" + juce::String(sliceIndex) + ".wav");
+        if (!f.existsAsFile())
+        {
+            return f;
+        }
+        for (int i = 1; i < 10000; ++i)
+        {
+            f = audioDir.getChildFile(juce::String("cycle_pass_") + batchStamp + "_"
+                                      + juce::String(sliceIndex) + "_" + juce::String(i) + ".wav");
+            if (!f.existsAsFile())
+            {
+                return f;
+            }
+        }
+        return audioDir.getChildFile(
+            juce::String("cycle_pass_") + batchStamp + "_" + juce::String(sliceIndex)
+            + "_collision.wav");
+    }
+
+    // Defer-and-retry cleanup: the continuous WAV may briefly remain locked by Windows after the
+    // recorder writer is closed (AV scan / indexer / kernel handle release latency). One synchronous
+    // attempt + up to 1 s of message-thread retries (no audio-thread work, no sleeps), then
+    // rename to a `_debug_cycle_continuous_…` sibling as last resort.
+    class DeferredCycleMasterDeleter : private juce::Timer
+    {
+    public:
+        static void schedule(juce::File f)
+        {
+            std::unique_ptr<DeferredCycleMasterDeleter> p(new DeferredCycleMasterDeleter(std::move(f)));
+            p->startTimer(kRetryIntervalMs);
+            liveInstances().push_back(std::move(p));
+        }
+
+    private:
+        explicit DeferredCycleMasterDeleter(juce::File f) noexcept : file_(std::move(f)) {}
+
+        void timerCallback() override
+        {
+            ++attempts_;
+            if (!file_.existsAsFile())
+            {
+                retire();
+                return;
+            }
+            if (file_.deleteFile())
+            {
+                juce::Logger::writeToLog(
+                    "[Rec] cycle split: deleted continuous master WAV (deferred attempt "
+                    + juce::String(attempts_) + ", " + file_.getFileName() + ").");
+                retire();
+                return;
+            }
+            if (attempts_ >= kMaxAttempts)
+            {
+                const juce::File dbg = file_.getSiblingFile(
+                    "_debug_cycle_continuous_" + file_.getFileName());
+                if (dbg.existsAsFile())
+                {
+                    (void)dbg.deleteFile();
+                }
+                const bool renamed = file_.moveFileTo(dbg);
+                if (!renamed)
+                {
+                    juce::Logger::writeToLog(
+                        "[Rec] cycle split WARNING: continuous master could not be deleted or renamed: "
+                        + file_.getFullPathName());
+                }
+                else
+                {
+                    juce::Logger::writeToLog(
+                        "[Rec] cycle split: continuous master kept as debug file "
+                        + dbg.getFullPathName());
+                }
+                retire();
+            }
+        }
+
+        void retire()
+        {
+            stopTimer();
+            DeferredCycleMasterDeleter* self = this;
+            juce::MessageManager::callAsync([self]() {
+                auto& v = liveInstances();
+                v.erase(std::remove_if(v.begin(), v.end(),
+                                       [self](const std::unique_ptr<DeferredCycleMasterDeleter>& x) {
+                                           return x.get() == self;
+                                       }),
+                        v.end());
+            });
+        }
+
+        static std::vector<std::unique_ptr<DeferredCycleMasterDeleter>>& liveInstances() noexcept
+        {
+            static std::vector<std::unique_ptr<DeferredCycleMasterDeleter>> v;
+            return v;
+        }
+
+        juce::File file_;
+        int attempts_ = 0;
+        static constexpr int kMaxAttempts = 20;     // 20 * 50 ms = 1 s
+        static constexpr int kRetryIntervalMs = 50;
+    };
+
+    inline void scheduleCycleContinuousMasterCleanup(const juce::File& continuousWav)
+    {
+        if (continuousWav == juce::File() || !continuousWav.existsAsFile())
+        {
+            return;
+        }
+        if (continuousWav.deleteFile())
+        {
+            juce::Logger::writeToLog(
+                "[Rec] cycle split: deleted continuous master WAV (" + continuousWav.getFileName()
+                + ").");
+            return;
+        }
+        DeferredCycleMasterDeleter::schedule(continuousWav);
     }
 
     // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
@@ -274,7 +562,14 @@ private:
             , recorder_(recorderIn)
             , countInClicks_(countInClicksIn)
             , timelineViewport_()
-            , rulerView(sessionIn, transportIn, deviceManagerIn, timelineViewport_)
+            , rulerView(
+                  sessionIn,
+                  transportIn,
+                  deviceManagerIn,
+                  timelineViewport_,
+                  [this]() {
+                      return recorder_.isRecording() || isCountInActive();
+                  })
             , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn)
             , inspectorView_(sessionIn)
         {
@@ -312,6 +607,18 @@ private:
                 keyDiagLabel_.setJustificationType(juce::Justification::centredLeft);
                 keyDiagLabel_.setText("key: —", juce::dontSendNotification);
             }
+            if constexpr (kShowShortcutDiagnostics)
+            {
+                shortcutDiagLabel_ = std::make_unique<juce::Label>();
+                shortcutDiagLabel_->setFont(juce::FontOptions(12.0f));
+                shortcutDiagLabel_->setJustificationType(juce::Justification::centredLeft);
+                shortcutDiagLabel_->setInterceptsMouseClicks(false, false);
+                shortcutDiagLabel_->setMinimumHorizontalScale(1.0f);
+                shortcutDiagLabel_->setText(
+                    "[ShortcutDiag ui] (press a key — same source as routeShortcut logger line)",
+                    juce::dontSendNotification);
+                addAndMakeVisible(*shortcutDiagLabel_);
+            }
             countInStatusLabel_.setFont(juce::FontOptions(12.0f));
             countInStatusLabel_.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(countInStatusLabel_);
@@ -328,6 +635,10 @@ private:
         {
             deviceManager.removeChangeListener(this);
             cancelCountIn();
+            if (cycleRecordingWrapTimer_ != nullptr)
+            {
+                cycleRecordingWrapTimer_->stopTimer();
+            }
         }
 
         // [Message thread] Invoked only from `MainWindow` shortcut router (not from child
@@ -343,11 +654,42 @@ private:
             }
             togglePlayPauseTransportOnly();
         }
+        void invokeJumpToLeftLocatorFromWindowShortcut()
+        {
+            if (recorder_.isRecording() || isCountInActive())
+            {
+                juce::Logger::writeToLog("[Shortcut] numpad1 ignored (recording or count-in)");
+                return;
+            }
+            const std::int64_t L = session.getLeftLocatorSamples();
+            const std::int64_t R = session.getRightLocatorSamples();
+            if (R > L && R > 0)
+            {
+                transport.requestSeek(L);
+                return;
+            }
+            juce::Logger::writeToLog("[Shortcut] numpad1 ignored: no valid locator range");
+        }
         void setKeyDiagnosticLine(const juce::String& line)
         {
             if (kShowKeyDiagnostic)
             {
                 keyDiagLabel_.setText(line, juce::dontSendNotification);
+            }
+        }
+
+        void setShortcutDiagVisibleCaption(const juce::String& line)
+        {
+            if constexpr (kShowShortcutDiagnostics)
+            {
+                if (shortcutDiagLabel_)
+                {
+                    shortcutDiagLabel_->setText(line, juce::dontSendNotification);
+                }
+            }
+            else
+            {
+                juce::ignoreUnused(line);
             }
         }
 
@@ -371,6 +713,13 @@ private:
             playPauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             audioSettingsButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            if constexpr (kShowShortcutDiagnostics)
+            {
+                if (shortcutDiagLabel_ != nullptr)
+                {
+                    shortcutDiagLabel_->setBounds(area.removeFromTop(28));
+                }
+            }
             constexpr int kTimelineRulerHeight = 20;
             constexpr int kInspectorWidth = 90;
             auto inspectorCol = area.removeFromLeft(kInspectorWidth).reduced(0, 0);
@@ -392,6 +741,31 @@ private:
             TransportControlsContent& owner;
         };
         friend struct CountInTimer;
+
+        struct CycleRecordingWrapTimer final : juce::Timer
+        {
+            explicit CycleRecordingWrapTimer(TransportControlsContent& o)
+                : owner(o)
+            {
+            }
+            void timerCallback() override { owner.onCycleRecordingWrapTimerTick(); }
+            TransportControlsContent& owner;
+        };
+        friend struct CycleRecordingWrapTimer;
+
+        void onCycleRecordingWrapTimerTick()
+        {
+            if (!cycleRecordingActive_ || !recorder_.isRecording())
+            {
+                return;
+            }
+            const std::uint32_t now = transport.readCycleWrapCountForUi();
+            if (now != lastSeenWrapCount_)
+            {
+                numCompletedPasses_ += static_cast<int>(now - lastSeenWrapCount_);
+                lastSeenWrapCount_ = now;
+            }
+        }
 
         void changeListenerCallback(juce::ChangeBroadcaster* source) override
         {
@@ -834,11 +1208,28 @@ private:
                     juce::String{"[Rec] stop/commit source="} + sourceContext);
             }
 
+            const bool commitCycleTakes = cycleRecordingActive_;
+            const TrackId cycleTrackId = cycleSessionTrackId_;
+            const std::int64_t cycleLocL = cycleSessionLocL_;
+            const std::int64_t cycleLocR = cycleSessionLocR_;
+            const double cycleSr = cycleSessionSampleRate_;
+
             transport.requestPlaybackIntent(PlaybackIntent::Stopped);
             updatePlayPauseButtonFromTransport();
+            if (cycleRecordingWrapTimer_ != nullptr)
+            {
+                cycleRecordingWrapTimer_->stopTimer();
+            }
+
+            trackLanesView.clearCycleRecordingPreviewContext();
+            cycleRecordingActive_ = false;
+
             const RecordedTakeResult r = recorder_.stopRecordingAndFinalize();
+
             if (!r.success)
             {
+                numCompletedPasses_ = 0;
+                lastSeenWrapCount_ = 0;
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::AlertWindow::WarningIcon,
                     "Recording",
@@ -847,6 +1238,17 @@ private:
                     juce::String{"[Rec] stop/finalize failed: "} + r.errorMessage);
                 return;
             }
+
+            std::uint32_t wrapFinal = transport.readCycleWrapCountForUi();
+            if (commitCycleTakes)
+            {
+                if (wrapFinal != lastSeenWrapCount_)
+                {
+                    numCompletedPasses_ += static_cast<int>(wrapFinal - lastSeenWrapCount_);
+                    lastSeenWrapCount_ = wrapFinal;
+                }
+            }
+
             if (r.droppedSampleCount > 0)
             {
                 const juce::String w = "Recording overrun: " + juce::String(r.droppedSampleCount)
@@ -856,23 +1258,201 @@ private:
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::AlertWindow::InfoIcon, "Recording", w);
             }
-            const juce::Result ar = session.addRecordedTakeAtSample(
-                r.takeFile,
-                r.sampleRate,
-                r.recordingStartSample,
-                r.targetTrackId,
-                r.intendedSampleCount);
-            if (!ar.wasOk())
+
+            if (commitCycleTakes)
             {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Session", ar.getErrorMessage());
-                juce::Logger::writeToLog(
-                    juce::String{"[Rec] addRecordedTakeAtSample failed: "} + ar.getErrorMessage());
+                std::unique_ptr<AudioClip> loadedClip;
+                const auto loadClipResult
+                    = AudioFileLoader::loadFromFile(r.takeFile, cycleSr, loadedClip);
+                if (!loadClipResult.wasOk() || loadedClip == nullptr)
+                {
+                    numCompletedPasses_ = 0;
+                    lastSeenWrapCount_ = 0;
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Session",
+                        loadClipResult.getErrorMessage().isNotEmpty() ? loadClipResult.getErrorMessage()
+                                                                     : "Could not decode recorded WAV.");
+                    juce::Logger::writeToLog(
+                        juce::String{"[Rec] cycle decode failed: "} + loadClipResult.getErrorMessage());
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    return;
+                }
+
+                const std::int64_t passLen = cycleLocR - cycleLocL;
+                if (passLen <= 0 || cycleSr <= 0.0 || loadedClip->getNumChannels() < 1)
+                {
+                    numCompletedPasses_ = 0;
+                    lastSeenWrapCount_ = 0;
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Session",
+                        "Cycle recording commit failed: invalid loop range or decoded material.");
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    return;
+                }
+
+                juce::File audioDir = session.getCurrentProjectFolder().getChildFile("Audio");
+                if (audioDir.getFullPathName().isEmpty())
+                {
+                    numCompletedPasses_ = 0;
+                    lastSeenWrapCount_ = 0;
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon, "Session", "Could not resolve project Audio folder.");
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    return;
+                }
+                if (!audioDir.isDirectory() && !audioDir.createDirectory())
+                {
+                    numCompletedPasses_ = 0;
+                    lastSeenWrapCount_ = 0;
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Session",
+                        "Could not create project Audio folder: " + audioDir.getFullPathName());
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    return;
+                }
+
+                const float* const pcmLive = loadedClip->getAudio().getReadPointer(0);
+                const auto decoded = static_cast<std::int64_t>(loadedClip->getNumSamples());
+                const std::int64_t totalAvail
+                    = juce::jmax<std::int64_t>(std::int64_t{ 0 }, juce::jmin(decoded, r.intendedSampleCount));
+
+                const std::int64_t maxFullBySamples
+                    = passLen > 0 ? totalAvail / passLen : std::int64_t{ 0 };
+                const int nFullPasses = static_cast<int>(
+                    juce::jmin(static_cast<std::int64_t>(numCompletedPasses_), maxFullBySamples));
+
+                if (totalAvail < 1)
+                {
+                    numCompletedPasses_ = 0;
+                    lastSeenWrapCount_ = 0;
+                    loadedClip.reset();
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Session",
+                        "Cycle recording had no usable samples to commit.");
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    return;
+                }
+
+                std::vector<float> pcmStable(
+                    static_cast<size_t>(
+                        juce::jmax<std::int64_t>(std::int64_t{ 0 }, totalAvail)));
+                for (std::int64_t i = 0; i < totalAvail; ++i)
+                {
+                    pcmStable[(size_t)i] = pcmLive[i];
+                }
+                loadedClip.reset();
+
+                const float* const pcm = pcmStable.data();
+
+                const juce::String batchStamp
+                    = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
+                bool allOk = true;
+                const juce::File continuousMaster = r.takeFile;
+                int sliceFileIndex = 0;
+
+                auto writeSliceCommit = [&](const std::int64_t offsetSamples, std::int64_t sliceLen) {
+                    if (sliceLen <= 0 || offsetSamples < 0)
+                    {
+                        return;
+                    }
+                    if (offsetSamples + sliceLen > totalAvail)
+                    {
+                        sliceLen = totalAvail - offsetSamples;
+                        if (sliceLen <= 0)
+                        {
+                            allOk = false;
+                            return;
+                        }
+                    }
+                    const auto sampleCount = static_cast<int>(sliceLen);
+                    const juce::File sliceWav = makeUniqueCyclePassWavInProjectAudioDir(
+                        audioDir, batchStamp, sliceFileIndex);
+
+                    ++sliceFileIndex;
+
+                    const juce::Result wrResult = MonoWavFileWriter::writeMono24BitWavSegment(
+                        sliceWav, pcm + offsetSamples, sampleCount, cycleSr);
+
+                    if (!wrResult.wasOk())
+                    {
+                        allOk = false;
+                        juce::Logger::writeToLog(
+                            "[Rec] cycle split write failed (" + sliceWav.getFileName()
+                            + "): " + wrResult.getErrorMessage());
+                        return;
+                    }
+
+                    const juce::Result ar = session.addRecordedTakeAtSample(
+                        sliceWav,
+                        cycleSr,
+                        cycleLocL,
+                        cycleTrackId,
+                        sliceLen);
+                    if (!ar.wasOk())
+                    {
+                        allOk = false;
+                        juce::Logger::writeToLog(
+                            "[Rec] cycle addRecordedTake "
+                            + sliceWav.getFileName() + ": " + ar.getErrorMessage());
+                    }
+                };
+
+                for (int i = 0; i < nFullPasses; ++i)
+                {
+                    writeSliceCommit(static_cast<std::int64_t>(i) * passLen, passLen);
+                }
+
+                const std::int64_t partialOffset = static_cast<std::int64_t>(nFullPasses) * passLen;
+                std::int64_t partialLen = totalAvail - partialOffset;
+                partialLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, partialLen);
+                writeSliceCommit(partialOffset, partialLen);
+
+                numCompletedPasses_ = 0;
+                lastSeenWrapCount_ = 0;
+
+                if (!allOk)
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "Session",
+                        "Some cycle takes could not be split or committed (see log).");
+                }
+                else
+                {
+                    syncViewportFromSession();
+                    scheduleCycleContinuousMasterCleanup(continuousMaster);
+                }
             }
             else
             {
-                syncViewportFromSession();
+                const juce::Result ar = session.addRecordedTakeAtSample(
+                    r.takeFile,
+                    r.sampleRate,
+                    r.recordingStartSample,
+                    r.targetTrackId,
+                    r.intendedSampleCount);
+                if (!ar.wasOk())
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon, "Session", ar.getErrorMessage());
+                    juce::Logger::writeToLog(
+                        juce::String{"[Rec] addRecordedTakeAtSample failed: "} + ar.getErrorMessage());
+                }
+                else
+                {
+                    syncViewportFromSession();
+                }
             }
+
             rulerView.repaint();
             trackLanesView.repaint();
         }
@@ -955,6 +1535,20 @@ private:
                     juce::AlertWindow::WarningIcon, "Audio", "Invalid device sample rate.");
                 return;
             }
+
+            cycleRecordingActive_ = false;
+            const bool cycleOn = transport.readCycleEnabledForUi();
+            const std::int64_t locL = session.getLeftLocatorSamples();
+            const std::int64_t locR = session.getRightLocatorSamples();
+            if (cycleOn && locR > locL && locR > 0)
+            {
+                cycleRecordingActive_ = true;
+                cycleSessionLocL_ = locL;
+                cycleSessionLocR_ = locR;
+                numCompletedPasses_ = 0;
+                transport.requestSeek(locL);
+            }
+
             BeginRecordingRequest req;
             req.takeFile = takeWav;
             req.targetTrackId = armed;
@@ -978,6 +1572,17 @@ private:
             pendingCountIn_.reset();
             countInClicks_.cancel();
             countInStatusLabel_.setText({}, juce::dontSendNotification);
+            if (cycleRecordingActive_)
+            {
+                cycleRecordingActive_ = false;
+                trackLanesView.clearCycleRecordingPreviewContext();
+                if (cycleRecordingWrapTimer_ != nullptr)
+                {
+                    cycleRecordingWrapTimer_->stopTimer();
+                }
+                numCompletedPasses_ = 0;
+                lastSeenWrapCount_ = 0;
+            }
             juce::Logger::writeToLog("[Rec] count-in cancelled");
         }
 
@@ -1059,11 +1664,35 @@ private:
                 return;
             }
             BeginRecordingRequest req = *pendingCountIn_;
-            req.recordingStartSample = transport.readPlayheadSamplesForUi();
             pendingCountIn_.reset();
             countInStatusLabel_.setText({}, juce::dontSendNotification);
+
+            const bool armedCycleSession = cycleRecordingActive_;
+            if (armedCycleSession)
+            {
+                req.recordingStartSample = cycleSessionLocL_;
+                cycleSessionTrackId_ = req.targetTrackId;
+                cycleSessionSampleRate_ = req.sampleRate;
+                cycleSessionTakeFile_ = req.takeFile;
+            }
+            else
+            {
+                req.recordingStartSample = transport.readPlayheadSamplesForUi();
+            }
+
             if (!recorder_.beginRecording(req))
             {
+                if (armedCycleSession)
+                {
+                    cycleRecordingActive_ = false;
+                    trackLanesView.clearCycleRecordingPreviewContext();
+                    if (cycleRecordingWrapTimer_ != nullptr)
+                    {
+                        cycleRecordingWrapTimer_->stopTimer();
+                    }
+                    numCompletedPasses_ = 0;
+                    lastSeenWrapCount_ = 0;
+                }
                 juce::String err = recorder_.getLastError();
                 if (err.isEmpty())
                 {
@@ -1074,6 +1703,20 @@ private:
                 juce::Logger::writeToLog(juce::String{"[Rec] beginRecording failed: "} + err);
                 return;
             }
+
+            if (armedCycleSession)
+            {
+                lastSeenWrapCount_ = transport.readCycleWrapCountForUi();
+                numCompletedPasses_ = 0;
+                trackLanesView.setCycleRecordingPreviewContext(
+                    true, cycleSessionLocL_, cycleSessionLocR_, lastSeenWrapCount_);
+                if (cycleRecordingWrapTimer_ == nullptr)
+                {
+                    cycleRecordingWrapTimer_ = std::make_unique<CycleRecordingWrapTimer>(*this);
+                }
+                cycleRecordingWrapTimer_->startTimerHz(50);
+            }
+
             transport.requestPlaybackIntent(PlaybackIntent::Playing);
             updatePlayPauseButtonFromTransport();
         }
@@ -1091,6 +1734,16 @@ private:
         /// Count-in / recording line (no always-visible audio device debug; use Audio...).
         juce::Label countInStatusLabel_;
 
+        std::unique_ptr<CycleRecordingWrapTimer> cycleRecordingWrapTimer_;
+        bool cycleRecordingActive_ = false;
+        TrackId cycleSessionTrackId_ = kInvalidTrackId;
+        std::int64_t cycleSessionLocL_ = 0;
+        std::int64_t cycleSessionLocR_ = 0;
+        double cycleSessionSampleRate_ = 0.0;
+        juce::File cycleSessionTakeFile_;
+        std::uint32_t lastSeenWrapCount_ = 0;
+        int numCompletedPasses_ = 0;
+
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
         bool importInFlight_ = false;
 
@@ -1102,6 +1755,9 @@ private:
         juce::TextButton stopButton{ "Stop" };
         juce::TextButton audioSettingsButton{ "Audio..." };
         juce::Label keyDiagLabel_;
+
+        /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).
+        std::unique_ptr<juce::Label> shortcutDiagLabel_;
 
         /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).
         TimelineViewportModel timelineViewport_;
@@ -1192,6 +1848,14 @@ private:
     private:
         [[nodiscard]] bool routeShortcut(const juce::KeyPress& key)
         {
+            logShortcutRouterKey(key);
+            if constexpr (kShowShortcutDiagnostics)
+            {
+                if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                {
+                    tcc->setShortcutDiagVisibleCaption(makeShortcutDiagVisibleCaption(key));
+                }
+            }
             if (isRecordToggleShortcut(key))
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
@@ -1199,6 +1863,18 @@ private:
                     tcc->invokeRecordToggleFromWindowShortcut();
                     juce::Logger::writeToLog(
                         juce::String{"[Shortcut] record toggle: "} + key.getTextDescription());
+                    return true;
+                }
+                return false;
+            }
+            if (isNumpad1Shortcut(key))
+            {
+                if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                {
+                    tcc->invokeJumpToLeftLocatorFromWindowShortcut();
+                    juce::Logger::writeToLog(juce::String{"[Shortcut] jump to left locator (numpad1 / top-row "
+                                                          "1 / VK): "}
+                                             + key.getTextDescription());
                     return true;
                 }
                 return false;

@@ -35,6 +35,7 @@
 #include "transport/Transport.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_core/juce_core.h>
 
 #include <cstdint>
 #include <limits>
@@ -197,58 +198,200 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         return;
     }
 
-    const std::int64_t canDo = juce::jmin(
-        static_cast<std::int64_t>(deviceBlockSizeInFrames), timelineEnd - t0);
-    const int R = static_cast<int>(canDo);
-    if (R <= 0)
+    const auto jmax0 = [](const std::int64_t x) noexcept -> std::int64_t
+    {
+        return x < 0 ? std::int64_t{ 0 } : x;
+    };
+
+    const bool cycleOn = transport_.audioThread_loadCycleEnabled();
+    const std::int64_t locL = sessionSnap->getLeftLocatorSamples();
+    const std::int64_t locR = sessionSnap->getRightLocatorSamples();
+    const bool validCycle = cycleOn && locR > locL && locR > 0;
+
+#if !defined(NDEBUG)
+    {
+        static bool s_loggedPastRlinearMode = false;
+        if (!cycleOn || !validCycle || t0 < locR)
+            s_loggedPastRlinearMode = false;
+        else if (!s_loggedPastRlinearMode && t0 >= locR && validCycle)
+        {
+            s_loggedPastRlinearMode = true;
+            juce::Logger::writeToLog(
+                juce::String("PlaybackEngine diag: cycle on + valid [L,R) but playhead >= R ")
+                + "(linear, no wrap this block). cycleOn="
+                + juce::String(cycleOn ? "true" : "false")
+                + " L="
+                + juce::String(locL)
+                + " R="
+                + juce::String(locR)
+                + " t0="
+                + juce::String(t0));
+        }
+    }
+#endif
+
+    std::int64_t tWork = t0;
+
+    const std::int64_t availTimeline = timelineEnd - tWork;
+    if (availTimeline <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
         return;
     }
 
-    for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
-    {
-        const Track& tr = sessionSnap->getTrack(ti);
-        if (recorder_ != nullptr && recorder_->isRecording() && tr.getId() == recorder_->getRecordingTrackId())
-        {
-            // Transient: do not play existing clips on the track being recorded; other tracks mix as usual.
-            continue;
-        }
-        const float trackGain = tr.getChannelFaderGain();
-        if (trackGain <= 0.0f)
-        {
-            continue;
-        }
-        const std::vector<PlacedClip>& lane = tr.getPlacedClips();
-        std::int64_t t = t0;
-        int out0 = 0;
-        while (out0 < R)
-        {
-            const int row = findCoveringRowIndexInLane(lane, t);
-            const std::int64_t nextB = minBoundaryStrictlyAfterInLane(lane, t, timelineEnd);
-            jassert(nextB > t);
-            int run = static_cast<int>(juce::jmin(
-                static_cast<std::int64_t>(R - out0), nextB - t));
-            jassert(run > 0);
+    const std::int64_t blockFrames = static_cast<std::int64_t>(deviceBlockSizeInFrames);
 
-            if (row >= 0)
-            {
-                const PlacedClip& p = lane[(size_t)row];
-                const AudioClip& c = p.getAudioClip();
-                const std::int64_t rel = t - p.getStartSample();
-                jassert(rel >= 0);
-                jassert(rel + static_cast<std::int64_t>(run) <= p.getEffectiveLengthSamples());
-                const int off = static_cast<int>(rel + p.getLeftTrimSamples());
-                jassert(off >= 0);
-                jassert(off + run <= c.getNumSamples());
-                addClipRunToOutputs(c, off, run, out0, numOutputChannels, outputChannelData, trackGain);
-            }
-            t += run;
-            out0 += run;
+    const auto renderRun = [&](const std::int64_t segT0, const int segRun, const int outFrame0) noexcept
+    {
+        if (segRun <= 0)
+        {
+            return;
         }
-        jassert(out0 == R);
-        jassert(t - t0 == static_cast<std::int64_t>(R));
+
+        jassert(segRun > 0);
+
+        for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
+        {
+            const Track& tr = sessionSnap->getTrack(ti);
+            if (recorder_ != nullptr && recorder_->isRecording()
+                && tr.getId() == recorder_->getRecordingTrackId())
+            {
+                // Transient: do not play existing clips on the track being recorded; other tracks mix as usual.
+                continue;
+            }
+            const float trackGain = tr.getChannelFaderGain();
+            if (trackGain <= 0.0f)
+            {
+                continue;
+            }
+            const std::vector<PlacedClip>& lane = tr.getPlacedClips();
+            std::int64_t t = segT0;
+            int out0 = 0;
+            while (out0 < segRun)
+            {
+                const int row = findCoveringRowIndexInLane(lane, t);
+                const std::int64_t nextB = minBoundaryStrictlyAfterInLane(lane, t, timelineEnd);
+                jassert(nextB > t);
+                int run = static_cast<int>(juce::jmin(
+                    static_cast<std::int64_t>(segRun - out0), nextB - t));
+                jassert(run > 0);
+
+                if (row >= 0)
+                {
+                    const PlacedClip& p = lane[(size_t)row];
+                    const AudioClip& c = p.getAudioClip();
+                    const std::int64_t rel = t - p.getStartSample();
+                    jassert(rel >= 0);
+                    jassert(rel + static_cast<std::int64_t>(run) <= p.getEffectiveLengthSamples());
+                    const int off = static_cast<int>(rel + p.getLeftTrimSamples());
+                    jassert(off >= 0);
+                    jassert(off + run <= c.getNumSamples());
+                    addClipRunToOutputs(
+                        c, off, run, outFrame0 + out0, numOutputChannels, outputChannelData, trackGain);
+                }
+                t += run;
+                out0 += run;
+            }
+            jassert(out0 == segRun);
+            jassert(t - segT0 == static_cast<std::int64_t>(segRun));
+        }
+    };
+
+    // --- Linear playback (cycle off, invalid range, or playhead already at / past right locator). ---
+    if (!validCycle || tWork >= locR)
+    {
+        const std::int64_t firstRun64 = juce::jmin(blockFrames, jmax0(availTimeline));
+        if (firstRun64 <= 0)
+        {
+            transport_.audioThread_advancePlayheadIfPlaying(0);
+            return;
+        }
+        renderRun(tWork, static_cast<int>(firstRun64), 0);
+        transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
+        return;
     }
 
-    transport_.audioThread_advancePlayheadIfPlaying(static_cast<std::int64_t>(R));
+    // --- Cycle wrap: approached from tWork < locR ---
+    const std::int64_t framesToR = locR - tWork;
+    const std::int64_t maxPlayableThisBlock = juce::jmin(blockFrames, jmax0(availTimeline));
+    const std::int64_t firstRun64 = juce::jmin(maxPlayableThisBlock, framesToR);
+
+    if (firstRun64 <= 0)
+    {
+        transport_.audioThread_advancePlayheadIfPlaying(0);
+        return;
+    }
+
+    const int firstRun = static_cast<int>(firstRun64);
+    renderRun(tWork, firstRun, 0);
+
+    const bool reachedRightLocator = (tWork + firstRun64 >= locR);
+    if (!reachedRightLocator)
+    {
+        transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
+        return;
+    }
+
+    const std::int64_t remainingInBlock = blockFrames - firstRun64;
+    const std::int64_t loopSpan = locR - locL;
+    const std::int64_t secondRun64 = juce::jmin(
+        jmax0(remainingInBlock),
+        jmax0(loopSpan),
+        jmax0(timelineEnd - locL));
+
+    if (secondRun64 > 0)
+    {
+        const int sr = static_cast<int>(secondRun64);
+        renderRun(locL, sr, firstRun);
+        transport_.audioThread_storePlayheadOnWrap(locL + secondRun64);
+        transport_.audioThread_signalCycleWrap();
+#if !defined(NDEBUG)
+        juce::Logger::writeToLog(
+            juce::String("PlaybackEngine wrap: cycleOn=")
+            + (cycleOn ? "1" : "0")
+            + " valid=1"
+            + " L="
+            + juce::String(locL)
+            + " R="
+            + juce::String(locR)
+            + " t0="
+            + juce::String(t0)
+            + " framesToR="
+            + juce::String(framesToR)
+            + " firstRun="
+            + juce::String(firstRun64)
+            + " wrapped=1 secondRun="
+            + juce::String(secondRun64)
+            + " storePlayhead="
+            + juce::String(locL + secondRun64)
+            + " wrapCount="
+            + juce::String(transport_.audioThread_relaxedLoadWrapPassCount()));
+#endif
+    }
+    else
+    {
+        transport_.audioThread_storePlayheadOnWrap(locL);
+        transport_.audioThread_signalCycleWrap();
+#if !defined(NDEBUG)
+        juce::Logger::writeToLog(
+            juce::String("PlaybackEngine wrap: cycleOn=")
+            + (cycleOn ? "1" : "0")
+            + " valid=1"
+            + " L="
+            + juce::String(locL)
+            + " R="
+            + juce::String(locR)
+            + " t0="
+            + juce::String(t0)
+            + " framesToR="
+            + juce::String(framesToR)
+            + " firstRun="
+            + juce::String(firstRun64)
+            + " wrapped=1 secondRun=0 (block ends exactly at R)"
+            + " storePlayhead=L="
+            + juce::String(locL)
+            + " wrapCount="
+            + juce::String(transport_.audioThread_relaxedLoadWrapPassCount()));
+#endif
+    }
 }

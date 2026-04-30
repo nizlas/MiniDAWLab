@@ -82,6 +82,18 @@ public:
         std::int64_t leftTrimSamples,
         std::int64_t visibleLengthSamples) noexcept;
 
+    // Same + material window bounds (cycle takes sharing one WAV).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipAddedAsNewestOnTargetTrack(
+        const SessionSnapshot& previous,
+        PlacedClipId newClipId,
+        std::shared_ptr<const AudioClip> material,
+        std::int64_t startSampleOnTimeline,
+        TrackId targetTrackId,
+        std::int64_t leftTrimSamples,
+        std::int64_t visibleLengthSamples,
+        std::int64_t materialWindowStartSamples,
+        std::int64_t materialWindowEndExclusiveSamples) noexcept;
+
     // [Message thread] Append an empty track at the end. `newTrackId` must be non-zero and not
     // already present in `previous`.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackAdded(
@@ -146,10 +158,22 @@ public:
         std::vector<Track> tracks,
         std::int64_t arrangementExtentSamples) noexcept;
 
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTracks(
+        std::vector<Track> tracks,
+        std::int64_t arrangementExtentSamples,
+        std::int64_t leftLocatorSamples,
+        std::int64_t rightLocatorSamples) noexcept;
+
     // [Message thread] Same tracks, new **stored** arrangement extent (e.g. `Session::setArrangementExtentSamples`).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withArrangementExtent(
         const SessionSnapshot& previous,
         std::int64_t newArrangementExtentSamples) noexcept;
+
+    /// [Message thread] Timeline left/right locators (`right == 0` = right locator unset sentinel).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withLocators(
+        const SessionSnapshot& previous,
+        std::int64_t leftLocatorSamples,
+        std::int64_t rightLocatorSamples) noexcept;
 
     [[nodiscard]] bool isEmpty() const noexcept;
     [[nodiscard]] int getNumTracks() const noexcept
@@ -175,9 +199,17 @@ public:
         return arrangementExtentSamples_;
     }
 
+    [[nodiscard]] std::int64_t getLeftLocatorSamples() const noexcept { return leftLocatorSamples_; }
+    [[nodiscard]] std::int64_t getRightLocatorSamples() const noexcept { return rightLocatorSamples_; }
+
 private:
-    explicit SessionSnapshot(std::vector<Track> tracks, std::int64_t arrangementExtentSamples) noexcept;
+    explicit SessionSnapshot(std::vector<Track> tracks,
+                             std::int64_t arrangementExtentSamples,
+                             std::int64_t leftLocatorSamples,
+                             std::int64_t rightLocatorSamples) noexcept;
 
     std::vector<Track> tracks_;
     std::int64_t arrangementExtentSamples_ = 0;
+    std::int64_t leftLocatorSamples_ = 0;
+    std::int64_t rightLocatorSamples_ = 0;
 };

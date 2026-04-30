@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace
 {
@@ -41,18 +42,48 @@ namespace
     // Ruler playhead: short vertical at the top so the hairline in the lane has a “handle” in time.
     constexpr float kPlayheadMarkerLengthPx = 7.0f;
 
+    // Locator band + shapes are drawn below the playhead so the playhead stays on top.
+    // Alphas tuned for readability on dark UI (Cubase-ish strength).
+    constexpr float kLocatorBandAlphaCycleOn = 0.58f;
+    constexpr float kLocatorBandAlphaCycleOff = 0.30f;
+    constexpr float kLocatorBandAlphaInvalid = 0.58f;
+
+    constexpr float kLocatorTopStripeFrac = 0.45f;
+    constexpr float kLocatorTriangleHalfWidth = 5.5f;
+    constexpr float kLocatorTriangleHeight = 9.0f;
+
     // Minimum / maximum **samples per pixel** at zoom in/out.
     constexpr double kSppMin = 0.1;
+
+    void fillDownPointingLocatorTriangle(juce::Graphics& g,
+        const float centerX,
+        const float rulerTop,
+        const juce::Colour& fillCol,
+        const juce::Colour& outlineCol)
+    {
+        const float baseTop = rulerTop + 0.25f;
+        const float apexX = centerX;
+        const float apexY = baseTop + kLocatorTriangleHeight;
+        const float hw = kLocatorTriangleHalfWidth;
+        juce::Path p;
+        p.addTriangle(apexX - hw, baseTop, apexX + hw, baseTop, apexX, apexY);
+        g.setColour(fillCol);
+        g.fillPath(p);
+        g.setColour(outlineCol);
+        g.strokePath(p, juce::PathStrokeType{ 1.0f });
+    }
 } // namespace
 
 TimelineRulerView::TimelineRulerView(Session& session,
                                      Transport& transport,
                                      juce::AudioDeviceManager& deviceManager,
-                                     TimelineViewportModel& timelineViewport)
+                                     TimelineViewportModel& timelineViewport,
+                                     std::function<bool()> isUiInputBlockedByRecording)
     : session_(session)
     , transport_(transport)
     , deviceManager_(deviceManager)
     , timelineViewport_(timelineViewport)
+    , isUiInputBlockedByRecording_(std::move(isUiInputBlockedByRecording))
 {
     setInterceptsMouseClicks(true, false);
     startTimerHz(kPlayheadUpdateHz);
@@ -144,15 +175,113 @@ void TimelineRulerView::applySeekForLocalX(const float x) noexcept
     repaint();
 }
 
+void TimelineRulerView::applyLeftLocatorForLocalX(const float x) noexcept
+{
+    const std::int64_t arr = session_.getArrangementExtentSamples();
+    if (arr <= 0)
+    {
+        return;
+    }
+    const float w = (float)getWidth();
+    if (w <= 0.0f)
+    {
+        return;
+    }
+    const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
+    const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
+    const std::int64_t t
+        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+    session_.setLeftLocatorAtSample(t);
+    repaint();
+}
+
+void TimelineRulerView::applyRightLocatorForLocalX(const float x) noexcept
+{
+    const std::int64_t arr = session_.getArrangementExtentSamples();
+    if (arr <= 0)
+    {
+        return;
+    }
+    const float w = (float)getWidth();
+    if (w <= 0.0f)
+    {
+        return;
+    }
+    const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
+    const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
+    const std::int64_t t
+        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+    session_.setRightLocatorAtSample(t);
+    repaint();
+}
+
+void TimelineRulerView::tryToggleCycleEnabled() noexcept
+{
+    if (isUiInputBlockedByRecording_)
+    {
+        const bool blocked = isUiInputBlockedByRecording_();
+        if (blocked)
+        {
+            juce::Logger::writeToLog("[Cycle] toggle ignored (recording or count-in)");
+            return;
+        }
+    }
+    transport_.requestCycleEnabled(!transport_.readCycleEnabledForUi());
+    juce::Logger::writeToLog(juce::String{"[Cycle] "}
+                             + (transport_.readCycleEnabledForUi() ? "on" : "off"));
+    repaint();
+}
+
 void TimelineRulerView::mouseDown(const juce::MouseEvent& e)
 {
-    applySeekForLocalX(e.position.x);
+    const float h = (float)getHeight();
+    const bool upperHalf = h > 0.0f && e.position.y < h * 0.5f;
+
+    if (e.mods.isAltDown())
+    {
+        applyRightLocatorForLocalX(e.position.x);
+    }
+    else if (e.mods.isCtrlDown())
+    {
+        applyLeftLocatorForLocalX(e.position.x);
+    }
+    else if (upperHalf)
+    {
+        tryToggleCycleEnabled();
+    }
+    else
+    {
+        applySeekForLocalX(e.position.x);
+    }
 }
 
 void TimelineRulerView::mouseDrag(const juce::MouseEvent& e)
 {
-    // Each move queues a new seek; the audio thread applies the latest pending target per block.
-    applySeekForLocalX(e.position.x);
+    const float h = (float)getHeight();
+    const bool lowerHalf = h > 0.0f && e.position.y >= h * 0.5f;
+
+    if (e.mods.isAltDown())
+    {
+        applyRightLocatorForLocalX(e.position.x);
+    }
+    else if (e.mods.isCtrlDown())
+    {
+        applyLeftLocatorForLocalX(e.position.x);
+    }
+    else if (lowerHalf)
+    {
+        applySeekForLocalX(e.position.x);
+    }
 }
 
 void TimelineRulerView::mouseUp(const juce::MouseEvent& e)
@@ -244,6 +373,113 @@ void TimelineRulerView::paint(juce::Graphics& g)
                     x,
                     bounds.getBottom() - 1.0f - hShort,
                     1.0f);
+            }
+        }
+    }
+
+    // --- Locators: strong band + triangle handles (**before** playhead so playhead stays on top)
+    {
+        const std::int64_t locL = session_.getLeftLocatorSamples();
+        const std::int64_t locR = session_.getRightLocatorSamples();
+
+        constexpr juce::uint32 kFillPurpleBlue = 0xff7058e8u;
+        constexpr juce::uint32 kFillNeutralGray = 0xffb8c2d8u;
+        constexpr juce::uint32 kFillInvalidOrange = 0xfff06828u;
+
+        const bool cycleOn = transport_.readCycleEnabledForUi();
+
+        const auto drawTriangleHandleIfVisibleWithClip = [&](const std::int64_t s,
+                                                            const juce::Colour& fill,
+                                                            const juce::Colour& outline)
+        {
+            if (s < visStart || s >= visStart + visLen)
+            {
+                return;
+            }
+            const float xCenter = sessionSampleToX(s);
+            if (xCenter < bounds.getX() - 14.0f || xCenter > bounds.getRight() + 14.0f)
+            {
+                return;
+            }
+            fillDownPointingLocatorTriangle(g, xCenter, bounds.getY(), fill, outline);
+        };
+
+        if (locR > 0)
+        {
+            const float x0 = sessionSampleToX(locL);
+            const float x1 = sessionSampleToX(locR);
+            const float fillLeft = juce::jmin(x0, x1);
+            const float fillRight = juce::jmax(x0, x1);
+            const float clipL = juce::jmax(fillLeft, bounds.getX());
+            const float clipR = juce::jmin(fillRight, bounds.getRight());
+            const float bandW = clipR - clipL;
+
+            const bool validInterval = locR > locL;
+            const juce::Colour mainFillCol = validInterval
+                ? (cycleOn ? juce::Colour(kFillPurpleBlue).withAlpha(kLocatorBandAlphaCycleOn)
+                           : juce::Colour(kFillNeutralGray).withAlpha(kLocatorBandAlphaCycleOff))
+                : juce::Colour(kFillInvalidOrange).withAlpha(kLocatorBandAlphaInvalid);
+
+            const juce::Colour stripeFillCol = validInterval
+                ? (cycleOn ? juce::Colour(kFillPurpleBlue).withAlpha(0.72f)
+                           : juce::Colour(kFillNeutralGray).withAlpha(0.46f))
+                : juce::Colour(kFillInvalidOrange).withAlpha(0.76f);
+
+            if (bandW > 0.0f)
+            {
+                const float stripeH
+                    = juce::jlimit(3.0f, bounds.getHeight() * kLocatorTopStripeFrac, 11.5f);
+
+                g.setColour(mainFillCol);
+                g.fillRect(juce::Rectangle<float>(clipL,
+                                                    bounds.getY(),
+                                                    bandW,
+                                                    bounds.getHeight()));
+
+                g.setColour(stripeFillCol);
+                g.fillRect(juce::Rectangle<float>(clipL, bounds.getY(), bandW, stripeH));
+
+                const juce::Colour edgeGlow = stripeFillCol.withAlpha(
+                    juce::jmin(1.0f, stripeFillCol.getFloatAlpha() * 1.06f));
+                g.setColour(edgeGlow);
+                g.fillRect(juce::Rectangle<float>(clipL, bounds.getY(), bandW, 1.25f));
+                g.fillRect(juce::Rectangle<float>(clipL, bounds.getBottom() - 2.35f, bandW, 1.85f));
+            }
+
+            const juce::Colour handleOutline = juce::Colours::white.withAlpha(0.62f);
+
+            juce::Colour triLFill;
+            juce::Colour triRFill;
+            if (!validInterval)
+            {
+                triLFill = juce::Colour(0xffffc070).withAlpha(0.98f);
+                triRFill = juce::Colour(0xffff9640).withAlpha(0.98f);
+            }
+            else if (cycleOn)
+            {
+                triLFill = juce::Colour(0xffeae2ff).withAlpha(0.98f);
+                triRFill = juce::Colour(0xfffff0dc).withAlpha(0.97f);
+            }
+            else
+            {
+                triLFill = juce::Colour(0xfff2f5fb).withAlpha(0.97f);
+                triRFill = juce::Colour(0xffe4e9f5).withAlpha(0.97f);
+            }
+
+            drawTriangleHandleIfVisibleWithClip(locL, triLFill, handleOutline);
+            drawTriangleHandleIfVisibleWithClip(locR, triRFill, handleOutline);
+        }
+        else
+        {
+            const juce::Colour soloLFill = juce::Colour(0xffd8dee8).withAlpha(0.96f);
+            const juce::Colour soloLOutline = juce::Colours::white.withAlpha(0.48f);
+            if (locL >= visStart && locL < visStart + visLen)
+            {
+                const float xc = sessionSampleToX(locL);
+                if (xc >= bounds.getX() - 14.0f && xc <= bounds.getRight() + 14.0f)
+                {
+                    fillDownPointingLocatorTriangle(g, xc, bounds.getY(), soloLFill, soloLOutline);
+                }
             }
         }
     }

@@ -26,6 +26,7 @@
 #include <memory>
 #include <new>
 #include <utility>
+#include <limits>
 
 namespace
 {
@@ -231,6 +232,91 @@ juce::Result Session::addRecordedTakeAtSample(
     catch (...)
     {
         return juce::Result::fail("Unknown exception while adding recorded take.");
+    }
+    return juce::Result::ok();
+}
+
+juce::Result Session::addPlacedClipFromExistingMaterial(
+    std::shared_ptr<const AudioClip> material,
+    const std::int64_t startSampleOnTimeline,
+    const std::int64_t leftTrimSamples,
+    const std::int64_t visibleLengthSamples,
+    const TrackId targetTrackId)
+{
+    return addPlacedClipFromExistingMaterial(std::move(material),
+                                             startSampleOnTimeline,
+                                             leftTrimSamples,
+                                             visibleLengthSamples,
+                                             targetTrackId,
+                                             std::int64_t{ 0 },
+                                             std::numeric_limits<std::int64_t>::min());
+}
+
+juce::Result Session::addPlacedClipFromExistingMaterial(
+    std::shared_ptr<const AudioClip> material,
+    const std::int64_t startSampleOnTimeline,
+    const std::int64_t leftTrimSamples,
+    const std::int64_t visibleLengthSamples,
+    const TrackId targetTrackId,
+    const std::int64_t materialWindowStartSamples,
+    const std::int64_t materialWindowEndExclusiveSamples)
+{
+    if (targetTrackId == kInvalidTrackId)
+    {
+        return juce::Result::fail("Invalid target track");
+    }
+    if (material == nullptr)
+    {
+        return juce::Result::fail("No audio material");
+    }
+    if (visibleLengthSamples <= 0)
+    {
+        return juce::Result::fail("Placed clip has no length");
+    }
+    if (leftTrimSamples < 0)
+    {
+        return juce::Result::fail("Invalid left trim");
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return juce::Result::fail("Internal error: no session snapshot.");
+    }
+    if (current->findTrackIndexById(targetTrackId) < 0)
+    {
+        return juce::Result::fail("Target track does not exist.");
+    }
+    const PlacedClipId newId = nextPlacedClipId_++;
+    jassert(newId != kInvalidPlacedClipId);
+    try
+    {
+        const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withClipAddedAsNewestOnTargetTrack(
+            *current,
+            newId,
+            std::move(material),
+            startSampleOnTimeline,
+            targetTrackId,
+            leftTrimSamples,
+            visibleLengthSamples,
+            materialWindowStartSamples,
+            materialWindowEndExclusiveSamples);
+        if (next == nullptr)
+        {
+            return juce::Result::fail("Internal error: could not add clip to session.");
+        }
+        std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    }
+    catch (const std::bad_alloc&)
+    {
+        return juce::Result::fail("Out of memory while adding the clip.");
+    }
+    catch (const std::exception& e)
+    {
+        return juce::Result::fail(juce::String("Exception while adding clip: ") + e.what());
+    }
+    catch (...)
+    {
+        return juce::Result::fail("Unknown exception while adding clip.");
     }
     return juce::Result::ok();
 }
@@ -514,6 +600,56 @@ void Session::setArrangementExtentSamples(const std::int64_t v) noexcept
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::setLeftLocatorAtSample(const std::int64_t s) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> cur = loadSessionSnapshotForAudioThread();
+    if (cur == nullptr)
+    {
+        return;
+    }
+    const std::int64_t hi = cur->getArrangementExtentSamples();
+    const std::int64_t clamped = juce::jlimit(std::int64_t{0}, hi, s);
+    if (clamped == cur->getLeftLocatorSamples())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withLocators(
+        *cur, clamped, cur->getRightLocatorSamples());
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+void Session::setRightLocatorAtSample(const std::int64_t s) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> cur = loadSessionSnapshotForAudioThread();
+    if (cur == nullptr)
+    {
+        return;
+    }
+    const std::int64_t hi = cur->getArrangementExtentSamples();
+    const std::int64_t clamped = juce::jlimit(std::int64_t{0}, hi, s);
+    if (clamped == cur->getRightLocatorSamples())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withLocators(
+        *cur, cur->getLeftLocatorSamples(), clamped);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+std::int64_t Session::getLeftLocatorSamples() const noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> snap = loadSessionSnapshotForAudioThread();
+    return (snap != nullptr) ? snap->getLeftLocatorSamples() : 0;
+}
+
+std::int64_t Session::getRightLocatorSamples() const noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> snap = loadSessionSnapshotForAudioThread();
+    return (snap != nullptr) ? snap->getRightLocatorSamples() : 0;
+}
+
 std::shared_ptr<const SessionSnapshot> Session::loadSessionSnapshotForAudioThread() const noexcept
 {
     // Acquire: pair with the release stores in replace/clear so this read happens-after the last
@@ -562,10 +698,19 @@ juce::Result Session::saveProjectToFile(Transport& transport,
             const std::int64_t eff = p.getEffectiveLengthSamples();
             const std::int64_t ltrim = p.getLeftTrimSamples();
             const std::int64_t fullTail
-                = (matN > 0) ? (static_cast<std::int64_t>(matN) - ltrim) : std::int64_t{0};
+                = (matN > 0) ? (static_cast<std::int64_t>(matN) - ltrim) : std::int64_t{ 0 };
             c.leftTrimSamples = ltrim;
-            c.visibleLengthSamples
-                = (matN > 0 && eff < fullTail) ? eff : 0;
+            const std::int64_t ws = p.getMaterialWindowStartSamples();
+            const std::int64_t we = p.getMaterialWindowEndExclusiveSamples();
+            const bool narrowedFullMaterial
+                = (matN > 0 && !(ws == 0 && we == static_cast<std::int64_t>(matN)));
+            if (narrowedFullMaterial)
+            {
+                c.hasMaterialWindowInFile = true;
+                c.materialWindowStartSamples = ws;
+                c.materialWindowEndExclusiveSamples = we;
+            }
+            c.visibleLengthSamples = (matN > 0 && eff < fullTail) ? eff : 0;
             tr.clips.push_back(std::move(c));
         }
         out.tracks.push_back(std::move(tr));
@@ -645,7 +790,21 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                                             static_cast<std::int64_t>(matN) - 1,
                                             lRaw)
                              : 0;
-            if (cDto.visibleLengthSamples > 0)
+            if (parsed.version >= 7 && cDto.hasMaterialWindowInFile && matN > 0)
+            {
+                const std::int64_t reqV = cDto.visibleLengthSamples > 0
+                                              ? cDto.visibleLengthSamples
+                                              : static_cast<std::int64_t>(-1);
+                placed.emplace_back(
+                    cDto.id,
+                    material,
+                    cDto.startSample,
+                    l,
+                    reqV,
+                    cDto.materialWindowStartSamples,
+                    cDto.materialWindowEndExclusiveSamples);
+            }
+            else if (cDto.visibleLengthSamples > 0)
             {
                 placed.emplace_back(
                     cDto.id, material, cDto.startSample, l, cDto.visibleLengthSamples);
@@ -671,8 +830,11 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     nextPlacedClipId_ = juce::jmax(parsed.nextPlacedClipId, static_cast<PlacedClipId>(maxClipInFile + 1));
     nextTrackId_ = juce::jmax(parsed.nextTrackId, static_cast<TrackId>(maxTrackInFile + 1));
 
-    const std::shared_ptr<const SessionSnapshot> next
-        = SessionSnapshot::withTracks(std::move(built), parsed.arrangementExtentSamples);
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTracks(
+        std::move(built),
+        parsed.arrangementExtentSamples,
+        parsed.leftLocatorSamples,
+        parsed.rightLocatorSamples);
     if (next == nullptr)
     {
         return juce::Result::fail("Could not build session from project file.");

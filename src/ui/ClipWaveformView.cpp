@@ -392,6 +392,81 @@ namespace
         g.fillRect(bx0, yHi, juce::jmax(1.0f, segW), yLo - yHi);
     }
 
+    // --- Live take preview: one pass’s body + min/max peak blocks (timeline-anchored).
+    void paintLiveRecordingPassPreview(
+        juce::Graphics& g,
+        const float boundsX,
+        const std::int64_t visStart,
+        const double spp,
+        const juce::Rectangle<float>& eventTrackY,
+        const std::int64_t span0,
+        const std::int64_t rawLen,
+        const std::vector<RecordingPreviewPeakBlock>& peaks,
+        const juce::Colour& bodyFillColour,
+        const juce::Colour& borderColour,
+        const juce::Colour& peakColour,
+        const float halfDraw,
+        const float midY)
+    {
+        const std::int64_t span1 = span0 + (rawLen > 0 ? rawLen : 1);
+        if (span1 <= span0)
+        {
+            return;
+        }
+        float rx0 = TimelineRulerView::sessionSampleToLocalX(span0, boundsX, visStart, spp);
+        float rx1 = TimelineRulerView::sessionSampleToLocalX(span1, boundsX, visStart, spp);
+        const float xl = juce::jmin(rx0, rx1);
+        const float xr = juce::jmax(rx0, rx1);
+        juce::Rectangle<float> recRect{ xl, eventTrackY.getY(), juce::jmax(1.0f, xr - xl),
+                                        eventTrackY.getHeight() };
+        // Recording preview: fully opaque (no alpha blending — older passes must not show through).
+        g.setColour(bodyFillColour);
+        g.fillRect(recRect);
+        g.setColour(borderColour);
+        g.drawRect(recRect, 1.25f);
+
+        juce::Rectangle<float> innerRec = recRect.reduced(1.5f, 1.5f);
+
+        if (innerRec.getWidth() < 0.5f || innerRec.getHeight() < 1.0f)
+        {
+            return;
+        }
+        std::int64_t acc = 0;
+        for (const auto& b : peaks)
+        {
+            if (b.numSourceSamples <= 0)
+            {
+                continue;
+            }
+            const std::int64_t seg0s = span0 + acc;
+            const std::int64_t seg1s = seg0s + static_cast<std::int64_t>(b.numSourceSamples);
+            acc += static_cast<std::int64_t>(b.numSourceSamples);
+            const float sx0 = TimelineRulerView::sessionSampleToLocalX(
+                seg0s, boundsX, visStart, spp);
+            const float sx1 = TimelineRulerView::sessionSampleToLocalX(
+                seg1s, boundsX, visStart, spp);
+            const float segLeft = juce::jmin(sx0, sx1);
+            const float segRight = juce::jmax(sx0, sx1);
+            const float bx0 = juce::jmax(innerRec.getX(), segLeft);
+            const float bx1 = juce::jmin(innerRec.getRight(), segRight);
+            const float segW = juce::jmax(1.0f, bx1 - bx0);
+            if (segW < 0.5f)
+            {
+                continue;
+            }
+            fillMinMaxPeakRectClamped(
+                g,
+                b.minSample,
+                b.maxSample,
+                halfDraw,
+                innerRec,
+                midY,
+                bx0,
+                segW,
+                peakColour);
+        }
+    }
+
     // Merges **overlapping or touching** half-open [a,b) intervals: [0,5) and [5,8) become [0,8)
     // (same *union* in continuous time, since 5 is not included twice). **Why:** the hatch and
     // interval tricks below assume “one closed-open segment per connected region” — otherwise
@@ -579,6 +654,7 @@ void ClipWaveformView::setRecordingPreviewOverlay(
     const std::int64_t lengthSamples,
     const std::vector<RecordingPreviewPeakBlock>& peakBlocks)
 {
+    clearRecordingCyclePassPreviewLayers();
     recordingPreviewActive_ = true;
     recordingPreviewStartSample_ = startSampleOnTimeline;
     recordingPreviewLengthSamples_ = juce::jmax(std::int64_t{0}, lengthSamples);
@@ -588,15 +664,45 @@ void ClipWaveformView::setRecordingPreviewOverlay(
 
 void ClipWaveformView::clearRecordingPreviewOverlay()
 {
-    if (!recordingPreviewActive_)
-    {
-        return;
-    }
+    const bool hadAny = recordingPreviewActive_ || recordingCycleBehindLayersActive_;
+    clearRecordingCyclePassPreviewLayers();
+
     recordingPreviewActive_ = false;
     recordingPreviewStartSample_ = 0;
     recordingPreviewLengthSamples_ = 0;
     recordingPreviewPeaks_.clear();
+    if (hadAny)
+    {
+        repaint();
+    }
+}
+
+void ClipWaveformView::setRecordingCyclePassPreviewLayers(
+    const std::vector<std::vector<RecordingPreviewPeakBlock>>& completedPassesOlderFirst,
+    const std::int64_t loopLeftSample,
+    const std::int64_t passWindowSamples,
+    const std::int64_t currentStartSampleOnTimeline,
+    const std::int64_t currentVisibleLengthSamples,
+    const std::vector<RecordingPreviewPeakBlock>& currentPeaks)
+{
+    recordingCycleBehindPasses_ = completedPassesOlderFirst;
+    recordingCycleBehindLayersActive_ = !recordingCycleBehindPasses_.empty();
+    recordingCycleLoopAnchorL_ = loopLeftSample;
+    recordingCyclePassWindowLenSamples_ = juce::jmax(std::int64_t{ 0 }, passWindowSamples);
+
+    recordingPreviewActive_ = true;
+    recordingPreviewStartSample_ = currentStartSampleOnTimeline;
+    recordingPreviewLengthSamples_ = juce::jmax(std::int64_t{ 0 }, currentVisibleLengthSamples);
+    recordingPreviewPeaks_ = currentPeaks;
     repaint();
+}
+
+void ClipWaveformView::clearRecordingCyclePassPreviewLayers() noexcept
+{
+    recordingCycleBehindLayersActive_ = false;
+    recordingCycleBehindPasses_.clear();
+    recordingCycleLoopAnchorL_ = 0;
+    recordingCyclePassWindowLenSamples_ = 0;
 }
 
 void ClipWaveformView::setInvalidDropCursor()
@@ -1721,65 +1827,58 @@ void ClipWaveformView::paint(juce::Graphics& g)
 
     // --- (3b) Live recording preview (UI only; not in `SessionSnapshot`): growing body + preview
     //     min/max blocks; **after** committed events + overlap hatch, **before** playhead.
+    //     Cycle OD: oldest completed-pass layers first, brightest current-pass on top.
+    if (recordingCycleBehindLayersActive_)
+    {
+        const std::int64_t anchor = recordingCycleLoopAnchorL_;
+        const std::int64_t pw = recordingCyclePassWindowLenSamples_;
+        const size_t nBehind = recordingCycleBehindPasses_.size();
+        for (size_t pi = 0; pi < nBehind; ++pi)
+        {
+            // Older passes use slightly darker fixed opaque fills so stacked laps remain distinguishable.
+            static constexpr std::uint32_t kBehindBodies[] = {
+                0xff173d2c,
+                0xff1c4834,
+                0xff23543e,
+                0xff2d624a,
+                0xff386f56,
+                0xff467e64
+            };
+            const int pal = juce::jmin(
+                (int)(sizeof(kBehindBodies) / sizeof(kBehindBodies[0])) - 1,
+                static_cast<int>(pi));
+            paintLiveRecordingPassPreview(
+                g,
+                bounds.getX(),
+                visStart,
+                spp,
+                eventTrackY,
+                anchor,
+                pw,
+                recordingCycleBehindPasses_[pi],
+                juce::Colour(kBehindBodies[(size_t)pal]),
+                juce::Colour(0xff5ec998),
+                juce::Colour(0xffbdfce0),
+                halfDraw,
+                midY);
+        }
+    }
     if (recordingPreviewActive_)
     {
-        const std::int64_t span0 = recordingPreviewStartSample_;
-        const std::int64_t rawLen = recordingPreviewLengthSamples_;
-        const std::int64_t span1
-            = span0 + (rawLen > 0 ? rawLen : 1); // at least one sample of width when length is still 0
-        if (span1 > span0)
-        {
-            float rx0 = TimelineRulerView::sessionSampleToLocalX(span0, bounds.getX(), visStart, spp);
-            float rx1 = TimelineRulerView::sessionSampleToLocalX(span1, bounds.getX(), visStart, spp);
-            const float xl = juce::jmin(rx0, rx1);
-            const float xr = juce::jmax(rx0, rx1);
-            juce::Rectangle<float> recRect{ xl, eventTrackY.getY(), juce::jmax(1.0f, xr - xl),
-                                            eventTrackY.getHeight() };
-            g.setColour(juce::Colour(0xff2f6a4a).withAlpha(0.30f));
-            g.fillRoundedRectangle(recRect, kEventCorner);
-            g.setColour(juce::Colour(0xff8ae8b0).withAlpha(0.48f));
-            g.drawRoundedRectangle(recRect, kEventCorner, 1.0f);
-
-            juce::Rectangle<float> innerRec
-                = recRect.reduced(1.0f + kWaveInset, 1.0f + kWaveInset * 0.5f);
-            if (innerRec.getWidth() >= 0.5f && innerRec.getHeight() >= 1.0f)
-            {
-                std::int64_t acc = 0;
-                for (const auto& b : recordingPreviewPeaks_)
-                {
-                    if (b.numSourceSamples <= 0)
-                    {
-                        continue;
-                    }
-                    const std::int64_t seg0 = span0 + acc;
-                    const std::int64_t seg1 = seg0 + static_cast<std::int64_t>(b.numSourceSamples);
-                    acc += static_cast<std::int64_t>(b.numSourceSamples);
-                    const float sx0 = TimelineRulerView::sessionSampleToLocalX(
-                        seg0, bounds.getX(), visStart, spp);
-                    const float sx1 = TimelineRulerView::sessionSampleToLocalX(
-                        seg1, bounds.getX(), visStart, spp);
-                    const float segLeft = juce::jmin(sx0, sx1);
-                    const float segRight = juce::jmax(sx0, sx1);
-                    const float bx0 = juce::jmax(innerRec.getX(), segLeft);
-                    const float bx1 = juce::jmin(innerRec.getRight(), segRight);
-                    const float segW = juce::jmax(1.0f, bx1 - bx0);
-                    if (segW < 0.5f)
-                    {
-                        continue;
-                    }
-                    fillMinMaxPeakRectClamped(
-                        g,
-                        b.minSample,
-                        b.maxSample,
-                        halfDraw,
-                        innerRec,
-                        midY,
-                        bx0,
-                        segW,
-                        juce::Colour(0xffc8ffe0).withAlpha(0.88f));
-                }
-            }
-        }
+        paintLiveRecordingPassPreview(
+            g,
+            bounds.getX(),
+            visStart,
+            spp,
+            eventTrackY,
+            recordingPreviewStartSample_,
+            recordingPreviewLengthSamples_,
+            recordingPreviewPeaks_,
+            juce::Colour(0xff32b878),
+            juce::Colour(0xff92f0bc),
+            juce::Colour(0xffeefff4),
+            halfDraw,
+            midY);
     }
 
     // --- (4) Playhead: clamp to arrangement extent; line only when inside the visible window.

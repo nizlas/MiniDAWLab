@@ -25,6 +25,10 @@ struct ProjectFileClipV1
     std::int64_t visibleLengthSamples = 0;
     // v4: non-destructive left trim (file indices skipped); 0 = absent in JSON.
     std::int64_t leftTrimSamples = 0;
+    // v7: bounds on permissible trim within shared material [start, end) in file indices; omit for full-material.
+    std::int64_t materialWindowStartSamples = 0;
+    std::int64_t materialWindowEndExclusiveSamples = 0;
+    bool hasMaterialWindowInFile = false;
 };
 
 struct ProjectFileTrackV1
@@ -39,7 +43,7 @@ struct ProjectFileTrackV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 5;
+    static constexpr int kCurrentVersion = 7;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -50,6 +54,9 @@ struct ProjectFileV1
     // v3: effective arrangement extent in samples (optional in JSON; 0 = treat as “absent / floor
     // from content only” on load — see `SessionSnapshot::withTracks`).
     std::int64_t arrangementExtentSamples = 0;
+    // v6: timeline locators (samples). Omitted in JSON when 0; `right == 0` = right locator unset.
+    std::int64_t leftLocatorSamples = 0;
+    std::int64_t rightLocatorSamples = 0;
     std::vector<ProjectFileTrackV1> tracks;
 };
 

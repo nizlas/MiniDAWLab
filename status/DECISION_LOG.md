@@ -7,6 +7,38 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-04-30 — Cycle recording: continuous master capture, offline per-pass split, opaque preview, deferred master cleanup
+
+**Scope:** Product behaviour and implementation shape for **cycle OD** (loop record) — **not** take lanes / comping UI, **not** a `ProjectFile` schema change for the **final** split model (per-pass clips are normal recorded assets like single-take takes). **RecorderService** realtime capture path (single continuous WAV, SPSC input, writer thread) **unchanged** in intent.
+
+**During recording**
+
+- **One continuous mono master WAV** is written for the whole cycle session so there are **no recording gaps** at loop boundaries (no stop/restart of the writer per lap).
+- With **cycle enabled**, **playback / playhead** wrap between **left locator L** and **right locator R** on the audio thread; locators remain session metadata as before.
+
+**On stop / commit (message thread only)**
+
+- After **`stopRecordingAndFinalize()`** completes, the continuous master is **decoded once** and **split offline** into **one WAV per completed full pass** plus an optional **final partial** pass; each file is written under **`<projectFolder>/Audio/`** with a **`cycle_pass_<timestamp>_<index>.wav`** pattern (implementation detail; steering: independent files per pass).
+- Each pass is committed via the **same path as a normal recorded take**: **`Session::addRecordedTakeAtSample`** at **timeline L** (left locator), **full file = visible material** (no shared “one long buffer” placement with material windows for **new** cycle commits). **Newest pass is topmost** in the track list (same “prepend as newest” rule as other added clips).
+- **Recording preview (UI):** body and peaks are **fully opaque** — **no alpha-blended** active recording preview layers; older pass sketches must not show through the current pass in the drawn region.
+
+**Continuous master after success**
+
+- If **all** per-pass writes and session adds succeed, the app **deletes** the continuous **`take_*.wav`** master. If Windows still holds the file (brief lock), cleanup uses a **message-thread deferred retry** (timer), then **`_debug_cycle_continuous_<name>`** rename + log if delete still fails. **Failed** split/commit does **not** delete or rename the master.
+
+**Alignment / latency**
+
+- An **alignment audit** (runtime traces) found **split math sample-consistent** with device sample rate, **`i * passLen`** slice origins, and placement at **L**; **input monitoring / device latency compensation** remains **future work** (not implemented here).
+
+**Explicit non-goals**
+
+- **Take lanes / comping UI** — not implemented.
+- **ProjectFile schema change** specifically for “cycle split” — not required; committed passes are ordinary clip entries referencing their own WAV paths.
+
+Rationale: avoids fragile shared-material-window semantics for cycle takes, keeps gapless capture, and makes every committed pass a normal clip for trim/save/load.
+
+---
+
 ## 2026-04-28 — Active-track Inspector channel fader + `ProjectFile` v5 (`channelFaderGain`)
 
 **Scope:** `Track` / `Session` / `SessionSnapshot`, [PlaybackEngine](src/engine/PlaybackEngine.cpp), [InspectorView](src/ui/InspectorView.cpp), [ProjectFile](src/io/ProjectFile.cpp) — **not** recording path, clip import, per-track lane headers.
@@ -625,3 +657,76 @@ Out of scope:
 - Key bindings other than `Ctrl+wheel`, vertical zoom, persisting the viewport, fit-to-content.
 
 ---
+
+## Timeline locator range (markers only; groundwork)
+
+Date: 2026-04-28
+
+Context:
+
+- Need **Cubase-style** left/right **locators** as session metadata (markers on the timeline/ruler)
+  **before** loop, punch, or export-range features consume them.
+
+Decision:
+
+- **`SessionSnapshot`** stores **`leftLocatorSamples_`** / **`rightLocatorSamples_`** alongside
+  arrangement extent; **`withLocators(previous, left, right)`** publishes updates; loaders use
+  four-arg **`withTracks(..., extent, left, right)`**, which clamps both to
+  **`[0, max(storedExtent, derivedContentEnd)]`** without swapping or normalizing L/R order.
+  **`rightLocatorSamples == 0`** means the **right** locator is **unset**; **pre–schema-v6**
+  projects load locators as **0 / 0**.
+- **`Session::setLeftLocatorAtSample` / `setRightLocatorAtSample`** clamp to current
+  **`getArrangementExtentSamples()`**; getters read the snapshot — **PlaybackEngine unchanged**,
+  audio thread does **not** branch on locators.
+- **`TimelineRulerView`:** plain click/drag **seeks**; **Ctrl**+click/drag sets **left**; **Alt**+click/drag
+  sets **right**. Ruler draws a **translucent** band between locators (**blue** when `right > left`,
+  **orange** when **`right ≤ left`** and **`right > 0`**); markers at L (and at R when set). Locator fill
+  and markers are painted **before** the playhead so the playhead stays **visibly on top**.
+- **Project file v6 (`ProjectFileV1::kCurrentVersion`)** writes **`leftLocatorSamples`** /
+  **`rightLocatorSamples`** only when non-zero **(omit zero)**; readers accept versions **1–6**.
+
+Rationale:
+
+- Single immutable snapshot pipeline, deterministic persistence, ruler-only UX until downstream
+  features consume locators.
+
+Out of scope:
+
+- Loop playback, punch in/out, export range selection, snapping, key commands, locator labels.
+
+---
+
+## Cycle UI and Numpad 1 jump to left locator (visual only; no loop playback)
+
+Date: 2026-04-28
+
+Context:
+
+- Extend Cubase-like **locator** UX: **upper/lower** ruler zones, transient **cycle armed** state, and
+  **Numpad 1** jump to the **left** locator when the range is valid — **without** loop wrap on the
+  audio thread yet.
+
+Decision:
+
+- **`Transport`** holds **`cycleEnabled_`** as **`std::atomic<bool>`** (**transient**, not in
+  **ProjectFile**). **`requestCycleEnabled` / `readCycleEnabledForUi`** use release/acquire; **PlaybackEngine**
+  does **not** read it in this slice.
+- **`TimelineRulerView`:** **lower half** plain click/drag **seeks**; **upper half** plain **click**
+  toggles cycle (suppressed when a callback reports recording or count-in). **Ctrl**/**Alt** still set
+  L/R locators on either half (**override** zones). Locator band: **valid range** (**`right > left`**
+  and **`right > 0`**) paints **blue** when cycle **on**, **gray** when **off**; **invalid** order
+  (**`right ≤ left`**, **`right > 0`**) paints **orange**; small **bracket** strokes at L/R when cycle is
+  on and the range is valid. **PlaybackEngine unchanged.**
+- **`MainWindow::routeShortcut`:** **Numpad 1** (incl. raw **VK_NUMPAD1**) calls
+  **`invokeJumpToLeftLocatorFromWindowShortcut`** on **`TransportControlsContent`**: if not recording /
+  count-in and **`right > left`** and **`right > 0`**, **`Transport::requestSeek(left)`**; else log and no-op.
+
+Rationale:
+
+- Keeps realtime path unchanged while matching familiar DAW gestures; persistence deferred until loop
+  playback consumes cycle state meaningfully alongside locators.
+
+Out of scope:
+
+- Actual loop playback (wrap at right locator), punch, cycle record, schema bump, **`PlaybackEngine`** /
+  audio-thread changes.
