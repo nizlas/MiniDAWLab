@@ -72,7 +72,7 @@ From the repository root, after a Release build (or let the script build for you
 This reads the version from `CMakeLists.txt` (`project(MiniDAWLab VERSION …)`), stages `dist\DanielssonsAudioLab-<version>\` (Release `MiniDAWLab.exe` plus bundled docs), ensures `dist\vendor\vc_redist.x64.exe` exists (downloaded once from Microsoft), writes `dist\DanielssonsAudioLab-<version>.zip`, and **if** [Inno Setup 6](https://jrsoftware.org/isinfo.php)’s `ISCC.exe` is on `PATH` or in the default install location, compiles `installer\MiniDAWLab.iss` to **`dist\DanielssonsAudioLab-<version>-Setup.exe`**.
 
 - Skip the build step (only if `build\ninja-release\…\Release\MiniDAWLab.exe` already exists): `.\scripts\package-windows.ps1 -SkipBuild`
-- Override the version string (advanced): `.\scripts\package-windows.ps1 -Version 0.1.0`
+- Override the version string (advanced): `.\scripts\package-windows.ps1 -Version 0.2.0`
 
 Details and hand compilation: [installer/README.md](installer/README.md).
 

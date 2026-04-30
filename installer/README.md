@@ -16,10 +16,10 @@ cd <repo>
 
 ## Manual compile (without the packaging script)
 
-After staging `dist\DanielssonsAudioLab-0.1.0\` and `dist\vendor\vc_redist.x64.exe` yourself:
+After staging `dist\DanielssonsAudioLab-0.2.0\` and `dist\vendor\vc_redist.x64.exe` yourself:
 
 ```powershell
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.1.0 "installer\MiniDAWLab.iss"
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.2.0 "installer\MiniDAWLab.iss"
 ```
 
 Run from the **repository root** (or use full paths in the script). The output is written to **`dist\`**.

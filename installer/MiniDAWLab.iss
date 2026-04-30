@@ -1,11 +1,11 @@
 ; MiniDAWLab — Inno Setup 6. Compile from repository root, or via scripts\package-windows.ps1
-;   "ISCC.exe" /DAppVersion=0.1.0 "installer\MiniDAWLab.iss"
+;   "ISCC.exe" /DAppVersion=0.2.0 "installer\MiniDAWLab.iss"
 ; Staged payload: dist\DanielssonsAudioLab-{#AppVersion}\ (created by package-windows.ps1)
 ; Embeds: dist\vendor\vc_redist.x64.exe (official Microsoft x64 redistributable)
 
 #define AppName "Danielssons Audio Lab"
 ; Default matches CMake project(); override: /DAppVersion=x.y.z
-#define AppVersion "0.1.0"
+#define AppVersion "0.2.0"
 
 [Setup]
 AppId={{2F8C9A1B-0D3E-4F5A-8B2C-9E1D4A6F0B2C}

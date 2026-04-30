@@ -39,6 +39,12 @@ Rationale: avoids fragile shared-material-window semantics for cycle takes, keep
 
 ---
 
+## 2026-04-30 — Danielssons Audio Lab **0.2.0** (packaging / cycle-recording alpha)
+
+Bump root **`project(MiniDAWLab VERSION …)`** from **0.1.0** → **0.2.0**; `package-windows.ps1` and Inno **`/DAppVersion`** continue to read or default from CMake. No target or binary rename.
+
+---
+
 ## 2026-04-28 — Active-track Inspector channel fader + `ProjectFile` v5 (`channelFaderGain`)
 
 **Scope:** `Track` / `Session` / `SessionSnapshot`, [PlaybackEngine](src/engine/PlaybackEngine.cpp), [InspectorView](src/ui/InspectorView.cpp), [ProjectFile](src/io/ProjectFile.cpp) — **not** recording path, clip import, per-track lane headers.
@@ -55,7 +61,7 @@ Rationale: avoids fragile shared-material-window semantics for cycle takes, keep
 
 **Scope:** [package-windows.ps1](scripts/package-windows.ps1), [MiniDAWLab.iss](installer/MiniDAWLab.iss), docs — no `src/**`, no CMake target rename, **`MiniDAWLab.exe`** and installer payload unchanged.
 
-**Names:** Staged folder, zip, and Inno **`OutputBaseFilename`** use the ASCII token **`DanielssonsAudioLab-<version>`** (e.g. `dist\DanielssonsAudioLab-0.1.0.zip`, `dist\DanielssonsAudioLab-0.1.0-Setup.exe`). **Visible** installer strings remain **Danielssons Audio Lab** (`AppName`, shortcuts). The installed binary is still **`{app}\MiniDAWLab.exe`**.
+**Names:** Staged folder, zip, and Inno **`OutputBaseFilename`** use the ASCII token **`DanielssonsAudioLab-<version>`** (e.g. `dist\DanielssonsAudioLab-0.2.0.zip`, `dist\DanielssonsAudioLab-0.2.0-Setup.exe`). **Visible** installer strings remain **Danielssons Audio Lab** (`AppName`, shortcuts). The installed binary is still **`{app}\MiniDAWLab.exe`**.
 
 **Prior:** Artifacts were named `MiniDAWLab-<version>.*`; the Inno `[Files]` `Source` path must stay aligned with the staging directory created by the packaging script.
 
