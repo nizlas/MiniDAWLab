@@ -152,6 +152,12 @@ float TimelineRulerView::sessionSampleToLocalXForSpan(
 
 void TimelineRulerView::applySeekForLocalX(const float x) noexcept
 {
+    if (isUiInputBlockedByRecording_ && isUiInputBlockedByRecording_())
+    {
+        juce::Logger::writeToLog("[Ruler] seek ignored (recording or count-in)");
+        return;
+    }
+
     const std::int64_t arr = session_.getArrangementExtentSamples();
     if (arr <= 0)
     {
@@ -177,6 +183,14 @@ void TimelineRulerView::applySeekForLocalX(const float x) noexcept
 
 void TimelineRulerView::applyLeftLocatorForLocalX(const float x) noexcept
 {
+    if (isUiInputBlockedByRecording_ && isUiInputBlockedByRecording_())
+    {
+        // Mid-take locator changes can desynchronize cycle wrap math, the offline split, and the
+        // UI overlay. Block until recording stops.
+        juce::Logger::writeToLog("[Ruler] Ctrl L locator edit ignored (recording or count-in)");
+        return;
+    }
+
     const std::int64_t arr = session_.getArrangementExtentSamples();
     if (arr <= 0)
     {
@@ -196,12 +210,33 @@ void TimelineRulerView::applyLeftLocatorForLocalX(const float x) noexcept
     const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
     const std::int64_t t
         = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+
+    // First-creation auto-enable: only fire when the user is creating a valid range from a state
+    // where no R locator has ever been set (R == 0). Once R is non-zero, the cycle on/off state
+    // is sticky against locator edits — making a valid range invalid then valid again does NOT
+    // re-enable cycle. Project load doesn't go through this path, so saved locators don't trigger.
+    const std::int64_t oldR = session_.getRightLocatorSamples();
+
     session_.setLeftLocatorAtSample(t);
+
+    const std::int64_t newR = session_.getRightLocatorSamples();
+    const bool newValid = newR > t && newR > 0;
+    if (oldR == 0 && newValid && !transport_.readCycleEnabledForUi())
+    {
+        transport_.requestCycleEnabled(true);
+        juce::Logger::writeToLog("[Cycle] auto-enabled by L locator edit (first-creation: oldR==0)");
+    }
     repaint();
 }
 
 void TimelineRulerView::applyRightLocatorForLocalX(const float x) noexcept
 {
+    if (isUiInputBlockedByRecording_ && isUiInputBlockedByRecording_())
+    {
+        juce::Logger::writeToLog("[Ruler] Alt R locator edit ignored (recording or count-in)");
+        return;
+    }
+
     const std::int64_t arr = session_.getArrangementExtentSamples();
     if (arr <= 0)
     {
@@ -221,7 +256,18 @@ void TimelineRulerView::applyRightLocatorForLocalX(const float x) noexcept
     const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
     const std::int64_t t
         = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+
+    const std::int64_t oldR = session_.getRightLocatorSamples();
+
     session_.setRightLocatorAtSample(t);
+
+    const std::int64_t newL = session_.getLeftLocatorSamples();
+    const bool newValid = t > newL && t > 0;
+    if (oldR == 0 && newValid && !transport_.readCycleEnabledForUi())
+    {
+        transport_.requestCycleEnabled(true);
+        juce::Logger::writeToLog("[Cycle] auto-enabled by R locator edit (first-creation: oldR==0)");
+    }
     repaint();
 }
 

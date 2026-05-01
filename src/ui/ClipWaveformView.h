@@ -106,9 +106,16 @@ public:
         const std::vector<RecordingPreviewPeakBlock>& peakBlocks);
     void clearRecordingPreviewOverlay();
 
-    // Cycle OD: stacked completed-pass previews (same [L,R) window each) + current-pass overlay on top.
+    // Cycle OD: stacked completed-pass previews + current-pass overlay on top.
+    // The very first completed pass (`completedPassesOlderFirst[0]`, oldest = "segment 0") is
+    // anchored at `firstSegmentTimelineStart` with width `firstSegmentLengthSamples`. All later
+    // completed passes ([1..]) sit at `loopLeftSample` with width `passWindowSamples` (one normal
+    // wrapped pass each). This split is needed because cycle recording can start at S != L: the
+    // first segment spans [S, R) while every wrapped pass spans [L, R).
     void setRecordingCyclePassPreviewLayers(
         const std::vector<std::vector<RecordingPreviewPeakBlock>>& completedPassesOlderFirst,
+        std::int64_t firstSegmentTimelineStart,
+        std::int64_t firstSegmentLengthSamples,
         std::int64_t loopLeftSample,
         std::int64_t passWindowSamples,
         std::int64_t currentStartSampleOnTimeline,
@@ -241,6 +248,11 @@ private:
     std::vector<std::vector<RecordingPreviewPeakBlock>> recordingCycleBehindPasses_;
     std::int64_t recordingCycleLoopAnchorL_ = 0;
     std::int64_t recordingCyclePassWindowLenSamples_ = 0;
+    /// Anchor + length used **only** for `recordingCycleBehindPasses_[0]` (the variable-length
+    /// segment 0 that begins at the actual recording start S, ends at R). Indices 1..N-1 use the
+    /// shared loop anchor + pass window.
+    std::int64_t recordingCycleFirstSegmentStart_ = 0;
+    std::int64_t recordingCycleFirstSegmentLength_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ClipWaveformView)
 };

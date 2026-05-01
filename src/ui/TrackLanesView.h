@@ -75,10 +75,13 @@ public:
     // is created before layout without waiting for a user resize.
     void syncTracksFromSession();
 
-    // Cycle recording preview: overlay spans [L, L+visible) per pass only; resets when playback wraps.
+    // Cycle recording preview: segment 0 spans [S, R); each later wrapped pass spans [L, R).
+    // `actualRecordingStart` is the playhead at the moment recording began (may be < L, in [L,R),
+    // or >= R). When >= R the live preview is linear from S (no wrap will be signalled).
     void setCycleRecordingPreviewContext(bool active,
                                          std::int64_t loopLeftSample,
                                          std::int64_t loopRightSample,
+                                         std::int64_t actualRecordingStart,
                                          std::uint32_t wrapPassCountBaselineAtRecordingStart) noexcept;
 
     void clearCycleRecordingPreviewContext() noexcept;
@@ -127,6 +130,9 @@ private:
     bool cyclePreviewActive_ = false;
     std::int64_t cyclePreviewLocL_ = 0;
     std::int64_t cyclePreviewLocR_ = 0;
+    /// Playhead at cycle-recording start, captured by `Main`. Used to anchor segment 0 at S
+    /// (length R−S) instead of at L. When S >= R the live preview falls back to linear.
+    std::int64_t cyclePreviewActualStart_ = 0;
     std::uint32_t cyclePreviewWrapBaseline_ = 0;
     std::uint32_t cyclePreviewLastSeenWrap_ = 0;
 

@@ -122,27 +122,58 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
 
     const std::uint32_t wrapNow = transport_.readCycleWrapCountForUi();
 
-    if (cyclePreviewActive_)
+    // Cycle preview mapping:
+    //   - S = actual recording start (cyclePreviewActualStart_)
+    //   - L, R = locators at recording start; passLen = R - L
+    //   - Segment 0 spans [S, R) with length firstSegLen = R - S (only when S < R)
+    //   - Each wrapped pass spans [L, R) with length passLen
+    //   - Wrap signals from PlaybackEngine drive completion: 1st wrap finalises segment 0,
+    //     subsequent wraps finalise wrapped passes
+    //   - When S >= R: PlaybackEngine never wraps, so the preview stays linear at S.
+    const std::int64_t passLen = cyclePreviewLocR_ - cyclePreviewLocL_;
+    const bool cycleRangeUsable = cyclePreviewActive_
+                                  && passLen > 0
+                                  && cyclePreviewActualStart_ < cyclePreviewLocR_;
+    std::int64_t firstSegLen = 0;
+    if (cycleRangeUsable)
     {
-        const std::int64_t passLen = cyclePreviewLocR_ - cyclePreviewLocL_;
-        if (passLen > 0)
+        firstSegLen = cyclePreviewLocR_ - cyclePreviewActualStart_;
+
+        // Peel completed segments. Segment 0 (the very first one) consumes firstSegLen samples;
+        // each subsequent wrapped pass consumes passLen samples. Iteration count is bounded by the
+        // delta between locked-in wrap count and what the audio thread has signalled.
+        while (cyclePreviewLastSeenWrap_ < wrapNow)
         {
-            while (cyclePreviewLastSeenWrap_ < wrapNow)
-            {
-                std::vector<RecordingPreviewPeakBlock> onePass;
-                peelPeakBlocksBySampleCount(recordingPreviewPeaksAccum_, onePass, passLen);
-                cycleRecordingCompletedPassPeaks_.push_back(std::move(onePass));
-                ++cyclePreviewLastSeenWrap_;
-            }
-            const std::uint32_t baseline = cyclePreviewWrapBaseline_;
-            const std::uint64_t deltaWraps
-                = (wrapNow >= baseline) ? static_cast<std::uint64_t>(wrapNow - baseline) : 0u;
-            const std::int64_t completed = static_cast<std::int64_t>(deltaWraps);
-            const std::int64_t offsetInPass = recLen - completed * passLen;
+            const std::uint32_t alreadyConsumed = cyclePreviewLastSeenWrap_ - cyclePreviewWrapBaseline_;
+            const std::int64_t peelLen = (alreadyConsumed == 0u) ? firstSegLen : passLen;
+            std::vector<RecordingPreviewPeakBlock> onePass;
+            peelPeakBlocksBySampleCount(recordingPreviewPeaksAccum_, onePass, peelLen);
+            cycleRecordingCompletedPassPeaks_.push_back(std::move(onePass));
+            ++cyclePreviewLastSeenWrap_;
+        }
+
+        // Compute current-pass anchor + length from actual recorded sample count.
+        const std::uint32_t wraps = (wrapNow >= cyclePreviewWrapBaseline_)
+                                    ? (wrapNow - cyclePreviewWrapBaseline_)
+                                    : 0u;
+        if (wraps == 0u)
+        {
+            recStart = cyclePreviewActualStart_;
+            recLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, firstSegLen, recLen);
+        }
+        else
+        {
+            // Wrapped pass in progress: anchored at L. Source offset within the recording is the
+            // length of segment 0 plus (wraps - 1) full wrapped passes.
+            const std::int64_t sourceOffset
+                = firstSegLen + static_cast<std::int64_t>(wraps - 1u) * passLen;
+            const std::int64_t offsetInPass = recLen - sourceOffset;
             recStart = cyclePreviewLocL_;
-            recLen = juce::jlimit(std::int64_t{ 0 }, passLen, offsetInPass);
+            recLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, offsetInPass);
         }
     }
+    // else (cyclePreviewActive_ false, or passLen <= 0, or S >= R): leave recStart/recLen as
+    // returned from recorder — single linear preview at S with length recordedSamples.
 
     for (auto& u : lanes_)
     {
@@ -152,11 +183,14 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
         }
         if (u->getTrackId() == recTid)
         {
-            const std::int64_t passLen = cyclePreviewLocR_ - cyclePreviewLocL_;
-            if (cyclePreviewActive_ && passLen > 0)
+            if (cycleRangeUsable)
             {
+                // Segment 0 anchor + length feed `recordingCycleBehindPasses_[0]`; later wrapped
+                // passes use L + passLen.
                 u->setRecordingCyclePassPreviewLayers(
                     cycleRecordingCompletedPassPeaks_,
+                    cyclePreviewActualStart_,
+                    firstSegLen,
                     cyclePreviewLocL_,
                     passLen,
                     recStart,
@@ -179,11 +213,13 @@ void TrackLanesView::setCycleRecordingPreviewContext(
     const bool active,
     const std::int64_t loopLeftSample,
     const std::int64_t loopRightSample,
+    const std::int64_t actualRecordingStart,
     const std::uint32_t wrapPassCountBaselineAtRecordingStart) noexcept
 {
     cyclePreviewActive_ = active;
     cyclePreviewLocL_ = loopLeftSample;
     cyclePreviewLocR_ = loopRightSample;
+    cyclePreviewActualStart_ = actualRecordingStart;
     cyclePreviewWrapBaseline_ = wrapPassCountBaselineAtRecordingStart;
     cyclePreviewLastSeenWrap_ = wrapPassCountBaselineAtRecordingStart;
     recordingPreviewPeaksAccum_.clear();

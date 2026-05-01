@@ -679,6 +679,8 @@ void ClipWaveformView::clearRecordingPreviewOverlay()
 
 void ClipWaveformView::setRecordingCyclePassPreviewLayers(
     const std::vector<std::vector<RecordingPreviewPeakBlock>>& completedPassesOlderFirst,
+    const std::int64_t firstSegmentTimelineStart,
+    const std::int64_t firstSegmentLengthSamples,
     const std::int64_t loopLeftSample,
     const std::int64_t passWindowSamples,
     const std::int64_t currentStartSampleOnTimeline,
@@ -689,6 +691,8 @@ void ClipWaveformView::setRecordingCyclePassPreviewLayers(
     recordingCycleBehindLayersActive_ = !recordingCycleBehindPasses_.empty();
     recordingCycleLoopAnchorL_ = loopLeftSample;
     recordingCyclePassWindowLenSamples_ = juce::jmax(std::int64_t{ 0 }, passWindowSamples);
+    recordingCycleFirstSegmentStart_ = firstSegmentTimelineStart;
+    recordingCycleFirstSegmentLength_ = juce::jmax(std::int64_t{ 0 }, firstSegmentLengthSamples);
 
     recordingPreviewActive_ = true;
     recordingPreviewStartSample_ = currentStartSampleOnTimeline;
@@ -703,6 +707,8 @@ void ClipWaveformView::clearRecordingCyclePassPreviewLayers() noexcept
     recordingCycleBehindPasses_.clear();
     recordingCycleLoopAnchorL_ = 0;
     recordingCyclePassWindowLenSamples_ = 0;
+    recordingCycleFirstSegmentStart_ = 0;
+    recordingCycleFirstSegmentLength_ = 0;
 }
 
 void ClipWaveformView::setInvalidDropCursor()
@@ -1847,14 +1853,18 @@ void ClipWaveformView::paint(juce::Graphics& g)
             const int pal = juce::jmin(
                 (int)(sizeof(kBehindBodies) / sizeof(kBehindBodies[0])) - 1,
                 static_cast<int>(pi));
+            // Segment 0 (the very first completed pass) sits at S with length R-S; subsequent
+            // wrapped passes sit at L with passLen.
+            const std::int64_t segAnchor = (pi == 0) ? recordingCycleFirstSegmentStart_ : anchor;
+            const std::int64_t segLen = (pi == 0) ? recordingCycleFirstSegmentLength_ : pw;
             paintLiveRecordingPassPreview(
                 g,
                 bounds.getX(),
                 visStart,
                 spp,
                 eventTrackY,
-                anchor,
-                pw,
+                segAnchor,
+                segLen,
                 recordingCycleBehindPasses_[pi],
                 juce::Colour(kBehindBodies[(size_t)pal]),
                 juce::Colour(0xff5ec998),

@@ -1212,6 +1212,7 @@ private:
             const TrackId cycleTrackId = cycleSessionTrackId_;
             const std::int64_t cycleLocL = cycleSessionLocL_;
             const std::int64_t cycleLocR = cycleSessionLocR_;
+            const std::int64_t cycleStart = cycleSessionRecordingStartSample_;
             const double cycleSr = cycleSessionSampleRate_;
 
             transport.requestPlaybackIntent(PlaybackIntent::Stopped);
@@ -1323,11 +1324,6 @@ private:
                 const std::int64_t totalAvail
                     = juce::jmax<std::int64_t>(std::int64_t{ 0 }, juce::jmin(decoded, r.intendedSampleCount));
 
-                const std::int64_t maxFullBySamples
-                    = passLen > 0 ? totalAvail / passLen : std::int64_t{ 0 };
-                const int nFullPasses = static_cast<int>(
-                    juce::jmin(static_cast<std::int64_t>(numCompletedPasses_), maxFullBySamples));
-
                 if (totalAvail < 1)
                 {
                     numCompletedPasses_ = 0;
@@ -1359,7 +1355,12 @@ private:
                 const juce::File continuousMaster = r.takeFile;
                 int sliceFileIndex = 0;
 
-                auto writeSliceCommit = [&](const std::int64_t offsetSamples, std::int64_t sliceLen) {
+                // `timelinePos` is where the slice is placed on the session timeline. Segment 0
+                // sits at the actual recording start (which may be < L, in [L,R), or >= R), while
+                // every subsequent wrapped pass sits at L by definition of cycle wrap-around.
+                auto writeSliceCommit = [&](const std::int64_t offsetSamples,
+                                            std::int64_t sliceLen,
+                                            const std::int64_t timelinePos) {
                     if (sliceLen <= 0 || offsetSamples < 0)
                     {
                         return;
@@ -1394,7 +1395,7 @@ private:
                     const juce::Result ar = session.addRecordedTakeAtSample(
                         sliceWav,
                         cycleSr,
-                        cycleLocL,
+                        timelinePos,
                         cycleTrackId,
                         sliceLen);
                     if (!ar.wasOk())
@@ -1406,15 +1407,51 @@ private:
                     }
                 };
 
-                for (int i = 0; i < nFullPasses; ++i)
-                {
-                    writeSliceCommit(static_cast<std::int64_t>(i) * passLen, passLen);
-                }
+                // Variable first-segment placement: sample 0 of the recording corresponds to the
+                // playhead at recording-start (cycleStart). Wrap math (R - cycleStart) yields
+                // segment 0's natural length only if the recording actually crossed R from the
+                // left (i.e. at least one wrap signalled by the audio thread).
+                const std::int64_t actualStart = juce::jmax<std::int64_t>(std::int64_t{ 0 }, cycleStart);
+                const int wraps = juce::jmax(0, numCompletedPasses_);
 
-                const std::int64_t partialOffset = static_cast<std::int64_t>(nFullPasses) * passLen;
-                std::int64_t partialLen = totalAvail - partialOffset;
-                partialLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, partialLen);
-                writeSliceCommit(partialOffset, partialLen);
+                if (actualStart >= cycleLocR || wraps <= 0)
+                {
+                    // Linear: a single segment placed at actualStart, full take length.
+                    // Covers: start >= R (no wrap possible), or start < R but recording stopped
+                    // before reaching R (no wrap occurred).
+                    writeSliceCommit(std::int64_t{ 0 }, totalAvail, actualStart);
+                }
+                else
+                {
+                    // Segment 0 spans recording samples [0, R - actualStart) -> timeline [actualStart, R).
+                    const std::int64_t firstSegLen
+                        = juce::jmin(cycleLocR - actualStart, totalAvail);
+                    writeSliceCommit(std::int64_t{ 0 }, firstSegLen, actualStart);
+
+                    // Subsequent full passes (each of length passLen) are placed at L.
+                    const std::int64_t remainingAfterFirst = totalAvail - firstSegLen;
+                    const std::int64_t maxAdditionalFullsBySamples
+                        = passLen > 0 ? remainingAfterFirst / passLen : std::int64_t{ 0 };
+                    const int subsequentFull = static_cast<int>(
+                        juce::jmin(static_cast<std::int64_t>(juce::jmax(0, wraps - 1)),
+                                   maxAdditionalFullsBySamples));
+                    for (int i = 0; i < subsequentFull; ++i)
+                    {
+                        const std::int64_t off
+                            = firstSegLen + static_cast<std::int64_t>(i) * passLen;
+                        writeSliceCommit(off, passLen, cycleLocL);
+                    }
+
+                    // Final partial (at L), if any samples remain after the last full pass.
+                    const std::int64_t partialOffset
+                        = firstSegLen + static_cast<std::int64_t>(subsequentFull) * passLen;
+                    std::int64_t partialLen = totalAvail - partialOffset;
+                    partialLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, partialLen);
+                    if (partialLen > 0)
+                    {
+                        writeSliceCommit(partialOffset, partialLen, cycleLocL);
+                    }
+                }
 
                 numCompletedPasses_ = 0;
                 lastSeenWrapCount_ = 0;
@@ -1546,7 +1583,8 @@ private:
                 cycleSessionLocL_ = locL;
                 cycleSessionLocR_ = locR;
                 numCompletedPasses_ = 0;
-                transport.requestSeek(locL);
+                // No presnap to L: cycle recording starts at the current playhead. Cycle wraps still
+                // happen on the audio thread when playback crosses R from the left.
             }
 
             BeginRecordingRequest req;
@@ -1668,16 +1706,16 @@ private:
             countInStatusLabel_.setText({}, juce::dontSendNotification);
 
             const bool armedCycleSession = cycleRecordingActive_;
+            // For both linear and cycle recording, the timeline start is wherever the playhead is
+            // at the moment count-in completes. Cycle splitting (commit) reconstructs per-pass
+            // placement from this real start, the locators, and the wrap count.
+            req.recordingStartSample = transport.readPlayheadSamplesForUi();
             if (armedCycleSession)
             {
-                req.recordingStartSample = cycleSessionLocL_;
                 cycleSessionTrackId_ = req.targetTrackId;
                 cycleSessionSampleRate_ = req.sampleRate;
                 cycleSessionTakeFile_ = req.takeFile;
-            }
-            else
-            {
-                req.recordingStartSample = transport.readPlayheadSamplesForUi();
+                cycleSessionRecordingStartSample_ = req.recordingStartSample;
             }
 
             if (!recorder_.beginRecording(req))
@@ -1709,7 +1747,11 @@ private:
                 lastSeenWrapCount_ = transport.readCycleWrapCountForUi();
                 numCompletedPasses_ = 0;
                 trackLanesView.setCycleRecordingPreviewContext(
-                    true, cycleSessionLocL_, cycleSessionLocR_, lastSeenWrapCount_);
+                    true,
+                    cycleSessionLocL_,
+                    cycleSessionLocR_,
+                    cycleSessionRecordingStartSample_,
+                    lastSeenWrapCount_);
                 if (cycleRecordingWrapTimer_ == nullptr)
                 {
                     cycleRecordingWrapTimer_ = std::make_unique<CycleRecordingWrapTimer>(*this);
@@ -1739,6 +1781,9 @@ private:
         TrackId cycleSessionTrackId_ = kInvalidTrackId;
         std::int64_t cycleSessionLocL_ = 0;
         std::int64_t cycleSessionLocR_ = 0;
+        /// Actual playhead sample at the moment cycle recording begins (after count-in). Used by
+        /// the offline split to place segment 0 at its real start position rather than at L.
+        std::int64_t cycleSessionRecordingStartSample_ = 0;
         double cycleSessionSampleRate_ = 0.0;
         juce::File cycleSessionTakeFile_;
         std::uint32_t lastSeenWrapCount_ = 0;
