@@ -13,21 +13,22 @@
 //   The event lane (`ClipWaveformView`) stays focused on
 //
 // PRESENTATION
-//   Plain tick marks at **round seconds** (device sample rate → seconds for layout only). Density
-//   adapts so ticks do not merge. **No** mm:ss labels, no bar/beat. A short **playhead** stroke at
-//   the top aligns with the lane’s vertical playhead line when both use the same linear x↔sample map
-//   and the parent gives them **identical width** (see `Main.cpp` layout).
+//   Tick marks + lightweight time labels (seconds / fractional seconds / `m:ss` / `m:ss.mmm`) from
+//   timeline samples × an effective **display** sample rate (device SR or 48000 Hz fallback only —
+//   never persisted). Density adapts to zoom; labels never follow playback audible-offset; no
+//   bar/beat/tempo grid. A short **playhead** stroke at the top aligns with the lane vertical line
+//   when widths match (see `Main.cpp`).
 //
 // THREADING
 //   juce::Component + Timer: [Message thread] only. Reads `Session` / `Transport`; never runs on the
-//   audio callback. `AudioDeviceManager` is used on the message thread to read the current device
-//   sample rate for tick spacing only — not for transport state.
+//   audio callback. `AudioDeviceManager` is used on the message thread to read an **effective** sample
+//   rate for ruler tick/label placement only — not for transport state and not persisted.
 //
 // NOT RESPONSIBLE FOR
 //   Clip ordering, snap content, file I/O, or writing the authoritative playhead (only `requestSeek`).
 //   No shared “timeline model” object; mapping matches `ClipWaveformView` by contract and layout.
 //
-// See: TimelineRulerView.cpp (tick step choice, x→sample mapping).
+// See: `TimelineRulerView.cpp` (tick/label step ladder, timecode labels, x→sample mapping).
 // =============================================================================
 
 #include "domain/Session.h"
@@ -44,7 +45,7 @@ class Transport;
 // ---------------------------------------------------------------------------
 // TimelineRulerView — thin strip above the event lane
 // ---------------------------------------------------------------------------
-// Responsibility: paint second ticks + playhead marker; map pointer x to session samples and
+// Responsibility: paint ticks, time labels, playhead marker; map pointer x to session samples and
 // request seek. Does not own transport truth; does not store a second playhead.
 //
 // Threading: [Message thread] for construction, paint, mouse, timer.

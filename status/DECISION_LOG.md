@@ -7,6 +7,21 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-05-01 — Timeline ruler: **seconds / mm:ss-style time labels** (UI-only)
+
+**Scope:** [TimelineRulerView.cpp](src/ui/TimelineRulerView.cpp) **paint-only** — no tempo/grid/bars/beats, no `ProjectFile` / `Session` fields, **not** routed through playback audible-offset math.
+
+**Behaviour**
+
+- Ticks plus **floating time strings** derive from **`timeline_sample / effectiveSampleRate`**. **Effective SR** is the **current audio device** rate when `getCurrentSampleRate() > 0`, otherwise **`48000.0`** for **drawing only** (never written to latency XML / project files).
+- **Transport / timeline samples** anchor both ticks and strings; **`PlaybackEngine` audible alignment offset must not alter** ruler labels.
+- Labels **adapt to zoom**: fractional seconds (`0.5 s`, `1.0 s`) when spaced enough on screen, multi-second ladders at longer spans, **`m:ss`** / **`m:ss.mmm`** for longer horizons; locator triangle centres carve a skip band (`half_width + 2 px`) so handles stay readable.
+- Explicit **non-goals** in this slice: bar/beat grid, tempo BPM UI, SMPTE / drop-frame, hover readouts.
+
+Rationale: read position in human time against device SR without implying a tempo map that does not exist yet.
+
+---
+
 ## 2026-05-01 — Audio Settings: **Latency / Timing** controls (reported metrics, offsets, app XML)
 
 **Scope:** [LatencySettingsView](src/ui/LatencySettingsView.h) under the Audio Settings dialog (`AudioDeviceSelectorComponent` unchanged in role), [LatencySettingsStore](src/audio/LatencySettingsStore.h), [PlaybackEngine](src/engine/PlaybackEngine.h) audible read offset only, [AudioDeviceInfo](src/audio/AudioDeviceInfo.h) **sibling path** helper — **not** `RecorderService`, **not** `ProjectFile` / `Session` / placement APIs beyond commit-time reads in [Main.cpp](src/Main.cpp), **not** plugin delay compensation, **not** a real low-latency-record mode yet.
