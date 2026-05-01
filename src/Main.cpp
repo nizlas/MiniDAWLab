@@ -56,6 +56,8 @@
 #include "ui/TrackLanesView.h"
 #include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
+#include "audio/LatencySettingsStore.h"
+#include "ui/LatencySettingsView.h"
 #include "io/ProjectAudioImport.h"
 
 #include <algorithm>
@@ -453,6 +455,50 @@ namespace
     }
 } // namespace
 
+namespace
+{
+class AudioSettingsDialogContent final : public juce::Component
+{
+public:
+    AudioSettingsDialogContent(juce::AudioDeviceManager& dm,
+                               LatencySettingsStore& latencyStore,
+                               PlaybackEngine& playbackEngine)
+        : selector_(dm, 0, 2, 2, 2, false, false, false, false)
+        , latencyView_(latencyStore, playbackEngine)
+    {
+        addAndMakeVisible(selector_);
+        addAndMakeVisible(latencyView_);
+        setSize(640, 680);
+    }
+
+    void resized() override
+    {
+        constexpr int kGapBelowSelectorPx = 10;
+        auto area = getLocalBounds();
+        const int w = area.getWidth();
+        const int topY = area.getY();
+
+        // AudioDeviceSelectorComponent ends resized() by setSize(w, intrinsicHeight). Lay it out
+        // with enough vertical slack first so internal controls measure correctly; then tighten
+        // its bounds to that height so we do not leave a tall empty band above the latency panel.
+        const int provisionalH = juce::jmax(1, area.getHeight() - kGapBelowSelectorPx);
+        selector_.setBounds(area.getX(), topY, w, provisionalH);
+        const int selectorH = juce::jmax(1, selector_.getHeight());
+        selector_.setBounds(area.getX(), topY, w, selectorH);
+
+        const int latencyY = topY + selectorH + kGapBelowSelectorPx;
+        const int latencyH = juce::jmax(1, area.getBottom() - latencyY);
+        latencyView_.setBounds(area.getX(), latencyY, w, latencyH);
+    }
+
+    [[nodiscard]] LatencySettingsView& getLatencyPane() noexcept { return latencyView_; }
+
+private:
+    juce::AudioDeviceSelectorComponent selector_;
+    LatencySettingsView latencyView_;
+};
+} // namespace
+
 // ---------------------------------------------------------------------------
 // MiniDAWLabApplication — process-wide singleton, owns top-level subsystems
 // ---------------------------------------------------------------------------
@@ -504,6 +550,12 @@ public:
         juce::Logger::writeToLog(
             juce::String{"[Audio]\n"} + mini_daw::describeActiveAudioDeviceMultiLine(deviceManager));
 
+        latencySettingsStore = std::make_unique<LatencySettingsStore>(
+            deviceManager, mini_daw::getLatencySettingsFile());
+        latencySettingsStore->loadFromFile();
+        latencySettingsStore->refreshFromCurrentDevice();
+        playbackEngine->setPlaybackOffsetSamples(latencySettingsStore->getCurrentPlaybackOffsetSamples());
+
         // After this line, the audio thread can call our PlaybackEngine; keep UI after so we do
         // not paint or load files before the device exists.
         deviceManager.addAudioCallback(playbackEngine.get());
@@ -514,7 +566,9 @@ public:
             *session,
             deviceManager,
             *recorderService,
-            *countInOutput_);
+            *countInOutput_,
+            *latencySettingsStore,
+            *playbackEngine);
     }
 
     // [Message thread] Reverse of initialise; see file header.
@@ -555,12 +609,16 @@ private:
                                  Session& sessionIn,
                                  juce::AudioDeviceManager& deviceManagerIn,
                                  RecorderService& recorderIn,
-                                 CountInClickOutput& countInClicksIn)
+                                 CountInClickOutput& countInClicksIn,
+                                 LatencySettingsStore& latencyStoreIn,
+                                 PlaybackEngine& playbackEngineIn)
             : transport(transportIn)
             , session(sessionIn)
             , deviceManager(deviceManagerIn)
             , recorder_(recorderIn)
             , countInClicks_(countInClicksIn)
+            , latencyStore_(latencyStoreIn)
+            , playbackEngine_(playbackEngineIn)
             , timelineViewport_()
             , rulerView(
                   sessionIn,
@@ -570,7 +628,7 @@ private:
                   [this]() {
                       return recorder_.isRecording() || isCountInActive();
                   })
-            , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn)
+            , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn, latencyStoreIn)
             , inspectorView_(sessionIn)
         {
             setWantsKeyboardFocus(true);
@@ -772,6 +830,13 @@ private:
             juce::ignoreUnused(source);
             // Multi-line device detail is logged once at app init; on change, persist is best-effort.
             mini_daw::trySaveAudioDeviceState(deviceManager, mini_daw::getAudioSettingsFile());
+            latencyStore_.refreshFromCurrentDevice();
+            latencyStore_.save();
+            playbackEngine_.setPlaybackOffsetSamples(latencyStore_.getCurrentPlaybackOffsetSamples());
+            if (auto* lv = audioLatencySettingsWeak_.getComponent())
+            {
+                lv->syncFromStore();
+            }
         }
 
         void showAudioSettingsDialog()
@@ -789,19 +854,11 @@ private:
                 transport.requestPlaybackIntent(PlaybackIntent::Stopped);
                 updatePlayPauseButtonFromTransport();
             }
-            auto* selector = new juce::AudioDeviceSelectorComponent(
-                deviceManager,
-                0,
-                2,
-                2,
-                2,
-                false,
-                false,
-                false,
-                false);
-            selector->setSize(600, 480);
+            auto* body = new AudioSettingsDialogContent(deviceManager, latencyStore_, playbackEngine_);
+            audioLatencySettingsWeak_ = &body->getLatencyPane();
+            body->getLatencyPane().syncFromStore();
             juce::DialogWindow::LaunchOptions opt;
-            opt.content.setOwned(selector);
+            opt.content.setOwned(body);
             opt.dialogTitle = "Audio Settings";
             opt.dialogBackgroundColour
                 = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId);
@@ -1355,33 +1412,48 @@ private:
                 const juce::File continuousMaster = r.takeFile;
                 int sliceFileIndex = 0;
 
+                const std::int64_t recordingPlacementOffsetSamples
+                    = latencyStore_.getCurrentRecordingOffsetSamples();
+
                 // `timelinePos` is where the slice is placed on the session timeline. Segment 0
                 // sits at the actual recording start (which may be < L, in [L,R), or >= R), while
                 // every subsequent wrapped pass sits at L by definition of cycle wrap-around.
                 auto writeSliceCommit = [&](const std::int64_t offsetSamples,
                                             std::int64_t sliceLen,
-                                            const std::int64_t timelinePos) {
-                    if (sliceLen <= 0 || offsetSamples < 0)
+                                            const std::int64_t timelinePosRaw) {
+                    std::int64_t timelinePos = timelinePosRaw + recordingPlacementOffsetSamples;
+                    std::int64_t wavOff = offsetSamples;
+                    std::int64_t sliceUse = sliceLen;
+
+                    if (timelinePos < 0)
+                    {
+                        const std::int64_t underflow = -timelinePos;
+                        timelinePos = 0;
+                        wavOff += underflow;
+                        sliceUse -= underflow;
+                    }
+
+                    if (sliceUse <= 0 || wavOff < 0)
                     {
                         return;
                     }
-                    if (offsetSamples + sliceLen > totalAvail)
+                    if (wavOff + sliceUse > totalAvail)
                     {
-                        sliceLen = totalAvail - offsetSamples;
-                        if (sliceLen <= 0)
+                        sliceUse = totalAvail - wavOff;
+                        if (sliceUse <= 0)
                         {
                             allOk = false;
                             return;
                         }
                     }
-                    const auto sampleCount = static_cast<int>(sliceLen);
+                    const auto sampleCount = static_cast<int>(sliceUse);
                     const juce::File sliceWav = makeUniqueCyclePassWavInProjectAudioDir(
                         audioDir, batchStamp, sliceFileIndex);
 
                     ++sliceFileIndex;
 
                     const juce::Result wrResult = MonoWavFileWriter::writeMono24BitWavSegment(
-                        sliceWav, pcm + offsetSamples, sampleCount, cycleSr);
+                        sliceWav, pcm + wavOff, sampleCount, cycleSr);
 
                     if (!wrResult.wasOk())
                     {
@@ -1397,7 +1469,7 @@ private:
                         cycleSr,
                         timelinePos,
                         cycleTrackId,
-                        sliceLen);
+                        sliceUse);
                     if (!ar.wasOk())
                     {
                         allOk = false;
@@ -1471,10 +1543,17 @@ private:
             }
             else
             {
+                const std::int64_t recordingPlacementOffsetSamples
+                    = latencyStore_.getCurrentRecordingOffsetSamples();
+                // TODO: If committed start is negative, non-cycle could trim the head of the WAV
+                // symmetrically to cycle; v1 only clamps timeline placement to 0.
+                const std::int64_t committedStartSamples = juce::jmax<std::int64_t>(
+                    std::int64_t{ 0 }, r.recordingStartSample + recordingPlacementOffsetSamples);
+
                 const juce::Result ar = session.addRecordedTakeAtSample(
                     r.takeFile,
                     r.sampleRate,
-                    r.recordingStartSample,
+                    committedStartSamples,
                     r.targetTrackId,
                     r.intendedSampleCount);
                 if (!ar.wasOk())
@@ -1768,6 +1847,11 @@ private:
         juce::AudioDeviceManager& deviceManager;
         RecorderService& recorder_;
         CountInClickOutput& countInClicks_;
+        LatencySettingsStore& latencyStore_;
+        PlaybackEngine& playbackEngine_;
+
+        /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
+        juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
         std::optional<BeginRecordingRequest> pendingCountIn_;
         int countInBeat_ = 0;
         /// True after the 8th click: next timer fire ends count-in and starts `beginRecording`.
@@ -1823,7 +1907,9 @@ private:
                    Session& session,
                    juce::AudioDeviceManager& deviceManager,
                    RecorderService& recorderService,
-                   CountInClickOutput& countInClicks)
+                   CountInClickOutput& countInClicks,
+                   LatencySettingsStore& latencyStore,
+                   PlaybackEngine& playbackEngine)
             : DocumentWindow(
                   name,
                   juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
@@ -1832,8 +1918,13 @@ private:
         {
             setUsingNativeTitleBar(true);
             setContentOwned(
-                new TransportControlsContent(
-                    transport, session, deviceManager, recorderService, countInClicks),
+                new TransportControlsContent(transport,
+                                             session,
+                                             deviceManager,
+                                             recorderService,
+                                             countInClicks,
+                                             latencyStore,
+                                             playbackEngine),
                 true);
             setResizable(true, true);
             setResizeLimits(320, 240, 10000, 10000);
@@ -1948,6 +2039,7 @@ private:
     /// Count-in metronome clicks to device only; coordinator state lives in `TransportControlsContent`.
     std::unique_ptr<CountInClickOutput> countInOutput_;
     std::unique_ptr<PlaybackEngine> playbackEngine;
+    std::unique_ptr<LatencySettingsStore> latencySettingsStore;
     juce::AudioDeviceManager deviceManager;
     std::unique_ptr<MainWindow> mainWindow;
 };

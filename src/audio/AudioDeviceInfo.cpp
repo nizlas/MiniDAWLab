@@ -192,6 +192,13 @@ juce::File mini_daw::getAudioSettingsFile()
         .getChildFile("audio-device.xml");
 }
 
+juce::File mini_daw::getLatencySettingsFile()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("MiniDAWLab")
+        .getChildFile("audio-latency.xml");
+}
+
 void mini_daw::trySaveAudioDeviceState(juce::AudioDeviceManager& manager, const juce::File& file)
 {
     std::unique_ptr<juce::XmlElement> state = manager.createStateXml();

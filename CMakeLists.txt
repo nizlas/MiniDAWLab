@@ -26,6 +26,7 @@ target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_sources(MiniDAWLab PRIVATE
     src/audio/AudioDeviceInfo.cpp
+    src/audio/LatencySettingsStore.cpp
     src/Main.cpp
     src/transport/Transport.cpp
     src/domain/AudioClip.cpp
@@ -43,6 +44,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/ClipWaveformView.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
+    src/ui/LatencySettingsView.cpp
     src/ui/InspectorView.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp

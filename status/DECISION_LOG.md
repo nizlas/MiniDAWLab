@@ -7,6 +7,44 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-05-01 — Audio Settings: **Latency / Timing** controls (reported metrics, offsets, app XML)
+
+**Scope:** [LatencySettingsView](src/ui/LatencySettingsView.h) under the Audio Settings dialog (`AudioDeviceSelectorComponent` unchanged in role), [LatencySettingsStore](src/audio/LatencySettingsStore.h), [PlaybackEngine](src/engine/PlaybackEngine.h) audible read offset only, [AudioDeviceInfo](src/audio/AudioDeviceInfo.h) **sibling path** helper — **not** `RecorderService`, **not** `ProjectFile` / `Session` / placement APIs beyond commit-time reads in [Main.cpp](src/Main.cpp), **not** plugin delay compensation, **not** a real low-latency-record mode yet.
+
+**UI**
+
+- Audio Settings adds a clearly labeled **Latency / Timing** section **below** the JUCE device selector (dialog shell lays out intrinsic selector height then the latency pane with a small gap — no large filler band).
+- **Read-only** session/device context: current **sample rate**, **buffer size**, **reported input** and **reported output** latency (**samples** and derived **ms** where rate is known).
+- **Recording placement offset** (samples/ms editors, reset **to match negative reported input latency**): communicated as the **effective** timeline shift for committed takes; helper copy distinguishes **positive reported** hardware latency vs **negative** default compensation.
+- **Playback audible alignment offset** (samples/ms, **Reset to 0**, **Set to reported output latency** positive): advanced calibration copy in UI and **?** info.
+- **Low latency recording mode:** visible **disabled** control with explicit **“not yet supported”** — **no** processing change in this slice.
+- **Info popup** explains: (1) **live monitoring latency** (buffer/driver/routing; these settings do not speed monitoring), (2) **recording placement compensation** (post-take timeline shift, WAV unchanged), (3) **playback audible alignment** (read vs visible playhead; small values), (4) **future** low-latency / constrained-delay style mode.
+- **Labels / buttons** for this section use **plain ASCII** text (no Unicode minus or decorative punctuation in control strings) after a small layout/encoding cleanup pass.
+
+**Persistence**
+
+- **`%APPDATA%\MiniDAWLab\audio-latency.xml`** (separate from JUCE’s **`audio-device.xml`** so unknown XML children are not dropped on round-trip). **Per device** key: **`{typeName}::{deviceName}`**. If no stored row for the current key: **recording** offset defaults to **-(reported input latency samples)** (or **0** when input latency is unknown/negative); **playback** offset defaults to **0**.
+
+**Behaviour (summary)**
+
+- **Recording:** placement offset is applied **only when committing** recorded clips to the timeline (normal and cycle split paths); WAV contents and live monitoring path are **not** altered by this setting in the described design.
+- **Playback:** offset adjusts **which timeline sample is read** in the render callback; **transport playhead** and **cycle wrap** decisions stay **unshifted**; negative effective read positions **silence** until timeline **≥ 0**.
+
+**Live recording preview (tracks UI)**
+
+- The **live recording preview** uses the **current recording placement offset** (same [`LatencySettingsStore`](src/audio/LatencySettingsStore.h) signal as commit in [Main.cpp](src/Main.cpp)); mapping is implemented in [`TrackLanesView`](src/ui/TrackLanesView.cpp). The overlay is **intended to show where the audio will land** when the take is **committed**.
+- With a **negative** placement offset, the preview **may appear earlier on the timeline** than the **raw** recording start position users associate with capture start — this is **intentional** and matches commit behaviour.
+- **Preview and commit** both **clamp** placement at **timeline sample 0**. The preview additionally **trim/discard leading underflow visually** (no drawing left of zero) while keeping waveform alignment consistent with clamped commitment.
+- The same preview rules apply to **normal** recording and to **cycle** recording segments/passes.
+
+**Explicit non-goals (this entry)**
+
+- **ProjectFile** schema unchanged; **RecorderService** unchanged.
+
+Rationale: makes device/setup-specific timing explicit and user-tunable without mixing non-JUCE fields into JUCE device state XML or overloading project files for hardware calibration.
+
+---
+
 ## 2026-04-30 — Cycle recording: continuous master capture, offline per-pass split, opaque preview, deferred master cleanup
 
 **Scope:** Product behaviour and implementation shape for **cycle OD** (loop record) — **not** take lanes / comping UI, **not** a `ProjectFile` schema change for the **final** split model (per-pass clips are normal recorded assets like single-take takes). **RecorderService** realtime capture path (single continuous WAV, SPSC input, writer thread) **unchanged** in intent.

@@ -20,6 +20,8 @@ namespace mini_daw
 
     /// %APPDATA%\\MiniDAWLab\\audio-device.xml
     [[nodiscard]] juce::File getAudioSettingsFile();
+    /// %APPDATA%\\MiniDAWLab\\audio-latency.xml (per-device latency / timing overrides)
+    [[nodiscard]] juce::File getLatencySettingsFile();
     /// `createStateXml()` save; no-op if JUCE returns null. Write errors are logged only (non-fatal).
     void trySaveAudioDeviceState(juce::AudioDeviceManager& manager, const juce::File& file);
     [[nodiscard]] std::unique_ptr<juce::XmlElement> loadAudioSettingsXmlIfAny(const juce::File& file);

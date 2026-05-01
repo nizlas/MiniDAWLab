@@ -136,6 +136,11 @@ PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderS
 
 PlaybackEngine::~PlaybackEngine() = default;
 
+void PlaybackEngine::setPlaybackOffsetSamples(const std::int64_t samples) noexcept
+{
+    playbackOffsetSamples_.store(samples, std::memory_order_release);
+}
+
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     juce::ignoreUnused(device);
@@ -241,6 +246,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const std::int64_t blockFrames = static_cast<std::int64_t>(deviceBlockSizeInFrames);
 
+    const std::int64_t playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
+
     const auto renderRun = [&](const std::int64_t segT0, const int segRun, const int outFrame0) noexcept
     {
         if (segRun <= 0)
@@ -249,6 +256,21 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
 
         jassert(segRun > 0);
+
+        const std::int64_t renderBase = segT0 + playbackShift;
+        std::int64_t silenceFrames = 0;
+        if (renderBase < 0)
+        {
+            silenceFrames = juce::jmin(static_cast<std::int64_t>(segRun), -renderBase);
+        }
+        const int audibleRun = static_cast<int>(static_cast<std::int64_t>(segRun) - silenceFrames);
+        if (audibleRun <= 0)
+        {
+            return;
+        }
+        const std::int64_t timelineStartAudible = renderBase + silenceFrames;
+        jassert(timelineStartAudible >= 0);
+        const int silencePrefix = static_cast<int>(silenceFrames);
 
         for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
         {
@@ -265,15 +287,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 continue;
             }
             const std::vector<PlacedClip>& lane = tr.getPlacedClips();
-            std::int64_t t = segT0;
+            std::int64_t t = timelineStartAudible;
             int out0 = 0;
-            while (out0 < segRun)
+            while (out0 < audibleRun)
             {
                 const int row = findCoveringRowIndexInLane(lane, t);
                 const std::int64_t nextB = minBoundaryStrictlyAfterInLane(lane, t, timelineEnd);
                 jassert(nextB > t);
                 int run = static_cast<int>(juce::jmin(
-                    static_cast<std::int64_t>(segRun - out0), nextB - t));
+                    static_cast<std::int64_t>(audibleRun - out0), nextB - t));
                 jassert(run > 0);
 
                 if (row >= 0)
@@ -287,13 +309,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     jassert(off >= 0);
                     jassert(off + run <= c.getNumSamples());
                     addClipRunToOutputs(
-                        c, off, run, outFrame0 + out0, numOutputChannels, outputChannelData, trackGain);
+                        c, off, run, outFrame0 + silencePrefix + out0, numOutputChannels, outputChannelData, trackGain);
                 }
                 t += run;
                 out0 += run;
             }
-            jassert(out0 == segRun);
-            jassert(t - segT0 == static_cast<std::int64_t>(segRun));
+            jassert(out0 == audibleRun);
+            jassert(t - timelineStartAudible == static_cast<std::int64_t>(audibleRun));
         }
     };
 

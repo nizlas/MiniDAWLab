@@ -4,6 +4,7 @@
 
 #include "ui/TrackLanesView.h"
 
+#include "audio/LatencySettingsStore.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
@@ -63,6 +64,96 @@ namespace
             }
         }
     }
+
+    [[nodiscard]] std::int64_t totalPeakBlockSamples(const std::vector<RecordingPreviewPeakBlock>& v)
+    {
+        std::int64_t s = 0;
+        for (const auto& b : v)
+        {
+            s += static_cast<std::int64_t>(juce::jmax(0, b.numSourceSamples));
+        }
+        return s;
+    }
+
+    void peakBlocksAppendPrefixCopy(const std::vector<RecordingPreviewPeakBlock>& src,
+                                    std::vector<RecordingPreviewPeakBlock>& dst,
+                                    const std::int64_t prefixSamples)
+    {
+        dst.clear();
+        if (prefixSamples <= 0)
+        {
+            return;
+        }
+        std::int64_t taken = 0;
+        for (const RecordingPreviewPeakBlock& blk : src)
+        {
+            if (blk.numSourceSamples <= 0)
+            {
+                continue;
+            }
+            const std::int64_t ns = static_cast<std::int64_t>(blk.numSourceSamples);
+            const std::int64_t need = prefixSamples - taken;
+            if (need <= 0)
+            {
+                break;
+            }
+            if (ns <= need)
+            {
+                dst.push_back(blk);
+                taken += ns;
+            }
+            else
+            {
+                RecordingPreviewPeakBlock head = blk;
+                head.numSourceSamples = static_cast<int>(need);
+                dst.push_back(head);
+                taken += need;
+                break;
+            }
+        }
+    }
+
+    void discardPeakSamplesFromFront(std::vector<RecordingPreviewPeakBlock>& v,
+                                     std::int64_t nSamples)
+    {
+        if (nSamples <= 0)
+        {
+            return;
+        }
+        while (nSamples > 0 && !v.empty())
+        {
+            RecordingPreviewPeakBlock& fb = v.front();
+            if (fb.numSourceSamples <= 0)
+            {
+                v.erase(v.begin());
+                continue;
+            }
+            const auto ns = static_cast<std::int64_t>(fb.numSourceSamples);
+            if (nSamples >= ns)
+            {
+                nSamples -= ns;
+                v.erase(v.begin());
+                continue;
+            }
+            fb.numSourceSamples -= static_cast<int>(nSamples);
+            nSamples = 0;
+            break;
+        }
+    }
+
+    void peakBlocksApplyPlacementCompensation(std::vector<RecordingPreviewPeakBlock> peaksWork,
+                                              const std::int64_t rawSegmentTimelineStart,
+                                              const std::int64_t placementOffsetSamples,
+                                              std::int64_t& outVisibleStartSample,
+                                              std::vector<RecordingPreviewPeakBlock>& outPeaks)
+    {
+        const std::int64_t wanted = rawSegmentTimelineStart + placementOffsetSamples;
+        const std::int64_t trimAtProjectOrigin = wanted < std::int64_t{ 0 } ? -wanted : std::int64_t{ 0 };
+        outVisibleStartSample = wanted < std::int64_t{ 0 } ? std::int64_t{ 0 } : wanted;
+        discardPeakSamplesFromFront(peaksWork, trimAtProjectOrigin);
+        outPeaks = std::move(peaksWork);
+    }
+
 } // namespace
 
 TrackLanesView::TrackLanesView(
@@ -70,12 +161,14 @@ TrackLanesView::TrackLanesView(
     Transport& transport,
     TimelineViewportModel& timelineViewport,
     juce::AudioDeviceManager& deviceManager,
-    RecorderService& recorder)
+    RecorderService& recorder,
+    LatencySettingsStore& latencySettingsStore)
     : session_(session)
     , transport_(transport)
     , timelineViewport_(timelineViewport)
     , deviceManager_(deviceManager)
     , recorder_(recorder)
+    , latencyStore_(latencySettingsStore)
 {
     syncTracksFromSession();
     startTimerHz(kRecordingPreviewTimerHz);
@@ -116,32 +209,27 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
     }
 
     const TrackId recTid = recorder_.getRecordingTrackId();
+    const std::int64_t placementOff = latencyStore_.getCurrentRecordingOffsetSamples();
 
     std::int64_t recStart = recorder_.getRecordingStartSample();
     std::int64_t recLen = recorder_.getRecordedSampleCount();
 
     const std::uint32_t wrapNow = transport_.readCycleWrapCountForUi();
 
-    // Cycle preview mapping:
-    //   - S = actual recording start (cyclePreviewActualStart_)
-    //   - L, R = locators at recording start; passLen = R - L
-    //   - Segment 0 spans [S, R) with length firstSegLen = R - S (only when S < R)
-    //   - Each wrapped pass spans [L, R) with length passLen
-    //   - Wrap signals from PlaybackEngine drive completion: 1st wrap finalises segment 0,
-    //     subsequent wraps finalise wrapped passes
-    //   - When S >= R: PlaybackEngine never wraps, so the preview stays linear at S.
+    // Cycle preview mapping (raw anchors S, L, R). Placement offset mirrors commit math in Main.cpp:
+    // wantedPreviewStart = rawSegmentTimelineStart + placementOff; clamp visible start >= 0;
+    // discard that many preview source samples before drawing (timeline underflow trim).
     const std::int64_t passLen = cyclePreviewLocR_ - cyclePreviewLocL_;
     const bool cycleRangeUsable = cyclePreviewActive_
                                   && passLen > 0
                                   && cyclePreviewActualStart_ < cyclePreviewLocR_;
     std::int64_t firstSegLen = 0;
+    std::vector<std::vector<RecordingPreviewPeakBlock>> compensatedCompletedBehind;
+
     if (cycleRangeUsable)
     {
         firstSegLen = cyclePreviewLocR_ - cyclePreviewActualStart_;
 
-        // Peel completed segments. Segment 0 (the very first one) consumes firstSegLen samples;
-        // each subsequent wrapped pass consumes passLen samples. Iteration count is bounded by the
-        // delta between locked-in wrap count and what the audio thread has signalled.
         while (cyclePreviewLastSeenWrap_ < wrapNow)
         {
             const std::uint32_t alreadyConsumed = cyclePreviewLastSeenWrap_ - cyclePreviewWrapBaseline_;
@@ -152,7 +240,19 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
             ++cyclePreviewLastSeenWrap_;
         }
 
-        // Compute current-pass anchor + length from actual recorded sample count.
+        compensatedCompletedBehind.reserve(cycleRecordingCompletedPassPeaks_.size());
+        for (size_t pi = 0; pi < cycleRecordingCompletedPassPeaks_.size(); ++pi)
+        {
+            const std::int64_t rawAnch
+                = (pi == 0) ? cyclePreviewActualStart_ : cyclePreviewLocL_;
+            std::vector<RecordingPreviewPeakBlock> work = cycleRecordingCompletedPassPeaks_[pi];
+            std::int64_t segVisStartUnused = 0;
+            std::vector<RecordingPreviewPeakBlock> comp;
+            peakBlocksApplyPlacementCompensation(
+                std::move(work), rawAnch, placementOff, segVisStartUnused, comp);
+            compensatedCompletedBehind.push_back(std::move(comp));
+        }
+
         const std::uint32_t wraps = (wrapNow >= cyclePreviewWrapBaseline_)
                                     ? (wrapNow - cyclePreviewWrapBaseline_)
                                     : 0u;
@@ -163,8 +263,6 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
         }
         else
         {
-            // Wrapped pass in progress: anchored at L. Source offset within the recording is the
-            // length of segment 0 plus (wraps - 1) full wrapped passes.
             const std::int64_t sourceOffset
                 = firstSegLen + static_cast<std::int64_t>(wraps - 1u) * passLen;
             const std::int64_t offsetInPass = recLen - sourceOffset;
@@ -172,8 +270,6 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
             recLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, offsetInPass);
         }
     }
-    // else (cyclePreviewActive_ false, or passLen <= 0, or S >= R): leave recStart/recLen as
-    // returned from recorder — single linear preview at S with length recordedSamples.
 
     for (auto& u : lanes_)
     {
@@ -185,21 +281,63 @@ void TrackLanesView::updateRecordingPreviewOverlaysFromRecorder()
         {
             if (cycleRangeUsable)
             {
-                // Segment 0 anchor + length feed `recordingCycleBehindPasses_[0]`; later wrapped
-                // passes use L + passLen.
-                u->setRecordingCyclePassPreviewLayers(
-                    cycleRecordingCompletedPassPeaks_,
-                    cyclePreviewActualStart_,
-                    firstSegLen,
-                    cyclePreviewLocL_,
-                    passLen,
+                const std::int64_t wrappedWanted = cyclePreviewLocL_ + placementOff;
+                const std::int64_t compensatedLoopAnchorL = (wrappedWanted < 0) ? std::int64_t{ 0 }
+                                                                               : wrappedWanted;
+                const std::int64_t wrappedPassVisibleLen
+                    = (wrappedWanted < 0)
+                          ? juce::jmax<std::int64_t>(std::int64_t{ 0 }, passLen + wrappedWanted)
+                          : passLen;
+
+                std::int64_t firstSegmentVisLen = 0;
+                std::int64_t firstSegmentTimelineStart = 0;
+                if (!compensatedCompletedBehind.empty())
+                {
+                    const std::int64_t seg0wanted
+                        = cyclePreviewActualStart_ + placementOff;
+                    firstSegmentTimelineStart
+                        = (seg0wanted < 0) ? std::int64_t{ 0 } : seg0wanted;
+                    firstSegmentVisLen = totalPeakBlockSamples(compensatedCompletedBehind.front());
+                }
+
+                std::vector<RecordingPreviewPeakBlock> currentPrefix;
+                peakBlocksAppendPrefixCopy(
+                    recordingPreviewPeaksAccum_, currentPrefix, recLen);
+                std::int64_t currentVisStart = 0;
+                std::vector<RecordingPreviewPeakBlock> currentCompensatedPeaks;
+                peakBlocksApplyPlacementCompensation(
+                    std::move(currentPrefix),
                     recStart,
-                    recLen,
-                    recordingPreviewPeaksAccum_);
+                    placementOff,
+                    currentVisStart,
+                    currentCompensatedPeaks);
+                const std::int64_t currentVisLen
+                    = totalPeakBlockSamples(currentCompensatedPeaks);
+
+                u->setRecordingCyclePassPreviewLayers(
+                    compensatedCompletedBehind,
+                    firstSegmentTimelineStart,
+                    firstSegmentVisLen,
+                    compensatedLoopAnchorL,
+                    wrappedPassVisibleLen,
+                    currentVisStart,
+                    currentVisLen,
+                    currentCompensatedPeaks);
             }
             else
             {
-                u->setRecordingPreviewOverlay(recStart, recLen, recordingPreviewPeaksAccum_);
+                std::vector<RecordingPreviewPeakBlock> previewPrefix;
+                peakBlocksAppendPrefixCopy(recordingPreviewPeaksAccum_, previewPrefix, recLen);
+                std::int64_t visStartSample = 0;
+                std::vector<RecordingPreviewPeakBlock> compPeaks;
+                peakBlocksApplyPlacementCompensation(
+                    std::move(previewPrefix),
+                    recStart,
+                    placementOff,
+                    visStartSample,
+                    compPeaks);
+                const std::int64_t visLen = totalPeakBlockSamples(compPeaks);
+                u->setRecordingPreviewOverlay(visStartSample, visLen, compPeaks);
             }
         }
         else

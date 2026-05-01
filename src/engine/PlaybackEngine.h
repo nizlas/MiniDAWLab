@@ -41,6 +41,9 @@
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#include <atomic>
+#include <cstdint>
+
 class CountInClickOutput;
 class RecorderService;
 class Session;
@@ -81,9 +84,15 @@ public:
     // [Message thread] JUCE: stream ended; nothing to release in Phase 1.
     void audioDeviceStopped() override;
 
+    // [Message thread] Audible read position shifts by adding this to the transport timeline sample each block.
+    // Positive reads later material; negative reads earlier. Wrap decisions still use unshifted playhead.
+    void setPlaybackOffsetSamples(std::int64_t samples) noexcept;
+
 private:
     Transport& transport_;
     Session& session_;
     RecorderService* const recorder_;
     CountInClickOutput* const countIn_;
+
+    std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
 };

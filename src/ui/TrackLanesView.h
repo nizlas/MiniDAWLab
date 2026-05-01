@@ -40,6 +40,7 @@ class TrackHeaderView;
 class Session;
 class Transport;
 class TimelineViewportModel;
+class LatencySettingsStore;
 
 // ---------------------------------------------------------------------------
 // TrackLanesView — vertical stack of per-track event lanes
@@ -57,14 +58,16 @@ public:
     ~TrackLanesView() override;
 
     // [Message thread] `session` / `transport` / `timelineViewport` / `deviceManager` / `recorder`
-    // outlive this view. Rebuilds child lanes in `resized` to match the current `SessionSnapshot`
-    // track list.
+    // / `latencySettingsStore` outlive this view. Rebuilds child lanes in `resized` to match the
+    // current `SessionSnapshot` track list. Recording preview placement uses
+    // `latencySettingsStore.getCurrentRecordingOffsetSamples()`.
     TrackLanesView(
         Session& session,
         Transport& transport,
         TimelineViewportModel& timelineViewport,
         juce::AudioDeviceManager& deviceManager,
-        RecorderService& recorder);
+        RecorderService& recorder,
+        LatencySettingsStore& latencySettingsStore);
 
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
@@ -116,6 +119,7 @@ private:
     TimelineViewportModel& timelineViewport_;
     juce::AudioDeviceManager& deviceManager_;
     RecorderService& recorder_;
+    LatencySettingsStore& latencyStore_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
 
