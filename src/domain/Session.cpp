@@ -56,6 +56,94 @@ namespace
         }
         return total;
     }
+
+    // ---------------------------------------------------------------------
+    // Project persistence: strict `Audio/`-relative `sourcePath` strings only (portable `.dalproj`).
+    // ---------------------------------------------------------------------
+
+    [[nodiscard]] bool isRelativeAudioPath(const juce::String& stored) noexcept
+    {
+        if (stored.isEmpty() || juce::File::isAbsolutePath(stored))
+        {
+            return false;
+        }
+        if (stored.containsChar('\\'))
+        {
+            return false;
+        }
+        if (!stored.startsWith("Audio/"))
+        {
+            return false;
+        }
+        if (stored.endsWithChar('/'))
+        {
+            return false;
+        }
+        if (stored.startsWith("../") || stored == ".." || stored.contains("/../"))
+        {
+            return false;
+        }
+
+        const juce::StringArray segments = juce::StringArray::fromTokens(stored, "/", "");
+        const int ns = (int)segments.size();
+        if (ns < 2 || segments[ns - 1].isEmpty())
+        {
+            return false;
+        }
+        if (segments[0] != "Audio")
+        {
+            return false;
+        }
+        for (int i = 1; i < ns; ++i)
+        {
+            const juce::String& seg = segments[i];
+            if (seg.isEmpty() || seg == ".." || seg == ".")
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool isClipSourceFileUnderProjectAudio(const juce::File& srcFile,
+                                                          const juce::File& projectFolder) noexcept
+    {
+        if (!srcFile.existsAsFile())
+        {
+            return false;
+        }
+        const juce::File projectAudioDir = projectFolder.getChildFile("Audio");
+        const juce::String relFromAudio = srcFile.getRelativePathFrom(projectAudioDir);
+        if (juce::File::isAbsolutePath(relFromAudio))
+        {
+            return false;
+        }
+
+        const juce::String relNorm = relFromAudio.replaceCharacter('\\', '/');
+        if (relNorm == ".." || relNorm.startsWith("../"))
+        {
+            return false;
+        }
+        const juce::File viaRel = projectAudioDir.getChildFile(relFromAudio);
+        return (viaRel == srcFile);
+    }
+
+    [[nodiscard]] juce::String toProjectAudioStoredPath(const juce::File& src,
+                                                        const juce::File& projectFolder)
+    {
+        return src.getRelativePathFrom(projectFolder).replaceCharacter('\\', '/');
+    }
+
+    [[nodiscard]] juce::File resolveProjectAudioStoredPath(const juce::String& stored,
+                                                          const juce::File& projectFolder) noexcept
+    {
+        if (!isRelativeAudioPath(stored))
+        {
+            return {};
+        }
+        return projectFolder.getChildFile(stored);
+    }
+
 } // namespace
 
 Session::Session()
@@ -689,10 +777,31 @@ juce::Result Session::saveProjectToFile(Transport& transport,
             ProjectFileClipV1 c;
             c.id = p.getId();
             c.startSample = p.getStartSample();
-            c.sourcePath = p.getAudioClip().getSourceFilePath();
-            if (c.sourcePath.isEmpty())
             {
-                return juce::Result::fail("A clip in the session has no source file path; cannot save.");
+                const juce::File src(p.getAudioClip().getSourceFilePath());
+                if (src.getFullPathName().isEmpty())
+                {
+                    return juce::Result::fail("A clip in the session has no source file path; cannot save.");
+                }
+                const juce::File projectFolder = file.getParentDirectory();
+                if (!isClipSourceFileUnderProjectAudio(src, projectFolder))
+                {
+                    return juce::Result::fail(
+                        "Cannot save project because an audio clip refers to a file outside "
+                        "the project Audio folder: "
+                        + src.getFullPathName());
+                }
+
+                const juce::String storedRel = toProjectAudioStoredPath(src, projectFolder);
+                if (!storedRel.startsWith("Audio/"))
+                {
+                    return juce::Result::fail(
+                        "Cannot save project: clip source must lie under Audio/ relative to "
+                        "the project file (unexpected path derivation for "
+                        + src.getFullPathName()
+                        + ").");
+                }
+                c.sourcePath = storedRel;
             }
             const int matN = p.getMaterialLengthSamples();
             const std::int64_t eff = p.getEffectiveLengthSamples();
@@ -773,7 +882,23 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
         std::vector<PlacedClip> placed;
         for (const auto& cDto : trDto.clips)
         {
-            const juce::File f(cDto.sourcePath);
+            const juce::String& stored = cDto.sourcePath;
+            if (juce::File::isAbsolutePath(stored))
+            {
+                outSkippedClipDetails.add(stored
+                                          + " - Absolute audio paths are not allowed in project "
+                                            "files (expected Audio/... relative to project folder).");
+                continue;
+            }
+            if (!isRelativeAudioPath(stored))
+            {
+                outSkippedClipDetails.add(stored
+                                          + " - Invalid audio path (must be Audio/<name> with "
+                                            "forward slashes only, no parent-directory segments).");
+                continue;
+            }
+
+            const juce::File f = resolveProjectAudioStoredPath(stored, file.getParentDirectory());
             std::unique_ptr<AudioClip> loaded;
             const juce::Result lr = AudioFileLoader::loadFromFile(f, deviceSampleRate, loaded);
             if (!lr.wasOk())

@@ -3,8 +3,9 @@
 // =============================================================================
 // ProjectFile — v1 JSON encode/decode for minimal project persistence (io layer)
 // =============================================================================
-// `sourcePath` is the absolute on-disk path last used to decode the clip
-// (AudioClip::getSourceFilePath, derived from the loader at load time). Not relative paths.
+// `sourcePath` must be **relative** under `Audio/` using **forward slashes**, e.g.
+// `Audio/take_YYYYMMDD_HHMMSS.wav`. Absolute paths and paths outside `Audio/` are invalid — enforced
+// when saving/loading the session in `Session` (not at JSON parse time alone).
 // =============================================================================
 
 #include "domain/PlacedClip.h"

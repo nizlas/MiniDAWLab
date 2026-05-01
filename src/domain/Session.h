@@ -191,9 +191,9 @@ public:
     // [Message thread] True if the user has a known on-disk project (save or load completed).
     [[nodiscard]] bool hasKnownProjectFile() const noexcept;
 
-    // [Message thread] Write minimal project v1 (tracks, clip placements, absolute source paths,
-    // monotonic id seeds, active track, playhead and device rate metadata). `transport` is read
-    // for the playhead only (single owner of playhead state).
+    // [Message thread] Write minimal project v1 (tracks, clip placements, strict **`Audio/`-relative**
+    // source paths only**, monotonic id seeds, active track, playhead and device rate metadata).
+    // `transport` is read for the playhead only (single owner of playhead state).
     [[nodiscard]] juce::Result saveProjectToFile(
         Transport& transport, const juce::File& file, double deviceSampleRate);
 

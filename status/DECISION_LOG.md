@@ -7,6 +7,33 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-05-01 — Project audio paths: **strict `Audio/`-relative** `sourcePath` strings
+
+**Scope:** [`Session.cpp`](src/domain/Session.cpp) persistence (`saveProjectToFile` / `loadProjectFromFile`), [`ProjectFile.h`](src/io/ProjectFile.h) documentation only — **`ProjectFileV1::kCurrentVersion`** unchanged (**7**).
+
+**Philosophy**
+
+A **project folder** moves as a unit with its `.dalproj`; WAV assets live under **`<projectFolder>/Audio/`** only. Paths to audio in JSON are portable relative strings (`Audio/take_…wav`, …).
+
+**Save**
+
+- Clip must reference an on-disk file **under `<projectFolder>/Audio/`** (`isClipSourceFileUnderProjectAudio`).
+- Otherwise **save fails** with a clear error naming the offending absolute path.
+- Successful `sourcePath` is **`<projectFolder>`-relative**, **forward slashes**, and must start with **`Audio/`** (`toProjectAudioStoredPath`).
+
+**Load**
+
+- **Absolute** `sourcePath` entries are **rejected** — clip skipped with an explicit reason (**no** legacy absolute-path support by design).
+- **Relative** paths must pass `isRelativeAudioPath` (starts with `Audio/`, no `\`, no traversal / empty / `.` segments), then resolve with `projectFolder.getChildFile(stored)`.
+- **Missing** WAV under a valid stored path still flows through existing `AudioFileLoader` skip semantics.
+
+**Compatibility / non-goals**
+
+- Old projects with **drive-absolute** paths in `sourcePath`: clips are **skipped**, not auto-migrated — user must re-add or hand-edit JSON to `Audio/...` if they want portability under this policy.
+- Untouched: `RecorderService`, `PlaybackEngine`, [`ProjectAudioImport.cpp`](src/io/ProjectAudioImport.cpp), `AudioFileLoader` decoding, schema version.
+
+---
+
 ## 2026-05-01 — Timeline ruler: **seconds / mm:ss-style time labels** (UI-only)
 
 **Scope:** [TimelineRulerView.cpp](src/ui/TimelineRulerView.cpp) **paint-only** — no tempo/grid/bars/beats, no `ProjectFile` / `Session` fields, **not** routed through playback audible-offset math.
