@@ -25,6 +25,7 @@
 #include "domain/Track.h"
 #include "domain/PlacedClip.h"
 #include "engine/RecorderService.h"
+#include "ui/ClipWaveformView.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -40,11 +41,10 @@ namespace juce
     class AudioDeviceManager;
 } // namespace juce
 
-class ClipWaveformView;
-class TrackHeaderView;
 class Session;
 class Transport;
 class TimelineViewportModel;
+class TrackHeaderView;
 class LatencySettingsStore;
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,11 @@ public:
     void setOnUndoableClipMoveRequested(
         std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> fn) noexcept;
 
-    [[nodiscard]] bool isClipMoveGestureInProgress() const noexcept;
+    void setOnUndoableClipTrimRequested(
+        std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> fn) noexcept;
+
+    /** True while a clip move or trim gesture is in flight on any lane (undo/redo should no-op). */
+    [[nodiscard]] bool isClipEditGestureInProgress() const noexcept;
 
 private:
     void timerCallback() override;
@@ -185,6 +189,7 @@ private:
 
     std::function<void(TrackId)> onDeleteTrackRequested_;
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
+    std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

@@ -44,6 +44,9 @@ class Transport;
 class TimelineViewportModel;
 class ClipWaveformView;
 
+/** Undo-3 / trim host: which edge was committed on mouseUp. */
+enum class ClipTrimEdge { Left, Right };
+
 // [Message thread] At the start of a lane `mouseDown`, clear selection on **other** lanes only.
 using PeerLaneInteraction = std::function<void(ClipWaveformView&)>;
 
@@ -68,6 +71,10 @@ struct ClipWaveformLaneHost
                        std::int64_t newStartSamples,
                        std::optional<TrackId> destTrackOrNullForSameLane)>
         commitClipMoveAsUndoable;
+
+    /** Undo-3: completed clip trim only. `newValueSamples` = left trim (Left) or visible length (Right). */
+    std::function<bool(PlacedClipId clipId, ClipTrimEdge edge, std::int64_t newValueSamples)>
+        commitClipTrimAsUndoable;
 };
 
 // ---------------------------------------------------------------------------
@@ -102,9 +109,12 @@ public:
     // [Message thread] True while a move or trim is active (block timeline wheel pan in parent).
     [[nodiscard]] bool isTimelineEditGestureInProgress() const noexcept;
 
-    // [Message thread] True during an in-flight **clip move** (mouse down on body … mouse up). Narrows
-    // `isTimelineEditGestureInProgress` so trim drags do not block undo/redo shortcuts.
+    // [Message thread] True during an in-flight **clip move** (mouse down on body … mouse up).
+    // Aggregated into `TrackLanesView::isClipEditGestureInProgress` with trim.
     [[nodiscard]] bool isClipMoveGestureInProgress() const noexcept;
+
+    // [Message thread] True during in-flight **left or right trim** (mouse down on handle … mouse up).
+    [[nodiscard]] bool isClipTrimGestureInProgress() const noexcept;
 
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();

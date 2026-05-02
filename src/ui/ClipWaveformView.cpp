@@ -618,6 +618,13 @@ bool ClipWaveformView::isClipMoveGestureInProgress() const noexcept
     return pointerLaneMode_ == PointerLaneMode::MoveClip && mouseDownPlacedId_.has_value();
 }
 
+bool ClipWaveformView::isClipTrimGestureInProgress() const noexcept
+{
+    return (pointerLaneMode_ == PointerLaneMode::TrimLeft
+            || pointerLaneMode_ == PointerLaneMode::TrimRight)
+        && trimPlacedId_.has_value();
+}
+
 ClipWaveformView::ClipWaveformView(
     Session& session,
     Transport& transport,
@@ -1078,7 +1085,18 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
     {
         if (trimPlacedId_.has_value() && trimPreviewLeft_ != trimOriginLeft_)
         {
-            session_.setClipLeftEdgeTrim(*trimPlacedId_, trimPreviewLeft_);
+            bool didPublish = false;
+            if (laneHost_.commitClipTrimAsUndoable)
+            {
+                didPublish = laneHost_.commitClipTrimAsUndoable(
+                    *trimPlacedId_, ClipTrimEdge::Left, trimPreviewLeft_);
+            }
+            else
+            {
+                session_.setClipLeftEdgeTrim(*trimPlacedId_, trimPreviewLeft_);
+                didPublish = true;
+            }
+            if (didPublish)
             {
                 const double tw = (double)juce::jmax(1, getWidth());
                 timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
@@ -1096,7 +1114,18 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
     {
         if (trimPlacedId_.has_value() && trimPreviewVisibleLen_ != trimClickDownVisibleLen_)
         {
-            session_.setClipRightEdgeVisibleLength(*trimPlacedId_, trimPreviewVisibleLen_);
+            bool didPublish = false;
+            if (laneHost_.commitClipTrimAsUndoable)
+            {
+                didPublish = laneHost_.commitClipTrimAsUndoable(
+                    *trimPlacedId_, ClipTrimEdge::Right, trimPreviewVisibleLen_);
+            }
+            else
+            {
+                session_.setClipRightEdgeVisibleLength(*trimPlacedId_, trimPreviewVisibleLen_);
+                didPublish = true;
+            }
+            if (didPublish)
             {
                 const double tw = (double)juce::jmax(1, getWidth());
                 timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());

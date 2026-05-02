@@ -790,6 +790,72 @@ private:
                         });
                     return committed;
                 });
+            trackLanesView.setOnUndoableClipTrimRequested(
+                [this](const PlacedClipId clipId, const ClipTrimEdge edge, const std::int64_t newVal) -> bool {
+                    if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                        || recorder_.isRecording())
+                    {
+                        return false;
+                    }
+                    if (clipId == kInvalidPlacedClipId)
+                    {
+                        return false;
+                    }
+                    bool committed = false;
+                    executeUndoableSessionEdit(
+                        "Trim clip",
+                        [this, clipId, edge, newVal, &committed]() -> bool {
+                            const std::shared_ptr<const SessionSnapshot> snapBefore
+                                = session.loadSessionSnapshotForAudioThread();
+                            if (snapBefore == nullptr)
+                            {
+                                return false;
+                            }
+                            bool found = false;
+                            for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
+                            {
+                                const Track& tr = snapBefore->getTrack(ti);
+                                for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+                                {
+                                    if (tr.getPlacedClip(ci).getId() == clipId)
+                                    {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (found)
+                                {
+                                    break;
+                                }
+                            }
+                            if (!found)
+                            {
+                                return false;
+                            }
+                            if (edge == ClipTrimEdge::Left)
+                            {
+                                session.setClipLeftEdgeTrim(clipId, newVal);
+                            }
+                            else
+                            {
+                                session.setClipRightEdgeVisibleLength(clipId, newVal);
+                            }
+                            const std::shared_ptr<const SessionSnapshot> snapAfter
+                                = session.loadSessionSnapshotForAudioThread();
+                            if (snapAfter == snapBefore)
+                            {
+                                return false;
+                            }
+                            syncViewportFromSession();
+                            trackLanesView.syncTracksFromSession();
+                            rulerView.repaint();
+                            trackLanesView.repaint();
+                            inspectorView_.refreshFromSession();
+                            committed = true;
+                            return true;
+                        });
+                    return committed;
+                });
             deviceManager.addChangeListener(this);
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);
@@ -983,7 +1049,7 @@ private:
             {
                 return;
             }
-            if (trackLanesView.isClipMoveGestureInProgress())
+            if (trackLanesView.isClipEditGestureInProgress())
             {
                 return;
             }
@@ -1003,7 +1069,7 @@ private:
             {
                 return;
             }
-            if (trackLanesView.isClipMoveGestureInProgress())
+            if (trackLanesView.isClipEditGestureInProgress())
             {
                 return;
             }

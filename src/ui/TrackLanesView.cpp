@@ -390,11 +390,21 @@ void TrackLanesView::setOnUndoableClipMoveRequested(
     onUndoableClipMoveRequested_ = std::move(fn);
 }
 
-bool TrackLanesView::isClipMoveGestureInProgress() const noexcept
+void TrackLanesView::setOnUndoableClipTrimRequested(
+    std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> fn) noexcept
+{
+    onUndoableClipTrimRequested_ = std::move(fn);
+}
+
+bool TrackLanesView::isClipEditGestureInProgress() const noexcept
 {
     for (const auto& u : lanes_)
     {
-        if (u != nullptr && u->isClipMoveGestureInProgress())
+        if (u == nullptr)
+        {
+            continue;
+        }
+        if (u->isClipMoveGestureInProgress() || u->isClipTrimGestureInProgress())
         {
             return true;
         }
@@ -516,6 +526,22 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 else
                 {
                     session_.moveClip(id, start);
+                }
+                return true;
+            };
+        host.commitClipTrimAsUndoable =
+            [this](const PlacedClipId id, const ClipTrimEdge edge, const std::int64_t value) -> bool {
+                if (onUndoableClipTrimRequested_ != nullptr)
+                {
+                    return onUndoableClipTrimRequested_(id, edge, value);
+                }
+                if (edge == ClipTrimEdge::Left)
+                {
+                    session_.setClipLeftEdgeTrim(id, value);
+                }
+                else
+                {
+                    session_.setClipRightEdgeVisibleLength(id, value);
                 }
                 return true;
             };
