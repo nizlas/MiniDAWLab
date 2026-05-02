@@ -47,6 +47,9 @@ class ClipWaveformView;
 /** Undo-3 / trim host: which edge was committed on mouseUp. */
 enum class ClipTrimEdge { Left, Right };
 
+/** Edit toolbar: Pointer = select/move/trim; Split = click body to split. */
+enum class EditTool { Pointer, Split };
+
 // [Message thread] At the start of a lane `mouseDown`, clear selection on **other** lanes only.
 using PeerLaneInteraction = std::function<void(ClipWaveformView&)>;
 
@@ -75,6 +78,13 @@ struct ClipWaveformLaneHost
     /** Undo-3: completed clip trim only. `newValueSamples` = left trim (Left) or visible length (Right). */
     std::function<bool(PlacedClipId clipId, ClipTrimEdge edge, std::int64_t newValueSamples)>
         commitClipTrimAsUndoable;
+
+    /** Active tool from host (e.g. `TransportControlsContent`); empty = `Pointer`. */
+    std::function<EditTool()> getActiveEditTool;
+
+    /** Split tool: one undo entry per successful split. `clipWasSelected` drives post-split selection. */
+    std::function<void(PlacedClipId clipId, std::int64_t splitSampleOnTimeline, bool clipWasSelected)>
+        commitClipSplitAsUndoable;
 };
 
 // ---------------------------------------------------------------------------

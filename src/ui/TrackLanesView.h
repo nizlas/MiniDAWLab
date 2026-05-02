@@ -100,6 +100,9 @@ public:
     // [Message thread] Clear other lanes, then select clip index 0 on `tid` (paste / host actions).
     void selectFrontPlacedClipOnTrack(TrackId tid) noexcept;
 
+    // [Message thread] Select a specific placement on `tid` (clear other lanes). Used after split.
+    void selectPlacedClipOnTrack(TrackId tid, PlacedClipId clipId) noexcept;
+
     // [Message thread] After a placement is removed from the session (e.g. Delete): clear aggregate
     // selection if it pointed at that clip and clear per-lane UI selection on that track.
     void notifyPlacedClipRemoved(TrackId trackId, PlacedClipId clipId) noexcept;
@@ -118,6 +121,11 @@ public:
 
     void setOnUndoableClipTrimRequested(
         std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> fn) noexcept;
+
+    void setActiveEditToolProvider(std::function<EditTool()> fn) noexcept;
+
+    void setOnUndoableClipSplitRequested(
+        std::function<void(PlacedClipId, std::int64_t, bool)> fn) noexcept;
 
     /** True while a clip move or trim gesture is in flight on any lane (undo/redo should no-op). */
     [[nodiscard]] bool isClipEditGestureInProgress() const noexcept;
@@ -190,6 +198,8 @@ private:
     std::function<void(TrackId)> onDeleteTrackRequested_;
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
+    std::function<EditTool()> activeEditToolProvider_;
+    std::function<void(PlacedClipId, std::int64_t, bool)> onUndoableClipSplitRequested_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

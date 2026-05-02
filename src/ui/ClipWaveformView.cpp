@@ -62,7 +62,9 @@ namespace
     // Visual scale for rounded corners so events read as “blocks” on the timeline, not as raw bars.
     constexpr float kEventCorner = 2.5f;
     constexpr float kEventVerticalMargin = 4.0f;
-    constexpr float kWaveInset = 2.0f; // keep waveform off the 1px border so the frame reads first
+    // Vertical only for peak bar clamping; horizontal uses full `eventRect` width so adjacent split
+    // segments share one timeline scale with no stacked side insets (avoids a visible waveform gap).
+    constexpr float kWaveInset = 2.0f;
     // Horizontal delta below which a mousedown+move is treated as a click (no `Session::moveClip`).
     constexpr float kDragThresholdPx = 3.0f;
     // Cubase-style **trim**: small square in the bottom-right of the event (separate from move).
@@ -302,6 +304,57 @@ namespace
                 }
             }
         }
+        for (int i = 0; i < n; ++i)
+        {
+            const PlacedClip& pc = tr.getPlacedClip(i);
+            const std::int64_t a0 = pc.getStartSample();
+            const std::int64_t a1 = a0 + pc.getEffectiveLengthSamples();
+            if (a0 >= a1)
+            {
+                continue;
+            }
+            const float ex0
+                = TimelineRulerView::sessionSampleToLocalX(a0, b.getX(), visStart, samplesPerPixel);
+            const float ex1
+                = TimelineRulerView::sessionSampleToLocalX(a1, b.getX(), visStart, samplesPerPixel);
+            const float x0 = juce::jmin(ex0, ex1);
+            const float x1 = juce::jmax(ex0, ex1);
+            juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
+            if (eventRect.contains(p))
+            {
+                r.kind = LanePixelHitKind::EventBody;
+                r.rowInTrack = i;
+                r.id = pc.getId();
+                return r;
+            }
+        }
+        return r;
+    }
+
+    [[nodiscard]] LanePixelHit hitPlacedEventBodyOnlyInLaneAtPixels(
+        const std::shared_ptr<const SessionSnapshot>& snap,
+        const int tIdx,
+        juce::Point<float> p,
+        const juce::Rectangle<float>& b,
+        const juce::Rectangle<float>& eventTrackY,
+        const std::int64_t visStart,
+        const double samplesPerPixel) noexcept
+    {
+        LanePixelHit r;
+        if (snap == nullptr || tIdx < 0)
+        {
+            return r;
+        }
+        if (!b.contains(p) || !eventTrackY.contains(p))
+        {
+            return r;
+        }
+        if (samplesPerPixel <= 0.0)
+        {
+            return r;
+        }
+        const Track& tr = snap->getTrack(tIdx);
+        const int n = tr.getNumPlacedClips();
         for (int i = 0; i < n; ++i)
         {
             const PlacedClip& pc = tr.getPlacedClip(i);
@@ -829,8 +882,13 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples((double)b.getWidth());
 
     const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, kEventVerticalMargin);
+    const EditTool editTool
+        = (laneHost_.getActiveEditTool ? laneHost_.getActiveEditTool() : EditTool::Pointer);
     const LanePixelHit ph
-        = hitPlacedInLaneAtPixels(snap, tIdx, e.position, b, eventTrackY, visStart, spp);
+        = (editTool == EditTool::Split)
+              ? hitPlacedEventBodyOnlyInLaneAtPixels(
+                    snap, tIdx, e.position, b, eventTrackY, visStart, spp)
+              : hitPlacedInLaneAtPixels(snap, tIdx, e.position, b, eventTrackY, visStart, spp);
     if (ph.kind == LanePixelHitKind::TrimLeft)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
@@ -903,6 +961,37 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     if (ph.kind == LanePixelHitKind::EventBody)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
+        if (editTool == EditTool::Split)
+        {
+            const std::int64_t S = hitPlaced.getStartSample();
+            const std::int64_t V = hitPlaced.getEffectiveLengthSamples();
+            const float tClickL
+                = juce::jlimit(0.0f, 1.0f, e.position.x / juce::jmax(1.0f, b.getWidth()));
+            const std::int64_t splitT
+                = visStart + (std::int64_t)std::llround((double)tClickL * (double)visLen);
+            const bool clipWasSelected
+                = selectedPlacedId_.has_value() && *selectedPlacedId_ == ph.id;
+            selectedPlacedId_.reset();
+            publishPlacedClipSelectionToLaneHost();
+            if (splitT > S && splitT < S + V)
+            {
+                if (laneHost_.commitClipSplitAsUndoable)
+                {
+                    laneHost_.commitClipSplitAsUndoable(ph.id, splitT, clipWasSelected);
+                }
+                else
+                {
+                    (void)session_.splitClip(ph.id, splitT);
+                }
+            }
+            pointerLaneMode_ = PointerLaneMode::None;
+            mouseDownPlacedId_.reset();
+            dragMovementBeyondThreshold_ = false;
+            trimPlacedId_.reset();
+            updateTrimHoverAndCursor(e.position);
+            repaint();
+            return;
+        }
         selectedPlacedId_ = ph.id;
         publishPlacedClipSelectionToLaneHost();
         const std::int64_t eff = hitPlaced.getEffectiveLengthSamples();
@@ -1658,8 +1747,9 @@ void ClipWaveformView::paint(juce::Graphics& g)
             g.drawRoundedRectangle(eventRect, kEventCorner, 1.2f);
         }
 
-        juce::Rectangle<float> inner = eventRect.reduced(1.0f + kWaveInset, 1.0f + kWaveInset * 0.5f);
-        if (inner.getWidth() >= 1.0f && inner.getHeight() >= 1.0f)
+        juce::Rectangle<float> innerForPeakHeight
+            = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
+        if (eventRect.getWidth() >= 1.0f && innerForPeakHeight.getHeight() >= 1.0f)
         {
             const int ns = nsForDraw;
             if (rowTrimR || rowTrimL)
@@ -1690,7 +1780,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
                     {
                         const int colCount
                             = peakColumnCountForVisibleLength(wfloatForPeaks, ns, visLen);
-                        const float runW = inner.getWidth();
+                        const float runW = eventRect.getWidth();
                         if (runW >= 0.5f)
                         {
                             const float segW = runW / (float)juce::jmax(1, colCount);
@@ -1726,9 +1816,9 @@ void ClipWaveformView::paint(juce::Graphics& g)
                                     }
                                 }
                                 peak = juce::jlimit(0.0f, 1.0f, peak);
-                                const float xj = inner.getX() + (float)j * segW;
-                                const float h
-                                    = displayHalfHeightForNormalizedPeak(peak, halfDraw, inner, midY);
+                                const float xj = eventRect.getX() + (float)j * segW;
+                                const float h = displayHalfHeightForNormalizedPeak(
+                                    peak, halfDraw, innerForPeakHeight, midY);
                                 g.setColour(juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
                                 g.fillRect(xj, midY - h, juce::jmax(1.0f, segW), h * 2.0f);
                             }
@@ -1738,7 +1828,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
             }
             else if (!strip.peaks.empty())
             {
-                const float runW = inner.getWidth();
+                const float runW = eventRect.getWidth();
                 const int cols = (int)strip.peaks.size();
                 if (runW >= 0.5f)
                 {
@@ -1762,9 +1852,9 @@ void ClipWaveformView::paint(juce::Graphics& g)
                             continue;
                         }
 
-                        const float xj = inner.getX() + (float)j * segW;
+                        const float xj = eventRect.getX() + (float)j * segW;
                         const float h = displayHalfHeightForNormalizedPeak(
-                            strip.peaks[(size_t)j], halfDraw, inner, midY);
+                            strip.peaks[(size_t)j], halfDraw, innerForPeakHeight, midY);
                         g.setColour(juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
                         g.fillRect(xj, midY - h, juce::jmax(1.0f, segW), h * 2.0f);
                     }
@@ -1997,6 +2087,70 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
             hoverLeftTrimHandleId_.reset();
             hoverRightTrimHandleId_.reset();
             repaint();
+        }
+        return;
+    }
+
+    const EditTool editToolForSplit
+        = (laneHost_.getActiveEditTool ? laneHost_.getActiveEditTool() : EditTool::Pointer);
+    if (editToolForSplit == EditTool::Split && pointerLaneMode_ == PointerLaneMode::None
+        && !mouseDownPlacedId_.has_value())
+    {
+        const std::optional<PlacedClipId> beforeCueS = hoverEventTrimCueId_;
+        const std::optional<PlacedClipId> beforeLS = hoverLeftTrimHandleId_;
+        const std::optional<PlacedClipId> beforeRS = hoverRightTrimHandleId_;
+        hoverEventTrimCueId_.reset();
+        hoverLeftTrimHandleId_.reset();
+        hoverRightTrimHandleId_.reset();
+        if (beforeCueS != hoverEventTrimCueId_ || beforeLS != hoverLeftTrimHandleId_
+            || beforeRS != hoverRightTrimHandleId_)
+        {
+            repaint();
+        }
+        const std::shared_ptr<const SessionSnapshot> snapS
+            = session_.loadSessionSnapshotForAudioThread();
+        const std::int64_t contentEndS = session_.getContentEndSamples();
+        if (snapS == nullptr || contentEndS <= 0)
+        {
+            if (!cursorOverriddenForInvalidDrop_)
+            {
+                setMouseCursor(
+                    juce::MouseCursor(juce::MouseCursor::StandardCursorType::NormalCursor));
+            }
+            return;
+        }
+        const int tIdxS = snapS->findTrackIndexById(trackId_);
+        if (tIdxS < 0)
+        {
+            if (!cursorOverriddenForInvalidDrop_)
+            {
+                setMouseCursor(
+                    juce::MouseCursor(juce::MouseCursor::StandardCursorType::NormalCursor));
+            }
+            return;
+        }
+        const juce::Rectangle<float> bS = getLocalBounds().toFloat();
+        if (bS.getWidth() <= 0.0f)
+        {
+            return;
+        }
+        const juce::Rectangle<float> eventTrackYS = bS.reduced(0.0f, kEventVerticalMargin);
+        const std::int64_t visStartS = timelineViewport_.getVisibleStartSamples();
+        const double sppS = timelineViewport_.getSamplesPerPixel();
+        if (sppS <= 0.0)
+        {
+            return;
+        }
+        const LanePixelHit phS = hitPlacedEventBodyOnlyInLaneAtPixels(
+            snapS, tIdxS, pos, bS, eventTrackYS, visStartS, sppS);
+        if (phS.kind == LanePixelHitKind::EventBody && !cursorOverriddenForInvalidDrop_)
+        {
+            setMouseCursor(juce::MouseCursor(juce::MouseCursor::StandardCursorType::IBeamCursor));
+        }
+        else if (!cursorOverriddenForInvalidDrop_)
+        {
+            setMouseCursor(
+                juce::MouseCursor(juce::MouseCursor::StandardCursorType::NormalCursor));
         }
         return;
     }

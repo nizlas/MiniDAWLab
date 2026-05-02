@@ -25,6 +25,7 @@
 #include <exception>
 #include <memory>
 #include <new>
+#include <optional>
 #include <utility>
 #include <limits>
 
@@ -563,6 +564,62 @@ void Session::setClipLeftEdgeTrim(const PlacedClipId id, const std::int64_t newL
         = SessionSnapshot::withClipLeftEdgeTrimmed(*current, id, newLeftTrimSamples);
     jassert(next != nullptr);
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+std::optional<std::pair<PlacedClipId, PlacedClipId>> Session::splitClip(
+    const PlacedClipId id,
+    const std::int64_t splitSampleOnTimeline) noexcept
+{
+    if (id == kInvalidPlacedClipId)
+    {
+        return std::nullopt;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->isEmpty())
+    {
+        return std::nullopt;
+    }
+    int foundTi = -1;
+    int foundCi = -1;
+    for (int ti = 0; ti < current->getNumTracks(); ++ti)
+    {
+        const Track& tr = current->getTrack(ti);
+        for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+        {
+            if (tr.getPlacedClip(ci).getId() == id)
+            {
+                foundTi = ti;
+                foundCi = ci;
+                break;
+            }
+        }
+        if (foundTi >= 0)
+        {
+            break;
+        }
+    }
+    if (foundTi < 0)
+    {
+        return std::nullopt;
+    }
+    const PlacedClip& orig = current->getTrack(foundTi).getPlacedClip(foundCi);
+    const std::int64_t S = orig.getStartSample();
+    const std::int64_t V = orig.getEffectiveLengthSamples();
+    if (V <= 1)
+    {
+        return std::nullopt;
+    }
+    if (!(splitSampleOnTimeline > S && splitSampleOnTimeline < S + V))
+    {
+        return std::nullopt;
+    }
+    const PlacedClipId leftId = nextPlacedClipId_++;
+    const PlacedClipId rightId = nextPlacedClipId_++;
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withClipSplit(
+        *current, id, splitSampleOnTimeline, leftId, rightId);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return std::make_pair(leftId, rightId);
 }
 
 void Session::moveTrack(const TrackId movedTrackId, const int destIndex) noexcept

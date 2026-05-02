@@ -396,6 +396,17 @@ void TrackLanesView::setOnUndoableClipTrimRequested(
     onUndoableClipTrimRequested_ = std::move(fn);
 }
 
+void TrackLanesView::setActiveEditToolProvider(std::function<EditTool()> fn) noexcept
+{
+    activeEditToolProvider_ = std::move(fn);
+}
+
+void TrackLanesView::setOnUndoableClipSplitRequested(
+    std::function<void(PlacedClipId, std::int64_t, bool)> fn) noexcept
+{
+    onUndoableClipSplitRequested_ = std::move(fn);
+}
+
 bool TrackLanesView::isClipEditGestureInProgress() const noexcept
 {
     for (const auto& u : lanes_)
@@ -544,6 +555,20 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     session_.setClipRightEdgeVisibleLength(id, value);
                 }
                 return true;
+            };
+        host.getActiveEditTool = [this]() -> EditTool {
+            return activeEditToolProvider_ != nullptr ? activeEditToolProvider_() : EditTool::Pointer;
+        };
+        host.commitClipSplitAsUndoable =
+            [this](const PlacedClipId id, const std::int64_t splitT, const bool wasSel) {
+                if (onUndoableClipSplitRequested_ != nullptr)
+                {
+                    onUndoableClipSplitRequested_(id, splitT, wasSel);
+                }
+                else
+                {
+                    (void)session_.splitClip(id, splitT);
+                }
             };
         auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, timelineViewport_, std::move(host));
         addAndMakeVisible(*ptr);
@@ -962,6 +987,53 @@ void TrackLanesView::selectFrontPlacedClipOnTrack(const TrackId tid) noexcept
         if (u != nullptr && u->getTrackId() == tid)
         {
             u->applyExternalPlacedClipSelection(pid);
+            break;
+        }
+    }
+}
+
+void TrackLanesView::selectPlacedClipOnTrack(const TrackId tid, const PlacedClipId clipId) noexcept
+{
+    if (tid == kInvalidTrackId || clipId == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int tIdx = snap->findTrackIndexById(tid);
+    if (tIdx < 0)
+    {
+        return;
+    }
+    const Track& tr = snap->getTrack(tIdx);
+    bool found = false;
+    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+    {
+        if (tr.getPlacedClip(i).getId() == clipId)
+        {
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+    {
+        return;
+    }
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr && u->getTrackId() != tid)
+        {
+            u->clearSelectionOnly();
+        }
+    }
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr && u->getTrackId() == tid)
+        {
+            u->applyExternalPlacedClipSelection(clipId);
             break;
         }
     }

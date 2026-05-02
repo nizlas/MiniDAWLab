@@ -43,6 +43,8 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
+#include <utility>
 
 class AudioClip;
 class Transport;
@@ -135,6 +137,12 @@ public:
 
     // [Message thread] Non-destructive left-edge trim (material offset L); one snapshot publish.
     void setClipLeftEdgeTrim(PlacedClipId id, std::int64_t newLeftTrimSamples) noexcept;
+
+    // [Message thread] Split one placement into two at `splitSampleOnTimeline` (strictly inside the
+    // clip's audible span). Returns the new ids `{left, right}` on success; no publish on failure.
+    [[nodiscard]] std::optional<std::pair<PlacedClipId, PlacedClipId>> splitClip(
+        PlacedClipId id,
+        std::int64_t splitSampleOnTimeline) noexcept;
 
     // [Message thread] Reorder the **track list** only. Each track’s clips and name are unchanged.
     // **Does not** change `activeTrackId_` (add-clip target follows the same id in the new row).

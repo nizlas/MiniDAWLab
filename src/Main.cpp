@@ -55,6 +55,7 @@
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
+#include "ui/ClipWaveformView.h"
 #include "ui/TrackLanesView.h"
 #include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
@@ -656,6 +657,21 @@ private:
             audioSettingsButton.onClick = [this] { showAudioSettingsDialog(); };
             helpButton.onClick = [this] { showHelpMenuPopup(); };
 
+            constexpr int kEditToolRadioGroup = 90421;
+            pointerToolButton_.setClickingTogglesState(true);
+            pointerToolButton_.setToggleState(true, juce::dontSendNotification);
+            pointerToolButton_.setRadioGroupId(kEditToolRadioGroup);
+            splitToolButton_.setClickingTogglesState(true);
+            splitToolButton_.setRadioGroupId(kEditToolRadioGroup);
+            pointerToolButton_.onClick = [this] {
+                currentEditTool_ = EditTool::Pointer;
+                trackLanesView.repaint();
+            };
+            splitToolButton_.onClick = [this] {
+                currentEditTool_ = EditTool::Split;
+                trackLanesView.repaint();
+            };
+
             addAndMakeVisible(addClipButton);
             addAndMakeVisible(addTrackButton);
             addAndMakeVisible(saveProjectButton);
@@ -664,6 +680,8 @@ private:
             addAndMakeVisible(stopButton);
             addAndMakeVisible(audioSettingsButton);
             addAndMakeVisible(helpButton);
+            addAndMakeVisible(pointerToolButton_);
+            addAndMakeVisible(splitToolButton_);
             if (kShowKeyDiagnostic)
             {
                 addAndMakeVisible(keyDiagLabel_);
@@ -855,6 +873,94 @@ private:
                             return true;
                         });
                     return committed;
+                });
+            trackLanesView.setActiveEditToolProvider([this]() { return currentEditTool_; });
+            trackLanesView.setOnUndoableClipSplitRequested(
+                [this](const PlacedClipId clipId,
+                       const std::int64_t splitSample,
+                       const bool clipWasSelected) {
+                    if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                        || recorder_.isRecording())
+                    {
+                        return;
+                    }
+                    if (clipId == kInvalidPlacedClipId)
+                    {
+                        return;
+                    }
+                    std::optional<std::pair<PlacedClipId, PlacedClipId>> splitIds;
+                    executeUndoableSessionEdit(
+                        "Split clip",
+                        [this, clipId, splitSample, &splitIds]() -> bool {
+                            const std::shared_ptr<const SessionSnapshot> snapBefore
+                                = session.loadSessionSnapshotForAudioThread();
+                            if (snapBefore == nullptr)
+                            {
+                                return false;
+                            }
+                            bool found = false;
+                            for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
+                            {
+                                const Track& tr = snapBefore->getTrack(ti);
+                                for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+                                {
+                                    if (tr.getPlacedClip(ci).getId() == clipId)
+                                    {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (found)
+                                {
+                                    break;
+                                }
+                            }
+                            if (!found)
+                            {
+                                return false;
+                            }
+                            const auto maybe = session.splitClip(clipId, splitSample);
+                            if (!maybe.has_value())
+                            {
+                                return false;
+                            }
+                            const std::shared_ptr<const SessionSnapshot> snapAfter
+                                = session.loadSessionSnapshotForAudioThread();
+                            if (snapAfter == snapBefore)
+                            {
+                                return false;
+                            }
+                            splitIds = *maybe;
+                            syncViewportFromSession();
+                            trackLanesView.syncTracksFromSession();
+                            rulerView.repaint();
+                            trackLanesView.repaint();
+                            inspectorView_.refreshFromSession();
+                            return true;
+                        });
+                    if (!clipWasSelected || !splitIds.has_value())
+                    {
+                        return;
+                    }
+                    const PlacedClipId rightId = splitIds->second;
+                    const std::shared_ptr<const SessionSnapshot> snap
+                        = session.loadSessionSnapshotForAudioThread();
+                    if (snap == nullptr)
+                    {
+                        return;
+                    }
+                    for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+                    {
+                        const Track& tr = snap->getTrack(ti);
+                        for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+                        {
+                            if (tr.getPlacedClip(ci).getId() == rightId)
+                            {
+                                trackLanesView.selectPlacedClipOnTrack(tr.getId(), rightId);
+                                return;
+                            }
+                        }
+                    }
                 });
             deviceManager.addChangeListener(this);
             updatePlayPauseButtonFromTransport();
@@ -1126,6 +1232,10 @@ private:
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             audioSettingsButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             helpButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            auto toolRow = area.removeFromTop(28);
+            constexpr int kToolButtonW = 80;
+            pointerToolButton_.setBounds(toolRow.removeFromLeft(kToolButtonW).reduced(2, 2));
+            splitToolButton_.setBounds(toolRow.removeFromLeft(kToolButtonW).reduced(2, 2));
             if constexpr (kShowShortcutDiagnostics)
             {
                 if (shortcutDiagLabel_ != nullptr)
@@ -2337,6 +2447,8 @@ private:
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
         bool importInFlight_ = false;
 
+        EditTool currentEditTool_ = EditTool::Pointer;
+
         juce::TextButton addClipButton{ "Add clip..." };
         juce::TextButton addTrackButton{ "Add track" };
         juce::TextButton saveProjectButton{ "Save Project..." };
@@ -2345,6 +2457,8 @@ private:
         juce::TextButton stopButton{ "Stop" };
         juce::TextButton audioSettingsButton{ "Audio..." };
         juce::TextButton helpButton{ "Help..." };
+        juce::TextButton pointerToolButton_{ "Pointer" };
+        juce::TextButton splitToolButton_{ "Split" };
         juce::Label keyDiagLabel_;
 
         /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).

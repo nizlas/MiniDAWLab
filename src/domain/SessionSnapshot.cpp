@@ -844,6 +844,79 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
+    const SessionSnapshot& previous,
+    const PlacedClipId targetId,
+    const std::int64_t splitSampleOnTimeline,
+    const PlacedClipId leftNewId,
+    const PlacedClipId rightNewId) noexcept
+{
+    if (targetId == kInvalidPlacedClipId || leftNewId == kInvalidPlacedClipId
+        || rightNewId == kInvalidPlacedClipId || leftNewId == rightNewId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    bool any = false;
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int ti = 0; ti < previous.getNumTracks(); ++ti)
+    {
+        const Track& t = previous.getTrack(ti);
+        const std::vector<PlacedClip>& oldC = t.getPlacedClips();
+        std::vector<PlacedClip> v;
+        v.reserve(oldC.size() + 1);
+        bool rowChanged = false;
+        for (const PlacedClip& orig : oldC)
+        {
+            if (orig.getId() != targetId)
+            {
+                v.push_back(orig);
+                continue;
+            }
+            const std::int64_t S = orig.getStartSample();
+            const std::int64_t V = orig.getEffectiveLengthSamples();
+            const std::int64_t L = orig.getLeftTrimSamples();
+            const std::int64_t splitT = splitSampleOnTimeline;
+            if (!(splitT > S && splitT < S + V))
+            {
+                jassert(false);
+                v.push_back(orig);
+                continue;
+            }
+            const std::int64_t vLeft = splitT - S;
+            const std::int64_t vRight = (S + V) - splitT;
+            std::shared_ptr<const AudioClip> mat = orig.getMaterial();
+            const std::int64_t ws = orig.getMaterialWindowStartSamples();
+            const std::int64_t we = orig.getMaterialWindowEndExclusiveSamples();
+            v.emplace_back(leftNewId, mat, S, L, vLeft, ws, we);
+            v.emplace_back(rightNewId, mat, splitT, L + vLeft, vRight, ws, we);
+            any = true;
+            rowChanged = true;
+        }
+        if (rowChanged)
+        {
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
+        }
+        else
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+    }
+    if (!any)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGain(
     const SessionSnapshot& previous,
     const TrackId trackId,

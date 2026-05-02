@@ -152,6 +152,16 @@ public:
         PlacedClipId id,
         std::int64_t newLeftTrimSamples) noexcept;
 
+    // [Message thread] Replace one `PlacedClip` with two adjacent clips (same material + window).
+    // `splitSampleOnTimeline` must be strictly inside (start, start + visible); unknown `targetId`:
+    // debug jassert, verbatim copy. `leftNewId` / `rightNewId` must be non-zero and distinct.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipSplit(
+        const SessionSnapshot& previous,
+        PlacedClipId targetId,
+        std::int64_t splitSampleOnTimeline,
+        PlacedClipId leftNewId,
+        PlacedClipId rightNewId) noexcept;
+
     // [Message thread] Replace one track's `channelFaderGain`; other tracks unchanged. Unknown id: no-op
     // snapshotcopy of `previous` (debug jassert).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackChannelFaderGain(
