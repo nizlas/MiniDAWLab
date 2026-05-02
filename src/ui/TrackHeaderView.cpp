@@ -165,6 +165,7 @@ TrackHeaderView::TrackHeaderView(
     const TrackId trackId,
     std::function<void()> onActiveChanged,
     std::function<void()> onArmStateChanged,
+    std::function<void(TrackId)> onDeleteTrackRequested,
     TrackHeaderDragHost dragHost) noexcept
     : session_(session)
     , recorder_(recorder)
@@ -172,6 +173,7 @@ TrackHeaderView::TrackHeaderView(
     , trackId_(trackId)
     , onActiveChanged_(std::move(onActiveChanged))
     , onArmStateChanged_(std::move(onArmStateChanged))
+    , onDeleteTrackRequested_(std::move(onDeleteTrackRequested))
     , dragHost_(std::move(dragHost))
 {
     jassert(trackId_ != kInvalidTrackId);
@@ -240,6 +242,53 @@ void TrackHeaderView::paint(juce::Graphics& g)
 void TrackHeaderView::mouseDown(const juce::MouseEvent& e)
 {
     const auto p = e.getPosition();
+
+    if (e.mods.isPopupMenu())
+    {
+        // Whole-header context menu: activate this lane first so Delete and the inspector refer to
+        // the clicked track; do not toggle [Power][M][R] on right-click.
+        dragBlocker_ = DragBlocker::None;
+        headerDragInProgress_ = false;
+        session_.setActiveTrack(trackId_);
+        if (onActiveChanged_ != nullptr)
+        {
+            onActiveChanged_();
+        }
+
+        juce::PopupMenu menu;
+        constexpr int kDeleteTrackMenuId = 1;
+        const bool editLocked = transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                                || recorder_.isRecording();
+        juce::PopupMenu::Item deleteItem;
+        deleteItem.itemID = kDeleteTrackMenuId;
+        deleteItem.text = "Delete Track";
+        deleteItem.isEnabled = !editLocked;
+        menu.addItem(deleteItem);
+
+        juce::Component::SafePointer<TrackHeaderView> safeThis(this);
+        menu.showMenuAsync(
+            juce::PopupMenu::Options().withTargetComponent(this),
+            [safeThis, kDeleteTrackMenuId](const int result) {
+                if (safeThis == nullptr)
+                {
+                    return;
+                }
+                if (result != kDeleteTrackMenuId)
+                {
+                    return;
+                }
+                if (safeThis->transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                    || safeThis->recorder_.isRecording())
+                {
+                    return;
+                }
+                if (safeThis->onDeleteTrackRequested_ != nullptr)
+                {
+                    safeThis->onDeleteTrackRequested_(safeThis->trackId_);
+                }
+            });
+        return;
+    }
 
     const juce::Rectangle<int> armR = getArmButtonBounds();
     if (armR.contains(p))
@@ -334,6 +383,10 @@ void TrackHeaderView::mouseDown(const juce::MouseEvent& e)
 
 void TrackHeaderView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (!e.mods.isLeftButtonDown())
+    {
+        return;
+    }
     if (dragBlocker_ != DragBlocker::None)
     {
         return;

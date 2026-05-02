@@ -684,6 +684,23 @@ private:
             addAndMakeVisible(inspectorView_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
+            trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
+                if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                    || recorder_.isRecording())
+                {
+                    return;
+                }
+                if (tid == kInvalidTrackId)
+                {
+                    return;
+                }
+                session.removeTrack(tid);
+                syncViewportFromSession();
+                trackLanesView.syncTracksFromSession();
+                rulerView.repaint();
+                trackLanesView.repaint();
+                inspectorView_.refreshFromSession();
+            });
             deviceManager.addChangeListener(this);
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);

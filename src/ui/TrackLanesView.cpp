@@ -378,6 +378,12 @@ void TrackLanesView::syncTracksFromSession()
     resized();
 }
 
+void TrackLanesView::setOnDeleteTrackRequested(
+    std::function<void(TrackId)> onDeleteTrackRequested) noexcept
+{
+    onDeleteTrackRequested_ = std::move(onDeleteTrackRequested);
+}
+
 void TrackLanesView::rebuildChildLanesIfNeeded()
 {
     const int n = session_.getNumTracks();
@@ -428,8 +434,21 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 h->repaint();
             }
         };
+        auto onDelete = [this](const TrackId id) {
+            if (onDeleteTrackRequested_ != nullptr)
+            {
+                onDeleteTrackRequested_(id);
+            }
+        };
         auto head = std::make_unique<TrackHeaderView>(
-            session_, recorder_, transport_, tid, [this] { repaint(); }, onArm, std::move(dragHost));
+            session_,
+            recorder_,
+            transport_,
+            tid,
+            [this] { repaint(); },
+            onArm,
+            std::move(onDelete),
+            std::move(dragHost));
         addAndMakeVisible(*head);
         headers_.push_back(std::move(head));
         ClipWaveformLaneHost host;

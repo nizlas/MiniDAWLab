@@ -9,7 +9,9 @@
 // otherwise). **Mute** may toggle anytime.
 // Drag past a threshold (from the name strip) is coordinated by `TrackLanesView` (insert line,
 // `Session::moveTrack`). The event lane to the right is not a header-drag target. Invalid drop uses
-// `getForbiddenNoDropMouseCursor` (`ForbiddenCursor.h`).
+// `getForbiddenNoDropMouseCursor` (`ForbiddenCursor.h`). **Right-click** (popup menu) activates the
+// track and offers "Delete Track"; the host implements removal via `Session::removeTrack` with the
+// same Playing/recording guard as other edit actions.
 // =============================================================================
 
 #include "domain/Track.h"
@@ -40,6 +42,7 @@ public:
         TrackId trackId,
         std::function<void()> onActiveChanged,
         std::function<void()> onArmStateChanged,
+        std::function<void(TrackId)> onDeleteTrackRequested,
         TrackHeaderDragHost dragHost) noexcept;
 
     void paint(juce::Graphics& g) override;
@@ -79,6 +82,7 @@ private:
     const TrackId trackId_;
     std::function<void()> onActiveChanged_;
     std::function<void()> onArmStateChanged_;
+    std::function<void(TrackId)> onDeleteTrackRequested_;
     TrackHeaderDragHost dragHost_;
     bool headerDragInProgress_ = false;
     /// When non-None: gesture began on that control — do not promote to header-drag.

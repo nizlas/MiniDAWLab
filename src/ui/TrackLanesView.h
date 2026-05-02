@@ -15,7 +15,9 @@
 //   a separate gesture: `TrackHeaderView` past-threshold drags are coordinated here (insert line in
 //   `paintOverChildren` only in the **header column** width (same as `kTrackHeaderWidth` cap in
 //   `resized`), `Session::moveTrack` on commit; lane / clip drag unchanged). No-op drag: red line
-//   follows pointer y; valid reorder: green line at snapped gap.
+//   follows pointer y; valid reorder: green line at snapped gap. **Delete track:** `TrackHeaderView`
+//   posts `onDeleteTrackRequested(TrackId)` from its context menu; `Main` wires that to
+//   `Session::removeTrack` (not keyboard Delete).
 //
 // See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`, `TrackHeaderView`.
 // =============================================================================
@@ -102,6 +104,10 @@ public:
     // selection if it pointed at that clip and clear per-lane UI selection on that track.
     void notifyPlacedClipRemoved(TrackId trackId, PlacedClipId clipId) noexcept;
 
+    // [Message thread] Wired once by `Main`: header context menu "Delete Track" invokes this with the
+    // clicked track id (Playing/recording + validity handled by host).
+    void setOnDeleteTrackRequested(std::function<void(TrackId)> onDeleteTrackRequested) noexcept;
+
 private:
     void timerCallback() override;
 
@@ -166,6 +172,8 @@ private:
     int headerTrackDragDestIndex_ = -1; // for commit; valid when !invalid && !noop
 
     std::optional<std::pair<TrackId, PlacedClipId>> aggregatedSelectedPlacedClip_;
+
+    std::function<void(TrackId)> onDeleteTrackRequested_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };
