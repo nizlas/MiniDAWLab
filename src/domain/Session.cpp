@@ -648,6 +648,26 @@ void Session::removePlacedClip(const TrackId trackId, const PlacedClipId placedC
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::restoreSessionSnapshotForUndo(std::shared_ptr<const SessionSnapshot> restored) noexcept
+{
+    if (restored == nullptr)
+    {
+        return;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, restored, std::memory_order_release);
+
+    const int n = restored->getNumTracks();
+    if (n <= 0)
+    {
+        activeTrackId_ = kInvalidTrackId;
+        return;
+    }
+    if (restored->findTrackIndexById(activeTrackId_) < 0)
+    {
+        activeTrackId_ = restored->getTrack(0).getId();
+    }
+}
+
 void Session::setTrackChannelFaderGain(const TrackId trackId, float linearGain) noexcept
 {
     if (trackId == kInvalidTrackId)

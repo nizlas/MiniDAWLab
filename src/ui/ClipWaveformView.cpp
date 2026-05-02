@@ -613,6 +613,11 @@ bool ClipWaveformView::isTimelineEditGestureInProgress() const noexcept
     return pointerLaneMode_ != PointerLaneMode::None || mouseDownPlacedId_.has_value();
 }
 
+bool ClipWaveformView::isClipMoveGestureInProgress() const noexcept
+{
+    return pointerLaneMode_ == PointerLaneMode::MoveClip && mouseDownPlacedId_.has_value();
+}
+
 ClipWaveformView::ClipWaveformView(
     Session& session,
     Transport& transport,
@@ -1108,40 +1113,52 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
 
     if (mouseDownPlacedId_.has_value() && dragMovementBeyondThreshold_)
     {
+        const PlacedClipId movedId = *mouseDownPlacedId_;
         const bool canCrossLane = static_cast<bool>(laneHost_.findLaneAtScreen);
-        if (!canCrossLane)
+        ClipWaveformView* destLane = this;
+        if (canCrossLane)
         {
-            session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
-            {
-                const double tw = (double)juce::jmax(1, getWidth());
-                timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
-            }
+            destLane = laneHost_.findLaneAtScreen(juce::Point<int>(e.getScreenX(), e.getScreenY()));
         }
-        else
+
+        bool didPublish = false;
+        if (destLane != nullptr)
         {
-            auto* const lane
-                = laneHost_.findLaneAtScreen(juce::Point<int>(e.getScreenX(), e.getScreenY()));
-            if (lane == nullptr)
+            const bool sameLane = (destLane == this);
+            const bool sameStart = (tentativeStartOnTimeline_ == clickDownStartSample_);
+            const bool isNoop = sameLane && sameStart;
+
+            if (isNoop)
             {
-                // Cancel — no `Session` publish
+                session_.moveClip(movedId, tentativeStartOnTimeline_);
+                didPublish = true;
             }
-            else if (lane == this)
+            else if (laneHost_.commitClipMoveAsUndoable)
             {
-                session_.moveClip(*mouseDownPlacedId_, tentativeStartOnTimeline_);
-                {
-                    const double tw = (double)juce::jmax(1, getWidth());
-                    timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
-                }
+                didPublish = laneHost_.commitClipMoveAsUndoable(
+                    movedId,
+                    tentativeStartOnTimeline_,
+                    sameLane ? std::nullopt : std::optional<TrackId>(destLane->getTrackId()));
             }
             else
             {
-                session_.moveClipToTrack(
-                    *mouseDownPlacedId_, tentativeStartOnTimeline_, lane->getTrackId());
+                if (sameLane)
                 {
-                    const double tw = (double)juce::jmax(1, getWidth());
-                    timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
+                    session_.moveClip(movedId, tentativeStartOnTimeline_);
                 }
+                else
+                {
+                    session_.moveClipToTrack(
+                        movedId, tentativeStartOnTimeline_, destLane->getTrackId());
+                }
+                didPublish = true;
             }
+        }
+
+        if (didPublish)
+        {
+            const double tw = (double)juce::jmax(1, getWidth());
+            timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
         }
     }
     mouseDownPlacedId_.reset();

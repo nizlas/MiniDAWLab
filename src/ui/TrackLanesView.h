@@ -104,9 +104,19 @@ public:
     // selection if it pointed at that clip and clear per-lane UI selection on that track.
     void notifyPlacedClipRemoved(TrackId trackId, PlacedClipId clipId) noexcept;
 
+    // [Message thread] Clear all lane clip selections and the aggregate selection (e.g. after
+    // `Session::restoreSessionSnapshotForUndo` when prior `PlacedClipId`s may be invalid).
+    void clearAllPlacedClipSelections() noexcept;
+
     // [Message thread] Wired once by `Main`: header context menu "Delete Track" invokes this with the
     // clicked track id (Playing/recording + validity handled by host).
     void setOnDeleteTrackRequested(std::function<void(TrackId)> onDeleteTrackRequested) noexcept;
+
+    // [Message thread] Wired once by `Main`: committed clip move (real gesture only; see `ClipWaveformView`).
+    void setOnUndoableClipMoveRequested(
+        std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> fn) noexcept;
+
+    [[nodiscard]] bool isClipMoveGestureInProgress() const noexcept;
 
 private:
     void timerCallback() override;
@@ -174,6 +184,7 @@ private:
     std::optional<std::pair<TrackId, PlacedClipId>> aggregatedSelectedPlacedClip_;
 
     std::function<void(TrackId)> onDeleteTrackRequested_;
+    std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

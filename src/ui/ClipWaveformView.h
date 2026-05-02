@@ -60,6 +60,14 @@ struct ClipWaveformLaneHost
 
     /** When this lane's clip selection (`selectedPlacedId_`) changes. See `publishPlacedClipSelectionToLaneHost`. */
     std::function<void(TrackId laneTrackId, std::optional<PlacedClipId> placedId)> onPlacedClipSelectionChanged;
+
+    /** Undo-2: completed clip move only. Host wraps `Session::moveClip` / `moveClipToTrack` in history.
+        `destTrackOrNullForSameLane` is `nullopt` when the clip stays on this lane; else target track.
+        Returns false when the move was not applied (e.g. host blocked by transport). */
+    std::function<bool(PlacedClipId clipId,
+                       std::int64_t newStartSamples,
+                       std::optional<TrackId> destTrackOrNullForSameLane)>
+        commitClipMoveAsUndoable;
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +101,10 @@ public:
 
     // [Message thread] True while a move or trim is active (block timeline wheel pan in parent).
     [[nodiscard]] bool isTimelineEditGestureInProgress() const noexcept;
+
+    // [Message thread] True during an in-flight **clip move** (mouse down on body … mouse up). Narrows
+    // `isTimelineEditGestureInProgress` so trim drags do not block undo/redo shortcuts.
+    [[nodiscard]] bool isClipMoveGestureInProgress() const noexcept;
 
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();

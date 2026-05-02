@@ -149,6 +149,12 @@ public:
     // are unchanged. Unknown track or placement id: no-op.
     void removePlacedClip(TrackId trackId, PlacedClipId placedClipId) noexcept;
 
+    // [Message thread] Undo/redo only: atomically replace the published snapshot with `restored`
+    // (same release-store idiom as other mutators). Does **not** change `nextPlacedClipId_` /
+    // `nextTrackId_` (monotonic ids must never decrease). If `activeTrackId_` is absent from
+    // `restored`, clamps to the first track or `kInvalidTrackId`. No-op if `restored == nullptr`.
+    void restoreSessionSnapshotForUndo(std::shared_ptr<const SessionSnapshot> restored) noexcept;
+
     // [Message thread] Mixer channel volume: linear gain at the channel-fader point (see `Track`).
     // Clamped to [0, kTrackChannelFaderGainMax]; 0 = fader at −∞ (not the same as mute flag).
     void setTrackChannelFaderGain(TrackId trackId, float linearGain) noexcept;

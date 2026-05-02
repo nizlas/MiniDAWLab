@@ -384,6 +384,36 @@ void TrackLanesView::setOnDeleteTrackRequested(
     onDeleteTrackRequested_ = std::move(onDeleteTrackRequested);
 }
 
+void TrackLanesView::setOnUndoableClipMoveRequested(
+    std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> fn) noexcept
+{
+    onUndoableClipMoveRequested_ = std::move(fn);
+}
+
+bool TrackLanesView::isClipMoveGestureInProgress() const noexcept
+{
+    for (const auto& u : lanes_)
+    {
+        if (u != nullptr && u->isClipMoveGestureInProgress())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void TrackLanesView::clearAllPlacedClipSelections() noexcept
+{
+    aggregatedSelectedPlacedClip_.reset();
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr)
+        {
+            u->clearSelectionOnly();
+        }
+    }
+}
+
 void TrackLanesView::rebuildChildLanesIfNeeded()
 {
     const int n = session_.getNumTracks();
@@ -472,6 +502,22 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         host.onPlacedClipSelectionChanged =
             [this](const TrackId laneId, const std::optional<PlacedClipId> id) {
                 onLanePlacedClipSelectionChanged(laneId, id);
+            };
+        host.commitClipMoveAsUndoable =
+            [this](const PlacedClipId id, const std::int64_t start, const std::optional<TrackId> dest) -> bool {
+                if (onUndoableClipMoveRequested_ != nullptr)
+                {
+                    return onUndoableClipMoveRequested_(id, start, dest);
+                }
+                if (dest.has_value())
+                {
+                    session_.moveClipToTrack(id, start, *dest);
+                }
+                else
+                {
+                    session_.moveClip(id, start);
+                }
+                return true;
             };
         auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, timelineViewport_, std::move(host));
         addAndMakeVisible(*ptr);

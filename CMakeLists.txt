@@ -33,6 +33,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/PlacedClip.cpp
     src/domain/Track.cpp
     src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp

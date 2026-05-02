@@ -44,6 +44,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "domain/Session.h"
+#include "domain/SessionHistory.h"
 #include "domain/AudioClip.h"
 #include "domain/PlacedClip.h"
 #include "engine/CountInClickOutput.h"
@@ -64,6 +65,7 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -620,6 +622,7 @@ private:
             , countInClicks_(countInClicksIn)
             , latencyStore_(latencyStoreIn)
             , playbackEngine_(playbackEngineIn)
+            , sessionHistory_{}
             , timelineViewport_()
             , rulerView(
                   sessionIn,
@@ -651,6 +654,7 @@ private:
             // so RecorderService is never left recording while transport is Stopped.
             stopButton.onClick = [this] { stopOrSeekFromStopButton(); };
             audioSettingsButton.onClick = [this] { showAudioSettingsDialog(); };
+            helpButton.onClick = [this] { showHelpMenuPopup(); };
 
             addAndMakeVisible(addClipButton);
             addAndMakeVisible(addTrackButton);
@@ -659,6 +663,7 @@ private:
             addAndMakeVisible(playPauseButton);
             addAndMakeVisible(stopButton);
             addAndMakeVisible(audioSettingsButton);
+            addAndMakeVisible(helpButton);
             if (kShowKeyDiagnostic)
             {
                 addAndMakeVisible(keyDiagLabel_);
@@ -694,13 +699,97 @@ private:
                 {
                     return;
                 }
-                session.removeTrack(tid);
-                syncViewportFromSession();
-                trackLanesView.syncTracksFromSession();
-                rulerView.repaint();
-                trackLanesView.repaint();
-                inspectorView_.refreshFromSession();
+                executeUndoableSessionEdit(
+                    "Delete track",
+                    [this, tid]() -> bool {
+                        const std::shared_ptr<const SessionSnapshot> snap
+                            = session.loadSessionSnapshotForAudioThread();
+                        if (snap == nullptr || snap->findTrackIndexById(tid) < 0)
+                        {
+                            return false;
+                        }
+                        session.removeTrack(tid);
+                        syncViewportFromSession();
+                        trackLanesView.syncTracksFromSession();
+                        rulerView.repaint();
+                        trackLanesView.repaint();
+                        inspectorView_.refreshFromSession();
+                        return true;
+                    });
             });
+            trackLanesView.setOnUndoableClipMoveRequested(
+                [this](const PlacedClipId clipId,
+                       const std::int64_t newStart,
+                       const std::optional<TrackId> destTrack) -> bool {
+                    if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                        || recorder_.isRecording())
+                    {
+                        return false;
+                    }
+                    if (clipId == kInvalidPlacedClipId)
+                    {
+                        return false;
+                    }
+                    bool committed = false;
+                    executeUndoableSessionEdit(
+                        "Move clip",
+                        [this, clipId, newStart, destTrack, &committed]() -> bool {
+                            const std::shared_ptr<const SessionSnapshot> snapBefore
+                                = session.loadSessionSnapshotForAudioThread();
+                            if (snapBefore == nullptr)
+                            {
+                                return false;
+                            }
+                            bool found = false;
+                            for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
+                            {
+                                const Track& tr = snapBefore->getTrack(ti);
+                                for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+                                {
+                                    if (tr.getPlacedClip(ci).getId() == clipId)
+                                    {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (found)
+                                {
+                                    break;
+                                }
+                            }
+                            if (!found)
+                            {
+                                return false;
+                            }
+                            if (destTrack.has_value())
+                            {
+                                if (*destTrack == kInvalidTrackId
+                                    || snapBefore->findTrackIndexById(*destTrack) < 0)
+                                {
+                                    return false;
+                                }
+                                session.moveClipToTrack(clipId, newStart, *destTrack);
+                            }
+                            else
+                            {
+                                session.moveClip(clipId, newStart);
+                            }
+                            const std::shared_ptr<const SessionSnapshot> snapAfter
+                                = session.loadSessionSnapshotForAudioThread();
+                            if (snapAfter == snapBefore)
+                            {
+                                return false;
+                            }
+                            syncViewportFromSession();
+                            trackLanesView.syncTracksFromSession();
+                            rulerView.repaint();
+                            trackLanesView.repaint();
+                            inspectorView_.refreshFromSession();
+                            committed = true;
+                            return true;
+                        });
+                    return committed;
+                });
             deviceManager.addChangeListener(this);
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);
@@ -783,13 +872,18 @@ private:
             {
                 return;
             }
-            session.removePlacedClip(tid, pid);
-            trackLanesView.notifyPlacedClipRemoved(tid, pid);
-            syncViewportFromSession();
-            trackLanesView.syncTracksFromSession();
-            rulerView.repaint();
-            trackLanesView.repaint();
-            inspectorView_.refreshFromSession();
+            executeUndoableSessionEdit(
+                "Delete event",
+                [this, tid, pid]() -> bool {
+                    session.removePlacedClip(tid, pid);
+                    trackLanesView.notifyPlacedClipRemoved(tid, pid);
+                    syncViewportFromSession();
+                    trackLanesView.syncTracksFromSession();
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    inspectorView_.refreshFromSession();
+                    return true;
+                });
         }
 
         void invokeCopySelectedClipFromWindowShortcut()
@@ -857,24 +951,69 @@ private:
             {
                 return;
             }
-            const juce::Result r = session.addPlacedClipFromExistingMaterial(
-                pb.material,
-                transport.readPlayheadSamplesForUi(),
-                pb.leftTrimSamples,
-                pb.visibleLengthSamples,
-                target,
-                pb.materialWindowStartSamples,
-                pb.materialWindowEndExclusiveSamples);
-            if (!r.wasOk())
+            executeUndoableSessionEdit(
+                "Paste clip",
+                [this, target, pb]() -> bool {
+                    const juce::Result r = session.addPlacedClipFromExistingMaterial(
+                        pb.material,
+                        transport.readPlayheadSamplesForUi(),
+                        pb.leftTrimSamples,
+                        pb.visibleLengthSamples,
+                        target,
+                        pb.materialWindowStartSamples,
+                        pb.materialWindowEndExclusiveSamples);
+                    if (!r.wasOk())
+                    {
+                        return false;
+                    }
+                    syncViewportFromSession();
+                    trackLanesView.syncTracksFromSession();
+                    trackLanesView.selectFrontPlacedClipOnTrack(target);
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    inspectorView_.refreshFromSession();
+                    return true;
+                });
+        }
+
+        void invokeUndoFromWindowShortcut()
+        {
+            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                || recorder_.isRecording())
             {
                 return;
             }
-            syncViewportFromSession();
-            trackLanesView.syncTracksFromSession();
-            trackLanesView.selectFrontPlacedClipOnTrack(target);
-            rulerView.repaint();
-            trackLanesView.repaint();
-            inspectorView_.refreshFromSession();
+            if (trackLanesView.isClipMoveGestureInProgress())
+            {
+                return;
+            }
+            const std::optional<std::shared_ptr<const SessionSnapshot>> restored = sessionHistory_.popUndo();
+            if (!restored.has_value() || *restored == nullptr)
+            {
+                return;
+            }
+            session.restoreSessionSnapshotForUndo(*restored);
+            refreshAfterSessionSnapshotRestore();
+        }
+
+        void invokeRedoFromWindowShortcut()
+        {
+            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                || recorder_.isRecording())
+            {
+                return;
+            }
+            if (trackLanesView.isClipMoveGestureInProgress())
+            {
+                return;
+            }
+            const std::optional<std::shared_ptr<const SessionSnapshot>> restored = sessionHistory_.popRedo();
+            if (!restored.has_value() || *restored == nullptr)
+            {
+                return;
+            }
+            session.restoreSessionSnapshotForUndo(*restored);
+            refreshAfterSessionSnapshotRestore();
         }
 
         void setKeyDiagnosticLine(const juce::String& line)
@@ -911,7 +1050,7 @@ private:
             }
             constexpr int kCountInLabelWidth = 140;
             countInStatusLabel_.setBounds(row.removeFromRight(kCountInLabelWidth).reduced(4, 0));
-            const int buttonWidth = juce::jmax(48, row.getWidth() / 7);
+            const int buttonWidth = juce::jmax(48, row.getWidth() / 8);
 
             addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             addTrackButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
@@ -920,6 +1059,7 @@ private:
             playPauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             audioSettingsButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
+            helpButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
             if constexpr (kShowShortcutDiagnostics)
             {
                 if (shortcutDiagLabel_ != nullptr)
@@ -1029,6 +1169,61 @@ private:
             opt.launchAsync();
         }
 
+        void showHelpMenuPopup()
+        {
+            juce::PopupMenu menu;
+            constexpr int kUndoBehaviorMenuItemId = 1;
+            menu.addItem(kUndoBehaviorMenuItemId, "Undo Behavior...");
+            juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(&helpButton),
+                [safeThis, kUndoBehaviorMenuItemId](const int result) {
+                    if (safeThis == nullptr)
+                    {
+                        return;
+                    }
+                    if (result != kUndoBehaviorMenuItemId)
+                    {
+                        return;
+                    }
+                    safeThis->showUndoBehaviorDialog();
+                });
+        }
+
+        void showUndoBehaviorDialog()
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "Undo Behavior",
+                undoBehaviorHelpBodyText());
+        }
+
+        [[nodiscard]] static juce::String undoBehaviorHelpBodyText()
+        {
+            return juce::String(
+                "Undo will restore previous session/timeline states, such as:\n"
+                "  - clip moves\n"
+                "  - clip trims\n"
+                "  - split clips\n"
+                "  - pasted clips\n"
+                "  - deleted events\n"
+                "  - deleted tracks\n"
+                "  - track mute / off / fader changes\n"
+                "  - locator / range edits\n"
+                "\n"
+                "Undo will NOT automatically delete or restore external files on disk.\n"
+                "\n"
+                "For safety:\n"
+                "  - recorded audio files in the project Audio/ folder remain on disk\n"
+                "  - imported audio files copied into Audio/ remain on disk\n"
+                "  - undoing a recording or import placement may remove the timeline event,\n"
+                "    but not the underlying audio file\n"
+                "  - cleanup of unused files will be a separate future command\n"
+                "    (e.g. \"Clean Unused Media\")\n"
+                "\n"
+                "Note: undo/redo is not implemented yet. This dialog explains the planned behavior.");
+        }
+
         void timerCallback() override
         {
             updatePlayPauseButtonFromTransport();
@@ -1093,6 +1288,43 @@ private:
             {
                 playPauseButton.setButtonText(t);
             }
+        }
+
+        // [Message thread] After `Session::restoreSessionSnapshotForUndo` / redo: same tail as other
+        // edit paths, plus clear stale clip selection held only in `TrackLanesView`.
+        void refreshAfterSessionSnapshotRestore()
+        {
+            trackLanesView.clearAllPlacedClipSelections();
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            rulerView.repaint();
+            trackLanesView.repaint();
+            inspectorView_.refreshFromSession();
+        }
+
+        // [Message thread] Undo-1: mutator must return false when no session mutation occurred
+        // (e.g. paste `Result::fail`). `Session::removePlacedClip` / `removeTrack` always allocate a
+        // new `SessionSnapshot` instance even on semantic no-op, so we only wrap paths that
+        // pre-validate the target id (delete event / delete track) or use `Result::wasOk()` (paste).
+        template <typename F>
+        void executeUndoableSessionEdit(const juce::String& label, F&& mutator)
+        {
+            static_assert(std::is_invocable_r_v<bool, F>);
+            std::shared_ptr<const SessionSnapshot> before = session.loadSessionSnapshotForAudioThread();
+            if (before == nullptr)
+            {
+                return;
+            }
+            if (!mutator())
+            {
+                return;
+            }
+            std::shared_ptr<const SessionSnapshot> after = session.loadSessionSnapshotForAudioThread();
+            if (after == nullptr)
+            {
+                return;
+            }
+            sessionHistory_.record(label, std::move(before), std::move(after));
         }
 
         // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
@@ -1380,6 +1612,7 @@ private:
                         juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
                     return;
                 }
+                sessionHistory_.clear();
                 syncViewportFromSession();
                 trackLanesView.syncTracksFromSession();
                 inspectorView_.refreshFromSession();
@@ -2010,6 +2243,8 @@ private:
         LatencySettingsStore& latencyStore_;
         PlaybackEngine& playbackEngine_;
 
+        SessionHistory sessionHistory_;
+
         /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
         juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
         std::optional<BeginRecordingRequest> pendingCountIn_;
@@ -2043,6 +2278,7 @@ private:
         juce::TextButton playPauseButton{ "Play" };
         juce::TextButton stopButton{ "Stop" };
         juce::TextButton audioSettingsButton{ "Audio..." };
+        juce::TextButton helpButton{ "Help..." };
         juce::Label keyDiagLabel_;
 
         /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).
@@ -2179,6 +2415,26 @@ private:
                     if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
                     {
                         tcc->invokePasteClipFromWindowShortcut();
+                        return true;
+                    }
+                }
+                if (key.getModifiers().isCommandDown() && !key.getModifiers().isShiftDown()
+                    && (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z'))
+                {
+                    if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                    {
+                        tcc->invokeUndoFromWindowShortcut();
+                        return true;
+                    }
+                }
+                if (key.getModifiers().isCommandDown()
+                    && ((key.getKeyCode() == 'y' || key.getKeyCode() == 'Y')
+                        || ((key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')
+                            && key.getModifiers().isShiftDown())))
+                {
+                    if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                    {
+                        tcc->invokeRedoFromWindowShortcut();
                         return true;
                     }
                 }
