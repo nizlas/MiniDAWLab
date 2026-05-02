@@ -140,6 +140,15 @@ public:
     // **Does not** change `activeTrackId_` (add-clip target follows the same id in the new row).
     void moveTrack(TrackId movedTrackId, int destIndex) noexcept;
 
+    // [Message thread] Removes one track row and every `PlacedClip` on it. No disk / file changes.
+    // Unknown id: no-op. When `removedTrackId` was `activeTrackId_`, the active lane becomes the
+    // clip at the former index slot (fallback: neighbor above).
+    void removeTrack(TrackId removedTrackId) noexcept;
+
+    // [Message thread] Removes one `PlacedClip` row from `trackId` only. PCM / `AudioClip` and disk
+    // are unchanged. Unknown track or placement id: no-op.
+    void removePlacedClip(TrackId trackId, PlacedClipId placedClipId) noexcept;
+
     // [Message thread] Mixer channel volume: linear gain at the channel-fader point (see `Track`).
     // Clamped to [0, kTrackChannelFaderGainMax]; 0 = fader at −∞ (not the same as mute flag).
     void setTrackChannelFaderGain(TrackId trackId, float linearGain) noexcept;

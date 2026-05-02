@@ -596,6 +596,58 @@ void Session::moveTrack(const TrackId movedTrackId, const int destIndex) noexcep
     // `activeTrackId_` is intentionally unchanged — UI highlights by id.
 }
 
+void Session::removeTrack(const TrackId removedTrackId) noexcept
+{
+    if (removedTrackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    const int removedIndex = current->findTrackIndexById(removedTrackId);
+    if (removedIndex < 0)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackRemoved(*current, removedTrackId);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+
+    if (activeTrackId_ != removedTrackId)
+    {
+        return;
+    }
+    const int n = next->getNumTracks();
+    if (n <= 0)
+    {
+        activeTrackId_ = kInvalidTrackId;
+        return;
+    }
+    const int focusIdx = juce::jmin(removedIndex, n - 1);
+    activeTrackId_ = next->getTrack(focusIdx).getId();
+}
+
+void Session::removePlacedClip(const TrackId trackId, const PlacedClipId placedClipId) noexcept
+{
+    if (trackId == kInvalidTrackId || placedClipId == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withPlacedClipRemoved(*current, trackId, placedClipId);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::setTrackChannelFaderGain(const TrackId trackId, float linearGain) noexcept
 {
     if (trackId == kInvalidTrackId)

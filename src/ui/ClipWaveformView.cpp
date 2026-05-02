@@ -733,9 +733,25 @@ void ClipWaveformView::restoreNormalCursorAfterInvalidDrop()
     cursorOverriddenForInvalidDrop_ = false;
 }
 
+void ClipWaveformView::publishPlacedClipSelectionToLaneHost() noexcept
+{
+    if (laneHost_.onPlacedClipSelectionChanged)
+    {
+        laneHost_.onPlacedClipSelectionChanged(trackId_, selectedPlacedId_);
+    }
+}
+
+void ClipWaveformView::applyExternalPlacedClipSelection(const std::optional<PlacedClipId> id) noexcept
+{
+    selectedPlacedId_ = id;
+    publishPlacedClipSelectionToLaneHost();
+    repaint();
+}
+
 void ClipWaveformView::clearSelectionOnly()
 {
     selectedPlacedId_.reset();
+    publishPlacedClipSelectionToLaneHost();
     pointerLaneMode_ = PointerLaneMode::None;
     trimPlacedId_.reset();
     mouseDownPlacedId_.reset();
@@ -807,6 +823,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         selectedPlacedId_ = ph.id;
+        publishPlacedClipSelectionToLaneHost();
         const std::int64_t S0 = hitPlaced.getStartSample();
         const std::int64_t V0 = hitPlaced.getEffectiveLengthSamples();
         const std::int64_t L0 = hitPlaced.getLeftTrimSamples();
@@ -837,6 +854,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         selectedPlacedId_ = ph.id;
+        publishPlacedClipSelectionToLaneHost();
         const std::int64_t eff = hitPlaced.getEffectiveLengthSamples();
         const std::int64_t a0 = hitPlaced.getStartSample();
         const std::int64_t a1 = a0 + eff;
@@ -874,6 +892,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     {
         const PlacedClip& hitPlaced = snap->getTrack(tIdx).getPlacedClip(ph.rowInTrack);
         selectedPlacedId_ = ph.id;
+        publishPlacedClipSelectionToLaneHost();
         const std::int64_t eff = hitPlaced.getEffectiveLengthSamples();
         pointerLaneMode_ = PointerLaneMode::MoveClip;
         mouseDownPlacedId_ = ph.id;
@@ -888,6 +907,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     }
 
     selectedPlacedId_.reset();
+    publishPlacedClipSelectionToLaneHost();
     mouseDownPlacedId_.reset();
     dragMovementBeyondThreshold_ = false;
     pointerLaneMode_ = PointerLaneMode::None;
@@ -1141,12 +1161,14 @@ void ClipWaveformView::clearSelectionIfIdMissing(
     if (snap == nullptr)
     {
         selectedPlacedId_.reset();
+        publishPlacedClipSelectionToLaneHost();
         return;
     }
     const int tIdx = snap->findTrackIndexById(trackId_);
     if (tIdx < 0)
     {
         selectedPlacedId_.reset();
+        publishPlacedClipSelectionToLaneHost();
         return;
     }
     const Track& tr = snap->getTrack(tIdx);
@@ -1161,6 +1183,7 @@ void ClipWaveformView::clearSelectionIfIdMissing(
     hoverEventTrimCueId_.reset();
     hoverLeftTrimHandleId_.reset();
     hoverRightTrimHandleId_.reset();
+    publishPlacedClipSelectionToLaneHost();
 }
 
 // [Message thread] Fills `clipStrips_` with per-row peak columns so `paint` only maps numbers to x.
@@ -1215,6 +1238,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         juce::Logger::writeToLog(
             juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=null_snap trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
+        publishPlacedClipSelectionToLaneHost();
         mouseDownPlacedId_.reset();
         dragMovementBeyondThreshold_ = false;
         return;
@@ -1225,6 +1249,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         juce::Logger::writeToLog(
             juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=no_track trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
+        publishPlacedClipSelectionToLaneHost();
         mouseDownPlacedId_.reset();
         dragMovementBeyondThreshold_ = false;
         return;
@@ -1234,6 +1259,7 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
         juce::Logger::writeToLog(
             juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=empty_session trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
+        publishPlacedClipSelectionToLaneHost();
         mouseDownPlacedId_.reset();
         dragMovementBeyondThreshold_ = false;
         return;

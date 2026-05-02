@@ -451,6 +451,101 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
+    const SessionSnapshot& previous,
+    const TrackId removedTrackId) noexcept
+{
+    if (removedTrackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    bool found = false;
+    std::vector<Track> out;
+    out.reserve(static_cast<size_t>(juce::jmax(0, previous.getNumTracks() - 1)));
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (t.getId() == removedTrackId)
+        {
+            found = true;
+            continue;
+        }
+        out.push_back(duplicateTrackSameClips(t));
+    }
+    if (!found)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    if (out.empty())
+    {
+        return createEmpty();
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out),
+        previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples()});
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withPlacedClipRemoved(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const PlacedClipId placedClipId) noexcept
+{
+    if (trackId == kInvalidTrackId || placedClipId == kInvalidPlacedClipId)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    const Track& touched = previous.getTrack(tIdx);
+    std::vector<PlacedClip> newClips;
+    newClips.reserve(touched.getPlacedClips().size());
+    bool removedAny = false;
+    for (const PlacedClip& p : touched.getPlacedClips())
+    {
+        if (p.getId() == placedClipId)
+        {
+            removedAny = true;
+            continue;
+        }
+        newClips.push_back(p);
+    }
+    if (!removedAny)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+            continue;
+        }
+        out.push_back(duplicateTrackWithMovedClips(t, std::move(newClips)));
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
     const SessionSnapshot& previous,
     const PlacedClipId movedId,

@@ -45,6 +45,7 @@
 
 #include "domain/Session.h"
 #include "domain/AudioClip.h"
+#include "domain/PlacedClip.h"
 #include "engine/CountInClickOutput.h"
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
@@ -728,6 +729,137 @@ private:
             }
             juce::Logger::writeToLog("[Shortcut] numpad1 ignored: no valid locator range");
         }
+
+        void invokeDeleteSelectedPlacedClipFromWindowShortcut()
+        {
+            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                || recorder_.isRecording())
+            {
+                return;
+            }
+            const std::optional<std::pair<TrackId, PlacedClipId>> sel
+                = trackLanesView.getAggregatedSelectedClip();
+            if (!sel.has_value())
+            {
+                return;
+            }
+            const TrackId tid = sel->first;
+            const PlacedClipId pid = sel->second;
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session.loadSessionSnapshotForAudioThread();
+            const int ti = (snap != nullptr) ? snap->findTrackIndexById(tid) : -1;
+            if (ti < 0)
+            {
+                return;
+            }
+            const Track& tr = snap->getTrack(ti);
+            bool found = false;
+            for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+            {
+                if (tr.getPlacedClip(i).getId() == pid)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                return;
+            }
+            session.removePlacedClip(tid, pid);
+            trackLanesView.notifyPlacedClipRemoved(tid, pid);
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            rulerView.repaint();
+            trackLanesView.repaint();
+            inspectorView_.refreshFromSession();
+        }
+
+        void invokeCopySelectedClipFromWindowShortcut()
+        {
+            const std::optional<std::pair<TrackId, PlacedClipId>> sel
+                = trackLanesView.getAggregatedSelectedClip();
+            if (!sel.has_value())
+            {
+                return;
+            }
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return;
+            }
+            const int tIdx = snap->findTrackIndexById(sel->first);
+            if (tIdx < 0)
+            {
+                return;
+            }
+            const Track& tr = snap->getTrack(tIdx);
+            for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+            {
+                const PlacedClip& p = tr.getPlacedClip(i);
+                if (p.getId() != sel->second)
+                {
+                    continue;
+                }
+                InternalClipPasteboard pb;
+                pb.material = p.getMaterial();
+                pb.leftTrimSamples = p.getLeftTrimSamples();
+                pb.visibleLengthSamples = p.getEffectiveLengthSamples();
+                pb.materialWindowStartSamples = p.getMaterialWindowStartSamples();
+                pb.materialWindowEndExclusiveSamples = p.getMaterialWindowEndExclusiveSamples();
+                clipPasteboard_ = std::move(pb);
+                return;
+            }
+        }
+
+        void invokePasteClipFromWindowShortcut()
+        {
+            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                || recorder_.isRecording())
+            {
+                return;
+            }
+            if (!clipPasteboard_.has_value())
+            {
+                return;
+            }
+            const TrackId target = session.getActiveTrackId();
+            if (target == kInvalidTrackId)
+            {
+                return;
+            }
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr || snap->findTrackIndexById(target) < 0)
+            {
+                return;
+            }
+            const InternalClipPasteboard pb = *clipPasteboard_;
+            if (pb.material == nullptr || pb.visibleLengthSamples <= 0)
+            {
+                return;
+            }
+            const juce::Result r = session.addPlacedClipFromExistingMaterial(
+                pb.material,
+                transport.readPlayheadSamplesForUi(),
+                pb.leftTrimSamples,
+                pb.visibleLengthSamples,
+                target,
+                pb.materialWindowStartSamples,
+                pb.materialWindowEndExclusiveSamples);
+            if (!r.wasOk())
+            {
+                return;
+            }
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            trackLanesView.selectFrontPlacedClipOnTrack(target);
+            rulerView.repaint();
+            trackLanesView.repaint();
+            inspectorView_.refreshFromSession();
+        }
+
         void setKeyDiagnosticLine(const juce::String& line)
         {
             if (kShowKeyDiagnostic)
@@ -789,6 +921,17 @@ private:
         }
 
     private:
+        struct InternalClipPasteboard
+        {
+            std::shared_ptr<const AudioClip> material;
+            std::int64_t leftTrimSamples = 0;
+            std::int64_t visibleLengthSamples = 0;
+            std::int64_t materialWindowStartSamples = 0;
+            std::int64_t materialWindowEndExclusiveSamples = 0;
+        };
+
+        std::optional<InternalClipPasteboard> clipPasteboard_;
+
         struct CountInTimer final : juce::Timer
         {
             explicit CountInTimer(TransportControlsContent& o)
@@ -1992,6 +2135,38 @@ private:
                     tcc->setShortcutDiagVisibleCaption(makeShortcutDiagVisibleCaption(key));
                 }
             }
+
+            const bool editorHasFocus
+                = (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent())
+                   != nullptr);
+            if (!editorHasFocus)
+            {
+                if (key.isKeyCode(juce::KeyPress::deleteKey))
+                {
+                    if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                    {
+                        tcc->invokeDeleteSelectedPlacedClipFromWindowShortcut();
+                        return true;
+                    }
+                }
+                if (key.getModifiers().isCommandDown() && (key.getKeyCode() == 'c' || key.getKeyCode() == 'C'))
+                {
+                    if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                    {
+                        tcc->invokeCopySelectedClipFromWindowShortcut();
+                        return true;
+                    }
+                }
+                if (key.getModifiers().isCommandDown() && (key.getKeyCode() == 'v' || key.getKeyCode() == 'V'))
+                {
+                    if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
+                    {
+                        tcc->invokePasteClipFromWindowShortcut();
+                        return true;
+                    }
+                }
+            }
+
             if (isRecordToggleShortcut(key))
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))

@@ -101,6 +101,19 @@ public:
         TrackId newTrackId,
         juce::String newTrackName) noexcept;
 
+    // [Message thread] Drops the `TrackId` row and all its `PlacedClip`s. Unknown id: same snapshot
+    // pointer shape (tracks copied verbatim). Removing the last lane yields `createEmpty()`.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRemoved(
+        const SessionSnapshot& previous,
+        TrackId removedTrackId) noexcept;
+
+    // [Message thread] Drops one `PlacedClip` on `trackId` only if `placedClipId` exists there.
+    // Other tracks untouched; lane keeps name/off/muted/fader. Unknown lane or placement: no-op copy.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withPlacedClipRemoved(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        PlacedClipId placedClipId) noexcept;
+
     // [Message thread] Only affects the track that contains `movedId` — same committed-move policy
     // as pre-track `withClipMoved`, but overlap is computed only **within that track**.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipMoved(

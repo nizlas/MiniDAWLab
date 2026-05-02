@@ -57,6 +57,9 @@ struct ClipWaveformLaneHost
     std::function<void(ClipWaveformView* target, std::int64_t startSample, std::int64_t lengthSamples)>
         setGhostOnLane;
     std::function<void()> clearAllGhosts;
+
+    /** When this lane's clip selection (`selectedPlacedId_`) changes. See `publishPlacedClipSelectionToLaneHost`. */
+    std::function<void(TrackId laneTrackId, std::optional<PlacedClipId> placedId)> onPlacedClipSelectionChanged;
 };
 
 // ---------------------------------------------------------------------------
@@ -94,6 +97,8 @@ public:
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();
 
+    // [Message thread] Select a placement from host code (`TrackLanesView` after paste).
+    void applyExternalPlacedClipSelection(std::optional<PlacedClipId> id) noexcept;
     // [Message thread] Cross-lane drag ghost (one lane at a time); called by `TrackLanesView` only.
     void setDragGhost(std::int64_t startSampleOnTimeline, std::int64_t lengthSamples);
     void clearDragGhost();
@@ -159,6 +164,9 @@ private:
 
     // [Message thread] If the selected id no longer exists in the snapshot, clear selection.
     void clearSelectionIfIdMissing(const std::shared_ptr<const SessionSnapshot>& snap);
+
+    /** Forwards current `selectedPlacedId_` to `laneHost_.onPlacedClipSelectionChanged` when set. */
+    void publishPlacedClipSelectionToLaneHost() noexcept;
 
     // [Message thread] Invalid-drop cursor on the **source** lane when the pointer leaves the lane
     // stack during a drag; `getForbiddenNoDropMouseCursor` (`ForbiddenCursor.h`), not a JUCE

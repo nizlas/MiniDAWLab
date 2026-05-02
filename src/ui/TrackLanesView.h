@@ -21,6 +21,7 @@
 // =============================================================================
 
 #include "domain/Track.h"
+#include "domain/PlacedClip.h"
 #include "engine/RecorderService.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -28,6 +29,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace juce
@@ -89,6 +92,16 @@ public:
 
     void clearCycleRecordingPreviewContext() noexcept;
 
+    // [Message thread] Last clip the user selected on any lane (`TrackId` + placement id).
+    [[nodiscard]] std::optional<std::pair<TrackId, PlacedClipId>> getAggregatedSelectedClip()
+        const noexcept;
+    // [Message thread] Clear other lanes, then select clip index 0 on `tid` (paste / host actions).
+    void selectFrontPlacedClipOnTrack(TrackId tid) noexcept;
+
+    // [Message thread] After a placement is removed from the session (e.g. Delete): clear aggregate
+    // selection if it pointed at that clip and clear per-lane UI selection on that track.
+    void notifyPlacedClipRemoved(TrackId trackId, PlacedClipId clipId) noexcept;
+
 private:
     void timerCallback() override;
 
@@ -98,6 +111,8 @@ private:
     // [Message thread] Match `std::vector` size and `TrackId` order to the session snapshot; id-
     // order changes (not in this project) would rebuild every lane.
     void rebuildChildLanesIfNeeded();
+
+    void onLanePlacedClipSelectionChanged(TrackId laneTrackId, std::optional<PlacedClipId> id) noexcept;
 
     // [Message thread] Screen point → which child `ClipWaveformView` (lane) that point falls in, or
     // `nullptr` if outside this view’s bounds (e.g. over the ruler or chrome).
@@ -149,6 +164,8 @@ private:
     bool headerTrackDragInvalidArea_ = true;
     bool headerTrackDragNoop_ = true;
     int headerTrackDragDestIndex_ = -1; // for commit; valid when !invalid && !noop
+
+    std::optional<std::pair<TrackId, PlacedClipId>> aggregatedSelectedPlacedClip_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

@@ -11,6 +11,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "domain/PlacedClip.h"
 #include "transport/Transport.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -384,6 +385,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     {
         headers_.clear();
         lanes_.clear();
+        aggregatedSelectedPlacedClip_.reset();
         return;
     }
     bool need = ((int)lanes_.size() != n || (int)headers_.size() != n);
@@ -404,6 +406,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     }
     headers_.clear();
     lanes_.clear();
+    aggregatedSelectedPlacedClip_.reset();
     for (int i = 0; i < n; ++i)
     {
         const TrackId tid = session_.getTrackIdAtIndex(i);
@@ -447,6 +450,10 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                   setGhostOnLaneImpl(target, start, len);
               };
         host.clearAllGhosts = [this] { clearAllGhostsImpl(); };
+        host.onPlacedClipSelectionChanged =
+            [this](const TrackId laneId, const std::optional<PlacedClipId> id) {
+                onLanePlacedClipSelectionChanged(laneId, id);
+            };
         auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, timelineViewport_, std::move(host));
         addAndMakeVisible(*ptr);
         lanes_.push_back(std::move(ptr));
@@ -790,4 +797,81 @@ void TrackLanesView::mouseWheelMove(
     }
     timelineViewport_.panBySamples(step, wPan, arr);
     repaint();
+}
+
+void TrackLanesView::notifyPlacedClipRemoved(const TrackId trackId, const PlacedClipId clipId) noexcept
+{
+    if (aggregatedSelectedPlacedClip_.has_value()
+        && aggregatedSelectedPlacedClip_->first == trackId
+        && aggregatedSelectedPlacedClip_->second == clipId)
+    {
+        aggregatedSelectedPlacedClip_.reset();
+    }
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr && u->getTrackId() == trackId)
+        {
+            u->clearSelectionOnly();
+            break;
+        }
+    }
+}
+
+void TrackLanesView::onLanePlacedClipSelectionChanged(const TrackId laneTrackId,
+                                                      const std::optional<PlacedClipId> id) noexcept
+{
+    if (id.has_value())
+    {
+        aggregatedSelectedPlacedClip_ = std::pair<TrackId, PlacedClipId>(laneTrackId, *id);
+    }
+    else if (aggregatedSelectedPlacedClip_.has_value()
+             && aggregatedSelectedPlacedClip_->first == laneTrackId)
+    {
+        aggregatedSelectedPlacedClip_.reset();
+    }
+}
+
+std::optional<std::pair<TrackId, PlacedClipId>> TrackLanesView::getAggregatedSelectedClip()
+    const noexcept
+{
+    return aggregatedSelectedPlacedClip_;
+}
+
+void TrackLanesView::selectFrontPlacedClipOnTrack(const TrackId tid) noexcept
+{
+    if (tid == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const int tIdx = snap->findTrackIndexById(tid);
+    if (tIdx < 0)
+    {
+        return;
+    }
+    const Track& tr = snap->getTrack(tIdx);
+    if (tr.getNumPlacedClips() <= 0)
+    {
+        return;
+    }
+    const PlacedClipId pid = tr.getPlacedClip(0).getId();
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr && u->getTrackId() != tid)
+        {
+            u->clearSelectionOnly();
+        }
+    }
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr && u->getTrackId() == tid)
+        {
+            u->applyExternalPlacedClipSelection(pid);
+            break;
+        }
+    }
 }
