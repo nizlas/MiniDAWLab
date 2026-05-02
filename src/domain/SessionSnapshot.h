@@ -146,6 +146,16 @@ public:
         TrackId trackId,
         float channelFaderGainLinear) noexcept;
 
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackOff(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        bool trackOff) noexcept;
+
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackMuted(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        bool trackMuted) noexcept;
+
     // [Message thread] **Load-only:** publish a full pre-built track list in one step (e.g. project
     // open). Does not add clips incrementally. `tracks` must be non-empty. Stored arrangement extent
     // is 0 (use `withTracks` overload for v3 load).

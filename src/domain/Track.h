@@ -53,12 +53,15 @@ public:
     // Unity channel fader; use `four-arg` ctor for explicit linear gain (`channelFaderGain`).
     explicit Track(TrackId id, juce::String name, std::vector<PlacedClip> placedClips) noexcept;
 
-    // [Message thread, snapshot build] Same as three-arg constructor; `channelFaderGain` is linear
-    // (0 = fader at −∞, 1 = 0 dB). Clamped to [0, kTrackChannelFaderGainMax].
+    // [Message thread, snapshot build] `channelFaderGain` linear, clamped [0, kTrackChannelFaderGainMax].
+    // `trackOff`: lane skipped by playback engine. `trackMuted`: engine applies zero effective gain
+    // without changing stored `channelFaderGain`.
     explicit Track(TrackId id,
                    juce::String name,
                    std::vector<PlacedClip> placedClips,
-                   float channelFaderGain) noexcept;
+                   float channelFaderGain,
+                   bool trackOff = false,
+                   bool trackMuted = false) noexcept;
 
     [[nodiscard]] TrackId getId() const noexcept { return id_; }
     [[nodiscard]] const juce::String& getName() const noexcept { return name_; }
@@ -70,10 +73,16 @@ public:
     }
     // Linear gain at the channel-fader point (see header block above). Not clip gain or pre-gain.
     [[nodiscard]] float getChannelFaderGain() const noexcept { return channelFaderGain_; }
+    /// If true, `PlaybackEngine` skips this track entirely (not the same as mute).
+    [[nodiscard]] bool isTrackOff() const noexcept { return trackOff_; }
+    /// If true, effective output gain is zero; stored fader value is unchanged.
+    [[nodiscard]] bool isMuted() const noexcept { return trackMuted_; }
 
 private:
     TrackId id_ = kInvalidTrackId;
     juce::String name_;
     std::vector<PlacedClip> placedClips_;
     float channelFaderGain_ = kTrackChannelVolumeUnityGain;
+    bool trackOff_ = false;
+    bool trackMuted_ = false;
 };

@@ -108,6 +108,37 @@ namespace
         }
         return clips;
     }
+
+    [[nodiscard]] Track duplicateTrackSameClips(const Track& t)
+    {
+        return Track(t.getId(),
+                     t.getName(),
+                     t.getPlacedClips(),
+                     t.getChannelFaderGain(),
+                     t.isTrackOff(),
+                     t.isMuted());
+    }
+
+    [[nodiscard]] Track duplicateTrackWithMovedClips(const Track& t, std::vector<PlacedClip>&& clips)
+    {
+        return Track(t.getId(),
+                     t.getName(),
+                     std::move(clips),
+                     t.getChannelFaderGain(),
+                     t.isTrackOff(),
+                     t.isMuted());
+    }
+
+    [[nodiscard]] Track duplicateTrackSameClipsWithGain(const Track& t, const float linearGain)
+    {
+        const float g = juce::jlimit(0.0f, kTrackChannelFaderGainMax, linearGain);
+        return Track(t.getId(),
+                     t.getName(),
+                     t.getPlacedClips(),
+                     g,
+                     t.isTrackOff(),
+                     t.isMuted());
+    }
 } // namespace
 
 SessionSnapshot::SessionSnapshot(std::vector<Track> tracks,
@@ -262,7 +293,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
         if (i != tIdx)
         {
             const Track& t = previous.getTrack(i);
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+            out.push_back(duplicateTrackSameClips(t));
         }
         else
         {
@@ -275,7 +306,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
             {
                 v.push_back(p);
             }
-            out.emplace_back(t.getId(), t.getName(), std::move(v), t.getChannelFaderGain());
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
@@ -363,7 +394,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
         if (i != tIdx)
         {
             const Track& t = previous.getTrack(i);
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+            out.push_back(duplicateTrackSameClips(t));
         }
         else
         {
@@ -382,7 +413,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
             {
                 v.push_back(p);
             }
-            out.emplace_back(t.getId(), t.getName(), std::move(v), t.getChannelFaderGain());
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
@@ -412,7 +443,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
     for (int i = 0; i < previous.getNumTracks(); ++i)
     {
         const Track& t = previous.getTrack(i);
-        out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+        out.push_back(duplicateTrackSameClips(t));
     }
     out.emplace_back(newTrackId, std::move(newTrackName), std::vector<PlacedClip>{});
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
@@ -445,7 +476,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
         {
             anyFound = true;
         }
-        out.emplace_back(t.getId(), t.getName(), std::move(u), t.getChannelFaderGain());
+        out.push_back(duplicateTrackWithMovedClips(t, std::move(u)));
     }
     if (!anyFound)
     {
@@ -527,7 +558,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
             const Track& t = previous.getTrack(i);
             std::vector<PlacedClip> v = t.getPlacedClips();
             v.erase(v.begin() + sourceRow);
-            out.emplace_back(t.getId(), t.getName(), std::move(v), t.getChannelFaderGain());
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
         }
         else if (i == targetIdx)
         {
@@ -540,12 +571,12 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
             {
                 v.push_back(p);
             }
-            out.emplace_back(t.getId(), t.getName(), std::move(v), t.getChannelFaderGain());
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
         }
         else
         {
             const Track& t = previous.getTrack(i);
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+            out.push_back(duplicateTrackSameClips(t));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
@@ -592,7 +623,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
     for (int i = 0; i < n; ++i)
     {
         const Track& t = previous.getTrack(i);
-        v.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+        v.push_back(duplicateTrackSameClips(t));
     }
     const Track moved = v[(size_t)s];
     v.erase(v.begin() + s);
@@ -640,11 +671,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRightEdgeTrimmed
         }
         if (rowChanged)
         {
-            out.emplace_back(t.getId(), t.getName(), std::move(v), t.getChannelFaderGain());
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
         }
         else
         {
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+            out.push_back(duplicateTrackSameClips(t));
         }
     }
     if (!any)
@@ -698,11 +729,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
         }
         if (rowChanged)
         {
-            out.emplace_back(t.getId(), t.getName(), std::move(v), t.getChannelFaderGain());
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
         }
         else
         {
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+            out.push_back(duplicateTrackSameClips(t));
         }
     }
     if (!any)
@@ -746,11 +777,103 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGai
         const Track& t = previous.getTrack(i);
         if (i != tIdx)
         {
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), t.getChannelFaderGain());
+            out.push_back(duplicateTrackSameClips(t));
         }
         else
         {
-            out.emplace_back(t.getId(), t.getName(), t.getPlacedClips(), g);
+            out.push_back(duplicateTrackSameClipsWithGain(t, g));
+        }
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const bool trackOff) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+        else
+        {
+            out.push_back(Track(t.getId(),
+                                t.getName(),
+                                t.getPlacedClips(),
+                                t.getChannelFaderGain(),
+                                trackOff,
+                                t.isMuted()));
+        }
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const bool trackMuted) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+        else
+        {
+            out.push_back(Track(t.getId(),
+                                t.getName(),
+                                t.getPlacedClips(),
+                                t.getChannelFaderGain(),
+                                t.isTrackOff(),
+                                trackMuted));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(

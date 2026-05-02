@@ -426,7 +426,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             }
         };
         auto head = std::make_unique<TrackHeaderView>(
-            session_, recorder_, tid, [this] { repaint(); }, onArm, std::move(dragHost));
+            session_, recorder_, transport_, tid, [this] { repaint(); }, onArm, std::move(dragHost));
         addAndMakeVisible(*head);
         headers_.push_back(std::move(head));
         ClipWaveformLaneHost host;

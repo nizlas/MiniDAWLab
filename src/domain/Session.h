@@ -141,8 +141,13 @@ public:
     void moveTrack(TrackId movedTrackId, int destIndex) noexcept;
 
     // [Message thread] Mixer channel volume: linear gain at the channel-fader point (see `Track`).
-    // Clamped to [0, kTrackChannelFaderGainMax]; 0 = fader at −∞ (not a separate mute flag).
+    // Clamped to [0, kTrackChannelFaderGainMax]; 0 = fader at −∞ (not the same as mute flag).
     void setTrackChannelFaderGain(TrackId trackId, float linearGain) noexcept;
+
+    // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
+    void setTrackOff(TrackId trackId, bool trackOff) noexcept;
+    // [Message thread] Mute: engine effective gain zero; stored fader untouched.
+    void setTrackMuted(TrackId trackId, bool muted) noexcept;
 
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.

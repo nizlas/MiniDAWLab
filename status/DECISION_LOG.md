@@ -816,3 +816,36 @@ Out of scope:
 
 - Actual loop playback (wrap at right locator), punch, cycle record, schema bump, **`PlaybackEngine`** /
   audio-thread changes.
+
+---
+
+## Track Off vs Mute (mixer slice; no schema version bump)
+
+Date: 2026-05-01
+
+Context:
+
+Per-track bypass and mute distinct from stored channel fader; transport must not constrain mute;
+**Off** must not apply while Playing or during recording.
+
+Decision:
+
+- **`Track`:** **`trackOff_`** ⇒ **`PlaybackEngine`** skips the entire track (**`continue`**), after the
+  existing “recording lane” transient skip. **`trackMuted_`** ⇒ engine applies **effective gain 0**
+  while still running the clip/overlap loop; **`channelFaderGain_`** unchanged.
+- **`SessionSnapshot`:** **`withTrackOff` / `withTrackMuted`**; all track copies preserve off/mute via
+  shared **`duplicateTrack*`** helpers.
+- **UI:** **`TrackHeaderView`** order **[Power][M][R]**; power drawn with **`juce::Path`** (IEC-style
+  ring + stem), not Unicode. **Off** click: no-op if **`PlaybackIntent::Playing`** or
+  **`RecorderService::isRecording()`** (no session write, repaint, queue, or dialog). **Mute** any time.
+- **Persistence:** optional JSON **`"off"`** / **`"muted"`** on each track (omit when false); same
+  **`ProjectFileV1::kCurrentVersion`**.
+
+Rationale:
+
+Separates “lane not processed” from “processed but silent,” with fader recall when un-muting; the
+transport gate avoids surprising bypass during performance.
+
+Out of scope:
+
+Routing, sends, plugins, automation, general mixer graph; combined transport button redesign.

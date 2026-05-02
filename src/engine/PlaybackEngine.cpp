@@ -281,8 +281,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 // Transient: do not play existing clips on the track being recorded; other tracks mix as usual.
                 continue;
             }
-            const float trackGain = tr.getChannelFaderGain();
-            if (trackGain <= 0.0f)
+            if (tr.isTrackOff())
+            {
+                continue;
+            }
+            const float storedFaderGain = tr.getChannelFaderGain();
+            const float effectiveGain = tr.isMuted() ? 0.0f : storedFaderGain;
+            if (!tr.isMuted() && storedFaderGain <= 0.0f)
             {
                 continue;
             }
@@ -309,7 +314,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     jassert(off >= 0);
                     jassert(off + run <= c.getNumSamples());
                     addClipRunToOutputs(
-                        c, off, run, outFrame0 + silencePrefix + out0, numOutputChannels, outputChannelData, trackGain);
+                        c, off, run, outFrame0 + silencePrefix + out0, numOutputChannels, outputChannelData, effectiveGain);
                 }
                 t += run;
                 out0 += run;

@@ -39,6 +39,10 @@ struct ProjectFileTrackV1
     std::vector<ProjectFileClipV1> clips;
     // v5: linear gain at channel-fader point (mixer). Omitted in JSON when ~ unity (see writer).
     float channelFaderGain = kTrackChannelVolumeUnityGain;
+    /// Skipped entirely by playback (JSON key `"off"`). Omitted when false.
+    bool off = false;
+    /// Effective output muted at engine; fader untouched (JSON `"muted"`). Omitted when false.
+    bool muted = false;
 };
 
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.

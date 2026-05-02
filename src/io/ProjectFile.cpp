@@ -47,6 +47,14 @@ namespace
         {
             to->setProperty("channelFaderGain", (double)t.channelFaderGain);
         }
+        if (t.off)
+        {
+            to->setProperty("off", true);
+        }
+        if (t.muted)
+        {
+            to->setProperty("muted", true);
+        }
         return juce::var(to.get());
     }
 
@@ -357,6 +365,18 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 trk.channelFaderGain = juce::jlimit(
                     0.0f, kTrackChannelFaderGainMax, (float)(double)gv);
             }
+        }
+        {
+            const juce::var& ov = tv.getProperty("off", {});
+            if (ov.isBool())
+                trk.off = (bool)ov;
+            else if (ov.isInt() || ov.isInt64() || ov.isDouble())
+                trk.off = static_cast<int>(static_cast<double>(ov) + 0.5) != 0;
+            const juce::var& mv = tv.getProperty("muted", {});
+            if (mv.isBool())
+                trk.muted = (bool)mv;
+            else if (mv.isInt() || mv.isInt64() || mv.isDouble())
+                trk.muted = static_cast<int>(static_cast<double>(mv) + 0.5) != 0;
         }
 
         const juce::var& clipsV = tv.getProperty("clips", {});

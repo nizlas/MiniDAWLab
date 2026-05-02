@@ -614,6 +614,39 @@ void Session::setTrackChannelFaderGain(const TrackId trackId, float linearGain) 
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::setTrackOff(const TrackId trackId, const bool trackOff) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->findTrackIndexById(trackId) < 0)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTrackOff(*current, trackId, trackOff);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+void Session::setTrackMuted(const TrackId trackId, const bool muted) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->findTrackIndexById(trackId) < 0)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackMuted(*current, trackId, muted);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::clearClip() noexcept
 {
     // “No file”: one **empty** default track (id 1), same as a fresh `Session` — not the shared
@@ -944,7 +977,9 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
             trDto.id,
             trDto.name,
             std::move(placed),
-            juce::jlimit(0.0f, kTrackChannelFaderGainMax, trDto.channelFaderGain));
+            juce::jlimit(0.0f, kTrackChannelFaderGainMax, trDto.channelFaderGain),
+            trDto.off,
+            trDto.muted);
     }
 
     if (built.empty())
