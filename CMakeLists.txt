@@ -26,6 +26,7 @@ target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_sources(MiniDAWLab PRIVATE
     src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginDiscovery.cpp
     src/plugins/PluginEditorWindows.cpp
     src/audio/AudioDeviceInfo.cpp
     src/audio/LatencySettingsStore.cpp

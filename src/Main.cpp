@@ -51,6 +51,7 @@
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/PluginDiscovery.h"
 #include "io/AudioFileLoader.h"
 #include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
@@ -78,6 +79,12 @@ namespace
     // Temporary: log + on-screen line for keys reaching MainWindow::routeShortcut. Leave `false` in
     // normal use (no extra layout row; `if constexpr` strips the UI).
     constexpr bool kShowShortcutDiagnostics = false;
+
+    [[nodiscard]] juce::String instrumentVst3InsertBlockedMessage()
+    {
+        return juce::String{
+            "This plugin appears to be an instrument. MiniDAWLab does not support instrument inserts on audio tracks yet."};
+    }
 
     [[nodiscard]] juce::String hex8(const juce::uint32 x)
     {
@@ -847,10 +854,16 @@ private:
                     self->sessionHistory_.record(label, snap, snap, std::move(copy));
                 });
             trackLanesView.setTrackHeaderPluginHost(
-                { [this](const TrackId tid) { beginLoadVst3ForTrack(tid); },
+                { [this](const TrackId tid) { showVst3PluginPickerForTrack(tid, this); },
                   [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
                   [this](const TrackId tid) { pluginHost_.openGenericParamsEditor(tid); },
                   [this](const TrackId tid) { pluginHost_.removePlugin(tid); } });
+            inspectorView_.setInspectorPluginHost({
+                [this](const TrackId tid) { return pluginHost_.hasPluginOnTrack(tid); },
+                [this](const TrackId tid) { return pluginHost_.getPluginDisplayNameForTrack(tid); },
+                [this](const TrackId tid) { showVst3PluginPickerForTrack(tid, &inspectorView_); },
+                [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
+                [this](const TrackId tid) { pluginHost_.removePlugin(tid); } });
             trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
                 if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
                     || recorder_.isRecording())
@@ -1850,6 +1863,131 @@ private:
             });
         }
 
+        void showVst3PluginPickerForTrack(const TrackId trackId, juce::Component* anchor)
+        {
+            if (trackId == kInvalidTrackId)
+            {
+                return;
+            }
+            juce::FileSearchPath combined = mini_daw::getStandardVst3SearchPaths();
+            const juce::FileSearchPath userPaths = mini_daw::loadUserVst3SearchPaths();
+            for (int i = 0; i < userPaths.getNumPaths(); ++i)
+            {
+                combined.add(userPaths[i], -1);
+            }
+            auto scan = mini_daw::scanForVst3Plugins(combined);
+
+            juce::PopupMenu menu;
+            juce::PopupMenu discovered;
+            if (scan.entries.empty())
+            {
+                discovered.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+            }
+            else
+            {
+                constexpr int kFoundBase = 1000;
+                for (size_t i = 0; i < scan.entries.size(); ++i)
+                {
+                    const auto& en = scan.entries[i];
+                    juce::PopupMenu::Item item(
+                        en.support == mini_daw::PluginPickerSupport::SupportedCandidate
+                            ? en.displayName
+                            : en.displayName + "  (" + en.unsupportedReason + ")");
+                    item.itemID = static_cast<int>(kFoundBase + static_cast<int>(i));
+                    item.setEnabled(en.support == mini_daw::PluginPickerSupport::SupportedCandidate);
+                    discovered.addItem(item);
+                }
+            }
+            menu.addSubMenu("Discovered VST3 plugins", discovered);
+            menu.addSeparator();
+            menu.addItem(1, "Add VST3 Folder...");
+            menu.addItem(2, "Load Specific VST3...");
+
+            juce::Component* const target = (anchor != nullptr) ? anchor : this;
+            juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+            std::vector<mini_daw::PluginDiscoveryEntry> entries = std::move(scan.entries);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(target),
+                [safeThis, trackId, entries = std::move(entries), anchor](const int result) {
+                    if (safeThis == nullptr || result == 0)
+                    {
+                        return;
+                    }
+                    if (result == 1)
+                    {
+                        safeThis->beginAddVst3FolderForTrack(trackId, anchor);
+                        return;
+                    }
+                    if (result == 2)
+                    {
+                        safeThis->beginLoadVst3ForTrack(trackId);
+                        return;
+                    }
+                    constexpr int kFoundBase = 1000;
+                    const size_t idx = static_cast<size_t>(result - kFoundBase);
+                    if (idx >= entries.size())
+                    {
+                        return;
+                    }
+                    if (mini_daw::classifyVst3Candidate(entries[idx].file.getFileNameWithoutExtension())
+                        == mini_daw::PluginPickerSupport::UnsupportedInstrument)
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "VST3", instrumentVst3InsertBlockedMessage());
+                        safeThis->inspectorView_.refreshFromSession();
+                        return;
+                    }
+                    const juce::Result r
+                        = safeThis->pluginHost_.loadVst3FromFile(trackId, entries[idx].file);
+                    if (!r.wasOk())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "VST3", r.getErrorMessage());
+                    }
+                    safeThis->inspectorView_.refreshFromSession();
+                });
+        }
+
+        void beginAddVst3FolderForTrack(const TrackId trackId, juce::Component* anchor)
+        {
+            if (trackId == kInvalidTrackId)
+            {
+                return;
+            }
+            if (vst3FolderChooserInFlight_)
+            {
+                return;
+            }
+            vst3FolderChooserInFlight_ = true;
+            const auto chooserFlags = juce::FileBrowserComponent::openMode
+                                      | juce::FileBrowserComponent::canSelectDirectories;
+            auto chooser = std::make_shared<juce::FileChooser>("Add VST3 search folder", juce::File{}, "*");
+            chooser->launchAsync(
+                chooserFlags,
+                [this, chooser, trackId, anchor](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearFolderChooser
+                    {
+                        bool& flag;
+                        explicit ClearFolderChooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearFolderChooser() { flag = false; }
+                    } clearFlag{ vst3FolderChooserInFlight_ };
+                    const juce::File folder = fc.getResult();
+                    if (!folder.isDirectory())
+                    {
+                        return;
+                    }
+                    juce::FileSearchPath paths = mini_daw::loadUserVst3SearchPaths();
+                    paths.add(folder, -1);
+                    mini_daw::saveUserVst3SearchPaths(paths);
+                    showVst3PluginPickerForTrack(trackId, anchor);
+                });
+        }
+
         void beginLoadVst3ForTrack(const TrackId trackId)
         {
             if (trackId == kInvalidTrackId)
@@ -1880,6 +2018,15 @@ private:
                     const juce::File file = fc.getResult();
                     if (!file.exists())
                     {
+                        inspectorView_.refreshFromSession();
+                        return;
+                    }
+                    if (mini_daw::classifyVst3Candidate(file.getFileNameWithoutExtension())
+                        == mini_daw::PluginPickerSupport::UnsupportedInstrument)
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "VST3", instrumentVst3InsertBlockedMessage());
+                        inspectorView_.refreshFromSession();
                         return;
                     }
                     const juce::Result r = pluginHost_.loadVst3FromFile(trackId, file);
@@ -1888,6 +2035,7 @@ private:
                         juce::AlertWindow::showMessageBoxAsync(
                             juce::AlertWindow::WarningIcon, "VST3", r.getErrorMessage());
                     }
+                    inspectorView_.refreshFromSession();
                 });
         }
 
@@ -2682,6 +2830,7 @@ private:
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
         bool importInFlight_ = false;
         bool vst3ChooserInFlight_ = false;
+        bool vst3FolderChooserInFlight_ = false;
 
         EditTool currentEditTool_ = EditTool::Pointer;
 

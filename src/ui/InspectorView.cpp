@@ -184,6 +184,49 @@ InspectorView::InspectorView(Session& session)
     channelVolumeDbEditor_.addListener(this);
     addAndMakeVisible(channelVolumeDbEditor_);
 
+    insertsSectionLabel_.setText("Inserts", juce::dontSendNotification);
+    insertsSectionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(insertsSectionLabel_);
+
+    addInsertButton_.setButtonText("+ Add insert");
+    addInsertButton_.onClick = [this] {
+        const TrackId t = session_.getActiveTrackId();
+        if (t == kInvalidTrackId || !pluginHost_.requestAdd)
+        {
+            return;
+        }
+        pluginHost_.requestAdd(t);
+    };
+    addAndMakeVisible(addInsertButton_);
+
+    insertSlotNameLabel_.setJustificationType(juce::Justification::centredLeft);
+    insertSlotNameLabel_.setFont(juce::FontOptions(12.0f));
+    insertSlotNameLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(insertSlotNameLabel_);
+
+    editPluginButton_.setButtonText("Edit");
+    editPluginButton_.onClick = [this] {
+        const TrackId t = session_.getActiveTrackId();
+        if (t == kInvalidTrackId || !pluginHost_.requestEdit)
+        {
+            return;
+        }
+        pluginHost_.requestEdit(t);
+    };
+    addAndMakeVisible(editPluginButton_);
+
+    removePluginButton_.setButtonText("Remove");
+    removePluginButton_.onClick = [this] {
+        const TrackId t = session_.getActiveTrackId();
+        if (t == kInvalidTrackId || !pluginHost_.requestRemove)
+        {
+            return;
+        }
+        pluginHost_.requestRemove(t);
+        refreshFromSession();
+    };
+    addAndMakeVisible(removePluginButton_);
+
     refreshFromSession();
 }
 
@@ -215,6 +258,54 @@ void InspectorView::updateElidedTrackTitleDisplay()
     const juce::String shown = elideTextToFitWidth(activeTrackPlainName_, font, maxW);
     activeTrackTitleLabel_.setTooltip(activeTrackPlainName_);
     activeTrackTitleLabel_.setText(shown, juce::dontSendNotification);
+}
+
+void InspectorView::syncInsertsWhenInspectorDisabled()
+{
+    insertsSectionLabel_.setVisible(true);
+    addInsertButton_.setVisible(true);
+    addInsertButton_.setEnabled(false);
+    insertSlotNameLabel_.setVisible(false);
+    editPluginButton_.setVisible(false);
+    removePluginButton_.setVisible(false);
+}
+
+void InspectorView::syncInsertsNoActiveTrack()
+{
+    insertsSectionLabel_.setVisible(true);
+    addInsertButton_.setVisible(true);
+    addInsertButton_.setEnabled(false);
+    insertSlotNameLabel_.setVisible(false);
+    editPluginButton_.setVisible(false);
+    removePluginButton_.setVisible(false);
+}
+
+void InspectorView::syncInsertsForActiveTrack(const TrackId active)
+{
+    if (active == kInvalidTrackId)
+    {
+        syncInsertsNoActiveTrack();
+        return;
+    }
+    insertsSectionLabel_.setVisible(true);
+    const bool hasPlugin = pluginHost_.hasPlugin && pluginHost_.hasPlugin(active);
+    juce::String pname;
+    if (hasPlugin && pluginHost_.displayName)
+    {
+        pname = pluginHost_.displayName(active);
+    }
+
+    addInsertButton_.setVisible(!hasPlugin);
+    addInsertButton_.setEnabled(!hasPlugin && (pluginHost_.requestAdd != nullptr));
+    insertSlotNameLabel_.setVisible(hasPlugin);
+    editPluginButton_.setVisible(hasPlugin);
+    removePluginButton_.setVisible(hasPlugin);
+    if (hasPlugin)
+    {
+        insertSlotNameLabel_.setText("1  " + pname, juce::dontSendNotification);
+        editPluginButton_.setEnabled(pluginHost_.requestEdit != nullptr);
+        removePluginButton_.setEnabled(pluginHost_.requestRemove != nullptr);
+    }
 }
 
 void InspectorView::commitVolumeField()
@@ -261,6 +352,7 @@ void InspectorView::refreshFromSession()
         activeTrackTitleLabel_.setText("—", juce::dontSendNotification);
         activeTrackTitleLabel_.setTooltip({});
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
+        syncInsertsWhenInspectorDisabled();
         return;
     }
     setEnabled(true);
@@ -273,6 +365,7 @@ void InspectorView::refreshFromSession()
         activeTrackTitleLabel_.setText("(no active track)", juce::dontSendNotification);
         activeTrackTitleLabel_.setTooltip({});
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
+        syncInsertsNoActiveTrack();
         return;
     }
     const Track& tr = snap->getTrack(idx);
@@ -282,6 +375,8 @@ void InspectorView::refreshFromSession()
     const float snapGain = tr.getChannelFaderGain();
     const bool switchedTrack = (lastShownTrackId_ != active);
     lastShownTrackId_ = active;
+
+    syncInsertsForActiveTrack(active);
 
     if (channelVolumeDbEditor_.hasKeyboardFocus(false) && !switchedTrack)
         return;
@@ -317,6 +412,26 @@ void InspectorView::resized()
     channelVolumeDbEditor_.setBounds(xStart, yy, kDbValueFieldWidth, kDbValueFieldHeight);
     channelVolumeDbUnitLabel_.setBounds(xStart + kDbValueFieldWidth + kGapValueToDbSuffix, yy,
                                         kDbUnitLabelWidth, kDbValueFieldHeight);
+
+    area.removeFromTop(10);
+    insertsSectionLabel_.setBounds(area.removeFromTop(18));
+    area.removeFromTop(4);
+    constexpr int kInsertButtonH = 24;
+    if (addInsertButton_.isVisible())
+    {
+        addInsertButton_.setBounds(area.removeFromTop(kInsertButtonH));
+    }
+    else
+    {
+        insertSlotNameLabel_.setBounds(area.removeFromTop(20));
+        area.removeFromTop(4);
+        auto btnRow = area.removeFromTop(kInsertButtonH);
+        constexpr int kBtnGap = 4;
+        const int half = (btnRow.getWidth() - kBtnGap) / 2;
+        editPluginButton_.setBounds(btnRow.removeFromLeft(half));
+        btnRow.removeFromLeft(kBtnGap);
+        removePluginButton_.setBounds(btnRow);
+    }
 
     updateElidedTrackTitleDisplay();
 }

@@ -85,6 +85,9 @@ public:
 
     [[nodiscard]] bool hasPluginOnTrack(TrackId trackId) const noexcept;
 
+    /// [Message thread] `AudioPluginInstance::getName()` when a plugin is loaded on the track, else empty.
+    [[nodiscard]] juce::String getPluginDisplayNameForTrack(TrackId trackId) const;
+
     // Called from `PlaybackEngine::audioDeviceAboutToStop` / device restart path.
     void prepareForDevice(double sampleRate, int blockSize, int numOutputChannels);
     void releaseResources();

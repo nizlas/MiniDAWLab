@@ -456,6 +456,20 @@ bool PluginInsertHost::hasPluginOnTrack(const TrackId trackId) const noexcept
     return it != instances_.end() && it->second != nullptr;
 }
 
+juce::String PluginInsertHost::getPluginDisplayNameForTrack(const TrackId trackId) const
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return {};
+    }
+    const auto it = instances_.find(trackId);
+    if (it == instances_.end() || it->second == nullptr)
+    {
+        return {};
+    }
+    return it->second->getName();
+}
+
 void PluginInsertHost::prepareForDevice(const double sampleRate, const int blockSize, const int numOutputChannels)
 {
     scratchMismatchNotified_.store(false, std::memory_order_relaxed);
