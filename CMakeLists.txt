@@ -25,6 +25,8 @@ juce_generate_juce_header(MiniDAWLab)
 target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_sources(MiniDAWLab PRIVATE
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
     src/audio/AudioDeviceInfo.cpp
     src/audio/LatencySettingsStore.cpp
     src/Main.cpp
@@ -56,6 +58,7 @@ target_compile_definitions(MiniDAWLab
     PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_VST3=1
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:MiniDAWLab,JUCE_PRODUCT_NAME>"
         JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:MiniDAWLab,JUCE_VERSION>"
 )
@@ -64,6 +67,7 @@ target_link_libraries(MiniDAWLab
     PRIVATE
         juce::juce_audio_devices
         juce::juce_audio_utils
+        juce::juce_audio_processors
         juce::juce_audio_formats
         juce::juce_gui_extra
         juce::juce_recommended_config_flags

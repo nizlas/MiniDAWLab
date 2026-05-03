@@ -10,8 +10,8 @@
 // Drag past a threshold (from the name strip) is coordinated by `TrackLanesView` (insert line,
 // `Session::moveTrack`). The event lane to the right is not a header-drag target. Invalid drop uses
 // `getForbiddenNoDropMouseCursor` (`ForbiddenCursor.h`). **Right-click** (popup menu) activates the
-// track and offers "Delete Track"; the host implements removal via `Session::removeTrack` with the
-// same Playing/recording guard as other edit actions.
+// track and offers **Delete Track** plus optional **VST3** actions (`Load VST3…`, editors, **Remove
+// VST3**) when `TrackHeaderPluginHost` callbacks are wired from `Main`.
 // =============================================================================
 
 #include "domain/Track.h"
@@ -23,6 +23,15 @@ class RecorderService;
 class Session;
 class Transport;
 class TrackHeaderView;
+
+/// Optional per-track VST3 actions from the header context menu (`Main` / `TrackLanesView`).
+struct TrackHeaderPluginHost
+{
+    std::function<void(TrackId)> loadVst3;
+    std::function<void(TrackId)> openPluginEditor;
+    std::function<void(TrackId)> openPluginParams;
+    std::function<void(TrackId)> removePlugin;
+};
 
 // [Message thread] `TrackLanesView` implements these; Began/Ended pair with move updates.
 struct TrackHeaderDragHost
@@ -43,6 +52,7 @@ public:
         std::function<void()> onActiveChanged,
         std::function<void()> onArmStateChanged,
         std::function<void(TrackId)> onDeleteTrackRequested,
+        TrackHeaderPluginHost pluginHost,
         TrackHeaderDragHost dragHost) noexcept;
 
     void paint(juce::Graphics& g) override;
@@ -83,6 +93,7 @@ private:
     std::function<void()> onActiveChanged_;
     std::function<void()> onArmStateChanged_;
     std::function<void(TrackId)> onDeleteTrackRequested_;
+    TrackHeaderPluginHost pluginHost_;
     TrackHeaderDragHost dragHost_;
     bool headerDragInProgress_ = false;
     /// When non-None: gesture began on that control — do not promote to header-drag.

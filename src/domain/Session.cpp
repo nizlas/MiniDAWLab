@@ -17,6 +17,7 @@
 #include "domain/AudioClip.h"
 #include "io/AudioFileLoader.h"
 #include "io/ProjectFile.h"
+#include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
 
 #include <juce_core/juce_core.h>
@@ -909,7 +910,8 @@ std::shared_ptr<const SessionSnapshot> Session::loadSessionSnapshotForAudioThrea
 
 juce::Result Session::saveProjectToFile(Transport& transport,
                                        const juce::File& file,
-                                       const double deviceSampleRate)
+                                       const double deviceSampleRate,
+                                       PluginInsertHost* pluginHost)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -984,6 +986,20 @@ juce::Result Session::saveProjectToFile(Transport& transport,
             c.visibleLengthSamples = (matN > 0 && eff < fullTail) ? eff : 0;
             tr.clips.push_back(std::move(c));
         }
+        if (pluginHost != nullptr)
+        {
+            const PluginTrackSlot ps = pluginHost->exportSlot(tr.id);
+            if (ps.occupied)
+            {
+                tr.pluginVst3Path = ps.vst3AbsolutePath;
+                tr.pluginIdentifier = ps.pluginIdentifier;
+                if (ps.opaqueState.getSize() > 0)
+                {
+                    tr.pluginStateBase64
+                        = juce::Base64::toBase64(ps.opaqueState.getData(), (int)ps.opaqueState.getSize());
+                }
+            }
+        }
         out.tracks.push_back(std::move(tr));
     }
 
@@ -1003,7 +1019,8 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                                           const juce::File& file,
                                           const double deviceSampleRate,
                                           juce::StringArray& outSkippedClipDetails,
-                                          juce::String& outInfoNote)
+                                          juce::String& outInfoNote,
+                                          PluginInsertHost* pluginHost)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -1138,6 +1155,11 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
         activeTrackId_ = next->getTrack(0).getId();
     }
 
+    if (pluginHost != nullptr)
+    {
+        pluginHost->removeAllPlugins();
+    }
+
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 
     currentProjectFile_ = file;
@@ -1147,6 +1169,41 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     const std::int64_t seekTo
         = juce::jlimit<std::int64_t>(0, hi, static_cast<std::int64_t>(parsed.playheadSamples));
     transport.requestSeek(seekTo);
+
+    if (pluginHost != nullptr && parsed.version >= 8)
+    {
+        for (const auto& trDto : parsed.tracks)
+        {
+            if (trDto.pluginVst3Path.isEmpty())
+            {
+                continue;
+            }
+            PluginTrackSlot slot;
+            slot.occupied = true;
+            slot.vst3AbsolutePath = trDto.pluginVst3Path;
+            slot.pluginIdentifier = trDto.pluginIdentifier;
+            if (trDto.pluginStateBase64.isNotEmpty())
+            {
+                juce::MemoryOutputStream mos;
+                if (!juce::Base64::convertFromBase64(mos, trDto.pluginStateBase64))
+                {
+                    outSkippedClipDetails.add("[plugin] track " + juce::String((juce::int64)trDto.id)
+                                              + " - invalid pluginStateBase64.");
+                }
+                else
+                {
+                    slot.opaqueState.replaceAll(mos.getData(), mos.getDataSize());
+                }
+            }
+            const juce::File plugFile(slot.vst3AbsolutePath);
+            if (!plugFile.exists())
+            {
+                outSkippedClipDetails.add("[plugin] track " + juce::String((juce::int64)trDto.id)
+                                          + " missing " + slot.vst3AbsolutePath);
+            }
+            pluginHost->importSlot(trDto.id, slot);
+        }
+    }
 
     return juce::Result::ok();
 }

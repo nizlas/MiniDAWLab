@@ -181,6 +181,15 @@ TrackLanesView::~TrackLanesView()
     clearCycleRecordingPreviewContext();
 }
 
+void TrackLanesView::setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept
+{
+    trackHeaderPluginHost_ = std::move(host);
+    headers_.clear();
+    lanes_.clear();
+    aggregatedSelectedPlacedClip_.reset();
+    syncTracksFromSession();
+}
+
 void TrackLanesView::timerCallback()
 {
     updateRecordingPreviewOverlaysFromRecorder();
@@ -499,6 +508,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             [this] { repaint(); },
             onArm,
             std::move(onDelete),
+            trackHeaderPluginHost_,
             std::move(dragHost));
         addAndMakeVisible(*head);
         headers_.push_back(std::move(head));

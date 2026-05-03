@@ -9,23 +9,38 @@
 //   redo restores `after`. Never touches disk, Transport, or the audio thread — callers invoke
 //   `Session::restoreSessionSnapshotForUndo` on the message thread only.
 //
+// PHASE 8
+//   A step may optionally include a **plugin slot** before/after for one `TrackId`. Plugin-only
+//   edits use the **same** snapshot pointer for `before` and `after` with a non-empty plugin delta
+//   (`pluginSides.has_value()`). Apply order on undo: restore timeline snapshot, then
+//   `PluginInsertHost::importSlot(trackId, pluginSides->before)`.
+//
 // RECORD
 //   `record` clears the redo deque. Steps are dropped from the front when over capacity.
 //
 // NO-OP / CHANGE DETECTION
-//   Some `Session` mutators always allocate a new snapshot shared_ptr even when the edit was a
-//   semantic no-op, so pointer-identity alone is insufficient. Callers must only invoke `record`
-//   after a mutator that returns success / is pre-validated (see `Main.cpp` `executeUndoableSessionEdit`).
-//   Additionally, `record` ignores `before.get() == after.get()` as a cheap safety net.
+//   Without a plugin delta: ignores if `before.get() == after.get()`. With a plugin delta: records
+//   when `before` and `after` slot snapshots differ; timeline pointers may match.
 // =============================================================================
 
 #include "domain/SessionSnapshot.h"
+#include "plugins/PluginTrackSlot.h"
 
 #include <juce_core/juce_core.h>
 
 #include <deque>
 #include <memory>
 #include <optional>
+
+struct SessionHistoryRestoreBundle
+{
+    /// Always non-null when `popUndo` / `popRedo` returns has_value.
+    std::shared_ptr<const SessionSnapshot> timelineSnapshot;
+    /// When set, restore this plugin slot **after** applying `timelineSnapshot`.
+    std::optional<PluginUndoStepSides> pluginSides {};
+    /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
+    bool isRedo = false;
+};
 
 class SessionHistory
 {
@@ -34,19 +49,21 @@ public:
 
     void clear() noexcept;
 
-    /// [Message thread] Pushes one undo step and clears redo. No-op if either pointer is null or
-    /// both refer to the same snapshot instance.
+    /// [Message thread] Pushes one undo step and clears redo. Without plugin delta: no-op if either
+    /// snapshot pointer is null or both refer to the same instance. With plugin delta: requires
+    /// valid `pluginSides->trackId` and allows identical snapshot pointers when slots differ.
     void record(juce::String label,
                 std::shared_ptr<const SessionSnapshot> before,
-                std::shared_ptr<const SessionSnapshot> after) noexcept;
+                std::shared_ptr<const SessionSnapshot> after,
+                std::optional<PluginUndoStepSides> pluginSides = std::nullopt) noexcept;
 
-    /// [Message thread] Pops one undo step, pushes it onto redo, returns the snapshot to restore
-    /// (`before` of that step). Empty if nothing to undo.
-    [[nodiscard]] std::optional<std::shared_ptr<const SessionSnapshot>> popUndo() noexcept;
+    /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
+    /// restore (`pluginSides` present — caller applies `before` slot).
+    [[nodiscard]] std::optional<SessionHistoryRestoreBundle> popUndo() noexcept;
 
-    /// [Message thread] Pops one redo step, pushes it back onto undo, returns the snapshot to
-    /// restore (`after` of that step). Empty if nothing to redo.
-    [[nodiscard]] std::optional<std::shared_ptr<const SessionSnapshot>> popRedo() noexcept;
+    /// [Message thread] Pops one redo step back onto undo; returns bundle (`pluginSides->after` if
+    /// present).
+    [[nodiscard]] std::optional<SessionHistoryRestoreBundle> popRedo() noexcept;
 
 private:
     struct Step
@@ -54,6 +71,7 @@ private:
         juce::String label;
         std::shared_ptr<const SessionSnapshot> before;
         std::shared_ptr<const SessionSnapshot> after;
+        std::optional<PluginUndoStepSides> pluginSides;
     };
 
     int maxSteps_;

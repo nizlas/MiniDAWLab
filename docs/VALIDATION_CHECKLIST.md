@@ -268,6 +268,17 @@ When validating **simple mono input recording** (`docs/PHASE_PLAN.md` Phase 4, `
 - **Unsaved project:** with **no** saved on-disk project path, recording **fails** with a **visible** message (e.g. *“Save the project before recording.”*). **No** transport start, **no** orphan take file, **no** empty committed clip.
 - **Narrow slice:** no mixer, pan, sends, routing matrix, split/cut, fades, plugin processing, or full Cubase-like audio settings in this phase.
 
+## Phase 8: minimal VST3 insert hosting (single slot per track)
+
+When validating **VST3 plugin insert hosting** (`docs/PHASE_PLAN.md` Phase 8, `docs/ARCHITECTURE_PRINCIPLES.md` Plugin host section):
+
+- **No plugin in `SessionSnapshot`:** `SessionSnapshot` / `Track` value types are unchanged; live `AudioPluginInstance` objects live only in `PluginInsertHost` on the message thread.
+- **Audio thread:** `PlaybackEngine` acquire-loads the active processor view only; no `Session` access for plugin processing; no allocation or locks on the plugin path; scratch buffers are pre-sized at `prepareToPlay` / device start.
+- **Signal order:** clip coverage → optional VST3 **`processBlock`** on per-track scratch → channel fader / mute → cross-track sum (unchanged cross-track rule).
+- **Persistence:** save writes **v8** with optional per-track plugin fields (absolute `.vst3` path, identifier, Base64 state); load accepts older versions; missing or incompatible plugin appends a **`[plugin]`** line to the existing skipped-details list; session snapshot still applies.
+- **Undo/redo:** plugin slot or post-edit state integrates with `SessionHistory` (plugin-only steps may use identical before/after snapshot pointers when a plugin delta is recorded); Ctrl+Z / redo restore plugin state as well as the timeline when the step carries a plugin delta.
+- **Editors:** native plugin UI uses JUCE `AudioProcessorEditor` in a `DocumentWindow`; optional generic parameter window is UI-only and does not replace native editor.
+
 ## Phase 1 Validation Checklist
 
 For Phase 1 specifically, validate all of the following:

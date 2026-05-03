@@ -7,6 +7,31 @@ It exists to capture concrete decisions, rationale, and limits that may matter l
 
 ---
 
+## 2026-05-02 — Phase 8: minimal **VST3** insert hosting (one slot per track)
+
+**Scope:** `PluginInsertHost` (message-thread ownership of `AudioPluginInstance` per `TrackId`), atomic active-processor view for `PlaybackEngine`, **ProjectFile v8** optional per-track plugin path + identifier + opaque state (Base64), UI hooks on track headers (FX / Edit / Params / Remove). **Not** in `SessionSnapshot`.
+
+**Philosophy**
+
+- Keeps the existing immutable timeline snapshot model intact; plugins are **live mutable** objects and must not be copied inside `SessionSnapshot::with*` factories.
+- **Pre-fader** insert: effect runs on the track’s summed clip audio **before** `Track::channelFaderGain` / mute are applied in the engine (matches the conceptual ordering already described in `Track.h` comments).
+- **In-process** hosting only — no sandbox; a crashing plugin crashes the app (accepted for this learning slice).
+
+**Persistence**
+
+- v8 adds optional track fields: absolute `.vst3` path, plugin identifier string, Base64 `getStateInformation` blob. Paths are **not** under `Audio/` and are not subject to the clip `Audio/`-relative rule.
+- Load failures skip plugin restore with a **`[plugin]`** entry in the existing `outSkippedClipDetails` path.
+
+**Undo**
+
+- `SessionHistory` steps may carry an optional **plugin slot before/after** pair for the same undo stack as timeline edits; plugin-only edits may use identical before/after **snapshot** pointers when the plugin delta is non-empty.
+
+**Deferred**
+
+- Insert chains, sends/buses, PDC, automation lanes, plugin scan cache UI, AU / other formats, out-of-process hosting.
+
+---
+
 ## 2026-05-01 — Project audio paths: **strict `Audio/`-relative** `sourcePath` strings
 
 **Scope:** [`Session.cpp`](src/domain/Session.cpp) persistence (`saveProjectToFile` / `loadProjectFromFile`), [`ProjectFile.h`](src/io/ProjectFile.h) documentation only — **`ProjectFileV1::kCurrentVersion`** unchanged (**7**).

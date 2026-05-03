@@ -235,7 +235,7 @@ Examples of risky patterns:
 Do not add architectural concepts that are not explicitly needed for the current phase.
 
 In particular, do not introduce major subsystems for:
-- plugin hosting
+- plugin hosting **beyond** the minimal per-track single VST3 insert slice documented as **Phase 8** in `docs/PHASE_PLAN.md`
 - mixer/routing frameworks
 - background asset pipelines
 - generalized track graphs
@@ -244,6 +244,14 @@ In particular, do not introduce major subsystems for:
 - multi-threaded job systems
 
 unless those are explicitly added to the steering documents first.
+
+## Plugin host — ownership and threading (Phase 8)
+
+- **Live plugin instances are not part of `SessionSnapshot`.** They are mutable, may own GUI editors, and must be constructed and torn down on the **message thread** only.
+- A **`PluginInsertHost`** (name in code is an implementation detail) **owns** `TrackId → std::unique_ptr<juce::AudioPluginInstance>` on the message thread. It publishes a separate **atomic `shared_ptr` to an immutable “active processor view”** for the audio callback (same handoff *idea* as `Session::sessionSnapshot_`, but a different pointer and payload).
+- **`prepareToPlay` / `releaseResources` / loading state / opening editors** run on the message thread. The audio callback must only **read** the active view and call **`processBlock`** on already-prepared processors into **pre-sized scratch buffers** — no locks, no heap allocation on that path, no `Session` access.
+- **Persistence:** project file v8 stores plugin **file path** (absolute `.vst3` on disk), a stable **identifier string** for mismatch detection, and an opaque **`getStateInformation`** blob (e.g. Base64). This is **not** clip PCM and does not use the `Audio/` project-relative audio policy.
+- **Realtime caveat:** third-party `processBlock` code is **not** guaranteed to be allocation-free or lock-free; this is accepted for Phase 8 and must not be mistaken for a certification of realtime safety.
 
 ## Modern C++ Principle
 

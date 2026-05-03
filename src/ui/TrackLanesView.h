@@ -17,7 +17,7 @@
 //   `resized`), `Session::moveTrack` on commit; lane / clip drag unchanged). No-op drag: red line
 //   follows pointer y; valid reorder: green line at snapped gap. **Delete track:** `TrackHeaderView`
 //   posts `onDeleteTrackRequested(TrackId)` from its context menu; `Main` wires that to
-//   `Session::removeTrack` (not keyboard Delete).
+//   `Session::removeTrack` (not keyboard Delete). Optional **VST3** actions via `setTrackHeaderPluginHost`.
 //
 // See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`, `TrackHeaderView`.
 // =============================================================================
@@ -26,6 +26,7 @@
 #include "domain/PlacedClip.h"
 #include "engine/RecorderService.h"
 #include "ui/ClipWaveformView.h"
+#include "ui/TrackHeaderView.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -44,7 +45,6 @@ namespace juce
 class Session;
 class Transport;
 class TimelineViewportModel;
-class TrackHeaderView;
 class LatencySettingsStore;
 
 // ---------------------------------------------------------------------------
@@ -114,6 +114,9 @@ public:
     // [Message thread] Wired once by `Main`: header context menu "Delete Track" invokes this with the
     // clicked track id (Playing/recording + validity handled by host).
     void setOnDeleteTrackRequested(std::function<void(TrackId)> onDeleteTrackRequested) noexcept;
+
+    // [Message thread] Wired once by `Main`: header context menu VST3 / editor / remove (optional).
+    void setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept;
 
     // [Message thread] Wired once by `Main`: committed clip move (real gesture only; see `ClipWaveformView`).
     void setOnUndoableClipMoveRequested(
@@ -195,6 +198,7 @@ private:
 
     std::optional<std::pair<TrackId, PlacedClipId>> aggregatedSelectedPlacedClip_;
 
+    TrackHeaderPluginHost trackHeaderPluginHost_{};
     std::function<void(TrackId)> onDeleteTrackRequested_;
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;

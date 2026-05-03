@@ -43,12 +43,16 @@ struct ProjectFileTrackV1
     bool off = false;
     /// Effective output muted at engine; fader untouched (JSON `"muted"`). Omitted when false.
     bool muted = false;
+    // v8: optional per-track VST3 insert (absolute path to bundle / `.vst3`; omitted when no insert).
+    juce::String pluginVst3Path;
+    juce::String pluginIdentifier;
+    juce::String pluginStateBase64;
 };
 
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 7;
+    static constexpr int kCurrentVersion = 8;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

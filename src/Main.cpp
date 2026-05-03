@@ -9,8 +9,8 @@
 //   not implement playback math or file decoding — that lives in the engine / session / io layers.
 //
 // STARTUP ORDER (see initialise) — read before changing tear order
-//   1. transport, session, recorderService, playbackEngine  (non-owning: engine points at
-//      transport+session+recorder; recorder does not own Transport/Session)
+//   1. transport, session, recorderService, pluginInsertHost, playbackEngine  (non-owning: engine
+//      points at transport+session+recorder+pluginHost; recorder does not own Transport/Session)
 //   2. deviceManager.initialiseWithDefaultDevices  —  **1 in / 2 out** when possible; falls back
 //      to output-only (0, 2) with a log if the system cannot open an input (playback still works).
 //   3. addAudioCallback(playbackEngine)  —  the engine will now receive audioDeviceIO* calls
@@ -20,7 +20,7 @@
 //   1. destroy main window
 //   2. removeAudioCallback(playbackEngine)
 //   3. closeAudioDevice
-//   4. destroy playbackEngine, then recorderService, then session, transport
+//   4. destroy playbackEngine, then pluginInsertHost, then recorderService, then session, transport
 //
 // THREADING
 //   juce::JUCEApplication::initialise / shutdown and all UI (buttons, file chooser, paint) are
@@ -50,6 +50,7 @@
 #include "engine/CountInClickOutput.h"
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
+#include "plugins/PluginInsertHost.h"
 #include "io/AudioFileLoader.h"
 #include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
@@ -531,8 +532,9 @@ public:
         // device init below.
         recorderService = std::make_unique<RecorderService>();
         countInOutput_ = std::make_unique<CountInClickOutput>();
+        pluginInsertHost_ = std::make_unique<PluginInsertHost>();
         playbackEngine = std::make_unique<PlaybackEngine>(
-            *transport, *session, recorderService.get(), countInOutput_.get());
+            *transport, *session, recorderService.get(), countInOutput_.get(), pluginInsertHost_.get());
 
         // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present
         // (Stage 2); else pick defaults. Prefer **1 input, 2 outputs**; fall back to output-only.
@@ -568,6 +570,7 @@ public:
             getApplicationName(),
             *transport,
             *session,
+            *pluginInsertHost_,
             deviceManager,
             *recorderService,
             *countInOutput_,
@@ -592,6 +595,7 @@ public:
         // After callback removal, drop engine (it held `recorderService.get()` for audio thread) then
         // the recorder, then the rest. `RecorderService` is independent of Transport/Session.
         playbackEngine.reset();
+        pluginInsertHost_.reset();
         countInOutput_.reset();
         recorderService.reset();
         session.reset();
@@ -611,6 +615,7 @@ private:
     public:
         TransportControlsContent(Transport& transportIn,
                                  Session& sessionIn,
+                                 PluginInsertHost& pluginInsertHostIn,
                                  juce::AudioDeviceManager& deviceManagerIn,
                                  RecorderService& recorderIn,
                                  CountInClickOutput& countInClicksIn,
@@ -618,6 +623,7 @@ private:
                                  PlaybackEngine& playbackEngineIn)
             : transport(transportIn)
             , session(sessionIn)
+            , pluginHost_(pluginInsertHostIn)
             , deviceManager(deviceManagerIn)
             , recorder_(recorderIn)
             , countInClicks_(countInClicksIn)
@@ -707,6 +713,24 @@ private:
             addAndMakeVisible(inspectorView_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
+            pluginHost_.setUndoRecorder(
+                this,
+                [](void* ctx, const juce::String& label, const PluginUndoStepSides& sides) {
+                    auto* const self = static_cast<TransportControlsContent*>(ctx);
+                    const std::shared_ptr<const SessionSnapshot> snap
+                        = self->session.loadSessionSnapshotForAudioThread();
+                    if (snap == nullptr)
+                    {
+                        return;
+                    }
+                    PluginUndoStepSides copy = sides;
+                    self->sessionHistory_.record(label, snap, snap, std::move(copy));
+                });
+            trackLanesView.setTrackHeaderPluginHost(
+                { [this](const TrackId tid) { beginLoadVst3ForTrack(tid); },
+                  [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
+                  [this](const TrackId tid) { pluginHost_.openGenericParamsEditor(tid); },
+                  [this](const TrackId tid) { pluginHost_.removePlugin(tid); } });
             trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
                 if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
                     || recorder_.isRecording())
@@ -726,6 +750,7 @@ private:
                         {
                             return false;
                         }
+                        pluginHost_.evictPluginForTrackNoUndo(tid);
                         session.removeTrack(tid);
                         syncViewportFromSession();
                         trackLanesView.syncTracksFromSession();
@@ -1159,12 +1184,16 @@ private:
             {
                 return;
             }
-            const std::optional<std::shared_ptr<const SessionSnapshot>> restored = sessionHistory_.popUndo();
-            if (!restored.has_value() || *restored == nullptr)
+            const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popUndo();
+            if (!bundle.has_value() || bundle->timelineSnapshot == nullptr)
             {
                 return;
             }
-            session.restoreSessionSnapshotForUndo(*restored);
+            session.restoreSessionSnapshotForUndo(bundle->timelineSnapshot);
+            if (bundle->pluginSides.has_value())
+            {
+                pluginHost_.importSlot(bundle->pluginSides->trackId, bundle->pluginSides->before);
+            }
             refreshAfterSessionSnapshotRestore();
         }
 
@@ -1179,12 +1208,16 @@ private:
             {
                 return;
             }
-            const std::optional<std::shared_ptr<const SessionSnapshot>> restored = sessionHistory_.popRedo();
-            if (!restored.has_value() || *restored == nullptr)
+            const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popRedo();
+            if (!bundle.has_value() || bundle->timelineSnapshot == nullptr)
             {
                 return;
             }
-            session.restoreSessionSnapshotForUndo(*restored);
+            session.restoreSessionSnapshotForUndo(bundle->timelineSnapshot);
+            if (bundle->pluginSides.has_value())
+            {
+                pluginHost_.importSlot(bundle->pluginSides->trackId, bundle->pluginSides->after);
+            }
             refreshAfterSessionSnapshotRestore();
         }
 
@@ -1658,6 +1691,47 @@ private:
             });
         }
 
+        void beginLoadVst3ForTrack(const TrackId trackId)
+        {
+            if (trackId == kInvalidTrackId)
+            {
+                return;
+            }
+            if (vst3ChooserInFlight_)
+            {
+                return;
+            }
+            vst3ChooserInFlight_ = true;
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>("Load VST3", juce::File{}, "*.vst3");
+            chooser->launchAsync(
+                fileChooserFlags,
+                [this, chooser, trackId](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearVst3Chooser
+                    {
+                        bool& flag;
+                        explicit ClearVst3Chooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearVst3Chooser() { flag = false; }
+                    } clearFlag{ vst3ChooserInFlight_ };
+                    const juce::File file = fc.getResult();
+                    if (!file.exists())
+                    {
+                        return;
+                    }
+                    const juce::Result r = pluginHost_.loadVst3FromFile(trackId, file);
+                    if (!r.wasOk())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "VST3", r.getErrorMessage());
+                    }
+                });
+        }
+
         void saveProjectClicked()
         {
             juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
@@ -1674,8 +1748,8 @@ private:
             // Normal save: no chooser. Explicit "Save As" / "New project" is deferred.
             if (session.hasKnownProjectFile())
             {
-                const juce::Result r
-                    = session.saveProjectToFile(transport, session.getCurrentProjectFile(), sampleRate);
+                const juce::Result r = session.saveProjectToFile(
+                    transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -1743,7 +1817,8 @@ private:
                         return;
                     }
                 }
-                const juce::Result r = session.saveProjectToFile(transport, projectFile, sampleRate);
+                const juce::Result r
+                    = session.saveProjectToFile(transport, projectFile, sampleRate, &pluginHost_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -1781,7 +1856,7 @@ private:
                 juce::StringArray skipped;
                 juce::String infoNote;
                 const juce::Result r
-                    = session.loadProjectFromFile(transport, f, sampleRate, skipped, infoNote);
+                    = session.loadProjectFromFile(transport, f, sampleRate, skipped, infoNote, &pluginHost_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -2413,6 +2488,7 @@ private:
 
         Transport& transport;
         Session& session;
+        PluginInsertHost& pluginHost_;
         juce::AudioDeviceManager& deviceManager;
         RecorderService& recorder_;
         CountInClickOutput& countInClicks_;
@@ -2446,6 +2522,7 @@ private:
 
         /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
         bool importInFlight_ = false;
+        bool vst3ChooserInFlight_ = false;
 
         EditTool currentEditTool_ = EditTool::Pointer;
 
@@ -2481,6 +2558,7 @@ private:
         MainWindow(const juce::String& name,
                    Transport& transport,
                    Session& session,
+                   PluginInsertHost& pluginInsertHost,
                    juce::AudioDeviceManager& deviceManager,
                    RecorderService& recorderService,
                    CountInClickOutput& countInClicks,
@@ -2496,6 +2574,7 @@ private:
             setContentOwned(
                 new TransportControlsContent(transport,
                                              session,
+                                             pluginInsertHost,
                                              deviceManager,
                                              recorderService,
                                              countInClicks,
@@ -2666,6 +2745,7 @@ private:
     std::unique_ptr<RecorderService> recorderService;
     /// Count-in metronome clicks to device only; coordinator state lives in `TransportControlsContent`.
     std::unique_ptr<CountInClickOutput> countInOutput_;
+    std::unique_ptr<PluginInsertHost> pluginInsertHost_;
     std::unique_ptr<PlaybackEngine> playbackEngine;
     std::unique_ptr<LatencySettingsStore> latencySettingsStore;
     juce::AudioDeviceManager deviceManager;

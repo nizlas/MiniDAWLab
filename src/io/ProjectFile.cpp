@@ -55,6 +55,18 @@ namespace
         {
             to->setProperty("muted", true);
         }
+        if (t.pluginVst3Path.isNotEmpty())
+        {
+            to->setProperty("pluginVst3Path", t.pluginVst3Path);
+            if (t.pluginIdentifier.isNotEmpty())
+            {
+                to->setProperty("pluginIdentifier", t.pluginIdentifier);
+            }
+            if (t.pluginStateBase64.isNotEmpty())
+            {
+                to->setProperty("pluginStateBase64", t.pluginStateBase64);
+            }
+        }
         return juce::var(to.get());
     }
 
@@ -377,6 +389,12 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 trk.muted = (bool)mv;
             else if (mv.isInt() || mv.isInt64() || mv.isDouble())
                 trk.muted = static_cast<int>(static_cast<double>(mv) + 0.5) != 0;
+        }
+        if (ver >= 8)
+        {
+            trk.pluginVst3Path = tv.getProperty("pluginVst3Path", {}).toString();
+            trk.pluginIdentifier = tv.getProperty("pluginIdentifier", {}).toString();
+            trk.pluginStateBase64 = tv.getProperty("pluginStateBase64", {}).toString();
         }
 
         const juce::var& clipsV = tv.getProperty("clips", {});

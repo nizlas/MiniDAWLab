@@ -166,6 +166,7 @@ TrackHeaderView::TrackHeaderView(
     std::function<void()> onActiveChanged,
     std::function<void()> onArmStateChanged,
     std::function<void(TrackId)> onDeleteTrackRequested,
+    TrackHeaderPluginHost pluginHost,
     TrackHeaderDragHost dragHost) noexcept
     : session_(session)
     , recorder_(recorder)
@@ -174,6 +175,7 @@ TrackHeaderView::TrackHeaderView(
     , onActiveChanged_(std::move(onActiveChanged))
     , onArmStateChanged_(std::move(onArmStateChanged))
     , onDeleteTrackRequested_(std::move(onDeleteTrackRequested))
+    , pluginHost_(std::move(pluginHost))
     , dragHost_(std::move(dragHost))
 {
     jassert(trackId_ != kInvalidTrackId);
@@ -265,16 +267,67 @@ void TrackHeaderView::mouseDown(const juce::MouseEvent& e)
         deleteItem.isEnabled = !editLocked;
         menu.addItem(deleteItem);
 
+        constexpr int kLoadVst3MenuId = 10;
+        constexpr int kPluginEditorMenuId = 11;
+        constexpr int kPluginParamsMenuId = 12;
+        constexpr int kRemovePluginMenuId = 13;
+        if (pluginHost_.loadVst3 != nullptr)
+        {
+            juce::PopupMenu::Item loadItem;
+            loadItem.itemID = kLoadVst3MenuId;
+            loadItem.text = "Load VST3…";
+            loadItem.isEnabled = !editLocked;
+            menu.addItem(loadItem);
+        }
+        if (pluginHost_.openPluginEditor != nullptr)
+        {
+            juce::PopupMenu::Item edItem;
+            edItem.itemID = kPluginEditorMenuId;
+            edItem.text = "Plugin editor…";
+            edItem.isEnabled = !editLocked;
+            menu.addItem(edItem);
+        }
+        if (pluginHost_.openPluginParams != nullptr)
+        {
+            juce::PopupMenu::Item parItem;
+            parItem.itemID = kPluginParamsMenuId;
+            parItem.text = "Plugin parameters…";
+            parItem.isEnabled = !editLocked;
+            menu.addItem(parItem);
+        }
+        if (pluginHost_.removePlugin != nullptr)
+        {
+            juce::PopupMenu::Item rmItem;
+            rmItem.itemID = kRemovePluginMenuId;
+            rmItem.text = "Remove VST3";
+            rmItem.isEnabled = !editLocked;
+            menu.addItem(rmItem);
+        }
+
         juce::Component::SafePointer<TrackHeaderView> safeThis(this);
         menu.showMenuAsync(
             juce::PopupMenu::Options().withTargetComponent(this),
-            [safeThis, kDeleteTrackMenuId](const int result) {
+            [safeThis,
+             kDeleteTrackMenuId,
+             kLoadVst3MenuId,
+             kPluginEditorMenuId,
+             kPluginParamsMenuId,
+             kRemovePluginMenuId](const int result) {
                 if (safeThis == nullptr)
                 {
                     return;
                 }
-                if (result != kDeleteTrackMenuId)
+                if (result == kDeleteTrackMenuId)
                 {
+                    if (safeThis->transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                        || safeThis->recorder_.isRecording())
+                    {
+                        return;
+                    }
+                    if (safeThis->onDeleteTrackRequested_ != nullptr)
+                    {
+                        safeThis->onDeleteTrackRequested_(safeThis->trackId_);
+                    }
                     return;
                 }
                 if (safeThis->transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
@@ -282,9 +335,22 @@ void TrackHeaderView::mouseDown(const juce::MouseEvent& e)
                 {
                     return;
                 }
-                if (safeThis->onDeleteTrackRequested_ != nullptr)
+                const TrackId tid = safeThis->trackId_;
+                if (result == kLoadVst3MenuId && safeThis->pluginHost_.loadVst3 != nullptr)
                 {
-                    safeThis->onDeleteTrackRequested_(safeThis->trackId_);
+                    safeThis->pluginHost_.loadVst3(tid);
+                }
+                else if (result == kPluginEditorMenuId && safeThis->pluginHost_.openPluginEditor != nullptr)
+                {
+                    safeThis->pluginHost_.openPluginEditor(tid);
+                }
+                else if (result == kPluginParamsMenuId && safeThis->pluginHost_.openPluginParams != nullptr)
+                {
+                    safeThis->pluginHost_.openPluginParams(tid);
+                }
+                else if (result == kRemovePluginMenuId && safeThis->pluginHost_.removePlugin != nullptr)
+                {
+                    safeThis->pluginHost_.removePlugin(tid);
                 }
             });
         return;

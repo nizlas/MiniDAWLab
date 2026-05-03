@@ -3,8 +3,8 @@
 // =============================================================================
 //
 // ROLE IN THE ARCHITECTURE
-//   JUCE’s audio callback. We fill the device’s float buffers from `PlacedClip` data via the
-//   immutable `SessionSnapshot` and advance `Transport`’s playhead. No file decode, no UI.
+//   JUCE's audio callback. We fill the device's float buffers from `PlacedClip` data via the
+//   immutable `SessionSnapshot` and advance `Transport`'s playhead. No file decode, no UI.
 //
 // PHASE 3 (minimal multi-track): **Within each track**, Phase 2 still applies: overlapping clips
 //   are ordered; the **smallest** index in that **lane** that covers a timeline instant wins for
@@ -13,6 +13,11 @@
 //   multiplying by its `Track::channelFaderGain` (mixer channel volume at the fader point; not
 //   clip/pre-gain — see `Track`). Future post-fader taps or inserts may need per-track staging buffers;
 //   not implemented — gain is applied at track-output merge into the device buffer today.
+//
+// PHASE 8 (per-track VST3 insert): when `audioThread_hasActivePluginForTrack` reports an active stereo
+//   insert, clip audio is written pre-fader into `PluginInsertHost`'s stereo scratch, processed in
+//   place, then summed into the device buffer with the same effective fader/mute gain as the dry path.
+//   Mono device: (L+R)*0.5 into output 0. Stereo+: L→0, R→1; higher channels unchanged by inserts.
 //
 // WHERE THIS SITS
 //   `Session` publish → acquire-load of `const SessionSnapshot` (refcount) here; `Transport` seek
@@ -32,6 +37,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -123,14 +129,93 @@ namespace
             }
         }
     }
+
+    /// Pre-fader: copies material into stereo scratch [L,R]. Mono duplicates; stereo maps 0→L, 1→R.
+    void copyClipRunToStereoScratch(const AudioClip& clip,
+                                    int offInMaterial,
+                                    int run,
+                                    float* scratchL,
+                                    float* scratchR) noexcept
+    {
+        const int numSourceChannels = clip.getNumChannels();
+        const juce::AudioBuffer<float>& buf = clip.getAudio();
+        const float* src0 = buf.getReadPointer(0) + offInMaterial;
+        if (numSourceChannels == 1)
+        {
+            juce::FloatVectorOperations::copy(scratchL, src0, run);
+            juce::FloatVectorOperations::copy(scratchR, src0, run);
+        }
+        else
+        {
+            juce::FloatVectorOperations::copy(scratchL, src0, run);
+            if (numSourceChannels >= 2)
+            {
+                juce::FloatVectorOperations::copy(scratchR, buf.getReadPointer(1) + offInMaterial, run);
+            }
+            else
+            {
+                juce::FloatVectorOperations::clear(scratchR, run);
+            }
+        }
+    }
+
+    /// After `processBlock`, mix scratch into device; `trackGain` is effective post-insert fader gain.
+    void addStereoScratchToDeviceOutputs(float* const* scratchPtrs,
+                                        int run,
+                                        int outFrame0,
+                                        int numOutputChannels,
+                                        float* const* outputChannelData,
+                                        float trackGain) noexcept
+    {
+        if (scratchPtrs == nullptr || run <= 0)
+        {
+            return;
+        }
+        const float* L = scratchPtrs[0];
+        const float* R = scratchPtrs[1];
+        if (L == nullptr || R == nullptr)
+        {
+            return;
+        }
+        if (numOutputChannels <= 0)
+        {
+            return;
+        }
+        if (numOutputChannels == 1)
+        {
+            float* d = outputChannelData[0];
+            if (d != nullptr)
+            {
+                float* const dest = d + outFrame0;
+                const float halfGain = 0.5f * trackGain;
+                juce::FloatVectorOperations::addWithMultiply(dest, L, halfGain, run);
+                juce::FloatVectorOperations::addWithMultiply(dest, R, halfGain, run);
+            }
+        }
+        else
+        {
+            if (float* d0 = outputChannelData[0])
+            {
+                juce::FloatVectorOperations::addWithMultiply(d0 + outFrame0, L, trackGain, run);
+            }
+            if (numOutputChannels >= 2)
+            {
+                if (float* d1 = outputChannelData[1])
+                {
+                    juce::FloatVectorOperations::addWithMultiply(d1 + outFrame0, R, trackGain, run);
+                }
+            }
+        }
+    }
 } // namespace
 
 PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder,
-                                 CountInClickOutput* countIn)
+                               CountInClickOutput* countIn, PluginInsertHost* pluginHost)
     : transport_(transport)
     , session_(session)
     , recorder_(recorder)
     , countIn_(countIn)
+    , pluginHost_(pluginHost)
 {
 }
 
@@ -143,10 +228,22 @@ void PlaybackEngine::setPlaybackOffsetSamples(const std::int64_t samples) noexce
 
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
-    juce::ignoreUnused(device);
+    if (device != nullptr && pluginHost_ != nullptr)
+    {
+        const double sr = device->getCurrentSampleRate();
+        const int bs = device->getCurrentBufferSizeSamples();
+        const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
+        pluginHost_->prepareForDevice(sr, bs, nOut);
+    }
 }
 
-void PlaybackEngine::audioDeviceStopped() {}
+void PlaybackEngine::audioDeviceStopped()
+{
+    if (pluginHost_ != nullptr)
+    {
+        pluginHost_->releaseResources();
+    }
+}
 
 void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                                      int numInputChannels,
@@ -292,6 +389,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 continue;
             }
             const std::vector<PlacedClip>& lane = tr.getPlacedClips();
+            const bool useInsert = pluginHost_ != nullptr
+                                   && pluginHost_->audioThread_hasActivePluginForTrack(tr.getId());
             std::int64_t t = timelineStartAudible;
             int out0 = 0;
             while (out0 < audibleRun)
@@ -313,8 +412,24 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     const int off = static_cast<int>(rel + p.getLeftTrimSamples());
                     jassert(off >= 0);
                     jassert(off + run <= c.getNumSamples());
-                    addClipRunToOutputs(
-                        c, off, run, outFrame0 + silencePrefix + out0, numOutputChannels, outputChannelData, effectiveGain);
+                    const int destFrame = outFrame0 + silencePrefix + out0;
+
+                    if (useInsert)
+                    {
+                        pluginHost_->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
+                        if (float* const* scratch = pluginHost_->audioThread_getScratchWritePointers())
+                        {
+                            copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
+                            pluginHost_->audioThread_processForTrack(tr.getId(), run);
+                            addStereoScratchToDeviceOutputs(
+                                scratch, run, destFrame, numOutputChannels, outputChannelData, effectiveGain);
+                        }
+                    }
+                    else
+                    {
+                        addClipRunToOutputs(
+                            c, off, run, destFrame, numOutputChannels, outputChannelData, effectiveGain);
+                    }
                 }
                 t += run;
                 out0 += run;

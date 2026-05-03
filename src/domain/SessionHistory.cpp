@@ -17,25 +17,31 @@ void SessionHistory::clear() noexcept
 
 void SessionHistory::record(juce::String label,
                             std::shared_ptr<const SessionSnapshot> before,
-                            std::shared_ptr<const SessionSnapshot> after) noexcept
+                            std::shared_ptr<const SessionSnapshot> after,
+                            std::optional<PluginUndoStepSides> pluginSides) noexcept
 {
     if (before == nullptr || after == nullptr)
     {
         return;
     }
-    if (before.get() == after.get())
+    const bool pluginDelta = pluginSides.has_value() && pluginSides->trackId != kInvalidTrackId
+                             && !pluginSides->before.slotEquals(pluginSides->after);
+    if (!pluginDelta)
     {
-        return;
+        if (before.get() == after.get())
+        {
+            return;
+        }
     }
     redo_.clear();
-    undo_.push_back(Step{std::move(label), std::move(before), std::move(after)});
+    undo_.push_back(Step{ std::move(label), std::move(before), std::move(after), std::move(pluginSides) });
     while (static_cast<int>(undo_.size()) > maxSteps_)
     {
         undo_.pop_front();
     }
 }
 
-std::optional<std::shared_ptr<const SessionSnapshot>> SessionHistory::popUndo() noexcept
+std::optional<SessionHistoryRestoreBundle> SessionHistory::popUndo() noexcept
 {
     if (undo_.empty())
     {
@@ -43,12 +49,15 @@ std::optional<std::shared_ptr<const SessionSnapshot>> SessionHistory::popUndo() 
     }
     Step step = undo_.back();
     undo_.pop_back();
-    std::shared_ptr<const SessionSnapshot> toRestore = step.before;
-    redo_.push_back(std::move(step));
-    return toRestore;
+    redo_.push_back(step);
+    SessionHistoryRestoreBundle bundle;
+    bundle.timelineSnapshot = step.before;
+    bundle.pluginSides = step.pluginSides;
+    bundle.isRedo = false;
+    return bundle;
 }
 
-std::optional<std::shared_ptr<const SessionSnapshot>> SessionHistory::popRedo() noexcept
+std::optional<SessionHistoryRestoreBundle> SessionHistory::popRedo() noexcept
 {
     if (redo_.empty())
     {
@@ -56,7 +65,10 @@ std::optional<std::shared_ptr<const SessionSnapshot>> SessionHistory::popRedo() 
     }
     Step step = redo_.back();
     redo_.pop_back();
-    std::shared_ptr<const SessionSnapshot> toRestore = step.after;
-    undo_.push_back(std::move(step));
-    return toRestore;
+    undo_.push_back(step);
+    SessionHistoryRestoreBundle bundle;
+    bundle.timelineSnapshot = step.after;
+    bundle.pluginSides = step.pluginSides;
+    bundle.isRedo = true;
+    return bundle;
 }

@@ -532,6 +532,49 @@ The project begins to support melody prototyping, one of the core workflow goals
 
 ---
 
+## Phase 8 — Minimal VST3 Plugin Insert Hosting (single effect per track)
+
+**Phase order note:** Phase 8 may be implemented **before** Phase 5 (Basic Mixer) and Phase 6 (Routing/Sends/Groups). It does not require a mixer UI or send/bus graph: each track applies **at most one** VST3 **effect** insert **in-process** on that track’s summed clip audio **before** the existing channel-fader gain and cross-track sum (pre-fader insert; see `Track` header signal-chain commentary).
+
+### Goal
+
+Host **one** VST3 plugin instance per `TrackId` for real-time playback, expose the plugin’s **native** editor (and an optional generic parameter window), persist plugin path + opaque `getStateInformation` blob in the project file, and integrate **undo/redo** for discrete plugin-slot edits and for parameter changes **captured when the plugin editor closes**.
+
+### In Scope
+
+- `juce_audio_processors` + `JUCE_PLUGINHOST_VST3`; load `.vst3` from an absolute file path (FabFilter Pro-R is a typical smoke test).
+- Message-thread-owned `PluginInsertHost`: `std::unordered_map<TrackId, std::unique_ptr<juce::AudioPluginInstance>>`; **not** stored inside `SessionSnapshot`.
+- Atomic handoff of a **read-only active processor list** to the audio thread (same release-store / acquire-load pattern as `Session::sessionSnapshot_`). Audio thread only calls `processBlock` on already-prepared instances using **pre-allocated** per-track scratch buffers — **no** allocation, **no** locks, **no** `Session` access on the callback path.
+- `PlaybackEngine`: per track, sum covering clips into a scratch buffer → optional `processInPlace` → multiply by channel fader → add into device outputs.
+- UI: per-track **FX** (file chooser), **Edit** (native editor), optional **Params** (`GenericAudioProcessorEditor`), **Remove**; failures show alerts / log lines.
+- Persistence: **ProjectFile v8** optional fields per track — `pluginVst3Path` (absolute), `pluginIdentifier`, `pluginStateBase64`; readers accept v1–v8; missing or broken plugin at load → `[plugin]` line in the existing skipped-details string array, snapshot still applied.
+- Undo/redo: extend `SessionHistory` steps with optional per-step plugin slot snapshots (`PluginTrackSlot`) so **plugin-only** edits (and session+plugin in one step later) share one stack; allow `before == after` snapshot pointers **only** when a plugin delta is recorded. Optional: on native editor close, if `getStateInformation` changed since open, record one undo step.
+
+### Out of Scope
+
+- More than one insert per track; ordered insert chains; sends, buses, sidechain, PDC, sidechain inputs.
+- AU, VST2, LV2; plugin scanner / `KnownPluginList` cache UI (path-only load in this slice).
+- Timeline **parameter automation** lanes; sample-accurate automation.
+- Out-of-process / sandboxed hosting; crash isolation (in-process VST3 only).
+- Storing plugin binaries under the project folder or relocating `.vst3` paths (absolute path only in v8).
+- Claiming `AudioProcessor::processBlock implementations are realtime-safe — document the caveat.
+
+### Threading (steering)
+
+- **Message thread:** instantiate, destroy, `prepareToPlay` / `releaseResources`, `getStateInformation` / `setStateInformation`, editor open/close, atomic publish of the active processor map.
+- **Audio thread:** acquire-load active map, `processBlock` on scratch buffers only.
+
+### Expected Value
+
+A credible first plugin-host slice aligned with JUCE and the existing snapshot + engine split, without smuggling plugin instances into `SessionSnapshot`.
+
+### Key Risks
+
+- Same-pointer `SessionSnapshot` undo steps must be explicit for plugin-only edits (history records plugin deltas).
+- Long-tailed reverb across audio blocks is not handled beyond what the plugin’s own DSP does internally (no PDC / no cross-block graph state beyond `processBlock`).
+
+---
+
 ## General Phase Advancement Rule
 
 A phase must not automatically lead to the next phase just because implementation “seems to work”.

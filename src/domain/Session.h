@@ -48,6 +48,7 @@
 
 class AudioClip;
 class Transport;
+class PluginInsertHost;
 
 // ---------------------------------------------------------------------------
 // Session — sole publisher of `std::shared_ptr<const SessionSnapshot>` to readers (engine + UI)
@@ -222,20 +223,22 @@ public:
     // [Message thread] Write minimal project v1 (tracks, clip placements, strict **`Audio/`-relative**
     // source paths only**, monotonic id seeds, active track, playhead and device rate metadata).
     // `transport` is read for the playhead only (single owner of playhead state).
+    // Optional `pluginHost`: when non-null, **v8** saves per-track VST3 path, identifier, and Base64 state.
     [[nodiscard]] juce::Result saveProjectToFile(
-        Transport& transport, const juce::File& file, double deviceSampleRate);
+        Transport& transport,
+        const juce::File& file,
+        double deviceSampleRate,
+        PluginInsertHost* pluginHost = nullptr);
 
-    // [Message thread] Parse and decode in one new snapshot, single `atomic_store` on success.
-    // `Transport&` is used only to `requestSeek` after publish (clamped; playhead is not read from
-    // the file for anything else). Clips that fail to load are skipped; each becomes one line in
-    // `outSkippedClipDetails` (path + reason). `outInfoNote` is non-empty e.g. when device rate at
-    // save differs from `deviceSampleRate` (user-visible context for partial load).
+    // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
+    // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).
     [[nodiscard]] juce::Result loadProjectFromFile(
         Transport& transport,
         const juce::File& file,
         double deviceSampleRate,
         juce::StringArray& outSkippedClipDetails,
-        juce::String& outInfoNote);
+        juce::String& outInfoNote,
+        PluginInsertHost* pluginHost = nullptr);
 
 private:
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
