@@ -10,6 +10,7 @@
 
 #include "domain/PlacedClip.h"
 #include "domain/Track.h"
+#include "plugins/InsertSlotId.h"
 
 #include <juce_core/juce_core.h>
 
@@ -32,6 +33,15 @@ struct ProjectFileClipV1
     bool hasMaterialWindowInFile = false;
 };
 
+struct ProjectFileInsertV1
+{
+    InsertSlotId slotId = kInvalidInsertSlotId;
+    InsertStage stage = InsertStage::Post;
+    juce::String pluginVst3Path;
+    juce::String pluginIdentifier;
+    juce::String pluginStateBase64;
+};
+
 struct ProjectFileTrackV1
 {
     TrackId id = kInvalidTrackId;
@@ -43,16 +53,18 @@ struct ProjectFileTrackV1
     bool off = false;
     /// Effective output muted at engine; fader untouched (JSON `"muted"`). Omitted when false.
     bool muted = false;
-    // v8: optional per-track VST3 insert (absolute path to bundle / `.vst3`; omitted when no insert).
+    // v8: legacy single insert (read + migration). v9+ writers emit `inserts` only, not these keys.
     juce::String pluginVst3Path;
     juce::String pluginIdentifier;
     juce::String pluginStateBase64;
+    // v9: ordered insert chain (Pre before Post in array order).
+    std::vector<ProjectFileInsertV1> inserts;
 };
 
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 8;
+    static constexpr int kCurrentVersion = 10;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -66,6 +78,8 @@ struct ProjectFileV1
     // v6: timeline locators (samples). Omitted in JSON when 0; `right == 0` = right locator unset.
     std::int64_t leftLocatorSamples = 0;
     std::int64_t rightLocatorSamples = 0;
+    // v10: cycle/loop armed (Transport). Omitted in JSON when false (default).
+    bool cycleEnabled = false;
     std::vector<ProjectFileTrackV1> tracks;
 };
 

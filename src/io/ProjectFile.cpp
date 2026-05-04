@@ -12,7 +12,7 @@
 
 namespace
 {
-    [[nodiscard]] juce::var trackToVar(const ProjectFileTrackV1& t)
+    [[nodiscard]] juce::var trackToVar(const ProjectFileTrackV1& t, const int fileVersion)
     {
         juce::Array<juce::var> clipVars;
         for (const auto& c : t.clips)
@@ -55,7 +55,31 @@ namespace
         {
             to->setProperty("muted", true);
         }
-        if (t.pluginVst3Path.isNotEmpty())
+        if (fileVersion >= 9)
+        {
+            if (!t.inserts.empty())
+            {
+                juce::Array<juce::var> insertVars;
+                for (const auto& in : t.inserts)
+                {
+                    juce::DynamicObject::Ptr io = new juce::DynamicObject();
+                    io->setProperty("slotId", static_cast<std::int64_t>(in.slotId));
+                    io->setProperty("stage", in.stage == InsertStage::Pre ? "pre" : "post");
+                    io->setProperty("pluginVst3Path", in.pluginVst3Path);
+                    if (in.pluginIdentifier.isNotEmpty())
+                    {
+                        io->setProperty("pluginIdentifier", in.pluginIdentifier);
+                    }
+                    if (in.pluginStateBase64.isNotEmpty())
+                    {
+                        io->setProperty("pluginStateBase64", in.pluginStateBase64);
+                    }
+                    insertVars.add(juce::var(io.get()));
+                }
+                to->setProperty("inserts", juce::var(insertVars));
+            }
+        }
+        else if (t.pluginVst3Path.isNotEmpty())
         {
             to->setProperty("pluginVst3Path", t.pluginVst3Path);
             if (t.pluginIdentifier.isNotEmpty())
@@ -90,6 +114,90 @@ namespace
             return static_cast<std::int64_t>((double)v);
         }
         return 0;
+    }
+
+    [[nodiscard]] juce::Result parseTrackInsertsFromVar(const juce::var& tv,
+                                                      ProjectFileTrackV1& trk,
+                                                      juce::String& err,
+                                                      const int fileVersion)
+    {
+        if (fileVersion < 9)
+        {
+            return juce::Result::ok();
+        }
+        const juce::var& insVar = tv.getProperty("inserts", {});
+        if (!insVar.isArray())
+        {
+            return juce::Result::ok();
+        }
+        const juce::Array<juce::var>* insArr = insVar.getArray();
+        if (insArr == nullptr)
+        {
+            return juce::Result::ok();
+        }
+        std::unordered_set<InsertSlotId> seen;
+        for (const juce::var& iv : *insArr)
+        {
+            if (!iv.isObject())
+            {
+                err = "Each insert must be a JSON object.";
+                return juce::Result::fail(err);
+            }
+            bool sidOk = false;
+            const std::int64_t sid64 = int64FromVarId(iv.getProperty("slotId", {}), sidOk);
+            if (!sidOk || sid64 <= 0)
+            {
+                err = "Insert missing valid slotId.";
+                return juce::Result::fail(err);
+            }
+            const InsertSlotId sid = static_cast<InsertSlotId>(sid64);
+            if (!seen.insert(sid).second)
+            {
+                err = "Duplicate insert slotId within a track.";
+                return juce::Result::fail(err);
+            }
+            ProjectFileInsertV1 ins;
+            ins.slotId = sid;
+            const juce::String st = iv.getProperty("stage", {}).toString().toLowerCase();
+            if (st == "pre")
+            {
+                ins.stage = InsertStage::Pre;
+            }
+            else if (st == "post")
+            {
+                ins.stage = InsertStage::Post;
+            }
+            else
+            {
+                err = "Insert has invalid stage (expected \"pre\" or \"post\").";
+                return juce::Result::fail(err);
+            }
+            ins.pluginVst3Path = iv.getProperty("pluginVst3Path", {}).toString();
+            if (ins.pluginVst3Path.isEmpty())
+            {
+                err = "Insert missing pluginVst3Path.";
+                return juce::Result::fail(err);
+            }
+            ins.pluginIdentifier = iv.getProperty("pluginIdentifier", {}).toString();
+            ins.pluginStateBase64 = iv.getProperty("pluginStateBase64", {}).toString();
+            trk.inserts.push_back(std::move(ins));
+        }
+        return juce::Result::ok();
+    }
+
+    void migrateLegacySinglePluginToInserts(ProjectFileTrackV1& trk)
+    {
+        if (!trk.inserts.empty() || trk.pluginVst3Path.isEmpty())
+        {
+            return;
+        }
+        ProjectFileInsertV1 mig;
+        mig.slotId = 1;
+        mig.stage = InsertStage::Post;
+        mig.pluginVst3Path = trk.pluginVst3Path;
+        mig.pluginIdentifier = trk.pluginIdentifier;
+        mig.pluginStateBase64 = trk.pluginStateBase64;
+        trk.inserts.push_back(std::move(mig));
     }
 
     [[nodiscard]] juce::Result clipFromVar(
@@ -168,7 +276,7 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     juce::Array<juce::var> trackVars;
     for (const auto& t : data.tracks)
     {
-        trackVars.add(trackToVar(t));
+        trackVars.add(trackToVar(t, data.version));
     }
 
     juce::DynamicObject::Ptr root = new juce::DynamicObject();
@@ -192,6 +300,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         {
             root->setProperty("rightLocatorSamples", data.rightLocatorSamples);
         }
+    }
+    if (data.version >= 10 && data.cycleEnabled)
+    {
+        root->setProperty("cycleEnabled", true);
     }
     root->setProperty("tracks", juce::var(trackVars));
 
@@ -332,6 +444,19 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
 
+    if (ver >= 10)
+    {
+        const juce::var& cv = root.getProperty("cycleEnabled", {});
+        if (cv.isBool())
+        {
+            out.cycleEnabled = (bool)cv;
+        }
+        else if (cv.isInt() || cv.isInt64() || cv.isDouble())
+        {
+            out.cycleEnabled = static_cast<int>(static_cast<double>(cv) + 0.5) != 0;
+        }
+    }
+
     const juce::var& tracksVar = root["tracks"];
     if (!tracksVar.isArray())
     {
@@ -395,6 +520,18 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             trk.pluginVst3Path = tv.getProperty("pluginVst3Path", {}).toString();
             trk.pluginIdentifier = tv.getProperty("pluginIdentifier", {}).toString();
             trk.pluginStateBase64 = tv.getProperty("pluginStateBase64", {}).toString();
+        }
+        if (ver >= 9)
+        {
+            const juce::Result ir = parseTrackInsertsFromVar(tv, trk, err, ver);
+            if (ir.failed())
+            {
+                return juce::Result::fail(err);
+            }
+        }
+        if (ver >= 8)
+        {
+            migrateLegacySinglePluginToInserts(trk);
         }
 
         const juce::var& clipsV = tv.getProperty("clips", {});

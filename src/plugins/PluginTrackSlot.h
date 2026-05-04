@@ -1,42 +1,68 @@
 #pragma once
 
 // =============================================================================
-// PluginTrackSlot — serializable snapshot of one track’s VST3 insert slot (Phase 8)
+// Plugin insert chain — serializable snapshots for undo/redo and project I/O
 // =============================================================================
 //
 // ROLE
-//   Value type for undo/redo and project load/save. Not a live processor; `PluginInsertHost`
-//   turns this into `juce::AudioPluginInstance` on the message thread.
+//   Value types for undo/redo and project load/save. Not live processors; `PluginInsertHost`
+//   turns `PluginInsertDescriptor` rows into `juce::AudioPluginInstance` on the message thread.
 //
 // THREADING
 //   [Message thread] only — `MemoryBlock` may be large; never passed through the audio callback.
 // =============================================================================
 
+#include "plugins/InsertSlotId.h"
+
 #include "domain/Track.h"
 
 #include <juce_core/juce_core.h>
 
-struct PluginTrackSlot
+#include <vector>
+
+struct PluginInsertDescriptor
 {
-    /// False: lane has no insert; ignore path / identifier / state.
+    InsertSlotId slotId = kInvalidInsertSlotId;
+    InsertStage stage = InsertStage::Post;
+    /// False: ignore path / identifier / state (should not appear in persisted chains).
     bool occupied = false;
-    /// Absolute path to the `.vst3` bundle on disk (Windows / macOS).
     juce::String vst3AbsolutePath;
-    /// JUCE `PluginDescription::createIdentifierString()` for mismatch detection on load.
     juce::String pluginIdentifier;
-    /// `AudioProcessor::getStateInformation` blob (opaque to the host).
     juce::MemoryBlock opaqueState;
 
-    [[nodiscard]] bool slotEquals(const PluginTrackSlot& o) const noexcept
+    [[nodiscard]] bool descriptorEquals(const PluginInsertDescriptor& o) const noexcept
     {
-        return occupied == o.occupied && vst3AbsolutePath == o.vst3AbsolutePath
-               && pluginIdentifier == o.pluginIdentifier && opaqueState == o.opaqueState;
+        return slotId == o.slotId && stage == o.stage && occupied == o.occupied
+               && vst3AbsolutePath == o.vst3AbsolutePath && pluginIdentifier == o.pluginIdentifier
+               && opaqueState == o.opaqueState;
+    }
+};
+
+struct PluginTrackChain
+{
+    /// Pre slots first, then Post slots — canonical processing order.
+    std::vector<PluginInsertDescriptor> slots;
+
+    [[nodiscard]] bool chainEquals(const PluginTrackChain& o) const noexcept
+    {
+        if (slots.size() != o.slots.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < slots.size(); ++i)
+        {
+            if (!slots[i].descriptorEquals(o.slots[i]))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 };
 
 struct PluginUndoStepSides
 {
     TrackId trackId = kInvalidTrackId;
-    PluginTrackSlot before{};
-    PluginTrackSlot after{};
+    PluginTrackChain before{};
+    PluginTrackChain after{};
 };

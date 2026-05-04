@@ -6,16 +6,59 @@
 
 #include "plugins/PluginInsertHost.h"
 
+namespace
+{
+    [[nodiscard]] bool dispatchHostUndoRedoFromPluginWindowKey(const juce::KeyPress& key,
+                                                               const PluginEditorWindowHostShortcuts& sh)
+    {
+        if (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+        {
+            return false;
+        }
+
+        if (!key.getModifiers().isCommandDown())
+        {
+            return false;
+        }
+
+        const int kc = key.getKeyCode();
+        if (!key.getModifiers().isShiftDown() && (kc == 'z' || kc == 'Z'))
+        {
+            if (sh.requestUndo)
+            {
+                sh.requestUndo();
+                return true;
+            }
+            return false;
+        }
+        if ((kc == 'y' || kc == 'Y')
+            || (key.getModifiers().isShiftDown() && (kc == 'z' || kc == 'Z')))
+        {
+            if (sh.requestRedo)
+            {
+                sh.requestRedo();
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+} // namespace
+
 PluginEditorWindow::PluginEditorWindow(PluginInsertHost& host,
                                        const TrackId trackId,
+                                       const InsertSlotId insertSlotId,
                                        juce::AudioProcessor& proc,
-                                       std::unique_ptr<juce::AudioProcessorEditor> editor)
+                                       std::unique_ptr<juce::AudioProcessorEditor> editor,
+                                       PluginEditorWindowHostShortcuts hostShortcuts)
     : DocumentWindow(proc.getName().isNotEmpty() ? proc.getName() : "Plugin",
                      juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                          juce::ResizableWindow::backgroundColourId),
                      DocumentWindow::closeButton)
     , host_(host)
     , trackId_(trackId)
+    , insertSlotId_(insertSlotId)
+    , hostShortcuts_(std::move(hostShortcuts))
 {
     juce::ignoreUnused(proc);
     setUsingNativeTitleBar(true);
@@ -29,21 +72,34 @@ PluginEditorWindow::PluginEditorWindow(PluginInsertHost& host,
     setVisible(true);
 }
 
+bool PluginEditorWindow::keyPressed(const juce::KeyPress& key)
+{
+    if (dispatchHostUndoRedoFromPluginWindowKey(key, hostShortcuts_))
+    {
+        return true;
+    }
+    return DocumentWindow::keyPressed(key);
+}
+
 void PluginEditorWindow::closeButtonPressed()
 {
-    host_.editorWindowClosing(trackId_, false);
+    host_.editorWindowClosing(trackId_, insertSlotId_, false);
 }
 
 PluginParamsWindow::PluginParamsWindow(PluginInsertHost& host,
                                        const TrackId trackId,
+                                       const InsertSlotId insertSlotId,
                                        juce::AudioProcessor& proc,
-                                       std::unique_ptr<juce::AudioProcessorEditor> editor)
+                                       std::unique_ptr<juce::AudioProcessorEditor> editor,
+                                       PluginEditorWindowHostShortcuts hostShortcuts)
     : DocumentWindow((proc.getName().isNotEmpty() ? proc.getName() : "Plugin") + " — parameters",
                      juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                          juce::ResizableWindow::backgroundColourId),
                      DocumentWindow::closeButton)
     , host_(host)
     , trackId_(trackId)
+    , insertSlotId_(insertSlotId)
+    , hostShortcuts_(std::move(hostShortcuts))
 {
     juce::ignoreUnused(proc);
     setUsingNativeTitleBar(true);
@@ -57,7 +113,16 @@ PluginParamsWindow::PluginParamsWindow(PluginInsertHost& host,
     setVisible(true);
 }
 
+bool PluginParamsWindow::keyPressed(const juce::KeyPress& key)
+{
+    if (dispatchHostUndoRedoFromPluginWindowKey(key, hostShortcuts_))
+    {
+        return true;
+    }
+    return DocumentWindow::keyPressed(key);
+}
+
 void PluginParamsWindow::closeButtonPressed()
 {
-    host_.editorWindowClosing(trackId_, true);
+    host_.editorWindowClosing(trackId_, insertSlotId_, true);
 }

@@ -8,6 +8,9 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace
 {
     [[nodiscard]] juce::PluginDescription pickPrimaryDescription(const juce::File& vst3File,
@@ -42,6 +45,18 @@ namespace
     {
         return bs > 0 ? bs : 512;
     }
+
+    void eraseLastHostAppliedStateForTrack(std::map<std::pair<TrackId, InsertSlotId>, juce::MemoryBlock>& map,
+                                          const TrackId trackId)
+    {
+        for (auto it = map.begin(); it != map.end();)
+        {
+            if (it->first.first == trackId)
+                it = map.erase(it);
+            else
+                ++it;
+        }
+    }
 } // namespace
 
 PluginInsertHost::PluginInsertHost()
@@ -56,7 +71,7 @@ PluginInsertHost::~PluginInsertHost()
     releaseResources();
     editorWindows_.clear();
     paramsWindows_.clear();
-    instances_.clear();
+    chains_.clear();
 }
 
 void PluginInsertHost::recordPluginSlotUndo(const juce::String& label, const PluginUndoStepSides& sides)
@@ -65,6 +80,166 @@ void PluginInsertHost::recordPluginSlotUndo(const juce::String& label, const Plu
     {
         undoRecorder_(undoContext_, label, sides);
     }
+}
+
+void PluginInsertHost::pushPluginParameterUndoStep(const TrackId trackId,
+                                                   const InsertSlotId slotId,
+                                                   const juce::MemoryBlock& baselineOpaqueState)
+{
+    if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
+    {
+        return;
+    }
+    PluginTrackChain afterChain = exportChain(trackId);
+    PluginTrackChain beforeChain = afterChain;
+    bool found = false;
+    for (auto& d : beforeChain.slots)
+    {
+        if (d.slotId == slotId)
+        {
+            d.opaqueState = baselineOpaqueState;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+    {
+        return;
+    }
+    PluginUndoStepSides sides;
+    sides.trackId = trackId;
+    sides.before = std::move(beforeChain);
+    sides.after = std::move(afterChain);
+    recordPluginSlotUndo("Plugin parameters", sides);
+}
+
+void PluginInsertHost::flushOpenEditorParameterUndoSteps()
+{
+    std::vector<std::pair<EditorKey, juce::MemoryBlock>> entries;
+    entries.reserve(editorOpenState_.size());
+    for (const auto& kv : editorOpenState_)
+    {
+        entries.push_back(kv);
+    }
+    for (const auto& e : entries)
+    {
+        const LiveInsertSlot* live = findLiveConst(e.first.first, e.first.second);
+        if (live == nullptr || live->instance == nullptr)
+        {
+            continue;
+        }
+        juce::MemoryBlock now;
+        live->instance->getStateInformation(now);
+        if (now == e.second)
+        {
+            continue;
+        }
+        const auto hostIt = lastHostAppliedState_.find(e.first);
+        if (hostIt != lastHostAppliedState_.end() && now == hostIt->second)
+        {
+            continue;
+        }
+        pushPluginParameterUndoStep(e.first.first, e.first.second, e.second);
+        editorOpenState_[e.first] = std::move(now);
+    }
+}
+
+bool PluginInsertHost::tryInPlaceParameterStateRestore(const TrackId trackId,
+                                                      const PluginTrackChain& targetChain)
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+
+    const auto itLive = chains_.find(trackId);
+    const bool hasLive = itLive != chains_.end() && !itLive->second.empty();
+
+    if (targetChain.slots.empty())
+    {
+        if (!hasLive)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    if (!hasLive)
+    {
+        return false;
+    }
+
+    std::vector<LiveInsertSlot>& v = itLive->second;
+    if (v.size() != targetChain.slots.size())
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        const LiveInsertSlot& live = v[i];
+        const PluginInsertDescriptor& desc = targetChain.slots[i];
+        if (!desc.occupied)
+        {
+            return false;
+        }
+        if (live.instance == nullptr)
+        {
+            return false;
+        }
+        if (live.slotId != desc.slotId)
+        {
+            return false;
+        }
+        if (live.stage != desc.stage)
+        {
+            return false;
+        }
+        if (desc.vst3AbsolutePath != live.instance->getPluginDescription().fileOrIdentifier)
+        {
+            return false;
+        }
+        const juce::String liveId = live.instance->getPluginDescription().createIdentifierString();
+        if (desc.pluginIdentifier.isNotEmpty() && liveId != desc.pluginIdentifier)
+        {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        LiveInsertSlot& live = v[i];
+        const PluginInsertDescriptor& desc = targetChain.slots[i];
+
+        if (desc.opaqueState.getSize() > 0)
+        {
+            live.instance->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+            if (live.instance->getMainBusNumInputChannels() != 2
+                || live.instance->getMainBusNumOutputChannels() != 2)
+            {
+                live.instance->prepareToPlay(effectiveSr(sampleRate_), effectiveBs(blockSize_));
+            }
+            live.layoutOk = live.instance->getMainBusNumInputChannels() == 2
+                            && live.instance->getMainBusNumOutputChannels() == 2;
+        }
+
+        const EditorKey ek{ trackId, live.slotId };
+        juce::MemoryBlock postRestore;
+        live.instance->getStateInformation(postRestore);
+        lastHostAppliedState_[ek] = postRestore;
+        if (auto st = editorOpenState_.find(ek); st != editorOpenState_.end())
+        {
+            st->second = postRestore;
+        }
+    }
+
+    rebuildAudioThreadMapAndPublish();
+    return true;
+}
+
+InsertSlotId PluginInsertHost::allocateSlotId() noexcept
+{
+    return nextInsertSlotId_++;
 }
 
 void PluginInsertHost::logPluginInstanceLayout(const char* context, juce::AudioPluginInstance& inst) const
@@ -111,7 +286,84 @@ bool PluginInsertHost::tryPrepareStereoInsert(juce::AudioPluginInstance& inst, c
     return inst.getMainBusNumInputChannels() == 2 && inst.getMainBusNumOutputChannels() == 2;
 }
 
-juce::Result PluginInsertHost::loadVst3FromFile(const TrackId trackId, const juce::File& vst3File)
+void PluginInsertHost::insertLiveSlotSorted(const TrackId trackId, LiveInsertSlot slot)
+{
+    auto& v = chains_[trackId];
+    if (slot.stage == InsertStage::Pre)
+    {
+        auto it = std::find_if(
+            v.begin(), v.end(), [](const LiveInsertSlot& s) { return s.stage == InsertStage::Post; });
+        v.insert(it, std::move(slot));
+    }
+    else
+    {
+        v.push_back(std::move(slot));
+    }
+}
+
+PluginInsertHost::LiveInsertSlot* PluginInsertHost::findLiveMutable(const TrackId trackId,
+                                                                    const InsertSlotId slotId) noexcept
+{
+    auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return nullptr;
+    }
+    for (auto& s : it->second)
+    {
+        if (s.slotId == slotId)
+        {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+const PluginInsertHost::LiveInsertSlot* PluginInsertHost::findLiveConst(const TrackId trackId,
+                                                                       const InsertSlotId slotId) const noexcept
+{
+    auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return nullptr;
+    }
+    for (const auto& s : it->second)
+    {
+        if (s.slotId == slotId)
+        {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+const PluginInsertHost::LiveInsertSlot* PluginInsertHost::findPrimaryUiSlotConst(const TrackId trackId) const noexcept
+{
+    auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return nullptr;
+    }
+    for (const auto& s : it->second)
+    {
+        if (s.stage == InsertStage::Post && s.instance != nullptr)
+        {
+            return &s;
+        }
+    }
+    for (const auto& s : it->second)
+    {
+        if (s.instance != nullptr)
+        {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+juce::Result PluginInsertHost::addInsertFromVst3FileNoUndo(const TrackId trackId,
+                                                          const InsertStage stage,
+                                                          const juce::File& vst3File)
 {
     if (trackId == kInvalidTrackId)
     {
@@ -122,7 +374,6 @@ juce::Result PluginInsertHost::loadVst3FromFile(const TrackId trackId, const juc
         return juce::Result::fail("VST3 file or bundle does not exist.");
     }
 
-    const PluginTrackSlot before = exportSlot(trackId);
     juce::String err;
     const juce::PluginDescription desc = pickPrimaryDescription(vst3File, formatManager_, err);
     if (err.isNotEmpty() || desc.name.isEmpty())
@@ -140,24 +391,252 @@ juce::Result PluginInsertHost::loadVst3FromFile(const TrackId trackId, const juc
     }
 
     const bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
-    insertLayoutOk_[trackId] = layoutOk;
     if (!layoutOk)
     {
         logStereoLayoutFailure(trackId);
     }
     logPluginInstanceLayout("load", *inst);
 
-    closeEditorsForTrack(trackId);
-    instances_[trackId] = std::move(inst);
-    rebuildAudioThreadMapAndPublish();
+    LiveInsertSlot live;
+    live.slotId = allocateSlotId();
+    live.stage = stage;
+    live.instance = std::move(inst);
+    live.layoutOk = layoutOk;
 
-    const PluginTrackSlot after = exportSlot(trackId);
+    insertLiveSlotSorted(trackId, std::move(live));
+    rebuildAudioThreadMapAndPublish();
+    return juce::Result::ok();
+}
+
+juce::Result PluginInsertHost::addInsertFromVst3File(const TrackId trackId,
+                                                    const InsertStage stage,
+                                                    const juce::File& vst3File)
+{
+    const PluginTrackChain before = exportChain(trackId);
+    const juce::Result r = addInsertFromVst3FileNoUndo(trackId, stage, vst3File);
+    if (!r.wasOk())
+    {
+        return r;
+    }
+    const PluginTrackChain after = exportChain(trackId);
+    if (!before.chainEquals(after))
+    {
+        PluginUndoStepSides sides;
+        sides.trackId = trackId;
+        sides.before = before;
+        sides.after = after;
+        recordPluginSlotUndo("Add VST3 insert", sides);
+    }
+    return juce::Result::ok();
+}
+
+juce::Result PluginInsertHost::loadVst3FromFile(const TrackId trackId, const juce::File& vst3File)
+{
+    const PluginTrackChain before = exportChain(trackId);
+    importChainNoUndo(trackId, {});
+    const juce::Result r = addInsertFromVst3FileNoUndo(trackId, InsertStage::Post, vst3File);
+    if (!r.wasOk())
+    {
+        importChainNoUndo(trackId, before);
+        return r;
+    }
+    const PluginTrackChain after = exportChain(trackId);
     PluginUndoStepSides sides;
     sides.trackId = trackId;
     sides.before = before;
     sides.after = after;
     recordPluginSlotUndo("Load VST3", sides);
     return juce::Result::ok();
+}
+
+void PluginInsertHost::removeInsert(const TrackId trackId, const InsertSlotId slotId)
+{
+    if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
+    {
+        return;
+    }
+    const PluginTrackChain before = exportChain(trackId);
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return;
+    }
+    auto& v = it->second;
+    const auto found
+        = std::find_if(v.begin(), v.end(), [&](const LiveInsertSlot& s) { return s.slotId == slotId; });
+    if (found == v.end())
+    {
+        return;
+    }
+    closeEditorForSlot(trackId, slotId);
+    lastHostAppliedState_.erase(EditorKey{ trackId, slotId });
+    if (found->instance != nullptr)
+    {
+        found->instance->releaseResources();
+    }
+    v.erase(found);
+    if (v.empty())
+    {
+        chains_.erase(trackId);
+    }
+    rebuildAudioThreadMapAndPublish();
+    const PluginTrackChain after = exportChain(trackId);
+    if (!before.chainEquals(after))
+    {
+        PluginUndoStepSides sides;
+        sides.trackId = trackId;
+        sides.before = before;
+        sides.after = after;
+        recordPluginSlotUndo("Remove VST3 insert", sides);
+    }
+}
+
+PluginTrackChain PluginInsertHost::exportChain(const TrackId trackId) const
+{
+    PluginTrackChain out;
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return out;
+    }
+    for (const auto& live : it->second)
+    {
+        if (live.instance == nullptr)
+        {
+            continue;
+        }
+        PluginInsertDescriptor d;
+        d.slotId = live.slotId;
+        d.stage = live.stage;
+        d.occupied = true;
+        const juce::PluginDescription pd = live.instance->getPluginDescription();
+        d.vst3AbsolutePath = pd.fileOrIdentifier;
+        d.pluginIdentifier = pd.createIdentifierString();
+        live.instance->getStateInformation(d.opaqueState);
+        out.slots.push_back(std::move(d));
+    }
+    return out;
+}
+
+void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrackChain& chain)
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    eraseLastHostAppliedStateForTrack(lastHostAppliedState_, trackId);
+    closeEditorsForTrack(trackId);
+    chains_.erase(trackId);
+
+    std::vector<LiveInsertSlot> built;
+    built.reserve(chain.slots.size());
+
+    for (const auto& desc : chain.slots)
+    {
+        if (!desc.occupied)
+        {
+            continue;
+        }
+
+        if (desc.slotId != kInvalidInsertSlotId)
+        {
+            nextInsertSlotId_ = juce::jmax(nextInsertSlotId_, desc.slotId + 1);
+        }
+
+        if (desc.vst3AbsolutePath.isEmpty())
+        {
+            continue;
+        }
+
+        const juce::File f(desc.vst3AbsolutePath);
+        if (!f.exists())
+        {
+            juce::Logger::writeToLog("[plugin] Missing VST3 path: " + desc.vst3AbsolutePath);
+            continue;
+        }
+
+        juce::String err;
+        const juce::PluginDescription pd = pickPrimaryDescription(f, formatManager_, err);
+        if (pd.name.isEmpty())
+        {
+            juce::Logger::writeToLog("[plugin] Could not restore plugin: " + err);
+            continue;
+        }
+        if (desc.pluginIdentifier.isNotEmpty()
+            && pd.createIdentifierString() != desc.pluginIdentifier)
+        {
+            juce::Logger::writeToLog(
+                "[plugin] Identifier mismatch for track " + juce::String((juce::int64)trackId));
+        }
+
+        const double srU = effectiveSr(sampleRate_);
+        const int bsU = effectiveBs(blockSize_);
+        std::unique_ptr<juce::AudioPluginInstance> inst(
+            formatManager_.createPluginInstance(pd, srU, bsU, err));
+        if (inst == nullptr)
+        {
+            juce::Logger::writeToLog("[plugin] createPluginInstance failed: " + err);
+            continue;
+        }
+        bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
+        if (desc.opaqueState.getSize() > 0)
+        {
+            inst->setStateInformation(desc.opaqueState.getData(), (int)desc.opaqueState.getSize());
+            if (inst->getMainBusNumInputChannels() != 2 || inst->getMainBusNumOutputChannels() != 2)
+            {
+                inst->prepareToPlay(srU, bsU);
+            }
+            layoutOk = inst->getMainBusNumInputChannels() == 2 && inst->getMainBusNumOutputChannels() == 2;
+        }
+        if (!layoutOk)
+        {
+            logStereoLayoutFailure(trackId);
+        }
+        logPluginInstanceLayout("import", *inst);
+
+        LiveInsertSlot live;
+        live.slotId = desc.slotId != kInvalidInsertSlotId ? desc.slotId : allocateSlotId();
+        live.stage = desc.stage;
+        live.instance = std::move(inst);
+        live.layoutOk = layoutOk;
+        built.push_back(std::move(live));
+    }
+
+    if (!built.empty())
+    {
+        chains_[trackId] = std::move(built);
+    }
+    rebuildAudioThreadMapAndPublish();
+}
+
+void PluginInsertHost::importChain(const TrackId trackId, const PluginTrackChain& chain)
+{
+    if (tryInPlaceParameterStateRestore(trackId, chain))
+    {
+        return;
+    }
+    importChainNoUndo(trackId, chain);
+}
+
+std::vector<InsertRowView> PluginInsertHost::getInsertRowsForTrack(const TrackId trackId) const
+{
+    std::vector<InsertRowView> rows;
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return rows;
+    }
+    rows.reserve(it->second.size());
+    for (const auto& live : it->second)
+    {
+        if (live.instance == nullptr)
+        {
+            continue;
+        }
+        rows.push_back(
+            InsertRowView{ live.slotId, live.stage, live.instance->getName() });
+    }
+    return rows;
 }
 
 void PluginInsertHost::removeAllPlugins() noexcept
@@ -179,15 +658,19 @@ void PluginInsertHost::removeAllPlugins() noexcept
     }
     paramsWindows_.clear();
     editorOpenState_.clear();
-    insertLayoutOk_.clear();
-    for (auto& kv : instances_)
+    lastHostAppliedState_.clear();
+    for (auto& kv : chains_)
     {
-        if (kv.second != nullptr)
+        for (auto& live : kv.second)
         {
-            kv.second->releaseResources();
+            if (live.instance != nullptr)
+            {
+                live.instance->releaseResources();
+            }
         }
     }
-    instances_.clear();
+    chains_.clear();
+    nextInsertSlotId_ = 1;
     rebuildAudioThreadMapAndPublish();
 }
 
@@ -197,17 +680,19 @@ void PluginInsertHost::evictPluginForTrackNoUndo(const TrackId trackId) noexcept
     {
         return;
     }
+    eraseLastHostAppliedStateForTrack(lastHostAppliedState_, trackId);
     closeEditorsForTrack(trackId);
-    if (const auto it = instances_.find(trackId); it != instances_.end())
+    if (const auto it = chains_.find(trackId); it != chains_.end())
     {
-        if (it->second != nullptr)
+        for (auto& live : it->second)
         {
-            it->second->releaseResources();
+            if (live.instance != nullptr)
+            {
+                live.instance->releaseResources();
+            }
         }
-        instances_.erase(it);
+        chains_.erase(it);
     }
-    editorOpenState_.erase(trackId);
-    insertLayoutOk_.erase(trackId);
     rebuildAudioThreadMapAndPublish();
 }
 
@@ -217,27 +702,15 @@ void PluginInsertHost::removePlugin(const TrackId trackId)
     {
         return;
     }
-    const PluginTrackSlot before = exportSlot(trackId);
-    closeEditorsForTrack(trackId);
-    const auto it = instances_.find(trackId);
-    if (it != instances_.end())
+    const PluginTrackChain before = exportChain(trackId);
+    importChainNoUndo(trackId, {});
+    const PluginTrackChain after = exportChain(trackId);
+    if (!before.chainEquals(after))
     {
-        if (it->second != nullptr)
-        {
-            it->second->releaseResources();
-        }
-        instances_.erase(it);
-    }
-    editorOpenState_.erase(trackId);
-    insertLayoutOk_.erase(trackId);
-    rebuildAudioThreadMapAndPublish();
-    const PluginTrackSlot after = exportSlot(trackId);
-    PluginUndoStepSides sides;
-    sides.trackId = trackId;
-    sides.before = before;
-    sides.after = after;
-    if (!before.slotEquals(after))
-    {
+        PluginUndoStepSides sides;
+        sides.trackId = trackId;
+        sides.before = before;
+        sides.after = after;
         recordPluginSlotUndo("Remove VST3", sides);
     }
 }
@@ -245,29 +718,40 @@ void PluginInsertHost::removePlugin(const TrackId trackId)
 void PluginInsertHost::rebuildAudioThreadMapAndPublish()
 {
     auto next = std::make_shared<PluginAudioThreadMap>();
-    next->entries.reserve(instances_.size());
-    for (const auto& kv : instances_)
+    next->entries.reserve(chains_.size());
+    for (const auto& kv : chains_)
     {
-        if (kv.second == nullptr)
+        if (kv.second.empty())
         {
             continue;
         }
         PluginAudioThreadMap::Entry e;
         e.trackId = kv.first;
-        e.processor = kv.second.get();
-        if (const auto itOk = insertLayoutOk_.find(kv.first); itOk != insertLayoutOk_.end())
+        e.slots.reserve(kv.second.size());
+        for (const auto& live : kv.second)
         {
-            e.layoutOk = itOk->second;
+            if (live.instance == nullptr)
+            {
+                continue;
+            }
+            PluginAudioThreadMap::SlotProc sp;
+            sp.processor = live.instance.get();
+            sp.layoutOk = live.layoutOk;
+            e.slots.push_back(sp);
         }
-        next->entries.push_back(e);
+        if (!e.slots.empty())
+        {
+            next->entries.push_back(std::move(e));
+        }
     }
     std::atomic_store_explicit(&audioThreadMap_, std::move(next), std::memory_order_release);
 }
 
-void PluginInsertHost::closeEditorsForTrack(const TrackId trackId)
+void PluginInsertHost::closeEditorForSlot(const TrackId trackId, const InsertSlotId slotId)
 {
-    editorOpenState_.erase(trackId);
-    if (auto it = editorWindows_.find(trackId); it != editorWindows_.end())
+    const EditorKey key{ trackId, slotId };
+    editorOpenState_.erase(key);
+    if (auto it = editorWindows_.find(key); it != editorWindows_.end())
     {
         if (it->second != nullptr)
         {
@@ -275,7 +759,7 @@ void PluginInsertHost::closeEditorsForTrack(const TrackId trackId)
         }
         editorWindows_.erase(it);
     }
-    if (auto itp = paramsWindows_.find(trackId); itp != paramsWindows_.end())
+    if (auto itp = paramsWindows_.find(key); itp != paramsWindows_.end())
     {
         if (itp->second != nullptr)
         {
@@ -285,19 +769,70 @@ void PluginInsertHost::closeEditorsForTrack(const TrackId trackId)
     }
 }
 
+void PluginInsertHost::closeEditorsForTrack(const TrackId trackId)
+{
+    for (auto it = editorOpenState_.begin(); it != editorOpenState_.end();)
+    {
+        if (it->first.first == trackId)
+        {
+            it = editorOpenState_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    for (auto it = editorWindows_.begin(); it != editorWindows_.end();)
+    {
+        if (it->first.first == trackId)
+        {
+            if (it->second != nullptr)
+            {
+                it->second->setVisible(false);
+            }
+            it = editorWindows_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    for (auto it = paramsWindows_.begin(); it != paramsWindows_.end();)
+    {
+        if (it->first.first == trackId)
+        {
+            if (it->second != nullptr)
+            {
+                it->second->setVisible(false);
+            }
+            it = paramsWindows_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
 void PluginInsertHost::openNativeEditor(const TrackId trackId)
 {
-    const auto it = instances_.find(trackId);
-    if (it == instances_.end() || it->second == nullptr)
+    const LiveInsertSlot* c = findPrimaryUiSlotConst(trackId);
+    if (c == nullptr)
     {
         return;
     }
-    if (editorWindows_.find(trackId) != editorWindows_.end())
+    LiveInsertSlot* s = findLiveMutable(trackId, c->slotId);
+    if (s == nullptr || s->instance == nullptr)
     {
-        editorWindows_[trackId]->toFront(true);
         return;
     }
-    juce::AudioProcessor& proc = *it->second;
+    const EditorKey key{ trackId, s->slotId };
+    if (editorWindows_.find(key) != editorWindows_.end())
+    {
+        editorWindows_[key]->toFront(true);
+        return;
+    }
+    juce::AudioProcessor& proc = *s->instance;
     juce::AudioProcessorEditor* const rawEd = proc.createEditor();
     if (rawEd == nullptr)
     {
@@ -306,154 +841,85 @@ void PluginInsertHost::openNativeEditor(const TrackId trackId)
     auto ed = std::unique_ptr<juce::AudioProcessorEditor>(rawEd);
     juce::MemoryBlock snap;
     proc.getStateInformation(snap);
-    editorOpenState_[trackId] = std::move(snap);
-    editorWindows_[trackId] = std::make_unique<PluginEditorWindow>(*this, trackId, proc, std::move(ed));
+    editorOpenState_[key] = std::move(snap);
+    editorWindows_[key] = std::make_unique<PluginEditorWindow>(
+        *this, trackId, s->slotId, proc, std::move(ed), editorShortcutCallbacks_);
 }
 
 void PluginInsertHost::openGenericParamsEditor(const TrackId trackId)
 {
-    const auto it = instances_.find(trackId);
-    if (it == instances_.end() || it->second == nullptr)
+    const LiveInsertSlot* c = findPrimaryUiSlotConst(trackId);
+    if (c == nullptr)
     {
         return;
     }
-    if (paramsWindows_.find(trackId) != paramsWindows_.end())
+    LiveInsertSlot* s = findLiveMutable(trackId, c->slotId);
+    if (s == nullptr || s->instance == nullptr)
     {
-        paramsWindows_[trackId]->toFront(true);
         return;
     }
-    juce::AudioProcessor& proc = *it->second;
+    const EditorKey key{ trackId, s->slotId };
+    if (paramsWindows_.find(key) != paramsWindows_.end())
+    {
+        paramsWindows_[key]->toFront(true);
+        return;
+    }
+    juce::AudioProcessor& proc = *s->instance;
     juce::MemoryBlock snap;
     proc.getStateInformation(snap);
-    editorOpenState_[trackId] = std::move(snap);
+    editorOpenState_[key] = std::move(snap);
     auto ed = std::make_unique<juce::GenericAudioProcessorEditor>(proc);
-    paramsWindows_[trackId] = std::make_unique<PluginParamsWindow>(*this, trackId, proc, std::move(ed));
+    paramsWindows_[key] = std::make_unique<PluginParamsWindow>(
+        *this, trackId, s->slotId, proc, std::move(ed), editorShortcutCallbacks_);
 }
 
-void PluginInsertHost::editorWindowClosing(const TrackId trackId, const bool wasGenericEditor)
+void PluginInsertHost::editorWindowClosing(const TrackId trackId,
+                                           const InsertSlotId slotId,
+                                           const bool wasGenericEditor)
 {
-    const auto it = instances_.find(trackId);
-    if (it != instances_.end() && it->second != nullptr)
+    const EditorKey key{ trackId, slotId };
+    const LiveInsertSlot* live = findLiveConst(trackId, slotId);
+    if (live != nullptr && live->instance != nullptr)
     {
-        const auto st = editorOpenState_.find(trackId);
-        if (st != editorOpenState_.end())
+        if (const auto st = editorOpenState_.find(key); st != editorOpenState_.end())
         {
             juce::MemoryBlock now;
-            it->second->getStateInformation(now);
+            live->instance->getStateInformation(now);
             if (now != st->second)
             {
-                PluginTrackSlot beforeSlot = exportSlot(trackId);
-                beforeSlot.opaqueState = st->second;
-                PluginTrackSlot afterSlot = exportSlot(trackId);
-                PluginUndoStepSides sides;
-                sides.trackId = trackId;
-                sides.before = beforeSlot;
-                sides.after = afterSlot;
-                recordPluginSlotUndo("Plugin parameters", sides);
+                const auto hostIt = lastHostAppliedState_.find(key);
+                if (hostIt == lastHostAppliedState_.end() || now != hostIt->second)
+                {
+                    pushPluginParameterUndoStep(trackId, slotId, st->second);
+                }
             }
         }
     }
-    editorOpenState_.erase(trackId);
+    editorOpenState_.erase(key);
     if (wasGenericEditor)
     {
-        paramsWindows_.erase(trackId);
+        paramsWindows_.erase(key);
     }
     else
     {
-        editorWindows_.erase(trackId);
+        editorWindows_.erase(key);
     }
-}
-
-PluginTrackSlot PluginInsertHost::exportSlot(const TrackId trackId) const
-{
-    PluginTrackSlot s;
-    const auto it = instances_.find(trackId);
-    if (it == instances_.end() || it->second == nullptr)
-    {
-        return s;
-    }
-    s.occupied = true;
-    const juce::PluginDescription d = it->second->getPluginDescription();
-    s.vst3AbsolutePath = d.fileOrIdentifier;
-    s.pluginIdentifier = d.createIdentifierString();
-    it->second->getStateInformation(s.opaqueState);
-    return s;
-}
-
-void PluginInsertHost::importSlot(const TrackId trackId, const PluginTrackSlot& slot)
-{
-    closeEditorsForTrack(trackId);
-    const auto itExisting = instances_.find(trackId);
-    if (itExisting != instances_.end() && itExisting->second != nullptr)
-    {
-        itExisting->second->releaseResources();
-    }
-    instances_.erase(trackId);
-    insertLayoutOk_.erase(trackId);
-
-    if (!slot.occupied)
-    {
-        rebuildAudioThreadMapAndPublish();
-        return;
-    }
-
-    const juce::File f(slot.vst3AbsolutePath);
-    if (!f.exists())
-    {
-        juce::Logger::writeToLog("[plugin] Missing VST3 path: " + slot.vst3AbsolutePath);
-        rebuildAudioThreadMapAndPublish();
-        return;
-    }
-
-    juce::String err;
-    const juce::PluginDescription desc = pickPrimaryDescription(f, formatManager_, err);
-    if (desc.name.isEmpty())
-    {
-        juce::Logger::writeToLog("[plugin] Could not restore plugin: " + err);
-        rebuildAudioThreadMapAndPublish();
-        return;
-    }
-    if (slot.pluginIdentifier.isNotEmpty()
-        && desc.createIdentifierString() != slot.pluginIdentifier)
-    {
-        juce::Logger::writeToLog(
-            "[plugin] Identifier mismatch for track " + juce::String((juce::int64)trackId));
-    }
-
-    const double srU = effectiveSr(sampleRate_);
-    const int bsU = effectiveBs(blockSize_);
-    std::unique_ptr<juce::AudioPluginInstance> inst(
-        formatManager_.createPluginInstance(desc, srU, bsU, err));
-    if (inst == nullptr)
-    {
-        juce::Logger::writeToLog("[plugin] createPluginInstance failed: " + err);
-        rebuildAudioThreadMapAndPublish();
-        return;
-    }
-    bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
-    if (slot.opaqueState.getSize() > 0)
-    {
-        inst->setStateInformation(slot.opaqueState.getData(), (int)slot.opaqueState.getSize());
-        if (inst->getMainBusNumInputChannels() != 2 || inst->getMainBusNumOutputChannels() != 2)
-        {
-            inst->prepareToPlay(srU, bsU);
-        }
-        layoutOk = inst->getMainBusNumInputChannels() == 2 && inst->getMainBusNumOutputChannels() == 2;
-    }
-    insertLayoutOk_[trackId] = layoutOk;
-    if (!layoutOk)
-    {
-        logStereoLayoutFailure(trackId);
-    }
-    logPluginInstanceLayout("import", *inst);
-    instances_[trackId] = std::move(inst);
-    rebuildAudioThreadMapAndPublish();
 }
 
 bool PluginInsertHost::hasPluginOnTrack(const TrackId trackId) const noexcept
 {
-    const auto it = instances_.find(trackId);
-    return it != instances_.end() && it->second != nullptr;
+    return hasAnyInsertOnTrack(trackId);
+}
+
+bool PluginInsertHost::hasAnyInsertOnTrack(const TrackId trackId) const noexcept
+{
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        return false;
+    }
+    return std::any_of(
+        it->second.begin(), it->second.end(), [](const LiveInsertSlot& s) { return s.instance != nullptr; });
 }
 
 juce::String PluginInsertHost::getPluginDisplayNameForTrack(const TrackId trackId) const
@@ -462,12 +928,12 @@ juce::String PluginInsertHost::getPluginDisplayNameForTrack(const TrackId trackI
     {
         return {};
     }
-    const auto it = instances_.find(trackId);
-    if (it == instances_.end() || it->second == nullptr)
+    const LiveInsertSlot* s = findPrimaryUiSlotConst(trackId);
+    if (s == nullptr || s->instance == nullptr)
     {
         return {};
     }
-    return it->second->getName();
+    return s->instance->getName();
 }
 
 void PluginInsertHost::prepareForDevice(const double sampleRate, const int blockSize, const int numOutputChannels)
@@ -485,35 +951,41 @@ void PluginInsertHost::prepareForDevice(const double sampleRate, const int block
         scratchPtrs_.push_back(scratch_.getWritePointer(c));
     }
 
-    for (auto& kv : instances_)
+    for (auto& kv : chains_)
     {
-        if (kv.second == nullptr)
+        for (auto& live : kv.second)
         {
-            continue;
-        }
-        const bool layoutOk = tryPrepareStereoInsert(*kv.second, sampleRate_, blockSize_);
-        insertLayoutOk_[kv.first] = layoutOk;
-        if (!layoutOk)
-        {
-            const bool alreadyWarned
-                = stereoPrepareFailureOneShot_.exchange(true, std::memory_order_relaxed);
-            if (!alreadyWarned)
+            if (live.instance == nullptr)
             {
-                logStereoLayoutFailure(kv.first);
+                continue;
             }
+            const bool layoutOk = tryPrepareStereoInsert(*live.instance, sampleRate_, blockSize_);
+            live.layoutOk = layoutOk;
+            if (!(live.layoutOk))
+            {
+                const bool alreadyWarned
+                    = stereoPrepareFailureOneShot_.exchange(true, std::memory_order_relaxed);
+                if (!alreadyWarned)
+                {
+                    logStereoLayoutFailure(kv.first);
+                }
+            }
+            logPluginInstanceLayout("device", *live.instance);
         }
-        logPluginInstanceLayout("device", *kv.second);
     }
     rebuildAudioThreadMapAndPublish();
 }
 
 void PluginInsertHost::releaseResources()
 {
-    for (auto& kv : instances_)
+    for (auto& kv : chains_)
     {
-        if (kv.second != nullptr)
+        for (auto& live : kv.second)
         {
-            kv.second->releaseResources();
+            if (live.instance != nullptr)
+            {
+                live.instance->releaseResources();
+            }
         }
     }
 }
@@ -550,10 +1022,18 @@ bool PluginInsertHost::audioThread_hasActivePluginForTrack(const TrackId trackId
     }
     for (const auto& e : m->entries)
     {
-        if (e.trackId == trackId && e.processor != nullptr && e.layoutOk)
+        if (e.trackId != trackId)
         {
-            return true;
+            continue;
         }
+        for (const auto& sp : e.slots)
+        {
+            if (sp.processor != nullptr && sp.layoutOk)
+            {
+                return true;
+            }
+        }
+        return false;
     }
     return false;
 }
@@ -590,22 +1070,30 @@ void PluginInsertHost::audioThread_processForTrack(const TrackId trackId, const 
     {
         return;
     }
+
     const PluginAudioThreadMap::Entry* hit = nullptr;
     for (const auto& e : m->entries)
     {
-        if (e.trackId == trackId && e.processor != nullptr)
+        if (e.trackId == trackId)
         {
             hit = &e;
             break;
         }
     }
-    if (hit == nullptr || !hit->layoutOk)
+    if (hit == nullptr || hit->slots.empty())
     {
         return;
     }
 
     juce::AudioBuffer<float> view(scratchPtrs_.data(), kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
-    hit->processor->processBlock(view, midiScratch_);
-    midiScratch_.clear();
+    for (const auto& sp : hit->slots)
+    {
+        if (sp.processor == nullptr || !sp.layoutOk)
+        {
+            continue;
+        }
+        sp.processor->processBlock(view, midiScratch_);
+        midiScratch_.clear();
+    }
 }

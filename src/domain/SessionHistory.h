@@ -9,11 +9,11 @@
 //   redo restores `after`. Never touches disk, Transport, or the audio thread — callers invoke
 //   `Session::restoreSessionSnapshotForUndo` on the message thread only.
 //
-// PHASE 8
-//   A step may optionally include a **plugin slot** before/after for one `TrackId`. Plugin-only
-//   edits use the **same** snapshot pointer for `before` and `after` with a non-empty plugin delta
-//   (`pluginSides.has_value()`). Apply order on undo: restore timeline snapshot, then
-//   `PluginInsertHost::importSlot(trackId, pluginSides->before)`.
+// PHASE 8 / Slice A
+//   A step may optionally include a **plugin insert chain** before/after for one `TrackId`.
+//   Plugin-only edits use the **same** snapshot pointer for `before` and `after` with a non-empty
+//   plugin delta (`pluginSides.has_value()`). Apply order on undo: restore timeline snapshot, then
+//   `PluginInsertHost::importChain(trackId, pluginSides->before)`.
 //
 // RECORD
 //   `record` clears the redo deque. Steps are dropped from the front when over capacity.
@@ -58,7 +58,7 @@ public:
                 std::optional<PluginUndoStepSides> pluginSides = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
-    /// restore (`pluginSides` present — caller applies `before` slot).
+    /// restore (`pluginSides` present — caller applies `before` chain).
     [[nodiscard]] std::optional<SessionHistoryRestoreBundle> popUndo() noexcept;
 
     /// [Message thread] Pops one redo step back onto undo; returns bundle (`pluginSides->after` if

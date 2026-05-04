@@ -94,8 +94,9 @@ public:
     // w.r.t. playhead stores from the audio thread). Thread: any non-callback; safe for UI.
     [[nodiscard]] std::int64_t readPlayheadSamplesForUi() const noexcept;
 
-    // Cycle/loop armed state (Cubase-like). Transient — not persisted. UI sets via release;
-    // PlaybackEngine reads on the audio thread with acquire — see audioThread_loadCycleEnabled.
+    // Cycle/loop armed state (Cubase-like). UI sets via release; PlaybackEngine reads on the
+    // audio thread with acquire — see audioThread_loadCycleEnabled. Persisted in `ProjectFileV1`
+    // (v10+) as `cycleEnabled`; omitted when false in JSON — older projects default to off on load.
     void requestCycleEnabled(bool enabled) noexcept;
     [[nodiscard]] bool readCycleEnabledForUi() const noexcept;
 

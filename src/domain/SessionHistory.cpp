@@ -25,7 +25,7 @@ void SessionHistory::record(juce::String label,
         return;
     }
     const bool pluginDelta = pluginSides.has_value() && pluginSides->trackId != kInvalidTrackId
-                             && !pluginSides->before.slotEquals(pluginSides->after);
+                             && !pluginSides->before.chainEquals(pluginSides->after);
     if (!pluginDelta)
     {
         if (before.get() == after.get())

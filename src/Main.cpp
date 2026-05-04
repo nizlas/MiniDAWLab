@@ -853,6 +853,9 @@ private:
                     PluginUndoStepSides copy = sides;
                     self->sessionHistory_.record(label, snap, snap, std::move(copy));
                 });
+            pluginHost_.setEditorShortcutCallbacks({
+                [this] { invokeUndoFromWindowShortcut(); },
+                [this] { invokeRedoFromWindowShortcut(); } });
             trackLanesView.setTrackHeaderPluginHost(
                 { [this](const TrackId tid) { showVst3PluginPickerForTrack(tid, this); },
                   [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
@@ -1317,15 +1320,24 @@ private:
             {
                 return;
             }
+            pluginHost_.flushOpenEditorParameterUndoSteps();
             const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popUndo();
             if (!bundle.has_value() || bundle->timelineSnapshot == nullptr)
             {
                 return;
             }
-            session.restoreSessionSnapshotForUndo(bundle->timelineSnapshot);
+            {
+                const std::shared_ptr<const SessionSnapshot> live
+                    = session.loadSessionSnapshotForAudioThread();
+                const std::int64_t curL = live ? live->getLeftLocatorSamples() : 0;
+                const std::int64_t curR = live ? live->getRightLocatorSamples() : 0;
+                const std::shared_ptr<const SessionSnapshot> restoredWithLocators
+                    = SessionSnapshot::withLocators(*bundle->timelineSnapshot, curL, curR);
+                session.restoreSessionSnapshotForUndo(restoredWithLocators);
+            }
             if (bundle->pluginSides.has_value())
             {
-                pluginHost_.importSlot(bundle->pluginSides->trackId, bundle->pluginSides->before);
+                pluginHost_.importChain(bundle->pluginSides->trackId, bundle->pluginSides->before);
             }
             refreshAfterSessionSnapshotRestore();
         }
@@ -1346,10 +1358,18 @@ private:
             {
                 return;
             }
-            session.restoreSessionSnapshotForUndo(bundle->timelineSnapshot);
+            {
+                const std::shared_ptr<const SessionSnapshot> live
+                    = session.loadSessionSnapshotForAudioThread();
+                const std::int64_t curL = live ? live->getLeftLocatorSamples() : 0;
+                const std::int64_t curR = live ? live->getRightLocatorSamples() : 0;
+                const std::shared_ptr<const SessionSnapshot> restoredWithLocators
+                    = SessionSnapshot::withLocators(*bundle->timelineSnapshot, curL, curR);
+                session.restoreSessionSnapshotForUndo(restoredWithLocators);
+            }
             if (bundle->pluginSides.has_value())
             {
-                pluginHost_.importSlot(bundle->pluginSides->trackId, bundle->pluginSides->after);
+                pluginHost_.importChain(bundle->pluginSides->trackId, bundle->pluginSides->after);
             }
             refreshAfterSessionSnapshotRestore();
         }

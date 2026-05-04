@@ -927,6 +927,9 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     out.playheadSamples = transport.readPlayheadSamplesForUi();
     out.deviceSampleRateAtSave = deviceSampleRate;
     out.arrangementExtentSamples = s->getArrangementExtentSamples();
+    out.leftLocatorSamples = s->getLeftLocatorSamples();
+    out.rightLocatorSamples = s->getRightLocatorSamples();
+    out.cycleEnabled = transport.readCycleEnabledForUi();
 
     for (int i = 0; i < s->getNumTracks(); ++i)
     {
@@ -988,16 +991,24 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         }
         if (pluginHost != nullptr)
         {
-            const PluginTrackSlot ps = pluginHost->exportSlot(tr.id);
-            if (ps.occupied)
+            const PluginTrackChain ch = pluginHost->exportChain(tr.id);
+            for (const auto& d : ch.slots)
             {
-                tr.pluginVst3Path = ps.vst3AbsolutePath;
-                tr.pluginIdentifier = ps.pluginIdentifier;
-                if (ps.opaqueState.getSize() > 0)
+                if (!d.occupied)
                 {
-                    tr.pluginStateBase64
-                        = juce::Base64::toBase64(ps.opaqueState.getData(), (int)ps.opaqueState.getSize());
+                    continue;
                 }
+                ProjectFileInsertV1 ins;
+                ins.slotId = d.slotId;
+                ins.stage = d.stage;
+                ins.pluginVst3Path = d.vst3AbsolutePath;
+                ins.pluginIdentifier = d.pluginIdentifier;
+                if (d.opaqueState.getSize() > 0)
+                {
+                    ins.pluginStateBase64 = juce::Base64::toBase64(
+                        d.opaqueState.getData(), (int)d.opaqueState.getSize());
+                }
+                tr.inserts.push_back(std::move(ins));
             }
         }
         out.tracks.push_back(std::move(tr));
@@ -1169,39 +1180,44 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     const std::int64_t seekTo
         = juce::jlimit<std::int64_t>(0, hi, static_cast<std::int64_t>(parsed.playheadSamples));
     transport.requestSeek(seekTo);
+    transport.requestCycleEnabled(parsed.cycleEnabled);
 
     if (pluginHost != nullptr && parsed.version >= 8)
     {
         for (const auto& trDto : parsed.tracks)
         {
-            if (trDto.pluginVst3Path.isEmpty())
+            PluginTrackChain chain;
+            for (const auto& ins : trDto.inserts)
             {
-                continue;
-            }
-            PluginTrackSlot slot;
-            slot.occupied = true;
-            slot.vst3AbsolutePath = trDto.pluginVst3Path;
-            slot.pluginIdentifier = trDto.pluginIdentifier;
-            if (trDto.pluginStateBase64.isNotEmpty())
-            {
-                juce::MemoryOutputStream mos;
-                if (!juce::Base64::convertFromBase64(mos, trDto.pluginStateBase64))
+                if (ins.pluginVst3Path.isEmpty())
                 {
-                    outSkippedClipDetails.add("[plugin] track " + juce::String((juce::int64)trDto.id)
-                                              + " - invalid pluginStateBase64.");
+                    continue;
                 }
-                else
+                PluginInsertDescriptor d;
+                d.slotId = ins.slotId;
+                d.stage = ins.stage;
+                d.occupied = true;
+                d.vst3AbsolutePath = ins.pluginVst3Path;
+                d.pluginIdentifier = ins.pluginIdentifier;
+                if (ins.pluginStateBase64.isNotEmpty())
                 {
-                    slot.opaqueState.replaceAll(mos.getData(), mos.getDataSize());
+                    juce::MemoryOutputStream mos;
+                    if (!juce::Base64::convertFromBase64(mos, ins.pluginStateBase64))
+                    {
+                        outSkippedClipDetails.add("[plugin] track " + juce::String((juce::int64)trDto.id)
+                                                  + " - invalid pluginStateBase64.");
+                    }
+                    else
+                    {
+                        d.opaqueState.replaceAll(mos.getData(), mos.getDataSize());
+                    }
                 }
+                chain.slots.push_back(std::move(d));
             }
-            const juce::File plugFile(slot.vst3AbsolutePath);
-            if (!plugFile.exists())
+            if (!chain.slots.empty())
             {
-                outSkippedClipDetails.add("[plugin] track " + juce::String((juce::int64)trDto.id)
-                                          + " missing " + slot.vst3AbsolutePath);
+                pluginHost->importChain(trDto.id, chain);
             }
-            pluginHost->importSlot(trDto.id, slot);
         }
     }
 
