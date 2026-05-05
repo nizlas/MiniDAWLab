@@ -85,8 +85,19 @@ public:
 
     void removeInsert(TrackId trackId, InsertSlotId slotId);
 
-    /// [Message thread] Move an occupied insert to the end of Pre or Post; keeps the live instance and slot id.
+    /// [Message thread] Move insert to `targetStage` at gap index in the target stage in [0, targetStageCount].
+    /// Preserves instance and slot id; undo label "Move insert" if chain changes.
+    void moveInsertToStageAtGap(TrackId trackId,
+                                InsertSlotId slotId,
+                                InsertStage targetStage,
+                                int gapIndexInTargetStage);
+
+    /// [Message thread] Move an occupied insert to the end of Pre or Post; delegates to `moveInsertToStageAtGap` (append).
     void moveInsertToStage(TrackId trackId, InsertSlotId slotId, InsertStage newStage);
+
+    /// [Message thread] Reorder within the slot's current stage. `gapIndexInStage` is the visual gap before removal,
+    /// in [0, stageCount]. No-op if gap is same position (gap == srcIndex or gap == srcIndex + 1).
+    void reorderInsertWithinStage(TrackId trackId, InsertSlotId slotId, int gapIndexInStage);
 
     [[nodiscard]] PluginTrackChain exportChain(TrackId trackId) const;
 

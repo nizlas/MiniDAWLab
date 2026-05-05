@@ -9,6 +9,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <algorithm>
+#include <limits>
 #include <vector>
 
 namespace
@@ -492,47 +493,82 @@ void PluginInsertHost::removeInsert(const TrackId trackId, const InsertSlotId sl
     }
 }
 
-void PluginInsertHost::moveInsertToStage(const TrackId trackId,
-                                         const InsertSlotId slotId,
-                                         const InsertStage newStage)
+void PluginInsertHost::moveInsertToStageAtGap(const TrackId trackId,
+                                              const InsertSlotId slotId,
+                                              const InsertStage targetStage,
+                                              const int gapIndexInTargetStage)
 {
     if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
     {
         return;
     }
-    LiveInsertSlot* const live = findLiveMutable(trackId, slotId);
-    if (live == nullptr)
+
+    const auto itChain = chains_.find(trackId);
+    if (itChain == chains_.end())
     {
         return;
     }
-    if (live->stage == newStage)
+
+    auto& v = itChain->second;
+    const auto found = std::find_if(v.begin(), v.end(), [&](const LiveInsertSlot& s) {
+        return s.slotId == slotId;
+    });
+    if (found == v.end())
+    {
+        return;
+    }
+    if (found->stage == targetStage)
     {
         return;
     }
 
     const PluginTrackChain before = exportChain(trackId);
-    const auto it = chains_.find(trackId);
-    if (it == chains_.end())
-    {
-        return;
-    }
-    auto& v = it->second;
-    const auto found
-        = std::find_if(v.begin(), v.end(), [&](const LiveInsertSlot& s) { return s.slotId == slotId; });
-    if (found == v.end())
-    {
-        return;
-    }
 
     LiveInsertSlot moved = std::move(*found);
     v.erase(found);
     if (v.empty())
     {
         chains_.erase(trackId);
+        moved.stage = targetStage;
+        std::vector<LiveInsertSlot> nv;
+        nv.push_back(std::move(moved));
+        chains_[trackId] = std::move(nv);
+        rebuildAudioThreadMapAndPublish();
+        const PluginTrackChain after = exportChain(trackId);
+        if (!before.chainEquals(after))
+        {
+            PluginUndoStepSides sides;
+            sides.trackId = trackId;
+            sides.before = before;
+            sides.after = after;
+            recordPluginSlotUndo("Move insert", sides);
+        }
+        return;
     }
 
-    moved.stage = newStage;
-    insertLiveSlotSorted(trackId, std::move(moved));
+    auto& v2 = chains_[trackId];
+    int targetCount = 0;
+    for (const auto& s : v2)
+    {
+        if (s.stage == targetStage)
+        {
+            ++targetCount;
+        }
+    }
+
+    const int finalIdx = juce::jlimit(0, targetCount, gapIndexInTargetStage);
+    moved.stage = targetStage;
+
+    if (targetStage == InsertStage::Pre)
+    {
+        v2.insert(v2.begin() + finalIdx, std::move(moved));
+    }
+    else
+    {
+        const auto firstPost = std::find_if(
+            v2.begin(), v2.end(), [](const LiveInsertSlot& s) { return s.stage == InsertStage::Post; });
+        v2.insert(firstPost + finalIdx, std::move(moved));
+    }
 
     rebuildAudioThreadMapAndPublish();
     const PluginTrackChain after = exportChain(trackId);
@@ -543,6 +579,101 @@ void PluginInsertHost::moveInsertToStage(const TrackId trackId,
         sides.before = before;
         sides.after = after;
         recordPluginSlotUndo("Move insert", sides);
+    }
+}
+
+void PluginInsertHost::moveInsertToStage(const TrackId trackId,
+                                         const InsertSlotId slotId,
+                                         const InsertStage newStage)
+{
+    moveInsertToStageAtGap(
+        trackId, slotId, newStage, std::numeric_limits<int>::max());
+}
+
+void PluginInsertHost::reorderInsertWithinStage(const TrackId trackId,
+                                               const InsertSlotId slotId,
+                                               const int gapIndexInStage)
+{
+    if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
+    {
+        return;
+    }
+
+    const auto itChain = chains_.find(trackId);
+    if (itChain == chains_.end())
+    {
+        return;
+    }
+
+    auto& v = itChain->second;
+    const auto srcIt = std::find_if(v.begin(), v.end(), [&](const LiveInsertSlot& s) {
+        return s.slotId == slotId;
+    });
+    if (srcIt == v.end())
+    {
+        return;
+    }
+
+    const InsertStage st = srcIt->stage;
+
+    int srcIndexInStage = 0;
+    for (auto it = v.begin(); it != srcIt; ++it)
+    {
+        if (it->stage == st)
+        {
+            ++srcIndexInStage;
+        }
+    }
+
+    int stageCount = 0;
+    for (const auto& s : v)
+    {
+        if (s.stage == st)
+        {
+            ++stageCount;
+        }
+    }
+
+    const int gap = juce::jlimit(0, stageCount, gapIndexInStage);
+    if (gap == srcIndexInStage || gap == srcIndexInStage + 1)
+    {
+        return;
+    }
+
+    const PluginTrackChain before = exportChain(trackId);
+
+    const int finalIdx = (gap > srcIndexInStage) ? (gap - 1) : gap;
+
+    LiveInsertSlot moved = std::move(*srcIt);
+    v.erase(srcIt);
+    if (v.empty())
+    {
+        chains_.erase(trackId);
+        return;
+    }
+
+    if (st == InsertStage::Pre)
+    {
+        const auto insertPos = v.begin() + finalIdx;
+        v.insert(insertPos, std::move(moved));
+    }
+    else
+    {
+        const auto firstPost = std::find_if(
+            v.begin(), v.end(), [](const LiveInsertSlot& s) { return s.stage == InsertStage::Post; });
+        const auto insertPos = firstPost + finalIdx;
+        v.insert(insertPos, std::move(moved));
+    }
+
+    rebuildAudioThreadMapAndPublish();
+    const PluginTrackChain after = exportChain(trackId);
+    if (!before.chainEquals(after))
+    {
+        PluginUndoStepSides sides;
+        sides.trackId = trackId;
+        sides.before = before;
+        sides.after = after;
+        recordPluginSlotUndo("Reorder insert", sides);
     }
 }
 

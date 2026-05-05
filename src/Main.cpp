@@ -893,8 +893,11 @@ private:
                 },
                 [this](const TrackId tid, const InsertSlotId sid) { pluginHost_.openNativeEditor(tid, sid); },
                 [this](const TrackId tid, const InsertSlotId sid) { pluginHost_.removeInsert(tid, sid); },
-                [this](const TrackId tid, const InsertSlotId sid, const InsertStage st) {
-                    pluginHost_.moveInsertToStage(tid, sid, st);
+                [this](const TrackId tid, const InsertSlotId sid, const InsertStage st, const int gap) {
+                    pluginHost_.moveInsertToStageAtGap(tid, sid, st, gap);
+                },
+                [this](const TrackId tid, const InsertSlotId sid, const int gapIndex) {
+                    pluginHost_.reorderInsertWithinStage(tid, sid, gapIndex);
                 } });
             trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
                 if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing

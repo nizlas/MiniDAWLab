@@ -228,19 +228,21 @@ public:
         return owner_.isInsertRowDragPayloadAcceptedForActiveTrack(dragSourceDetails.description);
     }
 
-    void itemDragEnter(const SourceDetails&) override
+    void itemDragEnter(const SourceDetails& details) override
     {
-        owner_.notifyInsertStageDropHover(stage_);
+        owner_.updateInsertDragHoverFromInspectorPoint(
+            owner_.getLocalPoint(this, details.localPosition));
     }
 
-    void itemDragMove(const SourceDetails&) override
+    void itemDragMove(const SourceDetails& details) override
     {
-        owner_.notifyInsertStageDropHover(stage_);
+        owner_.updateInsertDragHoverFromInspectorPoint(
+            owner_.getLocalPoint(this, details.localPosition));
     }
 
     void itemDragExit(const SourceDetails&) override
     {
-        owner_.clearInsertStageDropHover();
+        owner_.clearInsertDropHover();
     }
 
     void itemDropped(const SourceDetails& dragSourceDetails) override
@@ -250,88 +252,10 @@ public:
         InsertStage src = InsertStage::Post;
         if (!parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src))
         {
-            owner_.clearInsertStageDropHover();
             return;
         }
-        owner_.handleInsertStageDropped(tid, sid, src, stage_);
-    }
-
-private:
-    InspectorView& owner_;
-    InsertStage stage_;
-};
-
-class InspectorView::InsertStageDropSlot final : public juce::Component,
-                                               public juce::DragAndDropTarget
-{
-public:
-    InsertStageDropSlot(InspectorView& owner, InsertStage stage)
-        : owner_(owner)
-        , stage_(stage)
-    {
-        setOpaque(false);
-        setInterceptsMouseClicks(true, false);
-    }
-
-    void paint(juce::Graphics& g) override
-    {
-        const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
-        constexpr float kCorner = 4.f;
-
-        const juce::Colour fill = findColour(juce::TextButton::buttonColourId).withAlpha(0.12f);
-        g.setColour(fill);
-        g.fillRoundedRectangle(bounds, kCorner);
-
-        juce::Path outline;
-        outline.addRoundedRectangle(bounds, kCorner);
-        const float dashLens[] = { 4.f, 3.f };
-        juce::Path dashed;
-        juce::PathStrokeType dashStroke(1.f);
-        dashStroke.createDashedStroke(dashed, outline, dashLens, 2);
-        g.setColour(findColour(juce::TextEditor::outlineColourId).withAlpha(0.55f));
-        g.strokePath(dashed, juce::PathStrokeType(1.f));
-
-        const juce::Font font(juce::FontOptions(12.0f));
-        const juce::String text = "Drop here";
-        const float pad = 8.f;
-        const float maxW = juce::jmax(4.f, bounds.getWidth() - 2.f * pad);
-        const juce::String elided = elideTextToFitWidth(text, font, maxW);
-        g.setColour(findColour(juce::Label::textColourId).withAlpha(0.65f));
-        g.setFont(font);
-        g.drawText(elided, bounds.reduced(pad, 0.f), juce::Justification::centred, true);
-    }
-
-    bool isInterestedInDragSource(const SourceDetails& dragSourceDetails) override
-    {
-        return owner_.isCrossStageInsertDropAccepted(dragSourceDetails.description, stage_);
-    }
-
-    void itemDragEnter(const SourceDetails&) override
-    {
-        owner_.notifyInsertStageDropHover(stage_);
-    }
-
-    void itemDragMove(const SourceDetails&) override
-    {
-        owner_.notifyInsertStageDropHover(stage_);
-    }
-
-    void itemDragExit(const SourceDetails&) override
-    {
-        owner_.clearInsertStageDropHover();
-    }
-
-    void itemDropped(const SourceDetails& dragSourceDetails) override
-    {
-        TrackId tid = kInvalidTrackId;
-        InsertSlotId sid = kInvalidInsertSlotId;
-        InsertStage src = InsertStage::Post;
-        if (!parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src))
-        {
-            owner_.clearInsertStageDropHover();
-            return;
-        }
-        owner_.handleInsertStageDropped(tid, sid, src, stage_);
+        owner_.handleInsertDropped(
+            tid, sid, src, stage_, owner_.getLocalPoint(this, dragSourceDetails.localPosition));
     }
 
 private:
@@ -475,19 +399,21 @@ public:
         return owner_.isInsertRowDragPayloadAcceptedForActiveTrack(dragSourceDetails.description);
     }
 
-    void itemDragEnter(const SourceDetails&) override
+    void itemDragEnter(const SourceDetails& details) override
     {
-        owner_.notifyInsertStageDropHover(stage_);
+        owner_.updateInsertDragHoverFromInspectorPoint(
+            owner_.getLocalPoint(this, details.localPosition));
     }
 
-    void itemDragMove(const SourceDetails&) override
+    void itemDragMove(const SourceDetails& details) override
     {
-        owner_.notifyInsertStageDropHover(stage_);
+        owner_.updateInsertDragHoverFromInspectorPoint(
+            owner_.getLocalPoint(this, details.localPosition));
     }
 
     void itemDragExit(const SourceDetails&) override
     {
-        owner_.clearInsertStageDropHover();
+        owner_.clearInsertDropHover();
     }
 
     void itemDropped(const SourceDetails& dragSourceDetails) override
@@ -497,10 +423,10 @@ public:
         InsertStage src = InsertStage::Post;
         if (!parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src))
         {
-            owner_.clearInsertStageDropHover();
             return;
         }
-        owner_.handleInsertStageDropped(tid, sid, src, stage_);
+        owner_.handleInsertDropped(
+            tid, sid, src, stage_, owner_.getLocalPoint(this, dragSourceDetails.localPosition));
     }
 
     void mouseEnter(const juce::MouseEvent&) override
@@ -588,6 +514,10 @@ InspectorView::InspectorView(Session& session)
 
     addPreInsertButton_.setButtonText("+ Add Pre insert");
     addPreInsertButton_.onClick = [this] {
+        if (insertDragSourceStage_.has_value())
+        {
+            return;
+        }
         const TrackId t = session_.getActiveTrackId();
         if (t == kInvalidTrackId || !pluginHost_.requestAdd)
         {
@@ -615,6 +545,10 @@ InspectorView::InspectorView(Session& session)
 
     addPostInsertButton_.setButtonText("+ Add Post insert");
     addPostInsertButton_.onClick = [this] {
+        if (insertDragSourceStage_.has_value())
+        {
+            return;
+        }
         const TrackId t = session_.getActiveTrackId();
         if (t == kInvalidTrackId || !pluginHost_.requestAdd)
         {
@@ -623,13 +557,6 @@ InspectorView::InspectorView(Session& session)
         pluginHost_.requestAdd(t, InsertStage::Post);
     };
     addAndMakeVisible(addPostInsertButton_);
-
-    preDropSlot_ = std::make_unique<InsertStageDropSlot>(*this, InsertStage::Pre);
-    postDropSlot_ = std::make_unique<InsertStageDropSlot>(*this, InsertStage::Post);
-    addAndMakeVisible(*preDropSlot_);
-    addAndMakeVisible(*postDropSlot_);
-    preDropSlot_->setVisible(false);
-    postDropSlot_->setVisible(false);
 
     refreshFromSession();
 }
@@ -663,77 +590,26 @@ void InspectorView::requestRemoveForSlot(const InsertSlotId slotId)
     });
 }
 
-void InspectorView::applyInsertCrossStageDragChrome() noexcept
-{
-    if (!insertDragSourceStage_.has_value())
-    {
-        return;
-    }
-    if (*insertDragSourceStage_ == InsertStage::Post)
-    {
-        addPreInsertButton_.setVisible(false);
-    }
-    else
-    {
-        addPostInsertButton_.setVisible(false);
-    }
-    if (preDropSlot_ != nullptr && postDropSlot_ != nullptr)
-    {
-        const bool showPreGhost = *insertDragSourceStage_ == InsertStage::Post;
-        preDropSlot_->setVisible(showPreGhost);
-        postDropSlot_->setVisible(!showPreGhost);
-        if (showPreGhost)
-        {
-            preDropSlot_->toFront(false);
-        }
-        else
-        {
-            postDropSlot_->toFront(false);
-        }
-    }
-}
-
 void InspectorView::onInsertSlotDragStarted(const InsertStage sourceStage)
 {
     insertDragSourceStage_ = sourceStage;
-    applyInsertCrossStageDragChrome();
-    resized();
     repaint();
 }
 
 void InspectorView::clearInsertSlotDragSession() noexcept
 {
     insertDragSourceStage_.reset();
-    addPreInsertButton_.setVisible(true);
-    addPostInsertButton_.setVisible(true);
-    if (preDropSlot_ != nullptr)
-    {
-        preDropSlot_->setVisible(false);
-    }
-    if (postDropSlot_ != nullptr)
-    {
-        postDropSlot_->setVisible(false);
-    }
-    clearInsertStageDropHover();
+    clearInsertDropHover();
 }
 
 void InspectorView::dragOperationEnded(const juce::DragAndDropTarget::SourceDetails&)
 {
     clearInsertSlotDragSession();
-    resized();
     repaint();
 }
 
 std::optional<InsertStage> InspectorView::stageForLocalPoint(const juce::Point<int> p) const noexcept
 {
-    if (preDropSlot_ != nullptr && preDropSlot_->isVisible() && preDropSlot_->getBounds().contains(p))
-    {
-        return InsertStage::Pre;
-    }
-    if (postDropSlot_ != nullptr && postDropSlot_->isVisible() && postDropSlot_->getBounds().contains(p))
-    {
-        return InsertStage::Post;
-    }
     if (preInsertBlockBounds_.contains(p))
     {
         return InsertStage::Pre;
@@ -752,33 +628,17 @@ bool InspectorView::isInterestedInDragSource(const juce::DragAndDropTarget::Sour
 
 void InspectorView::itemDragEnter(const juce::DragAndDropTarget::SourceDetails& details)
 {
-    const auto stage = stageForLocalPoint(details.localPosition);
-    if (stage.has_value())
-    {
-        notifyInsertStageDropHover(*stage);
-    }
-    else
-    {
-        clearInsertStageDropHover();
-    }
+    updateInsertDragHoverFromInspectorPoint(details.localPosition);
 }
 
 void InspectorView::itemDragMove(const juce::DragAndDropTarget::SourceDetails& details)
 {
-    const auto stage = stageForLocalPoint(details.localPosition);
-    if (stage.has_value())
-    {
-        notifyInsertStageDropHover(*stage);
-    }
-    else
-    {
-        clearInsertStageDropHover();
-    }
+    updateInsertDragHoverFromInspectorPoint(details.localPosition);
 }
 
 void InspectorView::itemDragExit(const juce::DragAndDropTarget::SourceDetails&)
 {
-    clearInsertStageDropHover();
+    clearInsertDropHover();
 }
 
 void InspectorView::itemDropped(const juce::DragAndDropTarget::SourceDetails& details)
@@ -797,55 +657,142 @@ void InspectorView::itemDropped(const juce::DragAndDropTarget::SourceDetails& de
         clearInsertSlotDragSession();
         return;
     }
-    handleInsertStageDropped(tid, sid, src, *targetStage);
+    handleInsertDropped(tid, sid, src, *targetStage, details.localPosition);
 }
 
-bool InspectorView::isCrossStageInsertDropAccepted(const juce::var& desc,
-                                                   const InsertStage targetStage) const noexcept
+bool InspectorView::isSameStageAddButtonArea(const InsertStage st, const juce::Point<int> p) const noexcept
 {
-    TrackId tid = kInvalidTrackId;
-    InsertSlotId sid = kInvalidInsertSlotId;
-    InsertStage src = InsertStage::Post;
-    if (!parseInsertRowDragDescription(desc, tid, sid, src))
+    if (st == InsertStage::Pre)
     {
-        return false;
+        return addPreInsertButton_.getBounds().contains(p);
     }
-    const TrackId expected = (lastShownInsertRowsTrackId_ != kInvalidTrackId)
-                                 ? lastShownInsertRowsTrackId_
-                                 : session_.getActiveTrackId();
-    if (tid != expected)
-    {
-        return false;
-    }
-    return src != targetStage;
+    return addPostInsertButton_.getBounds().contains(p);
 }
 
-void InspectorView::notifyInsertStageDropHover(InsertStage stage) noexcept
+int InspectorView::gapIndexForStageAtLocalPoint(const InsertStage stage,
+                                               const juce::Point<int> p) const noexcept
 {
-    if (insertDragSourceStage_.has_value() && *insertDragSourceStage_ == stage)
+    const auto& rows = stage == InsertStage::Pre ? preRowStrips_ : postRowStrips_;
+    if (rows.empty())
     {
-        clearInsertStageDropHover();
+        return 0;
+    }
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+    {
+        if (p.y < rows[static_cast<size_t>(i)]->getBounds().getCentreY())
+        {
+            return i;
+        }
+    }
+    return static_cast<int>(rows.size());
+}
+
+int InspectorView::gapIndexForCrossStageDrop(const InsertStage targetStage,
+                                            const juce::Point<int> p) const noexcept
+{
+    const auto& rows = targetStage == InsertStage::Pre ? preRowStrips_ : postRowStrips_;
+    if (isSameStageAddButtonArea(targetStage, p))
+    {
+        return static_cast<int>(rows.size());
+    }
+    if (rows.empty())
+    {
+        return 0;
+    }
+    return gapIndexForStageAtLocalPoint(targetStage, p);
+}
+
+void InspectorView::notifyInsertDropHover(const InsertStage stage, const juce::Point<int> p) noexcept
+{
+    constexpr int kLineH = 2;
+    const auto& rows = stage == InsertStage::Pre ? preRowStrips_ : postRowStrips_;
+    const juce::Rectangle<int> addBounds = stage == InsertStage::Pre ? addPreInsertButton_.getBounds()
+                                                                      : addPostInsertButton_.getBounds();
+
+    int gap = 0;
+    juce::Rectangle<int> line;
+
+    if (isSameStageAddButtonArea(stage, p))
+    {
+        gap = static_cast<int>(rows.size());
+        const int x = rows.empty() ? addBounds.getX() : rows[0]->getX();
+        const int w = rows.empty() ? addBounds.getWidth() : juce::jmax(1, rows[0]->getWidth());
+        line = juce::Rectangle<int>(x, addBounds.getY() - kLineH / 2, w, kLineH);
+    }
+    else if (rows.empty())
+    {
+        gap = 0;
+        line = juce::Rectangle<int>(addBounds.getX(), addBounds.getY() - kLineH / 2,
+                                    juce::jmax(1, addBounds.getWidth()), kLineH);
+    }
+    else
+    {
+        gap = gapIndexForStageAtLocalPoint(stage, p);
+        const int x = rows[0]->getX();
+        const int w = juce::jmax(1, rows[0]->getWidth());
+        if (gap == 0)
+        {
+            const int y = rows[0]->getY();
+            line = juce::Rectangle<int>(x, y - kLineH / 2, w, kLineH);
+        }
+        else if (gap >= static_cast<int>(rows.size()))
+        {
+            const int y = rows.back()->getBottom();
+            line = juce::Rectangle<int>(x, y - kLineH / 2, w, kLineH);
+        }
+        else
+        {
+            const int y = rows[static_cast<size_t>(gap)]->getY();
+            line = juce::Rectangle<int>(x, y - kLineH / 2, w, kLineH);
+        }
+    }
+
+    if (insertDropHoverActive_ && insertDropHoverStage_ == stage && insertDropHoverGapIndex_ == gap
+        && insertDropLineBounds_ == line)
+    {
         return;
     }
-    if (insertStageDropHoverActive_ && insertStageDropHoverStage_ == stage)
-    {
-        return;
-    }
-    insertStageDropHoverActive_ = true;
-    insertStageDropHoverStage_ = stage;
+    insertDropHoverActive_ = true;
+    insertDropHoverStage_ = stage;
+    insertDropHoverGapIndex_ = gap;
+    insertDropLineBounds_ = line;
     repaint(preInsertBlockBounds_);
     repaint(postInsertBlockBounds_);
 }
 
-void InspectorView::clearInsertStageDropHover() noexcept
+void InspectorView::clearInsertDropHover() noexcept
 {
-    if (!insertStageDropHoverActive_)
+    if (!insertDropHoverActive_)
     {
         return;
     }
-    insertStageDropHoverActive_ = false;
+    insertDropHoverActive_ = false;
     repaint(preInsertBlockBounds_);
     repaint(postInsertBlockBounds_);
+}
+
+void InspectorView::updateInsertDragHoverFromInspectorPoint(const juce::Point<int> p) noexcept
+{
+    if (!insertDragSourceStage_.has_value())
+    {
+        clearInsertDropHover();
+        return;
+    }
+
+    const auto stOpt = stageForLocalPoint(p);
+    if (!stOpt.has_value())
+    {
+        clearInsertDropHover();
+        return;
+    }
+
+    if (*stOpt == *insertDragSourceStage_ && isSameStageAddButtonArea(*stOpt, p))
+    {
+        clearInsertDropHover();
+        return;
+    }
+
+    notifyInsertDropHover(*stOpt, p);
 }
 
 bool InspectorView::isInsertRowDragPayloadAcceptedForActiveTrack(const juce::var& desc) const noexcept
@@ -863,10 +810,11 @@ bool InspectorView::isInsertRowDragPayloadAcceptedForActiveTrack(const juce::var
     return tid == expected;
 }
 
-void InspectorView::handleInsertStageDropped(const TrackId tid,
-                                            const InsertSlotId sid,
-                                            const InsertStage sourceStage,
-                                            const InsertStage targetStage)
+void InspectorView::handleInsertDropped(const TrackId tid,
+                                       const InsertSlotId sid,
+                                       const InsertStage sourceStage,
+                                       const InsertStage targetStage,
+                                       const juce::Point<int> localPoint)
 {
     const TrackId active = session_.getActiveTrackId();
     const TrackId shown = lastShownInsertRowsTrackId_;
@@ -882,16 +830,29 @@ void InspectorView::handleInsertStageDropped(const TrackId tid,
     {
         return;
     }
+
     if (sourceStage == targetStage)
     {
-        return;
+        if (isSameStageAddButtonArea(targetStage, localPoint))
+        {
+            return;
+        }
+        if (!pluginHost_.requestReorderInStage)
+        {
+            return;
+        }
+        const int gap = gapIndexForStageAtLocalPoint(targetStage, localPoint);
+        pluginHost_.requestReorderInStage(tid, sid, gap);
     }
-    if (!pluginHost_.requestMoveToStage)
+    else
     {
-        return;
+        if (!pluginHost_.requestMoveToStageAtGap)
+        {
+            return;
+        }
+        const int gap = gapIndexForCrossStageDrop(targetStage, localPoint);
+        pluginHost_.requestMoveToStageAtGap(tid, sid, targetStage, gap);
     }
-
-    pluginHost_.requestMoveToStage(tid, sid, targetStage);
 
     juce::Component::SafePointer<InspectorView> safeSelf(this);
     juce::MessageManager::callAsync([safeSelf] {
@@ -904,20 +865,11 @@ void InspectorView::handleInsertStageDropped(const TrackId tid,
 
 void InspectorView::paintOverChildren(juce::Graphics& g)
 {
-    if (!insertStageDropHoverActive_)
+    if (insertDropHoverActive_ && !insertDropLineBounds_.isEmpty())
     {
-        return;
+        g.setColour(juce::Colour(0xff40c040));
+        g.fillRect(insertDropLineBounds_);
     }
-    const juce::Rectangle<int> primary
-        = insertStageDropHoverStage_ == InsertStage::Pre ? preInsertBlockBounds_
-                                                        : postInsertBlockBounds_;
-    if (primary.isEmpty())
-    {
-        return;
-    }
-    constexpr float kCorner = 4.f;
-    g.setColour(findColour(juce::TextButton::buttonOnColourId).withAlpha(0.07f));
-    g.fillRoundedRectangle(primary.toFloat().reduced(1.f), kCorner);
 }
 
 void InspectorView::clearInsertRowStrips()
@@ -1096,8 +1048,6 @@ void InspectorView::syncInsertsForActiveTrack(const TrackId active)
         lastShownInsertRows_ = rows;
         lastShownInsertRowsTrackId_ = active;
     }
-
-    applyInsertCrossStageDragChrome();
 }
 
 void InspectorView::commitVolumeField()
@@ -1235,11 +1185,6 @@ void InspectorView::resized()
     {
         preStageDrop_->setBounds(preInsertBlockBounds_);
     }
-    if (preDropSlot_ != nullptr && preDropSlot_->isVisible())
-    {
-        preDropSlot_->setBounds(addPreInsertButton_.getBounds());
-        preDropSlot_->toFront(false);
-    }
 
     area.removeFromTop(kGapSection);
 
@@ -1262,11 +1207,6 @@ void InspectorView::resized()
     if (postStageDrop_ != nullptr)
     {
         postStageDrop_->setBounds(postInsertBlockBounds_);
-    }
-    if (postDropSlot_ != nullptr && postDropSlot_->isVisible())
-    {
-        postDropSlot_->setBounds(addPostInsertButton_.getBounds());
-        postDropSlot_->toFront(false);
     }
 
     updateElidedTrackTitleDisplay();

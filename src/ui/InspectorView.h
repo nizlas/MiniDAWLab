@@ -29,7 +29,10 @@ struct InspectorPluginHost
     std::function<void(TrackId, InsertStage)> requestAdd;
     std::function<void(TrackId, InsertSlotId)> requestEdit;
     std::function<void(TrackId, InsertSlotId)> requestRemove;
-    std::function<void(TrackId, InsertSlotId, InsertStage)> requestMoveToStage;
+    /// `gapIndexInTargetStage` in [0, targetStageCount] (see PluginInsertHost::moveInsertToStageAtGap).
+    std::function<void(TrackId, InsertSlotId, InsertStage, int)> requestMoveToStageAtGap;
+    /// `gapIndexInStage` is the visual gap in [0, stageCount] before removal (see PluginInsertHost::reorderInsertWithinStage).
+    std::function<void(TrackId, InsertSlotId, int)> requestReorderInStage;
 };
 
 /// Active-track-only controls (Cubase-style Inspector), not repeated in every track header.
@@ -41,7 +44,6 @@ class InspectorView final : public juce::Component,
 {
     class InsertSlotButton;
     class StageDropTarget;
-    class InsertStageDropSlot;
 
 public:
     explicit InspectorView(Session& session);
@@ -66,25 +68,28 @@ public:
 private:
     friend class InsertSlotButton;
     friend class StageDropTarget;
-    friend class InsertStageDropSlot;
 
     void requestEditForSlot(InsertSlotId slotId);
     void requestRemoveForSlot(InsertSlotId slotId);
 
     void onInsertSlotDragStarted(InsertStage sourceStage);
     void clearInsertSlotDragSession() noexcept;
-    /// While `insertDragSourceStage_` is set: hide target-stage Add, show matching Drop here overlay.
-    void applyInsertCrossStageDragChrome() noexcept;
-    [[nodiscard]] bool isCrossStageInsertDropAccepted(const juce::var& desc, InsertStage targetStage) const noexcept;
 
-    void notifyInsertStageDropHover(InsertStage stage) noexcept;
-    void clearInsertStageDropHover() noexcept;
     [[nodiscard]] bool isInsertRowDragPayloadAcceptedForActiveTrack(const juce::var& desc) const noexcept;
     [[nodiscard]] std::optional<InsertStage> stageForLocalPoint(juce::Point<int> p) const noexcept;
-    void handleInsertStageDropped(TrackId tid,
-                                 InsertSlotId sid,
-                                 InsertStage sourceStage,
-                                 InsertStage targetStage);
+
+    void handleInsertDropped(TrackId tid,
+                            InsertSlotId sid,
+                            InsertStage sourceStage,
+                            InsertStage targetStage,
+                            juce::Point<int> localPoint);
+
+    void updateInsertDragHoverFromInspectorPoint(juce::Point<int> p) noexcept;
+    void notifyInsertDropHover(InsertStage stage, juce::Point<int> p) noexcept;
+    void clearInsertDropHover() noexcept;
+    [[nodiscard]] int gapIndexForStageAtLocalPoint(InsertStage stage, juce::Point<int> p) const noexcept;
+    [[nodiscard]] int gapIndexForCrossStageDrop(InsertStage targetStage, juce::Point<int> p) const noexcept;
+    [[nodiscard]] bool isSameStageAddButtonArea(InsertStage st, juce::Point<int> p) const noexcept;
 
     void textEditorReturnKeyPressed(juce::TextEditor& editor) override;
     void textEditorEscapeKeyPressed(juce::TextEditor& editor) override;
@@ -117,24 +122,23 @@ private:
 
     std::unique_ptr<StageDropTarget> preStageDrop_;
     std::unique_ptr<StageDropTarget> postStageDrop_;
-    std::unique_ptr<InsertStageDropSlot> preDropSlot_;
-    std::unique_ptr<InsertStageDropSlot> postDropSlot_;
     std::optional<InsertStage> insertDragSourceStage_;
     juce::Rectangle<int> preInsertBlockBounds_;
     juce::Rectangle<int> postInsertBlockBounds_;
-    bool insertStageDropHoverActive_ = false;
-    InsertStage insertStageDropHoverStage_ = InsertStage::Pre;
+
+    bool insertDropHoverActive_ = false;
+    InsertStage insertDropHoverStage_ = InsertStage::Pre;
+    int insertDropHoverGapIndex_ = 0;
+    juce::Rectangle<int> insertDropLineBounds_;
 
     std::vector<std::unique_ptr<InsertSlotButton>> preRowStrips_;
     std::vector<std::unique_ptr<InsertSlotButton>> postRowStrips_;
 
     /// Last insert-row model shown in the UI (avoids rebuilding strips on every timer tick).
     std::vector<InspectorInsertRow> lastShownInsertRows_;
-    TrackId lastShownInsertRowsTrackId_ = kInvalidTrackId;
-
-    /// Full active-track name (used for tooltip and eliding to narrow label width).
     juce::String activeTrackPlainName_;
 
+    TrackId lastShownInsertRowsTrackId_ = kInvalidTrackId;
     TrackId lastShownTrackId_ = kInvalidTrackId;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(InspectorView)
