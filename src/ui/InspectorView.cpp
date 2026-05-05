@@ -5,6 +5,7 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cctype>
 #include <string>
@@ -39,12 +40,10 @@ namespace
         compact = compact.removeCharacters(" \t");
         if (compact == "-inf" || compact == "-infinity")
             return true;
-        // User may paste the Unicode minus-infinity glyph; still maps to silent gain.
         const juce::String inf = utf8InfinityChar();
         return t == (juce::String("-") + inf);
     }
 
-    /// Value fragment only — static "dB" label is beside the [`TextEditor`].
     [[nodiscard]] juce::String formatLinearGainToValueFieldOnly(const float linearGain)
     {
         if (linearGain <= 0.f)
@@ -118,7 +117,6 @@ namespace
         return lin;
     }
 
-
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -151,7 +149,438 @@ namespace
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
+} // namespace
+
+namespace
+{
+    void logInsertDndDiag(const juce::String& line)
+    {
+        juce::Logger::writeToLog(line);
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                   .getChildFile("MiniDAWLab");
+        (void) dir.createDirectory();
+        const juce::File logFile = dir.getChildFile("insert-dnd-diagnostic.log");
+        (void) logFile.appendText(line + juce::newLine);
+    }
+} // namespace
+
+[[nodiscard]] static bool parseInsertRowDragDescription(const juce::var& description,
+                                                       TrackId& outTid,
+                                                       InsertSlotId& outSid,
+                                                       InsertStage& outSrcStage)
+{
+    outTid = kInvalidTrackId;
+    outSid = kInvalidInsertSlotId;
+    outSrcStage = InsertStage::Post;
+
+    juce::String s = description.toString().trim().unquoted();
+    if (!s.startsWithIgnoreCase("insert:"))
+    {
+        return false;
+    }
+
+    s = s.substring(7).trim();
+
+    juce::StringArray parts;
+    parts.addTokens(s, ":", "");
+    parts.trim();
+    parts.removeEmptyStrings();
+
+    if (parts.size() != 3)
+    {
+        return false;
+    }
+
+    const auto tid64 = parts[0].getLargeIntValue();
+    const auto sid64 = parts[1].getLargeIntValue();
+    if (tid64 <= 0 || sid64 <= 0)
+    {
+        return false;
+    }
+
+    if (parts[2].equalsIgnoreCase("pre"))
+    {
+        outSrcStage = InsertStage::Pre;
+    }
+    else if (parts[2].equalsIgnoreCase("post"))
+    {
+        outSrcStage = InsertStage::Post;
+    }
+    else
+    {
+        return false;
+    }
+
+    outTid = static_cast<TrackId>(tid64);
+    outSid = static_cast<InsertSlotId>(sid64);
+    return true;
 }
+
+[[nodiscard]] static juce::String insertRowDragDescription(const TrackId tid,
+                                                          const InsertSlotId sid,
+                                                          const InsertStage st)
+{
+    const char* const stageStr = st == InsertStage::Pre ? "pre" : "post";
+    return juce::String("insert:") + juce::String(static_cast<juce::int64>(tid))
+        + ":" + juce::String(static_cast<juce::int64>(sid)) + ":" + stageStr;
+}
+
+class InspectorView::StageDropTarget final : public juce::Component,
+                                             public juce::DragAndDropTarget
+{
+public:
+    StageDropTarget(InspectorView& owner, InsertStage stage)
+        : owner_(owner)
+        , stage_(stage)
+    {
+        setOpaque(false);
+    }
+
+    bool isInterestedInDragSource(const SourceDetails& dragSourceDetails) override
+    {
+        return owner_.isInsertRowDragPayloadAcceptedForActiveTrack(dragSourceDetails.description);
+    }
+
+    void itemDragEnter(const SourceDetails&) override
+    {
+        owner_.notifyInsertStageDropHover(stage_);
+    }
+
+    void itemDragMove(const SourceDetails&) override
+    {
+        owner_.notifyInsertStageDropHover(stage_);
+    }
+
+    void itemDragExit(const SourceDetails&) override
+    {
+        owner_.clearInsertStageDropHover();
+    }
+
+    void itemDropped(const SourceDetails& dragSourceDetails) override
+    {
+        TrackId tid = kInvalidTrackId;
+        InsertSlotId sid = kInvalidInsertSlotId;
+        InsertStage src = InsertStage::Post;
+        if (!parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src))
+        {
+            owner_.clearInsertStageDropHover();
+            return;
+        }
+        owner_.handleInsertStageDropped(tid, sid, src, stage_);
+    }
+
+private:
+    InspectorView& owner_;
+    InsertStage stage_;
+};
+
+class InspectorView::InsertStageDropSlot final : public juce::Component,
+                                               public juce::DragAndDropTarget
+{
+public:
+    InsertStageDropSlot(InspectorView& owner, InsertStage stage)
+        : owner_(owner)
+        , stage_(stage)
+    {
+        setOpaque(false);
+        setInterceptsMouseClicks(true, false);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+        constexpr float kCorner = 4.f;
+
+        const juce::Colour fill = findColour(juce::TextButton::buttonColourId).withAlpha(0.10f);
+        g.setColour(fill);
+        g.fillRoundedRectangle(bounds, kCorner);
+
+        juce::Path outline;
+        outline.addRoundedRectangle(bounds, kCorner);
+        const float dashLens[] = { 4.f, 3.f };
+        juce::Path dashed;
+        juce::PathStrokeType dashStroke(1.f);
+        dashStroke.createDashedStroke(dashed, outline, dashLens, 2);
+        g.setColour(findColour(juce::TextEditor::outlineColourId).withAlpha(0.55f));
+        g.strokePath(dashed, juce::PathStrokeType(1.f));
+
+        const juce::Font font(juce::FontOptions(12.0f));
+        const juce::String text = "Drop here";
+        const float pad = 8.f;
+        const float maxW = juce::jmax(4.f, bounds.getWidth() - 2.f * pad);
+        const juce::String elided = elideTextToFitWidth(text, font, maxW);
+        g.setColour(findColour(juce::Label::textColourId).withAlpha(0.65f));
+        g.setFont(font);
+        g.drawText(elided, bounds.reduced(pad, 0.f), juce::Justification::centred, true);
+    }
+
+    bool isInterestedInDragSource(const SourceDetails& dragSourceDetails) override
+    {
+        TrackId tid = kInvalidTrackId;
+        InsertSlotId sid = kInvalidInsertSlotId;
+        InsertStage src = InsertStage::Post;
+        const bool parsedOk
+            = parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src);
+        const bool result
+            = owner_.isCrossStageInsertDropAccepted(dragSourceDetails.description, stage_);
+        const TrackId active = owner_.session_.getActiveTrackId();
+        const TrackId shown = owner_.lastShownInsertRowsTrackId_;
+        const juce::String line
+            = "[insert-dnd-diag] ghost interested target="
+              + juce::String(stage_ == InsertStage::Pre ? "pre" : "post") + " payload=\""
+              + dragSourceDetails.description.toString() + "\"" + " result="
+              + juce::String(result ? "yes" : "no") + " parsed="
+              + juce::String(parsedOk ? "ok" : "fail") + " tid="
+              + juce::String(static_cast<juce::int64>(parsedOk ? tid : static_cast<TrackId>(0))) + " sid="
+              + juce::String(static_cast<juce::int64>(parsedOk ? sid : static_cast<InsertSlotId>(0)))
+              + " src=" + juce::String(parsedOk ? (src == InsertStage::Pre ? "pre" : "post") : "?") + " active="
+              + juce::String(static_cast<juce::int64>(active)) + " shown="
+              + juce::String(static_cast<juce::int64>(shown));
+        if (lastGhostInterestedLine_ != line)
+        {
+            lastGhostInterestedLine_ = line;
+            logInsertDndDiag(line);
+        }
+        return result;
+    }
+
+    void itemDragEnter(const SourceDetails&) override
+    {
+        owner_.notifyInsertStageDropHover(stage_);
+    }
+
+    void itemDragMove(const SourceDetails&) override
+    {
+        owner_.notifyInsertStageDropHover(stage_);
+    }
+
+    void itemDragExit(const SourceDetails&) override
+    {
+        owner_.clearInsertStageDropHover();
+    }
+
+    void itemDropped(const SourceDetails& dragSourceDetails) override
+    {
+        logInsertDndDiag("[insert-dnd-diag] ghost dropped target="
+                         + juce::String(stage_ == InsertStage::Pre ? "pre" : "post") + " payload=\""
+                         + dragSourceDetails.description.toString() + "\"");
+        TrackId tid = kInvalidTrackId;
+        InsertSlotId sid = kInvalidInsertSlotId;
+        InsertStage src = InsertStage::Post;
+        if (!parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src))
+        {
+            owner_.clearInsertStageDropHover();
+            return;
+        }
+        owner_.handleInsertStageDropped(tid, sid, src, stage_);
+    }
+
+private:
+    InspectorView& owner_;
+    InsertStage stage_;
+    mutable juce::String lastGhostInterestedLine_;
+};
+
+class InspectorView::InsertSlotButton final : public juce::Component,
+                                              public juce::DragAndDropTarget
+{
+public:
+    InsertSlotButton(InspectorView& owner,
+                     TrackId trackId,
+                     InsertSlotId slotId,
+                     InsertStage stage,
+                     int displayIndex,
+                     juce::String displayName)
+        : owner_(owner)
+        , trackId_(trackId)
+        , slotId_(slotId)
+        , stage_(stage)
+        , displayIndex_(displayIndex)
+        , displayName_(std::move(displayName))
+    {
+        setOpaque(false);
+        setHelpText(juce::String(displayIndex_) + "  " + displayName_);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+        constexpr float kCorner = 4.f;
+        juce::Colour fill = findColour(juce::TextButton::buttonColourId);
+        juce::Colour outline = findColour(juce::TextEditor::outlineColourId);
+        if (!isEnabled())
+        {
+            fill = fill.withMultipliedAlpha(0.55f);
+        }
+        const bool leftDown = isMouseButtonDown() && !pendingContextMenu_;
+        if (leftDown)
+        {
+            fill = fill.brighter(0.12f);
+        }
+        else if (hovered_)
+        {
+            fill = fill.brighter(0.06f);
+        }
+        g.setColour(fill);
+        g.fillRoundedRectangle(bounds, kCorner);
+        g.setColour(outline.withMultipliedAlpha(hovered_ ? 1.0f : 0.75f));
+        g.drawRoundedRectangle(bounds, kCorner, 1.f);
+
+        const juce::Font font(juce::FontOptions(12.0f));
+        const juce::String line = juce::String(displayIndex_) + "  " + displayName_;
+        const float pad = 8.f;
+        const float textL = bounds.getX() + pad;
+        const float maxW = juce::jmax(4.f, bounds.getWidth() - 2.f * pad);
+        const juce::String elided = elideTextToFitWidth(line, font, maxW);
+        g.setColour(findColour(juce::Label::textColourId));
+        g.setFont(font);
+        g.drawText(elided, juce::Rectangle<float>(textL, bounds.getY(), maxW, bounds.getHeight()),
+                   juce::Justification::centredLeft, true);
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu())
+        {
+            pendingContextMenu_ = true;
+            armedForLeftClick_ = false;
+            dragLiftIssued_ = false;
+            return;
+        }
+        pendingContextMenu_ = false;
+        armedForLeftClick_ = true;
+        dragLiftIssued_ = false;
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (pendingContextMenu_)
+        {
+            return;
+        }
+        if (dragLiftIssued_)
+        {
+            return;
+        }
+        if (e.getDistanceFromDragStart() < 8)
+        {
+            return;
+        }
+        dragLiftIssued_ = true;
+        armedForLeftClick_ = false;
+        owner_.onInsertSlotDragStarted(stage_);
+        if (auto* container = findParentComponentOfClass<juce::DragAndDropContainer>())
+        {
+            const juce::String desc = insertRowDragDescription(trackId_, slotId_, stage_);
+            logInsertDndDiag("[insert-dnd-diag] drag-start track="
+                             + juce::String(static_cast<juce::int64>(trackId_)) + " slot="
+                             + juce::String(static_cast<juce::int64>(slotId_)) + " stage="
+                             + juce::String(stage_ == InsertStage::Pre ? "pre" : "post") + " payload=\""
+                             + desc + "\"");
+            container->startDragging(juce::var(desc), this, juce::ScaledImage(), true, nullptr);
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (pendingContextMenu_)
+        {
+            pendingContextMenu_ = false;
+            juce::PopupMenu menu;
+            menu.addItem(1, "Remove insert");
+            const auto screenPt = localPointToGlobal(e.getPosition());
+            menu.showMenuAsync(
+                juce::PopupMenu::Options{}.withTargetScreenArea(
+                    juce::Rectangle<int>(screenPt.x, screenPt.y, 1, 1)),
+                [safeThis = juce::Component::SafePointer<InsertSlotButton>(this)](int r) {
+                    if (safeThis == nullptr || r != 1)
+                    {
+                        return;
+                    }
+                    safeThis->performRemoveFromContextMenu();
+                });
+            repaint();
+            return;
+        }
+        if (e.mods.isPopupMenu())
+        {
+            repaint();
+            return;
+        }
+        const bool openEditor
+            = armedForLeftClick_ && !dragLiftIssued_ && e.mouseWasClicked() && !e.mods.isPopupMenu();
+        armedForLeftClick_ = false;
+        repaint();
+        if (openEditor)
+        {
+            owner_.requestEditForSlot(slotId_);
+        }
+    }
+
+    bool isInterestedInDragSource(const SourceDetails& dragSourceDetails) override
+    {
+        return owner_.isInsertRowDragPayloadAcceptedForActiveTrack(dragSourceDetails.description);
+    }
+
+    void itemDragEnter(const SourceDetails&) override
+    {
+        owner_.notifyInsertStageDropHover(stage_);
+    }
+
+    void itemDragMove(const SourceDetails&) override
+    {
+        owner_.notifyInsertStageDropHover(stage_);
+    }
+
+    void itemDragExit(const SourceDetails&) override
+    {
+        owner_.clearInsertStageDropHover();
+    }
+
+    void itemDropped(const SourceDetails& dragSourceDetails) override
+    {
+        TrackId tid = kInvalidTrackId;
+        InsertSlotId sid = kInvalidInsertSlotId;
+        InsertStage src = InsertStage::Post;
+        if (!parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src))
+        {
+            owner_.clearInsertStageDropHover();
+            return;
+        }
+        owner_.handleInsertStageDropped(tid, sid, src, stage_);
+    }
+
+    void mouseEnter(const juce::MouseEvent&) override
+    {
+        hovered_ = true;
+        repaint();
+    }
+
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        hovered_ = false;
+        repaint();
+    }
+
+    /// Called from async context menu handler (SafePointer to `this` only).
+    void performRemoveFromContextMenu()
+    {
+        owner_.requestRemoveForSlot(slotId_);
+    }
+
+private:
+    InspectorView& owner_;
+    TrackId trackId_ = kInvalidTrackId;
+    InsertSlotId slotId_ = kInvalidInsertSlotId;
+    InsertStage stage_ = InsertStage::Post;
+    int displayIndex_ = 1;
+    juce::String displayName_;
+
+    bool dragLiftIssued_ = false;
+    bool armedForLeftClick_ = false;
+    bool pendingContextMenu_ = false;
+    bool hovered_ = false;
+};
 
 InspectorView::InspectorView(Session& session)
     : session_(session)
@@ -188,46 +617,439 @@ InspectorView::InspectorView(Session& session)
     insertsSectionLabel_.setFont(juce::FontOptions(11.0f));
     addAndMakeVisible(insertsSectionLabel_);
 
-    addInsertButton_.setButtonText("+ Add insert");
-    addInsertButton_.onClick = [this] {
+    preStageDrop_ = std::make_unique<StageDropTarget>(*this, InsertStage::Pre);
+    addAndMakeVisible(*preStageDrop_);
+
+    preSectionLabel_.setText("Pre", juce::dontSendNotification);
+    preSectionLabel_.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+    preSectionLabel_.setJustificationType(juce::Justification::centredLeft);
+    preSectionLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(preSectionLabel_);
+
+    preEmptyLabel_.setText("(empty)", juce::dontSendNotification);
+    preEmptyLabel_.setFont(juce::Font(juce::FontOptions(11.0f)).italicised());
+    preEmptyLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    preEmptyLabel_.setJustificationType(juce::Justification::centredLeft);
+    preEmptyLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(preEmptyLabel_);
+
+    addPreInsertButton_.setButtonText("+ Add Pre insert");
+    addPreInsertButton_.onClick = [this] {
         const TrackId t = session_.getActiveTrackId();
         if (t == kInvalidTrackId || !pluginHost_.requestAdd)
         {
             return;
         }
-        pluginHost_.requestAdd(t);
+        pluginHost_.requestAdd(t, InsertStage::Pre);
     };
-    addAndMakeVisible(addInsertButton_);
+    addAndMakeVisible(addPreInsertButton_);
 
-    insertSlotNameLabel_.setJustificationType(juce::Justification::centredLeft);
-    insertSlotNameLabel_.setFont(juce::FontOptions(12.0f));
-    insertSlotNameLabel_.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(insertSlotNameLabel_);
+    postStageDrop_ = std::make_unique<StageDropTarget>(*this, InsertStage::Post);
+    addAndMakeVisible(*postStageDrop_);
 
-    editPluginButton_.setButtonText("Edit");
-    editPluginButton_.onClick = [this] {
+    postSectionLabel_.setText("Post", juce::dontSendNotification);
+    postSectionLabel_.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+    postSectionLabel_.setJustificationType(juce::Justification::centredLeft);
+    postSectionLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(postSectionLabel_);
+
+    postEmptyLabel_.setText("(empty)", juce::dontSendNotification);
+    postEmptyLabel_.setFont(juce::Font(juce::FontOptions(11.0f)).italicised());
+    postEmptyLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    postEmptyLabel_.setJustificationType(juce::Justification::centredLeft);
+    postEmptyLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(postEmptyLabel_);
+
+    addPostInsertButton_.setButtonText("+ Add Post insert");
+    addPostInsertButton_.onClick = [this] {
         const TrackId t = session_.getActiveTrackId();
-        if (t == kInvalidTrackId || !pluginHost_.requestEdit)
+        if (t == kInvalidTrackId || !pluginHost_.requestAdd)
         {
             return;
         }
-        pluginHost_.requestEdit(t);
+        pluginHost_.requestAdd(t, InsertStage::Post);
     };
-    addAndMakeVisible(editPluginButton_);
+    addAndMakeVisible(addPostInsertButton_);
 
-    removePluginButton_.setButtonText("Remove");
-    removePluginButton_.onClick = [this] {
-        const TrackId t = session_.getActiveTrackId();
-        if (t == kInvalidTrackId || !pluginHost_.requestRemove)
-        {
-            return;
-        }
-        pluginHost_.requestRemove(t);
-        refreshFromSession();
-    };
-    addAndMakeVisible(removePluginButton_);
+    preDropSlot_ = std::make_unique<InsertStageDropSlot>(*this, InsertStage::Pre);
+    postDropSlot_ = std::make_unique<InsertStageDropSlot>(*this, InsertStage::Post);
+    addAndMakeVisible(*preDropSlot_);
+    addAndMakeVisible(*postDropSlot_);
+    preDropSlot_->setVisible(false);
+    postDropSlot_->setVisible(false);
 
     refreshFromSession();
+}
+
+InspectorView::~InspectorView() = default;
+
+void InspectorView::requestEditForSlot(const InsertSlotId slotId)
+{
+    const TrackId t = session_.getActiveTrackId();
+    if (t == kInvalidTrackId || slotId == kInvalidInsertSlotId || !pluginHost_.requestEdit)
+    {
+        return;
+    }
+    pluginHost_.requestEdit(t, slotId);
+}
+
+void InspectorView::requestRemoveForSlot(const InsertSlotId slotId)
+{
+    const TrackId t = session_.getActiveTrackId();
+    if (t == kInvalidTrackId || slotId == kInvalidInsertSlotId || !pluginHost_.requestRemove)
+    {
+        return;
+    }
+    pluginHost_.requestRemove(t, slotId);
+    juce::Component::SafePointer<InspectorView> safeSelf(this);
+    juce::MessageManager::callAsync([safeSelf] {
+        if (safeSelf != nullptr)
+        {
+            safeSelf->refreshFromSession();
+        }
+    });
+}
+
+void InspectorView::onInsertSlotDragStarted(const InsertStage sourceStage)
+{
+    insertDragSourceStage_ = sourceStage;
+    if (preDropSlot_ != nullptr && postDropSlot_ != nullptr)
+    {
+        const bool showPreGhost = sourceStage == InsertStage::Post;
+        preDropSlot_->setVisible(showPreGhost);
+        postDropSlot_->setVisible(!showPreGhost);
+        if (showPreGhost)
+        {
+            preDropSlot_->toFront(false);
+        }
+        else
+        {
+            postDropSlot_->toFront(false);
+        }
+    }
+    resized();
+    repaint();
+}
+
+void InspectorView::clearInsertSlotDragSession() noexcept
+{
+    insertDragSourceStage_.reset();
+    if (preDropSlot_ != nullptr)
+    {
+        preDropSlot_->setVisible(false);
+    }
+    if (postDropSlot_ != nullptr)
+    {
+        postDropSlot_->setVisible(false);
+    }
+    clearInsertStageDropHover();
+}
+
+void InspectorView::dragOperationEnded(const juce::DragAndDropTarget::SourceDetails&)
+{
+    clearInsertSlotDragSession();
+    resized();
+    repaint();
+}
+
+std::optional<InsertStage> InspectorView::stageForLocalPoint(const juce::Point<int> p) const noexcept
+{
+    if (preDropSlot_ != nullptr && preDropSlot_->isVisible() && preDropSlot_->getBounds().contains(p))
+    {
+        return InsertStage::Pre;
+    }
+    if (postDropSlot_ != nullptr && postDropSlot_->isVisible() && postDropSlot_->getBounds().contains(p))
+    {
+        return InsertStage::Post;
+    }
+    if (preInsertBlockBounds_.contains(p))
+    {
+        return InsertStage::Pre;
+    }
+    if (postInsertBlockBounds_.contains(p))
+    {
+        return InsertStage::Post;
+    }
+    return std::nullopt;
+}
+
+bool InspectorView::isInterestedInDragSource(const juce::DragAndDropTarget::SourceDetails& details)
+{
+    TrackId tid = kInvalidTrackId;
+    InsertSlotId sid = kInvalidInsertSlotId;
+    InsertStage src = InsertStage::Post;
+    const bool parsedOk = parseInsertRowDragDescription(details.description, tid, sid, src);
+    const bool result = isInsertRowDragPayloadAcceptedForActiveTrack(details.description);
+    const TrackId active = session_.getActiveTrackId();
+    const TrackId shown = lastShownInsertRowsTrackId_;
+    const juce::String line
+        = "[insert-dnd-diag] inspector interested payload=\""
+          + details.description.toString() + "\" result=" + juce::String(result ? "yes" : "no") + " parsed="
+          + juce::String(parsedOk ? "ok" : "fail") + " tid="
+          + juce::String(static_cast<juce::int64>(parsedOk ? tid : static_cast<TrackId>(0))) + " sid="
+          + juce::String(static_cast<juce::int64>(parsedOk ? sid : static_cast<InsertSlotId>(0))) + " src="
+          + juce::String(parsedOk ? (src == InsertStage::Pre ? "pre" : "post") : "?") + " active="
+          + juce::String(static_cast<juce::int64>(active)) + " shown="
+          + juce::String(static_cast<juce::int64>(shown));
+    static thread_local juce::String lastInspectorInterestedLine;
+    if (lastInspectorInterestedLine != line)
+    {
+        lastInspectorInterestedLine = line;
+        logInsertDndDiag(line);
+    }
+    return result;
+}
+
+void InspectorView::itemDragEnter(const juce::DragAndDropTarget::SourceDetails& details)
+{
+    const auto stage = stageForLocalPoint(details.localPosition);
+    if (stage.has_value())
+    {
+        notifyInsertStageDropHover(*stage);
+    }
+    else
+    {
+        clearInsertStageDropHover();
+    }
+}
+
+void InspectorView::itemDragMove(const juce::DragAndDropTarget::SourceDetails& details)
+{
+    const auto stage = stageForLocalPoint(details.localPosition);
+    if (stage.has_value())
+    {
+        notifyInsertStageDropHover(*stage);
+    }
+    else
+    {
+        clearInsertStageDropHover();
+    }
+}
+
+void InspectorView::itemDragExit(const juce::DragAndDropTarget::SourceDetails&)
+{
+    clearInsertStageDropHover();
+}
+
+void InspectorView::itemDropped(const juce::DragAndDropTarget::SourceDetails& details)
+{
+    const auto resolvedTarget = stageForLocalPoint(details.localPosition);
+    logInsertDndDiag("[insert-dnd-diag] inspector dropped payload=\""
+                     + details.description.toString() + "\" x="
+                     + juce::String(details.localPosition.x) + " y="
+                     + juce::String(details.localPosition.y) + " target="
+                     + (resolvedTarget.has_value()
+                            ? juce::String(*resolvedTarget == InsertStage::Pre ? "pre" : "post")
+                            : juce::String("none")));
+    TrackId tid = kInvalidTrackId;
+    InsertSlotId sid = kInvalidInsertSlotId;
+    InsertStage src = InsertStage::Post;
+    if (!parseInsertRowDragDescription(details.description, tid, sid, src))
+    {
+        clearInsertSlotDragSession();
+        return;
+    }
+    const auto targetStage = stageForLocalPoint(details.localPosition);
+    if (!targetStage.has_value())
+    {
+        clearInsertSlotDragSession();
+        return;
+    }
+    handleInsertStageDropped(tid, sid, src, *targetStage);
+}
+
+bool InspectorView::isCrossStageInsertDropAccepted(const juce::var& desc,
+                                                   const InsertStage targetStage) const noexcept
+{
+    TrackId tid = kInvalidTrackId;
+    InsertSlotId sid = kInvalidInsertSlotId;
+    InsertStage src = InsertStage::Post;
+    if (!parseInsertRowDragDescription(desc, tid, sid, src))
+    {
+        return false;
+    }
+    const TrackId expected = (lastShownInsertRowsTrackId_ != kInvalidTrackId)
+                                 ? lastShownInsertRowsTrackId_
+                                 : session_.getActiveTrackId();
+    if (tid != expected)
+    {
+        return false;
+    }
+    return src != targetStage;
+}
+
+void InspectorView::notifyInsertStageDropHover(InsertStage stage) noexcept
+{
+    if (insertDragSourceStage_.has_value() && *insertDragSourceStage_ == stage)
+    {
+        clearInsertStageDropHover();
+        return;
+    }
+    if (insertStageDropHoverActive_ && insertStageDropHoverStage_ == stage)
+    {
+        return;
+    }
+    insertStageDropHoverActive_ = true;
+    insertStageDropHoverStage_ = stage;
+    repaint(preInsertBlockBounds_);
+    repaint(postInsertBlockBounds_);
+}
+
+void InspectorView::clearInsertStageDropHover() noexcept
+{
+    if (!insertStageDropHoverActive_)
+    {
+        return;
+    }
+    insertStageDropHoverActive_ = false;
+    repaint(preInsertBlockBounds_);
+    repaint(postInsertBlockBounds_);
+}
+
+bool InspectorView::isInsertRowDragPayloadAcceptedForActiveTrack(const juce::var& desc) const noexcept
+{
+    TrackId tid = kInvalidTrackId;
+    InsertSlotId sid = kInvalidInsertSlotId;
+    InsertStage src = InsertStage::Post;
+    if (!parseInsertRowDragDescription(desc, tid, sid, src))
+    {
+        return false;
+    }
+    const TrackId expected = (lastShownInsertRowsTrackId_ != kInvalidTrackId)
+                                 ? lastShownInsertRowsTrackId_
+                                 : session_.getActiveTrackId();
+    return tid == expected;
+}
+
+void InspectorView::handleInsertStageDropped(const TrackId tid,
+                                            const InsertSlotId sid,
+                                            const InsertStage sourceStage,
+                                            const InsertStage targetStage)
+{
+    const TrackId active = session_.getActiveTrackId();
+    const TrackId shown = lastShownInsertRowsTrackId_;
+    const TrackId expected = (shown != kInvalidTrackId) ? shown : active;
+
+    logInsertDndDiag("[insert-dnd-diag] handleDrop tid=" + juce::String(static_cast<juce::int64>(tid))
+                     + " expected=" + juce::String(static_cast<juce::int64>(expected)) + " active="
+                     + juce::String(static_cast<juce::int64>(active)) + " shown="
+                     + juce::String(static_cast<juce::int64>(shown)) + " slot="
+                     + juce::String(static_cast<juce::int64>(sid)) + " src="
+                     + juce::String(sourceStage == InsertStage::Pre ? "pre" : "post") + " target="
+                     + juce::String(targetStage == InsertStage::Pre ? "pre" : "post"));
+
+    clearInsertSlotDragSession();
+
+    if (tid == kInvalidTrackId || sid == kInvalidInsertSlotId)
+    {
+        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=invalid-id");
+        return;
+    }
+    if (tid != expected)
+    {
+        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=wrong-track");
+        return;
+    }
+    if (sourceStage == targetStage)
+    {
+        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=same-stage");
+        return;
+    }
+    if (!pluginHost_.requestMoveToStage)
+    {
+        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=no-callback");
+        return;
+    }
+
+    logInsertDndDiag("[insert-dnd-diag] handleDrop call requestMoveToStage");
+    pluginHost_.requestMoveToStage(tid, sid, targetStage);
+
+    juce::Component::SafePointer<InspectorView> safeSelf(this);
+    juce::MessageManager::callAsync([safeSelf] {
+        if (safeSelf != nullptr)
+        {
+            safeSelf->refreshFromSession();
+        }
+    });
+}
+
+void InspectorView::paintOverChildren(juce::Graphics& g)
+{
+    if (!insertStageDropHoverActive_)
+    {
+        return;
+    }
+    const juce::Rectangle<int> primary
+        = insertStageDropHoverStage_ == InsertStage::Pre ? preInsertBlockBounds_
+                                                        : postInsertBlockBounds_;
+    if (primary.isEmpty())
+    {
+        return;
+    }
+    constexpr float kCorner = 4.f;
+    g.setColour(findColour(juce::TextButton::buttonOnColourId).withAlpha(0.07f));
+    g.fillRoundedRectangle(primary.toFloat().reduced(1.f), kCorner);
+}
+
+void InspectorView::clearInsertRowStrips()
+{
+    for (auto& p : preRowStrips_)
+    {
+        removeChildComponent(p.get());
+    }
+    preRowStrips_.clear();
+    for (auto& p : postRowStrips_)
+    {
+        removeChildComponent(p.get());
+    }
+    postRowStrips_.clear();
+}
+
+void InspectorView::rebuildInsertRowStrips(const TrackId active, const std::vector<InspectorInsertRow>& rows)
+{
+    clearInsertRowStrips();
+    if (active == kInvalidTrackId)
+    {
+        return;
+    }
+
+    int preIndex = 1;
+    for (const auto& r : rows)
+    {
+        if (r.stage != InsertStage::Pre || r.slotId == kInvalidInsertSlotId)
+        {
+            continue;
+        }
+        const InsertSlotId sid = r.slotId;
+        auto strip = std::make_unique<InsertSlotButton>(*this,
+                                                      active,
+                                                      sid,
+                                                      InsertStage::Pre,
+                                                      preIndex++,
+                                                      r.displayName);
+        addAndMakeVisible(*strip);
+        preRowStrips_.push_back(std::move(strip));
+    }
+
+    int postIndex = 1;
+    for (const auto& r : rows)
+    {
+        if (r.stage != InsertStage::Post || r.slotId == kInvalidInsertSlotId)
+        {
+            continue;
+        }
+        const InsertSlotId sid = r.slotId;
+        auto strip = std::make_unique<InsertSlotButton>(*this,
+                                                      active,
+                                                      sid,
+                                                      InsertStage::Post,
+                                                      postIndex++,
+                                                      r.displayName);
+        addAndMakeVisible(*strip);
+        postRowStrips_.push_back(std::move(strip));
+    }
+    resized();
+    repaint();
 }
 
 void InspectorView::setVolumeEditorTextFromLinearGain(const float linearGain)
@@ -263,21 +1085,37 @@ void InspectorView::updateElidedTrackTitleDisplay()
 void InspectorView::syncInsertsWhenInspectorDisabled()
 {
     insertsSectionLabel_.setVisible(true);
-    addInsertButton_.setVisible(true);
-    addInsertButton_.setEnabled(false);
-    insertSlotNameLabel_.setVisible(false);
-    editPluginButton_.setVisible(false);
-    removePluginButton_.setVisible(false);
+    preSectionLabel_.setVisible(true);
+    postSectionLabel_.setVisible(true);
+    preEmptyLabel_.setVisible(true);
+    postEmptyLabel_.setVisible(true);
+    addPreInsertButton_.setVisible(true);
+    addPostInsertButton_.setVisible(true);
+    addPreInsertButton_.setEnabled(false);
+    addPostInsertButton_.setEnabled(false);
+    clearInsertRowStrips();
+    lastShownInsertRows_.clear();
+    lastShownInsertRowsTrackId_ = kInvalidTrackId;
+    clearInsertSlotDragSession();
+    resized();
 }
 
 void InspectorView::syncInsertsNoActiveTrack()
 {
     insertsSectionLabel_.setVisible(true);
-    addInsertButton_.setVisible(true);
-    addInsertButton_.setEnabled(false);
-    insertSlotNameLabel_.setVisible(false);
-    editPluginButton_.setVisible(false);
-    removePluginButton_.setVisible(false);
+    preSectionLabel_.setVisible(true);
+    postSectionLabel_.setVisible(true);
+    preEmptyLabel_.setVisible(true);
+    postEmptyLabel_.setVisible(true);
+    addPreInsertButton_.setVisible(true);
+    addPostInsertButton_.setVisible(true);
+    addPreInsertButton_.setEnabled(false);
+    addPostInsertButton_.setEnabled(false);
+    clearInsertRowStrips();
+    lastShownInsertRows_.clear();
+    lastShownInsertRowsTrackId_ = kInvalidTrackId;
+    clearInsertSlotDragSession();
+    resized();
 }
 
 void InspectorView::syncInsertsForActiveTrack(const TrackId active)
@@ -288,23 +1126,46 @@ void InspectorView::syncInsertsForActiveTrack(const TrackId active)
         return;
     }
     insertsSectionLabel_.setVisible(true);
-    const bool hasPlugin = pluginHost_.hasPlugin && pluginHost_.hasPlugin(active);
-    juce::String pname;
-    if (hasPlugin && pluginHost_.displayName)
-    {
-        pname = pluginHost_.displayName(active);
-    }
+    preSectionLabel_.setVisible(true);
+    postSectionLabel_.setVisible(true);
+    addPreInsertButton_.setVisible(true);
+    addPostInsertButton_.setVisible(true);
 
-    addInsertButton_.setVisible(!hasPlugin);
-    addInsertButton_.setEnabled(!hasPlugin && (pluginHost_.requestAdd != nullptr));
-    insertSlotNameLabel_.setVisible(hasPlugin);
-    editPluginButton_.setVisible(hasPlugin);
-    removePluginButton_.setVisible(hasPlugin);
-    if (hasPlugin)
+    const bool canAdd
+        = pluginHost_.requestAdd != nullptr && isEnabled();
+    addPreInsertButton_.setEnabled(canAdd);
+    addPostInsertButton_.setEnabled(canAdd);
+
+    std::vector<InspectorInsertRow> rows;
+    if (pluginHost_.getInsertRows)
     {
-        insertSlotNameLabel_.setText("1  " + pname, juce::dontSendNotification);
-        editPluginButton_.setEnabled(pluginHost_.requestEdit != nullptr);
-        removePluginButton_.setEnabled(pluginHost_.requestRemove != nullptr);
+        rows = pluginHost_.getInsertRows(active);
+    }
+    const int preCount = static_cast<int>(
+        std::count_if(rows.begin(), rows.end(), [](const InspectorInsertRow& r) {
+            return r.stage == InsertStage::Pre && r.slotId != kInvalidInsertSlotId;
+        }));
+    const int postCount = static_cast<int>(
+        std::count_if(rows.begin(), rows.end(), [](const InspectorInsertRow& r) {
+            return r.stage == InsertStage::Post && r.slotId != kInvalidInsertSlotId;
+        }));
+
+    preEmptyLabel_.setVisible(preCount == 0);
+    postEmptyLabel_.setVisible(postCount == 0);
+
+    const bool sameTrack = (active == lastShownInsertRowsTrackId_);
+    const bool sameRows = sameTrack && lastShownInsertRows_.size() == rows.size()
+        && std::equal(rows.begin(), rows.end(), lastShownInsertRows_.begin(),
+                      [](const InspectorInsertRow& a, const InspectorInsertRow& b) {
+                          return a.slotId == b.slotId && a.stage == b.stage
+                                 && a.displayName == b.displayName;
+                      });
+
+    if (!sameRows)
+    {
+        rebuildInsertRowStrips(active, rows);
+        lastShownInsertRows_ = rows;
+        lastShownInsertRowsTrackId_ = active;
     }
 }
 
@@ -416,21 +1277,71 @@ void InspectorView::resized()
     area.removeFromTop(10);
     insertsSectionLabel_.setBounds(area.removeFromTop(18));
     area.removeFromTop(4);
-    constexpr int kInsertButtonH = 24;
-    if (addInsertButton_.isVisible())
+
+    constexpr int kRowH = 24;
+    constexpr int kSubHdrH = 18;
+    constexpr int kEmptyH = 16;
+    constexpr int kGapSmall = 2;
+    constexpr int kGapSection = 8;
+
+    const int preBlockTop = area.getY();
+    preSectionLabel_.setBounds(area.removeFromTop(kSubHdrH));
+    area.removeFromTop(kGapSmall);
+    for (auto& strip : preRowStrips_)
     {
-        addInsertButton_.setBounds(area.removeFromTop(kInsertButtonH));
+        strip->setBounds(area.removeFromTop(kRowH));
     }
-    else
+    if (preDropSlot_ != nullptr && preDropSlot_->isVisible())
     {
-        insertSlotNameLabel_.setBounds(area.removeFromTop(20));
-        area.removeFromTop(4);
-        auto btnRow = area.removeFromTop(kInsertButtonH);
-        constexpr int kBtnGap = 4;
-        const int half = (btnRow.getWidth() - kBtnGap) / 2;
-        editPluginButton_.setBounds(btnRow.removeFromLeft(half));
-        btnRow.removeFromLeft(kBtnGap);
-        removePluginButton_.setBounds(btnRow);
+        preDropSlot_->setBounds(area.removeFromTop(kRowH));
+    }
+    else if (preEmptyLabel_.isVisible())
+    {
+        preEmptyLabel_.setBounds(area.removeFromTop(kEmptyH));
+    }
+    area.removeFromTop(kGapSmall);
+    addPreInsertButton_.setBounds(area.removeFromTop(kRowH));
+
+    preInsertBlockBounds_
+        = juce::Rectangle<int>(area.getX(), preBlockTop, area.getWidth(), area.getY() - preBlockTop);
+    if (preStageDrop_ != nullptr)
+    {
+        preStageDrop_->setBounds(preInsertBlockBounds_);
+    }
+    if (preDropSlot_ != nullptr && preDropSlot_->isVisible())
+    {
+        preDropSlot_->toFront(false);
+    }
+
+    area.removeFromTop(kGapSection);
+
+    const int postBlockTop = area.getY();
+    postSectionLabel_.setBounds(area.removeFromTop(kSubHdrH));
+    area.removeFromTop(kGapSmall);
+    for (auto& strip : postRowStrips_)
+    {
+        strip->setBounds(area.removeFromTop(kRowH));
+    }
+    if (postDropSlot_ != nullptr && postDropSlot_->isVisible())
+    {
+        postDropSlot_->setBounds(area.removeFromTop(kRowH));
+    }
+    else if (postEmptyLabel_.isVisible())
+    {
+        postEmptyLabel_.setBounds(area.removeFromTop(kEmptyH));
+    }
+    area.removeFromTop(kGapSmall);
+    addPostInsertButton_.setBounds(area.removeFromTop(kRowH));
+
+    postInsertBlockBounds_
+        = juce::Rectangle<int>(area.getX(), postBlockTop, area.getWidth(), area.getY() - postBlockTop);
+    if (postStageDrop_ != nullptr)
+    {
+        postStageDrop_->setBounds(postInsertBlockBounds_);
+    }
+    if (postDropSlot_ != nullptr && postDropSlot_->isVisible())
+    {
+        postDropSlot_->toFront(false);
     }
 
     updateElidedTrackTitleDisplay();

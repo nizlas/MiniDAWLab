@@ -11,12 +11,13 @@
 //   *that* lane. **Across** tracks, the audible samples for each lane for the same time window are
 //   **added** into the device buffer — a minimal sum (no mixer UI). Each track contributes after
 //   multiplying by its `Track::channelFaderGain` (mixer channel volume at the fader point; not
-//   clip/pre-gain — see `Track`). Future post-fader taps or inserts may need per-track staging buffers;
-//   not implemented — gain is applied at track-output merge into the device buffer today.
+//   clip/pre-gain — see `Track`). With inserts (Phase 8 / Slice B), that fader multiplier is applied
+//   on the scratch between Pre and Post chains; the dry path still applies gain at merge.
 //
-// PHASE 8 (per-track VST3 insert): when `audioThread_hasActivePluginForTrack` reports an active stereo
-//   insert, clip audio is written pre-fader into `PluginInsertHost`'s stereo scratch, processed in
-//   place, then summed into the device buffer with the same effective fader/mute gain as the dry path.
+// PHASE 8 / Slice B (per-track VST3 Pre/Post): when `audioThread_hasActivePluginForTrack` reports an
+//   active stereo insert, clip audio copies into `PluginInsertHost`'s stereo scratch at unity, runs the
+//   **Pre** chain, applies effective track fader/mute gain in-place, runs the **Post** chain, then sums
+//   scratch into the device buffer at unity (same mono L+R blend rule as the dry path).
 //   Mono device: (L+R)*0.5 into output 0. Stereo+: L→0, R→1; higher channels unchanged by inserts.
 //
 // WHERE THIS SITS
@@ -159,7 +160,7 @@ namespace
         }
     }
 
-    /// After `processBlock`, mix scratch into device; `trackGain` is effective post-insert fader gain.
+    /// Mix scratch into device; `trackGain` is applied here (dry path: fader; insert path: use 1.0 after in-scratch gain).
     void addStereoScratchToDeviceOutputs(float* const* scratchPtrs,
                                         int run,
                                         int outFrame0,
@@ -205,6 +206,22 @@ namespace
                     juce::FloatVectorOperations::addWithMultiply(d1 + outFrame0, R, trackGain, run);
                 }
             }
+        }
+    }
+
+    void scaleStereoScratch(float* const* scratchPtrs, int run, float gain) noexcept
+    {
+        if (scratchPtrs == nullptr || run <= 0)
+        {
+            return;
+        }
+        if (float* L = scratchPtrs[0])
+        {
+            juce::FloatVectorOperations::multiply(L, gain, run);
+        }
+        if (float* R = scratchPtrs[1])
+        {
+            juce::FloatVectorOperations::multiply(R, gain, run);
         }
     }
 } // namespace
@@ -414,15 +431,21 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     jassert(off + run <= c.getNumSamples());
                     const int destFrame = outFrame0 + silencePrefix + out0;
 
-                    if (useInsert)
+                    if (useInsert && effectiveGain > 0.0f)
                     {
                         pluginHost_->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
                         if (float* const* scratch = pluginHost_->audioThread_getScratchWritePointers())
                         {
                             copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
-                            pluginHost_->audioThread_processForTrack(tr.getId(), run);
-                            addStereoScratchToDeviceOutputs(
-                                scratch, run, destFrame, numOutputChannels, outputChannelData, effectiveGain);
+                            pluginHost_->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
+                            scaleStereoScratch(scratch, run, effectiveGain);
+                            pluginHost_->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
+                            addStereoScratchToDeviceOutputs(scratch,
+                                                            run,
+                                                            destFrame,
+                                                            numOutputChannels,
+                                                            outputChannelData,
+                                                            1.0f);
                         }
                     }
                     else

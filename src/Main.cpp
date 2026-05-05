@@ -51,6 +51,7 @@
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/InsertSlotId.h"
 #include "plugins/PluginDiscovery.h"
 #include "io/AudioFileLoader.h"
 #include "io/MonoWavFileWriter.h"
@@ -620,6 +621,12 @@ private:
                                      private juce::Timer
     {
     private:
+        enum class InsertPickerMode
+        {
+            AddPre,
+            AddPost,
+        };
+
         static constexpr int kInspectorMaxW = 360;
         static constexpr int kInspectorDefaultW = 90;
         static constexpr int kSplitterW = 6;
@@ -857,16 +864,38 @@ private:
                 [this] { invokeUndoFromWindowShortcut(); },
                 [this] { invokeRedoFromWindowShortcut(); } });
             trackLanesView.setTrackHeaderPluginHost(
-                { [this](const TrackId tid) { showVst3PluginPickerForTrack(tid, this); },
+                { [this](const TrackId tid) {
+                      showVst3PluginPickerForTrack(tid, InsertPickerMode::AddPost, this);
+                  },
                   [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
                   [this](const TrackId tid) { pluginHost_.openGenericParamsEditor(tid); },
                   [this](const TrackId tid) { pluginHost_.removePlugin(tid); } });
             inspectorView_.setInspectorPluginHost({
-                [this](const TrackId tid) { return pluginHost_.hasPluginOnTrack(tid); },
-                [this](const TrackId tid) { return pluginHost_.getPluginDisplayNameForTrack(tid); },
-                [this](const TrackId tid) { showVst3PluginPickerForTrack(tid, &inspectorView_); },
-                [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
-                [this](const TrackId tid) { pluginHost_.removePlugin(tid); } });
+                [this](const TrackId tid) { return pluginHost_.hasAnyInsertOnTrack(tid); },
+                [this](const TrackId tid) {
+                    std::vector<InspectorInsertRow> rows;
+                    rows.reserve(8);
+                    for (const auto& rv : pluginHost_.getInsertRowsForTrack(tid))
+                    {
+                        InspectorInsertRow ir;
+                        ir.slotId = rv.slotId;
+                        ir.stage = rv.stage;
+                        ir.displayName = rv.displayName;
+                        rows.push_back(std::move(ir));
+                    }
+                    return rows;
+                },
+                [this](const TrackId tid, const InsertStage st) {
+                    showVst3PluginPickerForTrack(
+                        tid,
+                        st == InsertStage::Pre ? InsertPickerMode::AddPre : InsertPickerMode::AddPost,
+                        &inspectorView_);
+                },
+                [this](const TrackId tid, const InsertSlotId sid) { pluginHost_.openNativeEditor(tid, sid); },
+                [this](const TrackId tid, const InsertSlotId sid) { pluginHost_.removeInsert(tid, sid); },
+                [this](const TrackId tid, const InsertSlotId sid, const InsertStage st) {
+                    pluginHost_.moveInsertToStage(tid, sid, st);
+                } });
             trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
                 if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
                     || recorder_.isRecording())
@@ -1883,7 +1912,9 @@ private:
             });
         }
 
-        void showVst3PluginPickerForTrack(const TrackId trackId, juce::Component* anchor)
+        void showVst3PluginPickerForTrack(const TrackId trackId,
+                                          InsertPickerMode mode,
+                                          juce::Component* anchor)
         {
             if (trackId == kInvalidTrackId)
             {
@@ -1929,19 +1960,19 @@ private:
             std::vector<mini_daw::PluginDiscoveryEntry> entries = std::move(scan.entries);
             menu.showMenuAsync(
                 juce::PopupMenu::Options().withTargetComponent(target),
-                [safeThis, trackId, entries = std::move(entries), anchor](const int result) {
+                [safeThis, trackId, mode, entries = std::move(entries), anchor](const int result) {
                     if (safeThis == nullptr || result == 0)
                     {
                         return;
                     }
                     if (result == 1)
                     {
-                        safeThis->beginAddVst3FolderForTrack(trackId, anchor);
+                        safeThis->beginAddVst3FolderForTrack(trackId, anchor, mode);
                         return;
                     }
                     if (result == 2)
                     {
-                        safeThis->beginLoadVst3ForTrack(trackId);
+                        safeThis->beginLoadVst3ForTrack(trackId, mode);
                         return;
                     }
                     constexpr int kFoundBase = 1000;
@@ -1958,8 +1989,10 @@ private:
                         safeThis->inspectorView_.refreshFromSession();
                         return;
                     }
+                    const InsertStage stage
+                        = (mode == InsertPickerMode::AddPre) ? InsertStage::Pre : InsertStage::Post;
                     const juce::Result r
-                        = safeThis->pluginHost_.loadVst3FromFile(trackId, entries[idx].file);
+                        = safeThis->pluginHost_.addInsertFromVst3File(trackId, stage, entries[idx].file);
                     if (!r.wasOk())
                     {
                         juce::AlertWindow::showMessageBoxAsync(
@@ -1969,7 +2002,9 @@ private:
                 });
         }
 
-        void beginAddVst3FolderForTrack(const TrackId trackId, juce::Component* anchor)
+        void beginAddVst3FolderForTrack(const TrackId trackId,
+                                        juce::Component* anchor,
+                                        InsertPickerMode mode)
         {
             if (trackId == kInvalidTrackId)
             {
@@ -1985,7 +2020,7 @@ private:
             auto chooser = std::make_shared<juce::FileChooser>("Add VST3 search folder", juce::File{}, "*");
             chooser->launchAsync(
                 chooserFlags,
-                [this, chooser, trackId, anchor](const juce::FileChooser& fc) {
+                [this, chooser, trackId, anchor, mode](const juce::FileChooser& fc) {
                     juce::ignoreUnused(chooser);
                     struct ClearFolderChooser
                     {
@@ -2004,11 +2039,11 @@ private:
                     juce::FileSearchPath paths = mini_daw::loadUserVst3SearchPaths();
                     paths.add(folder, -1);
                     mini_daw::saveUserVst3SearchPaths(paths);
-                    showVst3PluginPickerForTrack(trackId, anchor);
+                    showVst3PluginPickerForTrack(trackId, mode, anchor);
                 });
         }
 
-        void beginLoadVst3ForTrack(const TrackId trackId)
+        void beginLoadVst3ForTrack(const TrackId trackId, InsertPickerMode mode)
         {
             if (trackId == kInvalidTrackId)
             {
@@ -2024,7 +2059,7 @@ private:
             auto chooser = std::make_shared<juce::FileChooser>("Load VST3", juce::File{}, "*.vst3");
             chooser->launchAsync(
                 fileChooserFlags,
-                [this, chooser, trackId](const juce::FileChooser& fc) {
+                [this, chooser, trackId, mode](const juce::FileChooser& fc) {
                     juce::ignoreUnused(chooser);
                     struct ClearVst3Chooser
                     {
@@ -2049,7 +2084,9 @@ private:
                         inspectorView_.refreshFromSession();
                         return;
                     }
-                    const juce::Result r = pluginHost_.loadVst3FromFile(trackId, file);
+                    const InsertStage stage
+                        = (mode == InsertPickerMode::AddPre) ? InsertStage::Pre : InsertStage::Post;
+                    const juce::Result r = pluginHost_.addInsertFromVst3File(trackId, stage, file);
                     if (!r.wasOk())
                     {
                         juce::AlertWindow::showMessageBoxAsync(

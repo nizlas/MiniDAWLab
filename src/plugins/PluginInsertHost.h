@@ -15,8 +15,8 @@
 //
 // THREADING
 //   Construct / load / remove / editors / `prepareForDevice` / `importChain`: [Message thread].
-//   `audioThread_clearScratch`, `audioThread_getScratchWritePointers`, `audioThread_processForTrack`,
-//   `audioThread_hasActivePluginForTrack`:
+//   `audioThread_clearScratch`, `audioThread_getScratchWritePointers`,
+//   `audioThread_processChainForTrack`, `audioThread_hasActivePluginForTrack`:
 //   [Audio thread] — no locks, no allocation; only touches pre-sized buffers and the atomic map.
 //
 // See `docs/PHASE_PLAN.md` Phase 8 and `docs/ARCHITECTURE_PRINCIPLES.md` Plugin host section.
@@ -48,6 +48,7 @@ struct PluginAudioThreadMap
     {
         juce::AudioProcessor* processor = nullptr;
         bool layoutOk = false;
+        InsertStage stage = InsertStage::Post;
     };
 
     struct Entry
@@ -84,6 +85,9 @@ public:
 
     void removeInsert(TrackId trackId, InsertSlotId slotId);
 
+    /// [Message thread] Move an occupied insert to the end of Pre or Post; keeps the live instance and slot id.
+    void moveInsertToStage(TrackId trackId, InsertSlotId slotId, InsertStage newStage);
+
     [[nodiscard]] PluginTrackChain exportChain(TrackId trackId) const;
 
     /// Replace chain from project or undo — clears or loads rows + `setStateInformation` when occupied.
@@ -102,7 +106,9 @@ public:
     void removePlugin(TrackId trackId);
 
     void openNativeEditor(TrackId trackId);
+    void openNativeEditor(TrackId trackId, InsertSlotId slotId);
     void openGenericParamsEditor(TrackId trackId);
+    void openGenericParamsEditor(TrackId trackId, InsertSlotId slotId);
     void editorWindowClosing(TrackId trackId, InsertSlotId slotId, bool wasGenericEditor);
 
     [[nodiscard]] bool hasPluginOnTrack(TrackId trackId) const noexcept;
@@ -126,7 +132,8 @@ public:
 
     [[nodiscard]] float* const* audioThread_getScratchWritePointers() noexcept;
 
-    void audioThread_processForTrack(TrackId trackId, int numSamples) noexcept;
+    /// [Audio thread] Runs `layoutOk` slots for one stage in published order (Pre / Post).
+    void audioThread_processChainForTrack(TrackId trackId, InsertStage stage, int numSamples) noexcept;
 
     /// [Audio thread] Acquire-loads the published map; true iff any insert on this track is stereo-ready.
     [[nodiscard]] bool audioThread_hasActivePluginForTrack(TrackId trackId) const noexcept;

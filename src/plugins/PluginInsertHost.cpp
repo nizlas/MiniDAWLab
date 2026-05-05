@@ -57,6 +57,16 @@ namespace
                 ++it;
         }
     }
+
+    void logInsertDndDiag(const juce::String& line)
+    {
+        juce::Logger::writeToLog(line);
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                   .getChildFile("MiniDAWLab");
+        (void) dir.createDirectory();
+        const juce::File logFile = dir.getChildFile("insert-dnd-diagnostic.log");
+        (void) logFile.appendText(line + juce::newLine);
+    }
 } // namespace
 
 PluginInsertHost::PluginInsertHost()
@@ -491,6 +501,73 @@ void PluginInsertHost::removeInsert(const TrackId trackId, const InsertSlotId sl
     }
 }
 
+void PluginInsertHost::moveInsertToStage(const TrackId trackId,
+                                         const InsertSlotId slotId,
+                                         const InsertStage newStage)
+{
+    logInsertDndDiag("[insert-dnd-diag] host move entry track="
+                     + juce::String(static_cast<juce::int64>(trackId)) + " slot="
+                     + juce::String(static_cast<juce::int64>(slotId)) + " target="
+                     + juce::String(newStage == InsertStage::Pre ? "pre" : "post"));
+
+    if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
+    {
+        logInsertDndDiag("[insert-dnd-diag] host move noop reason=invalid");
+        return;
+    }
+    LiveInsertSlot* const live = findLiveMutable(trackId, slotId);
+    if (live == nullptr)
+    {
+        logInsertDndDiag("[insert-dnd-diag] host move noop reason=slot-not-found");
+        return;
+    }
+    if (live->stage == newStage)
+    {
+        logInsertDndDiag("[insert-dnd-diag] host move noop reason=same-stage");
+        return;
+    }
+
+    const PluginTrackChain before = exportChain(trackId);
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end())
+    {
+        logInsertDndDiag("[insert-dnd-diag] host move noop reason=no-chain");
+        return;
+    }
+    auto& v = it->second;
+    const auto found
+        = std::find_if(v.begin(), v.end(), [&](const LiveInsertSlot& s) { return s.slotId == slotId; });
+    if (found == v.end())
+    {
+        logInsertDndDiag("[insert-dnd-diag] host move noop reason=slot-not-found");
+        return;
+    }
+
+    LiveInsertSlot moved = std::move(*found);
+    v.erase(found);
+    if (v.empty())
+    {
+        chains_.erase(trackId);
+    }
+
+    moved.stage = newStage;
+    insertLiveSlotSorted(trackId, std::move(moved));
+
+    rebuildAudioThreadMapAndPublish();
+    const PluginTrackChain after = exportChain(trackId);
+    logInsertDndDiag("[insert-dnd-diag] host move success beforeSlots="
+                     + juce::String(static_cast<int>(before.slots.size())) + " afterSlots="
+                     + juce::String(static_cast<int>(after.slots.size())));
+    if (!before.chainEquals(after))
+    {
+        PluginUndoStepSides sides;
+        sides.trackId = trackId;
+        sides.before = before;
+        sides.after = after;
+        recordPluginSlotUndo("Move insert", sides);
+    }
+}
+
 PluginTrackChain PluginInsertHost::exportChain(const TrackId trackId) const
 {
     PluginTrackChain out;
@@ -737,6 +814,7 @@ void PluginInsertHost::rebuildAudioThreadMapAndPublish()
             PluginAudioThreadMap::SlotProc sp;
             sp.processor = live.instance.get();
             sp.layoutOk = live.layoutOk;
+            sp.stage = live.stage;
             e.slots.push_back(sp);
         }
         if (!e.slots.empty())
@@ -821,7 +899,16 @@ void PluginInsertHost::openNativeEditor(const TrackId trackId)
     {
         return;
     }
-    LiveInsertSlot* s = findLiveMutable(trackId, c->slotId);
+    openNativeEditor(trackId, c->slotId);
+}
+
+void PluginInsertHost::openNativeEditor(const TrackId trackId, const InsertSlotId slotId)
+{
+    if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
+    {
+        return;
+    }
+    LiveInsertSlot* s = findLiveMutable(trackId, slotId);
     if (s == nullptr || s->instance == nullptr)
     {
         return;
@@ -853,7 +940,16 @@ void PluginInsertHost::openGenericParamsEditor(const TrackId trackId)
     {
         return;
     }
-    LiveInsertSlot* s = findLiveMutable(trackId, c->slotId);
+    openGenericParamsEditor(trackId, c->slotId);
+}
+
+void PluginInsertHost::openGenericParamsEditor(const TrackId trackId, const InsertSlotId slotId)
+{
+    if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
+    {
+        return;
+    }
+    LiveInsertSlot* s = findLiveMutable(trackId, slotId);
     if (s == nullptr || s->instance == nullptr)
     {
         return;
@@ -1038,7 +1134,9 @@ bool PluginInsertHost::audioThread_hasActivePluginForTrack(const TrackId trackId
     return false;
 }
 
-void PluginInsertHost::audioThread_processForTrack(const TrackId trackId, const int numSamples) noexcept
+void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
+                                                       const InsertStage stage,
+                                                       const int numSamples) noexcept
 {
     if (trackId == kInvalidTrackId || numSamples <= 0)
     {
@@ -1089,7 +1187,7 @@ void PluginInsertHost::audioThread_processForTrack(const TrackId trackId, const 
     juce::ScopedNoDenormals noDenormals;
     for (const auto& sp : hit->slots)
     {
-        if (sp.processor == nullptr || !sp.layoutOk)
+        if (sp.processor == nullptr || !sp.layoutOk || sp.stage != stage)
         {
             continue;
         }

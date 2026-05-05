@@ -83,7 +83,16 @@ bool PluginEditorWindow::keyPressed(const juce::KeyPress& key)
 
 void PluginEditorWindow::closeButtonPressed()
 {
-    host_.editorWindowClosing(trackId_, insertSlotId_, false);
+    setVisible(false);
+    PluginInsertHost* const host = &host_;
+    const TrackId trackId = trackId_;
+    const InsertSlotId slotId = insertSlotId_;
+    juce::MessageManager::callAsync([host, trackId, slotId] {
+        if (host != nullptr)
+        {
+            host->editorWindowClosing(trackId, slotId, false);
+        }
+    });
 }
 
 PluginParamsWindow::PluginParamsWindow(PluginInsertHost& host,
@@ -124,5 +133,14 @@ bool PluginParamsWindow::keyPressed(const juce::KeyPress& key)
 
 void PluginParamsWindow::closeButtonPressed()
 {
-    host_.editorWindowClosing(trackId_, insertSlotId_, true);
+    setVisible(false);
+    PluginInsertHost* const host = &host_;
+    const TrackId trackId = trackId_;
+    const InsertSlotId slotId = insertSlotId_;
+    juce::MessageManager::callAsync([host, trackId, slotId] {
+        if (host != nullptr)
+        {
+            host->editorWindowClosing(trackId, slotId, true);
+        }
+    });
 }
