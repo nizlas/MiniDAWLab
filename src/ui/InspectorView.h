@@ -73,6 +73,8 @@ private:
 
     void onInsertSlotDragStarted(InsertStage sourceStage);
     void clearInsertSlotDragSession() noexcept;
+    /// While `insertDragSourceStage_` is set: hide target-stage Add, show matching Drop here overlay.
+    void applyInsertCrossStageDragChrome() noexcept;
     [[nodiscard]] bool isCrossStageInsertDropAccepted(const juce::var& desc, InsertStage targetStage) const noexcept;
 
     void notifyInsertStageDropHover(InsertStage stage) noexcept;

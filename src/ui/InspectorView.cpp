@@ -291,7 +291,7 @@ public:
         const auto bounds = getLocalBounds().toFloat().reduced(0.5f);
         constexpr float kCorner = 4.f;
 
-        const juce::Colour fill = findColour(juce::TextButton::buttonColourId).withAlpha(0.10f);
+        const juce::Colour fill = findColour(juce::TextButton::buttonColourId).withAlpha(0.12f);
         g.setColour(fill);
         g.fillRoundedRectangle(bounds, kCorner);
 
@@ -710,12 +710,23 @@ void InspectorView::requestRemoveForSlot(const InsertSlotId slotId)
     });
 }
 
-void InspectorView::onInsertSlotDragStarted(const InsertStage sourceStage)
+void InspectorView::applyInsertCrossStageDragChrome() noexcept
 {
-    insertDragSourceStage_ = sourceStage;
+    if (!insertDragSourceStage_.has_value())
+    {
+        return;
+    }
+    if (*insertDragSourceStage_ == InsertStage::Post)
+    {
+        addPreInsertButton_.setVisible(false);
+    }
+    else
+    {
+        addPostInsertButton_.setVisible(false);
+    }
     if (preDropSlot_ != nullptr && postDropSlot_ != nullptr)
     {
-        const bool showPreGhost = sourceStage == InsertStage::Post;
+        const bool showPreGhost = *insertDragSourceStage_ == InsertStage::Post;
         preDropSlot_->setVisible(showPreGhost);
         postDropSlot_->setVisible(!showPreGhost);
         if (showPreGhost)
@@ -727,6 +738,12 @@ void InspectorView::onInsertSlotDragStarted(const InsertStage sourceStage)
             postDropSlot_->toFront(false);
         }
     }
+}
+
+void InspectorView::onInsertSlotDragStarted(const InsertStage sourceStage)
+{
+    insertDragSourceStage_ = sourceStage;
+    applyInsertCrossStageDragChrome();
     resized();
     repaint();
 }
@@ -734,6 +751,8 @@ void InspectorView::onInsertSlotDragStarted(const InsertStage sourceStage)
 void InspectorView::clearInsertSlotDragSession() noexcept
 {
     insertDragSourceStage_.reset();
+    addPreInsertButton_.setVisible(true);
+    addPostInsertButton_.setVisible(true);
     if (preDropSlot_ != nullptr)
     {
         preDropSlot_->setVisible(false);
@@ -1167,6 +1186,8 @@ void InspectorView::syncInsertsForActiveTrack(const TrackId active)
         lastShownInsertRows_ = rows;
         lastShownInsertRowsTrackId_ = active;
     }
+
+    applyInsertCrossStageDragChrome();
 }
 
 void InspectorView::commitVolumeField()
@@ -1291,11 +1312,7 @@ void InspectorView::resized()
     {
         strip->setBounds(area.removeFromTop(kRowH));
     }
-    if (preDropSlot_ != nullptr && preDropSlot_->isVisible())
-    {
-        preDropSlot_->setBounds(area.removeFromTop(kRowH));
-    }
-    else if (preEmptyLabel_.isVisible())
+    if (preEmptyLabel_.isVisible())
     {
         preEmptyLabel_.setBounds(area.removeFromTop(kEmptyH));
     }
@@ -1310,6 +1327,7 @@ void InspectorView::resized()
     }
     if (preDropSlot_ != nullptr && preDropSlot_->isVisible())
     {
+        preDropSlot_->setBounds(addPreInsertButton_.getBounds());
         preDropSlot_->toFront(false);
     }
 
@@ -1322,11 +1340,7 @@ void InspectorView::resized()
     {
         strip->setBounds(area.removeFromTop(kRowH));
     }
-    if (postDropSlot_ != nullptr && postDropSlot_->isVisible())
-    {
-        postDropSlot_->setBounds(area.removeFromTop(kRowH));
-    }
-    else if (postEmptyLabel_.isVisible())
+    if (postEmptyLabel_.isVisible())
     {
         postEmptyLabel_.setBounds(area.removeFromTop(kEmptyH));
     }
@@ -1341,6 +1355,7 @@ void InspectorView::resized()
     }
     if (postDropSlot_ != nullptr && postDropSlot_->isVisible())
     {
+        postDropSlot_->setBounds(addPostInsertButton_.getBounds());
         postDropSlot_->toFront(false);
     }
 
