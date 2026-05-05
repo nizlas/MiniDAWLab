@@ -151,19 +151,6 @@ namespace
 #endif
 } // namespace
 
-namespace
-{
-    void logInsertDndDiag(const juce::String& line)
-    {
-        juce::Logger::writeToLog(line);
-        const juce::File dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                                   .getChildFile("MiniDAWLab");
-        (void) dir.createDirectory();
-        const juce::File logFile = dir.getChildFile("insert-dnd-diagnostic.log");
-        (void) logFile.appendText(line + juce::newLine);
-    }
-} // namespace
-
 [[nodiscard]] static bool parseInsertRowDragDescription(const juce::var& description,
                                                        TrackId& outTid,
                                                        InsertSlotId& outSid,
@@ -316,32 +303,7 @@ public:
 
     bool isInterestedInDragSource(const SourceDetails& dragSourceDetails) override
     {
-        TrackId tid = kInvalidTrackId;
-        InsertSlotId sid = kInvalidInsertSlotId;
-        InsertStage src = InsertStage::Post;
-        const bool parsedOk
-            = parseInsertRowDragDescription(dragSourceDetails.description, tid, sid, src);
-        const bool result
-            = owner_.isCrossStageInsertDropAccepted(dragSourceDetails.description, stage_);
-        const TrackId active = owner_.session_.getActiveTrackId();
-        const TrackId shown = owner_.lastShownInsertRowsTrackId_;
-        const juce::String line
-            = "[insert-dnd-diag] ghost interested target="
-              + juce::String(stage_ == InsertStage::Pre ? "pre" : "post") + " payload=\""
-              + dragSourceDetails.description.toString() + "\"" + " result="
-              + juce::String(result ? "yes" : "no") + " parsed="
-              + juce::String(parsedOk ? "ok" : "fail") + " tid="
-              + juce::String(static_cast<juce::int64>(parsedOk ? tid : static_cast<TrackId>(0))) + " sid="
-              + juce::String(static_cast<juce::int64>(parsedOk ? sid : static_cast<InsertSlotId>(0)))
-              + " src=" + juce::String(parsedOk ? (src == InsertStage::Pre ? "pre" : "post") : "?") + " active="
-              + juce::String(static_cast<juce::int64>(active)) + " shown="
-              + juce::String(static_cast<juce::int64>(shown));
-        if (lastGhostInterestedLine_ != line)
-        {
-            lastGhostInterestedLine_ = line;
-            logInsertDndDiag(line);
-        }
-        return result;
+        return owner_.isCrossStageInsertDropAccepted(dragSourceDetails.description, stage_);
     }
 
     void itemDragEnter(const SourceDetails&) override
@@ -361,9 +323,6 @@ public:
 
     void itemDropped(const SourceDetails& dragSourceDetails) override
     {
-        logInsertDndDiag("[insert-dnd-diag] ghost dropped target="
-                         + juce::String(stage_ == InsertStage::Pre ? "pre" : "post") + " payload=\""
-                         + dragSourceDetails.description.toString() + "\"");
         TrackId tid = kInvalidTrackId;
         InsertSlotId sid = kInvalidInsertSlotId;
         InsertStage src = InsertStage::Post;
@@ -378,7 +337,6 @@ public:
 private:
     InspectorView& owner_;
     InsertStage stage_;
-    mutable juce::String lastGhostInterestedLine_;
 };
 
 class InspectorView::InsertSlotButton final : public juce::Component,
@@ -472,11 +430,6 @@ public:
         if (auto* container = findParentComponentOfClass<juce::DragAndDropContainer>())
         {
             const juce::String desc = insertRowDragDescription(trackId_, slotId_, stage_);
-            logInsertDndDiag("[insert-dnd-diag] drag-start track="
-                             + juce::String(static_cast<juce::int64>(trackId_)) + " slot="
-                             + juce::String(static_cast<juce::int64>(slotId_)) + " stage="
-                             + juce::String(stage_ == InsertStage::Pre ? "pre" : "post") + " payload=\""
-                             + desc + "\"");
             container->startDragging(juce::var(desc), this, juce::ScaledImage(), true, nullptr);
         }
     }
@@ -794,29 +747,7 @@ std::optional<InsertStage> InspectorView::stageForLocalPoint(const juce::Point<i
 
 bool InspectorView::isInterestedInDragSource(const juce::DragAndDropTarget::SourceDetails& details)
 {
-    TrackId tid = kInvalidTrackId;
-    InsertSlotId sid = kInvalidInsertSlotId;
-    InsertStage src = InsertStage::Post;
-    const bool parsedOk = parseInsertRowDragDescription(details.description, tid, sid, src);
-    const bool result = isInsertRowDragPayloadAcceptedForActiveTrack(details.description);
-    const TrackId active = session_.getActiveTrackId();
-    const TrackId shown = lastShownInsertRowsTrackId_;
-    const juce::String line
-        = "[insert-dnd-diag] inspector interested payload=\""
-          + details.description.toString() + "\" result=" + juce::String(result ? "yes" : "no") + " parsed="
-          + juce::String(parsedOk ? "ok" : "fail") + " tid="
-          + juce::String(static_cast<juce::int64>(parsedOk ? tid : static_cast<TrackId>(0))) + " sid="
-          + juce::String(static_cast<juce::int64>(parsedOk ? sid : static_cast<InsertSlotId>(0))) + " src="
-          + juce::String(parsedOk ? (src == InsertStage::Pre ? "pre" : "post") : "?") + " active="
-          + juce::String(static_cast<juce::int64>(active)) + " shown="
-          + juce::String(static_cast<juce::int64>(shown));
-    static thread_local juce::String lastInspectorInterestedLine;
-    if (lastInspectorInterestedLine != line)
-    {
-        lastInspectorInterestedLine = line;
-        logInsertDndDiag(line);
-    }
-    return result;
+    return isInsertRowDragPayloadAcceptedForActiveTrack(details.description);
 }
 
 void InspectorView::itemDragEnter(const juce::DragAndDropTarget::SourceDetails& details)
@@ -852,14 +783,6 @@ void InspectorView::itemDragExit(const juce::DragAndDropTarget::SourceDetails&)
 
 void InspectorView::itemDropped(const juce::DragAndDropTarget::SourceDetails& details)
 {
-    const auto resolvedTarget = stageForLocalPoint(details.localPosition);
-    logInsertDndDiag("[insert-dnd-diag] inspector dropped payload=\""
-                     + details.description.toString() + "\" x="
-                     + juce::String(details.localPosition.x) + " y="
-                     + juce::String(details.localPosition.y) + " target="
-                     + (resolvedTarget.has_value()
-                            ? juce::String(*resolvedTarget == InsertStage::Pre ? "pre" : "post")
-                            : juce::String("none")));
     TrackId tid = kInvalidTrackId;
     InsertSlotId sid = kInvalidInsertSlotId;
     InsertStage src = InsertStage::Post;
@@ -949,38 +872,25 @@ void InspectorView::handleInsertStageDropped(const TrackId tid,
     const TrackId shown = lastShownInsertRowsTrackId_;
     const TrackId expected = (shown != kInvalidTrackId) ? shown : active;
 
-    logInsertDndDiag("[insert-dnd-diag] handleDrop tid=" + juce::String(static_cast<juce::int64>(tid))
-                     + " expected=" + juce::String(static_cast<juce::int64>(expected)) + " active="
-                     + juce::String(static_cast<juce::int64>(active)) + " shown="
-                     + juce::String(static_cast<juce::int64>(shown)) + " slot="
-                     + juce::String(static_cast<juce::int64>(sid)) + " src="
-                     + juce::String(sourceStage == InsertStage::Pre ? "pre" : "post") + " target="
-                     + juce::String(targetStage == InsertStage::Pre ? "pre" : "post"));
-
     clearInsertSlotDragSession();
 
     if (tid == kInvalidTrackId || sid == kInvalidInsertSlotId)
     {
-        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=invalid-id");
         return;
     }
     if (tid != expected)
     {
-        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=wrong-track");
         return;
     }
     if (sourceStage == targetStage)
     {
-        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=same-stage");
         return;
     }
     if (!pluginHost_.requestMoveToStage)
     {
-        logInsertDndDiag("[insert-dnd-diag] handleDrop noop reason=no-callback");
         return;
     }
 
-    logInsertDndDiag("[insert-dnd-diag] handleDrop call requestMoveToStage");
     pluginHost_.requestMoveToStage(tid, sid, targetStage);
 
     juce::Component::SafePointer<InspectorView> safeSelf(this);

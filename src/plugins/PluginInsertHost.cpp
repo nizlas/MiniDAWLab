@@ -58,15 +58,6 @@ namespace
         }
     }
 
-    void logInsertDndDiag(const juce::String& line)
-    {
-        juce::Logger::writeToLog(line);
-        const juce::File dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                                   .getChildFile("MiniDAWLab");
-        (void) dir.createDirectory();
-        const juce::File logFile = dir.getChildFile("insert-dnd-diagnostic.log");
-        (void) logFile.appendText(line + juce::newLine);
-    }
 } // namespace
 
 PluginInsertHost::PluginInsertHost()
@@ -505,25 +496,17 @@ void PluginInsertHost::moveInsertToStage(const TrackId trackId,
                                          const InsertSlotId slotId,
                                          const InsertStage newStage)
 {
-    logInsertDndDiag("[insert-dnd-diag] host move entry track="
-                     + juce::String(static_cast<juce::int64>(trackId)) + " slot="
-                     + juce::String(static_cast<juce::int64>(slotId)) + " target="
-                     + juce::String(newStage == InsertStage::Pre ? "pre" : "post"));
-
     if (trackId == kInvalidTrackId || slotId == kInvalidInsertSlotId)
     {
-        logInsertDndDiag("[insert-dnd-diag] host move noop reason=invalid");
         return;
     }
     LiveInsertSlot* const live = findLiveMutable(trackId, slotId);
     if (live == nullptr)
     {
-        logInsertDndDiag("[insert-dnd-diag] host move noop reason=slot-not-found");
         return;
     }
     if (live->stage == newStage)
     {
-        logInsertDndDiag("[insert-dnd-diag] host move noop reason=same-stage");
         return;
     }
 
@@ -531,7 +514,6 @@ void PluginInsertHost::moveInsertToStage(const TrackId trackId,
     const auto it = chains_.find(trackId);
     if (it == chains_.end())
     {
-        logInsertDndDiag("[insert-dnd-diag] host move noop reason=no-chain");
         return;
     }
     auto& v = it->second;
@@ -539,7 +521,6 @@ void PluginInsertHost::moveInsertToStage(const TrackId trackId,
         = std::find_if(v.begin(), v.end(), [&](const LiveInsertSlot& s) { return s.slotId == slotId; });
     if (found == v.end())
     {
-        logInsertDndDiag("[insert-dnd-diag] host move noop reason=slot-not-found");
         return;
     }
 
@@ -555,9 +536,6 @@ void PluginInsertHost::moveInsertToStage(const TrackId trackId,
 
     rebuildAudioThreadMapAndPublish();
     const PluginTrackChain after = exportChain(trackId);
-    logInsertDndDiag("[insert-dnd-diag] host move success beforeSlots="
-                     + juce::String(static_cast<int>(before.slots.size())) + " afterSlots="
-                     + juce::String(static_cast<int>(after.slots.size())));
     if (!before.chainEquals(after))
     {
         PluginUndoStepSides sides;
