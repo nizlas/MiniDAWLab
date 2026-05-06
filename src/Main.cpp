@@ -9,8 +9,9 @@
 //   not implement playback math or file decoding — that lives in the engine / session / io layers.
 //
 // STARTUP ORDER (see initialise) — read before changing tear order
-//   1. transport, session, recorderService, pluginInsertHost, playbackEngine  (non-owning: engine
-//      points at transport+session+recorder+pluginHost; recorder does not own Transport/Session)
+//   1. transport, session, recorderService, pluginInsertHost, experimentalInstrumentHost, playbackEngine
+//      (`playbackEngine` points at transport+session+recorder+pluginHost+experimentalInstrument;
+//      recorder does not own Transport/Session)
 //   2. deviceManager.initialiseWithDefaultDevices  —  **1 in / 2 out** when possible; falls back
 //      to output-only (0, 2) with a log if the system cannot open an input (playback still works).
 //   3. addAudioCallback(playbackEngine)  —  the engine will now receive audioDeviceIO* calls
@@ -20,7 +21,7 @@
 //   1. destroy main window
 //   2. removeAudioCallback(playbackEngine)
 //   3. closeAudioDevice
-//   4. destroy playbackEngine, then pluginInsertHost, then recorderService, then session, transport
+//   4. destroy playbackEngine, then experimentalInstrumentHost, then pluginInsertHost, then recorderService, then session, transport
 //
 // THREADING
 //   juce::JUCEApplication::initialise / shutdown and all UI (buttons, file chooser, paint) are
@@ -51,8 +52,10 @@
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
+#include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/InsertSlotId.h"
 #include "plugins/PluginDiscovery.h"
+#include "plugins/Vst3ChildProcessScan.h"
 #include "io/AudioFileLoader.h"
 #include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
@@ -67,8 +70,11 @@
 #include "io/ProjectAudioImport.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -529,8 +535,18 @@ public:
 
     // [Message thread] Wires the stack described in the file header. jassert on empty init error
     // in debug: some audio output must open for playback; input is optional (see device init).
-    void initialise(const juce::String&) override
+    void initialise(const juce::String& commandLine) override
     {
+        const juce::StringArray workerArgv = mini_daw::rawScanWorkerArgsFromCommandLine(commandLine);
+        if (mini_daw::isVst3RawScanWorkerArgv(workerArgv))
+        {
+            vst3OopWorkerMode_ = true;
+            const int rc = mini_daw::runVst3RawScanWorkerMain(workerArgv);
+            setApplicationReturnValue(rc);
+            quit();
+            return;
+        }
+
         // Domain objects first: the engine only holds references; safe because we create them
         // in dependency order and tear down in reverse in shutdown.
         transport = std::make_unique<Transport>();
@@ -541,8 +557,13 @@ public:
         recorderService = std::make_unique<RecorderService>();
         countInOutput_ = std::make_unique<CountInClickOutput>();
         pluginInsertHost_ = std::make_unique<PluginInsertHost>();
-        playbackEngine = std::make_unique<PlaybackEngine>(
-            *transport, *session, recorderService.get(), countInOutput_.get(), pluginInsertHost_.get());
+        experimentalInstrumentHost_ = std::make_unique<ExperimentalInstrumentHost>();
+        playbackEngine = std::make_unique<PlaybackEngine>(*transport,
+                                                           *session,
+                                                           recorderService.get(),
+                                                           countInOutput_.get(),
+                                                           pluginInsertHost_.get(),
+                                                           experimentalInstrumentHost_.get());
 
         // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present
         // (Stage 2); else pick defaults. Prefer **1 input, 2 outputs**; fall back to output-only.
@@ -579,6 +600,7 @@ public:
             *transport,
             *session,
             *pluginInsertHost_,
+            *experimentalInstrumentHost_,
             deviceManager,
             *recorderService,
             *countInOutput_,
@@ -589,6 +611,12 @@ public:
     // [Message thread] Reverse of initialise; see file header.
     void shutdown() override
     {
+        if (vst3OopWorkerMode_)
+        {
+            vst3OopWorkerMode_ = false;
+            return;
+        }
+
         // Window first so no UI code runs while we tear down audio (matches JUCE’s typical order).
         mainWindow.reset();
 
@@ -603,6 +631,7 @@ public:
         // After callback removal, drop engine (it held `recorderService.get()` for audio thread) then
         // the recorder, then the rest. `RecorderService` is independent of Transport/Session.
         playbackEngine.reset();
+        experimentalInstrumentHost_.reset();
         pluginInsertHost_.reset();
         countInOutput_.reset();
         recorderService.reset();
@@ -745,6 +774,7 @@ private:
         TransportControlsContent(Transport& transportIn,
                                  Session& sessionIn,
                                  PluginInsertHost& pluginInsertHostIn,
+                                 ExperimentalInstrumentHost& experimentalInstrumentHostIn,
                                  juce::AudioDeviceManager& deviceManagerIn,
                                  RecorderService& recorderIn,
                                  CountInClickOutput& countInClicksIn,
@@ -753,6 +783,7 @@ private:
             : transport(transportIn)
             , session(sessionIn)
             , pluginHost_(pluginInsertHostIn)
+            , experimentalInstrumentHost_(experimentalInstrumentHostIn)
             , deviceManager(deviceManagerIn)
             , recorder_(recorderIn)
             , countInClicks_(countInClicksIn)
@@ -808,6 +839,42 @@ private:
                 currentEditTool_ = EditTool::Split;
                 trackLanesView.repaint();
             };
+
+            addAndMakeVisible(experimentalInstrumentRim_);
+            addAndMakeVisible(experimentalInstrumentTitleLabel_);
+            experimentalInstrumentTitleLabel_.setText(
+                "Experimental instrument (global slot — not saved, not undoable)",
+                juce::dontSendNotification);
+            experimentalInstrumentTitleLabel_.setFont(juce::Font(juce::FontOptions(12.5f)));
+            experimentalInstrumentTitleLabel_.setColour(juce::Label::textColourId,
+                                                         juce::Colours::darkorange.darker(0.15f));
+            experimentalInstrumentTitleLabel_.setMinimumHorizontalScale(1.0f);
+            experimentalInstrumentTitleLabel_.setInterceptsMouseClicks(false, false);
+            addAndMakeVisible(experimentalInstrumentLoadButton_);
+            experimentalInstrumentLoadButton_.onClick = [this] { showExperimentalInstrumentPicker(this); };
+            addAndMakeVisible(experimentalInstrumentScanOnlyButton_);
+            experimentalInstrumentScanOnlyButton_.onClick = [this] {
+                showExperimentalVst3ScanDiagnosticPicker(this);
+            };
+            addAndMakeVisible(experimentalInstrumentEditorButton_);
+            experimentalInstrumentEditorButton_.onClick = [this] {
+                experimentalInstrumentHost_.openNativeEditor();
+            };
+            addAndMakeVisible(experimentalInstrumentTestKickButton_);
+            experimentalInstrumentTestKickButton_.onClick = [this] {
+                experimentalInstrumentHost_.triggerTestKick();
+            };
+            addAndMakeVisible(experimentalInstrumentUnloadButton_);
+            experimentalInstrumentUnloadButton_.onClick = [this] {
+                experimentalInstrumentHost_.unloadInstrument();
+                refreshExperimentalInstrumentUi();
+            };
+            experimentalInstrumentStatusLabel_.setFont(juce::FontOptions(12.0f));
+            experimentalInstrumentStatusLabel_.setJustificationType(juce::Justification::centredLeft);
+            experimentalInstrumentStatusLabel_.setMinimumHorizontalScale(1.0f);
+            experimentalInstrumentStatusLabel_.setInterceptsMouseClicks(false, false);
+            addAndMakeVisible(experimentalInstrumentStatusLabel_);
+            refreshExperimentalInstrumentUi();
 
             addAndMakeVisible(addClipButton);
             addAndMakeVisible(addTrackButton);
@@ -1454,6 +1521,23 @@ private:
             constexpr int kToolButtonW = 80;
             pointerToolButton_.setBounds(toolRow.removeFromLeft(kToolButtonW).reduced(2, 2));
             splitToolButton_.setBounds(toolRow.removeFromLeft(kToolButtonW).reduced(2, 2));
+            constexpr int kExperimentalStripH = 56;
+            auto experimentalBounds = area.removeFromTop(kExperimentalStripH);
+            experimentalInstrumentRim_.setBounds(experimentalBounds);
+            auto expInner = experimentalBounds.reduced(7, 5);
+            experimentalInstrumentTitleLabel_.setBounds(expInner.removeFromTop(16));
+            auto expBtn = expInner.removeFromTop(28);
+            constexpr int kExpScanW = 86;
+            constexpr int kExpLoadW = 108;
+            constexpr int kExpEdW = 72;
+            constexpr int kExpKickW = 168;
+            constexpr int kExpUnlW = 72;
+            experimentalInstrumentScanOnlyButton_.setBounds(expBtn.removeFromLeft(kExpScanW).reduced(2, 0));
+            experimentalInstrumentLoadButton_.setBounds(expBtn.removeFromLeft(kExpLoadW).reduced(2, 0));
+            experimentalInstrumentEditorButton_.setBounds(expBtn.removeFromLeft(kExpEdW).reduced(2, 0));
+            experimentalInstrumentTestKickButton_.setBounds(expBtn.removeFromLeft(kExpKickW).reduced(2, 0));
+            experimentalInstrumentUnloadButton_.setBounds(expBtn.removeFromLeft(kExpUnlW).reduced(2, 0));
+            experimentalInstrumentStatusLabel_.setBounds(expInner.reduced(2, 0));
             if constexpr (kShowShortcutDiagnostics)
             {
                 if (shortcutDiagLabel_ != nullptr)
@@ -1511,6 +1595,16 @@ private:
         }
 
     private:
+        struct ExperimentalInstrumentRim final : juce::Component
+        {
+            void paint(juce::Graphics& g) override
+            {
+                g.fillAll(juce::Colours::darkorange.withAlpha(0.07f));
+                g.setColour(juce::Colours::darkorange.withAlpha(0.45f));
+                g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 5.0f, 1.0f);
+            }
+        };
+
         struct InternalClipPasteboard
         {
             std::shared_ptr<const AudioClip> material;
@@ -2002,6 +2096,725 @@ private:
                             juce::AlertWindow::WarningIcon, "VST3", r.getErrorMessage());
                     }
                     safeThis->inspectorView_.refreshFromSession();
+                });
+        }
+
+        void refreshExperimentalInstrumentUi()
+        {
+            const bool has = experimentalInstrumentHost_.hasInstrument();
+            experimentalInstrumentEditorButton_.setEnabled(has);
+            experimentalInstrumentTestKickButton_.setEnabled(has);
+            experimentalInstrumentUnloadButton_.setEnabled(has);
+            if (!experimentalOopScanBusy_.load())
+            {
+                experimentalInstrumentStatusLabel_.setText(
+                    has ? experimentalInstrumentHost_.getInstrumentNameForUi() : "(none)",
+                    juce::dontSendNotification);
+            }
+        }
+
+        void showExperimentalInstrumentPicker(juce::Component* anchor)
+        {
+            juce::FileSearchPath combined = mini_daw::getStandardVst3SearchPaths();
+            const juce::FileSearchPath userPaths = mini_daw::loadUserVst3SearchPaths();
+            for (int i = 0; i < userPaths.getNumPaths(); ++i)
+            {
+                combined.add(userPaths[i], -1);
+            }
+            auto scan = mini_daw::scanForVst3Plugins(combined);
+
+            juce::PopupMenu menu;
+            juce::PopupMenu discovered;
+            juce::PopupMenu discoveredScanOnly;
+            juce::PopupMenu discoveredOopScan;
+            juce::PopupMenu discoveredOopScanAndLoad;
+            juce::PopupMenu discoveredCachedLoad;
+            if (scan.entries.empty())
+            {
+                discovered.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+                discoveredScanOnly.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+                discoveredOopScan.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+                discoveredOopScanAndLoad.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+                discoveredCachedLoad.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+            }
+            else
+            {
+                constexpr int kFoundLoadBase = 1000;
+                constexpr int kFoundScanBase = 10000;
+                constexpr int kFoundOopScanBase = 40000;
+                constexpr int kFoundOopScanLoadBase = 50000;
+                constexpr int kFoundCachedLoadBase = 60000;
+                for (size_t i = 0; i < scan.entries.size(); ++i)
+                {
+                    const auto& en = scan.entries[i];
+                    juce::String label = en.displayName;
+                    if (en.support == mini_daw::PluginPickerSupport::UnsupportedInstrument)
+                    {
+                        label += "  (instrument)";
+                    }
+                    juce::PopupMenu::Item loadItem(label);
+                    loadItem.itemID = static_cast<int>(kFoundLoadBase + static_cast<int>(i));
+                    loadItem.setEnabled(true);
+                    discovered.addItem(loadItem);
+
+                    juce::PopupMenu::Item scanItem(label);
+                    scanItem.itemID = static_cast<int>(kFoundScanBase + static_cast<int>(i));
+                    scanItem.setEnabled(true);
+                    discoveredScanOnly.addItem(scanItem);
+
+                    juce::PopupMenu::Item oopItem(label);
+                    oopItem.itemID = static_cast<int>(kFoundOopScanBase + static_cast<int>(i));
+                    oopItem.setEnabled(true);
+                    discoveredOopScan.addItem(oopItem);
+
+                    juce::PopupMenu::Item oopLoadItem(label);
+                    oopLoadItem.itemID = static_cast<int>(kFoundOopScanLoadBase + static_cast<int>(i));
+                    oopLoadItem.setEnabled(true);
+                    discoveredOopScanAndLoad.addItem(oopLoadItem);
+
+                    std::vector<juce::PluginDescription> cacheProbe;
+                    juce::String cachedLabel = label;
+                    if (mini_daw::tryLoadExperimentalVst3DescriptionsFromCache(en.file, cacheProbe))
+                    {
+                        cachedLabel += "  [cached]";
+                    }
+                    juce::PopupMenu::Item cachedItem(cachedLabel);
+                    cachedItem.itemID = static_cast<int>(kFoundCachedLoadBase + static_cast<int>(i));
+                    cachedItem.setEnabled(true);
+                    discoveredCachedLoad.addItem(cachedItem);
+                }
+            }
+            menu.addSubMenu("Discovered VST3 (instrument path)", discovered);
+            menu.addSubMenu("Discovered VST3 (scan only, no instance)", discoveredScanOnly);
+            menu.addSubMenu("Discovered VST3 (child-process OOP scan)", discoveredOopScan);
+            menu.addSubMenu("Discovered VST3 (OOP scan + load instrument)", discoveredOopScanAndLoad);
+            menu.addSubMenu("Discovered VST3 (cached OOP description load)", discoveredCachedLoad);
+            menu.addSeparator();
+            menu.addItem(1, "Add VST3 Folder...");
+            menu.addItem(2, "Load Specific VST3...");
+            menu.addItem(3, "Scan Specific VST3 (diagnostic, no instance)...");
+            menu.addItem(4, "Scan Specific VST3 in child process (OOP)...");
+            menu.addItem(5, "OOP scan + load instrument...");
+            menu.addItem(6, "Load from cached OOP description...");
+
+            juce::Component* const target = (anchor != nullptr) ? anchor : this;
+            juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+            std::vector<mini_daw::PluginDiscoveryEntry> entries = std::move(scan.entries);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(target),
+                [safeThis, entries = std::move(entries), anchor](const int result) {
+                    if (safeThis == nullptr || result == 0)
+                    {
+                        return;
+                    }
+                    if (result == 1)
+                    {
+                        safeThis->beginExperimentalAddVst3Folder(anchor);
+                        return;
+                    }
+                    if (result == 2)
+                    {
+                        safeThis->beginExperimentalLoadVst3FromFile();
+                        return;
+                    }
+                    if (result == 3)
+                    {
+                        safeThis->beginExperimentalScanVst3FromFile();
+                        return;
+                    }
+                    if (result == 4)
+                    {
+                        safeThis->beginExperimentalOopScanFromFile();
+                        return;
+                    }
+                    if (result == 5)
+                    {
+                        safeThis->beginExperimentalOopScanAndLoadFromFile();
+                        return;
+                    }
+                    if (result == 6)
+                    {
+                        safeThis->beginExperimentalCachedLoadFromFile();
+                        return;
+                    }
+                    constexpr int kFoundCachedLoadBase = 60000;
+                    if (result >= kFoundCachedLoadBase)
+                    {
+                        const size_t idx = static_cast<size_t>(result - kFoundCachedLoadBase);
+                        if (idx < entries.size())
+                        {
+                            safeThis->runExperimentalCachedLoadOnFile(entries[idx].file);
+                        }
+                        return;
+                    }
+                    constexpr int kFoundOopScanLoadBase = 50000;
+                    if (result >= kFoundOopScanLoadBase)
+                    {
+                        const size_t idx = static_cast<size_t>(result - kFoundOopScanLoadBase);
+                        if (idx < entries.size())
+                        {
+                            safeThis->runExperimentalOopScanAndLoadOnFile(entries[idx].file);
+                        }
+                        return;
+                    }
+                    constexpr int kFoundOopScanBase = 40000;
+                    if (result >= kFoundOopScanBase)
+                    {
+                        const size_t idx = static_cast<size_t>(result - kFoundOopScanBase);
+                        if (idx < entries.size())
+                        {
+                            safeThis->runExperimentalOopScanOnFile(entries[idx].file);
+                        }
+                        return;
+                    }
+                    constexpr int kFoundScanBase = 10000;
+                    if (result >= kFoundScanBase)
+                    {
+                        const size_t idx = static_cast<size_t>(result - kFoundScanBase);
+                        if (idx < entries.size())
+                        {
+                            const juce::Result r = safeThis->experimentalInstrumentHost_.diagnosticScanVst3FileOnly(
+                                entries[idx].file);
+                            safeThis->alertExperimentalVst3ScanDiagnosticResult(r);
+                        }
+                        return;
+                    }
+                    constexpr int kFoundLoadBase = 1000;
+                    const size_t idx = static_cast<size_t>(result - kFoundLoadBase);
+                    if (idx >= entries.size())
+                    {
+                        return;
+                    }
+                    const juce::Result r = safeThis->experimentalInstrumentHost_.loadInstrumentFromVst3File(
+                        entries[idx].file);
+                    if (!r.wasOk())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "Experimental instrument", r.getErrorMessage());
+                    }
+                    safeThis->refreshExperimentalInstrumentUi();
+                });
+        }
+
+        static void alertExperimentalVst3ScanDiagnosticResult(const juce::Result& scanResult)
+        {
+            const juce::String pathHint
+                = "Log (append, flushed scan lines):\n"
+                  "%APPDATA%\\MiniDAWLab\\experimental-vst3-scan-diagnostic.log";
+            if (scanResult.wasOk())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "VST3 scan diagnostic",
+                    "Scan-only pass finished (no plugin instance created).\n"
+                    "If AFTER lines appear for each format, findAllTypesForFile returned.\n\n"
+                    + pathHint);
+            }
+            else
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "VST3 scan diagnostic",
+                                                       scanResult.getErrorMessage() + "\n\n" + pathHint);
+            }
+        }
+
+        void showExperimentalVst3ScanDiagnosticPicker(juce::Component* anchor)
+        {
+            juce::FileSearchPath combined = mini_daw::getStandardVst3SearchPaths();
+            const juce::FileSearchPath userPaths = mini_daw::loadUserVst3SearchPaths();
+            for (int i = 0; i < userPaths.getNumPaths(); ++i)
+            {
+                combined.add(userPaths[i], -1);
+            }
+            auto scan = mini_daw::scanForVst3Plugins(combined);
+
+            juce::PopupMenu menu;
+            juce::PopupMenu discoveredScanOnly;
+            juce::PopupMenu discoveredOopScan;
+            if (scan.entries.empty())
+            {
+                discoveredScanOnly.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+                discoveredOopScan.addItem(
+                    juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
+            }
+            else
+            {
+                constexpr int kFoundScanBase = 10000;
+                constexpr int kFoundOopScanBase = 40000;
+                for (size_t i = 0; i < scan.entries.size(); ++i)
+                {
+                    const auto& en = scan.entries[i];
+                    juce::String label = en.displayName;
+                    if (en.support == mini_daw::PluginPickerSupport::UnsupportedInstrument)
+                    {
+                        label += "  (instrument)";
+                    }
+                    juce::PopupMenu::Item scanItem(label);
+                    scanItem.itemID = static_cast<int>(kFoundScanBase + static_cast<int>(i));
+                    scanItem.setEnabled(true);
+                    discoveredScanOnly.addItem(scanItem);
+
+                    juce::PopupMenu::Item oopItem(label);
+                    oopItem.itemID = static_cast<int>(kFoundOopScanBase + static_cast<int>(i));
+                    oopItem.setEnabled(true);
+                    discoveredOopScan.addItem(oopItem);
+                }
+            }
+            menu.addSubMenu("Discovered VST3 (scan only, no instance)", discoveredScanOnly);
+            menu.addSubMenu("Discovered VST3 (child-process OOP scan)", discoveredOopScan);
+            menu.addSeparator();
+            menu.addItem(1, "Add VST3 Folder...");
+            menu.addItem(2, "Scan Specific VST3 (diagnostic)...");
+            menu.addItem(3, "Scan Specific VST3 in child process (OOP)...");
+
+            juce::Component* const target = (anchor != nullptr) ? anchor : this;
+            juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+            std::vector<mini_daw::PluginDiscoveryEntry> entries = std::move(scan.entries);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(target),
+                [safeThis, entries = std::move(entries), anchor](const int result) {
+                    if (safeThis == nullptr || result == 0)
+                    {
+                        return;
+                    }
+                    if (result == 1)
+                    {
+                        safeThis->beginExperimentalAddVst3Folder(anchor);
+                        return;
+                    }
+                    if (result == 2)
+                    {
+                        safeThis->beginExperimentalScanVst3FromFile();
+                        return;
+                    }
+                    if (result == 3)
+                    {
+                        safeThis->beginExperimentalOopScanFromFile();
+                        return;
+                    }
+                    constexpr int kFoundOopScanBase = 40000;
+                    if (result >= kFoundOopScanBase)
+                    {
+                        const size_t idx = static_cast<size_t>(result - kFoundOopScanBase);
+                        if (idx < entries.size())
+                        {
+                            safeThis->runExperimentalOopScanOnFile(entries[idx].file);
+                        }
+                        return;
+                    }
+                    constexpr int kFoundScanBase = 10000;
+                    const size_t idx = static_cast<size_t>(result - kFoundScanBase);
+                    if (idx < entries.size())
+                    {
+                        const juce::Result r = safeThis->experimentalInstrumentHost_.diagnosticScanVst3FileOnly(
+                            entries[idx].file);
+                        alertExperimentalVst3ScanDiagnosticResult(r);
+                    }
+                });
+        }
+
+        static void alertExperimentalOopScanResult(const mini_daw::Vst3OopScanResult& r)
+        {
+            const juce::String pathHint = "\n\nLog (flushed lines):\n"
+                                           "%APPDATA%\\MiniDAWLab\\experimental-vst3-oop-scan.log";
+            juce::String body;
+            auto icon = juce::AlertWindow::InfoIcon;
+            switch (r.outcome)
+            {
+            case mini_daw::Vst3OopScanOutcome::Success:
+                body = "Child scan completed. descriptionCount=" + juce::String(r.descriptionCount);
+                break;
+            case mini_daw::Vst3OopScanOutcome::ChildCrashedOrFailed:
+                icon = juce::AlertWindow::WarningIcon;
+                body = "Child process exited with an error before a valid result was written. "
+                       "Check experimental-vst3-oop-scan.log and Windows Event Viewer if it crashed.";
+                break;
+            case mini_daw::Vst3OopScanOutcome::Timeout:
+                icon = juce::AlertWindow::WarningIcon;
+                body = "Timed out waiting for child reply.";
+                break;
+            case mini_daw::Vst3OopScanOutcome::LaunchFailed:
+                icon = juce::AlertWindow::WarningIcon;
+                body = "Could not launch child worker process.";
+                break;
+            case mini_daw::Vst3OopScanOutcome::ParseFailed:
+                icon = juce::AlertWindow::WarningIcon;
+                body = "Could not parse child XML. First chars: " + r.rawXmlHint;
+                break;
+            default:
+                body = "Unknown outcome.";
+                break;
+            }
+            juce::AlertWindow::showMessageBoxAsync(icon, "VST3 child-process scan", body + pathHint);
+        }
+
+        void runExperimentalOopScanOnFile(const juce::File& file)
+        {
+            if (!file.exists())
+            {
+                return;
+            }
+            bool expectedBusy = false;
+            if (!experimentalOopScanBusy_.compare_exchange_strong(expectedBusy, true))
+            {
+                mini_daw::writeVst3OopScanDiagnosticLogLine("parent: OOP scan ignored (already in progress)");
+                return;
+            }
+            const auto oopScanUiT0 = std::chrono::steady_clock::now();
+            experimentalInstrumentLoadButton_.setEnabled(false);
+            experimentalInstrumentScanOnlyButton_.setEnabled(false);
+            experimentalInstrumentStatusLabel_.setText("OOP scan running...", juce::dontSendNotification);
+
+            juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+            const juce::File fileCopy = file;
+            std::thread([safeThis, fileCopy, oopScanUiT0] {
+                const mini_daw::Vst3OopScanResult scanResult
+                    = mini_daw::runVst3OopScanBlocking(fileCopy, mini_daw::kVst3OopScanReplyTimeoutMs);
+                juce::MessageManager::callAsync([safeThis, scanResult, oopScanUiT0] {
+                    if (safeThis != nullptr)
+                    {
+                        const int uiElapsedMs
+                            = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - oopScanUiT0)
+                                  .count();
+                        mini_daw::writeVst3OopScanDiagnosticLogLine(
+                            "parent-ui: clearing OOP scan busy elapsedMs=" + juce::String(uiElapsedMs));
+                        safeThis->experimentalOopScanBusy_.store(false);
+                        safeThis->experimentalInstrumentLoadButton_.setEnabled(true);
+                        safeThis->experimentalInstrumentScanOnlyButton_.setEnabled(true);
+                        safeThis->refreshExperimentalInstrumentUi();
+                        alertExperimentalOopScanResult(scanResult);
+                    }
+                });
+            }).detach();
+        }
+
+        void runExperimentalOopScanAndLoadOnFile(const juce::File& file)
+        {
+            if (!file.exists())
+            {
+                return;
+            }
+            bool expectedBusy = false;
+            if (!experimentalOopScanBusy_.compare_exchange_strong(expectedBusy, true))
+            {
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "parent: OOP scan+load ignored (already in progress)");
+                return;
+            }
+            const auto oopScanUiT0 = std::chrono::steady_clock::now();
+            experimentalInstrumentLoadButton_.setEnabled(false);
+            experimentalInstrumentScanOnlyButton_.setEnabled(false);
+            experimentalInstrumentStatusLabel_.setText("OOP scan + load...", juce::dontSendNotification);
+
+            juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+            const juce::File fileCopy = file;
+            std::thread([safeThis, fileCopy, oopScanUiT0] {
+                const mini_daw::Vst3OopScanResult scanResult
+                    = mini_daw::runVst3OopScanBlocking(fileCopy, mini_daw::kVst3OopScanReplyTimeoutMs);
+                juce::MessageManager::callAsync([safeThis, scanResult, fileCopy, oopScanUiT0] {
+                    if (safeThis == nullptr)
+                    {
+                        return;
+                    }
+                    const int uiElapsedMs = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - oopScanUiT0)
+                                                .count();
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "parent-ui: clearing OOP scan+load busy elapsedMs=" + juce::String(uiElapsedMs));
+                    safeThis->experimentalOopScanBusy_.store(false);
+                    safeThis->experimentalInstrumentLoadButton_.setEnabled(true);
+                    safeThis->experimentalInstrumentScanOnlyButton_.setEnabled(true);
+                    safeThis->refreshExperimentalInstrumentUi();
+                    alertExperimentalOopScanResult(scanResult);
+
+                    if (scanResult.outcome != mini_daw::Vst3OopScanOutcome::Success)
+                    {
+                        return;
+                    }
+                    if (scanResult.descriptions.empty())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon,
+                            "Experimental instrument",
+                            "OOP scan completed but no PluginDescription was parsed from the child result.");
+                        return;
+                    }
+
+                    const juce::PluginDescription& d = scanResult.descriptions.front();
+                    if (scanResult.descriptions.size() > 1U)
+                    {
+                        mini_daw::writeVst3OopScanDiagnosticLogLine(
+                            "parent-ui: oop-scan+load using description[0] of "
+                            + juce::String((int)scanResult.descriptions.size()) + " name=\"" + d.name + "\"");
+                    }
+
+                    const juce::Result loadR
+                        = safeThis->experimentalInstrumentHost_.loadInstrumentFromDescription(d, fileCopy);
+                    safeThis->refreshExperimentalInstrumentUi();
+                    if (!loadR.wasOk())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "Experimental instrument", loadR.getErrorMessage());
+                    }
+                });
+            }).detach();
+        }
+
+        void beginExperimentalOopScanFromFile()
+        {
+            if (explInstrVst3OopChooserInFlight_)
+            {
+                return;
+            }
+            explInstrVst3OopChooserInFlight_ = true;
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>(
+                "Scan VST3 in child process (OOP diagnostic)", juce::File{}, "*.vst3");
+            chooser->launchAsync(
+                fileChooserFlags,
+                [this, chooser](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearOopChooser
+                    {
+                        bool& flag;
+                        explicit ClearOopChooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearOopChooser() { flag = false; }
+                    } clearFlag{ explInstrVst3OopChooserInFlight_ };
+                    const juce::File f = fc.getResult();
+                    if (!f.exists())
+                    {
+                        return;
+                    }
+                    runExperimentalOopScanOnFile(f);
+                });
+        }
+
+        void beginExperimentalOopScanAndLoadFromFile()
+        {
+            if (explInstrVst3OopChooserInFlight_)
+            {
+                return;
+            }
+            explInstrVst3OopChooserInFlight_ = true;
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>(
+                "OOP scan + load instrument", juce::File{}, "*.vst3");
+            chooser->launchAsync(
+                fileChooserFlags,
+                [this, chooser](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearOopChooser
+                    {
+                        bool& flag;
+                        explicit ClearOopChooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearOopChooser() { flag = false; }
+                    } clearFlag{ explInstrVst3OopChooserInFlight_ };
+                    const juce::File f = fc.getResult();
+                    if (!f.exists())
+                    {
+                        return;
+                    }
+                    runExperimentalOopScanAndLoadOnFile(f);
+                });
+        }
+
+        void runExperimentalCachedLoadOnFile(const juce::File& vst3Bundle)
+        {
+            if (!vst3Bundle.exists())
+            {
+                return;
+            }
+            const juce::String pathStr = vst3Bundle.getFullPathName();
+            std::vector<juce::PluginDescription> cached;
+            const bool hit = mini_daw::tryLoadExperimentalVst3DescriptionsFromCache(vst3Bundle, cached);
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "parent: cached-load lookup path=\"" + pathStr + "\" hit=" + juce::String(hit ? "true" : "false")
+                + " count=" + juce::String((int)cached.size()));
+
+            if (!hit || cached.empty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "Experimental instrument",
+                                                       "No cached description found; run OOP scan-only once.");
+                return;
+            }
+            if (cached.size() > 1U)
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "Experimental instrument",
+                                                       "Multiple cached descriptions for this bundle (aborted). "
+                                                       "This path requires exactly one cached entry.");
+                return;
+            }
+
+            const juce::PluginDescription& d = cached.front();
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "parent: cached-load selected name=\"" + d.name + "\" manufacturer=\"" + d.manufacturerName
+                + "\" fileOrIdentifier=\"" + d.fileOrIdentifier + "\"");
+
+            const juce::Result r = experimentalInstrumentHost_.loadInstrumentFromDescription(
+                d, vst3Bundle, "cached-oop-description");
+            refreshExperimentalInstrumentUi();
+            if (!r.wasOk())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "Experimental instrument", r.getErrorMessage());
+            }
+        }
+
+        void beginExperimentalCachedLoadFromFile()
+        {
+            if (explInstrVst3OopChooserInFlight_)
+            {
+                return;
+            }
+            explInstrVst3OopChooserInFlight_ = true;
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>(
+                "Load from cached OOP description", juce::File{}, "*.vst3");
+            chooser->launchAsync(
+                fileChooserFlags,
+                [this, chooser](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearOopChooser
+                    {
+                        bool& flag;
+                        explicit ClearOopChooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearOopChooser() { flag = false; }
+                    } clearFlag{ explInstrVst3OopChooserInFlight_ };
+                    const juce::File f = fc.getResult();
+                    if (!f.exists())
+                    {
+                        return;
+                    }
+                    runExperimentalCachedLoadOnFile(f);
+                });
+        }
+
+        void beginExperimentalAddVst3Folder(juce::Component* anchor)
+        {
+            if (explInstrVst3FolderChooserInFlight_)
+            {
+                return;
+            }
+            explInstrVst3FolderChooserInFlight_ = true;
+            const auto chooserFlags = juce::FileBrowserComponent::openMode
+                                      | juce::FileBrowserComponent::canSelectDirectories;
+            auto chooser = std::make_shared<juce::FileChooser>("Add VST3 search folder", juce::File{}, "*");
+            chooser->launchAsync(
+                chooserFlags,
+                [this, chooser, anchor](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearFolderChooser
+                    {
+                        bool& flag;
+                        explicit ClearFolderChooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearFolderChooser() { flag = false; }
+                    } clearFlag{ explInstrVst3FolderChooserInFlight_ };
+                    const juce::File folder = fc.getResult();
+                    if (!folder.isDirectory())
+                    {
+                        return;
+                    }
+                    juce::FileSearchPath paths = mini_daw::loadUserVst3SearchPaths();
+                    paths.add(folder, -1);
+                    mini_daw::saveUserVst3SearchPaths(paths);
+                    showExperimentalInstrumentPicker(anchor);
+                });
+        }
+
+        void beginExperimentalLoadVst3FromFile()
+        {
+            if (explInstrVst3ChooserInFlight_)
+            {
+                return;
+            }
+            explInstrVst3ChooserInFlight_ = true;
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>("Load VST3 (instrument)", juce::File{}, "*.vst3");
+            chooser->launchAsync(
+                fileChooserFlags,
+                [this, chooser](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearVst3Chooser
+                    {
+                        bool& flag;
+                        explicit ClearVst3Chooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearVst3Chooser() { flag = false; }
+                    } clearFlag{ explInstrVst3ChooserInFlight_ };
+                    const juce::File file = fc.getResult();
+                    if (!file.exists())
+                    {
+                        refreshExperimentalInstrumentUi();
+                        return;
+                    }
+                    const juce::Result r = experimentalInstrumentHost_.loadInstrumentFromVst3File(file);
+                    if (!r.wasOk())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon, "Experimental instrument", r.getErrorMessage());
+                    }
+                    refreshExperimentalInstrumentUi();
+                });
+        }
+
+        void beginExperimentalScanVst3FromFile()
+        {
+            if (explInstrVst3ScanChooserInFlight_)
+            {
+                return;
+            }
+            explInstrVst3ScanChooserInFlight_ = true;
+            const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                          | juce::FileBrowserComponent::canSelectFiles;
+            auto chooser = std::make_shared<juce::FileChooser>(
+                "Scan VST3 only (diagnostic, no instance)", juce::File{}, "*.vst3");
+            chooser->launchAsync(
+                fileChooserFlags,
+                [this, chooser](const juce::FileChooser& fc) {
+                    juce::ignoreUnused(chooser);
+                    struct ClearScanChooser
+                    {
+                        bool& flag;
+                        explicit ClearScanChooser(bool& f) noexcept
+                            : flag(f)
+                        {
+                        }
+                        ~ClearScanChooser() { flag = false; }
+                    } clearFlag{ explInstrVst3ScanChooserInFlight_ };
+                    const juce::File file = fc.getResult();
+                    if (!file.exists())
+                    {
+                        return;
+                    }
+                    const juce::Result r = experimentalInstrumentHost_.diagnosticScanVst3FileOnly(file);
+                    alertExperimentalVst3ScanDiagnosticResult(r);
                 });
         }
 
@@ -2856,6 +3669,7 @@ private:
         Transport& transport;
         Session& session;
         PluginInsertHost& pluginHost_;
+        ExperimentalInstrumentHost& experimentalInstrumentHost_;
         juce::AudioDeviceManager& deviceManager;
         RecorderService& recorder_;
         CountInClickOutput& countInClicks_;
@@ -2891,6 +3705,11 @@ private:
         bool importInFlight_ = false;
         bool vst3ChooserInFlight_ = false;
         bool vst3FolderChooserInFlight_ = false;
+        bool explInstrVst3ChooserInFlight_ = false;
+        bool explInstrVst3ScanChooserInFlight_ = false;
+        bool explInstrVst3OopChooserInFlight_ = false;
+        bool explInstrVst3FolderChooserInFlight_ = false;
+        std::atomic<bool> experimentalOopScanBusy_{ false };
 
         EditTool currentEditTool_ = EditTool::Pointer;
 
@@ -2904,6 +3723,15 @@ private:
         juce::TextButton helpButton{ "Help..." };
         juce::TextButton pointerToolButton_{ "Pointer" };
         juce::TextButton splitToolButton_{ "Split" };
+
+        ExperimentalInstrumentRim experimentalInstrumentRim_;
+        juce::Label experimentalInstrumentTitleLabel_;
+        juce::TextButton experimentalInstrumentLoadButton_{ "Load VST3..." };
+        juce::TextButton experimentalInstrumentScanOnlyButton_{ "Scan only..." };
+        juce::TextButton experimentalInstrumentEditorButton_{ "Editor" };
+        juce::TextButton experimentalInstrumentTestKickButton_{ "Test Kick (MIDI 36)" };
+        juce::TextButton experimentalInstrumentUnloadButton_{ "Unload" };
+        juce::Label experimentalInstrumentStatusLabel_;
         juce::Label keyDiagLabel_;
 
         /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).
@@ -2930,6 +3758,7 @@ private:
                    Transport& transport,
                    Session& session,
                    PluginInsertHost& pluginInsertHost,
+                   ExperimentalInstrumentHost& experimentalInstrumentHost,
                    juce::AudioDeviceManager& deviceManager,
                    RecorderService& recorderService,
                    CountInClickOutput& countInClicks,
@@ -2946,6 +3775,7 @@ private:
                 new TransportControlsContent(transport,
                                              session,
                                              pluginInsertHost,
+                                             experimentalInstrumentHost,
                                              deviceManager,
                                              recorderService,
                                              countInClicks,
@@ -3110,12 +3940,15 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
     };
 
+    bool vst3OopWorkerMode_ = false;
+
     std::unique_ptr<Transport> transport;
     std::unique_ptr<Session> session;
     // Phase 4: recording capture (not user-wired in this file yet); engine holds non-owning `get()`.
     std::unique_ptr<RecorderService> recorderService;
     /// Count-in metronome clicks to device only; coordinator state lives in `TransportControlsContent`.
     std::unique_ptr<CountInClickOutput> countInOutput_;
+    std::unique_ptr<ExperimentalInstrumentHost> experimentalInstrumentHost_;
     std::unique_ptr<PluginInsertHost> pluginInsertHost_;
     std::unique_ptr<PlaybackEngine> playbackEngine;
     std::unique_ptr<LatencySettingsStore> latencySettingsStore;

@@ -1,5 +1,10 @@
 # MiniDAWLab — Scope & Working Agreement
 
+This document is the strategic governing brief for the MiniDAWLab project.
+
+It defines the project’s purpose, scope, direction, and primary technical choices.  
+Implementation work must remain aligned with this brief and must also follow the steering documents in `docs/`, which define the architecture envelope, implementation constraints, phase plan, and validation process.
+
 ## Purpose
 
 This project is primarily a hobby and learning project for better understanding:
@@ -14,6 +19,8 @@ This project is primarily a hobby and learning project for better understanding:
 
 The project is **not primarily intended to replace Cubase**.  
 If it eventually grows into a streamlined tool that can compete with Cubase for our own workflow, that is a bonus rather than the core requirement.
+
+
 
 ## Relationship to Cubase
 

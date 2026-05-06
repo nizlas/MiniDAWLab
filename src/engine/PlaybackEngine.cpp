@@ -20,6 +20,9 @@
 //   scratch into the device buffer at unity (same mono L+R blend rule as the dry path).
 //   Mono device: (L+R)*0.5 into output 0. Stereo+: L→0, R→1; higher channels unchanged by inserts.
 //
+// I1 (experimental global instrument): after clip/insert summing (and even when transport is not
+//   Playing), `ExperimentalInstrumentHost` may add one stereo instrument bus to the same outputs.
+//
 // WHERE THIS SITS
 //   `Session` publish → acquire-load of `const SessionSnapshot` (refcount) here; `Transport` seek
 //   apply, playhead read/advance. See ARCHITECTURE_PRINCIPLES (Phase 2/3, snapshot handoff).
@@ -38,6 +41,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
 
@@ -224,15 +228,30 @@ namespace
             juce::FloatVectorOperations::multiply(R, gain, run);
         }
     }
+
+    /// [Audio thread] Global experimental instrument slot (I1); summed after tracks / inserts.
+    void mixExperimentalInstrumentAfterTracks(ExperimentalInstrumentHost* host,
+                                             float* const* outputChannelData,
+                                             int numOutputChannels,
+                                             int numSamples) noexcept
+    {
+        if (host == nullptr || numSamples <= 0)
+        {
+            return;
+        }
+        host->audioThread_processBlockAndAddToOutputs(outputChannelData, numOutputChannels, numSamples);
+    }
 } // namespace
 
 PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder,
-                               CountInClickOutput* countIn, PluginInsertHost* pluginHost)
+                               CountInClickOutput* countIn, PluginInsertHost* pluginHost,
+                               ExperimentalInstrumentHost* experimentalInstrument)
     : transport_(transport)
     , session_(session)
     , recorder_(recorder)
     , countIn_(countIn)
     , pluginHost_(pluginHost)
+    , experimentalInstrument_(experimentalInstrument)
 {
 }
 
@@ -245,12 +264,19 @@ void PlaybackEngine::setPlaybackOffsetSamples(const std::int64_t samples) noexce
 
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
-    if (device != nullptr && pluginHost_ != nullptr)
+    if (device != nullptr)
     {
         const double sr = device->getCurrentSampleRate();
         const int bs = device->getCurrentBufferSizeSamples();
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
-        pluginHost_->prepareForDevice(sr, bs, nOut);
+        if (pluginHost_ != nullptr)
+        {
+            pluginHost_->prepareForDevice(sr, bs, nOut);
+        }
+        if (experimentalInstrument_ != nullptr)
+        {
+            experimentalInstrument_->prepareForDevice(sr, bs);
+        }
     }
 }
 
@@ -259,6 +285,10 @@ void PlaybackEngine::audioDeviceStopped()
     if (pluginHost_ != nullptr)
     {
         pluginHost_->releaseResources();
+    }
+    if (experimentalInstrument_ != nullptr)
+    {
+        experimentalInstrument_->releaseResources();
     }
 }
 
@@ -303,10 +333,16 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         countIn_->audioThread_mixInto(outputChannelData, numOutputChannels, numSamples);
     }
 
+    const auto mixInstrumentIfAny = [&]() noexcept {
+        mixExperimentalInstrumentAfterTracks(
+            experimentalInstrument_, outputChannelData, numOutputChannels, numSamples);
+    };
+
     if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0
         || playbackIntent != PlaybackIntent::Playing)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
+        mixInstrumentIfAny();
         return;
     }
 
@@ -314,6 +350,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (timelineEnd <= 0 || t0 >= timelineEnd)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
+        mixInstrumentIfAny();
         return;
     }
 
@@ -355,6 +392,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (availTimeline <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
+        mixInstrumentIfAny();
         return;
     }
 
@@ -469,10 +507,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         if (firstRun64 <= 0)
         {
             transport_.audioThread_advancePlayheadIfPlaying(0);
+            mixInstrumentIfAny();
             return;
         }
         renderRun(tWork, static_cast<int>(firstRun64), 0);
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
+        mixInstrumentIfAny();
         return;
     }
 
@@ -484,6 +524,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (firstRun64 <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
+        mixInstrumentIfAny();
         return;
     }
 
@@ -494,6 +535,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (!reachedRightLocator)
     {
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
+        mixInstrumentIfAny();
         return;
     }
 
@@ -559,4 +601,5 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             + juce::String(transport_.audioThread_relaxedLoadWrapPassCount()));
 #endif
     }
+    mixInstrumentIfAny();
 }

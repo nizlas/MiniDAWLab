@@ -45,6 +45,7 @@
 #include <cstdint>
 
 class CountInClickOutput;
+class ExperimentalInstrumentHost;
 class PluginInsertHost;
 class RecorderService;
 class Session;
@@ -59,8 +60,11 @@ public:
     // `countIn` is optional: short count-in metronome clicks to device outputs only (no session/recorder).
     // `pluginHost` optional Phase 8: per-track VST3 insert; must outlive this engine until after
     // `removeAudioCallback` (same tear order as `recorder`).
+    // `experimentalInstrument` optional I1: single global instrument slot mixed after tracks; same
+    // lifetime rule as `pluginHost`.
     PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder = nullptr,
-                  CountInClickOutput* countIn = nullptr, PluginInsertHost* pluginHost = nullptr);
+                  CountInClickOutput* countIn = nullptr, PluginInsertHost* pluginHost = nullptr,
+                  ExperimentalInstrumentHost* experimentalInstrument = nullptr);
     ~PlaybackEngine() override;
 
     PlaybackEngine(const PlaybackEngine&) = delete;
@@ -97,6 +101,7 @@ private:
     RecorderService* const recorder_;
     CountInClickOutput* const countIn_;
     PluginInsertHost* const pluginHost_;
+    ExperimentalInstrumentHost* const experimentalInstrument_;
 
     std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
 };
