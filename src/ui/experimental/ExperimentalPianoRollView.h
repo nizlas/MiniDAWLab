@@ -24,6 +24,8 @@ public:
 private:
     void timerCallback() override;
 
+    bool loggedFirstPaint_ = false;
+
     [[nodiscard]] int pitchAtY(int y) const;
     [[nodiscard]] int stepAtX(int x) const;
     [[nodiscard]] juce::Rectangle<int> keyboardBounds() const;

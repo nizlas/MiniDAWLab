@@ -2,6 +2,7 @@
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
 #include "ExperimentalPianoRollView.h"
+#include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
 #include <algorithm>
@@ -11,6 +12,11 @@ namespace
     constexpr int kToolbarH = 40;
     constexpr int kEditorTotalWidth = 720;
     constexpr int kEditorTotalHeight = 780;
+
+    [[nodiscard]] juce::String ptrToLog(const void* p) noexcept
+    {
+        return p != nullptr ? juce::String::formatted("%p", p) : juce::String("null");
+    }
 } // namespace
 
 class ExperimentalMidiEditorWindow::Body final : public juce::Component
@@ -27,6 +33,7 @@ public:
 
         player_->setPlaybackUiCallback([this] { updateStopButtonState(); });
 
+        addAndMakeVisible(viewport_);
         addAndMakeVisible(playButton_);
         playButton_.setButtonText("Play pattern");
         playButton_.onClick = [this] {
@@ -50,7 +57,7 @@ public:
         bpmSlider_.setValue(110.0);
         bpmSlider_.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 56, 22);
         bpmSlider_.onValueChange = [this] {
-            pattern_.bpm = bpmSlider_.getValue();
+            activePattern().bpm = bpmSlider_.getValue();
         };
 
         addAndMakeVisible(stepsLabel_);
@@ -65,17 +72,17 @@ public:
         stepsBox_.onChange = [this] {
             const int id = stepsBox_.getSelectedId();
             const int newSteps = (id == 2) ? 32 : 16;
-            if (newSteps == pattern_.numSteps)
+            if (newSteps == activePattern().numSteps)
             {
                 return;
             }
-            pattern_.numSteps = newSteps;
-            pattern_.notes.erase(
+            activePattern().numSteps = newSteps;
+            activePattern().notes.erase(
                 std::remove_if(
-                    pattern_.notes.begin(),
-                    pattern_.notes.end(),
+                    activePattern().notes.begin(),
+                    activePattern().notes.end(),
                     [newSteps](const PrototypeMidiNote& n) { return n.step >= newSteps; }),
-                pattern_.notes.end());
+                activePattern().notes.end());
             if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
             {
                 rv->repaint();
@@ -87,9 +94,7 @@ public:
         modeLabel_.setJustificationType(juce::Justification::centredLeft);
         modeLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffc8c8d8));
 
-        auto* roll = new ExperimentalPianoRollView(pattern_, player_.get());
-        viewport_.setViewedComponent(roll, true);
-        addAndMakeVisible(viewport_);
+        rebuildRollViewOnly();
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: window opened steps=" + juce::String(pattern_.numSteps) + " bpm="
@@ -118,30 +123,118 @@ public:
 
     void syncInstrumentUiFromHost()
     {
-        applyInstrumentUiState(host_.hasInstrument(), host_.getInstrumentNameForUi());
+        applyInstrumentUiState();
     }
 
-    void applyInstrumentUiState(bool hasInstrument, const juce::String& instrumentName)
+    void bindExternal(ExperimentalMidiPattern* p, InstrumentTrackController* trackForClipGate)
     {
-        const bool changed = !instrumentUiInitialized_ || (hasInstrument != lastHadInstrument_)
+        InstrumentTrackController* const gatePtr = (p != nullptr) ? trackForClipGate : nullptr;
+        if (externalPattern_ == p && instrumentTrackForClipBind_ == gatePtr)
+        {
+            syncSlidersFromActivePattern();
+            syncInstrumentUiFromHost();
+            return;
+        }
+
+        if (player_ != nullptr)
+        {
+            player_->stopPlayback("rebind");
+        }
+        externalPattern_ = p;
+        instrumentTrackForClipBind_ = gatePtr;
+        rebuildPlayerAndRoll();
+        syncSlidersFromActivePattern();
+        syncInstrumentUiFromHost();
+    }
+
+    void unbindExternal()
+    {
+        if (externalPattern_ == nullptr)
+        {
+            return;
+        }
+        if (player_ != nullptr)
+        {
+            player_->stopPlayback("rebind");
+        }
+        externalPattern_ = nullptr;
+        instrumentTrackForClipBind_ = nullptr;
+        rebuildPlayerAndRoll();
+        syncSlidersFromActivePattern();
+        syncInstrumentUiFromHost();
+    }
+
+    [[nodiscard]] ExperimentalMidiPattern& activePattern() noexcept
+    {
+        return externalPattern_ != nullptr ? *externalPattern_ : pattern_;
+    }
+
+    [[nodiscard]] const ExperimentalMidiPattern& activePattern() const noexcept
+    {
+        return externalPattern_ != nullptr ? *externalPattern_ : pattern_;
+    }
+
+    [[nodiscard]] bool editorInstrumentGate() const noexcept
+    {
+        if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr)
+        {
+            const auto* tr = instrumentTrackForClipBind_;
+            return tr->isInstrumentLoaded() && tr->isPowerOn() && !tr->isMuted();
+        }
+        return host_.hasInstrument();
+    }
+
+    void applyInstrumentUiState()
+    {
+        const bool clipBound = externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr;
+        const bool canPlayPattern = editorInstrumentGate();
+        const juce::String instrumentName = host_.getInstrumentNameForUi();
+        const bool changed = !instrumentUiInitialized_ || (canPlayPattern != lastPlayGate_)
                              || (instrumentName != lastInstrumentName_);
         instrumentUiInitialized_ = true;
-        lastHadInstrument_ = hasInstrument;
+        lastPlayGate_ = canPlayPattern;
         lastInstrumentName_ = instrumentName;
 
-        playButton_.setEnabled(hasInstrument);
+        playButton_.setEnabled(canPlayPattern);
 
-        const juce::String instPart =
-            hasInstrument ? (instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
-                                                           : juce::String("Instrument: (loaded)"))
-                          : juce::String("No instrument loaded");
+        juce::String instPart;
+        if (!clipBound)
+        {
+            instPart = host_.hasInstrument()
+                           ? (instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
+                                                          : juce::String("Instrument: (loaded)"))
+                           : juce::String("No instrument loaded");
+        }
+        else
+        {
+            const auto* tr = instrumentTrackForClipBind_;
+            if (tr == nullptr || !tr->isInstrumentLoaded())
+            {
+                instPart = juce::String("No instrument loaded");
+            }
+            else if (!tr->isPowerOn())
+            {
+                instPart = juce::String("Instrument track powered off (playback disabled)");
+            }
+            else if (tr->isMuted())
+            {
+                instPart = juce::String("Instrument track muted (playback disabled)");
+            }
+            else
+            {
+                instPart = instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
+                                                       : juce::String("Instrument: (loaded)");
+            }
+        }
+
+        const juce::Colour labelColour =
+            canPlayPattern ? juce::Colour(0xffc8c8d8) : juce::Colour(0xffffaa88);
+
         modeLabel_.setText(
             juce::String("Mode: Drum hits (100 ms gate) | ") + instPart + "\n"
                 + "Timing: ~4 ms message timer; not sample-accurate.",
             juce::dontSendNotification);
-        modeLabel_.setColour(juce::Label::textColourId,
-                             hasInstrument ? juce::Colour(0xffc8c8d8)
-                                           : juce::Colour(0xffffaa88));
+        modeLabel_.setColour(juce::Label::textColourId, labelColour);
 
         updateStopButtonState();
 
@@ -151,9 +244,9 @@ public:
         }
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-            juce::String("midi-editor: instrument state changed hasInstrument=") + (hasInstrument ? "true" : "false")
+            juce::String("midi-editor: instrument state changed canPlay=") + (canPlayPattern ? "true" : "false")
             + " name=\"" + instrumentName + "\"");
-        if (!hasInstrument)
+        if (!canPlayPattern)
         {
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
                 "midi-editor: instrument unavailable, playback disabled");
@@ -167,7 +260,7 @@ public:
 
     void updateStopButtonState()
     {
-        stopButton_.setEnabled(host_.hasInstrument() && player_ != nullptr && player_->isPlaying());
+        stopButton_.setEnabled(editorInstrumentGate() && player_ != nullptr && player_->isPlaying());
     }
 
     void resized() override
@@ -190,15 +283,53 @@ public:
             rv->setSize(juce::jmax(400, a.getWidth()), rollH);
         }
         viewport_.setBounds(a);
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                "midi-editor: resized viewport=" + viewport_.getBounds().toString() + " roll="
+                + rv->getBounds().toString());
+        }
     }
 
 private:
+    InstrumentTrackController* instrumentTrackForClipBind_ = nullptr;
+
+    void syncSlidersFromActivePattern()
+    {
+        bpmSlider_.setValue(activePattern().bpm, juce::dontSendNotification);
+        stepsBox_.setSelectedId(activePattern().numSteps == 32 ? 2 : 1, juce::dontSendNotification);
+    }
+
+    void rebuildPlayerAndRoll()
+    {
+        player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_, activePattern());
+        player_->setPlaybackUiCallback([this] { updateStopButtonState(); });
+        player_->setPlaybackAllowed([this] { return editorInstrumentGate(); });
+        rebuildRollViewOnly();
+        resized();
+    }
+
+    void rebuildRollViewOnly()
+    {
+        ExperimentalMidiPattern& ap = activePattern();
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "midi-editor: rebuild roll begin activePatternPtr=" + ptrToLog(&ap));
+
+        auto* roll = new ExperimentalPianoRollView(ap, player_.get());
+        viewport_.setViewedComponent(roll, true);
+
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "midi-editor: setViewedComponent rollPtr=" + ptrToLog(roll) + " width="
+            + juce::String(roll->getWidth()) + " height=" + juce::String(roll->getHeight()));
+    }
+
     ExperimentalInstrumentHost& host_;
     ExperimentalMidiPattern pattern_;
+    ExperimentalMidiPattern* externalPattern_ = nullptr;
     std::unique_ptr<ExperimentalMidiPatternPlayer> player_;
 
     bool instrumentUiInitialized_ = false;
-    bool lastHadInstrument_ = false;
+    bool lastPlayGate_ = false;
     juce::String lastInstrumentName_;
 
     juce::TextButton playButton_;
@@ -249,4 +380,34 @@ void ExperimentalMidiEditorWindow::syncInstrumentStateFromHost()
     {
         b->syncInstrumentUiFromHost();
     }
+}
+
+void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* pattern,
+                                                       const juce::String& titleSuffix,
+                                                       InstrumentTrackController* instrumentTrackForClip)
+{
+    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+        "midi-editor: bindExternalPattern begin patternPtr=" + ptrToLog(pattern) + " noteCount="
+        + juce::String(pattern != nullptr ? (int)pattern->notes.size() : -1));
+
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->bindExternal(pattern, instrumentTrackForClip);
+    }
+
+    juce::String winName { "I2 MIDI editor (Drum hits)" };
+    if (pattern != nullptr && titleSuffix.isNotEmpty())
+    {
+        winName << " - " << titleSuffix;
+    }
+    setName(winName);
+}
+
+void ExperimentalMidiEditorWindow::unbindExternalPattern()
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->unbindExternal();
+    }
+    setName("I2 MIDI editor (Drum hits)");
 }

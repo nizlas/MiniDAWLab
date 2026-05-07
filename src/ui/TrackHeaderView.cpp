@@ -1,13 +1,10 @@
 // =============================================================================
-// TrackHeaderView.cpp  —  `mouseDown` activates track; drag after threshold → `TrackLanesView` host
+// TrackHeaderView.cpp — model/callback-driven header; optional drag host
 // =============================================================================
 
 #include "ui/TrackHeaderView.h"
 
 #include "ui/ForbiddenCursor.h"
-#include "domain/Session.h"
-#include "engine/RecorderService.h"
-#include "transport/Transport.h"
 
 #include <juce_core/juce_core.h>
 
@@ -46,14 +43,15 @@ namespace
         g.drawFittedText(letter, circ, juce::Justification::centred, 1);
     }
 
-    /** Standby/power glyph: normalized coords mapped into `icon`; ring + short stem. */
     static void drawPowerGlyphInSquare(juce::Graphics& g,
                                        juce::Rectangle<float> icon,
                                        const juce::Colour glyphColour)
     {
         float side = juce::jmin(icon.getWidth(), icon.getHeight());
         if (side <= 4.0f)
+        {
             return;
+        }
 
         icon = juce::Rectangle<float>(icon.getCentreX() - side * 0.5f,
                                       icon.getCentreY() - side * 0.5f,
@@ -86,8 +84,8 @@ namespace
         g.strokePath(
             ring,
             juce::PathStrokeType(stroke,
-                                  juce::PathStrokeType::mitered,
-                                  juce::PathStrokeType::butt));
+                                 juce::PathStrokeType::mitered,
+                                 juce::PathStrokeType::butt));
 
         juce::Path stem;
         stem.startNewSubPath(x(0.5f), y(0.12f));
@@ -96,12 +94,10 @@ namespace
         g.strokePath(
             stem,
             juce::PathStrokeType(stroke,
-                                  juce::PathStrokeType::mitered,
-                                  juce::PathStrokeType::butt));
+                                 juce::PathStrokeType::mitered,
+                                 juce::PathStrokeType::butt));
     }
 
-    /// Power lane toggle (**`M`** / **`R`** footprint): grey = **`trackOff`** (**skipped**),
-    /// green = **processed**; light IEC-style standby symbol inside the circle.
     void paintPowerCircularButton(juce::Graphics& g,
                                   const juce::Rectangle<int>& powerVis,
                                   const bool trackOff)
@@ -115,6 +111,17 @@ namespace
         drawPowerGlyphInSquare(g,
                                powerVis.toFloat().reduced(2.0f),
                                juce::Colour(0xfff3f4f5));
+    }
+
+    void paintPowerCircularButtonDisabled(juce::Graphics& g, const juce::Rectangle<int>& powerVis)
+    {
+        juce::Graphics::ScopedSaveState clipGuard(g);
+        g.reduceClipRegion(powerVis);
+        g.setColour(juce::Colour(0xff444444));
+        g.fillEllipse(powerVis.toFloat());
+        drawPowerGlyphInSquare(g,
+                               powerVis.toFloat().reduced(2.0f),
+                               juce::Colour(0xff888888));
     }
 } // namespace
 
@@ -158,50 +165,28 @@ juce::Rectangle<int> TrackHeaderView::getArmVisualCircleBounds() const noexcept
     return circleGlyphBoundsInCell(getArmButtonBounds());
 }
 
-TrackHeaderView::TrackHeaderView(
-    Session& session,
-    RecorderService& recorder,
-    Transport& transport,
-    const TrackId trackId,
-    std::function<void()> onActiveChanged,
-    std::function<void()> onArmStateChanged,
-    std::function<void(TrackId)> onDeleteTrackRequested,
-    TrackHeaderPluginHost pluginHost,
-    TrackHeaderDragHost dragHost) noexcept
-    : session_(session)
-    , recorder_(recorder)
-    , transport_(transport)
-    , trackId_(trackId)
-    , onActiveChanged_(std::move(onActiveChanged))
-    , onArmStateChanged_(std::move(onArmStateChanged))
-    , onDeleteTrackRequested_(std::move(onDeleteTrackRequested))
-    , pluginHost_(std::move(pluginHost))
+TrackHeaderView::TrackHeaderView(TrackHeaderModelProvider modelProvider,
+                                 TrackHeaderCallbacks callbacks,
+                                 TrackId dragTrackId,
+                                 std::optional<TrackHeaderDragHost> dragHost) noexcept
+    : modelProvider_(std::move(modelProvider))
+    , callbacks_(std::move(callbacks))
+    , dragTrackId_(dragTrackId)
     , dragHost_(std::move(dragHost))
 {
-    jassert(trackId_ != kInvalidTrackId);
-    jassert(dragHost_.onHeaderDragBegan != nullptr);
-    jassert(dragHost_.onHeaderDragMoved != nullptr);
-    jassert(dragHost_.onHeaderDragEnded != nullptr);
+    if (dragHost_.has_value())
+    {
+        jassert(dragTrackId_ != kInvalidTrackId);
+        jassert(dragHost_->onHeaderDragBegan != nullptr);
+        jassert(dragHost_->onHeaderDragMoved != nullptr);
+        jassert(dragHost_->onHeaderDragEnded != nullptr);
+    }
 }
 
 void TrackHeaderView::paint(juce::Graphics& g)
 {
-    const bool active = (session_.getActiveTrackId() == trackId_);
-    const bool armed = (recorder_.getArmedTrackId() == trackId_);
-    bool trackOff = false;
-    bool trackMuted = false;
-    juce::String label;
-    if (const auto snap = session_.loadSessionSnapshotForAudioThread())
-    {
-        const int idx = snap->findTrackIndexById(trackId_);
-        if (idx >= 0)
-        {
-            const Track& tr = snap->getTrack(idx);
-            label = tr.getName();
-            trackOff = tr.isTrackOff();
-            trackMuted = tr.isMuted();
-        }
-    }
+    const auto m = modelProvider_();
+    const bool active = m.active;
 
     const auto b = getLocalBounds();
     g.setColour(active ? juce::Colour(0xff2a4a5a) : juce::Colour(0xff333333));
@@ -212,243 +197,134 @@ void TrackHeaderView::paint(juce::Graphics& g)
         g.fillRect(b.getX(), b.getY(), 4, b.getHeight());
     }
 
+    auto nameArea = b.withTrimmedRight(kRightControlsWidth).reduced(8, 0).withTrimmedLeft(active ? 6 : 4);
     g.setColour(juce::Colours::whitesmoke);
     g.setFont(14.0f);
-    g.drawFittedText(
-        label,
-        b.withTrimmedRight(kRightControlsWidth).reduced(8, 0).withTrimmedLeft(active ? 6 : 4),
-        juce::Justification::centredLeft,
-        1);
+    if (m.subtitle.isEmpty())
+    {
+        g.drawFittedText(m.name, nameArea, juce::Justification::centredLeft, 1);
+    }
+    else
+    {
+        auto r = nameArea;
+        g.drawText(m.name, r.removeFromTop(16), juce::Justification::centredLeft, true);
+        g.setColour(juce::Colour(0xffcccccc));
+        g.setFont(11.0f);
+        g.drawFittedText(m.subtitle, r, juce::Justification::topLeft, 2);
+    }
 
     const juce::Rectangle<int> muteCirc = getMuteVisualCircleBounds();
-    fillCircleLetterButton(g,
-                            muteCirc,
-                            "M",
-                            trackMuted ? juce::Colour(0xffbbaa33) : juce::Colour(0xff555555),
-                            trackMuted ? juce::Colour(0xff000000) : juce::Colour(0xffcccccc));
+    if (m.muteInteractable)
+    {
+        fillCircleLetterButton(g,
+                               muteCirc,
+                               "M",
+                               m.muted ? juce::Colour(0xffbbaa33) : juce::Colour(0xff555555),
+                               m.muted ? juce::Colour(0xff000000) : juce::Colour(0xffcccccc));
+    }
+    else
+    {
+        fillCircleLetterButton(
+            g, muteCirc, "M", juce::Colour(0xff444444), juce::Colour(0xff888888));
+    }
 
     const juce::Rectangle<int> armCirc = getArmVisualCircleBounds();
-    fillCircleLetterButton(g,
-                            armCirc,
-                            "R",
-                            armed ? juce::Colour(0xffcc2222) : juce::Colour(0xff555555),
-                            armed ? juce::Colour(0xffffffff) : juce::Colour(0xffcccccc));
+    if (m.armInteractable)
+    {
+        fillCircleLetterButton(g,
+                               armCirc,
+                               "R",
+                               m.armed ? juce::Colour(0xffcc2222) : juce::Colour(0xff555555),
+                               m.armed ? juce::Colour(0xffffffff) : juce::Colour(0xffcccccc));
+    }
+    else
+    {
+        fillCircleLetterButton(
+            g, armCirc, "R", juce::Colour(0xff444444), juce::Colour(0xff888888));
+    }
 
     const juce::Rectangle<int> powerVis = getPowerVisualCircleBounds();
     if (powerVis.getWidth() > 4 && powerVis.getHeight() > 4)
     {
-        paintPowerCircularButton(g, powerVis, trackOff);
+        if (m.powerInteractable)
+        {
+            paintPowerCircularButton(g, powerVis, m.off);
+        }
+        else
+        {
+            paintPowerCircularButtonDisabled(g, powerVis);
+        }
     }
 }
 
 void TrackHeaderView::mouseDown(const juce::MouseEvent& e)
 {
+    const auto m = modelProvider_();
     const auto p = e.getPosition();
 
     if (e.mods.isPopupMenu())
     {
-        // Whole-header context menu: activate this lane first so Delete and the inspector refer to
-        // the clicked track; do not toggle [Power][M][R] on right-click.
-        dragBlocker_ = DragBlocker::None;
-        headerDragInProgress_ = false;
-        session_.setActiveTrack(trackId_);
-        if (onActiveChanged_ != nullptr)
+        if (callbacks_.onShowContextMenu != nullptr)
         {
-            onActiveChanged_();
+            dragBlocker_ = DragBlocker::None;
+            headerDragInProgress_ = false;
+            callbacks_.onShowContextMenu(*this, e);
         }
-
-        juce::PopupMenu menu;
-        constexpr int kDeleteTrackMenuId = 1;
-        const bool editLocked = transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                                || recorder_.isRecording();
-        juce::PopupMenu::Item deleteItem;
-        deleteItem.itemID = kDeleteTrackMenuId;
-        deleteItem.text = "Delete Track";
-        deleteItem.isEnabled = !editLocked;
-        menu.addItem(deleteItem);
-
-        constexpr int kLoadVst3MenuId = 10;
-        constexpr int kPluginEditorMenuId = 11;
-        constexpr int kPluginParamsMenuId = 12;
-        constexpr int kRemovePluginMenuId = 13;
-        if (pluginHost_.loadVst3 != nullptr)
-        {
-            juce::PopupMenu::Item loadItem;
-            loadItem.itemID = kLoadVst3MenuId;
-            loadItem.text = "Load VST3…";
-            loadItem.isEnabled = !editLocked;
-            menu.addItem(loadItem);
-        }
-        if (pluginHost_.openPluginEditor != nullptr)
-        {
-            juce::PopupMenu::Item edItem;
-            edItem.itemID = kPluginEditorMenuId;
-            edItem.text = "Plugin editor…";
-            edItem.isEnabled = !editLocked;
-            menu.addItem(edItem);
-        }
-        if (pluginHost_.openPluginParams != nullptr)
-        {
-            juce::PopupMenu::Item parItem;
-            parItem.itemID = kPluginParamsMenuId;
-            parItem.text = "Plugin parameters…";
-            parItem.isEnabled = !editLocked;
-            menu.addItem(parItem);
-        }
-        if (pluginHost_.removePlugin != nullptr)
-        {
-            juce::PopupMenu::Item rmItem;
-            rmItem.itemID = kRemovePluginMenuId;
-            rmItem.text = "Remove VST3";
-            rmItem.isEnabled = !editLocked;
-            menu.addItem(rmItem);
-        }
-
-        juce::Component::SafePointer<TrackHeaderView> safeThis(this);
-        menu.showMenuAsync(
-            juce::PopupMenu::Options().withTargetComponent(this),
-            [safeThis,
-             kDeleteTrackMenuId,
-             kLoadVst3MenuId,
-             kPluginEditorMenuId,
-             kPluginParamsMenuId,
-             kRemovePluginMenuId](const int result) {
-                if (safeThis == nullptr)
-                {
-                    return;
-                }
-                if (result == kDeleteTrackMenuId)
-                {
-                    if (safeThis->transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                        || safeThis->recorder_.isRecording())
-                    {
-                        return;
-                    }
-                    if (safeThis->onDeleteTrackRequested_ != nullptr)
-                    {
-                        safeThis->onDeleteTrackRequested_(safeThis->trackId_);
-                    }
-                    return;
-                }
-                if (safeThis->transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                    || safeThis->recorder_.isRecording())
-                {
-                    return;
-                }
-                const TrackId tid = safeThis->trackId_;
-                if (result == kLoadVst3MenuId && safeThis->pluginHost_.loadVst3 != nullptr)
-                {
-                    safeThis->pluginHost_.loadVst3(tid);
-                }
-                else if (result == kPluginEditorMenuId && safeThis->pluginHost_.openPluginEditor != nullptr)
-                {
-                    safeThis->pluginHost_.openPluginEditor(tid);
-                }
-                else if (result == kPluginParamsMenuId && safeThis->pluginHost_.openPluginParams != nullptr)
-                {
-                    safeThis->pluginHost_.openPluginParams(tid);
-                }
-                else if (result == kRemovePluginMenuId && safeThis->pluginHost_.removePlugin != nullptr)
-                {
-                    safeThis->pluginHost_.removePlugin(tid);
-                }
-            });
         return;
     }
 
     const juce::Rectangle<int> armR = getArmButtonBounds();
     if (armR.contains(p))
     {
+        if (!m.armInteractable || callbacks_.onToggleArm == nullptr)
+        {
+            return;
+        }
         dragBlocker_ = DragBlocker::Arm;
-        if (recorder_.getArmedTrackId() == trackId_)
-        {
-            recorder_.disarm();
-        }
-        else
-        {
-            recorder_.armForRecording(trackId_);
-        }
-        if (onArmStateChanged_ != nullptr)
-        {
-            onArmStateChanged_();
-        }
-        session_.setActiveTrack(trackId_);
-        if (onActiveChanged_ != nullptr)
-        {
-            onActiveChanged_();
-        }
+        callbacks_.onToggleArm();
         return;
     }
 
     const juce::Rectangle<int> muteR = getMuteButtonBounds();
     if (muteR.contains(p))
     {
+        if (!m.muteInteractable || callbacks_.onToggleMute == nullptr)
+        {
+            return;
+        }
         dragBlocker_ = DragBlocker::Mute;
-        bool nowMuted = true;
-        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
-        {
-            const int idx = snap->findTrackIndexById(trackId_);
-            if (idx >= 0)
-            {
-                nowMuted = !snap->getTrack(idx).isMuted();
-            }
-        }
-        session_.setTrackMuted(trackId_, nowMuted);
-        if (onArmStateChanged_ != nullptr)
-        {
-            onArmStateChanged_();
-        }
-        repaint();
-        session_.setActiveTrack(trackId_);
-        if (onActiveChanged_ != nullptr)
-        {
-            onActiveChanged_();
-        }
+        callbacks_.onToggleMute();
         return;
     }
 
     const juce::Rectangle<int> powerR = getPowerButtonBounds();
     if (powerR.contains(p))
     {
-        if (transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording())
+        if (!m.powerInteractable || callbacks_.onTogglePower == nullptr)
         {
             return;
         }
-        dragBlocker_ = DragBlocker::Power;
-        bool nowOff = true;
-        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+        if (callbacks_.onTogglePower())
         {
-            const int idx = snap->findTrackIndexById(trackId_);
-            if (idx >= 0)
-            {
-                nowOff = !snap->getTrack(idx).isTrackOff();
-            }
-        }
-        session_.setTrackOff(trackId_, nowOff);
-        if (onArmStateChanged_ != nullptr)
-        {
-            onArmStateChanged_();
-        }
-        repaint();
-        session_.setActiveTrack(trackId_);
-        if (onActiveChanged_ != nullptr)
-        {
-            onActiveChanged_();
+            dragBlocker_ = DragBlocker::Power;
         }
         return;
     }
 
     dragBlocker_ = DragBlocker::None;
     headerDragInProgress_ = false;
-    session_.setActiveTrack(trackId_);
-    if (onActiveChanged_ != nullptr)
+    if (callbacks_.onActivateName != nullptr)
     {
-        onActiveChanged_();
+        callbacks_.onActivateName();
     }
 }
 
 void TrackHeaderView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (!dragHost_.has_value())
+    {
+        return;
+    }
     if (!e.mods.isLeftButtonDown())
     {
         return;
@@ -462,18 +338,18 @@ void TrackHeaderView::mouseDrag(const juce::MouseEvent& e)
         if (!headerDragInProgress_)
         {
             headerDragInProgress_ = true;
-            dragHost_.onHeaderDragBegan(trackId_, this);
+            dragHost_->onHeaderDragBegan(dragTrackId_, this);
         }
         const juce::Point<int> screen(e.getScreenX(), e.getScreenY());
-        dragHost_.onHeaderDragMoved(trackId_, screen);
+        dragHost_->onHeaderDragMoved(dragTrackId_, screen);
     }
 }
 
 void TrackHeaderView::mouseUp(const juce::MouseEvent& e)
 {
-    if (headerDragInProgress_)
+    if (headerDragInProgress_ && dragHost_.has_value())
     {
-        dragHost_.onHeaderDragEnded(trackId_);
+        dragHost_->onHeaderDragEnded(dragTrackId_);
         headerDragInProgress_ = false;
         dragBlocker_ = DragBlocker::None;
         return;

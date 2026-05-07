@@ -44,7 +44,7 @@ void ExperimentalMidiPatternPlayer::startPlayback()
     {
         return;
     }
-    const bool hasNow = host_.hasInstrument();
+    const bool hasNow = playbackAllowed_ ? playbackAllowed_() : host_.hasInstrument();
     writeMidiEditorLogLine(juce::String("midi-editor: play requested hasInstrument=") + (hasNow ? "true" : "false"));
     if (!hasNow)
     {
@@ -162,7 +162,8 @@ void ExperimentalMidiPatternPlayer::emitStepIfNeeded(const double nowMs,
         {
             continue;
         }
-        if (!host_.hasInstrument())
+        const bool canSend = playbackAllowed_ ? playbackAllowed_() : host_.hasInstrument();
+        if (!canSend)
         {
             stopPlayback("instrument-unloaded");
             return;

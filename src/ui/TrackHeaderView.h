@@ -1,27 +1,19 @@
 #pragma once
 
 // =============================================================================
-// TrackHeaderView  —  minimal label + active highlight; header-drag for track reorder (message)
+// TrackHeaderView — shared track header chrome (audio + experimental instrument)
 // =============================================================================
-// `mouseDown` on the **name** region calls `Session::setActiveTrack` (no snapshot republish). The
-// control strip (left → right **[Power][M][R]**) uses `Session` for off/mute and `RecorderService`
-// for arm. **Off** only applies when transport is not Playing and not recording (ignored silently
-// otherwise). **Mute** may toggle anytime.
-// Drag past a threshold (from the name strip) is coordinated by `TrackLanesView` (insert line,
-// `Session::moveTrack`). The event lane to the right is not a header-drag target. Invalid drop uses
-// `getForbiddenNoDropMouseCursor` (`ForbiddenCursor.h`). **Right-click** (popup menu) activates the
-// track and offers **Delete Track** plus optional **VST3** actions (`Load VST3…`, editors, **Remove
-// VST3**) when `TrackHeaderPluginHost` callbacks are wired from `Main`.
+// Visual: name (and optional subtitle), active accent, **[Power][M][R]** strip.
+// State comes from `TrackHeaderModelProvider`; actions from `TrackHeaderCallbacks`.
+// Optional `TrackHeaderDragHost` + `dragTrackId` enable header-drag reorder (audio lanes).
 // =============================================================================
 
 #include "domain/Track.h"
 
 #include <functional>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <optional>
 
-class RecorderService;
-class Session;
-class Transport;
 class TrackHeaderView;
 
 /// Optional per-track VST3 actions from the header context menu (`Main` / `TrackLanesView`).
@@ -33,7 +25,7 @@ struct TrackHeaderPluginHost
     std::function<void(TrackId)> removePlugin;
 };
 
-// [Message thread] `TrackLanesView` implements these; Began/Ended pair with move updates.
+/// [Message thread] `TrackLanesView` implements these; Began/Ended pair with move updates.
 struct TrackHeaderDragHost
 {
     std::function<void(TrackId, TrackHeaderView*)> onHeaderDragBegan;
@@ -41,26 +33,50 @@ struct TrackHeaderDragHost
     std::function<void(TrackId)> onHeaderDragEnded;
 };
 
+struct TrackHeaderModel
+{
+    juce::String name;
+    /// When non-empty, drawn under `name` (smaller, grey); audio tracks leave this empty.
+    juce::String subtitle;
+    bool active = false;
+    bool armed = false;
+    bool muted = false;
+    /// When true, power glyph reads as “track off” / standby (same as audio `Track::isTrackOff()`).
+    bool off = false;
+    bool powerInteractable = true;
+    bool muteInteractable = true;
+    bool armInteractable = true;
+};
+
+using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;
+
+struct TrackHeaderCallbacks
+{
+    /// Left-click on name strip (not on **[Power][M][R]**). Null = no-op.
+    std::function<void()> onActivateName;
+    /// Return true if the click was handled (blocks promoting to header-drag); false = ignored.
+    std::function<bool()> onTogglePower;
+    std::function<void()> onToggleMute;
+    std::function<void()> onToggleArm;
+    /// Right-click; null = ignore context menu entirely.
+    std::function<void(TrackHeaderView&, const juce::MouseEvent&)> onShowContextMenu;
+};
+
 class TrackHeaderView : public juce::Component
 {
 public:
-    TrackHeaderView(
-        Session& session,
-        RecorderService& recorder,
-        Transport& transport,
-        TrackId trackId,
-        std::function<void()> onActiveChanged,
-        std::function<void()> onArmStateChanged,
-        std::function<void(TrackId)> onDeleteTrackRequested,
-        TrackHeaderPluginHost pluginHost,
-        TrackHeaderDragHost dragHost) noexcept;
+    /// `dragTrackId` is forwarded to `TrackHeaderDragHost`. Use `kInvalidTrackId` when there is no
+    /// drag host (e.g. experimental instrument stripe).
+    TrackHeaderView(TrackHeaderModelProvider modelProvider,
+                    TrackHeaderCallbacks callbacks,
+                    TrackId dragTrackId,
+                    std::optional<TrackHeaderDragHost> dragHost) noexcept;
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
 
-    // [Message thread] Only `TrackLanesView` calls these on the source header during a drag.
     void setSourceForbiddenForHeaderDrag() noexcept;
     void restoreSourceCursorAfterHeaderDrag() noexcept;
 
@@ -73,30 +89,19 @@ private:
         Power
     };
 
-    /// [Power][M][R] trio (see `paint`); widths match hit targets.
     [[nodiscard]] juce::Rectangle<int> getRightControlsStripBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
-    /// Small circle centred in the power column (same sizing rule as **`M`** / **`R`**).
     [[nodiscard]] juce::Rectangle<int> getPowerVisualCircleBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
-    /// [Message / paint] Wider than the visible circle for click targets; `mouseDown` uses this.
     [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
-    /// Small circle centred in the mute column (same sizing rule as **`R`**).
     [[nodiscard]] juce::Rectangle<int> getMuteVisualCircleBounds() const noexcept;
-    /// Small circle centred in the record-arm column (**`R`** glyph).
     [[nodiscard]] juce::Rectangle<int> getArmVisualCircleBounds() const noexcept;
 
-    Session& session_;
-    RecorderService& recorder_;
-    Transport& transport_;
-    const TrackId trackId_;
-    std::function<void()> onActiveChanged_;
-    std::function<void()> onArmStateChanged_;
-    std::function<void(TrackId)> onDeleteTrackRequested_;
-    TrackHeaderPluginHost pluginHost_;
-    TrackHeaderDragHost dragHost_;
+    TrackHeaderModelProvider modelProvider_;
+    TrackHeaderCallbacks callbacks_;
+    TrackId dragTrackId_ = kInvalidTrackId;
+    std::optional<TrackHeaderDragHost> dragHost_;
     bool headerDragInProgress_ = false;
-    /// When non-None: gesture began on that control — do not promote to header-drag.
     DragBlocker dragBlocker_ = DragBlocker::None;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackHeaderView)

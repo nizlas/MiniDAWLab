@@ -64,11 +64,13 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TrackLanesView.h"
+#include "ui/TrackHeaderView.h"
 #include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
 #include "audio/LatencySettingsStore.h"
 #include "ui/LatencySettingsView.h"
 #include "ui/experimental/ExperimentalMidiEditorWindow.h"
+#include "ui/TimelineClipEventChrome.h"
 #include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
 
@@ -179,6 +181,26 @@ namespace
             << hex8(tcU) << ") ";
         cap << "desc=\"" << key.getTextDescription() << "\"";
         return cap;
+    }
+
+    /// MIDI runtime clip: same outer chrome sequence as placed audio clips (ClipWaveformView); label only inside.
+    void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
+                                        juce::Rectangle<float> eb,
+                                        bool selected)
+    {
+        using namespace mini_daw::timeline_clip_chrome;
+        paintEventChromeBody(g, eb, midiLaneEventBodyFill());
+        if (selected)
+        {
+            paintEventChromeSelectionOverlay(g, eb);
+        }
+        g.setColour(juce::Colour(0xff242a33));
+        g.setFont(11.5f);
+        g.drawFittedText(
+            juce::String("MIDI 1"),
+            clipEventLabelBounds(eb).toNearestInt(),
+            juce::Justification::centredLeft,
+            1);
     }
 
     // JUCE (Windows) uses e.g. VK_* | 0x10000 for numpad keys; `KeyPress::numberPadMultiply` matches
@@ -807,12 +829,53 @@ private:
             , inspectorView_(sessionIn)
             , inspectorResizeSplitter_(*this)
             , inspectorCollapsedKnob_(*this)
+            , instrumentMidiEventLane_(*this, instrumentTrackController_)
         {
             setWantsKeyboardFocus(true);
+            {
+                TrackHeaderCallbacks hdrCb;
+                // Selecting the instrument row makes it the UI-active track and clears any audio
+                // header active highlight (mutex; no `Session` change — see `setHeaderActiveSuppressProvider`).
+                hdrCb.onActivateName = [this] {
+                    instrumentTrackController_.setActive(true);
+                    trackLanesView.repaint();
+                };
+                hdrCb.onTogglePower = [this]() -> bool {
+                    instrumentTrackController_.setPowerOn(!instrumentTrackController_.isPowerOn());
+                    instrumentTrackController_.setActive(true);
+                    trackLanesView.repaint();
+                    return true;
+                };
+                hdrCb.onToggleMute = [this] {
+                    instrumentTrackController_.setMuted(!instrumentTrackController_.isMuted());
+                    instrumentTrackController_.setActive(true);
+                    trackLanesView.repaint();
+                };
+                hdrCb.onToggleArm = nullptr;
+                hdrCb.onShowContextMenu = nullptr;
+
+                instrumentTrackHeader_ = std::make_unique<TrackHeaderView>(
+                    [this]() -> TrackHeaderModel {
+                        TrackHeaderModel m;
+                        m.name = juce::String("Groove Agent SE");
+                        m.subtitle = {};
+                        m.active = instrumentTrackController_.isActive();
+                        m.armed = false;
+                        m.muted = instrumentTrackController_.isMuted();
+                        m.off = !instrumentTrackController_.isPowerOn();
+                        m.powerInteractable = true;
+                        m.muteInteractable = true;
+                        m.armInteractable = false;
+                        return m;
+                    },
+                    std::move(hdrCb),
+                    kInvalidTrackId,
+                    std::nullopt);
+            }
             timelineViewport_.setOnVisibleRangeChanged([this] {
                 rulerView.repaint();
                 trackLanesView.repaint();
-                instrumentTrackLaneStripe_.repaint();
+                repaintInstrumentTrackRow();
             });
             addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
             addTrackButton.onClick = [this] {
@@ -903,6 +966,7 @@ private:
                         = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
                     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create ok");
                 }
+                experimentalMidiEditorWindow_->unbindExternalPattern();
                 experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
                 ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window setVisible true");
                 experimentalMidiEditorWindow_->setVisible(true);
@@ -910,6 +974,8 @@ private:
                 experimentalMidiEditorWindow_->toFront(true);
             };
             addAndMakeVisible(experimentalInstrumentTestKickButton_);
+            // Instrument-track Power/Mute gate clip-bound MIDI roll playback only; Test Kick still
+            // triggers host MIDI for now (bypasses that gate — deferred).
             experimentalInstrumentTestKickButton_.onClick = [this] {
                 experimentalInstrumentHost_.triggerTestKick();
             };
@@ -965,8 +1031,10 @@ private:
             addAndMakeVisible(inspectorResizeSplitter_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
-            addAndMakeVisible(instrumentTrackLaneStripe_);
-            instrumentTrackLaneStripe_.setVisible(false);
+            addAndMakeVisible(*instrumentTrackHeader_);
+            addAndMakeVisible(instrumentMidiEventLane_);
+            instrumentTrackHeader_->setVisible(false);
+            instrumentMidiEventLane_.setVisible(false);
             addAndMakeVisible(inspectorCollapsedKnob_);
             inspectorCollapsedKnob_.setVisible(false);
             pluginHost_.setUndoRecorder(
@@ -1277,6 +1345,13 @@ private:
                         }
                     }
                 });
+            // UI-only mutex with the experimental instrument header. Audio headers paint inactive
+            // when the instrument row is the UI-active row; clicking any audio header clears it.
+            // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.
+            trackLanesView.setHeaderActiveSuppressProvider(
+                [this] { return instrumentTrackController_.isActive(); });
+            trackLanesView.setOnAudioHeaderActivated(
+                [this] { instrumentTrackController_.setActive(false); });
             deviceManager.addChangeListener(this);
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);
@@ -1640,16 +1715,32 @@ private:
             auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
             timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);    
             rulerView.setBounds(timelineRow);
-            if (instrumentTrackController_.hasInstrumentTrackShell())
+            if (instrumentTrackController_.hasInstrumentTrack())
             {
-                constexpr int kInstrumentStripeH = 42;
-                auto instStripe = area.removeFromBottom(kInstrumentStripeH);
-                instrumentTrackLaneStripe_.setVisible(true);
-                instrumentTrackLaneStripe_.setBounds(instStripe);
+                // Match audio lane row height: with N session tracks, each row in the band would be
+                // H/(N+1) if the instrument row shares the band evenly — same height as each audio header.
+                const int H = juce::jmax(0, area.getHeight());
+                const int nAudio = session.getNumTracks();
+                const int instH = (nAudio <= 0) ? H : juce::jmax(1, H / (nAudio + 1));
+                auto instRow = area.removeFromBottom(instH);
+                const int leftW = juce::jmin(TrackLanesView::kTrackHeaderWidth, instRow.getWidth());
+                auto headerCol = instRow.removeFromLeft(leftW);
+                if (instrumentTrackHeader_ != nullptr)
+                {
+                    instrumentTrackHeader_->setBounds(headerCol);
+                    instrumentTrackHeader_->setVisible(true);
+                    instrumentTrackHeader_->toFront(false);
+                }
+                instrumentMidiEventLane_.setBounds(instRow);
+                instrumentMidiEventLane_.setVisible(true);
             }
             else
             {
-                instrumentTrackLaneStripe_.setVisible(false);
+                if (instrumentTrackHeader_ != nullptr)
+                {
+                    instrumentTrackHeader_->setVisible(false);
+                }
+                instrumentMidiEventLane_.setVisible(false);
             }
             trackLanesView.setBounds(area);
             if (inspectorCurrentWidth_ == 0)
@@ -1664,32 +1755,210 @@ private:
             }
         }
 
-    private:
-        struct InstrumentTrackLaneStripe final : juce::Component
+        void openMidiEditorForInstrumentClip(const InstrumentMidiClipId clipId)
         {
-            InstrumentTrackLaneStripe()
+            InstrumentMidiClip* clip = instrumentTrackController_.getClipById(clipId);
+            if (clip == nullptr)
             {
-                addAndMakeVisible(label_);
-                label_.setText(InstrumentTrackController::kGrooveAgentShellDisplayName,
-                               juce::dontSendNotification);
-                label_.setFont(juce::Font(juce::FontOptions(13.0f)));
-                label_.setColour(juce::Label::textColourId, juce::Colour(0xffe8e0ff));
-                label_.setJustificationType(juce::Justification::centredLeft);
-                label_.setMinimumHorizontalScale(1.0f);
-                label_.setInterceptsMouseClicks(false, false);
+                return;
+            }
+            instrumentTrackController_.setSelectedClipId(clipId);
+            if (experimentalMidiEditorWindow_ == nullptr)
+            {
+                experimentalMidiEditorWindow_
+                    = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
+            }
+            experimentalMidiEditorWindow_->bindExternalPattern(
+                &clip->pattern, clip->name, &instrumentTrackController_);
+            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            experimentalMidiEditorWindow_->setVisible(true);
+            experimentalMidiEditorWindow_->toFront(true);
+        }
+
+        private:
+        void refreshExperimentalMidiEditorInstrumentUiIfOpen()
+        {
+            if (experimentalMidiEditorWindow_ != nullptr)
+            {
+                experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            }
+        }
+
+        /// Repaint sibling **TrackHeaderView** + MIDI lane (same row layout as `TrackLanesView`).
+        void repaintInstrumentTrackRow()
+        {
+            if (instrumentTrackHeader_ != nullptr)
+            {
+                instrumentTrackHeader_->repaint();
+            }
+            instrumentMidiEventLane_.repaint();
+        }
+
+        /// MIDI clip lane only (same role as `ClipWaveformView`). Header is a sibling `TrackHeaderView`.
+        struct InstrumentMidiEventLane final : public juce::Component, private juce::ChangeListener
+        {
+            static constexpr bool kLogInstrumentLane = false;
+
+            InstrumentMidiEventLane(TransportControlsContent& ownerIn,
+                                    InstrumentTrackController& controllerIn) noexcept
+                : owner_(ownerIn)
+                , controller_(controllerIn)
+            {
+                controller_.addChangeListener(this);
+            }
+
+            ~InstrumentMidiEventLane() override { controller_.removeChangeListener(this); }
+
+            void changeListenerCallback(juce::ChangeBroadcaster*) override
+            {
+                owner_.repaintInstrumentTrackRow();
+                owner_.refreshExperimentalMidiEditorInstrumentUiIfOpen();
             }
 
             void paint(juce::Graphics& g) override
             {
-                g.fillAll(juce::Colour(0xff2a1f4a));
-                g.setColour(juce::Colour(0xff6b5a9e).withAlpha(0.9f));
-                g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 4.0f, 1.0f);
+                const auto lane = getLocalBounds();
+
+                const juce::Colour laneBg = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId)
+                                              .darker(0.2f);
+                g.setColour(laneBg);
+                g.fillRect(lane);
+                g.setColour(laneBg.darker(0.12f));
+                g.drawVerticalLine(lane.getX(), (float)lane.getY(), (float)lane.getBottom());
+
+                const auto laneContent = getLaneContentBounds();
+                if (laneContent.isEmpty())
+                {
+                    return;
+                }
+
+                for (const auto& up : controller_.getClips())
+                {
+                    const auto* c = up.get();
+                    if (c == nullptr)
+                    {
+                        continue;
+                    }
+                    const auto eb = getEventBoundsForClip(*c, laneContent);
+                    if (eb.isEmpty())
+                    {
+                        continue;
+                    }
+                    const bool sel = (c->id == controller_.getSelectedClipId());
+                    if (kLogInstrumentLane)
+                    {
+                        juce::Logger::writeToLog("instrument-lane: paint clip id=" + juce::String((juce::int64)c->id)
+                                                 + " selected=" + juce::String(sel ? "true" : "false") + " eventBounds="
+                                                 + eb.toString());
+                    }
+
+                    paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel);
+                }
             }
 
-            void resized() override { label_.setBounds(getLocalBounds().reduced(10, 6)); }
+            void mouseDown(const juce::MouseEvent& e) override
+            {
+                const auto pos = e.getPosition();
+                if (kLogInstrumentLane)
+                {
+                    juce::Logger::writeToLog("instrument-lane: mouseDown x=" + juce::String(pos.x) + " y="
+                                             + juce::String(pos.y));
+                }
+
+                if (!getLocalBounds().contains(pos))
+                {
+                    return;
+                }
+
+                if (auto* clip = hitTestClipAtEvent(e.position))
+                {
+                    controller_.setSelectedClipId(clip->id);
+                    if (kLogInstrumentLane)
+                    {
+                        juce::Logger::writeToLog("instrument-lane: hit clip id=" + juce::String((juce::int64)clip->id)
+                                                 + " selected=true");
+                    }
+                }
+                else
+                {
+                    controller_.clearClipSelection();
+                    if (kLogInstrumentLane)
+                    {
+                        juce::Logger::writeToLog("instrument-lane: no hit");
+                    }
+                }
+
+                repaint();
+            }
+
+            void mouseDoubleClick(const juce::MouseEvent& e) override
+            {
+                if (auto* clip = hitTestClipAtEvent(e.position))
+                {
+                    controller_.setSelectedClipId(clip->id);
+                    owner_.openMidiEditorForInstrumentClip(clip->id);
+                    repaint();
+                }
+            }
 
         private:
-            juce::Label label_;
+            [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const
+            {
+                return getLocalBounds().reduced(8, 6);
+            }
+
+            [[nodiscard]] juce::Rectangle<int> getEventBoundsForClip(const InstrumentMidiClip& c,
+                                                                     juce::Rectangle<int> laneContent) const
+            {
+                using namespace mini_daw::timeline_clip_chrome;
+                const auto band = laneContent.toFloat().reduced(0.0f, kEventVerticalMargin);
+                const int laneCW = juce::jmax(1, juce::roundToInt(band.getWidth()));
+                const float s = (float)c.laneStartFractionPermille / 1000.f;
+                const float e = (float)c.laneEndFractionPermille / 1000.f;
+                const float span = juce::jlimit(0.02f, 1.f, e - s);
+                int w = juce::roundToInt((float)laneCW * span);
+                w = juce::jmax(40, juce::jmin(w, laneCW));
+                const int minX0 = juce::roundToInt(band.getX());
+                const int maxX0 = juce::roundToInt(band.getRight()) - w;
+                if (maxX0 < minX0)
+                {
+                    return {};
+                }
+                const int avail = juce::jmax(0, maxX0 - minX0);
+                const int x0 = minX0 + (avail > 0 ? juce::roundToInt(s * (float)avail) : 0);
+                const int clampedX0 = juce::jlimit(minX0, maxX0, x0);
+                const int y = juce::roundToInt(band.getY());
+                const int h = juce::jmax(1, juce::roundToInt(band.getHeight()));
+                return { clampedX0, y, w, h };
+            }
+
+            [[nodiscard]] InstrumentMidiClip* hitTestClipAtEvent(juce::Point<float> pos) const
+            {
+                const auto laneContent = getLaneContentBounds();
+                if (!laneContent.contains(pos.toInt()))
+                {
+                    return nullptr;
+                }
+
+                for (const auto& up : controller_.getClips())
+                {
+                    auto* c = up.get();
+                    if (c == nullptr)
+                    {
+                        continue;
+                    }
+
+                    if (getEventBoundsForClip(*c, laneContent).contains(pos.toInt()))
+                    {
+                        return c;
+                    }
+                }
+
+                return nullptr;
+            }
+
+            TransportControlsContent& owner_;
+            InstrumentTrackController& controller_;
         };
 
         struct ExperimentalInstrumentRim final : juce::Component
@@ -2199,7 +2468,12 @@ private:
         void refreshExperimentalInstrumentUi()
         {
             instrumentTrackController_.syncShellWithHostState();
-            instrumentTrackLaneStripe_.setVisible(instrumentTrackController_.hasInstrumentTrackShell());
+            const bool showInst = instrumentTrackController_.hasInstrumentTrack();
+            if (instrumentTrackHeader_ != nullptr)
+            {
+                instrumentTrackHeader_->setVisible(showInst);
+            }
+            instrumentMidiEventLane_.setVisible(showInst);
 
             const bool has = experimentalInstrumentHost_.hasInstrument();
             experimentalInstrumentEditorButton_.setEnabled(has);
@@ -3870,7 +4144,8 @@ private:
         juce::TextButton experimentalInstrumentTestKickButton_{ "Test Kick (MIDI 36)" };
         juce::TextButton experimentalInstrumentUnloadButton_{ "Unload" };
         juce::Label experimentalInstrumentStatusLabel_;
-        InstrumentTrackLaneStripe instrumentTrackLaneStripe_;
+        std::unique_ptr<TrackHeaderView> instrumentTrackHeader_;
+        InstrumentMidiEventLane instrumentMidiEventLane_;
         juce::Label keyDiagLabel_;
 
         /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).

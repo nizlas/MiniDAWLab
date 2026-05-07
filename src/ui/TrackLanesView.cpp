@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -416,6 +417,23 @@ void TrackLanesView::setOnUndoableClipSplitRequested(
     onUndoableClipSplitRequested_ = std::move(fn);
 }
 
+void TrackLanesView::setHeaderActiveSuppressProvider(std::function<bool()> fn) noexcept
+{
+    headerActiveSuppressProvider_ = std::move(fn);
+    for (auto& h : headers_)
+    {
+        if (h != nullptr)
+        {
+            h->repaint();
+        }
+    }
+}
+
+void TrackLanesView::setOnAudioHeaderActivated(std::function<void()> fn) noexcept
+{
+    onAudioHeaderActivated_ = std::move(fn);
+}
+
 bool TrackLanesView::isClipEditGestureInProgress() const noexcept
 {
     for (const auto& u : lanes_)
@@ -488,6 +506,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             = [this](const TrackId id, const juce::Point<int> p) { updateHeaderTrackDrag(id, p); };
         dragHost.onHeaderDragEnded
             = [this](const TrackId id) { endHeaderTrackDrag(id); };
+        const auto onActive = [this] { repaint(); };
         const auto onArm = [this] {
             for (auto& h : headers_)
             {
@@ -500,16 +519,217 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 onDeleteTrackRequested_(id);
             }
         };
+
+        TrackHeaderModelProvider modelProvider = [this, tid]() -> TrackHeaderModel {
+            TrackHeaderModel m;
+            m.subtitle = {};
+            const bool sessionSaysActive = (session_.getActiveTrackId() == tid);
+            const bool suppressed
+                = headerActiveSuppressProvider_ != nullptr && headerActiveSuppressProvider_();
+            m.active = sessionSaysActive && !suppressed;
+            m.armed = (recorder_.getArmedTrackId() == tid);
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    const Track& tr = snap->getTrack(idx);
+                    m.name = tr.getName();
+                    m.off = tr.isTrackOff();
+                    m.muted = tr.isMuted();
+                }
+            }
+            m.powerInteractable = true;
+            m.muteInteractable = true;
+            m.armInteractable = true;
+            return m;
+        };
+
+        TrackHeaderCallbacks callbacks;
+        callbacks.onActivateName = [this, tid, onActive] {
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onToggleArm = [this, tid, onActive, onArm] {
+            if (recorder_.getArmedTrackId() == tid)
+            {
+                recorder_.disarm();
+            }
+            else
+            {
+                recorder_.armForRecording(tid);
+            }
+            onArm();
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onToggleMute = [this, tid, onActive, onArm] {
+            bool nowMuted = true;
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    nowMuted = !snap->getTrack(idx).isMuted();
+                }
+            }
+            session_.setTrackMuted(tid, nowMuted);
+            onArm();
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onTogglePower = [this, tid, onActive, onArm]() -> bool {
+            if (transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording())
+            {
+                return false;
+            }
+            bool nowOff = true;
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    nowOff = !snap->getTrack(idx).isTrackOff();
+                }
+            }
+            session_.setTrackOff(tid, nowOff);
+            onArm();
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+            return true;
+        };
+        callbacks.onShowContextMenu = [this, tid, onActive, onDelete, pluginHost = trackHeaderPluginHost_](
+            TrackHeaderView& self, const juce::MouseEvent&) {
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+
+            juce::PopupMenu menu;
+            constexpr int kDeleteTrackMenuId = 1;
+            constexpr int kLoadVst3MenuId = 10;
+            constexpr int kPluginEditorMenuId = 11;
+            constexpr int kPluginParamsMenuId = 12;
+            constexpr int kRemovePluginMenuId = 13;
+
+            const bool editLocked = transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                                    || recorder_.isRecording();
+            juce::PopupMenu::Item deleteItem;
+            deleteItem.itemID = kDeleteTrackMenuId;
+            deleteItem.text = "Delete Track";
+            deleteItem.isEnabled = !editLocked;
+            menu.addItem(deleteItem);
+
+            if (pluginHost.loadVst3 != nullptr)
+            {
+                juce::PopupMenu::Item loadItem;
+                loadItem.itemID = kLoadVst3MenuId;
+                loadItem.text = "Load VST3…";
+                loadItem.isEnabled = !editLocked;
+                menu.addItem(loadItem);
+            }
+            if (pluginHost.openPluginEditor != nullptr)
+            {
+                juce::PopupMenu::Item edItem;
+                edItem.itemID = kPluginEditorMenuId;
+                edItem.text = "Plugin editor…";
+                edItem.isEnabled = !editLocked;
+                menu.addItem(edItem);
+            }
+            if (pluginHost.openPluginParams != nullptr)
+            {
+                juce::PopupMenu::Item parItem;
+                parItem.itemID = kPluginParamsMenuId;
+                parItem.text = "Plugin parameters…";
+                parItem.isEnabled = !editLocked;
+                menu.addItem(parItem);
+            }
+            if (pluginHost.removePlugin != nullptr)
+            {
+                juce::PopupMenu::Item rmItem;
+                rmItem.itemID = kRemovePluginMenuId;
+                rmItem.text = "Remove VST3";
+                rmItem.isEnabled = !editLocked;
+                menu.addItem(rmItem);
+            }
+
+            Transport* const transportPtr = &transport_;
+            RecorderService* const recorderPtr = &recorder_;
+            juce::Component::SafePointer<TrackHeaderView> safeThis(&self);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(&self),
+                [safeThis,
+                 transportPtr,
+                 recorderPtr,
+                 pluginHost,
+                 tid,
+                 onDelete,
+                 kDeleteTrackMenuId,
+                 kLoadVst3MenuId,
+                 kPluginEditorMenuId,
+                 kPluginParamsMenuId,
+                 kRemovePluginMenuId](const int result) {
+                    if (safeThis == nullptr)
+                    {
+                        return;
+                    }
+                    if (result == kDeleteTrackMenuId)
+                    {
+                        if (transportPtr->readPlaybackIntentForUi() == PlaybackIntent::Playing
+                            || recorderPtr->isRecording())
+                        {
+                            return;
+                        }
+                        onDelete(tid);
+                        return;
+                    }
+                    if (transportPtr->readPlaybackIntentForUi() == PlaybackIntent::Playing
+                        || recorderPtr->isRecording())
+                    {
+                        return;
+                    }
+                    if (result == kLoadVst3MenuId && pluginHost.loadVst3 != nullptr)
+                    {
+                        pluginHost.loadVst3(tid);
+                    }
+                    else if (result == kPluginEditorMenuId && pluginHost.openPluginEditor != nullptr)
+                    {
+                        pluginHost.openPluginEditor(tid);
+                    }
+                    else if (result == kPluginParamsMenuId && pluginHost.openPluginParams != nullptr)
+                    {
+                        pluginHost.openPluginParams(tid);
+                    }
+                    else if (result == kRemovePluginMenuId && pluginHost.removePlugin != nullptr)
+                    {
+                        pluginHost.removePlugin(tid);
+                    }
+                });
+        };
+
         auto head = std::make_unique<TrackHeaderView>(
-            session_,
-            recorder_,
-            transport_,
+            std::move(modelProvider),
+            std::move(callbacks),
             tid,
-            [this] { repaint(); },
-            onArm,
-            std::move(onDelete),
-            trackHeaderPluginHost_,
-            std::move(dragHost));
+            std::optional<TrackHeaderDragHost>(std::move(dragHost)));
         addAndMakeVisible(*head);
         headers_.push_back(std::move(head));
         ClipWaveformLaneHost host;

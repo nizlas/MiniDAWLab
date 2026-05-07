@@ -26,6 +26,9 @@ public:
     /// Optional: invoked after start/stop so the editor toolbar can refresh (e.g. Stop enable).
     void setPlaybackUiCallback(std::function<void()> callback) noexcept { playbackUiCallback_ = std::move(callback); }
 
+    /// When set, start/step emit consult this instead of `host.hasInstrument()` (I3b clip gate).
+    void setPlaybackAllowed(std::function<bool()> fn) noexcept { playbackAllowed_ = std::move(fn); }
+
     /// 0..1 within the current loop window (or 0 when stopped).
     [[nodiscard]] float getPlayheadNormalized() const noexcept;
 
@@ -60,4 +63,5 @@ private:
     std::priority_queue<PendingOff, std::vector<PendingOff>, OffOrder> pendingOffs_;
 
     std::function<void()> playbackUiCallback_;
+    std::function<bool()> playbackAllowed_;
 };

@@ -130,6 +130,15 @@ public:
     void setOnUndoableClipSplitRequested(
         std::function<void(PlacedClipId, std::int64_t, bool)> fn) noexcept;
 
+    /// [Message thread] Wired once by `Main`: when this returns true, audio header models force
+    /// `m.active = false` regardless of `Session::getActiveTrackId()` (UI-only mutex with the
+    /// experimental instrument header — no `Session` change).
+    void setHeaderActiveSuppressProvider(std::function<bool()> fn) noexcept;
+
+    /// [Message thread] Wired once by `Main`: fires from any audio header's name-strip click after
+    /// `Session::setActiveTrack` succeeds. `Main` uses this to clear the instrument-row active flag.
+    void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
+
     /** True while a clip move or trim gesture is in flight on any lane (undo/redo should no-op). */
     [[nodiscard]] bool isClipEditGestureInProgress() const noexcept;
 
@@ -204,6 +213,8 @@ private:
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
     std::function<EditTool()> activeEditToolProvider_;
     std::function<void(PlacedClipId, std::int64_t, bool)> onUndoableClipSplitRequested_;
+    std::function<bool()> headerActiveSuppressProvider_;
+    std::function<void()> onAudioHeaderActivated_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

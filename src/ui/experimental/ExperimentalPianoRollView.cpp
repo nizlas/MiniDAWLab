@@ -79,23 +79,35 @@ int ExperimentalPianoRollView::stepAtX(const int x) const
 
 void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 {
+    const auto pos = e.getPosition();
     const auto kb = keyboardBounds();
     const auto gr = gridBounds();
-    if (gr.contains(e.position.toInt()))
+    juce::ignoreUnused(kb);
+
+    if (gr.contains(pos))
     {
-        const int step = stepAtX(e.x);
-        const int pitch = pitchAtY(e.y);
+        const int step = stepAtX(pos.getX());
+        const int pitch = pitchAtY(pos.getY());
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "piano-roll: mouseDown x=" + juce::String(pos.getX()) + " y=" + juce::String(pos.getY())
+            + " note=" + juce::String(pitch) + " step=" + juce::String(step));
         pattern_.toggleHit(pitch, step);
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "piano-roll: toggle note=" + juce::String(pitch) + " step=" + juce::String(step) + " noteCount="
+            + juce::String((int)pattern_.notes.size()));
         repaint();
-    }
-    else
-    {
-        juce::ignoreUnused(kb);
     }
 }
 
 void ExperimentalPianoRollView::paint(juce::Graphics& g)
 {
+    if (!loggedFirstPaint_)
+    {
+        loggedFirstPaint_ = true;
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "piano-roll: paint width=" + juce::String(getWidth()) + " height=" + juce::String(getHeight()));
+    }
+
     const auto kb = keyboardBounds();
     const auto gr = gridBounds();
 
