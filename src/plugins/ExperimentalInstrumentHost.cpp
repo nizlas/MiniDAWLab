@@ -410,6 +410,20 @@ void ExperimentalInstrumentHost::queueMidiFromMessageThread(const ::juce::MidiMe
     midiIo_->uiPendingMidi.addEvent(message, 0);
 }
 
+void ExperimentalInstrumentHost::enqueueMidiMessageFromMessageThread(const juce::MidiMessage& message)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+    if (!hasInstrument())
+    {
+        return;
+    }
+    queueMidiFromMessageThread(message);
+}
+
 bool ExperimentalInstrumentHost::tryPrepareInstrumentLayout(juce::AudioPluginInstance& inst,
                                                             const double sampleRate,
                                                             const int blockSize)

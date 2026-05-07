@@ -64,8 +64,12 @@ public:
     void editorWindowClosing();
 
     /// I1: one drum-oriented test note (MIDI 36). Note-off queued from the message thread after a
-    /// short delay — never touches plugin state off the audio thread except via MidiMessageCollector.
+    /// short delay — never touches plugin state off the audio thread except via queueMidiFromMessageThread.
     void triggerTestKick();
+
+    /// [Message thread] I2: enqueue MIDI for the next audio block. No-op if not on message thread
+    /// or no instrument is loaded. Does not touch the plugin on the message thread.
+    void enqueueMidiMessageFromMessageThread(const juce::MidiMessage& message);
 
     void prepareForDevice(double sampleRate, int blockSize);
     void releaseResources();

@@ -67,6 +67,8 @@
 #include "audio/AudioDeviceInfo.h"
 #include "audio/LatencySettingsStore.h"
 #include "ui/LatencySettingsView.h"
+#include "ui/experimental/ExperimentalMidiEditorWindow.h"
+#include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
 
 #include <algorithm>
@@ -860,6 +862,31 @@ private:
             experimentalInstrumentEditorButton_.onClick = [this] {
                 experimentalInstrumentHost_.openNativeEditor();
             };
+            addAndMakeVisible(experimentalInstrumentMidiEditorButton_);
+            experimentalInstrumentMidiEditorButton_.onClick = [this] {
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: button clicked");
+                const bool hasInst = experimentalInstrumentHost_.hasInstrument();
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                    "midi-editor: open requested hasInstrument="
+                    + juce::String(hasInst ? "true" : "false"));
+                if (!hasInst)
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::InfoIcon, "Experimental instrument", "Load an instrument first.");
+                    return;
+                }
+                if (experimentalMidiEditorWindow_ == nullptr)
+                {
+                    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create begin");
+                    experimentalMidiEditorWindow_
+                        = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
+                    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create ok");
+                }
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window setVisible true");
+                experimentalMidiEditorWindow_->setVisible(true);
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window toFront");
+                experimentalMidiEditorWindow_->toFront(true);
+            };
             addAndMakeVisible(experimentalInstrumentTestKickButton_);
             experimentalInstrumentTestKickButton_.onClick = [this] {
                 experimentalInstrumentHost_.triggerTestKick();
@@ -1232,6 +1259,7 @@ private:
         {
             deviceManager.removeChangeListener(this);
             cancelCountIn();
+            experimentalMidiEditorWindow_.reset();
             if (cycleRecordingWrapTimer_ != nullptr)
             {
                 cycleRecordingWrapTimer_->stopTimer();
@@ -1530,11 +1558,13 @@ private:
             constexpr int kExpScanW = 86;
             constexpr int kExpLoadW = 108;
             constexpr int kExpEdW = 72;
+            constexpr int kExpMidiW = 100;
             constexpr int kExpKickW = 168;
             constexpr int kExpUnlW = 72;
             experimentalInstrumentScanOnlyButton_.setBounds(expBtn.removeFromLeft(kExpScanW).reduced(2, 0));
             experimentalInstrumentLoadButton_.setBounds(expBtn.removeFromLeft(kExpLoadW).reduced(2, 0));
             experimentalInstrumentEditorButton_.setBounds(expBtn.removeFromLeft(kExpEdW).reduced(2, 0));
+            experimentalInstrumentMidiEditorButton_.setBounds(expBtn.removeFromLeft(kExpMidiW).reduced(2, 0));
             experimentalInstrumentTestKickButton_.setBounds(expBtn.removeFromLeft(kExpKickW).reduced(2, 0));
             experimentalInstrumentUnloadButton_.setBounds(expBtn.removeFromLeft(kExpUnlW).reduced(2, 0));
             experimentalInstrumentStatusLabel_.setBounds(expInner.reduced(2, 0));
@@ -2103,8 +2133,13 @@ private:
         {
             const bool has = experimentalInstrumentHost_.hasInstrument();
             experimentalInstrumentEditorButton_.setEnabled(has);
+            experimentalInstrumentMidiEditorButton_.setEnabled(has);
             experimentalInstrumentTestKickButton_.setEnabled(has);
             experimentalInstrumentUnloadButton_.setEnabled(has);
+            if (!has && experimentalMidiEditorWindow_ != nullptr)
+            {
+                experimentalMidiEditorWindow_->notifyInstrumentUnloaded();
+            }
             if (!experimentalOopScanBusy_.load())
             {
                 experimentalInstrumentStatusLabel_.setText(
@@ -3710,6 +3745,7 @@ private:
         bool explInstrVst3OopChooserInFlight_ = false;
         bool explInstrVst3FolderChooserInFlight_ = false;
         std::atomic<bool> experimentalOopScanBusy_{ false };
+        std::unique_ptr<ExperimentalMidiEditorWindow> experimentalMidiEditorWindow_;
 
         EditTool currentEditTool_ = EditTool::Pointer;
 
@@ -3729,6 +3765,7 @@ private:
         juce::TextButton experimentalInstrumentLoadButton_{ "Load VST3..." };
         juce::TextButton experimentalInstrumentScanOnlyButton_{ "Scan only..." };
         juce::TextButton experimentalInstrumentEditorButton_{ "Editor" };
+        juce::TextButton experimentalInstrumentMidiEditorButton_{ "MIDI roll..." };
         juce::TextButton experimentalInstrumentTestKickButton_{ "Test Kick (MIDI 36)" };
         juce::TextButton experimentalInstrumentUnloadButton_{ "Unload" };
         juce::Label experimentalInstrumentStatusLabel_;

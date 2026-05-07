@@ -55,6 +55,9 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
     src/ui/TrackHeaderView.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    src/ui/experimental/ExperimentalPianoRollView.cpp
+    src/ui/experimental/ExperimentalMidiEditorWindow.cpp
 )
 
 target_compile_definitions(MiniDAWLab
