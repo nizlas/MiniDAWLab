@@ -53,6 +53,7 @@
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
 #include "plugins/ExperimentalInstrumentHost.h"
+#include "instruments/InstrumentTrackController.h"
 #include "plugins/InsertSlotId.h"
 #include "plugins/PluginDiscovery.h"
 #include "plugins/Vst3ChildProcessScan.h"
@@ -786,6 +787,7 @@ private:
             , session(sessionIn)
             , pluginHost_(pluginInsertHostIn)
             , experimentalInstrumentHost_(experimentalInstrumentHostIn)
+            , instrumentTrackController_(experimentalInstrumentHostIn)
             , deviceManager(deviceManagerIn)
             , recorder_(recorderIn)
             , countInClicks_(countInClicksIn)
@@ -810,13 +812,38 @@ private:
             timelineViewport_.setOnVisibleRangeChanged([this] {
                 rulerView.repaint();
                 trackLanesView.repaint();
+                instrumentTrackLaneStripe_.repaint();
             });
             addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
             addTrackButton.onClick = [this] {
-                session.addTrack();
-                syncViewportFromSession();
-                trackLanesView.syncTracksFromSession();
-                inspectorView_.refreshFromSession();
+                juce::PopupMenu menu;
+                menu.addItem(1, "Add Audio Track");
+                juce::PopupMenu instrMenu;
+                instrMenu.addItem(100, "Groove Agent SE");
+                instrMenu.addItem(
+                    juce::PopupMenu::Item("HALion Sonic (not validated yet)").setEnabled(false));
+                menu.addSubMenu("Add Instrument Track", instrMenu);
+                juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+                menu.showMenuAsync(
+                    juce::PopupMenu::Options().withTargetComponent(&addTrackButton),
+                    [safeThis](int result) {
+                        if (safeThis == nullptr || result == 0)
+                        {
+                            return;
+                        }
+                        if (result == 1)
+                        {
+                            safeThis->session.addTrack();
+                            safeThis->syncViewportFromSession();
+                            safeThis->trackLanesView.syncTracksFromSession();
+                            safeThis->inspectorView_.refreshFromSession();
+                            return;
+                        }
+                        if (result == 100)
+                        {
+                            safeThis->onAddGrooveAgentInstrumentTrackFromMenu();
+                        }
+                    });
             };
             saveProjectButton.onClick = [this] { saveProjectClicked(); };
             loadProjectButton.onClick = [this] { loadProjectClicked(); };
@@ -869,12 +896,6 @@ private:
                 ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
                     "midi-editor: open requested hasInstrument="
                     + juce::String(hasInst ? "true" : "false"));
-                if (!hasInst)
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::InfoIcon, "Experimental instrument", "Load an instrument first.");
-                    return;
-                }
                 if (experimentalMidiEditorWindow_ == nullptr)
                 {
                     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create begin");
@@ -882,6 +903,7 @@ private:
                         = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
                     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create ok");
                 }
+                experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
                 ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window setVisible true");
                 experimentalMidiEditorWindow_->setVisible(true);
                 ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window toFront");
@@ -893,6 +915,10 @@ private:
             };
             addAndMakeVisible(experimentalInstrumentUnloadButton_);
             experimentalInstrumentUnloadButton_.onClick = [this] {
+                if (experimentalMidiEditorWindow_ != nullptr)
+                {
+                    experimentalMidiEditorWindow_->prepareInstrumentUnloadFromHost();
+                }
                 experimentalInstrumentHost_.unloadInstrument();
                 refreshExperimentalInstrumentUi();
             };
@@ -939,6 +965,8 @@ private:
             addAndMakeVisible(inspectorResizeSplitter_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
+            addAndMakeVisible(instrumentTrackLaneStripe_);
+            instrumentTrackLaneStripe_.setVisible(false);
             addAndMakeVisible(inspectorCollapsedKnob_);
             inspectorCollapsedKnob_.setVisible(false);
             pluginHost_.setUndoRecorder(
@@ -1527,6 +1555,7 @@ private:
         // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
         void resized() override
         {
+            instrumentTrackController_.syncShellWithHostState();
             auto area = getLocalBounds().reduced(8);
             auto row = area.removeFromTop(32);
             if (kShowKeyDiagnostic)
@@ -1609,8 +1638,19 @@ private:
                 inspectorResizeSplitter_.setVisible(false);
             }
             auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
-            timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
+            timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);    
             rulerView.setBounds(timelineRow);
+            if (instrumentTrackController_.hasInstrumentTrackShell())
+            {
+                constexpr int kInstrumentStripeH = 42;
+                auto instStripe = area.removeFromBottom(kInstrumentStripeH);
+                instrumentTrackLaneStripe_.setVisible(true);
+                instrumentTrackLaneStripe_.setBounds(instStripe);
+            }
+            else
+            {
+                instrumentTrackLaneStripe_.setVisible(false);
+            }
             trackLanesView.setBounds(area);
             if (inspectorCurrentWidth_ == 0)
             {
@@ -1625,6 +1665,33 @@ private:
         }
 
     private:
+        struct InstrumentTrackLaneStripe final : juce::Component
+        {
+            InstrumentTrackLaneStripe()
+            {
+                addAndMakeVisible(label_);
+                label_.setText(InstrumentTrackController::kGrooveAgentShellDisplayName,
+                               juce::dontSendNotification);
+                label_.setFont(juce::Font(juce::FontOptions(13.0f)));
+                label_.setColour(juce::Label::textColourId, juce::Colour(0xffe8e0ff));
+                label_.setJustificationType(juce::Justification::centredLeft);
+                label_.setMinimumHorizontalScale(1.0f);
+                label_.setInterceptsMouseClicks(false, false);
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                g.fillAll(juce::Colour(0xff2a1f4a));
+                g.setColour(juce::Colour(0xff6b5a9e).withAlpha(0.9f));
+                g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 4.0f, 1.0f);
+            }
+
+            void resized() override { label_.setBounds(getLocalBounds().reduced(10, 6)); }
+
+        private:
+            juce::Label label_;
+        };
+
         struct ExperimentalInstrumentRim final : juce::Component
         {
             void paint(juce::Graphics& g) override
@@ -2131,14 +2198,17 @@ private:
 
         void refreshExperimentalInstrumentUi()
         {
+            instrumentTrackController_.syncShellWithHostState();
+            instrumentTrackLaneStripe_.setVisible(instrumentTrackController_.hasInstrumentTrackShell());
+
             const bool has = experimentalInstrumentHost_.hasInstrument();
             experimentalInstrumentEditorButton_.setEnabled(has);
-            experimentalInstrumentMidiEditorButton_.setEnabled(has);
+            experimentalInstrumentMidiEditorButton_.setEnabled(true);
             experimentalInstrumentTestKickButton_.setEnabled(has);
             experimentalInstrumentUnloadButton_.setEnabled(has);
-            if (!has && experimentalMidiEditorWindow_ != nullptr)
+            if (experimentalMidiEditorWindow_ != nullptr)
             {
-                experimentalMidiEditorWindow_->notifyInstrumentUnloaded();
+                experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             }
             if (!experimentalOopScanBusy_.load())
             {
@@ -2146,6 +2216,36 @@ private:
                     has ? experimentalInstrumentHost_.getInstrumentNameForUi() : "(none)",
                     juce::dontSendNotification);
             }
+        }
+
+        void onAddGrooveAgentInstrumentTrackFromMenu()
+        {
+            if (!experimentalInstrumentHost_.hasInstrument())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Instrument track",
+                    "Load Groove Agent SE from cached OOP description first.");
+                return;
+            }
+            if (!experimentalInstrumentHost_.getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Instrument track",
+                    "Load Groove Agent SE from cached OOP description first.");
+                return;
+            }
+            if (!instrumentTrackController_.tryAddGrooveAgentInstrumentTrackShell())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Instrument track",
+                    "An instrument track row is already shown.");
+                return;
+            }
+            refreshExperimentalInstrumentUi();
+            resized();
         }
 
         void showExperimentalInstrumentPicker(juce::Component* anchor)
@@ -3705,6 +3805,7 @@ private:
         Session& session;
         PluginInsertHost& pluginHost_;
         ExperimentalInstrumentHost& experimentalInstrumentHost_;
+        InstrumentTrackController instrumentTrackController_;
         juce::AudioDeviceManager& deviceManager;
         RecorderService& recorder_;
         CountInClickOutput& countInClicks_;
@@ -3769,6 +3870,7 @@ private:
         juce::TextButton experimentalInstrumentTestKickButton_{ "Test Kick (MIDI 36)" };
         juce::TextButton experimentalInstrumentUnloadButton_{ "Unload" };
         juce::Label experimentalInstrumentStatusLabel_;
+        InstrumentTrackLaneStripe instrumentTrackLaneStripe_;
         juce::Label keyDiagLabel_;
 
         /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).

@@ -17,12 +17,15 @@ class ExperimentalMidiEditorWindow::Body final : public juce::Component
 {
 public:
     explicit Body(ExperimentalInstrumentHost& hostIn)
-        : player_(std::make_unique<ExperimentalMidiPatternPlayer>(hostIn, pattern_))
+        : host_(hostIn)
+        , player_(std::make_unique<ExperimentalMidiPatternPlayer>(hostIn, pattern_))
     {
         pattern_.numSteps = 16;
         pattern_.stepDenom = 16;
         pattern_.bpm = 110.0;
         pattern_.loop = true;
+
+        player_->setPlaybackUiCallback([this] { updateStopButtonState(); });
 
         addAndMakeVisible(playButton_);
         playButton_.setButtonText("Play pattern");
@@ -32,6 +35,7 @@ public:
 
         addAndMakeVisible(stopButton_);
         stopButton_.setButtonText("Stop");
+        stopButton_.setEnabled(false);
         stopButton_.onClick = [this] {
             player_->stopPlayback("user");
         };
@@ -79,10 +83,6 @@ public:
         };
 
         addAndMakeVisible(modeLabel_);
-        modeLabel_.setText(
-            "Mode: Drum hits (100 ms gate)\n"
-            "Timing is message-thread / ~4 ms — not sample-accurate.",
-            juce::dontSendNotification);
         modeLabel_.setFont(juce::FontOptions(11.0f));
         modeLabel_.setJustificationType(juce::Justification::centredLeft);
         modeLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffc8c8d8));
@@ -94,6 +94,11 @@ public:
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: window opened steps=" + juce::String(pattern_.numSteps) + " bpm="
             + juce::String(pattern_.bpm, 2));
+
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            juce::String("midi-editor: opened hasInstrument=") + (hostIn.hasInstrument() ? "true" : "false"));
+
+        syncInstrumentUiFromHost();
     }
 
     ~Body() override
@@ -104,6 +109,65 @@ public:
     void stopForHostUnload()
     {
         player_->stopPlayback("instrument-unloaded");
+    }
+
+    void prepareBeforeHostUnload()
+    {
+        player_->stopPlayback("instrument-unloaded");
+    }
+
+    void syncInstrumentUiFromHost()
+    {
+        applyInstrumentUiState(host_.hasInstrument(), host_.getInstrumentNameForUi());
+    }
+
+    void applyInstrumentUiState(bool hasInstrument, const juce::String& instrumentName)
+    {
+        const bool changed = !instrumentUiInitialized_ || (hasInstrument != lastHadInstrument_)
+                             || (instrumentName != lastInstrumentName_);
+        instrumentUiInitialized_ = true;
+        lastHadInstrument_ = hasInstrument;
+        lastInstrumentName_ = instrumentName;
+
+        playButton_.setEnabled(hasInstrument);
+
+        const juce::String instPart =
+            hasInstrument ? (instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
+                                                           : juce::String("Instrument: (loaded)"))
+                          : juce::String("No instrument loaded");
+        modeLabel_.setText(
+            juce::String("Mode: Drum hits (100 ms gate) | ") + instPart + "\n"
+                + "Timing: ~4 ms message timer; not sample-accurate.",
+            juce::dontSendNotification);
+        modeLabel_.setColour(juce::Label::textColourId,
+                             hasInstrument ? juce::Colour(0xffc8c8d8)
+                                           : juce::Colour(0xffffaa88));
+
+        updateStopButtonState();
+
+        if (!changed)
+        {
+            return;
+        }
+
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            juce::String("midi-editor: instrument state changed hasInstrument=") + (hasInstrument ? "true" : "false")
+            + " name=\"" + instrumentName + "\"");
+        if (!hasInstrument)
+        {
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                "midi-editor: instrument unavailable, playback disabled");
+        }
+        else
+        {
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                "midi-editor: instrument available name=\"" + instrumentName + "\"");
+        }
+    }
+
+    void updateStopButtonState()
+    {
+        stopButton_.setEnabled(host_.hasInstrument() && player_ != nullptr && player_->isPlaying());
     }
 
     void resized() override
@@ -129,8 +193,13 @@ public:
     }
 
 private:
+    ExperimentalInstrumentHost& host_;
     ExperimentalMidiPattern pattern_;
     std::unique_ptr<ExperimentalMidiPatternPlayer> player_;
+
+    bool instrumentUiInitialized_ = false;
+    bool lastHadInstrument_ = false;
+    juce::String lastInstrumentName_;
 
     juce::TextButton playButton_;
     juce::TextButton stopButton_;
@@ -166,10 +235,18 @@ void ExperimentalMidiEditorWindow::closeButtonPressed()
     setVisible(false);
 }
 
-void ExperimentalMidiEditorWindow::notifyInstrumentUnloaded()
+void ExperimentalMidiEditorWindow::prepareInstrumentUnloadFromHost()
 {
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
-        b->stopForHostUnload();
+        b->prepareBeforeHostUnload();
+    }
+}
+
+void ExperimentalMidiEditorWindow::syncInstrumentStateFromHost()
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->syncInstrumentUiFromHost();
     }
 }

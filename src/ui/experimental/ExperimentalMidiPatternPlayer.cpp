@@ -44,9 +44,15 @@ void ExperimentalMidiPatternPlayer::startPlayback()
     {
         return;
     }
-    if (!host_.hasInstrument())
+    const bool hasNow = host_.hasInstrument();
+    writeMidiEditorLogLine(juce::String("midi-editor: play requested hasInstrument=") + (hasNow ? "true" : "false"));
+    if (!hasNow)
     {
-        writeMidiEditorLogLine("midi-editor: play ignored (no instrument loaded)");
+        writeMidiEditorLogLine("midi-editor: play blocked reason=no-instrument");
+        if (playbackUiCallback_)
+        {
+            playbackUiCallback_();
+        }
         return;
     }
 
@@ -54,8 +60,12 @@ void ExperimentalMidiPatternPlayer::startPlayback()
     playing_ = true;
     lastEmittedStep_ = -1;
     playStartMs_ = juce::Time::getMillisecondCounterHiRes();
-    writeMidiEditorLogLine("midi-editor: play start instrument=\"" + host_.getInstrumentNameForUi() + "\"");
+    writeMidiEditorLogLine("midi-editor: play start currentInstrument=\"" + host_.getInstrumentNameForUi() + "\"");
     startTimer(4);
+    if (playbackUiCallback_)
+    {
+        playbackUiCallback_();
+    }
 }
 
 void ExperimentalMidiPatternPlayer::stopPlayback(const char* reason)
@@ -75,6 +85,10 @@ void ExperimentalMidiPatternPlayer::stopPlayback(const char* reason)
     {
         writeMidiEditorLogLine(juce::String{ "midi-editor: play stop reason=" }
                                + (reason != nullptr ? reason : ""));
+    }
+    if (playbackUiCallback_)
+    {
+        playbackUiCallback_();
     }
 }
 

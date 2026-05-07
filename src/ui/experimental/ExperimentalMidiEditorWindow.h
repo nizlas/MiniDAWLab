@@ -11,7 +11,14 @@ public:
     ~ExperimentalMidiEditorWindow() override;
 
     void closeButtonPressed() override;
-    void notifyInstrumentUnloaded();
+
+    /// Call from Main **before** `ExperimentalInstrumentHost::unloadInstrument()` so note-offs /
+    /// all-notes-off still reach the plugin.
+    void prepareInstrumentUnloadFromHost();
+
+    /// Re-read `ExperimentalInstrumentHost` and refresh Play/Stop/labels (call after load/unload and
+    /// whenever the MIDI roll is shown).
+    void syncInstrumentStateFromHost();
 
 private:
     class Body;

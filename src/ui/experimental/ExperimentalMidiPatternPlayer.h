@@ -4,6 +4,7 @@
 
 #include <juce_events/juce_events.h>
 
+#include <functional>
 #include <queue>
 #include <string>
 
@@ -21,6 +22,9 @@ public:
     void startPlayback();
     void stopPlayback(const char* reason);
     [[nodiscard]] bool isPlaying() const noexcept { return playing_; }
+
+    /// Optional: invoked after start/stop so the editor toolbar can refresh (e.g. Stop enable).
+    void setPlaybackUiCallback(std::function<void()> callback) noexcept { playbackUiCallback_ = std::move(callback); }
 
     /// 0..1 within the current loop window (or 0 when stopped).
     [[nodiscard]] float getPlayheadNormalized() const noexcept;
@@ -54,4 +58,6 @@ private:
     double playStartMs_ = 0.0;
     int lastEmittedStep_ = -1;
     std::priority_queue<PendingOff, std::vector<PendingOff>, OffOrder> pendingOffs_;
+
+    std::function<void()> playbackUiCallback_;
 };
