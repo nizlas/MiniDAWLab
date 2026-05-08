@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include <juce_core/juce_core.h>
@@ -71,3 +73,51 @@ struct ExperimentalMidiPattern
         notes.push_back(n);
     }
 };
+
+/// Musical duration of the step grid in **seconds** (all steps at current BPM / denom).
+[[nodiscard]] inline double experimentalPatternMusicalDurationSec(
+    const ExperimentalMidiPattern& p) noexcept
+{
+    return p.stepDurationMs() * (double)juce::jmax(1, p.numSteps) / 1000.0;
+}
+
+/// Clip length in samples from the musical grid (**numSteps**, **stepDenom**, **bpm**) at `sampleRate`.
+/// Used when creating clips, after step/denom edits, and when loading legacy projects with missing length.
+/// Do **not** call this on BPM-only changes if `lengthSamples` must stay locked (I3d1).
+[[nodiscard]] inline std::int64_t experimentalPatternMusicalLengthSamples(
+    const ExperimentalMidiPattern& p,
+    double sampleRate) noexcept
+{
+    if (sampleRate <= 0.0 || !std::isfinite(sampleRate))
+    {
+        return 0;
+    }
+    const double sec = experimentalPatternMusicalDurationSec(p);
+    if (!std::isfinite(sec) || sec <= 0.0)
+    {
+        return 0;
+    }
+    return (std::int64_t)std::llround(sec * sampleRate);
+}
+
+/// Map a step index to a **sample offset inside the clip**, assuming the clip span is divided evenly
+/// into `numSteps` time slices (timeline-locked length; independent of BPM once length is set).
+[[nodiscard]] inline std::int64_t clipRelativeSampleAtStepCenter(
+    const int step,
+    const int numSteps,
+    const std::int64_t lengthSamples) noexcept
+{
+    const int ns = juce::jmax(1, numSteps);
+    const std::int64_t len = juce::jmax(std::int64_t{1}, lengthSamples);
+    const double t = (double)step + 0.5;
+    return (std::int64_t)std::llround(t * (double)len / (double)ns);
+}
+
+[[nodiscard]] inline std::int64_t absoluteSampleForNoteInClip(
+    const std::int64_t clipStartSamples,
+    const int step,
+    const int numSteps,
+    const std::int64_t lengthSamples) noexcept
+{
+    return clipStartSamples + clipRelativeSampleAtStepCenter(step, numSteps, lengthSamples);
+}

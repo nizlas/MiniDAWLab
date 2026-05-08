@@ -28,7 +28,12 @@ struct InstrumentMidiClip
     InstrumentMidiClipId id = 0;
     juce::String name { "MIDI 1" };
     ExperimentalMidiPattern pattern;
-    /// 0..1000, visual lane placement only until timeline samples exist (I3c+).
+    /// Session-timeline anchor (samples). I3d1: piano roll + lane use absolute samples.
+    std::int64_t startSamples = 0;
+    /// Locked pattern span in samples (explicit; user trim deferred). Recomputed only on clip create,
+    /// load when missing/zero, or **numSteps / stepDenom** change — **not** on BPM-only edits.
+    std::int64_t lengthSamples = 0;
+    /// Legacy fractional lane layout when main timeline mapping is unavailable (fallback).
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
 };
@@ -99,6 +104,13 @@ public:
     /// After `loadProjectFromFile`, attempts cache load + optional Windows path repair + host load.
     void runPendingGrooveAgentProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
 
+    /// Device sample rate for **musical** length derivation (message thread). Does not rescale clips.
+    void setTimelineSampleRate(double sampleRate) noexcept;
+
+    /// Recompute `lengthSamples` from pattern grid + `timelineSampleRate_` (create / load repair /
+    /// numSteps or stepDenom edits only — not BPM-only).
+    void recomputeLockedClipLengthFromPatternGrid(InstrumentMidiClip& clip) noexcept;
+
 private:
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
@@ -116,6 +128,8 @@ private:
     bool pendingProjectGrooveAutoload_ = false;
     juce::String pendingAdvisoryPluginBundlePath_;
     juce::String pendingInstrumentKind_;
+
+    double timelineSampleRate_ = 48000.0;
 
     void clearExperimentalInstrumentStateForProjectLoad();
 };

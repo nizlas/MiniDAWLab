@@ -67,8 +67,11 @@ bool InstrumentTrackController::tryAddGrooveAgentInstrumentTrackShell()
     clip->pattern.loop = true;
     clip->laneStartFractionPermille = 0;
     clip->laneEndFractionPermille = 250;
+    clip->startSamples = 0;
+    clip->lengthSamples = 0;
     selectedClipId_ = 0;
     clips_.push_back(std::move(clip));
+    recomputeLockedClipLengthFromPatternGrid(*clips_.back());
 
     sendChangeMessage();
     return true;
@@ -219,6 +222,8 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         c.stepDenom = cptr->pattern.stepDenom;
         c.bpm = cptr->pattern.bpm;
         c.loop = cptr->pattern.loop;
+        c.startSamples = cptr->startSamples;
+        c.lengthSamples = cptr->lengthSamples;
         c.laneStartFractionPermille = cptr->laneStartFractionPermille;
         c.laneEndFractionPermille = cptr->laneEndFractionPermille;
         for (const auto& n : cptr->pattern.notes)
@@ -278,6 +283,8 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
         clip->pattern.loop = cdto.loop;
         clip->laneStartFractionPermille = cdto.laneStartFractionPermille;
         clip->laneEndFractionPermille = cdto.laneEndFractionPermille;
+        clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
+        clip->lengthSamples = cdto.lengthSamples;
         for (const auto& n : cdto.notes)
         {
             PrototypeMidiNote pn;
@@ -298,8 +305,18 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
         clip->pattern.stepDenom = 16;
         clip->pattern.bpm = 110.0;
         clip->pattern.loop = true;
+        clip->startSamples = 0;
+        clip->lengthSamples = 0;
         clips_.push_back(std::move(clip));
+        recomputeLockedClipLengthFromPatternGrid(*clips_.back());
         maxId = 1;
+    }
+    for (auto& cp : clips_)
+    {
+        if (cp != nullptr && cp->lengthSamples <= 0)
+        {
+            recomputeLockedClipLengthFromPatternGrid(*cp);
+        }
     }
     nextClipId_ = maxId + 1;
     selectedClipId_ = 0;
@@ -364,4 +381,26 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
         juce::Logger::writeToLog("[project-autoload] Groove Agent load failed: " + loadResult.getErrorMessage());
     }
     syncShellWithHostState();
+}
+
+void InstrumentTrackController::setTimelineSampleRate(const double sampleRate) noexcept
+{
+    if (sampleRate > 0.0 && std::isfinite(sampleRate))
+    {
+        timelineSampleRate_ = sampleRate;
+    }
+}
+
+void InstrumentTrackController::recomputeLockedClipLengthFromPatternGrid(InstrumentMidiClip& clip) noexcept
+{
+    double sr = timelineSampleRate_;
+    if (sr <= 0.0 || !std::isfinite(sr))
+    {
+        sr = 48000.0;
+    }
+    const std::int64_t len = experimentalPatternMusicalLengthSamples(clip.pattern, sr);
+    if (len > 0)
+    {
+        clip.lengthSamples = len;
+    }
 }

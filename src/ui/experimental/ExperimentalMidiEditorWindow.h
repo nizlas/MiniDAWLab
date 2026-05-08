@@ -5,6 +5,14 @@
 class ExperimentalInstrumentHost;
 struct ExperimentalMidiPattern;
 class InstrumentTrackController;
+struct InstrumentMidiClip;
+class Session;
+class Transport;
+
+namespace juce
+{
+class AudioDeviceManager;
+}
 
 class ExperimentalMidiEditorWindow final : public juce::DocumentWindow
 {
@@ -22,11 +30,16 @@ public:
     /// whenever the MIDI roll is shown).
     void syncInstrumentStateFromHost();
 
-    /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass the instrument
-    /// track so UI/playback use Groove-Agent presence (not merely any host instrument).
+    /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass session/transport/
+    /// deviceManager for absolute-timeline roll + shared playhead/locators; `timelineClip` may be null
+    /// only for legacy detached use.
     void bindExternalPattern(ExperimentalMidiPattern* pattern,
-                             const juce::String& titleSuffix,
-                             InstrumentTrackController* instrumentTrackForClip = nullptr);
+                             InstrumentMidiClip* timelineClip,
+                             InstrumentTrackController* instrumentTrackForClip,
+                             Session* session,
+                             Transport* transport,
+                             juce::AudioDeviceManager* deviceManager,
+                             const juce::String& titleSuffix);
     void unbindExternalPattern();
 
 private:

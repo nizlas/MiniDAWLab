@@ -5,13 +5,19 @@
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
+#include "domain/Session.h"
+#include "transport/Transport.h"
+
+#include <juce_audio_devices/juce_audio_devices.h>
+
 #include <algorithm>
+#include <cmath>
 
 namespace
 {
     constexpr int kToolbarH = 40;
     constexpr int kEditorTotalWidth = 720;
-    constexpr int kEditorTotalHeight = 780;
+    constexpr int kEditorTotalHeight = 802;
 
     [[nodiscard]] juce::String ptrToLog(const void* p) noexcept
     {
@@ -35,7 +41,7 @@ public:
 
         addAndMakeVisible(viewport_);
         addAndMakeVisible(playButton_);
-        playButton_.setButtonText("Play pattern");
+        playButton_.setButtonText("Preview");
         playButton_.onClick = [this] {
             player_->startPlayback();
         };
@@ -83,9 +89,25 @@ public:
                     activePattern().notes.end(),
                     [newSteps](const PrototypeMidiNote& n) { return n.step >= newSteps; }),
                 activePattern().notes.end());
+            if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr)
+            {
+                instrumentTrackForClipBind_->recomputeLockedClipLengthFromPatternGrid(*boundTimelineClip_);
+                instrumentTrackForClipBind_->sendChangeMessage();
+            }
             if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
             {
+                rv->seedOrResetViewport();
                 rv->repaint();
+            }
+        };
+
+        addAndMakeVisible(followPlayheadToggle_);
+        followPlayheadToggle_.setButtonText("Follow");
+        followPlayheadToggle_.setClickingTogglesState(true);
+        followPlayheadToggle_.onClick = [this] {
+            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+            {
+                rv->setFollowPlayheadEnabled(followPlayheadToggle_.getToggleState());
             }
         };
 
@@ -124,12 +146,24 @@ public:
     void syncInstrumentUiFromHost()
     {
         applyInstrumentUiState();
+        refreshTimelineSampleRateOnTrack();
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            rv->setSessionTimelineContext(
+                boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_);
+        }
     }
 
-    void bindExternal(ExperimentalMidiPattern* p, InstrumentTrackController* trackForClipGate)
+    void bindExternal(ExperimentalMidiPattern* p,
+                      InstrumentMidiClip* timelineClip,
+                      InstrumentTrackController* trackForClipGate,
+                      Session* session,
+                      Transport* transport,
+                      juce::AudioDeviceManager* deviceManager)
     {
         InstrumentTrackController* const gatePtr = (p != nullptr) ? trackForClipGate : nullptr;
-        if (externalPattern_ == p && instrumentTrackForClipBind_ == gatePtr)
+        if (externalPattern_ == p && instrumentTrackForClipBind_ == gatePtr && boundTimelineClip_ == timelineClip
+            && sessionForRoll_ == session && transportForRoll_ == transport && deviceManagerForRoll_ == deviceManager)
         {
             syncSlidersFromActivePattern();
             syncInstrumentUiFromHost();
@@ -142,14 +176,38 @@ public:
         }
         externalPattern_ = p;
         instrumentTrackForClipBind_ = gatePtr;
+        boundTimelineClip_ = timelineClip;
+        sessionForRoll_ = session;
+        transportForRoll_ = transport;
+        deviceManagerForRoll_ = deviceManager;
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
     }
 
+    void refreshTimelineSampleRateOnTrack()
+    {
+        double sr = 48000.0;
+        if (deviceManagerForRoll_ != nullptr)
+        {
+            if (juce::AudioIODevice* d = deviceManagerForRoll_->getCurrentAudioDevice())
+            {
+                const double r = d->getCurrentSampleRate();
+                if (r > 0.0 && std::isfinite(r))
+                {
+                    sr = r;
+                }
+            }
+        }
+        if (instrumentTrackForClipBind_ != nullptr)
+        {
+            instrumentTrackForClipBind_->setTimelineSampleRate(sr);
+        }
+    }
+
     void unbindExternal()
     {
-        if (externalPattern_ == nullptr)
+        if (externalPattern_ == nullptr && boundTimelineClip_ == nullptr)
         {
             return;
         }
@@ -159,6 +217,10 @@ public:
         }
         externalPattern_ = nullptr;
         instrumentTrackForClipBind_ = nullptr;
+        boundTimelineClip_ = nullptr;
+        sessionForRoll_ = nullptr;
+        transportForRoll_ = nullptr;
+        deviceManagerForRoll_ = nullptr;
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
@@ -254,7 +316,11 @@ public:
             canPlayPattern ? juce::Colour(0xffc8c8d8) : juce::Colour(0xffffaa88);
 
         modeLabel_.setText(
-            juce::String("Mode: Drum hits (100 ms gate) | ") + instPart + "\n"
+            juce::String("I3d1: roll X = session samples (zoom/pan here is separate from main timeline). ")
+                + "Clip length in samples is locked when BPM changes; grid splits that length into equal time steps. "
+                  "Changing Steps recomputes musical length. Preview timing follows BPM and may diverge from the "
+                  "absolute grid after BPM edits.\n"
+                + instPart + "\n"
                 + "Timing: ~4 ms message timer; not sample-accurate." + kitLine,
             juce::dontSendNotification);
         modeLabel_.setColour(juce::Label::textColourId, labelColour);
@@ -295,12 +361,14 @@ public:
         stopButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         stepsLabel_.setBounds(toolbar.removeFromLeft(44).reduced(0, 4));
         stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
+        followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         bpmLabel_.setBounds(toolbar.removeFromLeft(36).reduced(0, 4));
         bpmSlider_.setBounds(toolbar.removeFromLeft(140).reduced(0, 2));
         modeLabel_.setBounds(toolbar.reduced(8, 0));
 
-        const int rollH = (ExperimentalPianoRollView::kPitchHigh - ExperimentalPianoRollView::kPitchLow + 1)
-                          * ExperimentalPianoRollView::kRowHeight;
+        const int rollH = ExperimentalPianoRollView::kRulerHeight
+                          + (ExperimentalPianoRollView::kPitchHigh - ExperimentalPianoRollView::kPitchLow + 1)
+                                * ExperimentalPianoRollView::kRowHeight;
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
             rv->setSize(juce::jmax(400, a.getWidth()), rollH);
@@ -316,6 +384,10 @@ public:
 
 private:
     InstrumentTrackController* instrumentTrackForClipBind_ = nullptr;
+    InstrumentMidiClip* boundTimelineClip_ = nullptr;
+    Session* sessionForRoll_ = nullptr;
+    Transport* transportForRoll_ = nullptr;
+    juce::AudioDeviceManager* deviceManagerForRoll_ = nullptr;
 
     void syncSlidersFromActivePattern()
     {
@@ -339,6 +411,9 @@ private:
             "midi-editor: rebuild roll begin activePatternPtr=" + ptrToLog(&ap));
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
+        roll->setSessionTimelineContext(
+            boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_);
+        roll->setFollowPlayheadEnabled(followPlayheadToggle_.getToggleState());
         viewport_.setViewedComponent(roll, true);
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
@@ -362,6 +437,7 @@ private:
     juce::Slider bpmSlider_;
     juce::Label stepsLabel_;
     juce::ComboBox stepsBox_;
+    juce::TextButton followPlayheadToggle_;
     juce::Label modeLabel_;
     juce::Viewport viewport_;
 };
@@ -407,8 +483,12 @@ void ExperimentalMidiEditorWindow::syncInstrumentStateFromHost()
 }
 
 void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* pattern,
-                                                       const juce::String& titleSuffix,
-                                                       InstrumentTrackController* instrumentTrackForClip)
+                                                       InstrumentMidiClip* timelineClip,
+                                                       InstrumentTrackController* instrumentTrackForClip,
+                                                       Session* session,
+                                                       Transport* transport,
+                                                       juce::AudioDeviceManager* deviceManager,
+                                                       const juce::String& titleSuffix)
 {
     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
         "midi-editor: bindExternalPattern begin patternPtr=" + ptrToLog(pattern) + " noteCount="
@@ -416,7 +496,7 @@ void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* 
 
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
-        b->bindExternal(pattern, instrumentTrackForClip);
+        b->bindExternal(pattern, timelineClip, instrumentTrackForClip, session, transport, deviceManager);
     }
 
     juce::String winName { "I2 MIDI editor (Drum hits)" };

@@ -44,6 +44,8 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cmath>
+
 #include "domain/Session.h"
 #include "domain/SessionHistory.h"
 #include "domain/AudioClip.h"
@@ -1356,6 +1358,7 @@ private:
             updatePlayPauseButtonFromTransport();
             startTimerHz(10);
             syncViewportFromSession();
+            syncInstrumentClipTimelineFromDevice();
         }
 
         ~TransportControlsContent() override
@@ -1768,11 +1771,32 @@ private:
                 experimentalMidiEditorWindow_
                     = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
             }
-            experimentalMidiEditorWindow_->bindExternalPattern(
-                &clip->pattern, clip->name, &instrumentTrackController_);
+            experimentalMidiEditorWindow_->bindExternalPattern(&clip->pattern,
+                                                               clip,
+                                                               &instrumentTrackController_,
+                                                               &session,
+                                                               &transport,
+                                                               &deviceManager,
+                                                               clip->name);
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
+        }
+
+        [[nodiscard]] TimelineViewportModel& getTimelineViewport() noexcept { return timelineViewport_; }
+
+        void syncInstrumentClipTimelineFromDevice() noexcept
+        {
+            double sr = 48000.0;
+            if (juce::AudioIODevice* d = deviceManager.getCurrentAudioDevice())
+            {
+                const double r = d->getCurrentSampleRate();
+                if (r > 0.0 && std::isfinite(r))
+                {
+                    sr = r;
+                }
+            }
+            instrumentTrackController_.setTimelineSampleRate(sr);
         }
 
         private:
@@ -1795,7 +1819,9 @@ private:
         }
 
         /// MIDI clip lane only (same role as `ClipWaveformView`). Header is a sibling `TrackHeaderView`.
-        struct InstrumentMidiEventLane final : public juce::Component, private juce::ChangeListener
+        struct InstrumentMidiEventLane final : public juce::Component,
+                                               private juce::ChangeListener,
+                                               private juce::Timer
         {
             static constexpr bool kLogInstrumentLane = false;
 
@@ -1805,14 +1831,27 @@ private:
                 , controller_(controllerIn)
             {
                 controller_.addChangeListener(this);
+                startTimerHz(20);
             }
 
-            ~InstrumentMidiEventLane() override { controller_.removeChangeListener(this); }
+            ~InstrumentMidiEventLane() override
+            {
+                stopTimer();
+                controller_.removeChangeListener(this);
+            }
 
             void changeListenerCallback(juce::ChangeBroadcaster*) override
             {
                 owner_.repaintInstrumentTrackRow();
                 owner_.refreshExperimentalMidiEditorInstrumentUiIfOpen();
+            }
+
+            void timerCallback() override
+            {
+                if (owner_.transport.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+                {
+                    repaint();
+                }
             }
 
             void paint(juce::Graphics& g) override
@@ -1912,6 +1951,37 @@ private:
             {
                 using namespace mini_daw::timeline_clip_chrome;
                 const auto band = laneContent.toFloat().reduced(0.0f, kEventVerticalMargin);
+                TimelineViewportModel& vp = owner_.getTimelineViewport();
+                const double spp = vp.getSamplesPerPixel();
+                if (spp > 0.0 && std::isfinite(spp) && c.lengthSamples > 0)
+                {
+                    const std::int64_t visStart = vp.getVisibleStartSamples();
+                    const float originX = band.getX();
+                    const std::int64_t len = juce::jmax(std::int64_t{1}, c.lengthSamples);
+                    const float x0 = TimelineRulerView::sessionSampleToLocalX(
+                        c.startSamples, originX, visStart, spp);
+                    const float x1 = TimelineRulerView::sessionSampleToLocalX(
+                        c.startSamples + len, originX, visStart, spp);
+                    float left = juce::jmin(x0, x1);
+                    float right = juce::jmax(x0, x1);
+                    constexpr float minW = 40.0f;
+                    if (right - left < minW)
+                    {
+                        const float mid = 0.5f * (left + right);
+                        left = mid - minW * 0.5f;
+                        right = mid + minW * 0.5f;
+                    }
+                    left = juce::jlimit(band.getX(), band.getRight(), left);
+                    right = juce::jlimit(band.getX(), band.getRight(), right);
+                    if (right <= band.getX() + 0.5f || left >= band.getRight() - 0.5f)
+                    {
+                        return {};
+                    }
+                    const int y = juce::roundToInt(band.getY());
+                    const int h = juce::jmax(1, juce::roundToInt(band.getHeight()));
+                    return { juce::roundToInt(left), y, juce::jmax(1, juce::roundToInt(right - left)), h };
+                }
+
                 const int laneCW = juce::jmax(1, juce::roundToInt(band.getWidth()));
                 const float s = (float)c.laneStartFractionPermille / 1000.f;
                 const float e = (float)c.laneEndFractionPermille / 1000.f;
@@ -2026,6 +2096,7 @@ private:
             latencyStore_.refreshFromCurrentDevice();
             latencyStore_.save();
             playbackEngine_.setPlaybackOffsetSamples(latencyStore_.getCurrentPlaybackOffsetSamples());
+            syncInstrumentClipTimelineFromDevice();
             if (auto* lv = audioLatencySettingsWeak_.getComponent())
             {
                 lv->syncFromStore();
@@ -2518,6 +2589,7 @@ private:
                     "An instrument track row is already shown.");
                 return;
             }
+            syncInstrumentClipTimelineFromDevice();
             refreshExperimentalInstrumentUi();
             resized();
         }
@@ -3444,6 +3516,7 @@ private:
                 }
                 juce::StringArray skipped;
                 juce::String infoNote;
+                instrumentTrackController_.setTimelineSampleRate(sampleRate);
                 const juce::Result r
                     = session.loadProjectFromFile(transport, f, sampleRate, skipped, infoNote, &pluginHost_, &instrumentTrackController_);
                 if (!r.wasOk())
@@ -3465,6 +3538,7 @@ private:
                 }
                 sessionHistory_.clear();
                 syncViewportFromSession();
+                syncInstrumentClipTimelineFromDevice();
                 trackLanesView.syncTracksFromSession();
                 inspectorView_.refreshFromSession();
                 rulerView.repaint();

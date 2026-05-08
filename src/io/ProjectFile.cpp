@@ -406,6 +406,26 @@ namespace
                         {
                             c.laneEndFractionPermille = (int)static_cast<double>(le);
                         }
+                        c.startSamples = 0;
+                        {
+                            bool ssOk = false;
+                            const std::int64_t ss
+                                = int64FromVarId(cv.getProperty("startSamples", {}), ssOk);
+                            if (ssOk)
+                            {
+                                c.startSamples = ss;
+                            }
+                        }
+                        c.lengthSamples = 0;
+                        {
+                            bool lenOk = false;
+                            const std::int64_t len
+                                = int64FromVarId(cv.getProperty("lengthSamples", {}), lenOk);
+                            if (lenOk)
+                            {
+                                c.lengthSamples = len;
+                            }
+                        }
                         const juce::var& notesV = cv.getProperty("notes", {});
                         if (notesV.isArray())
                         {
@@ -536,6 +556,8 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 {
                     co->setProperty("loop", false);
                 }
+                co->setProperty("startSamples", static_cast<juce::int64>(cl.startSamples));
+                co->setProperty("lengthSamples", static_cast<juce::int64>(cl.lengthSamples));
                 if (cl.laneStartFractionPermille != 0)
                 {
                     co->setProperty("laneStartFractionPermille", cl.laneStartFractionPermille);

@@ -77,6 +77,9 @@ struct ProjectFileExperimentalInstrumentClipV1
     int stepDenom = 16;
     double bpm = 110.0;
     bool loop = true;
+    /// I3d1: optional in v11 JSON (default 0); load path may derive length when absent/zero.
+    std::int64_t startSamples = 0;
+    std::int64_t lengthSamples = 0;
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
     std::vector<ProjectFileExperimentalInstrumentNoteV1> notes;
