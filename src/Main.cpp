@@ -1344,6 +1344,7 @@ private:
             startTimerHz(10);
             syncViewportFromSession();
             syncInstrumentClipTimelineFromDevice();
+            playbackEngine_.setInstrumentTrackController(&instrumentTrackController_);
         }
 
         ~TransportControlsContent() override

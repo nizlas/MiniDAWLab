@@ -41,6 +41,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
@@ -245,13 +246,15 @@ namespace
 
 PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder,
                                CountInClickOutput* countIn, PluginInsertHost* pluginHost,
-                               ExperimentalInstrumentHost* experimentalInstrument)
+                               ExperimentalInstrumentHost* experimentalInstrument,
+                               InstrumentTrackController* instrumentTrack)
     : transport_(transport)
     , session_(session)
     , recorder_(recorder)
     , countIn_(countIn)
     , pluginHost_(pluginHost)
     , experimentalInstrument_(experimentalInstrument)
+    , instrumentTrack_(instrumentTrack)
 {
 }
 
@@ -316,10 +319,32 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const int deviceBlockSizeInFrames = numSamples;
     transport_.audioThread_beginBlock();
+    if (experimentalInstrument_ != nullptr)
+    {
+        experimentalInstrument_->audioThread_beginAudioBlock(deviceBlockSizeInFrames);
+    }
 
     const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
     const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
     const std::int64_t t0 = transport_.audioThread_loadPlayhead();
+
+    struct StoreIntentAtScopeExit
+    {
+        PlaybackIntent v;
+        PlaybackIntent* d;
+        ~StoreIntentAtScopeExit() noexcept { *d = v; }
+    };
+    const StoreIntentAtScopeExit storePlaybackIntent { playbackIntent, &lastTransportIntentInCallback_ };
+
+    const bool becameStopped = (playbackIntent != PlaybackIntent::Playing
+                               && lastTransportIntentInCallback_ == PlaybackIntent::Playing);
+    if (becameStopped && instrumentTrack_ != nullptr && experimentalInstrument_ != nullptr)
+    {
+        instrumentTrack_->audioThread_flushTransportMidi(*experimentalInstrument_, 0, deviceBlockSizeInFrames);
+    }
+
+    const bool becamePlayingTransport = (playbackIntent == PlaybackIntent::Playing
+                                        && lastTransportIntentInCallback_ != PlaybackIntent::Playing);
 
     for (int ch = 0; ch < numOutputChannels; ++ch)
     {
@@ -400,7 +425,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const std::int64_t playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
 
-    const auto renderRun = [&](const std::int64_t segT0, const int segRun, const int outFrame0) noexcept
+    const auto renderRun = [&](const std::int64_t segT0, const int segRun, const int outFrame0,
+                               const bool forceSegDiscontinuity) noexcept
     {
         if (segRun <= 0)
         {
@@ -498,6 +524,18 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             jassert(out0 == audibleRun);
             jassert(t - timelineStartAudible == static_cast<std::int64_t>(audibleRun));
         }
+
+        if (instrumentTrack_ != nullptr && experimentalInstrument_ != nullptr
+            && playbackIntent == PlaybackIntent::Playing)
+        {
+            const bool segDisc = forceSegDiscontinuity || becamePlayingTransport;
+            instrumentTrack_->audioThread_scheduleTransportMidiForSegment(*experimentalInstrument_,
+                                                                          timelineStartAudible,
+                                                                          audibleRun,
+                                                                          outFrame0 + silencePrefix,
+                                                                          segDisc,
+                                                                          deviceBlockSizeInFrames);
+        }
     };
 
     // --- Linear playback (cycle off, invalid range, or playhead already at / past right locator). ---
@@ -510,7 +548,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             mixInstrumentIfAny();
             return;
         }
-        renderRun(tWork, static_cast<int>(firstRun64), 0);
+        renderRun(tWork, static_cast<int>(firstRun64), 0, becamePlayingTransport);
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
         mixInstrumentIfAny();
         return;
@@ -529,7 +567,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     }
 
     const int firstRun = static_cast<int>(firstRun64);
-    renderRun(tWork, firstRun, 0);
+    renderRun(tWork, firstRun, 0, becamePlayingTransport);
 
     const bool reachedRightLocator = (tWork + firstRun64 >= locR);
     if (!reachedRightLocator)
@@ -549,7 +587,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (secondRun64 > 0)
     {
         const int sr = static_cast<int>(secondRun64);
-        renderRun(locL, sr, firstRun);
+        renderRun(locL, sr, firstRun, true);
         transport_.audioThread_storePlayheadOnWrap(locL + secondRun64);
         transport_.audioThread_signalCycleWrap();
 #if !defined(NDEBUG)

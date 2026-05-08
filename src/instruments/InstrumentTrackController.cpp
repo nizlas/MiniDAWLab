@@ -2,11 +2,16 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
+#include <algorithm>
+#include <cmath>
+
+#include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 
 InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept
     : host_(host)
 {
+    publishRenderSnapshot();
 }
 
 bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
@@ -93,6 +98,7 @@ void InstrumentTrackController::syncShellWithHostState()
     }
 
     instrumentLoaded_ = now;
+    publishRenderSnapshot();
     sendChangeMessage();
 }
 
@@ -152,6 +158,7 @@ void InstrumentTrackController::setPowerOn(const bool on) noexcept
         return;
     }
     powerOn_ = on;
+    publishRenderSnapshot();
     sendChangeMessage();
 }
 
@@ -162,6 +169,7 @@ void InstrumentTrackController::setMuted(const bool muted) noexcept
         return;
     }
     muted_ = muted;
+    publishRenderSnapshot();
     sendChangeMessage();
 }
 
@@ -195,6 +203,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
     pendingPluginStateBase64_.clear();
+    publishRenderSnapshot();
 }
 
 ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperimentalInstrumentProjectBlock() const
@@ -329,6 +338,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     nextClipId_ = maxId + 1;
     selectedClipId_ = 0;
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
+    publishRenderSnapshot();
     sendChangeMessage();
 }
 
@@ -451,10 +461,16 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
 
 void InstrumentTrackController::setTimelineSampleRate(const double sampleRate) noexcept
 {
-    if (sampleRate > 0.0 && std::isfinite(sampleRate))
+    if (sampleRate <= 0.0 || !std::isfinite(sampleRate))
     {
-        timelineSampleRate_ = sampleRate;
+        return;
     }
+    if (timelineSampleRate_ == sampleRate)
+    {
+        return;
+    }
+    timelineSampleRate_ = sampleRate;
+    publishRenderSnapshot();
 }
 
 void InstrumentTrackController::recomputeLockedClipLengthFromPatternGrid(InstrumentMidiClip& clip) noexcept
@@ -468,5 +484,223 @@ void InstrumentTrackController::recomputeLockedClipLengthFromPatternGrid(Instrum
     if (len > 0)
     {
         clip.lengthSamples = len;
+    }
+    publishRenderSnapshot();
+}
+
+void InstrumentTrackController::notifyClipPatternMutated(const InstrumentMidiClipId clipId) noexcept
+{
+    if (InstrumentMidiClip* c = getClipById(clipId))
+    {
+        recomputeLockedClipLengthFromPatternGrid(*c);
+    }
+    else
+    {
+        publishRenderSnapshot();
+    }
+    sendChangeMessage();
+}
+
+void InstrumentTrackController::publishRenderSnapshot()
+{
+    auto snap = std::make_shared<InstrumentTrackRenderSnapshot>();
+    snap->revision = nextSnapshotRevision_++;
+    snap->midiChannel = 1;
+    double sr = timelineSampleRate_;
+    if (sr <= 0.0 || !std::isfinite(sr))
+    {
+        sr = 48000.0;
+    }
+    snap->gateSamples = juce::jmax(1, (int)std::llround(0.001 * 100.0 * sr));
+    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_ && instrumentLoaded_ && host_.hasInstrument();
+
+    for (const auto& cptr : clips_)
+    {
+        if (cptr == nullptr)
+        {
+            continue;
+        }
+        const InstrumentMidiClip& clip = *cptr;
+        if (clip.lengthSamples <= 0)
+        {
+            continue;
+        }
+        InstrumentClipRenderPlan plan;
+        plan.startSamples = clip.startSamples;
+        plan.endSamplesExclusive = clip.startSamples + clip.lengthSamples;
+        const int ns = juce::jmax(1, clip.pattern.numSteps);
+        for (const auto& n : clip.pattern.notes)
+        {
+            if (n.step < 0 || n.step >= clip.pattern.numSteps)
+            {
+                continue;
+            }
+            InstrumentNoteRenderEvent ev;
+            ev.absSample = absoluteSampleForNoteInClip(clip.startSamples, n.step, ns, clip.lengthSamples);
+            ev.midiNote = (std::uint8_t)juce::jlimit(0, 127, n.midiNote);
+            ev.velocity = (std::uint8_t)juce::jlimit(1, 127, n.velocity);
+            plan.notes.push_back(ev);
+        }
+        std::sort(plan.notes.begin(), plan.notes.end(), [](const InstrumentNoteRenderEvent& a,
+                                                           const InstrumentNoteRenderEvent& b) {
+            return a.absSample < b.absSample;
+        });
+        snap->clips.push_back(std::move(plan));
+    }
+    std::sort(snap->clips.begin(), snap->clips.end(), [](const InstrumentClipRenderPlan& a,
+                                                         const InstrumentClipRenderPlan& b) {
+        return a.startSamples < b.startSamples;
+    });
+    std::atomic_store_explicit(&renderSnapshot_, std::shared_ptr<const InstrumentTrackRenderSnapshot>(std::move(snap)),
+                               std::memory_order_release);
+}
+
+void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
+                                                               const int offsetInDevice,
+                                                               const int deviceBlockNumSamples) noexcept
+{
+    if (deviceBlockNumSamples <= 0)
+    {
+        rtPendingOffCount_ = 0;
+        rtLastSegEndTimeline_ = -1;
+        return;
+    }
+    const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, offsetInDevice);
+    const auto snap = std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
+    const int ch = (snap != nullptr) ? snap->midiChannel : 1;
+    for (int i = 0; i < rtPendingOffCount_; ++i)
+    {
+        host.audioThread_addMidiEventForCurrentBlock(
+            off0, juce::MidiMessage::noteOff(ch, rtPendingOffs_[(size_t)i].midiNote, 0.0f));
+    }
+    rtPendingOffCount_ = 0;
+    rtLastSegEndTimeline_ = -1;
+    host.audioThread_addMidiEventForCurrentBlock(off0, juce::MidiMessage::allNotesOff(ch));
+}
+
+void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
+    ExperimentalInstrumentHost& host,
+    const std::int64_t timelineSegStart,
+    const int segNumSamples,
+    const int bufferOffsetInDevice,
+    const bool forceDiscontinuity,
+    const int deviceBlockNumSamples) noexcept
+{
+    if (segNumSamples <= 0 || deviceBlockNumSamples <= 0)
+    {
+        return;
+    }
+
+    const auto snap = std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
+    if (snap == nullptr)
+    {
+        return;
+    }
+
+    const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, bufferOffsetInDevice);
+    const std::int64_t segEnd = timelineSegStart + static_cast<std::int64_t>(segNumSamples);
+
+    const bool revBump = (snap->revision != rtLastSnapshotRevision_);
+    if (revBump)
+    {
+        rtLastSnapshotRevision_ = snap->revision;
+    }
+
+    const bool gap = (rtLastSegEndTimeline_ >= 0 && timelineSegStart != rtLastSegEndTimeline_);
+    const bool discontinuity = forceDiscontinuity || revBump || gap;
+
+    const int ch = snap->midiChannel;
+
+    if (discontinuity)
+    {
+        for (int i = 0; i < rtPendingOffCount_; ++i)
+        {
+            host.audioThread_addMidiEventForCurrentBlock(
+                off0, juce::MidiMessage::noteOff(ch, rtPendingOffs_[(size_t)i].midiNote, 0.0f));
+        }
+        rtPendingOffCount_ = 0;
+    }
+    else
+    {
+        int w = 0;
+        for (int i = 0; i < rtPendingOffCount_; ++i)
+        {
+            const PendingTransportNoteOff p = rtPendingOffs_[(size_t)i];
+            if (p.dueAbsSample >= segEnd)
+            {
+                rtPendingOffs_[(size_t)w++] = p;
+                continue;
+            }
+            if (p.dueAbsSample >= timelineSegStart && p.dueAbsSample < segEnd)
+            {
+                const int rel = static_cast<int>(p.dueAbsSample - timelineSegStart);
+                const int o = juce::jlimit(0, deviceBlockNumSamples - 1, rel + bufferOffsetInDevice);
+                host.audioThread_addMidiEventForCurrentBlock(
+                    o, juce::MidiMessage::noteOff(ch, p.midiNote, 0.0f));
+                continue;
+            }
+            host.audioThread_addMidiEventForCurrentBlock(
+                off0, juce::MidiMessage::noteOff(ch, p.midiNote, 0.0f));
+        }
+        rtPendingOffCount_ = w;
+    }
+
+    rtLastSegEndTimeline_ = segEnd;
+
+    if (!snap->playbackEnabled)
+    {
+        return;
+    }
+
+    const int gate = juce::jmax(1, snap->gateSamples);
+
+    for (const auto& plan : snap->clips)
+    {
+        if (plan.endSamplesExclusive <= timelineSegStart || plan.startSamples >= segEnd)
+        {
+            continue;
+        }
+
+        auto it = std::lower_bound(plan.notes.begin(), plan.notes.end(), timelineSegStart,
+                                   [](const InstrumentNoteRenderEvent& e, const std::int64_t s) {
+                                       return e.absSample < s;
+                                   });
+
+        for (; it != plan.notes.end() && it->absSample < segEnd; ++it)
+        {
+            const InstrumentNoteRenderEvent& ev = *it;
+            if (ev.absSample < timelineSegStart)
+            {
+                continue;
+            }
+
+            const int onRel = static_cast<int>(ev.absSample - timelineSegStart);
+            const int onOffset = juce::jlimit(0, deviceBlockNumSamples - 1, onRel + bufferOffsetInDevice);
+            const float vel = static_cast<float>(ev.velocity) / 127.0f;
+            host.audioThread_addMidiEventForCurrentBlock(
+                onOffset, juce::MidiMessage::noteOn(ch, (int)ev.midiNote, vel));
+
+            const std::int64_t dueAbs = ev.absSample + static_cast<std::int64_t>(gate);
+            if (dueAbs >= timelineSegStart && dueAbs < segEnd)
+            {
+                const int offRel = static_cast<int>(dueAbs - timelineSegStart);
+                const int o = juce::jlimit(0, deviceBlockNumSamples - 1, offRel + bufferOffsetInDevice);
+                host.audioThread_addMidiEventForCurrentBlock(
+                    o, juce::MidiMessage::noteOff(ch, (int)ev.midiNote, 0.0f));
+            }
+            else if (dueAbs >= segEnd)
+            {
+                if (rtPendingOffCount_ < kMaxPendingTransportOffs)
+                {
+                    rtPendingOffs_[(size_t)rtPendingOffCount_++] = { dueAbs, (int)ev.midiNote };
+                }
+                else
+                {
+                    host.audioThread_addMidiEventForCurrentBlock(
+                        juce::jmax(0, deviceBlockNumSamples - 1),
+                        juce::MidiMessage::noteOff(ch, (int)ev.midiNote, 0.0f));
+                }
+            }
+        }
     }
 }

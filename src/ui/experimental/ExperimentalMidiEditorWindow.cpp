@@ -41,7 +41,7 @@ public:
 
         addAndMakeVisible(viewport_);
         addAndMakeVisible(playButton_);
-        playButton_.setButtonText("Preview");
+        playButton_.setButtonText("Debug Preview");
         playButton_.onClick = [this] {
             player_->startPlayback();
         };
@@ -150,7 +150,7 @@ public:
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
             rv->setSessionTimelineContext(
-                boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_);
+                boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_, instrumentTrackForClipBind_);
         }
     }
 
@@ -452,7 +452,7 @@ private:
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
         roll->setSessionTimelineContext(
-            boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_);
+            boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_, instrumentTrackForClipBind_);
         roll->setFollowPlayheadEnabled(followPlayheadToggle_.getToggleState());
         viewport_.setViewedComponent(roll, true);
 

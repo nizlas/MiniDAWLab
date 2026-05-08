@@ -44,8 +44,11 @@
 #include <atomic>
 #include <cstdint>
 
+#include "transport/Transport.h"
+
 class CountInClickOutput;
 class ExperimentalInstrumentHost;
+class InstrumentTrackController;
 class PluginInsertHost;
 class RecorderService;
 class Session;
@@ -62,9 +65,17 @@ public:
     // `removeAudioCallback` (same tear order as `recorder`).
     // `experimentalInstrument` optional I1: single global instrument slot mixed after tracks; same
     // lifetime rule as `pluginHost`.
+    // `instrumentTrack` optional I3e: Groove Agent MIDI clip scheduling; must outlive this engine until
+    // `removeAudioCallback`. May be null before main window attaches the controller.
     PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder = nullptr,
                   CountInClickOutput* countIn = nullptr, PluginInsertHost* pluginHost = nullptr,
-                  ExperimentalInstrumentHost* experimentalInstrument = nullptr);
+                  ExperimentalInstrumentHost* experimentalInstrument = nullptr,
+                  InstrumentTrackController* instrumentTrack = nullptr);
+
+    void setInstrumentTrackController(InstrumentTrackController* instrumentTrack) noexcept
+    {
+        instrumentTrack_ = instrumentTrack;
+    }
     ~PlaybackEngine() override;
 
     PlaybackEngine(const PlaybackEngine&) = delete;
@@ -102,6 +113,9 @@ private:
     CountInClickOutput* const countIn_;
     PluginInsertHost* const pluginHost_;
     ExperimentalInstrumentHost* const experimentalInstrument_;
+    InstrumentTrackController* instrumentTrack_;
 
     std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
+
+    PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
 };

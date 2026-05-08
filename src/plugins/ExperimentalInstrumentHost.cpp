@@ -424,6 +424,22 @@ void ExperimentalInstrumentHost::enqueueMidiMessageFromMessageThread(const juce:
     queueMidiFromMessageThread(message);
 }
 
+void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int numSamples) noexcept
+{
+    audioCallbackBlockSamples_ = juce::jmax(0, numSamples);
+}
+
+void ExperimentalInstrumentHost::audioThread_addMidiEventForCurrentBlock(int sampleOffsetInBlock,
+                                                                          const juce::MidiMessage& message) noexcept
+{
+    const int cap = audioCallbackBlockSamples_;
+    if (cap <= 0 || sampleOffsetInBlock < 0 || sampleOffsetInBlock >= cap)
+    {
+        return;
+    }
+    rtBlockMidi_.addEvent(message, sampleOffsetInBlock);
+}
+
 bool ExperimentalInstrumentHost::tryPrepareInstrumentLayout(juce::AudioPluginInstance& inst,
                                                             const double sampleRate,
                                                             const int blockSize)
@@ -1066,6 +1082,7 @@ void ExperimentalInstrumentHost::prepareForDevice(const double sampleRate, const
         const juce::ScopedLock sl(midiIo_->midiLock);
         midiIo_->uiPendingMidi.clear();
     }
+    rtBlockMidi_.clear();
 
     auto owner = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
     if (owner != nullptr && owner->inst != nullptr && owner->layoutOk)
@@ -1163,6 +1180,8 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         blockMidi.addEvents(midiIo_->uiPendingMidi, 0, numSamples, 0);
         midiIo_->uiPendingMidi.clear();
     }
+    blockMidi.addEvents(rtBlockMidi_, 0, numSamples, 0);
+    rtBlockMidi_.clear();
 
     const int scratchCh = juce::jmin(scratch_.getNumChannels(), juce::jmax(kStereoChannels, totalCh));
     const int n = juce::jmin(numSamples, scratch_.getNumSamples());

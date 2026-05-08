@@ -13,6 +13,7 @@ class AudioDeviceManager;
 
 class ExperimentalMidiPatternPlayer;
 struct InstrumentMidiClip;
+class InstrumentTrackController;
 class Session;
 class Transport;
 
@@ -40,7 +41,8 @@ public:
     void setSessionTimelineContext(InstrumentMidiClip* timelineClip,
                                    Session* session,
                                    Transport* transport,
-                                   juce::AudioDeviceManager* deviceManager) noexcept;
+                                   juce::AudioDeviceManager* deviceManager,
+                                   InstrumentTrackController* instrumentTrackController = nullptr) noexcept;
 
     void setFollowPlayheadEnabled(bool on) noexcept;
 
@@ -74,6 +76,7 @@ private:
     Session* session_ = nullptr;
     Transport* transport_ = nullptr;
     juce::AudioDeviceManager* deviceManager_ = nullptr;
+    InstrumentTrackController* instrumentTrackController_ = nullptr;
 
     std::int64_t visibleStartSamples_ = 0;
     double samplesPerPixel_ = 0.0;

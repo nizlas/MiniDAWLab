@@ -13,13 +13,15 @@
 #include "io/ProjectFile.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 #include <juce_events/juce_events.h>
 
-class ExperimentalInstrumentHost; // IWYU: full type in .cpp for autoload
+class ExperimentalInstrumentHost; // IWYU: full type in .cpp for autoload + I3e transport MIDI
 
 using InstrumentMidiClipId = std::uint64_t;
 
@@ -36,6 +38,31 @@ struct InstrumentMidiClip
     /// Legacy fractional lane layout when main timeline mapping is unavailable (fallback).
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
+};
+
+/// I3e: immutable copy of all experimental-clip MIDI for the audio thread (no raw `clips_` access).
+struct InstrumentNoteRenderEvent
+{
+    std::int64_t absSample = 0;
+    std::uint8_t midiNote = 60;
+    std::uint8_t velocity = 100;
+};
+
+struct InstrumentClipRenderPlan
+{
+    std::int64_t startSamples = 0;
+    std::int64_t endSamplesExclusive = 0;
+    std::vector<InstrumentNoteRenderEvent> notes;
+};
+
+struct InstrumentTrackRenderSnapshot
+{
+    std::uint32_t revision = 0;
+    bool playbackEnabled = false;
+    int midiChannel = 1;
+    int gateSamples = 4800;
+    /// Sorted by `startSamples`. Notes sorted by `absSample` within each clip.
+    std::vector<InstrumentClipRenderPlan> clips;
 };
 
 class InstrumentTrackController : public juce::ChangeBroadcaster
@@ -111,6 +138,27 @@ public:
     /// numSteps or stepDenom edits only — not BPM-only).
     void recomputeLockedClipLengthFromPatternGrid(InstrumentMidiClip& clip) noexcept;
 
+    /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
+    void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;
+
+    [[nodiscard]] std::shared_ptr<const InstrumentTrackRenderSnapshot> loadRenderSnapshotForAudioThread() const noexcept
+    {
+        return std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
+    }
+
+    /// [Audio thread] Sample-accurate Groove Agent MIDI for one render segment (half-open times).
+    void audioThread_scheduleTransportMidiForSegment(ExperimentalInstrumentHost& host,
+                                                     std::int64_t timelineSegStart,
+                                                     int segNumSamples,
+                                                     int bufferOffsetInDevice,
+                                                     bool forceDiscontinuity,
+                                                     int deviceBlockNumSamples) noexcept;
+
+    /// [Audio thread] Stop/flush: pending transport offs + allNotesOff(1).
+    void audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
+                                        int offsetInDevice,
+                                        int deviceBlockNumSamples) noexcept;
+
 private:
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
@@ -132,5 +180,22 @@ private:
 
     double timelineSampleRate_ = 48000.0;
 
+    std::atomic<std::shared_ptr<const InstrumentTrackRenderSnapshot>> renderSnapshot_;
+    std::uint32_t nextSnapshotRevision_ = 1;
+
+    void publishRenderSnapshot();
     void clearExperimentalInstrumentStateForProjectLoad();
+
+    // --- Audio thread only (I3e transport MIDI; `audioThread_*` entry points) ---
+    struct PendingTransportNoteOff
+    {
+        std::int64_t dueAbsSample = 0;
+        int midiNote = 0;
+    };
+
+    static constexpr int kMaxPendingTransportOffs = 256;
+    std::array<PendingTransportNoteOff, kMaxPendingTransportOffs> rtPendingOffs_{};
+    int rtPendingOffCount_ = 0;
+    std::int64_t rtLastSegEndTimeline_ = -1;
+    std::uint32_t rtLastSnapshotRevision_ = 0;
 };

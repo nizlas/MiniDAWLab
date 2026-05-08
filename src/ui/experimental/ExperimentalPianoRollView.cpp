@@ -217,14 +217,16 @@ std::int64_t ExperimentalPianoRollView::visibleEndSamples() const noexcept
 void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* timelineClip,
                                                           Session* session,
                                                           Transport* transport,
-                                                          juce::AudioDeviceManager* deviceManager) noexcept
+                                                          juce::AudioDeviceManager* deviceManager,
+                                                          InstrumentTrackController* trackController) noexcept
 {
     const bool changed = timelineClip_ != timelineClip || session_ != session || transport_ != transport
-                         || deviceManager_ != deviceManager;
+                         || deviceManager_ != deviceManager || instrumentTrackController_ != trackController;
     timelineClip_ = timelineClip;
     session_ = session;
     transport_ = transport;
     deviceManager_ = deviceManager;
+    instrumentTrackController_ = trackController;
     if (changed)
     {
         viewportInitialized_ = false;
@@ -457,6 +459,10 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "piano-roll: toggle note=" + juce::String(pitch) + " step=" + juce::String(step) + " noteCount="
             + juce::String((int)pattern_.notes.size()));
+        if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+        }
         repaint();
     }
 }

@@ -88,6 +88,16 @@ public:
     /// or no instrument is loaded. Does not touch the plugin on the message thread.
     void enqueueMidiMessageFromMessageThread(const juce::MidiMessage& message);
 
+    /// [Audio thread] Must be called at the start of each device callback before any
+    /// `audioThread_addMidiEventForCurrentBlock` (transport I3e scheduling). Sets the sample clamp
+    /// window to match this block's `numSamples`.
+    void audioThread_beginAudioBlock(int numSamples) noexcept;
+
+    /// [Audio thread] Sample-offset MIDI for the **current** device block (same block as the next
+    /// `audioThread_processBlockAndAddToOutputs`). Uses a separate buffer from UI/preview MIDI.
+    void audioThread_addMidiEventForCurrentBlock(int sampleOffsetInBlock,
+                                                 const juce::MidiMessage& message) noexcept;
+
     void prepareForDevice(double sampleRate, int blockSize);
     void releaseResources();
 
@@ -117,6 +127,10 @@ private:
 
     juce::AudioBuffer<float> scratch_;
     std::vector<float*> scratchPtrs_;
+
+    /// Transport-driven MIDI for the current audio callback (no lock; audio thread only).
+    juce::MidiBuffer rtBlockMidi_;
+    int audioCallbackBlockSamples_ = 0;
 
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
 
