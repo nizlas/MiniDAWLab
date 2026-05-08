@@ -16,8 +16,8 @@
 namespace
 {
     constexpr int kToolbarH = 40;
-    constexpr int kEditorTotalWidth = 720;
-    constexpr int kEditorTotalHeight = 802;
+    constexpr int kInitialEditorWidth = 1100;
+    constexpr int kInitialEditorHeight = 760;
 
     [[nodiscard]] juce::String ptrToLog(const void* p) noexcept
     {
@@ -180,6 +180,13 @@ public:
         sessionForRoll_ = session;
         transportForRoll_ = transport;
         deviceManagerForRoll_ = deviceManager;
+        if (p != nullptr && timelineClip != nullptr)
+        {
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                "midi-editor: bindExternal patternPtr=" + ptrToLog(p) + " noteCount="
+                + juce::String((int)p->notes.size()) + " clipStart=" + juce::String(timelineClip->startSamples)
+                + " clipLength=" + juce::String(timelineClip->lengthSamples));
+        }
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
@@ -366,19 +373,50 @@ public:
         bpmSlider_.setBounds(toolbar.removeFromLeft(140).reduced(0, 2));
         modeLabel_.setBounds(toolbar.reduced(8, 0));
 
-        const int rollH = ExperimentalPianoRollView::kRulerHeight
-                          + (ExperimentalPianoRollView::kPitchHigh - ExperimentalPianoRollView::kPitchLow + 1)
-                                * ExperimentalPianoRollView::kRowHeight;
-        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
-        {
-            rv->setSize(juce::jmax(400, a.getWidth()), rollH);
-        }
+        // Lay out the viewport first, then size the roll to match the viewport's *content budget*.
+        //
+        // JUCE note: `Viewport::getViewWidth/Height()` return `lastVisibleArea` — the intersection of
+        // what you can see with the *current* child size. If the piano roll is still narrow, that value
+        // stays pegged to the child (e.g. 400px), so `jmax(400, getViewWidth())` never grows and the
+        // editor leaves a grey gutter. `getMaximumVisibleWidth/Height()` is the client area minus
+        // scrollbar chrome; use that to size the viewed component so it fills the window.
         viewport_.setBounds(a);
+
+        const int rollMinH = ExperimentalPianoRollView::kRulerHeight
+                             + (ExperimentalPianoRollView::kPitchHigh - ExperimentalPianoRollView::kPitchLow + 1)
+                                   * ExperimentalPianoRollView::kRowHeight;
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
+            const int outerW = juce::jmax(1, viewport_.getWidth());
+            const int outerH = juce::jmax(1, viewport_.getHeight());
+
+            int budgetW = viewport_.getMaximumVisibleWidth();
+            int budgetH = viewport_.getMaximumVisibleHeight();
+            if (budgetW < 1)
+            {
+                budgetW = outerW;
+            }
+            if (budgetH < 1)
+            {
+                budgetH = outerH;
+            }
+
+            const int rw = juce::jmax(1, budgetW);
+            const int rh = juce::jmax(rollMinH, budgetH);
+            rv->setSize(rw, rh);
+            viewport_.setViewPosition(0, 0);
+
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-                "midi-editor: resized viewport=" + viewport_.getBounds().toString() + " roll="
-                + rv->getBounds().toString());
+                "midi-editor: resized viewportBounds=" + viewport_.getBounds().toString() + " maxVisible="
+                + juce::String(budgetW) + "x" + juce::String(budgetH) + " viewArea="
+                + juce::String(viewport_.getViewWidth()) + "x" + juce::String(viewport_.getViewHeight())
+                + " viewPos=" + viewport_.getViewPosition().toString() + " outer=" + juce::String(outerW) + "x"
+                + juce::String(outerH) + " rollBounds=" + rv->getBounds().toString() + " boundExternal="
+                + juce::String(externalPattern_ != nullptr ? "true" : "false") + " patternPtr="
+                + ptrToLog(&activePattern()) + " externalPatternPtr=" + ptrToLog(externalPattern_)
+                + " noteCount=" + juce::String((int)activePattern().notes.size()) + " visibleStart="
+                + juce::String(rv->getViewportVisibleStartSamples()) + " spp="
+                + juce::String(rv->getViewportSamplesPerPixel()));
         }
     }
 
@@ -408,7 +446,9 @@ private:
     {
         ExperimentalMidiPattern& ap = activePattern();
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-            "midi-editor: rebuild roll begin activePatternPtr=" + ptrToLog(&ap));
+            "midi-editor: rebuild roll begin activePatternPtr=" + ptrToLog(&ap) + " externalPatternPtr="
+            + ptrToLog(externalPattern_) + " internalPatternPtr=" + ptrToLog(&pattern_)
+            + " noteCount=" + juce::String((int)ap.notes.size()));
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
         roll->setSessionTimelineContext(
@@ -446,13 +486,13 @@ ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumen
     : DocumentWindow("I2 MIDI editor (Drum hits)",
                      juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                          juce::ResizableWindow::backgroundColourId),
-                     DocumentWindow::closeButton)
+                     DocumentWindow::allButtons)
 {
     setUsingNativeTitleBar(true);
     setContentOwned(new Body(host), true);
-    centreWithSize(kEditorTotalWidth, kEditorTotalHeight);
     setResizable(true, true);
-    setResizeLimits(520, 400, 2000, 1200);
+    setResizeLimits(640, 420, 10000, 10000);
+    centreWithSize(kInitialEditorWidth, kInitialEditorHeight);
 }
 
 ExperimentalMidiEditorWindow::~ExperimentalMidiEditorWindow() = default;

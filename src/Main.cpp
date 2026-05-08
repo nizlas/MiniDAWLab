@@ -955,25 +955,10 @@ private:
                 experimentalInstrumentHost_.openNativeEditor();
             };
             addAndMakeVisible(experimentalInstrumentMidiEditorButton_);
-            experimentalInstrumentMidiEditorButton_.onClick = [this] {
-                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: button clicked");
-                const bool hasInst = experimentalInstrumentHost_.hasInstrument();
-                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-                    "midi-editor: open requested hasInstrument="
-                    + juce::String(hasInst ? "true" : "false"));
-                if (experimentalMidiEditorWindow_ == nullptr)
-                {
-                    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create begin");
-                    experimentalMidiEditorWindow_
-                        = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
-                    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create ok");
-                }
-                experimentalMidiEditorWindow_->unbindExternalPattern();
-                experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
-                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window setVisible true");
-                experimentalMidiEditorWindow_->setVisible(true);
-                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window toFront");
-                experimentalMidiEditorWindow_->toFront(true);
+            experimentalInstrumentMidiEditorButton_.onClick = [this] { openInstrumentMidiEditorFromToolbar(); };
+            addAndMakeVisible(experimentalInstrumentScratchMidiEditorButton_);
+            experimentalInstrumentScratchMidiEditorButton_.onClick = [this] {
+                openExperimentalScratchMidiEditor();
             };
             addAndMakeVisible(experimentalInstrumentTestKickButton_);
             // Instrument-track Power/Mute gate clip-bound MIDI roll playback only; Test Kick still
@@ -1666,12 +1651,14 @@ private:
             constexpr int kExpLoadW = 108;
             constexpr int kExpEdW = 72;
             constexpr int kExpMidiW = 100;
-            constexpr int kExpKickW = 168;
+            constexpr int kExpScratchW = 124;
+            constexpr int kExpKickW = 152;
             constexpr int kExpUnlW = 72;
             experimentalInstrumentScanOnlyButton_.setBounds(expBtn.removeFromLeft(kExpScanW).reduced(2, 0));
             experimentalInstrumentLoadButton_.setBounds(expBtn.removeFromLeft(kExpLoadW).reduced(2, 0));
             experimentalInstrumentEditorButton_.setBounds(expBtn.removeFromLeft(kExpEdW).reduced(2, 0));
             experimentalInstrumentMidiEditorButton_.setBounds(expBtn.removeFromLeft(kExpMidiW).reduced(2, 0));
+            experimentalInstrumentScratchMidiEditorButton_.setBounds(expBtn.removeFromLeft(kExpScratchW).reduced(2, 0));
             experimentalInstrumentTestKickButton_.setBounds(expBtn.removeFromLeft(kExpKickW).reduced(2, 0));
             experimentalInstrumentUnloadButton_.setBounds(expBtn.removeFromLeft(kExpUnlW).reduced(2, 0));
             experimentalInstrumentStatusLabel_.setBounds(expInner.reduced(2, 0));
@@ -1778,6 +1765,64 @@ private:
                                                                &transport,
                                                                &deviceManager,
                                                                clip->name);
+            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            experimentalMidiEditorWindow_->setVisible(true);
+            experimentalMidiEditorWindow_->toFront(true);
+        }
+
+        /// Toolbar **MIDI roll…**: always opens the project clip-bound editor (same binding as double-click),
+        /// or explains why it cannot. The separate **Scratch MIDI roll…** keeps the internal scratch pattern.
+        void openInstrumentMidiEditorFromToolbar()
+        {
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: toolbar MIDI roll clicked");
+            const auto& clips = instrumentTrackController_.getClips();
+            if (!instrumentTrackController_.hasInstrumentTrack() || clips.empty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                                       "MIDI editor",
+                                                       "No instrument MIDI clip is available.\n\n"
+                                                       "Add an instrument track or load a project that "
+                                                       "contains instrument MIDI, then try again.");
+                return;
+            }
+
+            InstrumentMidiClipId targetId = 0;
+            const InstrumentMidiClipId sel = instrumentTrackController_.getSelectedClipId();
+            if (sel != 0 && instrumentTrackController_.getClipById(sel) != nullptr)
+            {
+                targetId = sel;
+            }
+            else if (clips.size() == 1u)
+            {
+                targetId = clips.front()->id;
+            }
+            else
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "MIDI editor",
+                    "Select a MIDI event in the instrument lane to edit it, or double-click the clip.");
+                return;
+            }
+
+            openMidiEditorForInstrumentClip(targetId);
+        }
+
+        void openExperimentalScratchMidiEditor()
+        {
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: scratch roll clicked");
+            const bool hasInst = experimentalInstrumentHost_.hasInstrument();
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                "midi-editor: scratch open requested hasInstrument="
+                + juce::String(hasInst ? "true" : "false"));
+            if (experimentalMidiEditorWindow_ == nullptr)
+            {
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create begin");
+                experimentalMidiEditorWindow_
+                    = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create ok");
+            }
+            experimentalMidiEditorWindow_->unbindExternalPattern();
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
@@ -2548,7 +2593,10 @@ private:
 
             const bool has = experimentalInstrumentHost_.hasInstrument();
             experimentalInstrumentEditorButton_.setEnabled(has);
-            experimentalInstrumentMidiEditorButton_.setEnabled(true);
+            const bool canOpenClipMidiRoll
+                = showInst && !instrumentTrackController_.getClips().empty();
+            experimentalInstrumentMidiEditorButton_.setEnabled(canOpenClipMidiRoll);
+            experimentalInstrumentScratchMidiEditorButton_.setEnabled(true);
             experimentalInstrumentTestKickButton_.setEnabled(has);
             experimentalInstrumentUnloadButton_.setEnabled(has);
             if (experimentalMidiEditorWindow_ != nullptr)
@@ -4228,6 +4276,7 @@ private:
         juce::TextButton experimentalInstrumentScanOnlyButton_{ "Scan only..." };
         juce::TextButton experimentalInstrumentEditorButton_{ "Editor" };
         juce::TextButton experimentalInstrumentMidiEditorButton_{ "MIDI roll..." };
+        juce::TextButton experimentalInstrumentScratchMidiEditorButton_{ "Scratch MIDI roll..." };
         juce::TextButton experimentalInstrumentTestKickButton_{ "Test Kick (MIDI 36)" };
         juce::TextButton experimentalInstrumentUnloadButton_{ "Unload" };
         juce::Label experimentalInstrumentStatusLabel_;

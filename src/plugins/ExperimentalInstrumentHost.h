@@ -44,9 +44,22 @@ public:
     /// [Message thread] Loads from a description obtained out-of-process (e.g. raw OOP scan or XML cache).
     /// Skips in-process findAllTypesForFile. If `desc.fileOrIdentifier` is empty, uses `originalPath`.
     /// `sourceTag` is copied into experimental-instrument.log (e.g. "oop-description", "cached-oop-description").
-    [[nodiscard]] juce::Result loadInstrumentFromDescription(const juce::PluginDescription& desc,
-                                                             const juce::File& originalPath,
-                                                             const char* sourceTag = "oop-description");
+    /// If `pluginStateToRestore` is non-null and non-empty, `setStateInformation` runs on the message thread
+    /// after layout `prepare` and before publishing `activeOwner_` (audio thread never sees pre-restored instance).
+    /// On restore failure the instance is reset via `releaseResources` + `tryPrepareInstrumentLayout` (default patch).
+    /// `outPluginStateRestoreWarning` receives a user-facing message if restore fails (load still succeeds).
+    [[nodiscard]] juce::Result loadInstrumentFromDescription(
+        const juce::PluginDescription& desc,
+        const juce::File& originalPath,
+        const char* sourceTag = "oop-description",
+        const juce::MemoryBlock* pluginStateToRestore = nullptr,
+        juce::String* outPluginStateRestoreWarning = nullptr);
+
+    /// [Message thread] Appends one line to `experimental-instrument.log` (shared with load/unload diagnostics).
+    static void appendInstrumentHostLogLine(const juce::String& message);
+
+    /// [Message thread] Base64 `getStateInformation` for the loaded instrument, or empty.
+    [[nodiscard]] juce::String getCurrentInstrumentStateBase64() const;
 
     /// [Message thread] Runs `findAllTypesForFile` only (no `createPluginInstance`, no bus prep).
     /// Writes flushed boundary lines to `%APPDATA%\\MiniDAWLab\\experimental-vst3-scan-diagnostic.log`.

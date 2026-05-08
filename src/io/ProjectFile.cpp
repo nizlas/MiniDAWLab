@@ -316,6 +316,7 @@ namespace
                 et.requiredKitName = "FiftySixDegreesModified";
             }
             et.pluginBundlePath = tv.getProperty("pluginBundlePath", {}).toString();
+            et.pluginStateBase64 = tv.getProperty("pluginStateBase64", {}).toString();
             const juce::var& pwl = tv.getProperty("pluginWasLoadedOnSave", {});
             if (pwl.isBool())
             {
@@ -534,6 +535,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             if (et.pluginWasLoadedOnSave)
             {
                 eo->setProperty("pluginWasLoadedOnSave", true);
+            }
+            if (et.pluginStateBase64.isNotEmpty())
+            {
+                eo->setProperty("pluginStateBase64", et.pluginStateBase64);
             }
             if (!et.powerOn)
             {

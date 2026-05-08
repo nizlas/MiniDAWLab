@@ -2,6 +2,8 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
+#include <juce_core/juce_core.h>
+
 InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept
     : host_(host)
 {
@@ -192,6 +194,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingProjectGrooveAutoload_ = false;
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
+    pendingPluginStateBase64_.clear();
 }
 
 ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperimentalInstrumentProjectBlock() const
@@ -207,6 +210,10 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     dto.requiredKitName = requiredKitName_.isNotEmpty() ? requiredKitName_ : juce::String("FiftySixDegreesModified");
     dto.pluginBundlePath = host_.getLastLoadedVst3OriginalPath();
     dto.pluginWasLoadedOnSave = host_.hasInstrument();
+    if (dto.pluginWasLoadedOnSave)
+    {
+        dto.pluginStateBase64 = host_.getCurrentInstrumentStateBase64();
+    }
     dto.powerOn = powerOn_;
     dto.muted = muted_;
     for (const auto& cptr : clips_)
@@ -269,6 +276,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     pendingProjectGrooveAutoload_ = chosen->pluginWasLoadedOnSave && chosen->instrumentKind == "GrooveAgentSE";
     pendingAdvisoryPluginBundlePath_ = chosen->pluginBundlePath;
     pendingInstrumentKind_ = chosen->instrumentKind;
+    pendingPluginStateBase64_ = chosen->pluginStateBase64;
 
     InstrumentMidiClipId maxId = 0;
     for (const auto& cdto : chosen->clips)
@@ -331,11 +339,14 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     if (!trackActive_ || !pendingProjectGrooveAutoload_ || pendingInstrumentKind_ != "GrooveAgentSE")
     {
         pendingProjectGrooveAutoload_ = false;
+        pendingPluginStateBase64_.clear();
         syncShellWithHostState();
         return;
     }
 
     pendingProjectGrooveAutoload_ = false;
+    const juce::String pendingB64 = pendingPluginStateBase64_;
+    pendingPluginStateBase64_.clear();
 
     std::vector<juce::PluginDescription> descs;
     juce::File bundle;
@@ -361,8 +372,45 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
         return;
     }
 
+    juce::MemoryBlock decodedState;
+    const juce::MemoryBlock* statePtr = nullptr;
+    juce::String stateRestoreHostWarning;
+
+    if (pendingB64.isNotEmpty())
+    {
+        juce::MemoryOutputStream mos;
+        if (!juce::Base64::convertFromBase64(mos, pendingB64))
+        {
+            ExperimentalInstrumentHost::appendInstrumentHostLogLine(
+                "plugin-state: restore failed message=\"invalid base64 in project file\"");
+            outWarning = "Groove Agent plug-in state in this project could not be decoded. "
+                         "Open the instrument editor and load the kit manually if audio is silent.";
+            if (requiredKitName_.isNotEmpty())
+            {
+                outWarning << " Kit hint: " << requiredKitName_ << ".";
+            }
+        }
+        else
+        {
+            decodedState.replaceAll(mos.getData(), mos.getDataSize());
+            if (decodedState.getSize() > 0)
+            {
+                statePtr = &decodedState;
+            }
+        }
+    }
+    else
+    {
+        ExperimentalInstrumentHost::appendInstrumentHostLogLine("plugin-state: restore skipped reason=no-state");
+    }
+
     const char* const tag = pathRepairUsed ? "project-autoload-repaired-cache" : "project-autoload-cached";
-    const juce::Result loadResult = host.loadInstrumentFromDescription(descs.front(), bundle, tag);
+    const juce::Result loadResult = host.loadInstrumentFromDescription(
+        descs.front(),
+        bundle,
+        tag,
+        statePtr,
+        (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
     if (loadResult.wasOk())
     {
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: load result ok");
@@ -374,12 +422,30 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     }
     else
     {
-        outWarning = loadResult.getErrorMessage();
+        if (outWarning.isNotEmpty())
+        {
+            outWarning << "\n\n";
+        }
+        outWarning << loadResult.getErrorMessage();
         mini_daw::writeVst3OopScanDiagnosticLogLine(
             "project-autoload: load result failed message=\"" + loadResult.getErrorMessage() + "\"");
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: failed, project remains editable");
         juce::Logger::writeToLog("[project-autoload] Groove Agent load failed: " + loadResult.getErrorMessage());
     }
+
+    if (stateRestoreHostWarning.isNotEmpty())
+    {
+        if (outWarning.isNotEmpty())
+        {
+            outWarning << "\n\n";
+        }
+        outWarning << stateRestoreHostWarning;
+        if (requiredKitName_.isNotEmpty())
+        {
+            outWarning << " Kit hint: " << requiredKitName_ << ".";
+        }
+    }
+
     syncShellWithHostState();
 }
 

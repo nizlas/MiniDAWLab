@@ -6,7 +6,9 @@
 #include "domain/Session.h"
 #include "transport/Transport.h"
 
+#include <climits>
 #include <cmath>
+#include <limits>
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -139,6 +141,11 @@ namespace
     {
         const int k = ((midiNote % 12) + 12) % 12;
         return k == 1 || k == 3 || k == 6 || k == 8 || k == 10;
+    }
+
+    [[nodiscard]] juce::String ptrToLogRoll(const void* p) noexcept
+    {
+        return p != nullptr ? juce::String::formatted("%p", p) : juce::String("null");
     }
 } // namespace
 
@@ -373,6 +380,12 @@ void ExperimentalPianoRollView::timerCallback()
 
 void ExperimentalPianoRollView::resized()
 {
+    const int w = getWidth();
+    if (useAbsoluteTimeline() && lastResizeComponentWidth_ >= 0 && w != lastResizeComponentWidth_)
+    {
+        viewportInitialized_ = false;
+    }
+    lastResizeComponentWidth_ = w;
     Component::resized();
     if (useAbsoluteTimeline())
     {
@@ -490,19 +503,13 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
 
 void ExperimentalPianoRollView::paint(juce::Graphics& g)
 {
-    if (!loggedFirstPaint_)
-    {
-        loggedFirstPaint_ = true;
-        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-            "piano-roll: paint width=" + juce::String(getWidth()) + " height=" + juce::String(getHeight()));
-    }
-
     const auto kb = keyboardBounds();
     const auto gr = gridBounds();
     const auto rulerCorner = rulerCornerBounds();
     const auto rulerTrack = rulerTrackBounds();
 
     const bool absTime = useAbsoluteTimeline();
+
     if (absTime)
     {
         ensureViewportSeeded();
@@ -522,6 +529,73 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
 
     const float cw = cellWidth();
     const int nSteps = juce::jmax(1, pattern_.numSteps);
+
+    {
+        static int sLastPaintW = INT_MIN;
+        static int sLastPaintH = INT_MIN;
+        static int sLastNoteCount = INT_MIN;
+        static bool sLastAbsTime = false;
+        static const void* sLastClip = nullptr;
+        static std::int64_t sLastVisStart = std::numeric_limits<std::int64_t>::min();
+        static double sLastSpp = 0.0;
+        static bool sHaveSppSnapshot = false;
+        static bool sHavePaintSnapshot = false;
+
+        const int w = getWidth();
+        const int h = getHeight();
+        const int nc = (int)pattern_.notes.size();
+        const void* const clipPtr = timelineClip_;
+        const std::int64_t cStart = timelineClip_ != nullptr ? timelineClip_->startSamples : 0;
+        const std::int64_t cLen = timelineClip_ != nullptr ? timelineClip_->lengthSamples : 0;
+        const std::int64_t v0 = visibleStartSamples_;
+        const double sppNow = samplesPerPixel_;
+        const bool sppChanged = !sHaveSppSnapshot || std::fabs(sppNow - sLastSpp) > 1.0e-9;
+        if (!sHavePaintSnapshot || w != sLastPaintW || h != sLastPaintH || nc != sLastNoteCount
+            || absTime != sLastAbsTime || clipPtr != sLastClip || v0 != sLastVisStart || sppChanged)
+        {
+            sHavePaintSnapshot = true;
+            sHaveSppSnapshot = true;
+            sLastPaintW = w;
+            sLastPaintH = h;
+            sLastNoteCount = nc;
+            sLastAbsTime = absTime;
+            sLastClip = clipPtr;
+            sLastVisStart = v0;
+            sLastSpp = sppNow;
+
+            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                "piano-roll: paint size=" + juce::String(w) + "x" + juce::String(h) + " noteCount="
+                + juce::String(nc) + " absTime=" + juce::String(absTime ? "true" : "false") + " clipStart="
+                + juce::String(cStart) + " clipLength=" + juce::String(cLen) + " visibleStart=" + juce::String(v0)
+                + " spp=" + juce::String(sppNow) + " gridBounds=" + gr.toString());
+
+            int loggedNotes = 0;
+            for (const auto& hit : pattern_.notes)
+            {
+                if (loggedNotes >= 64)
+                {
+                    break;
+                }
+                float xPix = 0.0f;
+                std::int64_t absS = -1;
+                if (absTime && timelineClip_ != nullptr)
+                {
+                    const std::int64_t lenClip = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+                    absS = absoluteSampleForNoteInClip(
+                        timelineClip_->startSamples, hit.step, pattern_.numSteps, lenClip);
+                    xPix = xForSessionSample(absS);
+                }
+                else
+                {
+                    xPix = (float)gr.getX() + ((float)hit.step + 0.5f) * cw;
+                }
+                ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+                    "piano-roll: noteMap note=" + juce::String(hit.midiNote) + " step=" + juce::String(hit.step)
+                    + " absSample=" + juce::String(absS) + " x=" + juce::String(xPix));
+                ++loggedNotes;
+            }
+        }
+    }
 
     auto rowRect = [&](const int midiNote) -> juce::Rectangle<int> {
         const int rowFromTop = kPitchHigh - midiNote;

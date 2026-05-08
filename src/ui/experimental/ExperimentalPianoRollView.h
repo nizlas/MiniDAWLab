@@ -46,10 +46,11 @@ public:
 
     void seedOrResetViewport();
 
+    [[nodiscard]] std::int64_t getViewportVisibleStartSamples() const noexcept { return visibleStartSamples_; }
+    [[nodiscard]] double getViewportSamplesPerPixel() const noexcept { return samplesPerPixel_; }
+
 private:
     void timerCallback() override;
-
-    bool loggedFirstPaint_ = false;
 
     [[nodiscard]] bool useAbsoluteTimeline() const noexcept;
     void ensureViewportSeeded();
@@ -90,6 +91,8 @@ private:
     std::int64_t lastObservedClipStartSamplesUi_ = 0;
     std::int64_t lastObservedClipLengthSamplesUi_ = 0;
     int lastObservedNoteCountUi_ = -1;
+
+    int lastResizeComponentWidth_ = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExperimentalPianoRollView)
 };

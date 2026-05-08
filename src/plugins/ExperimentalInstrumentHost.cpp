@@ -626,9 +626,48 @@ juce::String ExperimentalInstrumentHost::getLastLoadedVst3OriginalPath() const n
     return lastLoadedVst3OriginalPath_;
 }
 
+void ExperimentalInstrumentHost::appendInstrumentHostLogLine(const juce::String& message)
+{
+    writeExperimentalInstrumentLogLine(message);
+}
+
+juce::String ExperimentalInstrumentHost::getCurrentInstrumentStateBase64() const
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return {};
+    }
+
+    writeExperimentalInstrumentLogLine("plugin-state: save begin");
+
+    auto o = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    if (o == nullptr || o->inst == nullptr || !o->layoutOk)
+    {
+        writeExperimentalInstrumentLogLine("plugin-state: save skipped reason=no-instrument");
+        return {};
+    }
+
+    juce::MemoryBlock mb;
+    o->inst->getStateInformation(mb);
+    const juce::int64 nBytes = (juce::int64)mb.getSize();
+    if (nBytes <= 0)
+    {
+        writeExperimentalInstrumentLogLine("plugin-state: save ok bytes=0 base64Chars=0");
+        return {};
+    }
+
+    const juce::String b64 = juce::Base64::toBase64(mb.getData(), (int)mb.getSize());
+    writeExperimentalInstrumentLogLine("plugin-state: save ok bytes=" + juce::String(nBytes)
+                                       + " base64Chars=" + juce::String(b64.length()));
+    return b64;
+}
+
 juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juce::PluginDescription& descIn,
                                                                          const juce::File& originalPath,
-                                                                         const char* sourceTag)
+                                                                         const char* sourceTag,
+                                                                         const juce::MemoryBlock* pluginStateToRestore,
+                                                                         juce::String* outPluginStateRestoreWarning)
 {
     if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
         || !juce::MessageManager::getInstance()->isThisTheMessageThread())
@@ -713,8 +752,8 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     writeExperimentalInstrumentLogLine(
         "createPluginInstance: OK instanceName=\"" + inst->getName() + "\"");
 
-    const bool layoutOk = tryPrepareInstrumentLayout(*inst, sampleRate_, blockSize_);
-    if (!layoutOk)
+    bool finalLayoutOk = tryPrepareInstrumentLayout(*inst, sampleRate_, blockSize_);
+    if (!finalLayoutOk)
     {
         writeExperimentalInstrumentLogLine("load: FAILED bus layout after prepare (see bus negotiation lines above).");
         inst->releaseResources();
@@ -724,12 +763,78 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
             + juce::String(inst->getMainBusNumOutputChannels()));
     }
 
+    if (pluginStateToRestore != nullptr && pluginStateToRestore->getSize() > 0)
+    {
+        writeExperimentalInstrumentLogLine(
+            "plugin-state: restore begin bytes=" + juce::String((juce::int64)pluginStateToRestore->getSize()));
+        bool restoreOk = false;
+        try
+        {
+            inst->setStateInformation(pluginStateToRestore->getData(), (int)pluginStateToRestore->getSize());
+            if (inst->getMainBusNumOutputChannels() < kStereoChannels)
+            {
+                inst->prepareToPlay(srU, bsU);
+            }
+            restoreOk = inst->getMainBusNumOutputChannels() >= kStereoChannels;
+            if (restoreOk)
+            {
+                writeExperimentalInstrumentLogLine("plugin-state: restore ok");
+            }
+        }
+        catch (const std::exception& e)
+        {
+            writeExperimentalInstrumentLogLine(
+                "plugin-state: restore failed message=\"" + juce::String(e.what()) + "\"");
+            if (outPluginStateRestoreWarning != nullptr)
+            {
+                *outPluginStateRestoreWarning
+                    = "Groove Agent could not apply saved plug-in state (" + juce::String(e.what())
+                      + "). You may need to load the kit manually if audio is silent.";
+            }
+        }
+        catch (...)
+        {
+            writeExperimentalInstrumentLogLine("plugin-state: restore failed message=\"unknown exception\"");
+            if (outPluginStateRestoreWarning != nullptr)
+            {
+                *outPluginStateRestoreWarning = "Groove Agent could not apply saved plug-in state (unknown error). "
+                                                "You may need to load the kit manually if audio is silent.";
+            }
+        }
+
+        if (!restoreOk && outPluginStateRestoreWarning != nullptr && outPluginStateRestoreWarning->isEmpty())
+        {
+            writeExperimentalInstrumentLogLine(
+                "plugin-state: restore failed message=\"invalid output bus layout after setState\"");
+            *outPluginStateRestoreWarning
+                = "Groove Agent saved state could not be applied (invalid bus layout after restore). "
+                  "You may need to load the kit manually if audio is silent.";
+        }
+
+        if (!restoreOk)
+        {
+            writeExperimentalInstrumentLogLine("plugin-state: reset to default patch after failed restore");
+            inst->releaseResources();
+            finalLayoutOk = tryPrepareInstrumentLayout(*inst, sampleRate_, blockSize_);
+            if (!finalLayoutOk)
+            {
+                writeExperimentalInstrumentLogLine(
+                    "load: FAILED bus layout after failed state restore + reset (see bus negotiation lines above).");
+                inst->releaseResources();
+                return juce::Result::fail(
+                    "Could not use instrument bus layout after attempted state restore reset. "
+                    "Plugin reports main bus output channels: "
+                    + juce::String(inst->getMainBusNumOutputChannels()));
+            }
+        }
+    }
+
     writeExperimentalInstrumentScanBoundaryLine(
         "load: BEFORE active slot publish + scratch alloc totalOut=" + juce::String(inst->getTotalNumOutputChannels()));
 
     auto owner = std::make_shared<InstrumentOwner>();
     owner->inst = std::move(inst);
-    owner->layoutOk = true;
+    owner->layoutOk = finalLayoutOk;
 
     std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
 

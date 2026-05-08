@@ -125,6 +125,7 @@ private:
     bool isActive_ = false;
 
     juce::String requiredKitName_;
+    juce::String pendingPluginStateBase64_;
     bool pendingProjectGrooveAutoload_ = false;
     juce::String pendingAdvisoryPluginBundlePath_;
     juce::String pendingInstrumentKind_;

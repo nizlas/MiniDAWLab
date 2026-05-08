@@ -81,3 +81,9 @@ target_link_libraries(MiniDAWLab
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+# JUCE juce_VST3PluginFormat.cpp + VST3 SDK headers: local `iid` triggers MSVC C4458 (hides base member).
+# Safe to silence; module sources compile as part of this target.
+if (MSVC)
+    target_compile_options(MiniDAWLab PRIVATE /wd4458)
+endif()

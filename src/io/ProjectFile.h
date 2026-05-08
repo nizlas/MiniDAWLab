@@ -86,6 +86,7 @@ struct ProjectFileExperimentalInstrumentClipV1
 };
 
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).
+/// Optional `pluginStateBase64`: Base64 `AudioPluginInstance::getStateInformation` when saved with plug-in loaded.
 struct ProjectFileExperimentalInstrumentTrackV1
 {
     bool enabled = true;
@@ -94,6 +95,8 @@ struct ProjectFileExperimentalInstrumentTrackV1
     juce::String requiredKitName { "FiftySixDegreesModified" };
     /// Local hint only; may be missing on another machine (path repair may still find the plugin).
     juce::String pluginBundlePath;
+    /// Optional Base64 blob from `AudioPluginInstance::getStateInformation` when saved with plugin loaded.
+    juce::String pluginStateBase64;
     bool pluginWasLoadedOnSave = false;
     bool powerOn = true;
     bool muted = false;
