@@ -59,4 +59,20 @@ void writeVst3OopScanDiagnosticLogLine(const juce::String& message);
     const juce::File& vst3Bundle,
     std::vector<juce::PluginDescription>& descriptionsOut);
 
+/// Merge / replace one `bundle` entry in `experimental-vst3-descriptions.xml` (used after OOP scan or path repair).
+void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
+                                                    const std::vector<juce::PluginDescription>& descriptions);
+
+/// Project-load helper for **GrooveAgentSE** only: load from cache (optional full-cache scan), and if the
+/// cached bundle / `fileOrIdentifier` no longer exists, search standard Windows VST3 folders for
+/// `Groove Agent SE.vst3`, patch `PluginDescription` paths in memory, and return the resolved bundle.
+/// Does not run in-process `findAllTypesForFile` or raw OOP scan. Logs to `experimental-vst3-oop-scan.log`.
+[[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
+    const juce::File& savedOrAdvisoryBundle,
+    const juce::String& instrumentKind,
+    std::vector<juce::PluginDescription>& descriptionsOut,
+    juce::File& resolvedBundleOut,
+    juce::String& infoOrWarningOut,
+    bool* pathRepairWasUsedOut = nullptr);
+
 } // namespace mini_daw

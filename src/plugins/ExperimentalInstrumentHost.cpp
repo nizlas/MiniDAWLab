@@ -617,7 +617,13 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
     writeExperimentalInstrumentLogLine(
         "load: COMPLETED OK plugin=\"" + owner->inst->getName() + "\" totalOutCh=" + juce::String(totalCh));
 
+    lastLoadedVst3OriginalPath_ = vst3File.getFullPathName();
     return juce::Result::ok();
+}
+
+juce::String ExperimentalInstrumentHost::getLastLoadedVst3OriginalPath() const noexcept
+{
+    return lastLoadedVst3OriginalPath_;
 }
 
 juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juce::PluginDescription& descIn,
@@ -748,6 +754,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     writeExperimentalInstrumentLogLine(
         "load: COMPLETED OK plugin=\"" + owner->inst->getName() + "\" totalOutCh=" + juce::String(totalCh));
 
+    lastLoadedVst3OriginalPath_ = originalPath.getFullPathName();
     return juce::Result::ok();
 }
 
@@ -821,6 +828,8 @@ void ExperimentalInstrumentHost::unloadInstrument()
     }
 
     writeExperimentalInstrumentLogLine("unload: requested");
+
+    lastLoadedVst3OriginalPath_.clear();
 
     closeNativeEditor();
     if (testKickNoteOffTimer_ != nullptr)

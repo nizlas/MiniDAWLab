@@ -5,11 +5,12 @@
 // =============================================================================
 //
 // Message-thread only. Owns zero or one Groove-Agent instrument track and its MIDI
-// clips in memory (no Session / ProjectFile). Track and clips survive host unload;
-// instrumentLoaded_ only reflects whether the global Groove Agent slot is filled.
+// clips in memory (experimental ProjectFile v11 + optional project-load autoload).
+// instrumentLoaded_ reflects whether the global Groove Agent slot is filled.
 //
 // =============================================================================
 
+#include "io/ProjectFile.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <cstdint>
@@ -18,7 +19,7 @@
 
 #include <juce_events/juce_events.h>
 
-class ExperimentalInstrumentHost;
+class ExperimentalInstrumentHost; // IWYU: full type in .cpp for autoload
 
 using InstrumentMidiClipId = std::uint64_t;
 
@@ -85,6 +86,19 @@ public:
     void setSelectedClipId(InstrumentMidiClipId id) noexcept;
     void clearClipSelection() noexcept { setSelectedClipId(0); }
 
+    [[nodiscard]] const juce::String& getRequiredKitName() const noexcept { return requiredKitName_; }
+    void setRequiredKitName(juce::String name) noexcept;
+
+    /// One enabled row for `experimentalInstrumentTracks` when `hasInstrumentTrack()`.
+    [[nodiscard]] ProjectFileExperimentalInstrumentTrackV1 buildExperimentalInstrumentProjectBlock() const;
+
+    /// Replace in-memory track + clips from project (message thread). Clears track when `tracks` empty
+    /// or no enabled GrooveAgentSE row.
+    void restoreExperimentalInstrumentFromProject(const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks);
+
+    /// After `loadProjectFromFile`, attempts cache load + optional Windows path repair + host load.
+    void runPendingGrooveAgentProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
+
 private:
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
@@ -97,4 +111,11 @@ private:
     bool powerOn_ = true;
     bool muted_ = false;
     bool isActive_ = false;
+
+    juce::String requiredKitName_;
+    bool pendingProjectGrooveAutoload_ = false;
+    juce::String pendingAdvisoryPluginBundlePath_;
+    juce::String pendingInstrumentKind_;
+
+    void clearExperimentalInstrumentStateForProjectLoad();
 };

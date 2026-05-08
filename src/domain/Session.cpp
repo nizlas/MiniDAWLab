@@ -15,6 +15,7 @@
 #include "domain/Session.h"
 
 #include "domain/AudioClip.h"
+#include "instruments/InstrumentTrackController.h"
 #include "io/AudioFileLoader.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginInsertHost.h"
@@ -911,7 +912,8 @@ std::shared_ptr<const SessionSnapshot> Session::loadSessionSnapshotForAudioThrea
 juce::Result Session::saveProjectToFile(Transport& transport,
                                        const juce::File& file,
                                        const double deviceSampleRate,
-                                       PluginInsertHost* pluginHost)
+                                       PluginInsertHost* pluginHost,
+                                       InstrumentTrackController* instrumentController)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -1014,6 +1016,11 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         out.tracks.push_back(std::move(tr));
     }
 
+    if (instrumentController != nullptr && instrumentController->hasInstrumentTrack())
+    {
+        out.experimentalInstrumentTracks.push_back(instrumentController->buildExperimentalInstrumentProjectBlock());
+    }
+
     if (out.tracks.empty())
     {
         return juce::Result::fail("Session has no tracks to save.");
@@ -1031,7 +1038,8 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                                           const double deviceSampleRate,
                                           juce::StringArray& outSkippedClipDetails,
                                           juce::String& outInfoNote,
-                                          PluginInsertHost* pluginHost)
+                                          PluginInsertHost* pluginHost,
+                                          InstrumentTrackController* instrumentController)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -1219,6 +1227,11 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                 pluginHost->importChain(trDto.id, chain);
             }
         }
+    }
+
+    if (instrumentController != nullptr)
+    {
+        instrumentController->restoreExperimentalInstrumentFromProject(parsed.experimentalInstrumentTracks);
     }
 
     return juce::Result::ok();

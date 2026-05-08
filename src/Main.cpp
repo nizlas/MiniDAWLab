@@ -3338,7 +3338,7 @@ private:
             if (session.hasKnownProjectFile())
             {
                 const juce::Result r = session.saveProjectToFile(
-                    transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_);
+                    transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_, &instrumentTrackController_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -3407,7 +3407,7 @@ private:
                     }
                 }
                 const juce::Result r
-                    = session.saveProjectToFile(transport, projectFile, sampleRate, &pluginHost_);
+                    = session.saveProjectToFile(transport, projectFile, sampleRate, &pluginHost_, &instrumentTrackController_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -3445,12 +3445,23 @@ private:
                 juce::StringArray skipped;
                 juce::String infoNote;
                 const juce::Result r
-                    = session.loadProjectFromFile(transport, f, sampleRate, skipped, infoNote, &pluginHost_);
+                    = session.loadProjectFromFile(transport, f, sampleRate, skipped, infoNote, &pluginHost_, &instrumentTrackController_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
                     return;
+                }
+                juce::String experimentalInstrumentAutoloadNote;
+                instrumentTrackController_.runPendingGrooveAgentProjectAutoload(
+                    experimentalInstrumentHost_, experimentalInstrumentAutoloadNote);
+                if (experimentalInstrumentAutoloadNote.isNotEmpty())
+                {
+                    if (infoNote.isNotEmpty())
+                    {
+                        infoNote << "\n\n";
+                    }
+                    infoNote << experimentalInstrumentAutoloadNote;
                 }
                 sessionHistory_.clear();
                 syncViewportFromSession();
@@ -3458,6 +3469,8 @@ private:
                 inspectorView_.refreshFromSession();
                 rulerView.repaint();
                 trackLanesView.repaint();
+                refreshExperimentalInstrumentUi();
+                resized();
                 if (infoNote.isNotEmpty() || skipped.size() > 0)
                 {
                     juce::String body;

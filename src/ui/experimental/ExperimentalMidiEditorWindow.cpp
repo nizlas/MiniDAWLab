@@ -189,11 +189,17 @@ public:
         const bool clipBound = externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr;
         const bool canPlayPattern = editorInstrumentGate();
         const juce::String instrumentName = host_.getInstrumentNameForUi();
+        const juce::String requiredKitForUi
+            = clipBound && instrumentTrackForClipBind_ != nullptr
+                  ? instrumentTrackForClipBind_->getRequiredKitName()
+                  : juce::String();
         const bool changed = !instrumentUiInitialized_ || (canPlayPattern != lastPlayGate_)
-                             || (instrumentName != lastInstrumentName_);
+                             || (instrumentName != lastInstrumentName_)
+                             || (requiredKitForUi != lastRequiredKitName_);
         instrumentUiInitialized_ = true;
         lastPlayGate_ = canPlayPattern;
         lastInstrumentName_ = instrumentName;
+        lastRequiredKitName_ = requiredKitForUi;
 
         playButton_.setEnabled(canPlayPattern);
 
@@ -223,7 +229,24 @@ public:
             else
             {
                 instPart = instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
-                                                       : juce::String("Instrument: (loaded)");
+                                                        : juce::String("Instrument: (loaded)");
+            }
+        }
+
+        juce::String kitLine;
+        if (clipBound)
+        {
+            const auto* trk = instrumentTrackForClipBind_;
+            if (trk != nullptr && trk->getRequiredKitName().isNotEmpty())
+            {
+                if (!trk->isInstrumentLoaded())
+                {
+                    kitLine = "\nRequired kit: " + trk->getRequiredKitName() + " (Groove Agent not loaded)";
+                }
+                else
+                {
+                    kitLine = "\nLoad kit in Groove Agent: " + trk->getRequiredKitName();
+                }
             }
         }
 
@@ -232,7 +255,7 @@ public:
 
         modeLabel_.setText(
             juce::String("Mode: Drum hits (100 ms gate) | ") + instPart + "\n"
-                + "Timing: ~4 ms message timer; not sample-accurate.",
+                + "Timing: ~4 ms message timer; not sample-accurate." + kitLine,
             juce::dontSendNotification);
         modeLabel_.setColour(juce::Label::textColourId, labelColour);
 
@@ -331,6 +354,7 @@ private:
     bool instrumentUiInitialized_ = false;
     bool lastPlayGate_ = false;
     juce::String lastInstrumentName_;
+    juce::String lastRequiredKitName_;
 
     juce::TextButton playButton_;
     juce::TextButton stopButton_;

@@ -61,10 +61,46 @@ struct ProjectFileTrackV1
     std::vector<ProjectFileInsertV1> inserts;
 };
 
+struct ProjectFileExperimentalInstrumentNoteV1
+{
+    int midiNote = 60;
+    int step = 0;
+    int velocity = 100;
+    int lengthSteps = 1;
+};
+
+struct ProjectFileExperimentalInstrumentClipV1
+{
+    std::uint64_t id = 0;
+    juce::String name { "MIDI 1" };
+    int numSteps = 16;
+    int stepDenom = 16;
+    double bpm = 110.0;
+    bool loop = true;
+    int laneStartFractionPermille = 0;
+    int laneEndFractionPermille = 250;
+    std::vector<ProjectFileExperimentalInstrumentNoteV1> notes;
+};
+
+/// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).
+struct ProjectFileExperimentalInstrumentTrackV1
+{
+    bool enabled = true;
+    juce::String name { "Groove Agent SE" };
+    juce::String instrumentKind { "GrooveAgentSE" };
+    juce::String requiredKitName { "FiftySixDegreesModified" };
+    /// Local hint only; may be missing on another machine (path repair may still find the plugin).
+    juce::String pluginBundlePath;
+    bool pluginWasLoadedOnSave = false;
+    bool powerOn = true;
+    bool muted = false;
+    std::vector<ProjectFileExperimentalInstrumentClipV1> clips;
+};
+
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 10;
+    static constexpr int kCurrentVersion = 11;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -81,6 +117,8 @@ struct ProjectFileV1
     // v10: cycle/loop armed (Transport). Omitted in JSON when false (default).
     bool cycleEnabled = false;
     std::vector<ProjectFileTrackV1> tracks;
+    // v11+: optional; omitted in older files — empty after read.
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;
 };
 
 [[nodiscard]] juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data);

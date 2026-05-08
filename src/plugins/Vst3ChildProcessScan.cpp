@@ -154,107 +154,6 @@ namespace
         return s.substring(0, 800) + "...";
     }
 
-    [[nodiscard]] static juce::String experimentalDescriptionCacheRootTag() noexcept
-    {
-        return "MiniDAWExperimentalVst3Descriptions";
-    }
-
-    [[nodiscard]] static bool bundlePathKeyMatchesAttribute(const juce::String& storedPath,
-                                                            const juce::File& vst3Bundle) noexcept
-    {
-        const juce::String key = vst3Bundle.getFullPathName();
-#if JUCE_WINDOWS
-        return storedPath.compareIgnoreCase(key) == 0;
-#else
-        return storedPath == key;
-#endif
-    }
-
-    void mergeWriteExperimentalVst3DescriptionCache(const juce::File& vst3Bundle,
-                                                    const std::vector<juce::PluginDescription>& descriptions)
-    {
-        if (descriptions.empty())
-        {
-            return;
-        }
-
-        auto* newBundle = new juce::XmlElement{ "bundle" };
-        newBundle->setAttribute("vst3Path", vst3Bundle.getFullPathName());
-
-        int xmlCount = 0;
-        for (const auto& d : descriptions)
-        {
-            auto one = d.createXml();
-            if (one != nullptr)
-            {
-                newBundle->addChildElement(one.release());
-                ++xmlCount;
-            }
-        }
-
-        if (xmlCount == 0)
-        {
-            delete newBundle;
-            appendVst3OopScanLineFlushed(
-                "parent: experimental-vst3-descriptions.xml not updated (PluginDescription::createXml returned "
-                "nothing for all descriptions)");
-            return;
-        }
-
-        const juce::File cacheFile = getExperimentalVst3DescriptionsCacheFile();
-        try
-        {
-            if (!cacheFile.getParentDirectory().isDirectory())
-            {
-                (void)cacheFile.getParentDirectory().createDirectory();
-            }
-
-            std::unique_ptr<juce::XmlElement> root;
-            if (cacheFile.existsAsFile())
-            {
-                root = juce::parseXML(cacheFile);
-            }
-
-            if (root == nullptr || !root->hasTagName(experimentalDescriptionCacheRootTag()))
-            {
-                root = std::make_unique<juce::XmlElement>(experimentalDescriptionCacheRootTag());
-                root->setAttribute("version", 1);
-            }
-
-            juce::XmlElement* walk = root->getFirstChildElement();
-            while (walk != nullptr)
-            {
-                juce::XmlElement* const next = walk->getNextElement();
-                if (walk->hasTagName("bundle")
-                    && bundlePathKeyMatchesAttribute(walk->getStringAttribute("vst3Path"), vst3Bundle))
-                {
-                    root->removeChildElement(walk, true);
-                }
-                walk = next;
-            }
-
-            root->addChildElement(newBundle);
-
-            if (!root->writeTo(cacheFile))
-            {
-                appendVst3OopScanLineFlushed(
-                    "parent: experimental-vst3-descriptions.xml write FAILED path=\"" + cacheFile.getFullPathName()
-                    + "\"");
-                return;
-            }
-
-            appendVst3OopScanLineFlushed(
-                "parent: experimental-vst3-descriptions.xml updated vst3Path=\"" + vst3Bundle.getFullPathName()
-                + "\" pluginXmlCount=" + juce::String(xmlCount));
-        }
-        catch (...)
-        {
-            appendVst3OopScanLineFlushed(
-                "parent: experimental-vst3-descriptions.xml update threw (path=\""
-                + cacheFile.getFullPathName() + "\")");
-        }
-    }
-
     /// Windows-style argv split (double quotes; no `juce_ArgumentList` include on some JUCE setups).
     [[nodiscard]] juce::StringArray splitCommandLineToArgs(const juce::String& commandLine)
     {
@@ -420,6 +319,353 @@ bool tryLoadExperimentalVst3DescriptionsFromCache(const juce::File& vst3Bundle,
     return false;
 }
 
+[[nodiscard]] static bool experimentalBundleXmlKeyMatches(const juce::String& storedPath,
+                                                          const juce::File& vst3Bundle) noexcept
+{
+    const juce::String key = vst3Bundle.getFullPathName();
+#if JUCE_WINDOWS
+    return storedPath.compareIgnoreCase(key) == 0;
+#else
+    return storedPath == key;
+#endif
+}
+
+#if JUCE_WINDOWS
+[[nodiscard]] static juce::File findGrooveAgentSeVst3BundleOnDiskWindows()
+{
+    const juce::File preferredSteinberg(
+        "C:\\Program Files\\Common Files\\VST3\\Steinberg\\Groove Agent SE.vst3");
+    if (preferredSteinberg.isDirectory())
+    {
+        return preferredSteinberg;
+    }
+    const juce::File preferredRoot("C:\\Program Files\\Common Files\\VST3\\Groove Agent SE.vst3");
+    if (preferredRoot.isDirectory())
+    {
+        return preferredRoot;
+    }
+    const juce::File vst3Root("C:\\Program Files\\Common Files\\VST3");
+    if (!vst3Root.isDirectory())
+    {
+        return {};
+    }
+    for (const auto& entry : juce::RangedDirectoryIterator(
+             vst3Root, true, "*", juce::File::findFilesAndDirectories))
+    {
+        const juce::File f = entry.getFile();
+        if (f.isDirectory() && f.getFileName() == "Groove Agent SE.vst3")
+        {
+            return f;
+        }
+    }
+    return {};
+}
+#endif
+
+[[nodiscard]] static juce::File grooveAgentPreferredInnerModuleFile(const juce::File& bundleDir)
+{
+    const juce::File inner = bundleDir.getChildFile("Contents")
+                                 .getChildFile("x86_64-win")
+                                 .getChildFile("Groove Agent SE.vst3");
+    if (inner.exists())
+    {
+        return inner;
+    }
+    return bundleDir;
+}
+
+static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
+                                                const juce::String& oldBundleKeyPath,
+                                                const juce::File& newBundleDir)
+{
+    const juce::String oldRoot = juce::File(oldBundleKeyPath).getFullPathName();
+    const juce::String newRoot = newBundleDir.getFullPathName();
+    juce::String fid = d.fileOrIdentifier;
+    if (fid.isNotEmpty() && oldRoot.isNotEmpty())
+    {
+#if JUCE_WINDOWS
+        if (fid.startsWithIgnoreCase(oldRoot))
+        {
+            fid = newRoot + fid.substring(oldRoot.length());
+        }
+#else
+        if (fid.startsWith(oldRoot))
+        {
+            fid = newRoot + fid.substring(oldRoot.length());
+        }
+#endif
+    }
+    const juce::File preferred = grooveAgentPreferredInnerModuleFile(newBundleDir);
+    if (preferred.exists())
+        d.fileOrIdentifier = preferred.getFullPathName();
+    else
+        d.fileOrIdentifier = fid.isNotEmpty() ? fid : newRoot;
+}
+
+[[nodiscard]] static bool grooveAgentCachedPathsStillValid(const std::vector<juce::PluginDescription>& descs,
+                                                          const juce::File& cacheKeyBundle)
+{
+    if (!cacheKeyBundle.exists())
+    {
+        return false;
+    }
+    if (descs.empty())
+    {
+        return false;
+    }
+    const auto& d = descs.front();
+    if (d.fileOrIdentifier.isEmpty())
+    {
+        return true;
+    }
+    return juce::File{ d.fileOrIdentifier }.exists();
+}
+
+[[nodiscard]] static bool tryScanEntireExperimentalCacheForGrooveAgentSE(
+    std::vector<juce::PluginDescription>& descriptionsOut,
+    juce::String& bundleKeyAttributeOut)
+{
+    descriptionsOut.clear();
+    bundleKeyAttributeOut.clear();
+    const juce::File cacheFile = getExperimentalVst3DescriptionsCacheFile();
+    if (!cacheFile.existsAsFile())
+    {
+        return false;
+    }
+    const std::unique_ptr<juce::XmlElement> xmlRoot = juce::parseXML(cacheFile);
+    if (xmlRoot == nullptr || !xmlRoot->hasTagName("MiniDAWExperimentalVst3Descriptions"))
+    {
+        return false;
+    }
+    for (juce::XmlElement* bundle = xmlRoot->getFirstChildElement(); bundle != nullptr;
+         bundle = bundle->getNextElement())
+    {
+        if (!bundle->hasTagName("bundle"))
+        {
+            continue;
+        }
+        std::vector<juce::PluginDescription> oneBundle;
+        for (auto* e : bundle->getChildIterator())
+        {
+            if (e == nullptr)
+            {
+                continue;
+            }
+            juce::PluginDescription d;
+            if (d.loadFromXml(*e))
+            {
+                oneBundle.push_back(std::move(d));
+            }
+        }
+        for (const auto& d : oneBundle)
+        {
+            if (d.name.containsIgnoreCase("Groove Agent SE"))
+            {
+                descriptionsOut = std::move(oneBundle);
+                bundleKeyAttributeOut = bundle->getStringAttribute("vst3Path");
+                return !descriptionsOut.empty();
+            }
+        }
+    }
+    return false;
+}
+
+void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
+                                                    const std::vector<juce::PluginDescription>& descriptions)
+{
+    if (descriptions.empty())
+    {
+        return;
+    }
+
+    auto* newBundle = new juce::XmlElement{ "bundle" };
+    newBundle->setAttribute("vst3Path", vst3Bundle.getFullPathName());
+
+    int xmlCount = 0;
+    for (const auto& d : descriptions)
+    {
+        auto one = d.createXml();
+        if (one != nullptr)
+        {
+            newBundle->addChildElement(one.release());
+            ++xmlCount;
+        }
+    }
+
+    if (xmlCount == 0)
+    {
+        delete newBundle;
+        writeVst3OopScanDiagnosticLogLine(
+            "parent: experimental-vst3-descriptions.xml not updated (PluginDescription::createXml returned "
+            "nothing for all descriptions)");
+        return;
+    }
+
+    const juce::File cacheFile = getExperimentalVst3DescriptionsCacheFile();
+    try
+    {
+        if (!cacheFile.getParentDirectory().isDirectory())
+        {
+            (void)cacheFile.getParentDirectory().createDirectory();
+        }
+
+        std::unique_ptr<juce::XmlElement> root;
+        if (cacheFile.existsAsFile())
+        {
+            root = juce::parseXML(cacheFile);
+        }
+
+        if (root == nullptr || !root->hasTagName("MiniDAWExperimentalVst3Descriptions"))
+        {
+            root = std::make_unique<juce::XmlElement>("MiniDAWExperimentalVst3Descriptions");
+            root->setAttribute("version", 1);
+        }
+
+        juce::XmlElement* walk = root->getFirstChildElement();
+        while (walk != nullptr)
+        {
+            juce::XmlElement* const next = walk->getNextElement();
+            if (walk->hasTagName("bundle")
+                && experimentalBundleXmlKeyMatches(walk->getStringAttribute("vst3Path"), vst3Bundle))
+            {
+                root->removeChildElement(walk, true);
+            }
+            walk = next;
+        }
+
+        root->addChildElement(newBundle);
+
+        if (!root->writeTo(cacheFile))
+        {
+            writeVst3OopScanDiagnosticLogLine(
+                "parent: experimental-vst3-descriptions.xml write FAILED path=\"" + cacheFile.getFullPathName()
+                + "\"");
+            return;
+        }
+
+        writeVst3OopScanDiagnosticLogLine(
+            "parent: experimental-vst3-descriptions.xml updated vst3Path=\"" + vst3Bundle.getFullPathName()
+            + "\" pluginXmlCount=" + juce::String(xmlCount));
+    }
+    catch (...)
+    {
+        writeVst3OopScanDiagnosticLogLine(
+            "parent: experimental-vst3-descriptions.xml update threw (path=\"" + cacheFile.getFullPathName()
+            + "\")");
+    }
+}
+
+bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
+    const juce::File& savedOrAdvisoryBundle,
+    const juce::String& instrumentKind,
+    std::vector<juce::PluginDescription>& descriptionsOut,
+    juce::File& resolvedBundleOut,
+    juce::String& infoOrWarningOut,
+    bool* pathRepairWasUsedOut)
+{
+    descriptionsOut.clear();
+    resolvedBundleOut = juce::File();
+    infoOrWarningOut.clear();
+    if (pathRepairWasUsedOut != nullptr)
+    {
+        *pathRepairWasUsedOut = false;
+    }
+
+    if (instrumentKind != "GrooveAgentSE")
+    {
+        infoOrWarningOut = "Path repair is only implemented for instrumentKind=GrooveAgentSE.";
+        return false;
+    }
+
+    writeVst3OopScanDiagnosticLogLine("project-autoload: Groove Agent requested pluginWasLoadedOnSave=true");
+
+    std::vector<juce::PluginDescription> descs;
+    bool hit = false;
+    juce::String cacheKeyForPrefix;
+    if (savedOrAdvisoryBundle.getFullPathName().isNotEmpty())
+    {
+        hit = tryLoadExperimentalVst3DescriptionsFromCache(savedOrAdvisoryBundle, descs);
+        writeVst3OopScanDiagnosticLogLine("project-autoload: cache lookup path=\""
+                                          + savedOrAdvisoryBundle.getFullPathName() + "\" hit="
+                                          + juce::String(hit ? "true" : "false"));
+        if (hit && !descs.empty())
+        {
+            cacheKeyForPrefix = savedOrAdvisoryBundle.getFullPathName();
+        }
+    }
+    else
+    {
+        writeVst3OopScanDiagnosticLogLine("project-autoload: cache lookup path=\"\" hit=false");
+    }
+
+    if (!hit || descs.empty())
+    {
+        juce::String scanKey;
+        if (tryScanEntireExperimentalCacheForGrooveAgentSE(descs, scanKey))
+        {
+            hit = true;
+            cacheKeyForPrefix = scanKey;
+            writeVst3OopScanDiagnosticLogLine(
+                "project-autoload: cache fallback scan hit bundleKey=\"" + scanKey + "\" count="
+                + juce::String((int)descs.size()));
+        }
+    }
+
+    if (!hit || descs.empty())
+    {
+        infoOrWarningOut
+            = "No cached PluginDescription for Groove Agent SE; run OOP scan once or copy the cache from "
+              "another machine.";
+        writeVst3OopScanDiagnosticLogLine("project-autoload: failed (no cache entry), project remains editable");
+        return false;
+    }
+
+    const juce::File cacheKeyAsFile(cacheKeyForPrefix);
+    if (grooveAgentCachedPathsStillValid(descs, cacheKeyAsFile))
+    {
+        descriptionsOut = std::move(descs);
+        resolvedBundleOut = cacheKeyAsFile;
+        return true;
+    }
+
+    writeVst3OopScanDiagnosticLogLine("project-autoload: cached path missing, attempting path repair");
+
+#if JUCE_WINDOWS
+    const juce::File found = findGrooveAgentSeVst3BundleOnDiskWindows();
+#else
+    const juce::File found;
+#endif
+
+    if (!found.exists())
+    {
+        infoOrWarningOut = "Groove Agent SE was not found under standard VST3 folders (path repair failed).";
+        writeVst3OopScanDiagnosticLogLine("project-autoload: failed, project remains editable");
+        return false;
+    }
+
+    writeVst3OopScanDiagnosticLogLine("project-autoload: found Groove Agent bundle path=\""
+                                      + found.getFullPathName() + "\"");
+
+    for (auto& d : descs)
+    {
+        applyGrooveAgentDescriptionPathRepair(d, cacheKeyForPrefix, found);
+    }
+
+    if (!descs.empty())
+    {
+        writeVst3OopScanDiagnosticLogLine("project-autoload: repaired desc fileOrIdentifier=\""
+                                            + descs.front().fileOrIdentifier + "\"");
+    }
+
+    descriptionsOut = std::move(descs);
+    resolvedBundleOut = found;
+    if (pathRepairWasUsedOut != nullptr)
+    {
+        *pathRepairWasUsedOut = true;
+    }
+    return true;
+}
+
 // Diagnostic-only OOP scan using raw juce::ChildProcess (no ChildProcessCoordinator). If worker
 // processes are ever left behind or shutdown hangs, revisit ArgumentList parsing or Windows spawn flags.
 
@@ -527,7 +773,7 @@ Vst3OopScanResult runVst3OopScanBlocking(const juce::File& vst3File, const int r
     }
     logParentScanOutcome(out, elapsedMsSince(scanWallT0));
 
-    mergeWriteExperimentalVst3DescriptionCache(vst3File, out.descriptions);
+    mergeExperimentalVst3DescriptionsCacheBundle(vst3File, out.descriptions);
 
     const int runReturningMs = elapsedMsSince(scanWallT0);
     writeVst3OopScanDiagnosticLogLine("parent: run returning elapsedMs=" + juce::String(runReturningMs));

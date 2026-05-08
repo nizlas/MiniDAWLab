@@ -264,6 +264,193 @@ namespace
         }
         return juce::Result::ok();
     }
+
+    [[nodiscard]] juce::Result parseExperimentalInstrumentTracksObject(
+        const juce::var& root,
+        ProjectFileV1& out,
+        const int fileVersion)
+    {
+        if (fileVersion < 11)
+        {
+            return juce::Result::ok();
+        }
+        const juce::var& ex = root.getProperty("experimentalInstrumentTracks", {});
+        if (!ex.isArray())
+        {
+            return juce::Result::ok();
+        }
+        const juce::Array<juce::var>* arr = ex.getArray();
+        if (arr == nullptr)
+        {
+            return juce::Result::ok();
+        }
+        for (const juce::var& tv : *arr)
+        {
+            if (!tv.isObject())
+            {
+                continue;
+            }
+            ProjectFileExperimentalInstrumentTrackV1 et;
+            const juce::var& ev = tv.getProperty("enabled", {});
+            if (ev.isBool())
+            {
+                et.enabled = (bool)ev;
+            }
+            else if (ev.isInt() || ev.isInt64() || ev.isDouble())
+            {
+                et.enabled = static_cast<int>(static_cast<double>(ev) + 0.5) != 0;
+            }
+            et.name = tv.getProperty("name", {}).toString();
+            if (et.name.isEmpty())
+            {
+                et.name = "Groove Agent SE";
+            }
+            et.instrumentKind = tv.getProperty("instrumentKind", {}).toString();
+            if (et.instrumentKind.isEmpty())
+            {
+                et.instrumentKind = "GrooveAgentSE";
+            }
+            et.requiredKitName = tv.getProperty("requiredKitName", {}).toString();
+            if (et.requiredKitName.isEmpty())
+            {
+                et.requiredKitName = "FiftySixDegreesModified";
+            }
+            et.pluginBundlePath = tv.getProperty("pluginBundlePath", {}).toString();
+            const juce::var& pwl = tv.getProperty("pluginWasLoadedOnSave", {});
+            if (pwl.isBool())
+            {
+                et.pluginWasLoadedOnSave = (bool)pwl;
+            }
+            else if (pwl.isInt() || pwl.isInt64() || pwl.isDouble())
+            {
+                et.pluginWasLoadedOnSave = static_cast<int>(static_cast<double>(pwl) + 0.5) != 0;
+            }
+            et.powerOn = true;
+            const juce::var& po = tv.getProperty("powerOn", {});
+            if (po.isBool())
+            {
+                et.powerOn = (bool)po;
+            }
+            else if (po.isInt() || po.isInt64() || po.isDouble())
+            {
+                et.powerOn = static_cast<int>(static_cast<double>(po) + 0.5) != 0;
+            }
+            et.muted = false;
+            const juce::var& mu = tv.getProperty("muted", {});
+            if (mu.isBool())
+            {
+                et.muted = (bool)mu;
+            }
+            else if (mu.isInt() || mu.isInt64() || mu.isDouble())
+            {
+                et.muted = static_cast<int>(static_cast<double>(mu) + 0.5) != 0;
+            }
+            const juce::var& clipsV = tv.getProperty("clips", {});
+            if (clipsV.isArray())
+            {
+                const juce::Array<juce::var>* clipArr = clipsV.getArray();
+                if (clipArr != nullptr)
+                {
+                    for (const juce::var& cv : *clipArr)
+                    {
+                        if (!cv.isObject())
+                        {
+                            continue;
+                        }
+                        ProjectFileExperimentalInstrumentClipV1 c;
+                        bool idOk = false;
+                        c.id = static_cast<std::uint64_t>(
+                            int64FromVarId(cv.getProperty("id", {}), idOk));
+                        if (!idOk || c.id == 0)
+                        {
+                            continue;
+                        }
+                        c.name = cv.getProperty("name", {}).toString();
+                        if (c.name.isEmpty())
+                        {
+                            c.name = "MIDI 1";
+                        }
+                        c.numSteps = 16;
+                        const juce::var& ns = cv.getProperty("numSteps", {});
+                        if (ns.isInt() || ns.isInt64() || ns.isDouble())
+                        {
+                            c.numSteps = juce::jmax(1, (int)static_cast<double>(ns));
+                        }
+                        c.stepDenom = 16;
+                        const juce::var& sd = cv.getProperty("stepDenom", {});
+                        if (sd.isInt() || sd.isInt64() || sd.isDouble())
+                        {
+                            c.stepDenom = juce::jmax(1, (int)static_cast<double>(sd));
+                        }
+                        c.bpm = 110.0;
+                        const juce::var& bp = cv.getProperty("bpm", {});
+                        if (bp.isDouble() || bp.isInt() || bp.isInt64())
+                        {
+                            c.bpm = (double)bp;
+                        }
+                        c.loop = true;
+                        const juce::var& lp = cv.getProperty("loop", {});
+                        if (lp.isBool())
+                        {
+                            c.loop = (bool)lp;
+                        }
+                        c.laneStartFractionPermille = 0;
+                        const juce::var& ls = cv.getProperty("laneStartFractionPermille", {});
+                        if (ls.isInt() || ls.isInt64() || ls.isDouble())
+                        {
+                            c.laneStartFractionPermille = (int)static_cast<double>(ls);
+                        }
+                        c.laneEndFractionPermille = 250;
+                        const juce::var& le = cv.getProperty("laneEndFractionPermille", {});
+                        if (le.isInt() || le.isInt64() || le.isDouble())
+                        {
+                            c.laneEndFractionPermille = (int)static_cast<double>(le);
+                        }
+                        const juce::var& notesV = cv.getProperty("notes", {});
+                        if (notesV.isArray())
+                        {
+                            const juce::Array<juce::var>* na = notesV.getArray();
+                            if (na != nullptr)
+                            {
+                                for (const juce::var& nv : *na)
+                                {
+                                    if (!nv.isObject())
+                                    {
+                                        continue;
+                                    }
+                                    ProjectFileExperimentalInstrumentNoteV1 n;
+                                    const juce::var& mn = nv.getProperty("midiNote", {});
+                                    if (mn.isInt() || mn.isInt64() || mn.isDouble())
+                                    {
+                                        n.midiNote = (int)static_cast<double>(mn);
+                                    }
+                                    const juce::var& st = nv.getProperty("step", {});
+                                    if (st.isInt() || st.isInt64() || st.isDouble())
+                                    {
+                                        n.step = (int)static_cast<double>(st);
+                                    }
+                                    const juce::var& vl = nv.getProperty("velocity", {});
+                                    if (vl.isInt() || vl.isInt64() || vl.isDouble())
+                                    {
+                                        n.velocity = (int)static_cast<double>(vl);
+                                    }
+                                    const juce::var& ln = nv.getProperty("lengthSteps", {});
+                                    if (ln.isInt() || ln.isInt64() || ln.isDouble())
+                                    {
+                                        n.lengthSteps = juce::jmax(1, (int)static_cast<double>(ln));
+                                    }
+                                    c.notes.push_back(n);
+                                }
+                            }
+                        }
+                        et.clips.push_back(std::move(c));
+                    }
+                }
+            }
+            out.experimentalInstrumentTracks.push_back(std::move(et));
+        }
+        return juce::Result::ok();
+    }
 } // namespace
 
 juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
@@ -306,6 +493,75 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         root->setProperty("cycleEnabled", true);
     }
     root->setProperty("tracks", juce::var(trackVars));
+
+    if (data.version >= 11 && !data.experimentalInstrumentTracks.empty())
+    {
+        juce::Array<juce::var> exTracks;
+        for (const auto& et : data.experimentalInstrumentTracks)
+        {
+            juce::DynamicObject::Ptr eo = new juce::DynamicObject();
+            if (!et.enabled)
+            {
+                eo->setProperty("enabled", false);
+            }
+            eo->setProperty("name", et.name);
+            eo->setProperty("instrumentKind", et.instrumentKind);
+            eo->setProperty("requiredKitName", et.requiredKitName);
+            if (et.pluginBundlePath.isNotEmpty())
+            {
+                eo->setProperty("pluginBundlePath", et.pluginBundlePath);
+            }
+            if (et.pluginWasLoadedOnSave)
+            {
+                eo->setProperty("pluginWasLoadedOnSave", true);
+            }
+            if (!et.powerOn)
+            {
+                eo->setProperty("powerOn", false);
+            }
+            if (et.muted)
+            {
+                eo->setProperty("muted", true);
+            }
+            juce::Array<juce::var> clipVars;
+            for (const auto& cl : et.clips)
+            {
+                juce::DynamicObject::Ptr co = new juce::DynamicObject();
+                co->setProperty("id", static_cast<std::int64_t>(cl.id));
+                co->setProperty("name", cl.name);
+                co->setProperty("numSteps", cl.numSteps);
+                co->setProperty("stepDenom", cl.stepDenom);
+                co->setProperty("bpm", cl.bpm);
+                if (!cl.loop)
+                {
+                    co->setProperty("loop", false);
+                }
+                if (cl.laneStartFractionPermille != 0)
+                {
+                    co->setProperty("laneStartFractionPermille", cl.laneStartFractionPermille);
+                }
+                if (cl.laneEndFractionPermille != 250)
+                {
+                    co->setProperty("laneEndFractionPermille", cl.laneEndFractionPermille);
+                }
+                juce::Array<juce::var> noteVars;
+                for (const auto& n : cl.notes)
+                {
+                    juce::DynamicObject::Ptr no = new juce::DynamicObject();
+                    no->setProperty("midiNote", n.midiNote);
+                    no->setProperty("step", n.step);
+                    no->setProperty("velocity", n.velocity);
+                    no->setProperty("lengthSteps", n.lengthSteps);
+                    noteVars.add(juce::var(no.get()));
+                }
+                co->setProperty("notes", juce::var(noteVars));
+                clipVars.add(juce::var(co.get()));
+            }
+            eo->setProperty("clips", juce::var(clipVars));
+            exTracks.add(juce::var(eo.get()));
+        }
+        root->setProperty("experimentalInstrumentTracks", juce::var(exTracks));
+    }
 
     const juce::String text = juce::JSON::toString(juce::var(root.get()), true);
     if (text.isEmpty())
@@ -561,6 +817,14 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
 
         out.tracks.push_back(std::move(trk));
+    }
+
+    {
+        const juce::Result exr = parseExperimentalInstrumentTracksObject(root, out, ver);
+        if (exr.failed())
+        {
+            return exr;
+        }
     }
 
     {

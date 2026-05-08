@@ -60,6 +60,10 @@ public:
     [[nodiscard]] bool hasInstrument() const noexcept;
     [[nodiscard]] juce::String getInstrumentNameForUi() const;
 
+    /// Bundle / file path last passed to a successful `loadInstrumentFromVst3File` or
+    /// `loadInstrumentFromDescription` (empty after unload). Used for advisory project save only.
+    [[nodiscard]] juce::String getLastLoadedVst3OriginalPath() const noexcept;
+
     void openNativeEditor();
     void editorWindowClosing();
 
@@ -115,4 +119,7 @@ private:
 
     double sampleRate_ = 0.0;
     int blockSize_ = 0;
+
+    /// Advisory path for ProjectFile (experimental); not authoritative for loading.
+    juce::String lastLoadedVst3OriginalPath_;
 };

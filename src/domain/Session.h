@@ -49,6 +49,7 @@
 class AudioClip;
 class Transport;
 class PluginInsertHost;
+class InstrumentTrackController;
 
 // ---------------------------------------------------------------------------
 // Session — sole publisher of `std::shared_ptr<const SessionSnapshot>` to readers (engine + UI)
@@ -228,7 +229,8 @@ public:
         Transport& transport,
         const juce::File& file,
         double deviceSampleRate,
-        PluginInsertHost* pluginHost = nullptr);
+        PluginInsertHost* pluginHost = nullptr,
+        InstrumentTrackController* instrumentController = nullptr);
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).
@@ -238,7 +240,8 @@ public:
         double deviceSampleRate,
         juce::StringArray& outSkippedClipDetails,
         juce::String& outInfoNote,
-        PluginInsertHost* pluginHost = nullptr);
+        PluginInsertHost* pluginHost = nullptr,
+        InstrumentTrackController* instrumentController = nullptr);
 
 private:
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
