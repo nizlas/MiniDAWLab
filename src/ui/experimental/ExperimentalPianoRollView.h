@@ -69,6 +69,10 @@ private:
     [[nodiscard]] std::int64_t visibleEndSamples() const noexcept;
     [[nodiscard]] float cellWidth() const;
 
+    /// Sub-sample horizontal mapping for UI-smoothed playhead (same linear map as integer path).
+    [[nodiscard]] float xForSessionSampleD(double s) const noexcept;
+
+
     ExperimentalMidiPattern& pattern_;
     ExperimentalMidiPatternPlayer* player_;
 
@@ -96,6 +100,24 @@ private:
     int lastObservedNoteCountUi_ = -1;
 
     int lastResizeComponentWidth_ = -1;
+
+    /// Last `startTimerHz` value; updated when switching between idle and playback animation rates.
+    int uiTimerHzConfigured_ = -1;
+
+    /// Message-thread-only extrapolation for transport playhead (block-quantized UI reads + smooth motion).
+    double uiPlayheadDisplaySamples_ = 0.0;
+    double uiPlayheadExtrapBaseSample_ = 0.0;
+    double uiPlayheadExtrapWallSec_ = 0.0;
+    std::int64_t uiPlayheadLastRawPh_ = 0;
+
+    /// Last tick believed playing; used for stop-edge repaint.
+    bool wasTransportPlayingUi_ = false;
+
+    /// Latest preview absolute sample for paint when clip-bound (Debug Preview).
+    double uiPreviewDisplayAbsSample_ = 0.0;
+
+    /// Last frame transport playhead was considered “in view” for off-screen repaint skipping.
+    bool lastOffscreenGatePlayheadInView_ = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExperimentalPianoRollView)
 };
