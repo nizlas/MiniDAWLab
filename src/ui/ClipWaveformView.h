@@ -10,11 +10,12 @@
 //   playback; UI does not own transport truth. Seek is not initiated here; use `TimelineRulerView`.
 //
 // PRESENTATION (DAW / Cubase direction, Phase 2)
-//   **Each** `PlacedClip` row: one event **frame**; **peaks** are drawn in timeline regions that are
-//   *not* covered in session time by any row in front of it (index `< r` in the snapshot / paint
-//   stack). In **covered** regions on a back row, no readable peak sketch. The overlap *hint* (dark
-//   wash + very thin diagonals) is drawn on **whichever** row is the **local** topmost in time over
-//   at least one **older** row (higher index): not “row 0 only,” but the row that is visually on
+//   **Each** `PlacedClip` row: one event **frame**; waveforms draw from a shared **`AudioWaveformCache`
+//   min/max pyramid** per `AudioClip` in timeline regions that are *not* covered in session time by
+//   any row in front of it (index `< r` in the snapshot / paint stack). In **covered** regions on a
+//   back row, no readable waveform. The overlap *hint* (dark wash + very thin diagonals) is drawn on
+//   **whichever** row is the **local** topmost in time over at least one **older** row (higher index):
+//   not “row 0 only,” but the row that is visually on
 //   top in that x-range. **No** global “always dim because behind somewhere.” Same `Transport` axis,
 //   view only.
 //
@@ -31,7 +32,9 @@
 
 #include "domain/Session.h"
 #include "domain/Track.h"
+#include "domain/AudioClip.h"
 #include "engine/RecorderService.h"
+#include "io/AudioWaveformCache.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -90,8 +93,8 @@ struct ClipWaveformLaneHost
 // ---------------------------------------------------------------------------
 // ClipWaveformView — multi-clip timeline *view* (Session snapshot + Transport playhead)
 // ---------------------------------------------------------------------------
-// Responsibility: turn the current `SessionSnapshot` into rectangles + downsampled peaks and a
-// playhead line. Owns no audio, no `Transport` truth, no clip ordering: it **reads** published
+// Responsibility: turn the current `SessionSnapshot` into rectangles + waveform min/max from
+// `AudioWaveformCache`, and a playhead line. Owns no audio, no `Transport` truth, no clip ordering: it **reads** published
 // state only. Phase 2: per-row z-order (index 0 = newest) matches engine coverage **semantics** in
 // spirit (top row wins) but the **shading** rules are a **separate** product choice for legibility
 // (see .cpp: local topmost + underlap hint).
@@ -104,13 +107,14 @@ struct ClipWaveformLaneHost
 class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
-    // [Message thread] session/transport/timelineViewport outlive the view. `trackId` scopes this
-    // lane to one `Track` in the snapshot. `laneHost` is normally from `TrackLanesView` (cross-lane
-    // ghost + drop find). Default = only within-lane `moveClip` on drag commit.
+    // [Message thread] session/transport/timelineViewport/`waveformCache` outlive the view.
+    // `trackId` scopes this lane to one `Track` in the snapshot. `laneHost` is normally from
+    // `TrackLanesView` (cross-lane ghost + drop find). Default = only within-lane `moveClip` on drag.
     ClipWaveformView(Session& session,
                      Transport& transport,
                      TrackId trackId,
                      TimelineViewportModel& timelineViewport,
+                     AudioWaveformCache& waveformCache,
                      ClipWaveformLaneHost laneHost = {});
     ~ClipWaveformView() override;
 
@@ -174,13 +178,42 @@ public:
     void mouseExit(const juce::MouseEvent& e) override;
 
 private:
+    // Cached paint inputs: one entry per `getPlacedClip(i)` row (0 = front / newest in snapshot).
+    struct TimelineStrip
+    {
+        PlacedClipId clipId{ kInvalidPlacedClipId };
+        std::int64_t startOnTimeline = 0;
+        // Effective audible length V; material indices for PCM are [L, L + V).
+        std::int64_t leftTrimSamples = 0;
+        // Effective (placement) span: right-edge trim shortens the audible/painted region; not material size.
+        int materialNumSamples = 0;
+        std::shared_ptr<const AudioClip> material;
+        std::int64_t materialWindowStart = 0;
+        std::int64_t materialWindowEndExcl = 0;
+    };
+    std::vector<TimelineStrip> clipStrips_;
+    std::uint64_t lastPeaksFingerprint_ = 0;
+
     // [Message thread] Timer: schedules full `repaint` at a low fixed rate (see .cpp); playhead is sampled in
     // `paint` so the line tracks `Transport` without storing a cached position on the view.
     void timerCallback() override;
 
-    // [Message thread] Rebuilds per-clip `peaks` when snapshot identity or view width changes.
-    // O(view width) per clip, bounded columns — same contract as before.
-    void rebuildPeaksIfNeeded();
+    // [Message thread] Refreshes per-row strip metadata (timing + shared material handle) when the
+    // snapshot fingerprint or lane width changes. Peak **pyramids** live in `AudioWaveformCache`.
+    void syncClipStripsFromSnapshotIfNeeded();
+
+    // [Message thread] Viewport pixels → pyramid min/max queries; no PCM reads here.
+    void paintRowWaveformWithPyramid(
+        juce::Graphics& g,
+        int row,
+        const TimelineStrip& strip,
+        const juce::Rectangle<float>& eventRect,
+        const juce::Rectangle<float>& innerForPeakHeight,
+        float midY,
+        float halfDraw,
+        std::int64_t timelineStartForWaveform,
+        std::int64_t materialFileLeft,
+        int visibleMaterialSamples);
 
     // [Message thread] A timeline sample t is *covered* (for painting a lower row r) if any row
     // with a lower index in the snapshot — drawn later, “in front” — owns that half-open sample.
@@ -220,27 +253,12 @@ private:
     Session& session_;
     Transport& transport_;
     TimelineViewportModel& timelineViewport_;
+    AudioWaveformCache& waveformCache_;
 
     // Snapshot `shared_ptr` raw address — a new publish yields a new `const SessionSnapshot` and
     // a different pointer, so the cache key stays correct without touching Session.
     const void* lastSnapshotKey_ = nullptr;
     int lastWidth_ = 0;
-    std::int64_t lastVisibleStartForPeaks_ = 0;
-    std::int64_t lastVisibleLengthForPeaks_ = 0;
-
-    // Cached paint inputs: one entry per `getPlacedClip(i)` row (0 = front / newest in snapshot).
-    struct TimelineStrip
-    {
-        PlacedClipId clipId{ kInvalidPlacedClipId };
-        std::int64_t startOnTimeline = 0;
-        // Effective audible length V; material indices for PCM are [L, L + V).
-        std::int64_t leftTrimSamples = 0;
-        // Effective (placement) span: right-edge trim shortens the audible/painted region; not material size.
-        int materialNumSamples = 0;
-        std::vector<float> peaks;
-    };
-    std::vector<TimelineStrip> clipStrips_;
-    std::uint64_t lastPeaksFingerprint_ = 0;
 
     // UI-local selection; never published in `SessionSnapshot` (see `PHASE_PLAN` / `ARCHITECTURE_…`).
     std::optional<PlacedClipId> selectedPlacedId_;

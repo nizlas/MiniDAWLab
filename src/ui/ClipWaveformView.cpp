@@ -32,6 +32,7 @@
 #include "ui/ForbiddenCursor.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
+#include "io/AudioWaveformCache.h"
 #include "domain/AudioClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -53,9 +54,8 @@
 // duplicate engine mixing rules; this file never writes transport or the session.
 namespace
 {
-    // Cap: each clip’s peak vector could otherwise grow to one column per *sample*; we only need
-    // pixel-resolution sketching, not analytics-grade peaks (see `rebuildPeaksIfNeeded` span rule).
-    constexpr int kMaxPeakColumnsPerClip = 2000;
+// Off by default: logs coarse `paint` timing to the JUCE logger when enabled (developer-only).
+    constexpr bool kClipWaveformPaintDiagnostics = false;
     // Compromise: often enough to feel “live” on the playhead line without repainting the whole
     // view on every frame (full rate would be overkill for this teaching codebase).
     constexpr int kPlayheadUpdateHz = 20;
@@ -102,26 +102,6 @@ namespace
         const std::int64_t mapSpan) noexcept
     {
         return TimelineRulerView::sessionSampleToLocalXForSpan(s, b, visStart, mapSpan);
-    }
-
-    // Same **column** budget as `rebuildPeaksIfNeeded`: material span in **pixels** = lane width
-    // times the fraction of the **current visible window** (in samples) that `visibleMaterialSamples`
-    // would occupy. Use `getVisibleLengthSamples` for the denominator — **not** full arrangement
-    // length — or trim preview gets far too many narrow columns.
-    [[nodiscard]] int peakColumnCountForVisibleLength(
-        const float viewWidthPx,
-        const int visibleMaterialSamples,
-        const std::int64_t visibleWindowSamples) noexcept
-    {
-        if (viewWidthPx <= 0.0f || visibleMaterialSamples <= 0)
-        {
-            return 1;
-        }
-        const std::int64_t vW = juce::jmax(std::int64_t{1}, visibleWindowSamples);
-        const float spanPx
-            = viewWidthPx
-              * (float)(static_cast<double>(visibleMaterialSamples) / static_cast<double>(vW));
-        return juce::jmax(1, juce::jmin(kMaxPeakColumnsPerClip, (int)std::ceil((double)spanPx)));
     }
 
     enum class LanePixelHitKind { None, TrimLeft, TrimRight, EventBody };
@@ -401,22 +381,7 @@ namespace
     // Display only: does **not** affect audio, files, or session data. Applied to peak→pixels mapping.
     constexpr float kWaveformDisplayGain = 3.0f;
 
-    // Normalized [0,1] peak (material / trim preview) → symmetric half-height in px; clamped to
-    // `inner` so the bar never draws outside the event body.
-    [[nodiscard]] float displayHalfHeightForNormalizedPeak(
-        const float peak01,
-        const float halfDraw,
-        const juce::Rectangle<float>& inner,
-        const float midY) noexcept
-    {
-        const float p = juce::jlimit(0.0f, 1.0f, peak01);
-        const float raw = p * kWaveformDisplayGain * halfDraw;
-        const float cap = juce::jmin(juce::jmax(0.0f, midY - inner.getY()),
-                                     juce::jmax(0.0f, inner.getBottom() - midY));
-        return juce::jmin(raw, cap);
-    }
-
-    // Min/max in approximately [-1,1] (preview blocks, committed path uses symmetric bars above).
+    // Min/max in approximately [-1,1] (recording preview blocks + pyramid-driven committed clips).
     // Clamps vertical span to `inner` after display gain; purely visual.
     void fillMinMaxPeakRectClamped(
         juce::Graphics& g,
@@ -683,12 +648,14 @@ ClipWaveformView::ClipWaveformView(
     Transport& transport,
     const TrackId trackId,
     TimelineViewportModel& timelineViewport,
+    AudioWaveformCache& waveformCache,
     ClipWaveformLaneHost laneHost)
     : trackId_(trackId)
     , laneHost_(std::move(laneHost))
     , session_(session)
     , transport_(transport)
     , timelineViewport_(timelineViewport)
+    , waveformCache_(waveformCache)
 {
     jassert(trackId_ != kInvalidTrackId);
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
@@ -1321,18 +1288,12 @@ void ClipWaveformView::clearSelectionIfIdMissing(
     publishPlacedClipSelectionToLaneHost();
 }
 
-// [Message thread] Fills `clipStrips_` with per-row peak columns so `paint` only maps numbers to x.
-// **What we compute:** a max absolute sample in each *material* sub-range [s0,s1), roughly one
-// column per **pixel** this clip’s duration spans in the current view (capped) — the sketch
-// coarsens when zoomed out, not a full PCM trace. O(rows × columns × samples per column) when the
-// snapshot or width **changes** (cached by raw snapshot pointer + width).
-void ClipWaveformView::rebuildPeaksIfNeeded()
+// [Message thread] Fills `clipStrips_` with per-row timeline + material handles. Waveform **pixels**
+// come from `AudioWaveformCache` pyramids in `paint` — this pass stays free of PCM walks.
+void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     const int w = juce::jmax(1, getWidth());
-    const std::int64_t vStart = timelineViewport_.getVisibleStartSamples();
-    const std::int64_t vLen
-        = timelineViewport_.getVisibleLengthSamples((double)w);
 
     std::uint64_t fp = 0;
     if (snap != nullptr)
@@ -1346,32 +1307,26 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
                 const PlacedClip& p = t.getPlacedClip(j);
                 fp ^= (std::uint64_t)p.getId() * 0x9e3779b9ull;
                 fp ^= (std::uint64_t)(p.getLeftTrimSamples() + 0x1e35) * 0xc6a4a7935bd1e995ull;
+                if (p.getMaterial() != nullptr)
+                {
+                    fp ^= (std::uint64_t)(std::uintptr_t)p.getMaterial().get() * 0x85ebca6bull;
+                }
             }
         }
     }
-    if (snap.get() == lastSnapshotKey_ && w == lastWidth_ && vStart == lastVisibleStartForPeaks_
-        && vLen == lastVisibleLengthForPeaks_ && fp == lastPeaksFingerprint_)
+    if (snap.get() == lastSnapshotKey_ && w == lastWidth_ && fp == lastPeaksFingerprint_)
     {
-        // Same snapshot, width, visible x-span, and per-clip L: peaks still valid; avoid rescans.
         return;
     }
     lastPeaksFingerprint_ = fp;
 
-    juce::Logger::writeToLog(
-        juce::String("[CLIMPORT] STAGE:peaks:rebuild:begin trackId=") + juce::String(trackId_)
-        + " widthPx=" + juce::String(w) + " snapKey=" + juce::String::toHexString((juce::pointer_sized_int)(snap.get())));
-
     lastSnapshotKey_ = snap.get();
     lastWidth_ = w;
-    lastVisibleStartForPeaks_ = vStart;
-    lastVisibleLengthForPeaks_ = vLen;
     clipStrips_.clear();
     clearSelectionIfIdMissing(snap);
 
     if (snap == nullptr)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=null_snap trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
         publishPlacedClipSelectionToLaneHost();
         mouseDownPlacedId_.reset();
@@ -1381,8 +1336,6 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     const int tIdx = snap->findTrackIndexById(trackId_);
     if (tIdx < 0)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=no_track trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
         publishPlacedClipSelectionToLaneHost();
         mouseDownPlacedId_.reset();
@@ -1391,8 +1344,6 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     }
     if (snap->isEmpty())
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=empty_session trackId=") + juce::String(trackId_));
         selectedPlacedId_.reset();
         publishPlacedClipSelectionToLaneHost();
         mouseDownPlacedId_.reset();
@@ -1403,27 +1354,23 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
     const std::int64_t timelineEndExcl = snap->getDerivedTimelineLengthSamples();
     if (timelineEndExcl <= 0)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:peaks:rebuild:abort reason=timeline_length_zero trackId=")
-            + juce::String(trackId_));
         return;
     }
 
     const auto& tr = snap->getTrack(tIdx);
     const int n = tr.getNumPlacedClips();
     clipStrips_.reserve((size_t)n);
-    const float wfloat = static_cast<float>(w);
 
-    // Per clip: resample the PCM to `colCount` peak magnitudes in **material** [0, N), then
-    // `paint` maps those columns to **timeline** x using `startOnTimeline` — not done here.
     for (int i = 0; i < n; ++i)
     {
         TimelineStrip strip;
         const PlacedClip& placed = tr.getPlacedClip(i);
-        const AudioClip& ac = placed.getAudioClip();
         strip.clipId = placed.getId();
         strip.startOnTimeline = placed.getStartSample();
         strip.leftTrimSamples = placed.getLeftTrimSamples();
+        strip.material = placed.getMaterial();
+        strip.materialWindowStart = placed.getMaterialWindowStartSamples();
+        strip.materialWindowEndExcl = placed.getMaterialWindowEndExclusiveSamples();
         {
             const std::int64_t eff = placed.getEffectiveLengthSamples();
             strip.materialNumSamples
@@ -1431,60 +1378,112 @@ void ClipWaveformView::rebuildPeaksIfNeeded()
                     static_cast<std::int64_t>(std::numeric_limits<int>::max()), eff));
         }
 
-        if (strip.materialNumSamples <= 0)
-        {
-            clipStrips_.push_back(std::move(strip));
-            continue;
-        }
-
-        const juce::AudioBuffer<float>& audio = ac.getAudio();
-        const int numCh = audio.getNumChannels();
-        if (numCh <= 0)
-        {
-            clipStrips_.push_back(std::move(strip));
-            continue;
-        }
-
-        const int ns = strip.materialNumSamples;
-        // How many horizontal **pixels** this clip occupies for the current **visible** span — drives
-        // column count so we do not build thousands of columns for a one-pixel sliver. Uses
-        // `TimelineViewportModel`, not the derived length alone, so trim does not change scale.
-        const std::int64_t visSpan
-            = juce::jmax(std::int64_t{1}, timelineViewport_.getVisibleLengthSamples((double)w));
-        const float spanPx = wfloat
-                             * static_cast<float>(static_cast<double>(ns) / static_cast<double>(visSpan));
-        const int colCount = juce::jmax(1, juce::jmin(kMaxPeakColumnsPerClip, (int)std::ceil((double)spanPx)));
-        strip.peaks.resize((size_t)colCount, 0.0f);
-
-        for (int col = 0; col < colCount; ++col)
-        {
-            const int s0 = (col * ns) / colCount;
-            const int s1 = ((col + 1) * ns) / colCount;
-            float peak = 0.0f;
-            // Same *loudness* idea as a simple DAW trace: for this **column**, take the max |sample|
-            // across channels (Phase 1 stereo / mono path — not a LUFS meter).
-            const std::int64_t Lm = placed.getLeftTrimSamples();
-            for (int s = s0; s < s1; ++s)
-            {
-                const std::int64_t idx = Lm + static_cast<std::int64_t>(s);
-                if (idx < 0 || idx >= static_cast<std::int64_t>(ac.getNumSamples()))
-                {
-                    break;
-                }
-                const int ii = (int)idx;
-                for (int c = 0; c < numCh; ++c)
-                {
-                    peak = juce::jmax(peak, std::abs(audio.getSample(c, ii)));
-                }
-            }
-            strip.peaks[(size_t)col] = juce::jlimit(0.0f, 1.0f, peak);
-        }
-
         clipStrips_.push_back(std::move(strip));
     }
-    juce::Logger::writeToLog(
-        juce::String("[CLIMPORT] STAGE:peaks:rebuild:done trackId=") + juce::String(trackId_) + " stripsOnLane="
-        + juce::String((int)clipStrips_.size()));
+}
+
+void ClipWaveformView::paintRowWaveformWithPyramid(
+    juce::Graphics& g,
+    const int row,
+    const TimelineStrip& strip,
+    const juce::Rectangle<float>& eventRect,
+    const juce::Rectangle<float>& innerForPeakHeight,
+    const float midY,
+    const float halfDraw,
+    const std::int64_t timelineStartForWaveform,
+    const std::int64_t materialFileLeft,
+    const int visibleMaterialSamples)
+{
+    if (visibleMaterialSamples <= 0 || strip.material == nullptr)
+    {
+        return;
+    }
+    const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
+    const float cullL = bounds.getX();
+    const float cullR = bounds.getRight();
+    const float runW = eventRect.getWidth();
+    if (runW < 0.5f || innerForPeakHeight.getHeight() < 1.0f)
+    {
+        return;
+    }
+
+    auto pyramid = waveformCache_.getOrEnqueue(strip.material);
+    if (pyramid == nullptr)
+    {
+        g.setColour(juce::Colours::lightblue.withAlpha(0.22f));
+        g.drawLine(eventRect.getX(), midY, eventRect.getRight(), midY, 1.0f);
+        return;
+    }
+    const int nSrc = pyramid->getNumSourceSamples();
+    if (nSrc <= 0)
+    {
+        return;
+    }
+
+    const float drawL = juce::jmax(cullL, eventRect.getX());
+    const float drawR = juce::jmin(cullR, eventRect.getRight());
+    if (drawR - drawL < 0.25f)
+    {
+        return;
+    }
+
+    const int x0 = (int)std::floor(drawL);
+    const int x1 = (int)std::ceil(drawR);
+    const double nsD = (double)juce::jmax(1, visibleMaterialSamples);
+    const std::int64_t win0 = strip.materialWindowStart;
+    const std::int64_t win1 = strip.materialWindowEndExcl;
+
+    for (int xi = x0; xi < x1; ++xi)
+    {
+        const float px0 = (float)xi;
+        const float px1 = (float)xi + 1.0f;
+        const float segL = juce::jmax(eventRect.getX(), px0);
+        const float segR = juce::jmin(eventRect.getRight(), px1);
+        if (segR - segL < 0.01f)
+        {
+            continue;
+        }
+        double t0 = ((double)segL - (double)eventRect.getX()) / (double)runW;
+        double t1 = ((double)segR - (double)eventRect.getX()) / (double)runW;
+        t0 = juce::jlimit(0.0, 1.0, t0);
+        t1 = juce::jlimit(0.0, 1.0, t1);
+        if (t0 >= t1)
+        {
+            continue;
+        }
+        std::int64_t m0 = (std::int64_t)std::floor(t0 * nsD);
+        std::int64_t m1 = (std::int64_t)std::ceil(t1 * nsD);
+        m0 = juce::jlimit(std::int64_t{ 0 }, (std::int64_t)visibleMaterialSamples, m0);
+        m1 = juce::jlimit(std::int64_t{ 0 }, (std::int64_t)visibleMaterialSamples, juce::jmax(m0 + 1, m1));
+
+        std::int64_t f0 = materialFileLeft + m0;
+        std::int64_t f1 = materialFileLeft + m1;
+        f0 = juce::jmax(f0, win0);
+        f1 = juce::jmin(f1, win1);
+        f0 = juce::jlimit(std::int64_t{ 0 }, (std::int64_t)nSrc, f0);
+        f1 = juce::jlimit(std::int64_t{ 0 }, (std::int64_t)nSrc, juce::jmax(f0 + 1, f1));
+
+        const std::int64_t mmid = m0 + (m1 - m0) / 2;
+        const std::int64_t tOnTimeline = timelineStartForWaveform + mmid;
+        if (isTimelineSampleCoveredByPriorRows(row, tOnTimeline))
+        {
+            continue;
+        }
+
+        float mn = 0.0f;
+        float mx = 0.0f;
+        pyramid->queryMinMaxForFileRange(f0, f1, mn, mx);
+        fillMinMaxPeakRectClamped(
+            g,
+            mn,
+            mx,
+            halfDraw,
+            innerForPeakHeight,
+            midY,
+            segL,
+            juce::jmax(1.0f, segR - segL),
+            juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
+    }
 }
 
 // [Message thread] **Paint rule, not the mix rule:** if any *newer* `PlacedClip` (smaller index `k`
@@ -1602,7 +1601,7 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
 }
 
 // [Message thread] **Paint pipeline (scan top-down in this function):**
-//   (0) Rebuild downsampled peaks if snapshot or view width changed.
+//   (0) Sync strip metadata if snapshot or lane width changed (`AudioWaveformCache` owns pyramids).
 //   (1) One shared linear **session sample → x** (same as playhead).
 //   (2) Draw every row’s event **chassis** + peak bars (high row index first → low index last so
 //       the newest clip’s paint wins on overlaps).
@@ -1612,8 +1611,11 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
 //   (4) Playhead on top (always) so the line is never lost behind events or the recording card.
 void ClipWaveformView::paint(juce::Graphics& g)
 {
-    // (0) see `rebuildPeaksIfNeeded` — cheap no-op on steady state.
-    rebuildPeaksIfNeeded();
+    const std::int64_t diagT0 = kClipWaveformPaintDiagnostics
+                                    ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
+                                    : static_cast<std::int64_t>(0);
+    // (0) see `syncClipStripsFromSnapshotIfNeeded` — cheap no-op on steady state.
+    syncClipStripsFromSnapshotIfNeeded();
 
     // JUCE: default window background, slightly darkened so events read as “cards” (pure chrome).
     g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
@@ -1644,11 +1646,6 @@ void ClipWaveformView::paint(juce::Graphics& g)
     };
 
     const int numRows = (int)clipStrips_.size();
-    const std::shared_ptr<const SessionSnapshot> paintSnap
-        = session_.loadSessionSnapshotForAudioThread();
-    const int paintTrackIdx
-        = (paintSnap != nullptr) ? paintSnap->findTrackIndexById(trackId_) : -1;
-    const float wfloatForPeaks = static_cast<float>(juce::jmax(1, getWidth()));
     // Vertical event stack: a bit of margin from the view edge; silent audio still has the same rect.
     const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
@@ -1737,6 +1734,11 @@ void ClipWaveformView::paint(juce::Graphics& g)
         const float x1 = juce::jmax(ex0, ex1);
         juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
 
+        if (eventRect.getRight() < bounds.getX() || eventRect.getX() > bounds.getRight())
+        {
+            continue;
+        }
+
         g.setColour(eventBodyFill());
         g.fillRoundedRectangle(eventRect, kEventCorner);
         g.setColour(eventBodyBorder());
@@ -1752,112 +1754,49 @@ void ClipWaveformView::paint(juce::Graphics& g)
         if (eventRect.getWidth() >= 1.0f && innerForPeakHeight.getHeight() >= 1.0f)
         {
             const int ns = nsForDraw;
-            if (rowTrimR || rowTrimL)
+            if (ns > 0)
             {
-                // Recompute columns for the preview (cached peaks would squeeze wrong). File indices
-                // are [L, L + V) for both right and left live trim.
-                const PlacedClip* srcPlaced = nullptr;
-                if (paintTrackIdx >= 0 && paintSnap != nullptr)
+                if (rowTrimR)
                 {
-                    const Track& trP = paintSnap->getTrack(paintTrackIdx);
-                    for (int k = 0; k < trP.getNumPlacedClips(); ++k)
-                    {
-                        if (trP.getPlacedClip(k).getId() == strip.clipId)
-                        {
-                            srcPlaced = &trP.getPlacedClip(k);
-                            break;
-                        }
-                    }
+                    paintRowWaveformWithPyramid(
+                        g,
+                        row,
+                        strip,
+                        eventRect,
+                        innerForPeakHeight,
+                        midY,
+                        halfDraw,
+                        trimStartSample_,
+                        strip.leftTrimSamples,
+                        ns);
                 }
-                if (srcPlaced != nullptr && ns > 0)
+                else if (rowTrimL)
                 {
-                    const std::int64_t mBase
-                        = rowTrimL ? trimPreviewLeft_ : srcPlaced->getLeftTrimSamples();
-                    const AudioClip& ac = srcPlaced->getAudioClip();
-                    const juce::AudioBuffer<float>& audio = ac.getAudio();
-                    const int numCh = audio.getNumChannels();
-                    if (numCh > 0)
-                    {
-                        const int colCount
-                            = peakColumnCountForVisibleLength(wfloatForPeaks, ns, visLen);
-                        const float runW = eventRect.getWidth();
-                        if (runW >= 0.5f)
-                        {
-                            const float segW = runW / (float)juce::jmax(1, colCount);
-                            for (int j = 0; j < colCount; ++j)
-                            {
-                                const int s0 = (j * ns) / colCount;
-                                const int s1 = ((j + 1) * ns) / colCount;
-                                if (s0 >= s1)
-                                {
-                                    continue;
-                                }
-                                const int sMid = (s0 + s1) / 2;
-                                const std::int64_t tOnTimeline
-                                    = (rowTrimL ? trimPreviewStart_ : trimStartSample_)
-                                    + static_cast<std::int64_t>(juce::jlimit(0, ns - 1, sMid));
-                                if (isTimelineSampleCoveredByPriorRows(row, tOnTimeline))
-                                {
-                                    continue;
-                                }
-                                float peak = 0.0f;
-                                for (int s = s0; s < s1; ++s)
-                                {
-                                    const std::int64_t idx = mBase + (std::int64_t)s;
-                                    if (idx < 0 || idx >= (std::int64_t)ac.getNumSamples())
-                                    {
-                                        break;
-                                    }
-                                    const int is = (int)idx;
-                                    for (int c = 0; c < numCh; ++c)
-                                    {
-                                        peak
-                                            = juce::jmax(peak, std::abs(audio.getSample(c, is)));
-                                    }
-                                }
-                                peak = juce::jlimit(0.0f, 1.0f, peak);
-                                const float xj = eventRect.getX() + (float)j * segW;
-                                const float h = displayHalfHeightForNormalizedPeak(
-                                    peak, halfDraw, innerForPeakHeight, midY);
-                                g.setColour(juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
-                                g.fillRect(xj, midY - h, juce::jmax(1.0f, segW), h * 2.0f);
-                            }
-                        }
-                    }
+                    paintRowWaveformWithPyramid(
+                        g,
+                        row,
+                        strip,
+                        eventRect,
+                        innerForPeakHeight,
+                        midY,
+                        halfDraw,
+                        trimPreviewStart_,
+                        trimPreviewLeft_,
+                        ns);
                 }
-            }
-            else if (!strip.peaks.empty())
-            {
-                const float runW = eventRect.getWidth();
-                const int cols = (int)strip.peaks.size();
-                if (runW >= 0.5f)
+                else
                 {
-                    const int ns2 = nsForDraw;
-                    const float segW = runW / (float)cols;
-                    for (int j = 0; j < cols; ++j)
-                    {
-                        // Column maps to [s0, s1) in **material**; use mid sample → timeline for cover test.
-                        const int s0 = (j * ns2) / cols;
-                        const int s1 = ((j + 1) * ns2) / cols;
-                        if (s0 >= s1)
-                        {
-                            continue;
-                        }
-                        const int sMid = (s0 + s1) / 2;
-                        const std::int64_t tOnTimeline
-                            = startForDraw
-                              + static_cast<std::int64_t>(juce::jlimit(0, ns2 - 1, sMid));
-                        if (isTimelineSampleCoveredByPriorRows(row, tOnTimeline))
-                        {
-                            continue;
-                        }
-
-                        const float xj = eventRect.getX() + (float)j * segW;
-                        const float h = displayHalfHeightForNormalizedPeak(
-                            strip.peaks[(size_t)j], halfDraw, innerForPeakHeight, midY);
-                        g.setColour(juce::Colours::lightblue.withAlpha(kWaveformPeakAlpha));
-                        g.fillRect(xj, midY - h, juce::jmax(1.0f, segW), h * 2.0f);
-                    }
+                    paintRowWaveformWithPyramid(
+                        g,
+                        row,
+                        strip,
+                        eventRect,
+                        innerForPeakHeight,
+                        midY,
+                        halfDraw,
+                        startForDraw,
+                        strip.leftTrimSamples,
+                        ns);
                 }
             }
         }
@@ -1985,6 +1924,10 @@ void ClipWaveformView::paint(juce::Graphics& g)
         const float rxr = juce::jmax(rex0, rex1);
         juce::Rectangle<float> rowEventRect{ rxl, eventTrackY.getY(), juce::jmax(1.0f, rxr - rxl),
                                              eventTrackY.getHeight() };
+        if (rowEventRect.getRight() < bounds.getX() || rowEventRect.getX() > bounds.getRight())
+        {
+            continue;
+        }
         juce::Rectangle<float> rowInner
             = rowEventRect.reduced(1.0f + kWaveInset, 1.0f + kWaveInset * 0.5f);
         if (rowInner.getWidth() >= 1.0f && rowInner.getHeight() >= 1.0f)
@@ -2063,6 +2006,15 @@ void ClipWaveformView::paint(juce::Graphics& g)
         const float xLine = sessionSampleToX(phClamped);
         g.setColour(juce::Colours::white.withAlpha(0.92f));
         g.drawLine(xLine, bounds.getY(), xLine, bounds.getBottom(), 1.5f);
+    }
+
+    if (kClipWaveformPaintDiagnostics)
+    {
+        const double us = juce::Time::highResolutionTicksToSeconds(
+                              juce::Time::getHighResolutionTicks() - diagT0)
+                          * 1.0e6;
+        juce::Logger::writeToLog(juce::String("[ClipWaveformView] paint trackId=")
+                                  + juce::String(trackId_) + " µs=" + juce::String(us, 1));
     }
 }
 

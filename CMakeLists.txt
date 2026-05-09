@@ -43,8 +43,9 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp
-    src/io/ProjectAudioImport.cpp
+    src/io/AudioWaveformCache.cpp
     src/io/ProjectFile.cpp
+    src/io/ProjectAudioImport.cpp
     src/engine/CountInClickOutput.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/RecorderService.cpp

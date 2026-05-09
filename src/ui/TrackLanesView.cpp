@@ -164,13 +164,15 @@ TrackLanesView::TrackLanesView(
     TimelineViewportModel& timelineViewport,
     juce::AudioDeviceManager& deviceManager,
     RecorderService& recorder,
-    LatencySettingsStore& latencySettingsStore)
+    LatencySettingsStore& latencySettingsStore,
+    AudioWaveformCache& waveformCache)
     : session_(session)
     , transport_(transport)
     , timelineViewport_(timelineViewport)
     , deviceManager_(deviceManager)
     , recorder_(recorder)
     , latencyStore_(latencySettingsStore)
+    , waveformCache_(waveformCache)
 {
     syncTracksFromSession();
     startTimerHz(kRecordingPreviewTimerHz);
@@ -800,7 +802,8 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     (void)session_.splitClip(id, splitT);
                 }
             };
-        auto ptr = std::make_unique<ClipWaveformView>(session_, transport_, tid, timelineViewport_, std::move(host));
+        auto ptr = std::make_unique<ClipWaveformView>(
+            session_, transport_, tid, timelineViewport_, waveformCache_, std::move(host));
         addAndMakeVisible(*ptr);
         lanes_.push_back(std::move(ptr));
     }

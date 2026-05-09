@@ -75,6 +75,7 @@
 #include "ui/TimelineClipEventChrome.h"
 #include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
+#include "io/AudioWaveformCache.h"
 
 #include <algorithm>
 #include <atomic>
@@ -819,6 +820,7 @@ private:
             , playbackEngine_(playbackEngineIn)
             , sessionHistory_{}
             , timelineViewport_()
+            , audioWaveformCache_()
             , rulerView(
                   sessionIn,
                   transportIn,
@@ -827,7 +829,14 @@ private:
                   [this]() {
                       return recorder_.isRecording() || isCountInActive();
                   })
-            , trackLanesView(sessionIn, transportIn, timelineViewport_, deviceManagerIn, recorderIn, latencyStoreIn)
+            , trackLanesView(
+                  sessionIn,
+                  transportIn,
+                  timelineViewport_,
+                  deviceManagerIn,
+                  recorderIn,
+                  latencyStoreIn,
+                  audioWaveformCache_)
             , inspectorView_(sessionIn)
             , inspectorResizeSplitter_(*this)
             , inspectorCollapsedKnob_(*this)
@@ -4290,6 +4299,7 @@ private:
 
         /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).
         TimelineViewportModel timelineViewport_;
+        AudioWaveformCache audioWaveformCache_;
         TimelineRulerView rulerView;
         TrackLanesView trackLanesView;
         InspectorView inspectorView_;
