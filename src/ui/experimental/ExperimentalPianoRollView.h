@@ -16,6 +16,7 @@ struct InstrumentMidiClip;
 class InstrumentTrackController;
 class Session;
 class Transport;
+class TimelineViewportModel;
 
 /// Drum hits mode: diamonds at step centers; piano-style rows 24..72.
 /// I3d1: when bound to an `InstrumentMidiClip` + session/transport, X is **session-absolute samples**
@@ -38,15 +39,25 @@ public:
     void resized() override;
 
     /// Absolute timeline mode (clip editor). Pass nullptrs to use legacy clip-local step grid (internal pattern only).
+    /// `mainTimelineViewport` seeds horizontal zoom from the main DAW timeline when the clip has no roll viewport yet.
     void setSessionTimelineContext(InstrumentMidiClip* timelineClip,
                                    Session* session,
                                    Transport* transport,
                                    juce::AudioDeviceManager* deviceManager,
-                                   InstrumentTrackController* instrumentTrackController = nullptr) noexcept;
+                                   InstrumentTrackController* instrumentTrackController = nullptr,
+                                   const TimelineViewportModel* mainTimelineViewport = nullptr) noexcept;
 
     void setFollowPlayheadEnabled(bool on) noexcept;
 
     void seedOrResetViewport();
+
+    /// Replace horizontal pan/zoom (absolute timeline mode). Does not persist to clip until `syncViewportToBoundClip()`.
+    void setViewportState(std::int64_t visibleStartSamples, double samplesPerPixel) noexcept;
+
+    [[nodiscard]] bool hasValidViewportState() const noexcept;
+
+    /// Writes current roll pan/zoom/Follow into `timelineClip_` when bound (for session + project save).
+    void syncViewportToBoundClip() noexcept;
 
     /// I3f: musical snap for timeline editing (combo ids: 1=Off, 2=1/8, 3=1/16, 4=1/32 at current PPQ).
     void setMusicalSnapComboId(int id) noexcept;
@@ -61,7 +72,8 @@ private:
     void timerCallback() override;
 
     [[nodiscard]] bool useAbsoluteTimeline() const noexcept;
-    void ensureViewportSeeded();
+    void seedViewportFromMainTimelineOrFallback();
+    void applyViewportAfterContextBound();
     [[nodiscard]] std::int64_t sampleAtGridX(float localX) const noexcept;
     [[nodiscard]] float xForSessionSample(std::int64_t s) const noexcept;
     [[nodiscard]] int pitchAtY(int y) const;
@@ -90,11 +102,11 @@ private:
     Transport* transport_ = nullptr;
     juce::AudioDeviceManager* deviceManager_ = nullptr;
     InstrumentTrackController* instrumentTrackController_ = nullptr;
+    const TimelineViewportModel* mainTimelineViewport_ = nullptr;
 
     std::int64_t visibleStartSamples_ = 0;
     double samplesPerPixel_ = 0.0;
     bool followPlayhead_ = false;
-    bool viewportInitialized_ = false;
 
     /// Invalidate when rebinding so the next `timerCallback` repaints (locators/cycle/playhead).
     bool sessionTransportSnapshotValid_ = false;
@@ -107,8 +119,6 @@ private:
     std::int64_t lastObservedClipStartSamplesUi_ = 0;
     std::int64_t lastObservedClipLengthSamplesUi_ = 0;
     int lastObservedNoteCountUi_ = -1;
-
-    int lastResizeComponentWidth_ = -1;
 
     int musicalSnapComboId_ = 1;
     /// 1 = Hits (default), 2 = Bars.

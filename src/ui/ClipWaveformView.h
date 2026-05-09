@@ -104,7 +104,7 @@ struct ClipWaveformLaneHost
 //
 // Not responsible for: file decode, clip ordering *rules*, or transport ownership.
 // ---------------------------------------------------------------------------
-class ClipWaveformView : public juce::Component, private juce::Timer
+class ClipWaveformView : public juce::Component
 {
 public:
     // [Message thread] session/transport/timelineViewport/`waveformCache` outlive the view.
@@ -194,13 +194,66 @@ private:
     std::vector<TimelineStrip> clipStrips_;
     std::uint64_t lastPeaksFingerprint_ = 0;
 
-    // [Message thread] Timer: schedules full `repaint` at a low fixed rate (see .cpp); playhead is sampled in
-    // `paint` so the line tracks `Transport` without storing a cached position on the view.
-    void timerCallback() override;
+    enum class WaveformRasterRebuildReason : std::uint8_t
+    {
+        None = 0,
+        First,
+        Size,
+        Zoom,
+        Snapshot,
+        Pyramid,
+        OverscanRange,
+    };
 
-    // [Message thread] Refreshes per-row strip metadata (timing + shared material handle) when the
-    // snapshot fingerprint or lane width changes. Peak **pyramids** live in `AudioWaveformCache`.
+    // Overscanned raster cache: stable committed waveform + hatch (see .cpp).
+    juce::Image waveRaster_;
+    std::int64_t waveRasterCoveredStart_ = 0;
+    std::int64_t waveRasterCoveredEnd_ = 0;
+    int waveRasterImageW_ = 0;
+    int waveRasterImageH_ = 0;
+    double waveRasterSpp_ = 0.0;
+    std::uint64_t waveRasterStripFp_ = 0;
+    std::uint64_t waveRasterPyramidFp_ = 0;
+    int waveRasterMarginPx_ = 0;
+    WaveformRasterRebuildReason waveRasterLastRebuildReason_ = WaveformRasterRebuildReason::None;
+
+    [[nodiscard]] bool shouldBypassWaveformRasterCache() const noexcept;
+    [[nodiscard]] bool visibleFitsWaveRaster(std::int64_t visStart, std::int64_t visLen) const noexcept;
+    [[nodiscard]] std::uint64_t computePyramidReadyFingerprint() const;
+    void computeWaveRasterLayout(int viewWpx,
+                                 std::int64_t visStart,
+                                 std::int64_t visLen,
+                                 double spp,
+                                 int& outMarginPx,
+                                 std::int64_t& outCoveredStart,
+                                 int& outImageW) const;
+
+    // [Message thread] Refreshes per-row strip metadata when snapshot fingerprint or lane width changes.
     void syncClipStripsFromSnapshotIfNeeded();
+
+    void paintStableCommittedLayer(juce::Graphics& g,
+                                   const juce::Rectangle<float>& bounds,
+                                   std::int64_t mappingVisStart,
+                                   std::int64_t visLen,
+                                   double spp);
+
+    void paintUncachedFull(juce::Graphics& g,
+                           const juce::Rectangle<float>& bounds,
+                           std::int64_t visStart,
+                           std::int64_t visLen,
+                           double spp);
+
+    void paintDynamicChrome(juce::Graphics& g,
+                            const juce::Rectangle<float>& bounds,
+                            std::int64_t visStart,
+                            std::int64_t visLen,
+                            double spp);
+
+    bool ensureWaveRasterForViewState(const juce::Rectangle<float>& bounds,
+                                      std::int64_t visStart,
+                                      std::int64_t visLen,
+                                      double spp,
+                                      std::int64_t arrExtent);
 
     // [Message thread] Viewport pixels → pyramid min/max queries; no PCM reads here.
     void paintRowWaveformWithPyramid(
@@ -213,7 +266,10 @@ private:
         float halfDraw,
         std::int64_t timelineStartForWaveform,
         std::int64_t materialFileLeft,
-        int visibleMaterialSamples);
+        int visibleMaterialSamples,
+        const juce::Rectangle<float>& mappingBounds,
+        std::int64_t mappingVisStart,
+        double mappingSpp);
 
     // [Message thread] A timeline sample t is *covered* (for painting a lower row r) if any row
     // with a lower index in the snapshot — drawn later, “in front” — owns that half-open sample.

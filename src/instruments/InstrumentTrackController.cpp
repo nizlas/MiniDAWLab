@@ -242,6 +242,9 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         c.lengthSamples = cptr->lengthSamples;
         c.laneStartFractionPermille = cptr->laneStartFractionPermille;
         c.laneEndFractionPermille = cptr->laneEndFractionPermille;
+        c.midiRollVisibleStartSamples = cptr->midiRollVisibleStartSamples;
+        c.midiRollSamplesPerPixel = cptr->midiRollSamplesPerPixel;
+        c.midiRollFollowEnabled = cptr->midiRollFollowEnabled;
         for (const auto& n : cptr->pattern.notes)
         {
             ProjectFileExperimentalInstrumentNoteV1 nn;
@@ -311,6 +314,13 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
         clip->pattern.loop = cdto.loop;
         clip->laneStartFractionPermille = cdto.laneStartFractionPermille;
         clip->laneEndFractionPermille = cdto.laneEndFractionPermille;
+        clip->midiRollVisibleStartSamples = juce::jmax(std::int64_t{0}, cdto.midiRollVisibleStartSamples);
+        clip->midiRollSamplesPerPixel = cdto.midiRollSamplesPerPixel;
+        if (!std::isfinite(clip->midiRollSamplesPerPixel) || clip->midiRollSamplesPerPixel < 0.0)
+        {
+            clip->midiRollSamplesPerPixel = 0.0;
+        }
+        clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
         clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
         clip->lengthSamples = cdto.lengthSamples;
         for (const auto& n : cdto.notes)

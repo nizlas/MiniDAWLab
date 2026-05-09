@@ -843,6 +843,7 @@ private:
             , instrumentMidiEventLane_(*this, instrumentTrackController_)
         {
             setWantsKeyboardFocus(true);
+            audioWaveformCache_.setOnPyramidReady([this](const AudioClip*) { trackLanesView.repaint(); });
             {
                 TrackHeaderCallbacks hdrCb;
                 // Selecting the instrument row makes it the UI-active track and clears any audio
@@ -1358,6 +1359,7 @@ private:
 
         ~TransportControlsContent() override
         {
+            audioWaveformCache_.setOnPyramidReady({});
             deviceManager.removeChangeListener(this);
             cancelCountIn();
             experimentalMidiEditorWindow_.reset();
@@ -1774,6 +1776,7 @@ private:
                                                                &session,
                                                                &transport,
                                                                &deviceManager,
+                                                               &timelineViewport_,
                                                                clip->name);
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             experimentalMidiEditorWindow_->setVisible(true);
@@ -2391,8 +2394,6 @@ private:
             }
             if (importInFlight_)
             {
-                juce::Logger::writeToLog(
-                    juce::String("[CLIMPORT] STAGE:ui:ignored_second_add_while_chooser_in_flight"));
                 return;
             }
             importInFlight_ = true;
@@ -2424,15 +2425,12 @@ private:
                 if (!file.existsAsFile())
                 {
                     // Cancel or empty selection — not an error, keep the current session.
-                    juce::Logger::writeToLog(
-                        juce::String("[CLIMPORT] STAGE:ui:chooser_dismissed_cancel_or_no_file"));
                     return;
                 }
 
                 juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
                 if (device == nullptr)
                 {
-                    juce::Logger::writeToLog("[CLIMPORT] STAGE:ui:fail no_audio_device");
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon,
                         "Audio",
@@ -2440,8 +2438,6 @@ private:
                     return;
                 }
 
-                juce::Logger::writeToLog(
-                    juce::String("[CLIMPORT] STAGE:ui:chooser_ok file=") + file.getFullPathName());
                 // Snapshot once: this value becomes `PlacedClip::startSampleOnTimeline` for the
                 // new row (see Session / `PHASE_PLAN` add-at-playhead).
                 const std::int64_t startSampleOnTimeline = transport.readPlayheadSamplesForUi();
@@ -2455,33 +2451,17 @@ private:
                     = mini_daw::importAudioIntoProjectAudioDir(file, audioDir, pathToUse);
                 if (!importRes.wasOk())
                 {
-                    juce::Logger::writeToLog(
-                        juce::String{"[CLIMPORT] STAGE:ui:copy_fail reason="} + importRes.getErrorMessage());
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon,
                         "Could not import audio",
                         importRes.getErrorMessage());
                     return;
                 }
-                if (file == pathToUse)
-                {
-                    juce::Logger::writeToLog(
-                        juce::String{"[CLIMPORT] STAGE:ui:copy_ok dest=(already in Audio/) "}
-                        + pathToUse.getFullPathName());
-                }
-                else
-                {
-                    juce::Logger::writeToLog(
-                        juce::String{"[CLIMPORT] STAGE:ui:copy_ok dest="} + pathToUse.getFullPathName());
-                }
-
                 const juce::Result loadResult
                     = session.addClipFromFileAtPlayhead(pathToUse, sampleRate, startSampleOnTimeline);
 
                 if (!loadResult.wasOk())
                 {
-                    juce::Logger::writeToLog(
-                        juce::String("[CLIMPORT] STAGE:ui:session_add_failed err=") + loadResult.getErrorMessage());
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon,
                         "Could not open file",
@@ -2489,14 +2469,10 @@ private:
                 }
                 else
                 {
-                    juce::Logger::writeToLog(
-                        juce::String("[CLIMPORT] STAGE:ui:sync:begin file=") + pathToUse.getFileName());
                     // New **front** clip is on the active track; playhead/transport are unchanged.
                     syncViewportFromSession();
                     trackLanesView.syncTracksFromSession();
                     trackLanesView.repaint();
-                    juce::Logger::writeToLog(
-                        juce::String("[CLIMPORT] STAGE:ui:sync:done file=") + pathToUse.getFileName());
                 }
             });
         }
@@ -3467,6 +3443,10 @@ private:
             // Normal save: no chooser. Explicit "Save As" / "New project" is deferred.
             if (session.hasKnownProjectFile())
             {
+                if (experimentalMidiEditorWindow_ != nullptr)
+                {
+                    experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
+                }
                 const juce::Result r = session.saveProjectToFile(
                     transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_, &instrumentTrackController_);
                 if (!r.wasOk())
@@ -3535,6 +3515,10 @@ private:
                             juce::AlertWindow::WarningIcon, "Save project", conflict2);
                         return;
                     }
+                }
+                if (experimentalMidiEditorWindow_ != nullptr)
+                {
+                    experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
                 }
                 const juce::Result r
                     = session.saveProjectToFile(transport, projectFile, sampleRate, &pluginHost_, &instrumentTrackController_);

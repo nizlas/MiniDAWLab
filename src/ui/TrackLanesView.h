@@ -47,6 +47,7 @@ class Transport;
 class TimelineViewportModel;
 class LatencySettingsStore;
 class AudioWaveformCache;
+class PlayheadOverlay;
 
 // ---------------------------------------------------------------------------
 // TrackLanesView — vertical stack of per-track event lanes
@@ -180,6 +181,7 @@ private:
     AudioWaveformCache& waveformCache_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
+    std::unique_ptr<PlayheadOverlay> playheadOverlay_;
 
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
     // while recording as `drainNextPreviewBlock` returns data. Not session state.

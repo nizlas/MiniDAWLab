@@ -97,6 +97,12 @@ struct ProjectFileExperimentalInstrumentClipV1
     /// v12: internal PPQ domain (default 960).
     int ticksPerQuarter = 960;
     std::vector<ProjectFileExperimentalTimelineNoteV12> timelineNotes;
+    /// v12+ optional: MIDI roll horizontal scroll (samples). Omitted when no saved roll viewport.
+    std::int64_t midiRollVisibleStartSamples = 0;
+    /// v12+ optional: MIDI roll zoom; absence or 0 = no per-clip roll viewport in file.
+    double midiRollSamplesPerPixel = 0.0;
+    /// v12+ optional: piano-roll Follow playhead. Omitted when false.
+    bool midiRollFollowEnabled = false;
 };
 
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).
@@ -120,6 +126,7 @@ struct ProjectFileExperimentalInstrumentTrackV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
+    /// New optional JSON keys may be added at this version when missing properties default safely for older writers/readers (no bump required — see experimental clip `midiRoll*` keys).
     static constexpr int kCurrentVersion = 12;
 
     int version = kCurrentVersion;

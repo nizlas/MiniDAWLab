@@ -50,6 +50,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/PlaybackEngine.cpp
     src/engine/RecorderService.cpp
     src/ui/ClipWaveformView.cpp
+    src/ui/PlayheadOverlay.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
     src/ui/LatencySettingsView.cpp

@@ -8,6 +8,7 @@ class InstrumentTrackController;
 struct InstrumentMidiClip;
 class Session;
 class Transport;
+class TimelineViewportModel;
 
 namespace juce
 {
@@ -32,15 +33,20 @@ public:
 
     /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass session/transport/
     /// deviceManager for absolute-timeline roll + shared playhead/locators; `timelineClip` may be null
-    /// only for legacy detached use.
+    /// only for legacy detached use. `mainTimelineViewport` seeds roll zoom when the clip has no saved viewport.
     void bindExternalPattern(ExperimentalMidiPattern* pattern,
                              InstrumentMidiClip* timelineClip,
                              InstrumentTrackController* instrumentTrackForClip,
                              Session* session,
                              Transport* transport,
                              juce::AudioDeviceManager* deviceManager,
+                             const TimelineViewportModel* mainTimelineViewport,
                              const juce::String& titleSuffix);
+
     void unbindExternalPattern();
+
+    /// Persists piano-roll pan/zoom/Follow on the bound clip (call before project save and when closing).
+    void snapshotOpenClipViewportFromRoll() noexcept;
 
 private:
     class Body;

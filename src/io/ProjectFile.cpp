@@ -519,6 +519,26 @@ namespace
                                 }
                             }
                         }
+                        const juce::var& mrvs = cv.getProperty("midiRollVisibleStartSamples", {});
+                        if (mrvs.isInt() || mrvs.isInt64() || mrvs.isDouble())
+                        {
+                            c.midiRollVisibleStartSamples
+                                = static_cast<std::int64_t>(static_cast<double>(mrvs));
+                        }
+                        const juce::var& mrsp = cv.getProperty("midiRollSamplesPerPixel", {});
+                        if (mrsp.isDouble() || mrsp.isInt() || mrsp.isInt64())
+                        {
+                            c.midiRollSamplesPerPixel = static_cast<double>(mrsp);
+                        }
+                        const juce::var& mrfo = cv.getProperty("midiRollFollowEnabled", {});
+                        if (mrfo.isBool())
+                        {
+                            c.midiRollFollowEnabled = (bool)mrfo;
+                        }
+                        else if (mrfo.isInt() || mrfo.isInt64() || mrfo.isDouble())
+                        {
+                            c.midiRollFollowEnabled = static_cast<int>(static_cast<double>(mrfo) + 0.5) != 0;
+                        }
                         et.clips.push_back(std::move(c));
                     }
                 }
@@ -652,6 +672,16 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                         tnoteVars.add(juce::var(tnO.get()));
                     }
                     co->setProperty("timelineNotes", juce::var(tnoteVars));
+                }
+                if (cl.midiRollSamplesPerPixel > 0.0 && std::isfinite(cl.midiRollSamplesPerPixel))
+                {
+                    co->setProperty(
+                        "midiRollVisibleStartSamples", static_cast<juce::int64>(cl.midiRollVisibleStartSamples));
+                    co->setProperty("midiRollSamplesPerPixel", cl.midiRollSamplesPerPixel);
+                    if (cl.midiRollFollowEnabled)
+                    {
+                        co->setProperty("midiRollFollowEnabled", true);
+                    }
                 }
                 clipVars.add(juce::var(co.get()));
             }

@@ -26,6 +26,7 @@
 // =============================================================================
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -34,6 +35,8 @@
 #include <juce_core/juce_core.h>
 
 class AudioClip;
+
+using AudioWaveformCachePyramidReady = std::function<void(const AudioClip*)>;
 
 // Immutable peak pyramid: level 0 = finest bins of width `baseSamplesPerBin`; each coarser level
 // merges pairs of bins (min of mins, max of maxes) until one bin covers the tail.
@@ -88,6 +91,13 @@ public:
     [[nodiscard]] std::shared_ptr<const WaveformPyramid> getOrEnqueue(
         const std::shared_ptr<const AudioClip>& material);
 
+    // [Message thread] True if a pyramid is already available (does not schedule a build).
+    [[nodiscard]] bool isPyramidReady(const AudioClip* material) const noexcept;
+
+    // [Message thread] Optional: invoked asynchronously after a pyramid is published (worker thread
+    // schedules this on the message thread). Used to repaint waveform lanes without a playhead timer.
+    void setOnPyramidReady(AudioWaveformCachePyramidReady fn) { onPyramidReady_ = std::move(fn); }
+
     // [Message thread] Stops workers; clears slots. Used on shutdown (also runs in destructor).
     void shutdown() noexcept;
 
@@ -105,7 +115,8 @@ private:
         bool jobScheduled = false;
     };
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unordered_map<const AudioClip*, Slot> slots_;
     std::unique_ptr<juce::ThreadPool> pool_;
+    AudioWaveformCachePyramidReady onPyramidReady_;
 };

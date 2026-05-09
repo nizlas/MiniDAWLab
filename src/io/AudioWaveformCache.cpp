@@ -26,6 +26,8 @@
 
 #include "domain/AudioClip.h"
 
+#include <juce_events/juce_events.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -288,15 +290,24 @@ void AudioWaveformCache::completeBackgroundPyramidBuild(
     {
         return;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = slots_.find(material.get());
-    if (it != slots_.end())
+    AudioWaveformCachePyramidReady callbackCopy;
     {
-        if (built != nullptr)
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = slots_.find(material.get());
+        if (it != slots_.end())
         {
-            it->second.ready = std::move(built);
+            if (built != nullptr)
+            {
+                it->second.ready = std::move(built);
+            }
+            it->second.jobScheduled = false;
         }
-        it->second.jobScheduled = false;
+        callbackCopy = onPyramidReady_;
+    }
+    if (callbackCopy != nullptr && built != nullptr)
+    {
+        const AudioClip* key = material.get();
+        juce::MessageManager::callAsync([cb = std::move(callbackCopy), key] { cb(key); });
     }
 }
 
@@ -322,4 +333,19 @@ std::shared_ptr<const WaveformPyramid> AudioWaveformCache::getOrEnqueue(
         }
     }
     return nullptr;
+}
+
+bool AudioWaveformCache::isPyramidReady(const AudioClip* material) const noexcept
+{
+    if (material == nullptr)
+    {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = slots_.find(material);
+    if (it == slots_.end())
+    {
+        return false;
+    }
+    return it->second.ready != nullptr;
 }

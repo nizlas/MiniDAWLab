@@ -5,6 +5,7 @@
 
 #include "domain/Session.h"
 #include "transport/Transport.h"
+#include "ui/TimelineViewportModel.h"
 
 #include <cmath>
 
@@ -147,10 +148,14 @@ namespace
     /// During main transport or Debug Preview playback — ~display refresh for smooth playhead.
     constexpr int kMidiRollTimerHzAnimating = 60;
 
-    /// Follow auto-scroll: only adjust viewport when playhead leaves this **relative** band of the
-    /// visible window (0..1). Avoids recentering every block @60Hz which makes the grid “jitter”.
-    constexpr double kFollowBandLow = 0.40;
-    constexpr double kFollowBandHigh = 0.60;
+    /// Follow auto-scroll: edge-style follow — only pan when the playhead nears the right or left
+    /// edge of the visible grid. Avoids micro-recentering; forward playback leaves the line crossing
+    /// most of the view between scroll jumps.
+    constexpr double kFollowRightThreshold = 0.92;
+    constexpr double kFollowLeftThreshold = 0.08;
+    constexpr double kFollowForwardResetPosition = 0.20;
+    /// After a backward/seek correction, place slightly further right than forward reset (20–30%).
+    constexpr double kFollowBackwardResetPosition = 0.25;
 
     /// Resync extrapolation when `|transport - predicted|` exceeds this (seek / cycle / dropout).
     constexpr double kPlayheadHardResyncSamples = 8192.0;
@@ -226,18 +231,21 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
                                                           Session* session,
                                                           Transport* transport,
                                                           juce::AudioDeviceManager* deviceManager,
-                                                          InstrumentTrackController* trackController) noexcept
+                                                          InstrumentTrackController* trackController,
+                                                          const TimelineViewportModel* mainTimelineViewport) noexcept
 {
     const bool changed = timelineClip_ != timelineClip || session_ != session || transport_ != transport
-                         || deviceManager_ != deviceManager || instrumentTrackController_ != trackController;
+                         || deviceManager_ != deviceManager || instrumentTrackController_ != trackController
+                         || mainTimelineViewport_ != mainTimelineViewport;
     timelineClip_ = timelineClip;
     session_ = session;
     transport_ = transport;
     deviceManager_ = deviceManager;
     instrumentTrackController_ = trackController;
-    if (changed)
+    mainTimelineViewport_ = mainTimelineViewport;
+    if (changed && useAbsoluteTimeline())
     {
-        viewportInitialized_ = false;
+        applyViewportAfterContextBound();
     }
     sessionTransportSnapshotValid_ = false;
     clipGeometrySnapshotValid_ = false;
@@ -253,7 +261,6 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         uiPlayheadLastRawPh_ = ph;
         lastOffscreenGatePlayheadInView_ = true;
     }
-    ensureViewportSeeded();
     repaint();
 }
 
@@ -264,13 +271,28 @@ void ExperimentalPianoRollView::setFollowPlayheadEnabled(const bool on) noexcept
         return;
     }
     followPlayhead_ = on;
+    syncViewportToBoundClip();
     repaint();
 }
 
 void ExperimentalPianoRollView::seedOrResetViewport()
 {
-    viewportInitialized_ = false;
-    ensureViewportSeeded();
+    if (timelineClip_ != nullptr)
+    {
+        timelineClip_->midiRollVisibleStartSamples = 0;
+        timelineClip_->midiRollSamplesPerPixel = 0.0;
+        timelineClip_->midiRollFollowEnabled = false;
+    }
+    if (useAbsoluteTimeline())
+    {
+        seedViewportFromMainTimelineOrFallback();
+        syncViewportToBoundClip();
+    }
+    else
+    {
+        visibleStartSamples_ = 0;
+        samplesPerPixel_ = 0.0;
+    }
     sessionTransportSnapshotValid_ = false;
     clipGeometrySnapshotValid_ = false;
     lastObservedNoteCountUi_ = -1;
@@ -278,29 +300,111 @@ void ExperimentalPianoRollView::seedOrResetViewport()
     repaint();
 }
 
-bool ExperimentalPianoRollView::useAbsoluteTimeline() const noexcept
-{
-    return timelineClip_ != nullptr && session_ != nullptr && transport_ != nullptr;
-}
-
-void ExperimentalPianoRollView::ensureViewportSeeded()
+void ExperimentalPianoRollView::setViewportState(
+    const std::int64_t visibleStartSamples, const double samplesPerPixel) noexcept
 {
     if (!useAbsoluteTimeline())
     {
         return;
     }
-    if (viewportInitialized_ && samplesPerPixel_ > 0.0)
+    if (samplesPerPixel > 0.0 && std::isfinite(samplesPerPixel))
+    {
+        visibleStartSamples_ = juce::jmax(std::int64_t{0}, visibleStartSamples);
+        samplesPerPixel_ = samplesPerPixel;
+    }
+}
+
+bool ExperimentalPianoRollView::hasValidViewportState() const noexcept
+{
+    return samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_);
+}
+
+void ExperimentalPianoRollView::syncViewportToBoundClip() noexcept
+{
+    if (timelineClip_ == nullptr || !useAbsoluteTimeline())
     {
         return;
     }
+    if (!hasValidViewportState())
+    {
+        return;
+    }
+    timelineClip_->midiRollVisibleStartSamples = visibleStartSamples_;
+    timelineClip_->midiRollSamplesPerPixel = samplesPerPixel_;
+    timelineClip_->midiRollFollowEnabled = followPlayhead_;
+}
+
+bool ExperimentalPianoRollView::useAbsoluteTimeline() const noexcept
+{
+    return timelineClip_ != nullptr && session_ != nullptr && transport_ != nullptr;
+}
+
+void ExperimentalPianoRollView::seedViewportFromMainTimelineOrFallback()
+{
+    if (!useAbsoluteTimeline())
+    {
+        return;
+    }
+
     const auto gr = gridBounds();
     const double w = juce::jmax(1.0, (double)juce::jmax(1, gr.getWidth()));
     const double sr = effectiveDeviceSampleRate(deviceManager_);
-    samplesPerPixel_ = juce::jmax(1.0, sr / 10.0);
+
+    double spp = 0.0;
+    if (mainTimelineViewport_ != nullptr)
+    {
+        spp = mainTimelineViewport_->getSamplesPerPixel();
+    }
+    if (spp <= 0.0 || !std::isfinite(spp))
+    {
+        spp = juce::jmax(1.0, sr / 10.0);
+    }
+    samplesPerPixel_ = spp;
+
     const std::int64_t visibleLen = (std::int64_t)std::llround(w * samplesPerPixel_);
-    const std::int64_t anchor = timelineClip_->startSamples;
-    visibleStartSamples_ = juce::jmax(std::int64_t{0}, anchor - visibleLen / 4);
-    viewportInitialized_ = true;
+    std::int64_t visStart = 0;
+
+    if (timelineClip_ != nullptr && transport_ != nullptr)
+    {
+        const std::int64_t ph = transport_->readPlayheadSamplesForUi();
+        const std::int64_t c0 = timelineClip_->startSamples;
+        const std::int64_t c1 = c0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+        const std::int64_t margin = juce::jmax(std::int64_t{1}, visibleLen / 10);
+        const bool phNearClip = ph >= c0 - margin && ph <= c1 + margin;
+        if (phNearClip)
+        {
+            visStart = ph - (std::int64_t)std::llround(0.25 * (double)visibleLen);
+        }
+        else
+        {
+            visStart = c0 - (std::int64_t)std::llround(0.1 * (double)visibleLen);
+        }
+    }
+    else if (timelineClip_ != nullptr)
+    {
+        visStart = timelineClip_->startSamples - (std::int64_t)std::llround(0.1 * (double)visibleLen);
+    }
+
+    visibleStartSamples_ = juce::jmax(std::int64_t{0}, visStart);
+}
+
+void ExperimentalPianoRollView::applyViewportAfterContextBound()
+{
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr)
+    {
+        return;
+    }
+
+    if (timelineClip_->midiRollSamplesPerPixel > 0.0 && std::isfinite(timelineClip_->midiRollSamplesPerPixel))
+    {
+        visibleStartSamples_ = juce::jmax(std::int64_t{0}, timelineClip_->midiRollVisibleStartSamples);
+        samplesPerPixel_ = timelineClip_->midiRollSamplesPerPixel;
+        followPlayhead_ = timelineClip_->midiRollFollowEnabled;
+        return;
+    }
+
+    seedViewportFromMainTimelineOrFallback();
+    syncViewportToBoundClip();
 }
 
 std::int64_t ExperimentalPianoRollView::sampleAtGridX(const float localX) const noexcept
@@ -426,15 +530,29 @@ void ExperimentalPianoRollView::timerCallback()
             if (samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))
             {
                 const double spanSamples = wpx * samplesPerPixel_;
-                const double rel = spanSamples > 1e-9 ? (double)(phRaw - visibleStartSamples_) / spanSamples : 0.5;
-                if (rel < kFollowBandLow || rel > kFollowBandHigh)
+                const double ph = uiPlayheadDisplaySamples_;
+                const double rel
+                    = spanSamples > 1e-9 ? (ph - (double)visibleStartSamples_) / spanSamples : 0.5;
+
+                std::int64_t targetStart = visibleStartSamples_;
+                bool needScroll = false;
+                if (rel >= kFollowRightThreshold)
                 {
-                    const std::int64_t target = juce::jmax(
-                        std::int64_t{0},
-                        phRaw - (std::int64_t)std::llround(0.5 * spanSamples));
-                    if (target != visibleStartSamples_)
+                    needScroll = true;
+                    targetStart = (std::int64_t)std::llround(ph - kFollowForwardResetPosition * spanSamples);
+                }
+                else if (rel <= kFollowLeftThreshold)
+                {
+                    needScroll = true;
+                    targetStart = (std::int64_t)std::llround(ph - kFollowBackwardResetPosition * spanSamples);
+                }
+
+                if (needScroll)
+                {
+                    const std::int64_t clamped = juce::jmax(std::int64_t{0}, targetStart);
+                    if (clamped != visibleStartSamples_)
                     {
-                        visibleStartSamples_ = target;
+                        visibleStartSamples_ = clamped;
                         viewportMoved = true;
                         structuralRepaint = true;
                     }
@@ -463,6 +581,11 @@ void ExperimentalPianoRollView::timerCallback()
         lastObservedNoteCountUi_ = noteCount;
         lastObservedTimelineNoteCountUi_ = tnCount;
         structuralRepaint = true;
+    }
+
+    if (viewportMoved)
+    {
+        syncViewportToBoundClip();
     }
 
     wasTransportPlayingUi_ = transportPlaying;
@@ -518,17 +641,7 @@ void ExperimentalPianoRollView::timerCallback()
 
 void ExperimentalPianoRollView::resized()
 {
-    const int w = getWidth();
-    if (useAbsoluteTimeline() && lastResizeComponentWidth_ >= 0 && w != lastResizeComponentWidth_)
-    {
-        viewportInitialized_ = false;
-    }
-    lastResizeComponentWidth_ = w;
     Component::resized();
-    if (useAbsoluteTimeline())
-    {
-        ensureViewportSeeded();
-    }
 }
 
 float ExperimentalPianoRollView::cellWidth() const
@@ -742,7 +855,10 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
     {
         return;
     }
-    ensureViewportSeeded();
+    if (!hasValidViewportState())
+    {
+        seedViewportFromMainTimelineOrFallback();
+    }
     const auto gr = gridBounds();
     const auto rt = rulerTrackBounds();
     const bool inTimeline = gr.contains(e.getPosition())
@@ -762,6 +878,7 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
             std::int64_t{0},
             visibleStartSamples_ + (std::int64_t)std::llround(panPx * samplesPerPixel_));
         sessionTransportSnapshotValid_ = false;
+        syncViewportToBoundClip();
         repaint();
         return;
     }
@@ -773,6 +890,7 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
     visibleStartSamples_ = juce::jmax(std::int64_t{0}, visibleStartSamples_);
     samplesPerPixel_ = spp1;
     sessionTransportSnapshotValid_ = false;
+    syncViewportToBoundClip();
     repaint();
 }
 
@@ -787,18 +905,9 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
 
     if (absTime)
     {
-        ensureViewportSeeded();
-        // Ruler ticks/mapping must not depend on a valid prior zoom state; repair before any xForSessionSample use.
-        if (samplesPerPixel_ <= 0.0 || !std::isfinite(samplesPerPixel_))
+        if (!hasValidViewportState())
         {
-            const auto grSeed = gridBounds();
-            const double w = juce::jmax(1.0, (double)juce::jmax(1, grSeed.getWidth()));
-            const double sr = effectiveDeviceSampleRate(deviceManager_);
-            samplesPerPixel_ = juce::jmax(1.0, sr / 10.0);
-            viewportInitialized_ = true;
-            const std::int64_t visibleLen = (std::int64_t)std::llround(w * samplesPerPixel_);
-            const std::int64_t anchor = timelineClip_ != nullptr ? timelineClip_->startSamples : std::int64_t{0};
-            visibleStartSamples_ = juce::jmax(std::int64_t{0}, anchor - visibleLen / 4);
+            seedViewportFromMainTimelineOrFallback();
         }
     }
 

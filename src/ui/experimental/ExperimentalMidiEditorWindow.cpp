@@ -8,6 +8,7 @@
 
 #include "domain/Session.h"
 #include "transport/Transport.h"
+#include "ui/TimelineViewportModel.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
@@ -192,7 +193,12 @@ public:
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
             rv->setSessionTimelineContext(
-                boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_, instrumentTrackForClipBind_);
+                boundTimelineClip_,
+                sessionForRoll_,
+                transportForRoll_,
+                deviceManagerForRoll_,
+                instrumentTrackForClipBind_,
+                mainTimelineViewportForRoll_);
         }
     }
 
@@ -201,11 +207,13 @@ public:
                       InstrumentTrackController* trackForClipGate,
                       Session* session,
                       Transport* transport,
-                      juce::AudioDeviceManager* deviceManager)
+                      juce::AudioDeviceManager* deviceManager,
+                      const TimelineViewportModel* mainTimelineViewport)
     {
         InstrumentTrackController* const gatePtr = (p != nullptr) ? trackForClipGate : nullptr;
         if (externalPattern_ == p && instrumentTrackForClipBind_ == gatePtr && boundTimelineClip_ == timelineClip
-            && sessionForRoll_ == session && transportForRoll_ == transport && deviceManagerForRoll_ == deviceManager)
+            && sessionForRoll_ == session && transportForRoll_ == transport && deviceManagerForRoll_ == deviceManager
+            && mainTimelineViewportForRoll_ == mainTimelineViewport)
         {
             syncSlidersFromActivePattern();
             syncInstrumentUiFromHost();
@@ -216,12 +224,22 @@ public:
         {
             player_->stopPlayback("rebind");
         }
+
+        if (auto* oldRoll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (boundTimelineClip_ != nullptr)
+            {
+                oldRoll->syncViewportToBoundClip();
+            }
+        }
+
         externalPattern_ = p;
         instrumentTrackForClipBind_ = gatePtr;
         boundTimelineClip_ = timelineClip;
         sessionForRoll_ = session;
         transportForRoll_ = transport;
         deviceManagerForRoll_ = deviceManager;
+        mainTimelineViewportForRoll_ = mainTimelineViewport;
         if (p != nullptr && timelineClip != nullptr)
         {
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
@@ -264,15 +282,34 @@ public:
         {
             player_->stopPlayback("rebind");
         }
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (boundTimelineClip_ != nullptr)
+            {
+                rv->syncViewportToBoundClip();
+            }
+        }
         externalPattern_ = nullptr;
         instrumentTrackForClipBind_ = nullptr;
         boundTimelineClip_ = nullptr;
         sessionForRoll_ = nullptr;
         transportForRoll_ = nullptr;
         deviceManagerForRoll_ = nullptr;
+        mainTimelineViewportForRoll_ = nullptr;
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
+    }
+
+    void snapshotOpenClipViewportFromRoll() noexcept
+    {
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (boundTimelineClip_ != nullptr)
+            {
+                rv->syncViewportToBoundClip();
+            }
+        }
     }
 
     [[nodiscard]] ExperimentalMidiPattern& activePattern() noexcept
@@ -480,6 +517,7 @@ private:
     Session* sessionForRoll_ = nullptr;
     Transport* transportForRoll_ = nullptr;
     juce::AudioDeviceManager* deviceManagerForRoll_ = nullptr;
+    const TimelineViewportModel* mainTimelineViewportForRoll_ = nullptr;
 
     void syncSlidersFromActivePattern()
     {
@@ -506,8 +544,15 @@ private:
             + " noteCount=" + juce::String((int)ap.notes.size()));
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
-        roll->setSessionTimelineContext(
-            boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_, instrumentTrackForClipBind_);
+        roll->setSessionTimelineContext(boundTimelineClip_,
+                                        sessionForRoll_,
+                                        transportForRoll_,
+                                        deviceManagerForRoll_,
+                                        instrumentTrackForClipBind_,
+                                        mainTimelineViewportForRoll_);
+        followPlayheadToggle_.setToggleState(
+            boundTimelineClip_ != nullptr && boundTimelineClip_->midiRollFollowEnabled,
+            juce::dontSendNotification);
         roll->setFollowPlayheadEnabled(followPlayheadToggle_.getToggleState());
         viewport_.setViewedComponent(roll, true);
         roll->setMusicalSnapComboId(snapBox_.getSelectedId());
@@ -694,6 +739,7 @@ void ExperimentalMidiEditorWindow::closeButtonPressed()
 {
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
+        b->snapshotOpenClipViewportFromRoll();
         b->stopForHostUnload();
     }
     setVisible(false);
@@ -721,6 +767,7 @@ void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* 
                                                        Session* session,
                                                        Transport* transport,
                                                        juce::AudioDeviceManager* deviceManager,
+                                                       const TimelineViewportModel* mainTimelineViewport,
                                                        const juce::String& titleSuffix)
 {
     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
@@ -729,7 +776,8 @@ void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* 
 
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
-        b->bindExternal(pattern, timelineClip, instrumentTrackForClip, session, transport, deviceManager);
+        b->bindExternal(
+            pattern, timelineClip, instrumentTrackForClip, session, transport, deviceManager, mainTimelineViewport);
     }
 
     juce::String winName { "I2 MIDI editor (Drum hits)" };
@@ -747,4 +795,12 @@ void ExperimentalMidiEditorWindow::unbindExternalPattern()
         b->unbindExternal();
     }
     setName("I2 MIDI editor (Drum hits)");
+}
+
+void ExperimentalMidiEditorWindow::snapshotOpenClipViewportFromRoll() noexcept
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->snapshotOpenClipViewportFromRoll();
+    }
 }

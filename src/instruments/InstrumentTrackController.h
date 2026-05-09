@@ -38,6 +38,11 @@ struct InstrumentMidiClip
     /// Legacy fractional lane layout when main timeline mapping is unavailable (fallback).
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
+
+    /// MIDI piano-roll UI viewport (message thread). `midiRollSamplesPerPixel <= 0` = never set / use default seed.
+    std::int64_t midiRollVisibleStartSamples = 0;
+    double midiRollSamplesPerPixel = 0.0;
+    bool midiRollFollowEnabled = false;
 };
 
 /// I3e: immutable copy of all experimental-clip MIDI for the audio thread (no raw `clips_` access).

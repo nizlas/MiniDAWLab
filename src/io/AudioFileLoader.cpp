@@ -84,13 +84,6 @@ juce::Result AudioFileLoader::loadFromFile(const juce::File& file,
     }
 
     const int numSamples = static_cast<int>(lengthInSamples);
-    const std::uint64_t approxBytes
-        = static_cast<std::uint64_t>(numChannels) * static_cast<std::uint64_t>(numSamples)
-          * static_cast<std::uint64_t>(sizeof(float));
-    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:decode:entry file=") + file.getFullPathName()
-                              + " ch=" + juce::String(numChannels) + " samples=" + juce::String(numSamples)
-                              + " approxBufferBytes=" + juce::String(approxBytes));
-
     try
     {
         juce::AudioBuffer<float> buffer(numChannels, numSamples);
@@ -110,26 +103,18 @@ juce::Result AudioFileLoader::loadFromFile(const juce::File& file,
     }
     catch (const std::bad_alloc&)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:decode:fail OOM/alloc for ") + file.getFullPathName());
         return juce::Result::fail(
             "Out of memory while decoding audio (allocation failed). Try a smaller or shorter file.");
     }
     catch (const std::exception& e)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:decode:fail std::exception: ") + e.what() + " file="
-            + file.getFullPathName());
         return juce::Result::fail(
             juce::String("Exception while decoding: ") + e.what() + " (" + file.getFileName() + ")");
     }
     catch (...)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:decode:fail unknown for ") + file.getFullPathName());
         return juce::Result::fail("Unknown exception while decoding: " + file.getFileName());
     }
 
-    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:decode:ok file=") + file.getFullPathName());
     return juce::Result::ok();
 }

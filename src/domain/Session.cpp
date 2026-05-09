@@ -33,33 +33,6 @@
 
 namespace
 {
-    int countPlacedClipsIn(const SessionSnapshot& s) noexcept
-    {
-        int n = 0;
-        for (int t = 0; t < s.getNumTracks(); ++t)
-        {
-            n += s.getTrack(t).getNumPlacedClips();
-        }
-        return n;
-    }
-
-    std::uint64_t sumPcmBytesInSnapshotForDiagnosis(const SessionSnapshot& s) noexcept
-    {
-        std::uint64_t total = 0;
-        for (int t = 0; t < s.getNumTracks(); ++t)
-        {
-            const Track& tr = s.getTrack(t);
-            for (int i = 0; i < tr.getNumPlacedClips(); ++i)
-            {
-                const AudioClip& c = tr.getPlacedClip(i).getAudioClip();
-                total += static_cast<std::uint64_t>(c.getNumChannels())
-                         * static_cast<std::uint64_t>(c.getNumSamples())
-                         * static_cast<std::uint64_t>(sizeof(float));
-            }
-        }
-        return total;
-    }
-
     // ---------------------------------------------------------------------
     // Project persistence: strict `Audio/`-relative `sourcePath` strings only (portable `.dalproj`).
     // ---------------------------------------------------------------------
@@ -166,9 +139,6 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     {
         return juce::Result::fail("No active track");
     }
-    juce::Logger::writeToLog(
-        juce::String("[CLIMPORT] STAGE:session:entry addClipAtPlayhead file=") + file.getFullPathName()
-        + " startSample=" + juce::String(startSampleOnTimeline) + " activeTrackId=" + juce::String(activeTrackId_));
     // Decode on the message thread. Until we have a *complete* new `AudioClip`, we do not
     // publish: a corrupt file must not become a half-finished new snapshot.
     std::unique_ptr<AudioClip> loaded;
@@ -182,13 +152,6 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     }
 
     jassert(loaded != nullptr);
-    {
-        const std::uint64_t thisClipBytes
-            = static_cast<std::uint64_t>(loaded->getNumChannels())
-              * static_cast<std::uint64_t>(loaded->getNumSamples()) * static_cast<std::uint64_t>(sizeof(float));
-        juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:session:decode_ok thisClipPcmBytes=")
-                                  + juce::String(thisClipBytes) + " file=" + file.getFileName());
-    }
 
     const std::shared_ptr<const AudioClip> material(std::move(loaded));
     // `startSampleOnTimeline` was read on this thread (typically from `Transport` once, at add
@@ -199,12 +162,8 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
     if (current == nullptr)
     {
-        juce::Logger::writeToLog("[CLIMPORT] STAGE:session:fail current snapshot is null (unexpected)");
         return juce::Result::fail("Internal error: no session snapshot.");
     }
-    juce::Logger::writeToLog(
-        juce::String("[CLIMPORT] STAGE:session:build:begin newPlacedId=") + juce::String(newId) + " clipsBefore="
-        + juce::String(countPlacedClipsIn(*current)));
     try
     {
         const std::shared_ptr<const SessionSnapshot> next
@@ -213,45 +172,28 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
         jassert(next != nullptr);
         if (next == nullptr)
         {
-            juce::Logger::writeToLog(
-                juce::String("[CLIMPORT] STAGE:session:build:fail withClipAdded returned null for ")
-                + file.getFullPathName());
             return juce::Result::fail("Internal error: could not add clip to session.");
         }
-        const int clipsAfter = countPlacedClipsIn(*next);
-        const std::uint64_t totalPcm = sumPcmBytesInSnapshotForDiagnosis(*next);
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:session:publish:begin clipsAfter=") + juce::String(clipsAfter)
-            + " totalPcmBytesApprox=" + juce::String(totalPcm));
         // Release: make this snapshot the one future acquires see; old snapshot is kept alive by any
         // in-flight callback/UI read until their shared_ptrs drop.
         std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
     }
     catch (const std::bad_alloc&)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:session:build:fail OOM while building snapshot for ")
-            + file.getFullPathName());
         // Do not touch sessionSnapshot_ — previous snapshot is still the published one.
         return juce::Result::fail(
             "Out of memory while building the session (copying clips). Remove clips or use smaller or shorter files.");
     }
     catch (const std::exception& e)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:session:build:fail std::exception: ") + e.what() + " file="
-            + file.getFullPathName());
         return juce::Result::fail(
             juce::String("Exception while adding clip: ") + e.what() + " (" + file.getFileName() + ")");
     }
     catch (...)
     {
-        juce::Logger::writeToLog(
-            juce::String("[CLIMPORT] STAGE:session:build:fail unknown for ") + file.getFullPathName());
         return juce::Result::fail("Unknown exception while adding clip: " + file.getFileName());
     }
 
-    juce::Logger::writeToLog(juce::String("[CLIMPORT] STAGE:session:publish:ok file=") + file.getFileName());
     return juce::Result::ok();
 }
 

@@ -54,11 +54,8 @@
 // duplicate engine mixing rules; this file never writes transport or the session.
 namespace
 {
-// Off by default: logs coarse `paint` timing to the JUCE logger when enabled (developer-only).
+// Off by default: logs coarse `paint` timing + raster cache stats when enabled (developer-only).
     constexpr bool kClipWaveformPaintDiagnostics = false;
-    // Compromise: often enough to feel “live” on the playhead line without repainting the whole
-    // view on every frame (full rate would be overkill for this teaching codebase).
-    constexpr int kPlayheadUpdateHz = 20;
     // Visual scale for rounded corners so events read as “blocks” on the timeline, not as raw bars.
     constexpr float kEventCorner = 2.5f;
     constexpr float kEventVerticalMargin = 4.0f;
@@ -660,7 +657,6 @@ ClipWaveformView::ClipWaveformView(
     jassert(trackId_ != kInvalidTrackId);
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
-    startTimerHz(kPlayheadUpdateHz);
 }
 
 void ClipWaveformView::setDragGhost(const std::int64_t startSampleOnTimeline, const std::int64_t lengthSamples)
@@ -773,6 +769,11 @@ void ClipWaveformView::publishPlacedClipSelectionToLaneHost() noexcept
     }
 }
 
+ClipWaveformView::~ClipWaveformView()
+{
+    restoreNormalCursorAfterInvalidDrop();
+}
+
 void ClipWaveformView::applyExternalPlacedClipSelection(const std::optional<PlacedClipId> id) noexcept
 {
     selectedPlacedId_ = id;
@@ -791,22 +792,6 @@ void ClipWaveformView::clearSelectionOnly()
     hoverEventTrimCueId_.reset();
     hoverLeftTrimHandleId_.reset();
     hoverRightTrimHandleId_.reset();
-    repaint();
-}
-
-ClipWaveformView::~ClipWaveformView()
-{
-    restoreNormalCursorAfterInvalidDrop();
-    // JUCE: `Timer` must be stopped before destruction so the message loop never calls back in.
-    stopTimer();
-}
-
-// [Message thread] Throttled repaints: **contract** is “eventually consistent” playhead line —
-// we do not try to match every host audio callback; `paint` re-reads `readPlayheadSamplesForUi` so
-// the line stays aligned with the transport the user already trusts for audio, without a second
-// playhead copy stored on the view.
-void ClipWaveformView::timerCallback()
-{
     repaint();
 }
 
@@ -1382,6 +1367,257 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
     }
 }
 
+bool ClipWaveformView::shouldBypassWaveformRasterCache() const noexcept
+{
+    if (recordingPreviewActive_ || recordingCycleBehindLayersActive_)
+    {
+        return true;
+    }
+    if (hasDragGhost_)
+    {
+        return true;
+    }
+    if (pointerLaneMode_ != PointerLaneMode::None)
+    {
+        return true;
+    }
+    if (mouseDownPlacedId_.has_value() && dragMovementBeyondThreshold_)
+    {
+        return true;
+    }
+    return false;
+}
+
+bool ClipWaveformView::visibleFitsWaveRaster(const std::int64_t visStart, const std::int64_t visLen) const noexcept
+{
+    if (waveRaster_.isNull())
+    {
+        return false;
+    }
+    return visStart >= waveRasterCoveredStart_ && visStart + visLen <= waveRasterCoveredEnd_;
+}
+
+std::uint64_t ClipWaveformView::computePyramidReadyFingerprint() const
+{
+    std::uint64_t fp = 0;
+    for (const auto& s : clipStrips_)
+    {
+        if (s.material == nullptr)
+        {
+            continue;
+        }
+        const bool ready = waveformCache_.isPyramidReady(s.material.get());
+        fp ^= (std::uint64_t)(std::uintptr_t)s.material.get() * 0x9e3779b97f4a7c15ull;
+        fp ^= ready ? 0x85ebca6b932f5c01ull : 0x1271fd5ce733fb7bull;
+    }
+    return fp;
+}
+
+void ClipWaveformView::computeWaveRasterLayout(const int viewWpx,
+                                               const std::int64_t visStart,
+                                               const std::int64_t visLen,
+                                               const double spp,
+                                               int& outMarginPx,
+                                               std::int64_t& outCoveredStart,
+                                               int& outImageW) const
+{
+    juce::ignoreUnused(visLen);
+    outMarginPx = juce::roundToInt(0.75 * (double)juce::jmax(1, viewWpx));
+    outMarginPx = juce::jmax(1, outMarginPx);
+    outImageW = viewWpx + 2 * outMarginPx;
+    const std::int64_t marginSamples = (std::int64_t)std::llround((double)outMarginPx * spp);
+    outCoveredStart = visStart - marginSamples;
+    if (outCoveredStart < 0)
+    {
+        outCoveredStart = 0;
+    }
+}
+
+bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>& bounds,
+                                                    const std::int64_t visStart,
+                                                    const std::int64_t visLen,
+                                                    const double spp,
+                                                    const std::int64_t arrExtent)
+{
+    juce::ignoreUnused(bounds, arrExtent);
+    const int vw = juce::jmax(0, getWidth());
+    const int vh = juce::jmax(0, getHeight());
+    if (vw <= 0 || vh <= 0)
+    {
+        return false;
+    }
+
+    const std::uint64_t stripFp = lastPeaksFingerprint_;
+    const std::uint64_t pyrFp = computePyramidReadyFingerprint();
+
+    int marginPx = 0;
+    std::int64_t coveredStart = 0;
+    int imageW = 0;
+    computeWaveRasterLayout(vw, visStart, visLen, spp, marginPx, coveredStart, imageW);
+
+    const std::int64_t coveredEnd = coveredStart + (std::int64_t)std::llround((double)imageW * spp);
+
+    bool needRebuild = waveRaster_.isNull() || waveRasterImageW_ != imageW || waveRasterImageH_ != vh
+                       || waveRasterSpp_ != spp || waveRasterStripFp_ != stripFp
+                       || waveRasterPyramidFp_ != pyrFp;
+
+    WaveformRasterRebuildReason reason = WaveformRasterRebuildReason::None;
+    if (needRebuild)
+    {
+        if (waveRaster_.isNull())
+        {
+            reason = WaveformRasterRebuildReason::First;
+        }
+        else if (waveRasterImageW_ != imageW || waveRasterImageH_ != vh)
+        {
+            reason = WaveformRasterRebuildReason::Size;
+        }
+        else if (waveRasterSpp_ != spp)
+        {
+            reason = WaveformRasterRebuildReason::Zoom;
+        }
+        else if (waveRasterStripFp_ != stripFp)
+        {
+            reason = WaveformRasterRebuildReason::Snapshot;
+        }
+        else
+        {
+            reason = WaveformRasterRebuildReason::Pyramid;
+        }
+    }
+
+    if (!needRebuild && !visibleFitsWaveRaster(visStart, visLen))
+    {
+        needRebuild = true;
+        reason = WaveformRasterRebuildReason::OverscanRange;
+    }
+
+    if (!needRebuild)
+    {
+        waveRasterLastRebuildReason_ = WaveformRasterRebuildReason::None;
+        return true;
+    }
+
+    waveRasterLastRebuildReason_ = reason;
+
+    waveRaster_ = juce::Image(juce::Image::PixelFormat::ARGB, imageW, vh, true);
+    {
+        juce::Graphics gr(waveRaster_);
+        gr.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
+        const juce::Rectangle<float> imgBounds(0.0f, 0.0f, (float)imageW, (float)vh);
+        paintStableCommittedLayer(gr, imgBounds, coveredStart, visLen, spp);
+    }
+
+    waveRasterCoveredStart_ = coveredStart;
+    waveRasterCoveredEnd_ = coveredEnd;
+    waveRasterImageW_ = imageW;
+    waveRasterImageH_ = vh;
+    waveRasterSpp_ = spp;
+    waveRasterStripFp_ = stripFp;
+    waveRasterPyramidFp_ = pyrFp;
+    waveRasterMarginPx_ = marginPx;
+    return true;
+}
+
+void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
+                                                 const juce::Rectangle<float>& bounds,
+                                                 const std::int64_t mappingVisStart,
+                                                 const std::int64_t visLen,
+                                                 const double spp)
+{
+    juce::ignoreUnused(visLen);
+    const auto sessionSampleToX = [&](const std::int64_t s) {
+        return TimelineRulerView::sessionSampleToLocalX(s, bounds.getX(), mappingVisStart, spp);
+    };
+    const int numRows = (int)clipStrips_.size();
+    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
+    const float midY = eventTrackY.getCentreY();
+    const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
+    constexpr float kEventStroke = 1.0f;
+    for (int row = numRows - 1; row >= 0; --row)
+    {
+        const TimelineStrip& strip = clipStrips_[(size_t)row];
+        if (strip.materialNumSamples <= 0)
+        {
+            continue;
+        }
+        const int nsForDraw = strip.materialNumSamples;
+        const std::int64_t startForDraw = strip.startOnTimeline;
+        const float ex0 = TimelineRulerView::sessionSampleToLocalX(
+            startForDraw, bounds.getX(), mappingVisStart, spp);
+        const float ex1 = TimelineRulerView::sessionSampleToLocalX(
+            startForDraw + static_cast<std::int64_t>(nsForDraw), bounds.getX(), mappingVisStart, spp);
+        const float x0 = juce::jmin(ex0, ex1);
+        const float x1 = juce::jmax(ex0, ex1);
+        juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0),
+                                            eventTrackY.getHeight() };
+
+        if (eventRect.getRight() < bounds.getX() || eventRect.getX() > bounds.getRight())
+        {
+            continue;
+        }
+
+        g.setColour(eventBodyFill());
+        g.fillRoundedRectangle(eventRect, kEventCorner);
+        g.setColour(eventBodyBorder());
+        g.drawRoundedRectangle(eventRect, kEventCorner, kEventStroke);
+
+        juce::Rectangle<float> innerForPeakHeight = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
+        if (eventRect.getWidth() >= 1.0f && innerForPeakHeight.getHeight() >= 1.0f && nsForDraw > 0)
+        {
+            paintRowWaveformWithPyramid(
+                g,
+                row,
+                strip,
+                eventRect,
+                innerForPeakHeight,
+                midY,
+                halfDraw,
+                startForDraw,
+                strip.leftTrimSamples,
+                nsForDraw,
+                bounds,
+                mappingVisStart,
+                spp);
+        }
+    }
+
+    for (int r = numRows - 1; r >= 0; --r)
+    {
+        const TimelineStrip& stripR = clipStrips_[(size_t)r];
+        if (stripR.materialNumSamples <= 0)
+        {
+            continue;
+        }
+        std::vector<std::pair<std::int64_t, std::int64_t>> olap;
+        computeLocalOverlapShadeHalfOpenIntervalsForRow(r, olap);
+        if (olap.empty())
+        {
+            continue;
+        }
+        const int nsH = stripR.materialNumSamples;
+        const std::int64_t startHatch = stripR.startOnTimeline;
+        const float rex0
+            = TimelineRulerView::sessionSampleToLocalX(startHatch, bounds.getX(), mappingVisStart, spp);
+        const float rex1 = TimelineRulerView::sessionSampleToLocalX(
+            startHatch + static_cast<std::int64_t>(juce::jmax(0, nsH)), bounds.getX(), mappingVisStart, spp);
+        const float rxl = juce::jmin(rex0, rex1);
+        const float rxr = juce::jmax(rex0, rex1);
+        juce::Rectangle<float> rowEventRect{ rxl, eventTrackY.getY(), juce::jmax(1.0f, rxr - rxl),
+                                               eventTrackY.getHeight() };
+        if (rowEventRect.getRight() < bounds.getX() || rowEventRect.getX() > bounds.getRight())
+        {
+            continue;
+        }
+        juce::Rectangle<float> rowInner
+            = rowEventRect.reduced(1.0f + kWaveInset, 1.0f + kWaveInset * 0.5f);
+        if (rowInner.getWidth() >= 1.0f && rowInner.getHeight() >= 1.0f)
+        {
+            drawFrontOverlapShadeAndHatch(g, rowInner, olap, sessionSampleToX);
+        }
+    }
+}
+
 void ClipWaveformView::paintRowWaveformWithPyramid(
     juce::Graphics& g,
     const int row,
@@ -1392,15 +1628,18 @@ void ClipWaveformView::paintRowWaveformWithPyramid(
     const float halfDraw,
     const std::int64_t timelineStartForWaveform,
     const std::int64_t materialFileLeft,
-    const int visibleMaterialSamples)
+    const int visibleMaterialSamples,
+    const juce::Rectangle<float>& mappingBounds,
+    const std::int64_t mappingVisStart,
+    const double mappingSpp)
 {
+    juce::ignoreUnused(mappingVisStart, mappingSpp);
     if (visibleMaterialSamples <= 0 || strip.material == nullptr)
     {
         return;
     }
-    const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
-    const float cullL = bounds.getX();
-    const float cullR = bounds.getRight();
+    const float cullL = mappingBounds.getX();
+    const float cullR = mappingBounds.getRight();
     const float runW = eventRect.getWidth();
     if (runW < 0.5f || innerForPeakHeight.getHeight() < 1.0f)
     {
@@ -1600,25 +1839,14 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
     mergeNonOverlapping(outMerged);
 }
 
-// [Message thread] **Paint pipeline (scan top-down in this function):**
-//   (0) Sync strip metadata if snapshot or lane width changed (`AudioWaveformCache` owns pyramids).
-//   (1) One shared linear **session sample → x** (same as playhead).
-//   (2) Draw every row’s event **chassis** + peak bars (high row index first → low index last so
-//       the newest clip’s paint wins on overlaps).
-//   (3) Overlap *hint* pass per row (same order) — tint and hatch only on rows that the interval
-//       math says deserve it (tint + thin diagonals).
-//   (3b) Optional live **recording** preview (not session state) — after (3), before playhead.
-//   (4) Playhead on top (always) so the line is never lost behind events or the recording card.
+// [Message thread] **Paint:** sync strips → either overscanned raster blit + dynamic chrome, or full
+// uncached paint while editing/recording previews bypass the cache. Playhead draws in `PlayheadOverlay`.
 void ClipWaveformView::paint(juce::Graphics& g)
 {
     const std::int64_t diagT0 = kClipWaveformPaintDiagnostics
                                     ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
                                     : static_cast<std::int64_t>(0);
-    // (0) see `syncClipStripsFromSnapshotIfNeeded` — cheap no-op on steady state.
     syncClipStripsFromSnapshotIfNeeded();
-
-    // JUCE: default window background, slightly darkened so events read as “cards” (pure chrome).
-    g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
 
     const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
     if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
@@ -1639,6 +1867,128 @@ void ClipWaveformView::paint(juce::Graphics& g)
         return;
     }
     const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples(wPx);
+
+    auto reasonToStr = [](const WaveformRasterRebuildReason r) -> const char* {
+        switch (r)
+        {
+        case WaveformRasterRebuildReason::None:
+            return "none";
+        case WaveformRasterRebuildReason::First:
+            return "first";
+        case WaveformRasterRebuildReason::Size:
+            return "size";
+        case WaveformRasterRebuildReason::Zoom:
+            return "zoom";
+        case WaveformRasterRebuildReason::Snapshot:
+            return "snapshot";
+        case WaveformRasterRebuildReason::Pyramid:
+            return "pyramid";
+        case WaveformRasterRebuildReason::OverscanRange:
+            return "overscanRange";
+        default:
+            return "?";
+        }
+    };
+
+    if (shouldBypassWaveformRasterCache())
+    {
+        g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
+        paintUncachedFull(g, bounds, visStart, visLen, spp);
+        if (kClipWaveformPaintDiagnostics)
+        {
+            const double us = juce::Time::highResolutionTicksToSeconds(
+                                  juce::Time::getHighResolutionTicks() - diagT0)
+                              * 1.0e6;
+            juce::Logger::writeToLog(juce::String("[ClipWaveformView] paint bypassCache trackId=")
+                                      + juce::String((int)trackId_) + " µs=" + juce::String(us, 1));
+        }
+        return;
+    }
+
+    const bool hadRasterBefore = !waveRaster_.isNull();
+    const bool likelyHit = hadRasterBefore && visibleFitsWaveRaster(visStart, visLen)
+                           && waveRasterSpp_ == spp && waveRasterStripFp_ == lastPeaksFingerprint_
+                           && waveRasterPyramidFp_ == computePyramidReadyFingerprint();
+
+    const std::int64_t tRebuildStart
+        = kClipWaveformPaintDiagnostics && !likelyHit
+              ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
+              : (std::int64_t)0;
+
+    const bool ok = ensureWaveRasterForViewState(bounds, visStart, visLen, spp, arrLen);
+    const std::int64_t tAfterRebuild
+        = kClipWaveformPaintDiagnostics && !likelyHit
+              ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
+              : (std::int64_t)0;
+
+    std::uint64_t rebuildUs = 0;
+    if (kClipWaveformPaintDiagnostics && !likelyHit && tAfterRebuild > tRebuildStart)
+    {
+        rebuildUs = (std::uint64_t)(juce::Time::highResolutionTicksToSeconds(
+                                      tAfterRebuild - tRebuildStart)
+                                  * 1.0e6);
+    }
+
+    if (!ok || waveRaster_.isNull())
+    {
+        g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
+        paintUncachedFull(g, bounds, visStart, visLen, spp);
+        if (kClipWaveformPaintDiagnostics)
+        {
+            const double us = juce::Time::highResolutionTicksToSeconds(
+                                  juce::Time::getHighResolutionTicks() - diagT0)
+                              * 1.0e6;
+            juce::Logger::writeToLog(
+                juce::String("[ClipWaveformView] paint uncachedFallback trackId=")
+                + juce::String((int)trackId_) + " µs=" + juce::String(us, 1));
+        }
+        return;
+    }
+
+    const std::int64_t tBlit0 = kClipWaveformPaintDiagnostics
+                                    ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
+                                    : (std::int64_t)0;
+
+    const int vw = juce::jmax(1, getWidth());
+    int srcX = juce::roundToInt((double)(visStart - waveRasterCoveredStart_) / spp);
+    srcX = juce::jmax(0, juce::jmin(srcX, juce::jmax(0, waveRasterImageW_ - vw)));
+    g.drawImage(waveRaster_, 0, 0, vw, getHeight(), srcX, 0, vw, getHeight());
+
+    const std::int64_t tBlit1 = kClipWaveformPaintDiagnostics
+                                    ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
+                                    : (std::int64_t)0;
+
+    paintDynamicChrome(g, bounds, visStart, visLen, spp);
+
+    if (kClipWaveformPaintDiagnostics)
+    {
+        const bool cacheHit = (waveRasterLastRebuildReason_ == WaveformRasterRebuildReason::None);
+        const double totalUs = juce::Time::highResolutionTicksToSeconds(
+                                   juce::Time::getHighResolutionTicks() - diagT0)
+                               * 1.0e6;
+        const std::uint64_t blitUs = (tBlit1 > tBlit0)
+                                         ? (std::uint64_t)(juce::Time::highResolutionTicksToSeconds(
+                                                               tBlit1 - tBlit0)
+                                                           * 1.0e6)
+                                         : 0u;
+        juce::Logger::writeToLog(
+            juce::String("[ClipWaveformView] paint trackId=") + juce::String((int)trackId_)
+            + " cacheHit=" + juce::String(cacheHit ? "hit" : "miss")
+            + " rebuildReason=" + juce::String(reasonToStr(waveRasterLastRebuildReason_))
+            + " covered=[" + juce::String(waveRasterCoveredStart_) + ","
+            + juce::String(waveRasterCoveredEnd_) + ") vis=[" + juce::String(visStart) + ","
+            + juce::String(visStart + visLen) + ") marginPx=" + juce::String(waveRasterMarginPx_)
+            + " rebuildApproxUs=" + juce::String((std::int64_t)rebuildUs)
+            + " blitApproxUs=" + juce::String((std::int64_t)blitUs) + " totalUs=" + juce::String(totalUs, 1));
+    }
+}
+
+void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
+                                         const juce::Rectangle<float>& bounds,
+                                         const std::int64_t visStart,
+                                         const std::int64_t visLen,
+                                         const double spp)
+{
     // --- (1) Shared mapping: session sample → x (matches `TimelineRulerView` samples-per-pixel).
     // ---
     const auto sessionSampleToX = [&](const std::int64_t s) {
@@ -1768,7 +2118,10 @@ void ClipWaveformView::paint(juce::Graphics& g)
                         halfDraw,
                         trimStartSample_,
                         strip.leftTrimSamples,
-                        ns);
+                        ns,
+                        bounds,
+                        visStart,
+                        spp);
                 }
                 else if (rowTrimL)
                 {
@@ -1782,7 +2135,10 @@ void ClipWaveformView::paint(juce::Graphics& g)
                         halfDraw,
                         trimPreviewStart_,
                         trimPreviewLeft_,
-                        ns);
+                        ns,
+                        bounds,
+                        visStart,
+                        spp);
                 }
                 else
                 {
@@ -1796,7 +2152,10 @@ void ClipWaveformView::paint(juce::Graphics& g)
                         halfDraw,
                         startForDraw,
                         strip.leftTrimSamples,
-                        ns);
+                        ns,
+                        bounds,
+                        visStart,
+                        spp);
                 }
             }
         }
@@ -1995,26 +2354,162 @@ void ClipWaveformView::paint(juce::Graphics& g)
             halfDraw,
             midY);
     }
+}
 
-    // --- (4) Playhead: clamp to arrangement extent; line only when inside the visible window.
-    const std::int64_t ph = transport_.readPlayheadSamplesForUi();
-    const std::int64_t phClamped
-        = juce::jlimit(
-            std::int64_t{0}, juce::jmax(std::int64_t{0}, arrLen), ph);
-    if (phClamped >= visStart && phClamped < visStart + visLen)
+void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
+                                          const juce::Rectangle<float>& bounds,
+                                          const std::int64_t visStart,
+                                          const std::int64_t visLen,
+                                          const double spp)
+{
+    juce::ignoreUnused(visLen);
+    const int numRows = (int)clipStrips_.size();
+    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
+    const float midY = eventTrackY.getCentreY();
+    const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
+
+    if (hasDragGhost_ && dragGhostLengthSamples_ > 0)
     {
-        const float xLine = sessionSampleToX(phClamped);
-        g.setColour(juce::Colours::white.withAlpha(0.92f));
-        g.drawLine(xLine, bounds.getY(), xLine, bounds.getBottom(), 1.5f);
+        const float gs0 = TimelineRulerView::sessionSampleToLocalX(
+            dragGhostStartOnTimeline_, bounds.getX(), visStart, spp);
+        const float gs1 = TimelineRulerView::sessionSampleToLocalX(
+            dragGhostStartOnTimeline_ + dragGhostLengthSamples_, bounds.getX(), visStart, spp);
+        const float gLeft = juce::jmin(gs0, gs1);
+        const float gRight = juce::jmax(gs0, gs1);
+        juce::Rectangle<float> ghostRect{ gLeft, eventTrackY.getY(), juce::jmax(1.0f, gRight - gLeft),
+                                          eventTrackY.getHeight() };
+        g.setColour(juce::Colour(0xff5a7a9a).withAlpha(0.28f));
+        g.fillRoundedRectangle(ghostRect, kEventCorner);
+        g.setColour(juce::Colour(0xffa0b8d8).withAlpha(0.5f));
+        g.drawRoundedRectangle(ghostRect, kEventCorner, 1.0f);
     }
 
-    if (kClipWaveformPaintDiagnostics)
+    for (int row = numRows - 1; row >= 0; --row)
     {
-        const double us = juce::Time::highResolutionTicksToSeconds(
-                              juce::Time::getHighResolutionTicks() - diagT0)
-                          * 1.0e6;
-        juce::Logger::writeToLog(juce::String("[ClipWaveformView] paint trackId=")
-                                  + juce::String(trackId_) + " µs=" + juce::String(us, 1));
+        const TimelineStrip& strip = clipStrips_[(size_t)row];
+        if (strip.materialNumSamples <= 0)
+        {
+            continue;
+        }
+
+        const float ex0 = TimelineRulerView::sessionSampleToLocalX(
+            strip.startOnTimeline, bounds.getX(), visStart, spp);
+        const float ex1 = TimelineRulerView::sessionSampleToLocalX(
+            strip.startOnTimeline + static_cast<std::int64_t>(strip.materialNumSamples),
+            bounds.getX(),
+            visStart,
+            spp);
+        const float x0 = juce::jmin(ex0, ex1);
+        const float x1 = juce::jmax(ex0, ex1);
+        juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0),
+                                          eventTrackY.getHeight() };
+
+        if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
+        {
+            g.setColour(juce::Colour(0xff9eb8d8).withAlpha(0.95f));
+            g.drawRoundedRectangle(eventRect, kEventCorner, 1.2f);
+        }
+
+        const bool hideTrimCues
+            = (pointerLaneMode_ == PointerLaneMode::TrimRight && trimPlacedId_.has_value()
+               && *trimPlacedId_ == strip.clipId)
+              || (pointerLaneMode_ == PointerLaneMode::TrimLeft && trimPlacedId_.has_value()
+                  && *trimPlacedId_ == strip.clipId);
+        const bool onEventBodyTrimCue
+            = hoverEventTrimCueId_ == strip.clipId && !hoverLeftTrimHandleId_.has_value()
+              && !hoverRightTrimHandleId_.has_value();
+        const bool showLeftTrimHoverCue
+            = !hideTrimCues
+              && (hoverLeftTrimHandleId_ == strip.clipId || onEventBodyTrimCue);
+        const bool showRightTrimHoverCue
+            = !hideTrimCues
+              && (hoverRightTrimHandleId_ == strip.clipId || onEventBodyTrimCue);
+        if (eventRect.getWidth() >= kMinEventWidthForTrimHandlePx
+            && eventRect.getHeight() >= kTrimHandleSquarePx + 2.0f)
+        {
+            const float hsz = juce::jmin(
+                kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
+            if (hsz >= 2.0f)
+            {
+                if (showLeftTrimHoverCue)
+                {
+                    const float hLeftL = juce::jmin(
+                        eventRect.getX() + kTrimHandleMarginPx, eventRect.getRight() - hsz - 0.5f);
+                    const float hTopL = juce::jmax(
+                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
+                    const juce::Rectangle<float> hRL{ hLeftL, hTopL, hsz, hsz };
+                    g.setColour(juce::Colour(0xff3d4a5a).brighter(0.25f).withAlpha(0.88f));
+                    g.fillRoundedRectangle(hRL, 1.0f);
+                    g.setColour(juce::Colour(0xff9eb0c8).withAlpha(0.95f));
+                    g.drawRoundedRectangle(hRL, 1.0f, 0.75f);
+                }
+                if (showRightTrimHoverCue)
+                {
+                    const float hLeftR = juce::jmax(
+                        eventRect.getX() + 0.5f, eventRect.getRight() - kTrimHandleMarginPx - hsz);
+                    const float hTopR = juce::jmax(
+                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
+                    const juce::Rectangle<float> hR{ hLeftR, hTopR, hsz, hsz };
+                    g.setColour(juce::Colour(0xff3d4a5a).brighter(0.25f).withAlpha(0.88f));
+                    g.fillRoundedRectangle(hR, 1.0f);
+                    g.setColour(juce::Colour(0xff9eb0c8).withAlpha(0.95f));
+                    g.drawRoundedRectangle(hR, 1.0f, 0.75f);
+                }
+            }
+        }
+    }
+
+    if (recordingCycleBehindLayersActive_)
+    {
+        const std::int64_t anchor = recordingCycleLoopAnchorL_;
+        const std::int64_t pw = recordingCyclePassWindowLenSamples_;
+        const size_t nBehind = recordingCycleBehindPasses_.size();
+        for (size_t pi = 0; pi < nBehind; ++pi)
+        {
+            static constexpr std::uint32_t kBehindBodies[] = {
+                0xff173d2c,
+                0xff1c4834,
+                0xff23543e,
+                0xff2d624a,
+                0xff386f56,
+                0xff467e64
+            };
+            const int pal = juce::jmin(
+                (int)(sizeof(kBehindBodies) / sizeof(kBehindBodies[0])) - 1, static_cast<int>(pi));
+            const std::int64_t segAnchor = (pi == 0) ? recordingCycleFirstSegmentStart_ : anchor;
+            const std::int64_t segLen = (pi == 0) ? recordingCycleFirstSegmentLength_ : pw;
+            paintLiveRecordingPassPreview(
+                g,
+                bounds.getX(),
+                visStart,
+                spp,
+                eventTrackY,
+                segAnchor,
+                segLen,
+                recordingCycleBehindPasses_[pi],
+                juce::Colour(kBehindBodies[(size_t)pal]),
+                juce::Colour(0xff5ec998),
+                juce::Colour(0xffbdfce0),
+                halfDraw,
+                midY);
+        }
+    }
+    if (recordingPreviewActive_)
+    {
+        paintLiveRecordingPassPreview(
+            g,
+            bounds.getX(),
+            visStart,
+            spp,
+            eventTrackY,
+            recordingPreviewStartSample_,
+            recordingPreviewLengthSamples_,
+            recordingPreviewPeaks_,
+            juce::Colour(0xff32b878),
+            juce::Colour(0xff92f0bc),
+            juce::Colour(0xffeefff4),
+            halfDraw,
+            midY);
     }
 }
 
