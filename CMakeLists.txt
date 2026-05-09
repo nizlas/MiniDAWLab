@@ -46,6 +46,7 @@ target_sources(MiniDAWLab PRIVATE
     src/io/AudioWaveformCache.cpp
     src/io/ProjectFile.cpp
     src/io/ProjectAudioImport.cpp
+    src/io/InstrumentMidiClipExport.cpp
     src/engine/CountInClickOutput.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/RecorderService.cpp

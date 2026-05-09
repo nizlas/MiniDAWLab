@@ -1,5 +1,6 @@
 #include "ExperimentalMidiEditorWindow.h"
 #include "ExperimentalMidiImport.h"
+#include "io/InstrumentMidiClipExport.h"
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
 #include "ExperimentalPianoRollView.h"
@@ -78,8 +79,12 @@ public:
         };
 
         addAndMakeVisible(importButton_);
-        importButton_.setButtonText("Import MIDI…");
+        importButton_.setButtonText("Import MIDI...");
         importButton_.onClick = [this] { beginImportMidi(); };
+
+        addAndMakeVisible(exportButton_);
+        exportButton_.setButtonText("Export MIDI...");
+        exportButton_.onClick = [this] { beginExportMidi(); };
 
         addAndMakeVisible(snapLabel_);
         snapLabel_.setText("Snap", juce::dontSendNotification);
@@ -350,7 +355,10 @@ public:
         lastRequiredKitName_ = requiredKitForUi;
 
         playButton_.setEnabled(canPlayPattern);
-        importButton_.setEnabled(clipBound);
+        const bool clipTimelineBound =
+            externalPattern_ != nullptr && boundTimelineClip_ != nullptr;
+        importButton_.setEnabled(clipTimelineBound);
+        exportButton_.setEnabled(clipTimelineBound);
 
         juce::String instPart;
         if (!clipBound)
@@ -443,9 +451,10 @@ public:
         auto a = getLocalBounds();
         auto toolbar = a.removeFromTop(kToolbarH);
         toolbar.reduce(6, 4);
-        playButton_.setBounds(toolbar.removeFromLeft(110).reduced(0, 2));
-        stopButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        importButton_.setBounds(toolbar.removeFromLeft(108).reduced(0, 2));
+        playButton_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
+        stopButton_.setBounds(toolbar.removeFromLeft(64).reduced(0, 2));
+        importButton_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
+        exportButton_.setBounds(toolbar.removeFromLeft(104).reduced(0, 2));
         snapLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
         snapBox_.setBounds(toolbar.removeFromLeft(76).reduced(0, 2));
         displayLabel_.setBounds(toolbar.removeFromLeft(52).reduced(0, 4));
@@ -511,6 +520,8 @@ private:
     void beginImportMidi();
     void launchMidiFileChooserAfterConfirm();
     void applyMidiImportResult(const ExperimentalMidiImportResult& result);
+    void beginExportMidi();
+    void launchMidiExportFileChooser();
 
     InstrumentTrackController* instrumentTrackForClipBind_ = nullptr;
     InstrumentMidiClip* boundTimelineClip_ = nullptr;
@@ -576,6 +587,7 @@ private:
     juce::TextButton playButton_;
     juce::TextButton stopButton_;
     juce::TextButton importButton_;
+    juce::TextButton exportButton_;
     juce::Label snapLabel_;
     juce::ComboBox snapBox_;
     juce::Label displayLabel_;
@@ -589,6 +601,7 @@ private:
     juce::Viewport viewport_;
 
     std::unique_ptr<juce::FileChooser> midiImportChooser_;
+    std::unique_ptr<juce::FileChooser> midiExportChooser_;
 };
 
 void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
@@ -685,6 +698,91 @@ void ExperimentalMidiEditorWindow::Body::launchMidiFileChooserAfterConfirm()
                                                    "MIDI import",
                                                    r.warningMessage);
         }
+    });
+}
+
+void ExperimentalMidiEditorWindow::Body::beginExportMidi()
+{
+    if (externalPattern_ == nullptr || boundTimelineClip_ == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                               "Export MIDI",
+                                               "Open this editor from a clip on the instrument track to export MIDI.");
+        return;
+    }
+
+    launchMidiExportFileChooser();
+}
+
+void ExperimentalMidiEditorWindow::Body::launchMidiExportFileChooser()
+{
+    refreshTimelineSampleRateOnTrack();
+
+    juce::File startDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    juce::String fileName =
+        (boundTimelineClip_ != nullptr && boundTimelineClip_->name.isNotEmpty()) ? boundTimelineClip_->name
+                                                                                : juce::String("MIDI clip");
+    fileName = fileName.removeCharacters("\\/:*?\"<>|");
+    if (fileName.trim().isEmpty())
+    {
+        fileName = "MIDI clip";
+    }
+    if (!fileName.endsWithIgnoreCase(".mid") && !fileName.endsWithIgnoreCase(".midi"))
+    {
+        fileName = fileName + ".mid";
+    }
+
+    midiExportChooser_ = std::make_unique<juce::FileChooser>(
+        "Export MIDI", startDir.getChildFile(fileName), "*.mid;*.midi", true, false, this);
+
+    const auto flags =
+        juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles;
+
+    const juce::Component::SafePointer<Body> safeThis(this);
+    midiExportChooser_->launchAsync(flags, [safeThis](const juce::FileChooser& fc) {
+        if (safeThis == nullptr)
+        {
+            return;
+        }
+        const juce::File file = fc.getResult();
+        safeThis->midiExportChooser_.reset();
+
+        if (file.getFullPathName().isEmpty())
+        {
+            return;
+        }
+
+        double sr = 48000.0;
+        if (safeThis->deviceManagerForRoll_ != nullptr)
+        {
+            if (juce::AudioIODevice* d = safeThis->deviceManagerForRoll_->getCurrentAudioDevice())
+            {
+                const double r = d->getCurrentSampleRate();
+                if (r > 0.0 && std::isfinite(r))
+                {
+                    sr = r;
+                }
+            }
+        }
+
+        if (safeThis->boundTimelineClip_ == nullptr)
+        {
+            return;
+        }
+
+        const InstrumentMidiClipExportResult exportResult =
+            exportInstrumentMidiClipToMidiFile(*safeThis->boundTimelineClip_, file, sr);
+        if (!exportResult.ok)
+        {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                   "MIDI export failed",
+                                                   exportResult.errorMessage);
+            return;
+        }
+
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "midi-editor: export wrote path=\"" + file.getFullPathName() + "\" notes="
+            + juce::String(exportResult.notesExported));
     });
 }
 
