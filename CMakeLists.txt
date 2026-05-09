@@ -40,6 +40,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/Track.cpp
     src/domain/Session.cpp
     src/domain/SessionHistory.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp

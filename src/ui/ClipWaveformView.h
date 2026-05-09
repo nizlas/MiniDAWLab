@@ -133,6 +133,11 @@ public:
     // [Message thread] Clear UI selection without starting a move (used from `TrackLanesView`).
     void clearSelectionOnly();
 
+    // [Message thread] Hard reset of clip-edit gesture state, drag ghost, hover, cursor override,
+    // and waveform strip/raster caches. Call after `Session::restoreSessionSnapshotForUndo` so undo
+    // / redo never leaves stale overlays or frozen `shouldBypassWaveformRasterCache()` paths.
+    void cancelInteractionStateForSnapshotRestore();
+
     // [Message thread] Select a placement from host code (`TrackLanesView` after paste).
     void applyExternalPlacedClipSelection(std::optional<PlacedClipId> id) noexcept;
     // [Message thread] Cross-lane drag ghost (one lane at a time); called by `TrackLanesView` only.

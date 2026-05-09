@@ -65,6 +65,9 @@ public:
     /// present).
     [[nodiscard]] std::optional<SessionHistoryRestoreBundle> popRedo() noexcept;
 
+    [[nodiscard]] int undoStackSize() const noexcept { return static_cast<int>(undo_.size()); }
+    [[nodiscard]] int redoStackSize() const noexcept { return static_cast<int>(redo_.size()); }
+
 private:
     struct Step
     {

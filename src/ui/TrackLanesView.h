@@ -114,6 +114,10 @@ public:
     // `Session::restoreSessionSnapshotForUndo` when prior `PlacedClipId`s may be invalid).
     void clearAllPlacedClipSelections() noexcept;
 
+    // [Message thread] Cancel every lane’s clip gestures / ghosts / caches and clear header reorder
+    // drag state. Prefer this over `clearAllPlacedClipSelections` after a session snapshot restore.
+    void cancelAllClipGesturesAndTransientUiState() noexcept;
+
     // [Message thread] Wired once by `Main`: header context menu "Delete Track" invokes this with the
     // clicked track id (Playing/recording + validity handled by host).
     void setOnDeleteTrackRequested(std::function<void(TrackId)> onDeleteTrackRequested) noexcept;

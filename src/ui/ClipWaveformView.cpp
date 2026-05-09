@@ -33,6 +33,8 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "io/AudioWaveformCache.h"
+#include "diagnostics/UndoDiagnosticConfig.h"
+#include "diagnostics/UndoDiagnosticFileLog.h"
 #include "domain/AudioClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -795,6 +797,67 @@ void ClipWaveformView::clearSelectionOnly()
     repaint();
 }
 
+void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
+{
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine(
+            "[UndoDiag] ClipWaveformView::cancelInteractionState trackId="
+            + juce::String(static_cast<juce::uint64>(trackId_)) + " hadGhost="
+            + juce::String(hasDragGhost_ ? "Y" : "n"));
+    }
+
+    restoreNormalCursorAfterInvalidDrop();
+
+    selectedPlacedId_.reset();
+    publishPlacedClipSelectionToLaneHost();
+
+    pointerLaneMode_ = PointerLaneMode::None;
+    trimPlacedId_.reset();
+    trimStartSample_ = 0;
+    trimMaterialNumSamples_ = 0;
+    trimOriginLeft_ = 0;
+    trimClickDownVisibleLen_ = 0;
+    trimRightEdgeToMouseOffsetSamples_ = 0;
+    trimMouseOffsetToTimelineAtClick_ = 0;
+    trimPreviewVisibleLen_ = 0;
+    trimPreviewLeft_ = 0;
+    trimPreviewStart_ = 0;
+
+    mouseDownPlacedId_.reset();
+    clickDownX_ = 0.0f;
+    clickDownStartSample_ = 0;
+    tentativeStartOnTimeline_ = 0;
+    dragMovementBeyondThreshold_ = false;
+    mouseDownEffectiveNumSamples_ = 0;
+
+    hasDragGhost_ = false;
+    dragGhostStartOnTimeline_ = 0;
+    dragGhostLengthSamples_ = 0;
+
+    hoverEventTrimCueId_.reset();
+    hoverLeftTrimHandleId_.reset();
+    hoverRightTrimHandleId_.reset();
+
+    lastSnapshotKey_ = nullptr;
+    lastWidth_ = 0;
+    lastPeaksFingerprint_ = 0;
+    clipStrips_.clear();
+
+    waveRaster_ = juce::Image{};
+    waveRasterCoveredStart_ = 0;
+    waveRasterCoveredEnd_ = 0;
+    waveRasterImageW_ = 0;
+    waveRasterImageH_ = 0;
+    waveRasterSpp_ = 0.0;
+    waveRasterStripFp_ = 0;
+    waveRasterPyramidFp_ = 0;
+    waveRasterMarginPx_ = 0;
+    waveRasterLastRebuildReason_ = WaveformRasterRebuildReason::None;
+
+    repaint();
+}
+
 // [Message thread] Click: front-most hit test → select; empty lane → clear selection only (seek
 // uses `TimelineRulerView`). Drag (same gesture) is handled in `mouseDrag` / `mouseUp`;
 // `Session::moveClip` runs **only** on commit — ordering policy stays in
@@ -1292,6 +1355,8 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
                 const PlacedClip& p = t.getPlacedClip(j);
                 fp ^= (std::uint64_t)p.getId() * 0x9e3779b9ull;
                 fp ^= (std::uint64_t)(p.getLeftTrimSamples() + 0x1e35) * 0xc6a4a7935bd1e995ull;
+                fp ^= (std::uint64_t)(p.getStartSample() + 0x9e37) * 0xc2b2ae3d27d4eb4full;
+                fp ^= (std::uint64_t)(p.getEffectiveLengthSamples() + 0xbf58) * 0x94d049bb133111ebull;
                 if (p.getMaterial() != nullptr)
                 {
                     fp ^= (std::uint64_t)(std::uintptr_t)p.getMaterial().get() * 0x85ebca6bull;

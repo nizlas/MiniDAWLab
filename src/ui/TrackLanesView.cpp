@@ -14,6 +14,8 @@
 #include "domain/Track.h"
 #include "domain/PlacedClip.h"
 #include "transport/Transport.h"
+#include "diagnostics/UndoDiagnosticConfig.h"
+#include "diagnostics/UndoDiagnosticFileLog.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_core/juce_core.h>
@@ -464,6 +466,29 @@ void TrackLanesView::clearAllPlacedClipSelections() noexcept
         {
             u->clearSelectionOnly();
         }
+    }
+}
+
+void TrackLanesView::cancelAllClipGesturesAndTransientUiState() noexcept
+{
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine(
+            "[UndoDiag] TrackLanesView::cancelAllClipGestures entered laneCount="
+            + juce::String(static_cast<int>(lanes_.size())));
+    }
+    aggregatedSelectedPlacedClip_.reset();
+    for (auto& u : lanes_)
+    {
+        if (u != nullptr)
+        {
+            u->cancelInteractionStateForSnapshotRestore();
+        }
+    }
+    clearHeaderTrackDragState();
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine("[UndoDiag] TrackLanesView::cancelAllClipGestures done");
     }
 }
 

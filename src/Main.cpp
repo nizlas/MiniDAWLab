@@ -77,6 +77,8 @@
 #include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
 #include "io/AudioWaveformCache.h"
+#include "diagnostics/UndoDiagnosticConfig.h"
+#include "diagnostics/UndoDiagnosticFileLog.h"
 
 #include <algorithm>
 #include <atomic>
@@ -165,6 +167,15 @@ namespace
         msg += key.getTextDescription();
         msg += "\"";
         juce::Logger::writeToLog(msg);
+    }
+
+    [[nodiscard]] juce::String undoDiagSnapPtr(const SessionSnapshot* p)
+    {
+        if (p == nullptr)
+        {
+            return "null";
+        }
+        return "0x" + juce::String::toHexString(reinterpret_cast<juce::pointer_sized_int>(p));
     }
 
     // Single-line caption for temporary on-screen shortcut diagnostic (transport area).
@@ -1522,19 +1533,45 @@ private:
 
         void invokeUndoFromWindowShortcut()
         {
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine(
+                    "[UndoDiag] invokeUndoFromWindowShortcut entered undoSize="
+                    + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
+                    + juce::String(sessionHistory_.redoStackSize()));
+            }
             if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
                 || recorder_.isRecording())
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] invokeUndo bail: playingOrRecording playing="
+                        + juce::String(transport.readPlaybackIntentForUi() == PlaybackIntent::Playing ? "Y" : "n")
+                        + " recording=" + juce::String(recorder_.isRecording() ? "Y" : "n"));
+                }
                 return;
             }
             if (trackLanesView.isClipEditGestureInProgress())
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine("[UndoDiag] invokeUndo bail: gestureInProgress");
+                }
                 return;
             }
             pluginHost_.flushOpenEditorParameterUndoSteps();
             const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popUndo();
             if (!bundle.has_value() || bundle->timelineSnapshot == nullptr)
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] invokeUndo bail: emptyOrNullBundle hasValue="
+                        + juce::String(bundle.has_value() ? "Y" : "n") + " timelineNull="
+                        + juce::String(
+                            (bundle.has_value() && bundle->timelineSnapshot == nullptr) ? "Y" : "n"));
+                }
                 return;
             }
             {
@@ -1545,28 +1582,69 @@ private:
                 const std::shared_ptr<const SessionSnapshot> restoredWithLocators
                     = SessionSnapshot::withLocators(*bundle->timelineSnapshot, curL, curR);
                 session.restoreSessionSnapshotForUndo(restoredWithLocators);
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] invokeUndo restored timeline="
+                        + undoDiagSnapPtr(bundle->timelineSnapshot.get()) + " liveBeforeRestore="
+                        + undoDiagSnapPtr(live.get()));
+                }
             }
             if (bundle->pluginSides.has_value())
             {
                 pluginHost_.importChain(bundle->pluginSides->trackId, bundle->pluginSides->before);
             }
             refreshAfterSessionSnapshotRestore();
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                const auto liveNow = session.loadSessionSnapshotForAudioThread();
+                writeUndoDiagnosticLogLine(
+                    "[UndoDiag] invokeUndo complete liveNow=" + undoDiagSnapPtr(liveNow.get()) + " undoSize="
+                    + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
+                    + juce::String(sessionHistory_.redoStackSize()));
+            }
         }
 
         void invokeRedoFromWindowShortcut()
         {
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine(
+                    "[UndoDiag] invokeRedoFromWindowShortcut entered undoSize="
+                    + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
+                    + juce::String(sessionHistory_.redoStackSize()));
+            }
             if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
                 || recorder_.isRecording())
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] invokeRedo bail: playingOrRecording playing="
+                        + juce::String(transport.readPlaybackIntentForUi() == PlaybackIntent::Playing ? "Y" : "n")
+                        + " recording=" + juce::String(recorder_.isRecording() ? "Y" : "n"));
+                }
                 return;
             }
             if (trackLanesView.isClipEditGestureInProgress())
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine("[UndoDiag] invokeRedo bail: gestureInProgress");
+                }
                 return;
             }
             const std::optional<SessionHistoryRestoreBundle> bundle = sessionHistory_.popRedo();
             if (!bundle.has_value() || bundle->timelineSnapshot == nullptr)
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] invokeRedo bail: emptyOrNullBundle hasValue="
+                        + juce::String(bundle.has_value() ? "Y" : "n") + " timelineNull="
+                        + juce::String(
+                            (bundle.has_value() && bundle->timelineSnapshot == nullptr) ? "Y" : "n"));
+                }
                 return;
             }
             {
@@ -1577,12 +1655,27 @@ private:
                 const std::shared_ptr<const SessionSnapshot> restoredWithLocators
                     = SessionSnapshot::withLocators(*bundle->timelineSnapshot, curL, curR);
                 session.restoreSessionSnapshotForUndo(restoredWithLocators);
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] invokeRedo restored timeline="
+                        + undoDiagSnapPtr(bundle->timelineSnapshot.get()) + " liveBeforeRestore="
+                        + undoDiagSnapPtr(live.get()));
+                }
             }
             if (bundle->pluginSides.has_value())
             {
                 pluginHost_.importChain(bundle->pluginSides->trackId, bundle->pluginSides->after);
             }
             refreshAfterSessionSnapshotRestore();
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                const auto liveNow = session.loadSessionSnapshotForAudioThread();
+                writeUndoDiagnosticLogLine(
+                    "[UndoDiag] invokeRedo complete liveNow=" + undoDiagSnapPtr(liveNow.get()) + " undoSize="
+                    + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
+                    + juce::String(sessionHistory_.redoStackSize()));
+            }
         }
 
         void setKeyDiagnosticLine(const juce::String& line)
@@ -2295,16 +2388,41 @@ private:
             }
         }
 
-        // [Message thread] After `Session::restoreSessionSnapshotForUndo` / redo: same tail as other
-        // edit paths, plus clear stale clip selection held only in `TrackLanesView`.
+        // [Message thread] After `Session::restoreSessionSnapshotForUndo` / redo: playhead, cycle
+        // toggle, and L/R locator samples are not session-undo state for this pass (`withLocators`
+        // reapplies live locators on purpose). Clear clip UI gestures / caches so stale drag ghosts
+        // and raster fingerprints cannot survive restore.
         void refreshAfterSessionSnapshotRestore()
         {
-            trackLanesView.clearAllPlacedClipSelections();
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine(
+                    "[UndoDiag] refreshAfterSessionSnapshotRestore: cancel UI for snapshot restore");
+            }
+            trackLanesView.cancelAllClipGesturesAndTransientUiState();
+            if (cycleSessionTrackId_ != kInvalidTrackId)
+            {
+                const std::shared_ptr<const SessionSnapshot> snap
+                    = session.loadSessionSnapshotForAudioThread();
+                if (snap == nullptr || snap->findTrackIndexById(cycleSessionTrackId_) < 0)
+                {
+                    if constexpr (undo_diagnostic::kUndoDiag)
+                    {
+                        writeUndoDiagnosticLogLine(
+                            "[UndoDiag] cycleSessionTrackId cleared (track missing from snapshot)");
+                    }
+                    cycleSessionTrackId_ = kInvalidTrackId;
+                }
+            }
             syncViewportFromSession();
             trackLanesView.syncTracksFromSession();
             rulerView.repaint();
             trackLanesView.repaint();
             inspectorView_.refreshFromSession();
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] refreshAfterSessionSnapshotRestore complete");
+            }
         }
 
         // [Message thread] Undo-1: mutator must return false when no session mutation occurred
@@ -2318,18 +2436,48 @@ private:
             std::shared_ptr<const SessionSnapshot> before = session.loadSessionSnapshotForAudioThread();
             if (before == nullptr)
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSessionEdit skip: null before label=\""
+                                             + label + "\"");
+                }
                 return;
+            }
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSessionEdit mutator run label=\"" + label
+                                           + "\" before=" + undoDiagSnapPtr(before.get()) + " undoSize="
+                                           + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
+                                           + juce::String(sessionHistory_.redoStackSize()));
             }
             if (!mutator())
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] executeUndoableSessionEdit mutator=false label=\"" + label + "\"");
+                }
                 return;
             }
             std::shared_ptr<const SessionSnapshot> after = session.loadSessionSnapshotForAudioThread();
             if (after == nullptr)
             {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSessionEdit skip: null after label=\""
+                                               + label + "\"");
+                }
                 return;
             }
+            const SessionSnapshot* const afterPtrForDiag = after.get();
             sessionHistory_.record(label, std::move(before), std::move(after));
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSessionEdit after record label=\"" + label
+                                           + "\" after=" + undoDiagSnapPtr(afterPtrForDiag) + " undoSize="
+                                           + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
+                                           + juce::String(sessionHistory_.redoStackSize()));
+            }
         }
 
         // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
@@ -2440,23 +2588,25 @@ private:
                         importRes.getErrorMessage());
                     return;
                 }
-                const juce::Result loadResult
-                    = session.addClipFromFileAtPlayhead(pathToUse, sampleRate, startSampleOnTimeline);
-
-                if (!loadResult.wasOk())
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon,
-                        "Could not open file",
-                        loadResult.getErrorMessage());
-                }
-                else
-                {
+                executeUndoableSessionEdit("Import clip", [&]() -> bool {
+                    const juce::Result loadResult = session.addClipFromFileAtPlayhead(
+                        pathToUse, sampleRate, startSampleOnTimeline);
+                    if (!loadResult.wasOk())
+                    {
+                        juce::AlertWindow::showMessageBoxAsync(
+                            juce::AlertWindow::WarningIcon,
+                            "Could not open file",
+                            loadResult.getErrorMessage());
+                        return false;
+                    }
                     // New **front** clip is on the active track; playhead/transport are unchanged.
                     syncViewportFromSession();
                     trackLanesView.syncTracksFromSession();
+                    rulerView.repaint();
                     trackLanesView.repaint();
-                }
+                    inspectorView_.refreshFromSession();
+                    return true;
+                });
             });
         }
 
@@ -4325,6 +4475,10 @@ private:
                 }
             });
             setVisible(true);
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] enabled");
+            }
         }
 
         ~MainWindow() override { removeKeyListener(this); }
@@ -4352,6 +4506,11 @@ private:
         bool keyPressed(const juce::KeyPress& key, juce::Component* originating) override
         {
             juce::ignoreUnused(originating);
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] MainWindow::keyPressed desc=\""
+                                           + key.getTextDescription() + "\"");
+            }
             if (kShowKeyDiagnostic)
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
@@ -4369,6 +4528,21 @@ private:
         [[nodiscard]] bool routeShortcut(const juce::KeyPress& key)
         {
             logShortcutRouterKey(key);
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                const bool cmd = key.getModifiers().isCommandDown();
+                const bool z = (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z');
+                const bool y = (key.getKeyCode() == 'y' || key.getKeyCode() == 'Y');
+                const bool undoCombo = cmd && !key.getModifiers().isShiftDown() && z;
+                const bool redoCombo = cmd && (y || (key.getModifiers().isShiftDown() && z));
+                if (undoCombo || redoCombo)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] routeShortcut entered undoRelated desc=\"" + key.getTextDescription()
+                        + "\" undoCombo=" + juce::String(undoCombo ? "Y" : "n") + " redoCombo="
+                        + juce::String(redoCombo ? "Y" : "n") + ")");
+                }
+            }
             if constexpr (kShowShortcutDiagnostics)
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
@@ -4380,6 +4554,25 @@ private:
             const bool editorHasFocus
                 = (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent())
                    != nullptr);
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                const bool undoShortcut = key.getModifiers().isCommandDown()
+                                          && !key.getModifiers().isShiftDown()
+                                          && (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z');
+                const bool redoShortcut
+                    = key.getModifiers().isCommandDown()
+                      && ((key.getKeyCode() == 'y' || key.getKeyCode() == 'Y')
+                          || ((key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')
+                              && key.getModifiers().isShiftDown()));
+                if (editorHasFocus && (undoShortcut || redoShortcut))
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] routeShortcut blocked: TextEditor focus undoShortcut="
+                        + juce::String(undoShortcut ? "Y" : "n") + " redoShortcut="
+                        + juce::String(redoShortcut ? "Y" : "n") + " desc=\""
+                        + key.getTextDescription() + "\"");
+                }
+            }
             if (!editorHasFocus)
             {
                 if (key.isKeyCode(juce::KeyPress::deleteKey))
@@ -4411,6 +4604,11 @@ private:
                 {
                     if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
                     {
+                        if constexpr (undo_diagnostic::kUndoDiag)
+                        {
+                            writeUndoDiagnosticLogLine("[UndoDiag] routeShortcut matched=undo desc=\""
+                                                       + key.getTextDescription() + "\"");
+                        }
                         tcc->invokeUndoFromWindowShortcut();
                         return true;
                     }
@@ -4422,6 +4620,11 @@ private:
                 {
                     if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
                     {
+                        if constexpr (undo_diagnostic::kUndoDiag)
+                        {
+                            writeUndoDiagnosticLogLine("[UndoDiag] routeShortcut matched=redo desc=\""
+                                                       + key.getTextDescription() + "\"");
+                        }
                         tcc->invokeRedoFromWindowShortcut();
                         return true;
                     }
