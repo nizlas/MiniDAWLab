@@ -2,6 +2,7 @@
 #include "ExperimentalMidiPatternPlayer.h"
 #include "instruments/InstrumentTrackController.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/TimelineLocatorPainter.h"
 
 #include "domain/Session.h"
 #include "transport/Transport.h"
@@ -14,112 +15,6 @@
 namespace
 {
     constexpr bool kMidiEditorVerbosePianoRollMouseLog = false;
-
-    constexpr float kMinTickSpacingPx = 6.0f;
-
-    constexpr double kStepCandidatesSec[]
-        = { 0.1,  0.25, 0.5,  1.0,  2.0,  5.0,  10.0, 30.0,
-            60.0, 300.0, 600.0, 3600.0 };
-    constexpr int kNumStepCandidates
-        = (int)(sizeof(kStepCandidatesSec) / sizeof(kStepCandidatesSec[0]));
-
-    [[nodiscard]] float glyphLayoutWidthPx(const juce::Font& f, const juce::String& text) noexcept
-    {
-        juce::GlyphArrangement glyphs;
-        glyphs.addLineOfText(f, text, 0.0f, 0.0f);
-        const int n = glyphs.getNumGlyphs();
-        if (n <= 0)
-        {
-            return 0.0f;
-        }
-        return glyphs.getBoundingBox(0, n, true).getWidth();
-    }
-
-    [[nodiscard]] float referenceLabelMinSpacingPx() noexcept
-    {
-        const juce::Font f(juce::FontOptions(10.0f));
-        return glyphLayoutWidthPx(f, "00:00.000") + 8.0f;
-    }
-
-    [[nodiscard]] double pickTickStepSec(const double pxPerSec) noexcept
-    {
-        if (pxPerSec <= 0.0 || !std::isfinite(pxPerSec))
-        {
-            return kStepCandidatesSec[kNumStepCandidates - 1];
-        }
-        double chosen = kStepCandidatesSec[kNumStepCandidates - 1];
-        for (const double step : kStepCandidatesSec)
-        {
-            if (step * pxPerSec >= (double)kMinTickSpacingPx)
-            {
-                chosen = step;
-                break;
-            }
-        }
-        return chosen;
-    }
-
-    [[nodiscard]] double pickLabelStepSec(const double pxPerSec, const double tickStepSec) noexcept
-    {
-        const float minLabelPx = referenceLabelMinSpacingPx();
-        if (pxPerSec <= 0.0 || !std::isfinite(pxPerSec))
-        {
-            return juce::jmax(tickStepSec, kStepCandidatesSec[kNumStepCandidates - 1]);
-        }
-        for (const double step : kStepCandidatesSec)
-        {
-            if (step + 1e-15 < tickStepSec)
-            {
-                continue;
-            }
-            if (step * pxPerSec >= (double)minLabelPx)
-            {
-                return step;
-            }
-        }
-        double coarsestGeTick = tickStepSec;
-        for (const double step : kStepCandidatesSec)
-        {
-            if (step + 1e-15 >= tickStepSec)
-            {
-                coarsestGeTick = step;
-            }
-        }
-        return coarsestGeTick;
-    }
-
-    [[nodiscard]] juce::String formatRulerTimeLabel(const double seconds, const double stepSec) noexcept
-    {
-        if (!std::isfinite(seconds) || !std::isfinite(stepSec))
-        {
-            return {};
-        }
-        if (std::abs(seconds) < 1e-12)
-        {
-            return "0s";
-        }
-        if (seconds < 60.0)
-        {
-            if (stepSec >= 1.0 - 1e-15)
-            {
-                return juce::String((juce::int64)std::llround(seconds)) + "s";
-            }
-            if (stepSec >= 0.1 - 1e-15)
-            {
-                return juce::String(seconds, 1) + "s";
-            }
-            return juce::String(seconds, 2) + "s";
-        }
-        const auto totalMs = (std::int64_t)std::llround(seconds * 1000.0);
-        const std::int64_t m = totalMs / 60000;
-        const std::int64_t s = (totalMs % 60000) / 1000;
-        const std::int64_t ms = totalMs % 1000;
-        if (stepSec >= 1.0 - 1e-15)
-        {
-            return juce::String::formatted("%lld:%02lld", (long long)m, (long long)s);
-        }
-        return juce::String::formatted("%lld:%02lld.%03lld", (long long)m, (long long)s, (long long)ms);
-    }
 
     [[nodiscard]] double effectiveDeviceSampleRate(juce::AudioDeviceManager* dm) noexcept
     {
@@ -167,6 +62,7 @@ ExperimentalPianoRollView::ExperimentalPianoRollView(ExperimentalMidiPattern& pa
     , player_(player)
 {
     setOpaque(true);
+    setMouseClickGrabsKeyboardFocus(false);
     uiTimerHzConfigured_ = kMidiRollTimerHzIdle;
     startTimerHz(kMidiRollTimerHzIdle);
 }
@@ -248,6 +144,7 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         applyViewportAfterContextBound();
     }
     sessionTransportSnapshotValid_ = false;
+    uiRulerSeekDisplayHold_.reset();
     clipGeometrySnapshotValid_ = false;
     lastObservedNoteCountUi_ = -1;
     lastObservedTimelineNoteCountUi_ = -1;
@@ -294,6 +191,7 @@ void ExperimentalPianoRollView::seedOrResetViewport()
         samplesPerPixel_ = 0.0;
     }
     sessionTransportSnapshotValid_ = false;
+    uiRulerSeekDisplayHold_.reset();
     clipGeometrySnapshotValid_ = false;
     lastObservedNoteCountUi_ = -1;
     lastObservedTimelineNoteCountUi_ = -1;
@@ -466,38 +364,66 @@ void ExperimentalPianoRollView::timerCallback()
         const std::int64_t phRaw = transport_->readPlayheadSamplesForUi();
         const double sr = effectiveDeviceSampleRate(deviceManager_);
 
-        if (transportPlaying && !wasTransportPlaying)
+        if (uiRulerSeekDisplayHold_.has_value())
         {
-            uiPlayheadExtrapBaseSample_ = (double)phRaw;
-            uiPlayheadExtrapWallSec_ = nowSec;
-            uiPlayheadLastRawPh_ = phRaw;
-            uiPlayheadDisplaySamples_ = (double)phRaw;
-            lastOffscreenGatePlayheadInView_ = true;
+            const std::int64_t held = *uiRulerSeekDisplayHold_;
+            if (std::llabs(phRaw - held) <= 64)
+            {
+                uiRulerSeekDisplayHold_.reset();
+            }
         }
-        else if (!transportPlaying)
+
+        if (!uiRulerSeekDisplayHold_.has_value())
         {
-            uiPlayheadExtrapBaseSample_ = (double)phRaw;
-            uiPlayheadExtrapWallSec_ = nowSec;
-            uiPlayheadLastRawPh_ = phRaw;
-            uiPlayheadDisplaySamples_ = (double)phRaw;
+            if (transportPlaying && !wasTransportPlaying)
+            {
+                uiPlayheadExtrapBaseSample_ = (double)phRaw;
+                uiPlayheadExtrapWallSec_ = nowSec;
+                uiPlayheadLastRawPh_ = phRaw;
+                uiPlayheadDisplaySamples_ = (double)phRaw;
+                lastOffscreenGatePlayheadInView_ = true;
+            }
+            else if (!transportPlaying)
+            {
+                uiPlayheadExtrapBaseSample_ = (double)phRaw;
+                uiPlayheadExtrapWallSec_ = nowSec;
+                uiPlayheadLastRawPh_ = phRaw;
+                uiPlayheadDisplaySamples_ = (double)phRaw;
+            }
+            else
+            {
+                const double predicted = uiPlayheadExtrapBaseSample_
+                                        + (nowSec - uiPlayheadExtrapWallSec_) * sr;
+                const double deltaToRaw = (double)phRaw - predicted;
+                if (std::abs(deltaToRaw) > kPlayheadHardResyncSamples)
+                {
+                    uiPlayheadExtrapBaseSample_ = (double)phRaw;
+                    uiPlayheadExtrapWallSec_ = nowSec;
+                    uiPlayheadLastRawPh_ = phRaw;
+                }
+                else if (phRaw != uiPlayheadLastRawPh_)
+                {
+                    uiPlayheadExtrapBaseSample_ = (double)phRaw;
+                    uiPlayheadExtrapWallSec_ = nowSec;
+                    uiPlayheadLastRawPh_ = phRaw;
+                }
+                uiPlayheadDisplaySamples_
+                    = uiPlayheadExtrapBaseSample_ + (nowSec - uiPlayheadExtrapWallSec_) * sr;
+            }
         }
         else
         {
-            const double predicted = uiPlayheadExtrapBaseSample_ + (nowSec - uiPlayheadExtrapWallSec_) * sr;
-            const double deltaToRaw = (double)phRaw - predicted;
-            if (std::abs(deltaToRaw) > kPlayheadHardResyncSamples)
+            const std::int64_t held = *uiRulerSeekDisplayHold_;
+            const double wall = uiPlayheadExtrapWallSec_;
+            uiPlayheadLastRawPh_ = phRaw;
+            if (!transportPlaying)
             {
-                uiPlayheadExtrapBaseSample_ = (double)phRaw;
-                uiPlayheadExtrapWallSec_ = nowSec;
-                uiPlayheadLastRawPh_ = phRaw;
+                uiPlayheadDisplaySamples_ = (double)held;
             }
-            else if (phRaw != uiPlayheadLastRawPh_)
+            else
             {
-                uiPlayheadExtrapBaseSample_ = (double)phRaw;
-                uiPlayheadExtrapWallSec_ = nowSec;
-                uiPlayheadLastRawPh_ = phRaw;
+                uiPlayheadDisplaySamples_ = (double)held + (nowSec - wall) * sr;
             }
-            uiPlayheadDisplaySamples_ = uiPlayheadExtrapBaseSample_ + (nowSec - uiPlayheadExtrapWallSec_) * sr;
         }
 
         if (session_ != nullptr)
@@ -814,9 +740,244 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     repaint();
 }
 
+void ExperimentalPianoRollView::setTransportGestureBlockPredicate(std::function<bool()> f) noexcept
+{
+    transportGestureBlock_ = std::move(f);
+}
+
+void ExperimentalPianoRollView::applyRulerSeekAtXInTrack(const float xInTrack, const float trackWidth) noexcept
+{
+    if (transportGestureBlock_ && transportGestureBlock_())
+    {
+        juce::Logger::writeToLog("[MIDI-roll ruler] seek ignored (recording or count-in)");
+        return;
+    }
+    if (session_ == nullptr || transport_ == nullptr)
+    {
+        return;
+    }
+    const std::int64_t arr = session_->getArrangementExtentSamples();
+    if (arr <= 0 || trackWidth <= 0.0f || samplesPerPixel_ <= 0.0 || !std::isfinite(samplesPerPixel_))
+    {
+        return;
+    }
+    const std::int64_t s =
+        TimelineRulerView::xToSessionSampleClamped(xInTrack, trackWidth, visibleStartSamples_, samplesPerPixel_);
+    const std::int64_t seekTarget = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+    transport_->requestSeek(seekTarget);
+    syncUiPlayheadAfterRulerSeek(seekTarget);
+}
+
+void ExperimentalPianoRollView::applyLeftLocatorRulerX(const float xInTrack, const float trackWidth) noexcept
+{
+    if (transportGestureBlock_ && transportGestureBlock_())
+    {
+        juce::Logger::writeToLog("[MIDI-roll ruler] Ctrl L locator edit ignored (recording or count-in)");
+        return;
+    }
+    if (session_ == nullptr || transport_ == nullptr)
+    {
+        return;
+    }
+    const std::int64_t arr = session_->getArrangementExtentSamples();
+    if (arr <= 0 || trackWidth <= 0.0f || samplesPerPixel_ <= 0.0 || !std::isfinite(samplesPerPixel_))
+    {
+        return;
+    }
+    const std::int64_t s =
+        TimelineRulerView::xToSessionSampleClamped(xInTrack, trackWidth, visibleStartSamples_, samplesPerPixel_);
+    const std::int64_t t = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+
+    const std::int64_t oldR = session_->getRightLocatorSamples();
+    session_->setLeftLocatorAtSample(t);
+    const std::int64_t newR = session_->getRightLocatorSamples();
+    const bool newValid = newR > t && newR > 0;
+    if (oldR == 0 && newValid && !transport_->readCycleEnabledForUi())
+    {
+        transport_->requestCycleEnabled(true);
+        juce::Logger::writeToLog("[Cycle] auto-enabled by L locator edit (first-creation: oldR==0) [MIDI roll]");
+    }
+    repaint();
+}
+
+void ExperimentalPianoRollView::applyRightLocatorRulerX(const float xInTrack, const float trackWidth) noexcept
+{
+    if (transportGestureBlock_ && transportGestureBlock_())
+    {
+        juce::Logger::writeToLog("[MIDI-roll ruler] Alt R locator edit ignored (recording or count-in)");
+        return;
+    }
+    if (session_ == nullptr || transport_ == nullptr)
+    {
+        return;
+    }
+    const std::int64_t arr = session_->getArrangementExtentSamples();
+    if (arr <= 0 || trackWidth <= 0.0f || samplesPerPixel_ <= 0.0 || !std::isfinite(samplesPerPixel_))
+    {
+        return;
+    }
+    const std::int64_t s =
+        TimelineRulerView::xToSessionSampleClamped(xInTrack, trackWidth, visibleStartSamples_, samplesPerPixel_);
+    const std::int64_t t = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+
+    const std::int64_t oldR = session_->getRightLocatorSamples();
+    session_->setRightLocatorAtSample(t);
+    const std::int64_t newL = session_->getLeftLocatorSamples();
+    const bool newValid = t > newL && t > 0;
+    if (oldR == 0 && newValid && !transport_->readCycleEnabledForUi())
+    {
+        transport_->requestCycleEnabled(true);
+        juce::Logger::writeToLog("[Cycle] auto-enabled by R locator edit (first-creation: oldR==0) [MIDI roll]");
+    }
+    repaint();
+}
+
+void ExperimentalPianoRollView::tryToggleCycleFromRuler() noexcept
+{
+    if (transportGestureBlock_ && transportGestureBlock_())
+    {
+        juce::Logger::writeToLog("[Cycle] MIDI-roll toggle ignored (recording or count-in)");
+        return;
+    }
+    if (transport_ == nullptr)
+    {
+        return;
+    }
+    transport_->requestCycleEnabled(!transport_->readCycleEnabledForUi());
+    juce::Logger::writeToLog(juce::String{"[Cycle] "} + (transport_->readCycleEnabledForUi() ? "on" : "off")
+                             + " [MIDI roll]");
+    repaint();
+}
+
+void ExperimentalPianoRollView::maybeFollowViewportToAnchorSample(const double anchorSamples) noexcept
+{
+    if (!followPlayhead_ || !useAbsoluteTimeline())
+    {
+        return;
+    }
+    const auto gr = gridBounds();
+    const double wpx = juce::jmax(1.0, (double)juce::jmax(1, gr.getWidth()));
+    if (samplesPerPixel_ <= 0.0 || !std::isfinite(samplesPerPixel_))
+    {
+        return;
+    }
+    const double spanSamples = wpx * samplesPerPixel_;
+    const double rel = spanSamples > 1e-9 ? (anchorSamples - (double)visibleStartSamples_) / spanSamples : 0.5;
+
+    std::int64_t targetStart = visibleStartSamples_;
+    bool needScroll = false;
+    if (rel >= kFollowRightThreshold)
+    {
+        needScroll = true;
+        targetStart = (std::int64_t)std::llround(anchorSamples - kFollowForwardResetPosition * spanSamples);
+    }
+    else if (rel <= kFollowLeftThreshold)
+    {
+        needScroll = true;
+        targetStart = (std::int64_t)std::llround(anchorSamples - kFollowBackwardResetPosition * spanSamples);
+    }
+
+    if (!needScroll)
+    {
+        return;
+    }
+    const std::int64_t clamped = juce::jmax(std::int64_t{0}, targetStart);
+    if (clamped != visibleStartSamples_)
+    {
+        visibleStartSamples_ = clamped;
+        syncViewportToBoundClip();
+        sessionTransportSnapshotValid_ = false;
+        repaint();
+    }
+}
+
+void ExperimentalPianoRollView::syncUiPlayheadAfterRulerSeek(const std::int64_t seekTargetSamples) noexcept
+{
+    uiRulerSeekDisplayHold_ = seekTargetSamples;
+    const double wall = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    uiPlayheadDisplaySamples_ = (double)seekTargetSamples;
+    uiPlayheadExtrapBaseSample_ = (double)seekTargetSamples;
+    uiPlayheadExtrapWallSec_ = wall;
+    if (transport_ != nullptr)
+    {
+        uiPlayheadLastRawPh_ = transport_->readPlayheadSamplesForUi();
+    }
+    lastObservedPlayheadUi_ = seekTargetSamples;
+    sessionTransportSnapshotValid_ = true;
+    lastOffscreenGatePlayheadInView_ = true;
+    maybeFollowViewportToAnchorSample((double)seekTargetSamples);
+    repaint();
+}
+
+void ExperimentalPianoRollView::handleTimelineRulerMouseDown(const juce::MouseEvent& e,
+                                                             const juce::Rectangle<int>& rt)
+{
+    rulerGestureMode_ = RulerGestureMode::None;
+    const float h = (float)rt.getHeight();
+    const float yRel = (float)e.position.getY() - (float)rt.getY();
+    const bool upperHalf = h > 0.f && yRel < h * 0.5f;
+    const float w = (float)rt.getWidth();
+    const float xInTrack = (float)e.position.getX() - (float)rt.getX();
+
+    if (e.mods.isAltDown())
+    {
+        applyRightLocatorRulerX(xInTrack, w);
+        rulerGestureMode_ = RulerGestureMode::RightLocator;
+    }
+    else if (e.mods.isCtrlDown())
+    {
+        applyLeftLocatorRulerX(xInTrack, w);
+        rulerGestureMode_ = RulerGestureMode::LeftLocator;
+    }
+    else if (upperHalf)
+    {
+        tryToggleCycleFromRuler();
+    }
+    else
+    {
+        applyRulerSeekAtXInTrack(xInTrack, w);
+        rulerGestureMode_ = RulerGestureMode::Seek;
+    }
+}
+
+void ExperimentalPianoRollView::handleTimelineRulerMouseDrag(const juce::MouseEvent& e,
+                                                             const juce::Rectangle<int>& rt)
+{
+    if (rulerGestureMode_ == RulerGestureMode::None)
+    {
+        return;
+    }
+    const float h = (float)rt.getHeight();
+    const float yRel = (float)e.position.getY() - (float)rt.getY();
+    const bool lowerHalf = h > 0.f && yRel >= h * 0.5f;
+    const float w = (float)juce::jmax(1, rt.getWidth());
+    const float xRaw = (float)e.position.getX() - (float)rt.getX();
+    const float xInTrack = juce::jlimit(0.f, w - 1.f, xRaw);
+
+    if (rulerGestureMode_ == RulerGestureMode::RightLocator)
+    {
+        applyRightLocatorRulerX(xInTrack, w);
+    }
+    else if (rulerGestureMode_ == RulerGestureMode::LeftLocator)
+    {
+        applyLeftLocatorRulerX(xInTrack, w);
+    }
+    else if (rulerGestureMode_ == RulerGestureMode::Seek && lowerHalf)
+    {
+        applyRulerSeekAtXInTrack(xInTrack, w);
+    }
+}
+
 void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
+    const auto rt = rulerTrackBounds();
+    if (useAbsoluteTimeline() && !rt.isEmpty() && rt.contains(pos))
+    {
+        handleTimelineRulerMouseDown(e, rt);
+        return;
+    }
+
     const auto gr = gridBounds();
 
     if (gr.contains(pos))
@@ -847,6 +1008,22 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         }
         repaint();
     }
+}
+
+void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
+{
+    const auto rt = rulerTrackBounds();
+    if (!useAbsoluteTimeline() || rt.isEmpty() || rulerGestureMode_ == RulerGestureMode::None)
+    {
+        return;
+    }
+    handleTimelineRulerMouseDrag(e, rt);
+}
+
+void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
+{
+    juce::ignoreUnused(e);
+    rulerGestureMode_ = RulerGestureMode::None;
 }
 
 void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -949,43 +1126,17 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         g.drawHorizontalLine(rulerTrack.getBottom() - 1, (float)rulerTrack.getX(), (float)rulerTrack.getRight());
     }
 
-    // --- Timeline ruler: filled ranges + ticks + labels + playheads (ruler strip only; never use gridBounds for fills)
+    // --- Timeline ruler (strip only): clip underlay, shared locator/cycle + ticks/labels, playheads.
     if (absTime && !rulerTrack.isEmpty())
     {
         const double sampleRate = effectiveDeviceSampleRate(deviceManager_);
         const std::int64_t visStart = visibleStartSamples_;
-        const std::int64_t visEnd = visibleEndSamples();
+        const std::int64_t visEndEx = visibleEndSamples();
+        const std::int64_t visLen = juce::jmax(std::int64_t{0}, visEndEx - visStart);
         const juce::Rectangle<float> rb = rulerTrack.toFloat();
-        const double pxPerSec = sampleRate / samplesPerPixel_;
+        const std::int64_t arrLen = session_ != nullptr ? session_->getArrangementExtentSamples() : 0;
 
-        // --- Ruler-only filled range markers (same semantics as main timeline ruler; never tint
-        // gridBounds — see prior grid fills: bound clip span + cycle/locator band.)
-        if (session_ != nullptr && transport_ != nullptr)
-        {
-            const std::int64_t locL = session_->getLeftLocatorSamples();
-            const std::int64_t locR = session_->getRightLocatorSamples();
-            const bool cycleOn = transport_->readCycleEnabledForUi();
-            if (locR > 0)
-            {
-                const float x0 = xForSessionSample(locL);
-                const float x1 = xForSessionSample(locR);
-                const float fillLeft = juce::jmin(x0, x1);
-                const float fillRight = juce::jmax(x0, x1);
-                const float clipL = juce::jmax(fillLeft, rb.getX());
-                const float clipR = juce::jmin(fillRight, rb.getRight());
-                const float bandW = clipR - clipL;
-                const bool validInterval = locR > locL;
-                if (bandW > 0.5f)
-                {
-                    const juce::Colour fillCol = validInterval
-                        ? (cycleOn ? juce::Colour(0xff7058e8).withAlpha(0.52f)
-                                   : juce::Colour(0xffb8c2d8).withAlpha(0.36f))
-                        : juce::Colour(0xfff06828).withAlpha(0.52f);
-                    g.setColour(fillCol);
-                    g.fillRect(clipL, rb.getY(), bandW, rb.getHeight());
-                }
-            }
-        }
+        const auto xAtSample = [&](const std::int64_t s) { return xForSessionSample(s); };
 
         if (timelineClip_ != nullptr && timelineClip_->lengthSamples > 0)
         {
@@ -1004,107 +1155,37 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             }
         }
 
-        if (pxPerSec > 0.0 && std::isfinite(pxPerSec))
-        {
-            const double tickStepSec = pickTickStepSec(pxPerSec);
-            const double labelStepSec = pickLabelStepSec(pxPerSec, tickStepSec);
-            const float hShortMinor = juce::jmax(3.0f, rb.getHeight() * 0.28f);
-            const float hShortMajor = juce::jmax(5.0f, rb.getHeight() * 0.42f);
-
-            const auto xAtSample = [&](const std::int64_t s) {
-                return xForSessionSample(s);
-            };
-
-            // Minor ticks (major positions are drawn again below for stronger ticks + labels)
-            g.setColour(juce::Colour(0xff7a8aa0).withAlpha(0.42f));
-            for (int k = 0;; ++k)
-            {
-                const std::int64_t s
-                    = (std::int64_t)std::llround((double)k * tickStepSec * sampleRate);
-                if (s > visEnd + (std::int64_t)std::llround(labelStepSec * sampleRate * 2.0))
-                {
-                    break;
-                }
-                if (s < visStart)
-                {
-                    continue;
-                }
-                const float x = xAtSample(s);
-                if (x < rb.getX() - 1.0f || x > rb.getRight() + 1.0f)
-                {
-                    continue;
-                }
-                g.drawLine(x, rb.getBottom() - 1.0f, x, rb.getBottom() - 1.0f - hShortMinor, 1.0f);
-            }
-
-            // Major ticks + label cadence
-            g.setColour(juce::Colour(0xff7a8aa0).withAlpha(0.58f));
-            const juce::Font labelFont(juce::FontOptions(10.0f));
-            g.setFont(labelFont);
-            g.setColour(juce::Colours::white.withAlpha(0.52f));
-            const float labelBaselineY = rb.getBottom() - 2.0f - hShortMajor - 2.0f;
-
-            for (int k = 0;; ++k)
-            {
-                const std::int64_t samp
-                    = (std::int64_t)std::llround((double)k * labelStepSec * sampleRate);
-                if (samp > visEnd + (std::int64_t)std::llround(labelStepSec * sampleRate))
-                {
-                    break;
-                }
-                if (samp < visStart)
-                {
-                    continue;
-                }
-                const float x = xAtSample(samp);
-                if (x < rb.getX() - 1.0f || x > rb.getRight() + 1.0f)
-                {
-                    continue;
-                }
-                g.setColour(juce::Colour(0xff7a8aa0).withAlpha(0.58f));
-                g.drawLine(x, rb.getBottom() - 1.0f, x, rb.getBottom() - 1.0f - hShortMajor, 1.0f);
-
-                const double sec = (double)samp / sampleRate;
-                const juce::String text = formatRulerTimeLabel(sec, labelStepSec);
-                const float tw = glyphLayoutWidthPx(labelFont, text);
-                if (x - tw * 0.5f <= rb.getX() || x + tw * 0.5f >= rb.getRight())
-                {
-                    continue;
-                }
-                g.setColour(juce::Colours::white.withAlpha(0.52f));
-                g.drawText(text, juce::Rectangle<float>(x - tw * 0.5f, labelBaselineY - 11.0f, tw, 11.0f),
-                           juce::Justification::centredBottom, true);
-            }
-        }
-
-        // Locator verticals through ruler strip (grid gets thin lines separately; no filled band in grid)
-        if (session_ != nullptr && samplesPerPixel_ > 0.0)
+        if (session_ != nullptr && transport_ != nullptr && arrLen > 0)
         {
             const std::int64_t locL = session_->getLeftLocatorSamples();
             const std::int64_t locR = session_->getRightLocatorSamples();
-            auto rulerLine = [&](const std::int64_t s, const juce::Colour& col) {
-                const float x = xForSessionSample(s);
-                if (x >= rb.getX() - 1.0f && x <= rb.getRight() + 1.0f)
-                {
-                    g.setColour(col);
-                    g.drawVerticalLine(juce::roundToInt(x), rb.getY() + 0.5f, rb.getBottom() - 0.5f);
-                }
-            };
-            rulerLine(locL, juce::Colours::white.withAlpha(0.42f));
-            if (locR > 0)
-            {
-                rulerLine(locR, juce::Colours::white.withAlpha(0.36f));
-            }
+            const bool cycleOn = transport_->readCycleEnabledForUi();
+
+            using namespace timeline_locator_paint;
+
+            paintLocatorCycleBandAndStripe(
+                g, rb, xAtSample, visStart, visLen, locL, locR, cycleOn);
+            paintRulerTickMarks(g, rb, xAtSample, arrLen, visStart, visLen, sampleRate);
+            paintLocatorTriangleHandles(g, rb, xAtSample, visStart, visLen, locL, locR, cycleOn);
+            paintRulerTimeLabels(g, rb, xAtSample, arrLen, visStart, visLen, sampleRate, locL, locR);
         }
 
-        // Global playhead through ruler (line only): draw using UI-extrapolated sample (smooth sub-step motion).
-        if (transport_ != nullptr)
+        if (transport_ != nullptr && arrLen > 0)
         {
-            const float px = xForSessionSampleD(uiPlayheadDisplaySamples_);
-            if (px >= rb.getX() - 2.0f && px <= rb.getRight() + 2.0f)
+            const std::int64_t ph = transport_->readPlayheadSamplesForUi();
+            const std::int64_t phClamped
+                = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arrLen), ph);
+            const double phDrawD = uiRulerSeekDisplayHold_.has_value() ? uiPlayheadDisplaySamples_
+                                                                      : (double)phClamped;
+            if (phDrawD >= (double)visStart && phDrawD < (double)(visStart + visLen))
             {
-                g.setColour(juce::Colour(0xff66ddff));
-                g.drawLine(px, rb.getY() + 1.0f, px, rb.getBottom() - 1.0f, 1.35f);
+                const float xLine = xForSessionSampleD(phDrawD);
+                g.setColour(juce::Colours::white.withAlpha(0.92f));
+                g.drawLine(xLine,
+                           rb.getY(),
+                           xLine,
+                           rb.getY() + timeline_locator_paint::kRulerPlayheadMarkerLengthPx,
+                           1.5f);
             }
         }
 
@@ -1115,7 +1196,12 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             if (px >= rb.getX() - 2.0f && px <= rb.getRight() + 2.0f)
             {
                 g.setColour(juce::Colour(0xffe85566));
-                g.drawLine(px, rb.getY() + 2.0f, px, rb.getBottom() - 2.0f, 1.1f);
+                g.drawLine(
+                    px,
+                    rb.getY() + 1.0f,
+                    px,
+                    rb.getY() + timeline_locator_paint::kRulerPlayheadMarkerLengthPx + 1.0f,
+                    1.15f);
             }
         }
     }

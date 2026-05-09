@@ -10,6 +10,7 @@
 #include "domain/Session.h"
 #include "transport/Transport.h"
 #include "ui/TimelineViewportModel.h"
+#include "ui/TransportShortcutKeys.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
@@ -28,8 +29,10 @@ namespace
     }
 } // namespace
 
-class ExperimentalMidiEditorWindow::Body final : public juce::Component
+class ExperimentalMidiEditorWindow::Body final : public juce::Component, private juce::Timer
 {
+    friend class ExperimentalMidiEditorWindow;
+
 public:
     explicit Body(ExperimentalInstrumentHost& hostIn)
         : host_(hostIn)
@@ -40,19 +43,64 @@ public:
         pattern_.bpm = 110.0;
         pattern_.loop = true;
 
-        player_->setPlaybackUiCallback([this] { updateStopButtonState(); });
+        player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
 
         addAndMakeVisible(viewport_);
-        addAndMakeVisible(playButton_);
-        playButton_.setButtonText("Debug Preview");
-        playButton_.onClick = [this] {
+
+        addAndMakeVisible(transportPlayButton_);
+        transportPlayButton_.setButtonText("Play");
+        transportPlayButton_.onClick = [this] {
+            if (transportCommands_.onTogglePlayPause)
+            {
+                transportCommands_.onTogglePlayPause();
+            }
+        };
+
+        addAndMakeVisible(transportStopButton_);
+        transportStopButton_.setButtonText("Stop");
+        transportStopButton_.onClick = [this] {
+            if (transportCommands_.onStop)
+            {
+                transportCommands_.onStop();
+            }
+        };
+
+        addAndMakeVisible(cycleToggleButton_);
+        cycleToggleButton_.setButtonText("Cycle: Off");
+        cycleToggleButton_.setTooltip("Toggle loop/cycle (upper half of MIDI roll ruler also toggles).");
+        cycleToggleButton_.onClick = [this] {
+            if (transportCommands_.onToggleCycle)
+            {
+                transportCommands_.onToggleCycle();
+            }
+        };
+
+        addAndMakeVisible(recordButton_);
+        recordButton_.setButtonText("Record");
+        recordButton_.setTooltip("Record armed audio track (same as main window; uses numpad * or * key).");
+        recordButton_.onClick = [this] {
+            if (transportCommands_.onToggleRecord)
+            {
+                transportCommands_.onToggleRecord();
+            }
+        };
+        recordButton_.setEnabled(false);
+
+        transportPlayButton_.setEnabled(false);
+        transportStopButton_.setEnabled(false);
+        cycleToggleButton_.setEnabled(false);
+
+        addAndMakeVisible(debugPreviewButton_);
+        debugPreviewButton_.setButtonText("Debug Preview");
+        debugPreviewButton_.setTooltip("Local pattern preview only; does not start main transport.");
+        debugPreviewButton_.onClick = [this] {
             player_->startPlayback();
         };
 
-        addAndMakeVisible(stopButton_);
-        stopButton_.setButtonText("Stop");
-        stopButton_.setEnabled(false);
-        stopButton_.onClick = [this] {
+        addAndMakeVisible(debugStopButton_);
+        debugStopButton_.setButtonText("Preview Stop");
+        debugStopButton_.setEnabled(false);
+        debugStopButton_.onClick = [this] {
             player_->stopPlayback("user");
         };
 
@@ -178,6 +226,7 @@ public:
 
     ~Body() override
     {
+        stopTimer();
         player_->stopPlayback("window-closed");
     }
 
@@ -204,6 +253,7 @@ public:
                 deviceManagerForRoll_,
                 instrumentTrackForClipBind_,
                 mainTimelineViewportForRoll_);
+            pushTransportGestureBlockToRoll();
         }
     }
 
@@ -354,7 +404,7 @@ public:
         lastInstrumentName_ = instrumentName;
         lastRequiredKitName_ = requiredKitForUi;
 
-        playButton_.setEnabled(canPlayPattern);
+        debugPreviewButton_.setEnabled(canPlayPattern);
         const bool clipTimelineBound =
             externalPattern_ != nullptr && boundTimelineClip_ != nullptr;
         importButton_.setEnabled(clipTimelineBound);
@@ -419,7 +469,7 @@ public:
             juce::dontSendNotification);
         modeLabel_.setColour(juce::Label::textColourId, labelColour);
 
-        updateStopButtonState();
+        updateDebugStopButtonState();
 
         if (!changed)
         {
@@ -441,9 +491,9 @@ public:
         }
     }
 
-    void updateStopButtonState()
+    void updateDebugStopButtonState()
     {
-        stopButton_.setEnabled(editorInstrumentGate() && player_ != nullptr && player_->isPlaying());
+        debugStopButton_.setEnabled(editorInstrumentGate() && player_ != nullptr && player_->isPlaying());
     }
 
     void resized() override
@@ -451,10 +501,12 @@ public:
         auto a = getLocalBounds();
         auto toolbar = a.removeFromTop(kToolbarH);
         toolbar.reduce(6, 4);
-        playButton_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
-        stopButton_.setBounds(toolbar.removeFromLeft(64).reduced(0, 2));
-        importButton_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
-        exportButton_.setBounds(toolbar.removeFromLeft(104).reduced(0, 2));
+        transportPlayButton_.setBounds(toolbar.removeFromLeft(58).reduced(0, 2));
+        transportStopButton_.setBounds(toolbar.removeFromLeft(52).reduced(0, 2));
+        cycleToggleButton_.setBounds(toolbar.removeFromLeft(56).reduced(0, 2));
+        recordButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
+        importButton_.setBounds(toolbar.removeFromLeft(92).reduced(0, 2));
+        exportButton_.setBounds(toolbar.removeFromLeft(96).reduced(0, 2));
         snapLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
         snapBox_.setBounds(toolbar.removeFromLeft(76).reduced(0, 2));
         displayLabel_.setBounds(toolbar.removeFromLeft(52).reduced(0, 4));
@@ -463,7 +515,9 @@ public:
         stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
         followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         bpmLabel_.setBounds(toolbar.removeFromLeft(36).reduced(0, 4));
-        bpmSlider_.setBounds(toolbar.removeFromLeft(140).reduced(0, 2));
+        bpmSlider_.setBounds(toolbar.removeFromLeft(132).reduced(0, 2));
+        debugPreviewButton_.setBounds(toolbar.removeFromLeft(98).reduced(0, 2));
+        debugStopButton_.setBounds(toolbar.removeFromLeft(90).reduced(0, 2));
         modeLabel_.setBounds(toolbar.reduced(8, 0));
 
         // Lay out the viewport first, then size the roll to match the viewport's *content budget*.
@@ -514,6 +568,11 @@ public:
     }
 
 private:
+    void timerCallback() override;
+    void setTransportCommands(ExperimentalMidiTransportCommands commands);
+    void pushTransportGestureBlockToRoll();
+    [[nodiscard]] bool handleTopLevelShortcut(const juce::KeyPress& key);
+
     void syncStepsAndSnapUiForPattern();
     void pushSnapToRoll();
     void pushDisplayToRoll();
@@ -540,7 +599,7 @@ private:
     void rebuildPlayerAndRoll()
     {
         player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_, activePattern());
-        player_->setPlaybackUiCallback([this] { updateStopButtonState(); });
+        player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
         player_->setPlaybackAllowed([this] { return editorInstrumentGate(); });
         rebuildRollViewOnly();
         resized();
@@ -568,6 +627,7 @@ private:
         viewport_.setViewedComponent(roll, true);
         roll->setMusicalSnapComboId(snapBox_.getSelectedId());
         roll->setTimelineNotesDisplayComboId(displayBox_.getSelectedId());
+        pushTransportGestureBlockToRoll();
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: setViewedComponent rollPtr=" + ptrToLog(roll) + " width="
@@ -584,8 +644,12 @@ private:
     juce::String lastInstrumentName_;
     juce::String lastRequiredKitName_;
 
-    juce::TextButton playButton_;
-    juce::TextButton stopButton_;
+    juce::TextButton transportPlayButton_;
+    juce::TextButton transportStopButton_;
+    juce::TextButton cycleToggleButton_;
+    juce::TextButton recordButton_;
+    juce::TextButton debugPreviewButton_;
+    juce::TextButton debugStopButton_;
     juce::TextButton importButton_;
     juce::TextButton exportButton_;
     juce::Label snapLabel_;
@@ -602,7 +666,81 @@ private:
 
     std::unique_ptr<juce::FileChooser> midiImportChooser_;
     std::unique_ptr<juce::FileChooser> midiExportChooser_;
+
+    ExperimentalMidiTransportCommands transportCommands_{};
 };
+
+void ExperimentalMidiEditorWindow::Body::timerCallback()
+{
+    if (transportCommands_.transport == nullptr)
+    {
+        return;
+    }
+    const bool playing =
+        transportCommands_.transport->readPlaybackIntentForUi() == PlaybackIntent::Playing;
+    const juce::String want = playing ? "Pause" : "Play";
+    if (transportPlayButton_.getButtonText() != want)
+    {
+        transportPlayButton_.setButtonText(want);
+    }
+    const bool cyc = transportCommands_.transport->readCycleEnabledForUi();
+    cycleToggleButton_.setButtonText(cyc ? "Cycle: On" : "Cycle: Off");
+}
+
+void ExperimentalMidiEditorWindow::Body::setTransportCommands(ExperimentalMidiTransportCommands commands)
+{
+    transportCommands_ = std::move(commands);
+    const bool ok = transportCommands_.transport != nullptr;
+    transportPlayButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onTogglePlayPause));
+    transportStopButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onStop));
+    cycleToggleButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onToggleCycle));
+    recordButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onToggleRecord));
+    pushTransportGestureBlockToRoll();
+    if (ok)
+    {
+        timerCallback();
+        startTimerHz(10);
+    }
+    else
+    {
+        stopTimer();
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::pushTransportGestureBlockToRoll()
+{
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->setTransportGestureBlockPredicate(transportCommands_.isUiInputBlockedByRecording);
+    }
+}
+
+[[nodiscard]] bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyPress& key)
+{
+    if (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+    {
+        return false;
+    }
+    if (midi_transport_shortcuts::isRecordToggleShortcut(key))
+    {
+        if (transportCommands_.onToggleRecord)
+        {
+            transportCommands_.onToggleRecord();
+            return true;
+        }
+        return false;
+    }
+    if (midi_transport_shortcuts::isSpacePlayPauseShortcut(key))
+    {
+        if (transportCommands_.onTogglePlayPause)
+        {
+            transportCommands_.onTogglePlayPause();
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
 
 void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
 {
@@ -825,13 +963,18 @@ ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumen
                      DocumentWindow::allButtons)
 {
     setUsingNativeTitleBar(true);
+    addKeyListener(this);
+    setWantsKeyboardFocus(true);
     setContentOwned(new Body(host), true);
     setResizable(true, true);
     setResizeLimits(640, 420, 10000, 10000);
     centreWithSize(kInitialEditorWidth, kInitialEditorHeight);
 }
 
-ExperimentalMidiEditorWindow::~ExperimentalMidiEditorWindow() = default;
+ExperimentalMidiEditorWindow::~ExperimentalMidiEditorWindow()
+{
+    removeKeyListener(this);
+}
 
 void ExperimentalMidiEditorWindow::closeButtonPressed()
 {
@@ -893,6 +1036,24 @@ void ExperimentalMidiEditorWindow::unbindExternalPattern()
         b->unbindExternal();
     }
     setName("I2 MIDI editor (Drum hits)");
+}
+
+void ExperimentalMidiEditorWindow::bindTransportCommands(ExperimentalMidiTransportCommands commands)
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->setTransportCommands(std::move(commands));
+    }
+}
+
+bool ExperimentalMidiEditorWindow::keyPressed(const juce::KeyPress& key, juce::Component* originating)
+{
+    juce::ignoreUnused(originating);
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        return b->handleTopLevelShortcut(key);
+    }
+    return false;
 }
 
 void ExperimentalMidiEditorWindow::snapshotOpenClipViewportFromRoll() noexcept

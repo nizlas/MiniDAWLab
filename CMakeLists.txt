@@ -54,6 +54,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/PlayheadOverlay.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
+    src/ui/TimelineLocatorPainter.cpp
     src/ui/LatencySettingsView.cpp
     src/ui/InspectorView.cpp
     src/ui/TimelineViewportModel.cpp

@@ -72,6 +72,7 @@
 #include "audio/LatencySettingsStore.h"
 #include "ui/LatencySettingsView.h"
 #include "ui/experimental/ExperimentalMidiEditorWindow.h"
+#include "ui/TransportShortcutKeys.h"
 #include "ui/TimelineClipEventChrome.h"
 #include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
@@ -206,22 +207,6 @@ namespace
             1);
     }
 
-    // JUCE (Windows) uses e.g. VK_* | 0x10000 for numpad keys; `KeyPress::numberPadMultiply` matches
-    // that, but some paths deliver VK_MULTIPLY (0x6A) without the high bit — match both.
-    [[nodiscard]] bool isNumpadMultiplyKey(const juce::KeyPress& k) noexcept
-    {
-        if (k == juce::KeyPress::numberPadMultiply)
-        {
-            return true;
-        }
-        constexpr int kVkMultiply = 0x6A; // winuser.h VK_MULTIPLY
-        if ((k.getKeyCode() & 0xffff) == kVkMultiply)
-        {
-            return true;
-        }
-        return false;
-    }
-
     // Jump-to-left-locator shortcut: matches numpad 1, top-row "1", and (Windows) numpad-with-NumLock-off
     // which is often delivered as End (VK_END 0x23), e.g. raw keyCode 0x10023, desc "end".
     // For now the dedicated End key (navigation cluster) also triggers the same action.
@@ -286,36 +271,6 @@ namespace
             return true;
         }
 
-        return false;
-    }
-
-    // Numpad * or (for laptops) top-row * character (e.g. Shift+8) — not used for all keys with `*`
-    // in text outside this narrow set (handled only at MainWindow).
-    [[nodiscard]] bool isRecordToggleShortcut(const juce::KeyPress& k) noexcept
-    {
-        if (isNumpadMultiplyKey(k))
-        {
-            return true;
-        }
-        if (k.getTextCharacter() == juce_wchar{ '*' })
-        {
-            return true;
-        }
-        return false;
-    }
-
-    // Unmodified Space → play/pause toggle (not recording). Ctrl/Cmd/Alt+Space are ignored here.
-    [[nodiscard]] bool isSpacePlayPauseShortcut(const juce::KeyPress& k) noexcept
-    {
-        const juce::ModifierKeys m = k.getModifiers();
-        if (m.isCommandDown() || m.isCtrlDown() || m.isAltDown())
-        {
-            return false;
-        }
-        if (k.getKeyCode() == 32 || k.getTextCharacter() == juce_wchar{ ' ' })
-        {
-            return true;
-        }
         return false;
     }
 
@@ -1382,6 +1337,32 @@ private:
             }
             togglePlayPauseTransportOnly();
         }
+
+        /// I3h: same transport / seek / cycle / record entry points as the main window, for the
+        /// experimental MIDI editor (toolbar + piano-roll ruler). Does not duplicate transport state.
+        [[nodiscard]] ExperimentalMidiTransportCommands makeMidiEditorTransportCommands()
+        {
+            ExperimentalMidiTransportCommands c;
+            c.transport = &transport;
+            c.onTogglePlayPause = [this] { invokePlayPauseToggleFromWindowShortcut(); };
+            c.onStop = [this] { stopOrSeekFromStopButton(); };
+            c.onToggleRecord = [this] { invokeRecordToggleFromWindowShortcut(); };
+            c.onToggleCycle = [this] {
+                if (recorder_.isRecording() || isCountInActive())
+                {
+                    juce::Logger::writeToLog("[Cycle] MIDI editor toggle ignored (recording or count-in)");
+                    return;
+                }
+                transport.requestCycleEnabled(!transport.readCycleEnabledForUi());
+                juce::Logger::writeToLog(juce::String{"[Cycle] "}
+                                         + (transport.readCycleEnabledForUi() ? "on" : "off"));
+            };
+            c.isUiInputBlockedByRecording = [this]() {
+                return recorder_.isRecording() || isCountInActive();
+            };
+            return c;
+        }
+
         void invokeJumpToLeftLocatorFromWindowShortcut()
         {
             if (recorder_.isRecording() || isCountInActive())
@@ -1778,6 +1759,7 @@ private:
                                                                &deviceManager,
                                                                &timelineViewport_,
                                                                clip->name);
+            experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
@@ -1836,6 +1818,7 @@ private:
                 ExperimentalMidiPatternPlayer::writeMidiEditorLogLine("midi-editor: window create ok");
             }
             experimentalMidiEditorWindow_->unbindExternalPattern();
+            experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
@@ -4445,7 +4428,7 @@ private:
                 }
             }
 
-            if (isRecordToggleShortcut(key))
+            if (midi_transport_shortcuts::isRecordToggleShortcut(key))
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
                 {
@@ -4468,7 +4451,7 @@ private:
                 }
                 return false;
             }
-            if (isSpacePlayPauseShortcut(key))
+            if (midi_transport_shortcuts::isSpacePlayPauseShortcut(key))
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
                 {

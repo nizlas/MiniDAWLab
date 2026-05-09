@@ -3,6 +3,8 @@
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -35,6 +37,8 @@ public:
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     void resized() override;
 
@@ -48,6 +52,9 @@ public:
                                    const TimelineViewportModel* mainTimelineViewport = nullptr) noexcept;
 
     void setFollowPlayheadEnabled(bool on) noexcept;
+
+    /// I3h: same predicate as `TimelineRulerView` — block seek/locator/cycle during count-in/recording.
+    void setTransportGestureBlockPredicate(std::function<bool()> f) noexcept;
 
     void seedOrResetViewport();
 
@@ -89,6 +96,26 @@ private:
     [[nodiscard]] std::int64_t musicalSnapGridTicks() const noexcept;
     [[nodiscard]] std::int64_t referenceTimelineGridTicks() const noexcept;
     void handleTimelineNotesMouseDown(const juce::MouseEvent& e);
+
+    /// Ruler strip only (not note grid): mirrors `TimelineRulerView` mouse split + modifiers.
+    void handleTimelineRulerMouseDown(const juce::MouseEvent& e, const juce::Rectangle<int>& rulerTrack);
+    void handleTimelineRulerMouseDrag(const juce::MouseEvent& e, const juce::Rectangle<int>& rulerTrack);
+    void applyRulerSeekAtXInTrack(float xInTrack, float trackWidth) noexcept;
+    void applyLeftLocatorRulerX(float xInTrack, float trackWidth) noexcept;
+    void applyRightLocatorRulerX(float xInTrack, float trackWidth) noexcept;
+    void tryToggleCycleFromRuler() noexcept;
+    void syncUiPlayheadAfterRulerSeek(std::int64_t seekTargetSamples) noexcept;
+    void maybeFollowViewportToAnchorSample(double anchorSamples) noexcept;
+
+    enum class RulerGestureMode
+    {
+        None,
+        Seek,
+        LeftLocator,
+        RightLocator
+    };
+    RulerGestureMode rulerGestureMode_ = RulerGestureMode::None;
+    std::function<bool()> transportGestureBlock_;
 
     /// Sub-sample horizontal mapping for UI-smoothed playhead (same linear map as integer path).
     [[nodiscard]] float xForSessionSampleD(double s) const noexcept;
@@ -139,6 +166,10 @@ private:
 
     /// Latest preview absolute sample for paint when clip-bound (Debug Preview).
     double uiPreviewDisplayAbsSample_ = 0.0;
+
+    /// Until `readPlayheadSamplesForUi` catches up after `requestSeek`, keep ruler/grid playhead on
+    /// the requested sample (audio thread commits seek asynchronously).
+    std::optional<std::int64_t> uiRulerSeekDisplayHold_;
 
     /// Last frame transport playhead was considered “in view” for off-screen repaint skipping.
     bool lastOffscreenGatePlayheadInView_ = true;
