@@ -150,3 +150,9 @@ struct ProjectFileV1
 
 [[nodiscard]] juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data);
 [[nodiscard]] juce::Result readProjectFile(const juce::File& file, ProjectFileV1& outData);
+
+// --- Musical undo (I3i): same DTO shape as project save, but never carries plugin state ----------
+void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimentalInstrumentTrackV1& t) noexcept;
+[[nodiscard]] bool experimentalInstrumentTracksMusicalUndoEqual(
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& a,
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& b) noexcept;

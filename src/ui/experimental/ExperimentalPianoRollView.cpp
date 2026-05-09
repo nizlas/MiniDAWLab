@@ -139,6 +139,8 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     deviceManager_ = deviceManager;
     instrumentTrackController_ = trackController;
     mainTimelineViewport_ = mainTimelineViewport;
+    boundClipIdForSafety_
+        = (timelineClip != nullptr) ? static_cast<std::uint64_t>(timelineClip->id) : std::uint64_t{0};
     if (changed && useAbsoluteTimeline())
     {
         applyViewportAfterContextBound();
@@ -161,6 +163,21 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     repaint();
 }
 
+bool ExperimentalPianoRollView::isTimelineClipBindingFresh() const noexcept
+{
+    if (!useAbsoluteTimeline())
+    {
+        return true;
+    }
+    if (instrumentTrackController_ == nullptr || boundClipIdForSafety_ == 0 || timelineClip_ == nullptr)
+    {
+        return false;
+    }
+    InstrumentMidiClip* const c = instrumentTrackController_->getClipById(
+        static_cast<InstrumentMidiClipId>(boundClipIdForSafety_));
+    return c != nullptr && c == timelineClip_;
+}
+
 void ExperimentalPianoRollView::setFollowPlayheadEnabled(const bool on) noexcept
 {
     if (followPlayhead_ == on)
@@ -176,9 +193,13 @@ void ExperimentalPianoRollView::seedOrResetViewport()
 {
     if (timelineClip_ != nullptr)
     {
-        timelineClip_->midiRollVisibleStartSamples = 0;
-        timelineClip_->midiRollSamplesPerPixel = 0.0;
-        timelineClip_->midiRollFollowEnabled = false;
+        const bool canWriteClipFields = !useAbsoluteTimeline() || isTimelineClipBindingFresh();
+        if (canWriteClipFields)
+        {
+            timelineClip_->midiRollVisibleStartSamples = 0;
+            timelineClip_->midiRollSamplesPerPixel = 0.0;
+            timelineClip_->midiRollFollowEnabled = false;
+        }
     }
     if (useAbsoluteTimeline())
     {
@@ -217,9 +238,18 @@ bool ExperimentalPianoRollView::hasValidViewportState() const noexcept
     return samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_);
 }
 
+void ExperimentalPianoRollView::resetUiPlayheadAnchorToSample(const std::int64_t targetSample) noexcept
+{
+    syncUiPlayheadAfterRulerSeek(targetSample);
+}
+
 void ExperimentalPianoRollView::syncViewportToBoundClip() noexcept
 {
     if (timelineClip_ == nullptr || !useAbsoluteTimeline())
+    {
+        return;
+    }
+    if (!isTimelineClipBindingFresh())
     {
         return;
     }
@@ -240,6 +270,10 @@ bool ExperimentalPianoRollView::useAbsoluteTimeline() const noexcept
 void ExperimentalPianoRollView::seedViewportFromMainTimelineOrFallback()
 {
     if (!useAbsoluteTimeline())
+    {
+        return;
+    }
+    if (timelineClip_ != nullptr && !isTimelineClipBindingFresh())
     {
         return;
     }
@@ -339,6 +373,10 @@ void ExperimentalPianoRollView::timerCallback()
 {
     const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
     const bool absTime = useAbsoluteTimeline();
+    if (absTime && timelineClip_ != nullptr && !isTimelineClipBindingFresh())
+    {
+        return;
+    }
     const bool transportPlaying = absTime && transport_ != nullptr
                                   && transport_->readPlaybackIntentForUi() == PlaybackIntent::Playing;
     const bool previewPlaying = player_ != nullptr && player_->isPlaying();
@@ -362,6 +400,7 @@ void ExperimentalPianoRollView::timerCallback()
     if (absTime && transport_ != nullptr)
     {
         const std::int64_t phRaw = transport_->readPlayheadSamplesForUi();
+        const std::int64_t prevRawPh = uiPlayheadLastRawPh_;
         const double sr = effectiveDeviceSampleRate(deviceManager_);
 
         if (uiRulerSeekDisplayHold_.has_value())
@@ -409,6 +448,21 @@ void ExperimentalPianoRollView::timerCallback()
                 }
                 uiPlayheadDisplaySamples_
                     = uiPlayheadExtrapBaseSample_ + (nowSec - uiPlayheadExtrapWallSec_) * sr;
+
+                const std::int64_t hardThr = (std::int64_t)std::llround(kPlayheadHardResyncSamples);
+                if (std::llabs(phRaw - prevRawPh) >= hardThr)
+                {
+                    uiPlayheadDisplaySamples_ = (double)phRaw;
+                    uiPlayheadExtrapBaseSample_ = (double)phRaw;
+                    uiPlayheadExtrapWallSec_ = nowSec;
+                    uiPlayheadLastRawPh_ = phRaw;
+                    lastObservedPlayheadUi_ = phRaw;
+                    lastOffscreenGatePlayheadInView_ = true;
+                    if (followPlayhead_)
+                    {
+                        maybeFollowViewportToAnchorSample((double)phRaw);
+                    }
+                }
             }
         }
         else
@@ -487,17 +541,15 @@ void ExperimentalPianoRollView::timerCallback()
         }
     }
 
-    if (absTime && timelineClip_ != nullptr)
-    {
-        if (!clipGeometrySnapshotValid_
+    if (absTime && timelineClip_ != nullptr && isTimelineClipBindingFresh()
+        && (!clipGeometrySnapshotValid_
             || timelineClip_->startSamples != lastObservedClipStartSamplesUi_
-            || timelineClip_->lengthSamples != lastObservedClipLengthSamplesUi_)
-        {
-            lastObservedClipStartSamplesUi_ = timelineClip_->startSamples;
-            lastObservedClipLengthSamplesUi_ = timelineClip_->lengthSamples;
-            clipGeometrySnapshotValid_ = true;
-            structuralRepaint = true;
-        }
+            || timelineClip_->lengthSamples != lastObservedClipLengthSamplesUi_))
+    {
+        lastObservedClipStartSamplesUi_ = timelineClip_->startSamples;
+        lastObservedClipLengthSamplesUi_ = timelineClip_->lengthSamples;
+        clipGeometrySnapshotValid_ = true;
+        structuralRepaint = true;
     }
 
     const int noteCount = (int)pattern_.notes.size();
@@ -630,6 +682,12 @@ void ExperimentalPianoRollView::setTimelineNotesDisplayComboId(const int id) noe
     repaint();
 }
 
+void ExperimentalPianoRollView::setUndoablePatternEditHandler(
+    std::function<void(const juce::String&, std::function<bool()>)> handler) noexcept
+{
+    undoablePatternEditHandler_ = std::move(handler);
+}
+
 std::int64_t ExperimentalPianoRollView::musicalSnapGridTicks() const noexcept
 {
     const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
@@ -663,6 +721,11 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     {
         return;
     }
+    if (!isTimelineClipBindingFresh())
+    {
+        juce::Logger::writeToLog("[MIDI roll] timeline note click ignored (stale clip binding)");
+        return;
+    }
     const int pitch = pitchAtY(e.getPosition().getY());
     if (pitch < kPitchLow || pitch > kPitchHigh)
     {
@@ -693,12 +756,23 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         const std::int64_t a1 = a0 + juce::jmax<std::int64_t>(1, durS);
         if (absClick >= a0 && absClick < a1)
         {
-            pattern_.timelineNotes.erase(pattern_.timelineNotes.begin() + i);
-            if (instrumentTrackController_ != nullptr)
+            auto eraseAndNotify = [this, i]() -> bool {
+                pattern_.timelineNotes.erase(pattern_.timelineNotes.begin() + i);
+                if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+                {
+                    instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+                }
+                repaint();
+                return true;
+            };
+            if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
             {
-                instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+                undoablePatternEditHandler_("Delete MIDI note", std::move(eraseAndNotify));
             }
-            repaint();
+            else
+            {
+                eraseAndNotify();
+            }
             return;
         }
     }
@@ -718,26 +792,37 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     nn.startTick = rawTick;
     nn.durationTicks = snapG > 0 ? snapG : 240;
 
-    pattern_.timelineNotes.push_back(nn);
-    std::sort(
-        pattern_.timelineNotes.begin(), pattern_.timelineNotes.end(),
-        [](const TimelineMidiNote& a, const TimelineMidiNote& b) noexcept {
-            if (a.startTick != b.startTick)
-            {
-                return a.startTick < b.startTick;
-            }
-            if (a.midiNote != b.midiNote)
-            {
-                return a.midiNote < b.midiNote;
-            }
-            return a.channel < b.channel;
-        });
+    auto addAndNotify = [this, nn]() mutable -> bool {
+        pattern_.timelineNotes.push_back(nn);
+        std::sort(
+            pattern_.timelineNotes.begin(), pattern_.timelineNotes.end(),
+            [](const TimelineMidiNote& a, const TimelineMidiNote& b) noexcept {
+                if (a.startTick != b.startTick)
+                {
+                    return a.startTick < b.startTick;
+                }
+                if (a.midiNote != b.midiNote)
+                {
+                    return a.midiNote < b.midiNote;
+                }
+                return a.channel < b.channel;
+            });
 
-    if (instrumentTrackController_ != nullptr)
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+    if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
     {
-        instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        undoablePatternEditHandler_("Add MIDI note", std::move(addAndNotify));
     }
-    repaint();
+    else
+    {
+        addAndNotify();
+    }
 }
 
 void ExperimentalPianoRollView::setTransportGestureBlockPredicate(std::function<bool()> f) noexcept
@@ -971,6 +1056,12 @@ void ExperimentalPianoRollView::handleTimelineRulerMouseDrag(const juce::MouseEv
 void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
+    if (useAbsoluteTimeline() && timelineClip_ != nullptr && instrumentTrackController_ != nullptr
+        && !isTimelineClipBindingFresh())
+    {
+        juce::Logger::writeToLog("[MIDI roll] mouseDown ignored (stale clip binding)");
+        return;
+    }
     const auto rt = rulerTrackBounds();
     if (useAbsoluteTimeline() && !rt.isEmpty() && rt.contains(pos))
     {
@@ -995,18 +1086,29 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
                 "piano-roll: mouseDown x=" + juce::String(pos.getX()) + " y=" + juce::String(pos.getY())
                 + " note=" + juce::String(pitch) + " step=" + juce::String(step));
         }
-        pattern_.toggleHit(pitch, step);
+        auto toggleAndNotify = [this, pitch, step]() -> bool {
+            pattern_.toggleHit(pitch, step);
+            if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+            {
+                instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+            }
+            repaint();
+            return true;
+        };
+        if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            undoablePatternEditHandler_("Toggle drum step", std::move(toggleAndNotify));
+        }
+        else
+        {
+            toggleAndNotify();
+        }
         if (kMidiEditorVerbosePianoRollMouseLog)
         {
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
                 "piano-roll: toggle note=" + juce::String(pitch) + " step=" + juce::String(step) + " noteCount="
                 + juce::String((int)pattern_.notes.size()));
         }
-        if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
-        {
-            instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
-        }
-        repaint();
     }
 }
 
@@ -1014,6 +1116,11 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 {
     const auto rt = rulerTrackBounds();
     if (!useAbsoluteTimeline() || rt.isEmpty() || rulerGestureMode_ == RulerGestureMode::None)
+    {
+        return;
+    }
+    if (timelineClip_ != nullptr && instrumentTrackController_ != nullptr
+        && !isTimelineClipBindingFresh())
     {
         return;
     }
@@ -1029,6 +1136,11 @@ void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
     if (!useAbsoluteTimeline())
+    {
+        return;
+    }
+    if (timelineClip_ != nullptr && instrumentTrackController_ != nullptr
+        && !isTimelineClipBindingFresh())
     {
         return;
     }
@@ -1079,6 +1191,13 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
     const auto rulerTrack = rulerTrackBounds();
 
     const bool absTime = useAbsoluteTimeline();
+
+    if (absTime && timelineClip_ != nullptr && instrumentTrackController_ != nullptr
+        && !isTimelineClipBindingFresh())
+    {
+        g.fillAll(juce::Colour(0xff1a1a1e));
+        return;
+    }
 
     if (absTime)
     {

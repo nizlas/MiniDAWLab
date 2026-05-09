@@ -1,7 +1,7 @@
 #pragma once
 
 // =============================================================================
-// TransportShortcutKeys — Space / numpad * predicates
+// TransportShortcutKeys — Space / numpad * / jump-to-L predicates
 // =============================================================================
 //
 // Shared by `MainWindow::routeShortcut` and `ExperimentalMidiEditorWindow` so editor focus
@@ -56,6 +56,71 @@ namespace midi_transport_shortcuts
     {
         return true;
     }
+    return false;
+}
+
+// Jump-to-left-locator: numpad 1, top-row "1", numpad-as-End (NumLock off), and End / VK variants
+// (mirrors main-window `routeShortcut` historically in Main.cpp).
+[[nodiscard]] inline bool isJumpToLeftLocatorShortcut(const juce::KeyPress& k) noexcept
+{
+    if (k == juce::KeyPress::numberPad1)
+    {
+        return true;
+    }
+
+    const int canonNumpad1Code = juce::KeyPress::numberPad1;
+    const int raw = k.getKeyCode();
+    if (raw == canonNumpad1Code)
+    {
+        return true;
+    }
+    if ((raw & 0xffff) == (canonNumpad1Code & 0xffff))
+    {
+        return true;
+    }
+
+    constexpr int kVkNumpad1 = 0x61; // winuser.h VK_NUMPAD1
+    if (((raw & 0xffff) == kVkNumpad1) || raw == kVkNumpad1)
+    {
+        return true;
+    }
+
+    const auto topRowDigit1 = k.getTextCharacter();
+    if (topRowDigit1 == static_cast<decltype(topRowDigit1)>('1'))
+    {
+        return true;
+    }
+
+    constexpr int kAsciiDigit1 = 49; // 0x31 main-row
+    if (((raw & 0xffff) == kAsciiDigit1) || raw == kAsciiDigit1)
+    {
+        return true;
+    }
+
+    if (k == juce::KeyPress::endKey)
+    {
+        return true;
+    }
+    const int canonEnd = juce::KeyPress::endKey;
+    if (raw == canonEnd)
+    {
+        return true;
+    }
+    if ((raw & 0xffff) == (canonEnd & 0xffff))
+    {
+        return true;
+    }
+    constexpr int kVkEnd = 0x23; // winuser.h VK_END
+    if (((raw & 0xffff) == kVkEnd) || raw == kVkEnd)
+    {
+        return true;
+    }
+    constexpr int kObservedEndExtended = 0x10023;
+    if (raw == kObservedEndExtended)
+    {
+        return true;
+    }
+
     return false;
 }
 

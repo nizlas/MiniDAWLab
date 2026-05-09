@@ -11,11 +11,14 @@
 #include "transport/Transport.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TransportShortcutKeys.h"
+#include "diagnostics/UndoDiagnosticConfig.h"
+#include "diagnostics/UndoDiagnosticFileLog.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace
 {
@@ -29,7 +32,9 @@ namespace
     }
 } // namespace
 
-class ExperimentalMidiEditorWindow::Body final : public juce::Component, private juce::Timer
+class ExperimentalMidiEditorWindow::Body final : public juce::Component,
+                                                 private juce::Timer,
+                                                 private juce::Slider::Listener
 {
     friend class ExperimentalMidiEditorWindow;
 
@@ -113,18 +118,7 @@ public:
         bpmSlider_.setRange(60.0, 200.0, 0.1);
         bpmSlider_.setValue(110.0);
         bpmSlider_.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 56, 22);
-        bpmSlider_.onValueChange = [this] {
-            activePattern().bpm = bpmSlider_.getValue();
-            if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
-                && activePattern().usesTimelineNotes())
-            {
-                instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
-            }
-            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
-            {
-                rv->repaint();
-            }
-        };
+        bpmSlider_.addListener(this);
 
         addAndMakeVisible(importButton_);
         importButton_.setButtonText("Import MIDI...");
@@ -178,22 +172,35 @@ public:
             {
                 return;
             }
-            activePattern().numSteps = newSteps;
-            activePattern().notes.erase(
-                std::remove_if(
-                    activePattern().notes.begin(),
-                    activePattern().notes.end(),
-                    [newSteps](const PrototypeMidiNote& n) { return n.step >= newSteps; }),
-                activePattern().notes.end());
-            if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr)
+
+            auto applyStepsChange = [this, newSteps]() -> bool {
+                activePattern().numSteps = newSteps;
+                activePattern().notes.erase(
+                    std::remove_if(
+                        activePattern().notes.begin(),
+                        activePattern().notes.end(),
+                        [newSteps](const PrototypeMidiNote& n) { return n.step >= newSteps; }),
+                    activePattern().notes.end());
+                if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr)
+                {
+                    instrumentTrackForClipBind_->recomputeLockedClipLengthFromPatternGrid(*boundTimelineClip_);
+                    instrumentTrackForClipBind_->sendChangeMessage();
+                }
+                if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+                {
+                    rv->seedOrResetViewport();
+                    rv->repaint();
+                }
+                return true;
+            };
+
+            if (canUseInstrumentUndo() && static_cast<bool>(instrumentUndoableMutate_))
             {
-                instrumentTrackForClipBind_->recomputeLockedClipLengthFromPatternGrid(*boundTimelineClip_);
-                instrumentTrackForClipBind_->sendChangeMessage();
+                instrumentUndoableMutate_("Change steps", std::move(applyStepsChange));
             }
-            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+            else
             {
-                rv->seedOrResetViewport();
-                rv->repaint();
+                applyStepsChange();
             }
         };
 
@@ -226,6 +233,7 @@ public:
 
     ~Body() override
     {
+        bpmSlider_.removeListener(this);
         stopTimer();
         player_->stopPlayback("window-closed");
     }
@@ -270,6 +278,9 @@ public:
             && sessionForRoll_ == session && transportForRoll_ == transport && deviceManagerForRoll_ == deviceManager
             && mainTimelineViewportForRoll_ == mainTimelineViewport)
         {
+            persistentInstrumentClipIdForRebind_ = (timelineClip != nullptr)
+                                                         ? static_cast<std::uint64_t>(timelineClip->id)
+                                                         : std::uint64_t{0};
             syncSlidersFromActivePattern();
             syncInstrumentUiFromHost();
             return;
@@ -291,6 +302,9 @@ public:
         externalPattern_ = p;
         instrumentTrackForClipBind_ = gatePtr;
         boundTimelineClip_ = timelineClip;
+        persistentInstrumentClipIdForRebind_ = (timelineClip != nullptr)
+                                                   ? static_cast<std::uint64_t>(timelineClip->id)
+                                                   : std::uint64_t{0};
         sessionForRoll_ = session;
         transportForRoll_ = transport;
         deviceManagerForRoll_ = deviceManager;
@@ -305,6 +319,14 @@ public:
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
+        if constexpr (undo_diagnostic::kUndoDiag)
+        {
+            writeUndoDiagnosticLogLine(
+                "[UndoDiag] midi-editor bindExternal storedClipId="
+                + juce::String(static_cast<juce::int64>(persistentInstrumentClipIdForRebind_)) + " patternPtr="
+                + ptrToLog(p) + " timelineNotes="
+                + (p != nullptr ? juce::String((int)p->timelineNotes.size()) : juce::String("-")));
+        }
     }
 
     void refreshTimelineSampleRateOnTrack()
@@ -347,6 +369,7 @@ public:
         externalPattern_ = nullptr;
         instrumentTrackForClipBind_ = nullptr;
         boundTimelineClip_ = nullptr;
+        persistentInstrumentClipIdForRebind_ = 0;
         sessionForRoll_ = nullptr;
         transportForRoll_ = nullptr;
         deviceManagerForRoll_ = nullptr;
@@ -571,14 +594,31 @@ private:
     void timerCallback() override;
     void setTransportCommands(ExperimentalMidiTransportCommands commands);
     void pushTransportGestureBlockToRoll();
+    void applyInstrumentUndoGatewayToRoll();
+    [[nodiscard]] bool canUseInstrumentUndo() const noexcept;
+    void setInstrumentMusicalUndoUi(
+        std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
+        std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
+            onCommitMusicalDragEnd,
+        std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
+        std::function<void()> onUndoShortcut,
+        std::function<void()> onRedoShortcut);
     [[nodiscard]] bool handleTopLevelShortcut(const juce::KeyPress& key);
+    void notifyExternalTransportSeek(std::int64_t targetSample) noexcept;
+
+    [[nodiscard]] std::optional<std::uint64_t> getBoundInstrumentClipId() const noexcept;
+
+    void sliderValueChanged(juce::Slider* s) override;
+    void sliderDragStarted(juce::Slider* s) override;
+    void sliderDragEnded(juce::Slider* s) override;
 
     void syncStepsAndSnapUiForPattern();
     void pushSnapToRoll();
     void pushDisplayToRoll();
     void beginImportMidi();
     void launchMidiFileChooserAfterConfirm();
-    void applyMidiImportResult(const ExperimentalMidiImportResult& result);
+    void applyMidiImportResultToPattern(const ExperimentalMidiImportResult& result);
+    void finishMidiImportWithOptionalUndo(const ExperimentalMidiImportResult& result);
     void beginExportMidi();
     void launchMidiExportFileChooser();
 
@@ -632,6 +672,7 @@ private:
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: setViewedComponent rollPtr=" + ptrToLog(roll) + " width="
             + juce::String(roll->getWidth()) + " height=" + juce::String(roll->getHeight()));
+        applyInstrumentUndoGatewayToRoll();
     }
 
     ExperimentalInstrumentHost& host_;
@@ -666,6 +707,19 @@ private:
 
     std::unique_ptr<juce::FileChooser> midiImportChooser_;
     std::unique_ptr<juce::FileChooser> midiExportChooser_;
+
+    std::function<void(const juce::String&, std::function<bool()>)> instrumentUndoableMutate_;
+    std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
+        instrumentCommitMusicalDrag_;
+    std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> instrumentCaptureMusical_;
+    std::function<void()> onGlobalUndoRequested_;
+    std::function<void()> onGlobalRedoRequested_;
+    bool bpmSliderGestureActive_ = false;
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> bpmDragMusicalBefore_;
+
+    /// Stable clip id for post–instrument-undo rebind. Never read `boundTimelineClip_->id` after the
+    /// controller may have freed clip storage (`applyExperimentalInstrumentMusicalUndoBlock`).
+    std::uint64_t persistentInstrumentClipIdForRebind_ = 0;
 
     ExperimentalMidiTransportCommands transportCommands_{};
 };
@@ -715,11 +769,162 @@ void ExperimentalMidiEditorWindow::Body::pushTransportGestureBlockToRoll()
     }
 }
 
-[[nodiscard]] bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyPress& key)
+bool ExperimentalMidiEditorWindow::Body::canUseInstrumentUndo() const noexcept
+{
+    return externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
+           && instrumentTrackForClipBind_->hasInstrumentTrack();
+}
+
+void ExperimentalMidiEditorWindow::Body::setInstrumentMusicalUndoUi(
+    std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
+    std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
+        onCommitMusicalDragEnd,
+    std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
+    std::function<void()> onUndoShortcut,
+    std::function<void()> onRedoShortcut)
+{
+    instrumentUndoableMutate_ = std::move(onUndoableEdit);
+    instrumentCommitMusicalDrag_ = std::move(onCommitMusicalDragEnd);
+    instrumentCaptureMusical_ = std::move(captureMusical);
+    onGlobalUndoRequested_ = std::move(onUndoShortcut);
+    onGlobalRedoRequested_ = std::move(onRedoShortcut);
+    applyInstrumentUndoGatewayToRoll();
+}
+
+void ExperimentalMidiEditorWindow::Body::applyInstrumentUndoGatewayToRoll()
+{
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        if (instrumentUndoableMutate_)
+        {
+            rv->setUndoablePatternEditHandler(
+                [this](const juce::String& lab, std::function<bool()> m) {
+                    if (canUseInstrumentUndo())
+                    {
+                        instrumentUndoableMutate_(lab, std::move(m));
+                    }
+                    else
+                    {
+                        m();
+                    }
+                });
+        }
+        else
+        {
+            rv->setUndoablePatternEditHandler({});
+        }
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::sliderValueChanged(juce::Slider* s)
+{
+    if (s != &bpmSlider_)
+    {
+        return;
+    }
+    const double v = bpmSlider_.getValue();
+    auto applyLocal = [this, v] {
+        activePattern().bpm = v;
+        if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
+            && activePattern().usesTimelineNotes())
+        {
+            instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            rv->repaint();
+        }
+    };
+    if (!canUseInstrumentUndo())
+    {
+        applyLocal();
+        return;
+    }
+    if (bpmSliderGestureActive_)
+    {
+        applyLocal();
+        return;
+    }
+    if (instrumentUndoableMutate_)
+    {
+        instrumentUndoableMutate_("Edit BPM", [this, v]() -> bool {
+            activePattern().bpm = v;
+            if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
+                && activePattern().usesTimelineNotes())
+            {
+                instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
+            }
+            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+            {
+                rv->repaint();
+            }
+            return true;
+        });
+    }
+    else
+    {
+        applyLocal();
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::sliderDragStarted(juce::Slider* s)
+{
+    if (s != &bpmSlider_ || !canUseInstrumentUndo() || !instrumentCaptureMusical_
+        || !instrumentCommitMusicalDrag_)
+    {
+        return;
+    }
+    bpmSliderGestureActive_ = true;
+    bpmDragMusicalBefore_ = instrumentCaptureMusical_();
+}
+
+void ExperimentalMidiEditorWindow::Body::sliderDragEnded(juce::Slider* s)
+{
+    if (s != &bpmSlider_)
+    {
+        return;
+    }
+    if (!bpmSliderGestureActive_)
+    {
+        return;
+    }
+    bpmSliderGestureActive_ = false;
+    if (!canUseInstrumentUndo() || !instrumentCommitMusicalDrag_)
+    {
+        return;
+    }
+    instrumentCommitMusicalDrag_("Edit BPM", std::move(bpmDragMusicalBefore_));
+}
+
+std::optional<std::uint64_t> ExperimentalMidiEditorWindow::Body::getBoundInstrumentClipId() const noexcept
+{
+    if (persistentInstrumentClipIdForRebind_ == 0)
+    {
+        return std::nullopt;
+    }
+    return persistentInstrumentClipIdForRebind_;
+}
+
+bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyPress& key)
 {
     if (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent()) != nullptr)
     {
         return false;
+    }
+    const bool cmd = key.getModifiers().isCommandDown();
+    const bool z = (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z');
+    const bool y = (key.getKeyCode() == 'y' || key.getKeyCode() == 'Y');
+    const bool undoCombo = cmd && !key.getModifiers().isShiftDown() && z;
+    const bool redoCombo = cmd && (y || (key.getModifiers().isShiftDown() && z));
+    if (undoCombo && onGlobalUndoRequested_)
+    {
+        onGlobalUndoRequested_();
+        return true;
+    }
+    if (redoCombo && onGlobalRedoRequested_)
+    {
+        onGlobalRedoRequested_();
+        return true;
     }
     if (midi_transport_shortcuts::isRecordToggleShortcut(key))
     {
@@ -739,7 +944,24 @@ void ExperimentalMidiEditorWindow::Body::pushTransportGestureBlockToRoll()
         }
         return false;
     }
+    if (midi_transport_shortcuts::isJumpToLeftLocatorShortcut(key))
+    {
+        if (transportCommands_.onJumpToLeftLocator)
+        {
+            transportCommands_.onJumpToLeftLocator();
+            return true;
+        }
+        return false;
+    }
     return false;
+}
+
+void ExperimentalMidiEditorWindow::Body::notifyExternalTransportSeek(const std::int64_t targetSample) noexcept
+{
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->resetUiPlayheadAnchorToSample(targetSample);
+    }
 }
 
 void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
@@ -828,7 +1050,7 @@ void ExperimentalMidiEditorWindow::Body::launchMidiFileChooserAfterConfirm()
             return;
         }
 
-        safeThis->applyMidiImportResult(r);
+        safeThis->finishMidiImportWithOptionalUndo(r);
 
         if (r.warningMessage.isNotEmpty())
         {
@@ -924,7 +1146,22 @@ void ExperimentalMidiEditorWindow::Body::launchMidiExportFileChooser()
     });
 }
 
-void ExperimentalMidiEditorWindow::Body::applyMidiImportResult(const ExperimentalMidiImportResult& result)
+void ExperimentalMidiEditorWindow::Body::finishMidiImportWithOptionalUndo(const ExperimentalMidiImportResult& result)
+{
+    if (canUseInstrumentUndo() && instrumentUndoableMutate_)
+    {
+        instrumentUndoableMutate_("Import MIDI", [this, result]() -> bool {
+            applyMidiImportResultToPattern(result);
+            return true;
+        });
+    }
+    else
+    {
+        applyMidiImportResultToPattern(result);
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::applyMidiImportResultToPattern(const ExperimentalMidiImportResult& result)
 {
     ExperimentalMidiPattern& p = activePattern();
     p.notes.clear();
@@ -1046,6 +1283,33 @@ void ExperimentalMidiEditorWindow::bindTransportCommands(ExperimentalMidiTranspo
     }
 }
 
+void ExperimentalMidiEditorWindow::setInstrumentMusicalUndoUi(
+    std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
+    std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
+        onCommitMusicalDragEnd,
+    std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
+    std::function<void()> onUndoShortcut,
+    std::function<void()> onRedoShortcut)
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->setInstrumentMusicalUndoUi(std::move(onUndoableEdit),
+                                      std::move(onCommitMusicalDragEnd),
+                                      std::move(captureMusical),
+                                      std::move(onUndoShortcut),
+                                      std::move(onRedoShortcut));
+    }
+}
+
+std::optional<std::uint64_t> ExperimentalMidiEditorWindow::getBoundInstrumentClipId() const noexcept
+{
+    if (auto* b = dynamic_cast<const Body*>(getContentComponent()))
+    {
+        return b->getBoundInstrumentClipId();
+    }
+    return std::nullopt;
+}
+
 bool ExperimentalMidiEditorWindow::keyPressed(const juce::KeyPress& key, juce::Component* originating)
 {
     juce::ignoreUnused(originating);
@@ -1054,6 +1318,14 @@ bool ExperimentalMidiEditorWindow::keyPressed(const juce::KeyPress& key, juce::C
         return b->handleTopLevelShortcut(key);
     }
     return false;
+}
+
+void ExperimentalMidiEditorWindow::notifyExternalTransportSeek(const std::int64_t targetSample) noexcept
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->notifyExternalTransportSeek(targetSample);
+    }
 }
 
 void ExperimentalMidiEditorWindow::snapshotOpenClipViewportFromRoll() noexcept

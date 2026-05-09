@@ -77,6 +77,7 @@
 #include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
 #include "io/AudioWaveformCache.h"
+#include "io/ProjectFile.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 
@@ -216,73 +217,6 @@ namespace
             clipEventLabelBounds(eb).toNearestInt(),
             juce::Justification::centredLeft,
             1);
-    }
-
-    // Jump-to-left-locator shortcut: matches numpad 1, top-row "1", and (Windows) numpad-with-NumLock-off
-    // which is often delivered as End (VK_END 0x23), e.g. raw keyCode 0x10023, desc "end".
-    // For now the dedicated End key (navigation cluster) also triggers the same action.
-    [[nodiscard]] bool isNumpad1Shortcut(const juce::KeyPress& k) noexcept
-    {
-        if (k == juce::KeyPress::numberPad1)
-        {
-            return true;
-        }
-
-        const int canonNumpad1Code = juce::KeyPress::numberPad1;
-        const int raw = k.getKeyCode();
-        if (raw == canonNumpad1Code)
-        {
-            return true;
-        }
-        // Same virtual key as JUCE’s numpad 1, but high bits may differ (platform extended flags).
-        if ((raw & 0xffff) == (canonNumpad1Code & 0xffff))
-        {
-            return true;
-        }
-
-        constexpr int kVkNumpad1 = 0x61; // winuser.h VK_NUMPAD1
-        if (((raw & 0xffff) == kVkNumpad1) || raw == kVkNumpad1)
-        {
-            return true;
-        }
-
-        if (k.getTextCharacter() == juce_wchar{ '1' })
-        {
-            return true;
-        }
-
-        constexpr int kAsciiDigit1 = 49; // 0x31 main-row
-        if (((raw & 0xffff) == kAsciiDigit1) || raw == kAsciiDigit1)
-        {
-            return true;
-        }
-
-        // NumLock off: numpad "1" is often VK_END (0x23); JUCE may use extended keyCode e.g. 0x10023.
-        if (k == juce::KeyPress::endKey)
-        {
-            return true;
-        }
-        const int canonEnd = juce::KeyPress::endKey;
-        if (raw == canonEnd)
-        {
-            return true;
-        }
-        if ((raw & 0xffff) == (canonEnd & 0xffff))
-        {
-            return true;
-        }
-        constexpr int kVkEnd = 0x23; // winuser.h VK_END
-        if (((raw & 0xffff) == kVkEnd) || raw == kVkEnd)
-        {
-            return true;
-        }
-        constexpr int kObservedEndExtended = 0x10023; // e.g. numpad-1-as-End on Windows/JUCE (65571 decimal)
-        if (raw == kObservedEndExtended)
-        {
-            return true;
-        }
-
-        return false;
     }
 
     [[nodiscard]] juce::File makeUniqueTakeWavInProjectAudioDir(const juce::File& audioDir)
@@ -808,6 +742,9 @@ private:
             , inspectorCollapsedKnob_(*this)
             , instrumentMidiEventLane_(*this, instrumentTrackController_)
         {
+            trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
+                return recorder_.isRecording() || isCountInActive();
+            });
             setWantsKeyboardFocus(true);
             audioWaveformCache_.setOnPyramidReady([this](const AudioClip*) { trackLanesView.repaint(); });
             {
@@ -1011,7 +948,7 @@ private:
                         return;
                     }
                     PluginUndoStepSides copy = sides;
-                    self->sessionHistory_.record(label, snap, snap, std::move(copy));
+                    self->sessionHistory_.record(label, snap, snap, std::move(copy), std::nullopt);
                 });
             pluginHost_.setEditorShortcutCallbacks({
                 [this] { invokeUndoFromWindowShortcut(); },
@@ -1053,8 +990,7 @@ private:
                     pluginHost_.reorderInsertWithinStage(tid, sid, gapIndex);
                 } });
             trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
-                if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                    || recorder_.isRecording())
+                if (recorder_.isRecording() || isCountInActive())
                 {
                     return;
                 }
@@ -1085,8 +1021,7 @@ private:
                 [this](const PlacedClipId clipId,
                        const std::int64_t newStart,
                        const std::optional<TrackId> destTrack) -> bool {
-                    if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                        || recorder_.isRecording())
+                    if (recorder_.isRecording() || isCountInActive())
                     {
                         return false;
                     }
@@ -1156,8 +1091,7 @@ private:
                 });
             trackLanesView.setOnUndoableClipTrimRequested(
                 [this](const PlacedClipId clipId, const ClipTrimEdge edge, const std::int64_t newVal) -> bool {
-                    if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                        || recorder_.isRecording())
+                    if (recorder_.isRecording() || isCountInActive())
                     {
                         return false;
                     }
@@ -1225,8 +1159,7 @@ private:
                 [this](const PlacedClipId clipId,
                        const std::int64_t splitSample,
                        const bool clipWasSelected) {
-                    if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                        || recorder_.isRecording())
+                    if (recorder_.isRecording() || isCountInActive())
                     {
                         return;
                     }
@@ -1358,6 +1291,7 @@ private:
             c.onTogglePlayPause = [this] { invokePlayPauseToggleFromWindowShortcut(); };
             c.onStop = [this] { stopOrSeekFromStopButton(); };
             c.onToggleRecord = [this] { invokeRecordToggleFromWindowShortcut(); };
+            c.onJumpToLeftLocator = [this] { invokeJumpToLeftLocatorFromWindowShortcut(); };
             c.onToggleCycle = [this] {
                 if (recorder_.isRecording() || isCountInActive())
                 {
@@ -1386,6 +1320,10 @@ private:
             if (R > L && R > 0)
             {
                 transport.requestSeek(L);
+                if (experimentalMidiEditorWindow_ != nullptr)
+                {
+                    experimentalMidiEditorWindow_->notifyExternalTransportSeek(L);
+                }
                 return;
             }
             juce::Logger::writeToLog("[Shortcut] numpad1 ignored: no valid locator range");
@@ -1393,8 +1331,7 @@ private:
 
         void invokeDeleteSelectedPlacedClipFromWindowShortcut()
         {
-            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                || recorder_.isRecording())
+            if (recorder_.isRecording() || isCountInActive())
             {
                 return;
             }
@@ -1481,8 +1418,7 @@ private:
 
         void invokePasteClipFromWindowShortcut()
         {
-            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                || recorder_.isRecording())
+            if (recorder_.isRecording() || isCountInActive())
             {
                 return;
             }
@@ -1540,15 +1476,14 @@ private:
                     + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
                     + juce::String(sessionHistory_.redoStackSize()));
             }
-            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                || recorder_.isRecording())
+            if (recorder_.isRecording() || isCountInActive())
             {
                 if constexpr (undo_diagnostic::kUndoDiag)
                 {
                     writeUndoDiagnosticLogLine(
-                        "[UndoDiag] invokeUndo bail: playingOrRecording playing="
-                        + juce::String(transport.readPlaybackIntentForUi() == PlaybackIntent::Playing ? "Y" : "n")
-                        + " recording=" + juce::String(recorder_.isRecording() ? "Y" : "n"));
+                        "[UndoDiag] invokeUndo bail: recordingOrCountIn recording="
+                        + juce::String(recorder_.isRecording() ? "Y" : "n")
+                        + " countIn=" + juce::String(isCountInActive() ? "Y" : "n"));
                 }
                 return;
             }
@@ -1594,6 +1529,24 @@ private:
             {
                 pluginHost_.importChain(bundle->pluginSides->trackId, bundle->pluginSides->before);
             }
+            if (bundle->instrumentSides.has_value())
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    if (experimentalMidiEditorWindow_ != nullptr)
+                    {
+                        const auto preId = experimentalMidiEditorWindow_->getBoundInstrumentClipId();
+                        writeUndoDiagnosticLogLine(
+                            "[UndoDiag] invokeUndo pre instrument apply storedEditorClipId="
+                            + (preId.has_value() ? juce::String(static_cast<juce::int64>(*preId))
+                                                 : juce::String("none")));
+                    }
+                }
+                const std::vector<ProjectFileExperimentalInstrumentTrackV1>& mus
+                    = bundle->isRedo ? bundle->instrumentSides->after : bundle->instrumentSides->before;
+                instrumentTrackController_.applyExperimentalInstrumentMusicalUndoBlock(mus);
+                rebindExperimentalMidiEditorAfterInstrumentMusicalUndo();
+            }
             refreshAfterSessionSnapshotRestore();
             if constexpr (undo_diagnostic::kUndoDiag)
             {
@@ -1614,15 +1567,14 @@ private:
                     + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
                     + juce::String(sessionHistory_.redoStackSize()));
             }
-            if (transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                || recorder_.isRecording())
+            if (recorder_.isRecording() || isCountInActive())
             {
                 if constexpr (undo_diagnostic::kUndoDiag)
                 {
                     writeUndoDiagnosticLogLine(
-                        "[UndoDiag] invokeRedo bail: playingOrRecording playing="
-                        + juce::String(transport.readPlaybackIntentForUi() == PlaybackIntent::Playing ? "Y" : "n")
-                        + " recording=" + juce::String(recorder_.isRecording() ? "Y" : "n"));
+                        "[UndoDiag] invokeRedo bail: recordingOrCountIn recording="
+                        + juce::String(recorder_.isRecording() ? "Y" : "n")
+                        + " countIn=" + juce::String(isCountInActive() ? "Y" : "n"));
                 }
                 return;
             }
@@ -1666,6 +1618,24 @@ private:
             if (bundle->pluginSides.has_value())
             {
                 pluginHost_.importChain(bundle->pluginSides->trackId, bundle->pluginSides->after);
+            }
+            if (bundle->instrumentSides.has_value())
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    if (experimentalMidiEditorWindow_ != nullptr)
+                    {
+                        const auto preId = experimentalMidiEditorWindow_->getBoundInstrumentClipId();
+                        writeUndoDiagnosticLogLine(
+                            "[UndoDiag] invokeRedo pre instrument apply storedEditorClipId="
+                            + (preId.has_value() ? juce::String(static_cast<juce::int64>(*preId))
+                                                 : juce::String("none")));
+                    }
+                }
+                const std::vector<ProjectFileExperimentalInstrumentTrackV1>& mus
+                    = bundle->isRedo ? bundle->instrumentSides->after : bundle->instrumentSides->before;
+                instrumentTrackController_.applyExperimentalInstrumentMusicalUndoBlock(mus);
+                rebindExperimentalMidiEditorAfterInstrumentMusicalUndo();
             }
             refreshAfterSessionSnapshotRestore();
             if constexpr (undo_diagnostic::kUndoDiag)
@@ -1831,6 +1801,100 @@ private:
             }
         }
 
+        void wireMidiEditorForOpenClip(InstrumentMidiClip* clip)
+        {
+            jassert(clip != nullptr);
+            experimentalMidiEditorWindow_->bindExternalPattern(&clip->pattern,
+                                                               clip,
+                                                               &instrumentTrackController_,
+                                                               &session,
+                                                               &transport,
+                                                               &deviceManager,
+                                                               &timelineViewport_,
+                                                               clip->name);
+            experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
+            experimentalMidiEditorWindow_->setInstrumentMusicalUndoUi(
+                [this](const juce::String& lab, std::function<bool()> m) {
+                    executeUndoableInstrumentEdit(lab, std::move(m));
+                },
+                [this](const juce::String& lab, std::vector<ProjectFileExperimentalInstrumentTrackV1> before) {
+                    commitInstrumentMusicalUndoPair(lab, std::move(before));
+                },
+                [this] { return instrumentTrackController_.buildExperimentalInstrumentMusicalUndoBlock(); },
+                [this] { invokeUndoFromWindowShortcut(); },
+                [this] { invokeRedoFromWindowShortcut(); });
+            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+        }
+
+        /// Clip-bound editor is invalid (e.g. clip removed by undo); same scratch wiring as toolbar scratch.
+        void detachMidiEditorToScratchAfterMissingInstrumentClip(const juce::String& reasonForUser)
+        {
+            if (experimentalMidiEditorWindow_ == nullptr)
+            {
+                return;
+            }
+            experimentalMidiEditorWindow_->unbindExternalPattern();
+            experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
+            experimentalMidiEditorWindow_->setInstrumentMusicalUndoUi(
+                std::function<void(const juce::String&, std::function<bool()>)>{},
+                std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>{},
+                std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()>{},
+                [this] { invokeUndoFromWindowShortcut(); },
+                [this] { invokeRedoFromWindowShortcut(); });
+            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            if (reasonForUser.isNotEmpty())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon, "MIDI editor", reasonForUser);
+            }
+        }
+
+        void rebindExperimentalMidiEditorAfterInstrumentMusicalUndo()
+        {
+            if (experimentalMidiEditorWindow_ == nullptr)
+            {
+                return;
+            }
+            const std::optional<std::uint64_t> idOpt = experimentalMidiEditorWindow_->getBoundInstrumentClipId();
+            if (!idOpt.has_value() || *idOpt == 0)
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] rebindMidiAfterInstrumentUndo skip: no stored clip id");
+                }
+                return;
+            }
+            const InstrumentMidiClipId clipId = static_cast<InstrumentMidiClipId>(*idOpt);
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] rebindMidiAfterInstrumentUndo clipId="
+                                           + juce::String(static_cast<juce::int64>(clipId)));
+            }
+            InstrumentMidiClip* const clip = instrumentTrackController_.getClipById(clipId);
+            if (clip == nullptr)
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] rebindMidiAfterInstrumentUndo clip missing -> detach scratch");
+                }
+                detachMidiEditorToScratchAfterMissingInstrumentClip(
+                    "The MIDI clip being edited is no longer available after undo.\n\n"
+                    "The editor was switched to scratch mode.");
+                return;
+            }
+            instrumentTrackController_.setSelectedClipId(clipId);
+            wireMidiEditorForOpenClip(clip);
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine(
+                    "[UndoDiag] rebindMidiAfterInstrumentUndo ok patternPtr="
+                    + juce::String::formatted("%p", (void*)&clip->pattern) + " timelineNotes="
+                    + juce::String((int)clip->pattern.timelineNotes.size()));
+            }
+        }
+
         void openMidiEditorForInstrumentClip(const InstrumentMidiClipId clipId)
         {
             InstrumentMidiClip* clip = instrumentTrackController_.getClipById(clipId);
@@ -1844,16 +1908,7 @@ private:
                 experimentalMidiEditorWindow_
                     = std::make_unique<ExperimentalMidiEditorWindow>(experimentalInstrumentHost_);
             }
-            experimentalMidiEditorWindow_->bindExternalPattern(&clip->pattern,
-                                                               clip,
-                                                               &instrumentTrackController_,
-                                                               &session,
-                                                               &transport,
-                                                               &deviceManager,
-                                                               &timelineViewport_,
-                                                               clip->name);
-            experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
-            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            wireMidiEditorForOpenClip(clip);
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
         }
@@ -1912,6 +1967,12 @@ private:
             }
             experimentalMidiEditorWindow_->unbindExternalPattern();
             experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
+            experimentalMidiEditorWindow_->setInstrumentMusicalUndoUi(
+                std::function<void(const juce::String&, std::function<bool()>)>{},
+                std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>{},
+                std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()>{},
+                [this] { invokeUndoFromWindowShortcut(); },
+                [this] { invokeRedoFromWindowShortcut(); });
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
@@ -2478,6 +2539,104 @@ private:
                                            + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
                                            + juce::String(sessionHistory_.redoStackSize()));
             }
+        }
+
+        template <typename F>
+        void executeUndoableInstrumentEdit(const juce::String& label, F&& mutator)
+        {
+            static_assert(std::is_invocable_r_v<bool, F>);
+            std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] executeUndoableInstrumentEdit skip: null snap label=\"" + label + "\"");
+                }
+                return;
+            }
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical
+                = instrumentTrackController_.buildExperimentalInstrumentMusicalUndoBlock();
+            if (beforeMusical.empty())
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit skip: empty before label=\""
+                                               + label + "\"");
+                }
+                return;
+            }
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit mutator run label=\"" + label
+                                           + "\"");
+            }
+            if (!mutator())
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] executeUndoableInstrumentEdit mutator=false label=\"" + label + "\"");
+                }
+                return;
+            }
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical
+                = instrumentTrackController_.buildExperimentalInstrumentMusicalUndoBlock();
+            if (afterMusical.empty())
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit skip: empty after label=\""
+                                               + label + "\"");
+                }
+                return;
+            }
+            if (experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical))
+            {
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] executeUndoableInstrumentEdit skip: musicalEqual label=\"" + label + "\"");
+                }
+                return;
+            }
+            sessionHistory_.record(label,
+                                   snap,
+                                   snap,
+                                   std::nullopt,
+                                   InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) });
+            if constexpr (undo_diagnostic::kUndoDiag)
+            {
+                writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit recorded label=\"" + label
+                                           + "\" undoSize=" + juce::String(sessionHistory_.undoStackSize())
+                                           + " redoSize=" + juce::String(sessionHistory_.redoStackSize()));
+            }
+        }
+
+        void commitInstrumentMusicalUndoPair(
+            const juce::String& label,
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical)
+        {
+            if (beforeMusical.empty())
+            {
+                return;
+            }
+            std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return;
+            }
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical
+                = instrumentTrackController_.buildExperimentalInstrumentMusicalUndoBlock();
+            if (afterMusical.empty() || experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical))
+            {
+                return;
+            }
+            sessionHistory_.record(label,
+                                   snap,
+                                   snap,
+                                   std::nullopt,
+                                   InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) });
         }
 
         // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
@@ -4642,7 +4801,7 @@ private:
                 }
                 return false;
             }
-            if (isNumpad1Shortcut(key))
+            if (midi_transport_shortcuts::isJumpToLeftLocatorShortcut(key))
             {
                 if (auto* tcc = dynamic_cast<TransportControlsContent*>(getContentComponent()))
                 {

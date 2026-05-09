@@ -134,6 +134,16 @@ public:
     /// One enabled row for `experimentalInstrumentTracks` when `hasInstrumentTrack()`.
     [[nodiscard]] ProjectFileExperimentalInstrumentTrackV1 buildExperimentalInstrumentProjectBlock() const;
 
+    /// I3i: Musical-only undo snapshot (no plugin path, state blob, or autoload hints). Empty when
+    /// no instrument track exists.
+    [[nodiscard]] std::vector<ProjectFileExperimentalInstrumentTrackV1>
+    buildExperimentalInstrumentMusicalUndoBlock() const;
+
+    /// I3i: Replace clips + patterns + musical timing from a musical undo/rest **without** touching
+    /// the loaded instrument plugin or project-load autoload state.
+    void applyExperimentalInstrumentMusicalUndoBlock(
+        const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks);
+
     /// Replace in-memory track + clips from project (message thread). Clears track when `tracks` empty
     /// or no enabled GrooveAgentSE row.
     void restoreExperimentalInstrumentFromProject(const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks);

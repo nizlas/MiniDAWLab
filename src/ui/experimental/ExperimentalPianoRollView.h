@@ -56,6 +56,9 @@ public:
     /// I3h: same predicate as `TimelineRulerView` — block seek/locator/cycle during count-in/recording.
     void setTransportGestureBlockPredicate(std::function<bool()> f) noexcept;
 
+    /// After controller rebuild, `timelineClip_` may dangle; compares controller lookup by id to current pointer.
+    [[nodiscard]] bool isTimelineClipBindingFresh() const noexcept;
+
     void seedOrResetViewport();
 
     /// Replace horizontal pan/zoom (absolute timeline mode). Does not persist to clip until `syncViewportToBoundClip()`.
@@ -66,11 +69,18 @@ public:
     /// Writes current roll pan/zoom/Follow into `timelineClip_` when bound (for session + project save).
     void syncViewportToBoundClip() noexcept;
 
+    /// Re-anchor smoothed playhead to `targetSample` (e.g. after external `Transport::requestSeek`).
+    void resetUiPlayheadAnchorToSample(std::int64_t targetSample) noexcept;
+
     /// I3f: musical snap for timeline editing (combo ids: 1=Off, 2=1/8, 3=1/16, 4=1/32 at current PPQ).
     void setMusicalSnapComboId(int id) noexcept;
 
     /// Timeline paint only: 1 = compact hits (drums), 2 = duration bars (melodic). Does not change data or playback.
     void setTimelineNotesDisplayComboId(int id) noexcept;
+
+    /// I3i: when set, note/step mutations are wrapped for global instrument undo (clip-bound editor only).
+    void setUndoablePatternEditHandler(
+        std::function<void(const juce::String&, std::function<bool()>)> handler) noexcept;
 
     [[nodiscard]] std::int64_t getViewportVisibleStartSamples() const noexcept { return visibleStartSamples_; }
     [[nodiscard]] double getViewportSamplesPerPixel() const noexcept { return samplesPerPixel_; }
@@ -131,6 +141,10 @@ private:
     InstrumentTrackController* instrumentTrackController_ = nullptr;
     const TimelineViewportModel* mainTimelineViewport_ = nullptr;
 
+    /// Last known clip id from `setSessionTimelineContext`; used to detect stale `timelineClip_` without
+    /// dereferencing it after controller clip storage rebuild.
+    std::uint64_t boundClipIdForSafety_ = 0;
+
     std::int64_t visibleStartSamples_ = 0;
     double samplesPerPixel_ = 0.0;
     bool followPlayhead_ = false;
@@ -151,6 +165,8 @@ private:
     /// 1 = Hits (default), 2 = Bars.
     int timelineNotesDisplayComboId_ = 1;
     int lastObservedTimelineNoteCountUi_ = -1;
+
+    std::function<void(const juce::String&, std::function<bool()>)> undoablePatternEditHandler_;
 
     /// Last `startTimerHz` value; updated when switching between idle and playback animation rates.
     int uiTimerHzConfigured_ = -1;

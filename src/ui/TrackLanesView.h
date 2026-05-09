@@ -142,6 +142,10 @@ public:
     /// experimental instrument header — no `Session` change).
     void setHeaderActiveSuppressProvider(std::function<bool()> fn) noexcept;
 
+    /// [Message thread] Optional: block track-header structural actions (power, delete track, VST3
+    /// menu) during recording or count-in. When unset, only `RecorderService::isRecording()` is used.
+    void setStructuralTimelineEditBlockedPredicate(std::function<bool()> fn) noexcept;
+
     /// [Message thread] Wired once by `Main`: fires from any audio header's name-strip click after
     /// `Session::setActiveTrack` succeeds. `Main` uses this to clear the instrument-row active flag.
     void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
@@ -224,6 +228,9 @@ private:
     std::function<void(PlacedClipId, std::int64_t, bool)> onUndoableClipSplitRequested_;
     std::function<bool()> headerActiveSuppressProvider_;
     std::function<void()> onAudioHeaderActivated_;
+    std::function<bool()> structuralTimelineEditBlockedPredicate_;
+
+    [[nodiscard]] bool isStructuralTimelineEditBlocked() const noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

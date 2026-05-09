@@ -971,3 +971,98 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
 
     return juce::Result::ok();
 }
+
+void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimentalInstrumentTrackV1& t) noexcept
+{
+    t.pluginStateBase64.clear();
+    t.pluginWasLoadedOnSave = false;
+    t.pluginBundlePath.clear();
+}
+
+namespace
+{
+    [[nodiscard]] bool experimentalInstrumentClipMusicalEqual(const ProjectFileExperimentalInstrumentClipV1& a,
+                                                             const ProjectFileExperimentalInstrumentClipV1& b) noexcept
+    {
+        if (a.id != b.id || a.name != b.name || a.numSteps != b.numSteps || a.stepDenom != b.stepDenom
+            || a.bpm != b.bpm || a.loop != b.loop || a.startSamples != b.startSamples
+            || a.lengthSamples != b.lengthSamples || a.laneStartFractionPermille != b.laneStartFractionPermille
+            || a.laneEndFractionPermille != b.laneEndFractionPermille || a.ticksPerQuarter != b.ticksPerQuarter
+            || a.midiRollVisibleStartSamples != b.midiRollVisibleStartSamples
+            || a.midiRollSamplesPerPixel != b.midiRollSamplesPerPixel
+            || a.midiRollFollowEnabled != b.midiRollFollowEnabled)
+        {
+            return false;
+        }
+        if (a.notes.size() != b.notes.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.notes.size(); ++i)
+        {
+            const auto& p = a.notes[i];
+            const auto& q = b.notes[i];
+            if (p.midiNote != q.midiNote || p.step != q.step || p.velocity != q.velocity
+                || p.lengthSteps != q.lengthSteps)
+            {
+                return false;
+            }
+        }
+        if (a.timelineNotes.size() != b.timelineNotes.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.timelineNotes.size(); ++i)
+        {
+            const auto& p = a.timelineNotes[i];
+            const auto& q = b.timelineNotes[i];
+            if (p.midiNote != q.midiNote || p.velocity != q.velocity || p.channel != q.channel
+                || p.startTick != q.startTick || p.durationTicks != q.durationTicks)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool experimentalInstrumentTrackMusicalEqualIgnoringPlugin(
+        const ProjectFileExperimentalInstrumentTrackV1& a,
+        const ProjectFileExperimentalInstrumentTrackV1& b) noexcept
+    {
+        if (a.enabled != b.enabled || a.name != b.name || a.instrumentKind != b.instrumentKind
+            || a.requiredKitName != b.requiredKitName || a.powerOn != b.powerOn || a.muted != b.muted)
+        {
+            return false;
+        }
+        if (a.clips.size() != b.clips.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.clips.size(); ++i)
+        {
+            if (!experimentalInstrumentClipMusicalEqual(a.clips[i], b.clips[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+} // namespace
+
+bool experimentalInstrumentTracksMusicalUndoEqual(
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& a,
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& b) noexcept
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (!experimentalInstrumentTrackMusicalEqualIgnoringPlugin(a[i], b[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}

@@ -441,6 +441,20 @@ void TrackLanesView::setOnAudioHeaderActivated(std::function<void()> fn) noexcep
     onAudioHeaderActivated_ = std::move(fn);
 }
 
+void TrackLanesView::setStructuralTimelineEditBlockedPredicate(std::function<bool()> fn) noexcept
+{
+    structuralTimelineEditBlockedPredicate_ = std::move(fn);
+}
+
+bool TrackLanesView::isStructuralTimelineEditBlocked() const noexcept
+{
+    if (structuralTimelineEditBlockedPredicate_)
+    {
+        return structuralTimelineEditBlockedPredicate_();
+    }
+    return recorder_.isRecording();
+}
+
 bool TrackLanesView::isClipEditGestureInProgress() const noexcept
 {
     for (const auto& u : lanes_)
@@ -621,7 +635,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             onActive();
         };
         callbacks.onTogglePower = [this, tid, onActive, onArm]() -> bool {
-            if (transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording())
+            if (isStructuralTimelineEditBlocked())
             {
                 return false;
             }
@@ -660,8 +674,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             constexpr int kPluginParamsMenuId = 12;
             constexpr int kRemovePluginMenuId = 13;
 
-            const bool editLocked = transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing
-                                    || recorder_.isRecording();
+            const bool editLocked = isStructuralTimelineEditBlocked();
             juce::PopupMenu::Item deleteItem;
             deleteItem.itemID = kDeleteTrackMenuId;
             deleteItem.text = "Delete Track";
@@ -701,14 +714,11 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 menu.addItem(rmItem);
             }
 
-            Transport* const transportPtr = &transport_;
-            RecorderService* const recorderPtr = &recorder_;
             juce::Component::SafePointer<TrackHeaderView> safeThis(&self);
             menu.showMenuAsync(
                 juce::PopupMenu::Options().withTargetComponent(&self),
                 [safeThis,
-                 transportPtr,
-                 recorderPtr,
+                 this,
                  pluginHost,
                  tid,
                  onDelete,
@@ -723,16 +733,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     }
                     if (result == kDeleteTrackMenuId)
                     {
-                        if (transportPtr->readPlaybackIntentForUi() == PlaybackIntent::Playing
-                            || recorderPtr->isRecording())
+                        if (isStructuralTimelineEditBlocked())
                         {
                             return;
                         }
                         onDelete(tid);
                         return;
                     }
-                    if (transportPtr->readPlaybackIntentForUi() == PlaybackIntent::Playing
-                        || recorderPtr->isRecording())
+                    if (isStructuralTimelineEditBlocked())
                     {
                         return;
                     }

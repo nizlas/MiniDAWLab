@@ -1,6 +1,10 @@
 #pragma once
 
+#include "io/ProjectFile.h"
+
+#include <cstdint>
 #include <functional>
+#include <optional>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -26,6 +30,8 @@ struct ExperimentalMidiTransportCommands
     std::function<void()> onStop;
     std::function<void()> onToggleRecord;
     std::function<void()> onToggleCycle;
+    /// Same as main window `invokeJumpToLeftLocatorFromWindowShortcut` (valid locator range + seek).
+    std::function<void()> onJumpToLeftLocator;
     /// Same semantics as `TimelineRulerView`'s `isUiInputBlockedByRecording` (count-in + recording).
     std::function<bool()> isUiInputBlockedByRecording;
 };
@@ -60,8 +66,24 @@ public:
 
     void unbindExternalPattern();
 
-    /// I3h: wire Space / numpad-* / toolbar to the same main-window transport + record paths.
+    /// I3h: wire Space / numpad-* / jump-to-L / toolbar to the same main-window transport paths.
     void bindTransportCommands(ExperimentalMidiTransportCommands commands);
+
+    /// I3i: global `SessionHistory` integration for clip-bound edits (empty handlers = scratch editor).
+    void setInstrumentMusicalUndoUi(
+        std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
+        std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
+            onCommitMusicalDragEnd,
+        std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
+        std::function<void()> onUndoShortcut,
+        std::function<void()> onRedoShortcut);
+
+    /// After instrument musical undo applies, `InstrumentMidiClip` storage may be reallocated; rebind
+    /// if the editor was clip-bound (returns nullopt for scratch mode).
+    [[nodiscard]] std::optional<std::uint64_t> getBoundInstrumentClipId() const noexcept;
+
+    /// After a seek from outside the MIDI roll (main shortcuts, stop-to-L, etc.): re-anchor roll UI.
+    void notifyExternalTransportSeek(std::int64_t targetSample) noexcept;
 
     /// Persists piano-roll pan/zoom/Follow on the bound clip (call before project save and when closing).
     void snapshotOpenClipViewportFromRoll() noexcept;

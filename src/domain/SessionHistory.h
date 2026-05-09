@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include "domain/SessionSnapshot.h"
+#include "io/ProjectFile.h"
 #include "plugins/PluginTrackSlot.h"
 
 #include <juce_core/juce_core.h>
@@ -32,12 +33,20 @@
 #include <memory>
 #include <optional>
 
+struct InstrumentUndoStepSides
+{
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> before;
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> after;
+};
+
 struct SessionHistoryRestoreBundle
 {
     /// Always non-null when `popUndo` / `popRedo` returns has_value.
     std::shared_ptr<const SessionSnapshot> timelineSnapshot;
     /// When set, restore this plugin slot **after** applying `timelineSnapshot`.
     std::optional<PluginUndoStepSides> pluginSides {};
+    /// I3i: experimental instrument musical state (no plugin blobs); apply after timeline (+ plugin).
+    std::optional<InstrumentUndoStepSides> instrumentSides {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -55,7 +64,8 @@ public:
     void record(juce::String label,
                 std::shared_ptr<const SessionSnapshot> before,
                 std::shared_ptr<const SessionSnapshot> after,
-                std::optional<PluginUndoStepSides> pluginSides = std::nullopt) noexcept;
+                std::optional<PluginUndoStepSides> pluginSides = std::nullopt,
+                std::optional<InstrumentUndoStepSides> instrumentSides = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
     /// restore (`pluginSides` present — caller applies `before` chain).
@@ -75,6 +85,7 @@ private:
         std::shared_ptr<const SessionSnapshot> before;
         std::shared_ptr<const SessionSnapshot> after;
         std::optional<PluginUndoStepSides> pluginSides;
+        std::optional<InstrumentUndoStepSides> instrumentSides;
     };
 
     int maxSteps_;
