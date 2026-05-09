@@ -41,11 +41,16 @@ struct InstrumentMidiClip
 };
 
 /// I3e: immutable copy of all experimental-clip MIDI for the audio thread (no raw `clips_` access).
+/// I3f+: `midiChannel` is 1‑based (Groove Agent + standard MIDI numbering).
 struct InstrumentNoteRenderEvent
 {
     std::int64_t absSample = 0;
+    /// Timeline notes: absolute sample for note-off. **0** means use `InstrumentTrackRenderSnapshot::gateSamples`
+    /// after `absSample` (step grid / legacy).
+    std::int64_t noteOffAbsSample = 0;
     std::uint8_t midiNote = 60;
     std::uint8_t velocity = 100;
+    std::uint8_t midiChannel = 1;
 };
 
 struct InstrumentClipRenderPlan
@@ -141,6 +146,9 @@ public:
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;
 
+    /// BPM / timeline note timing changed (ticks→samples); does **not** rewrite `lengthSamples` from grid.
+    void notifyClipExperimentalMusicalTimingChanged() noexcept;
+
     [[nodiscard]] std::shared_ptr<const InstrumentTrackRenderSnapshot> loadRenderSnapshotForAudioThread() const noexcept
     {
         return std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
@@ -191,6 +199,7 @@ private:
     {
         std::int64_t dueAbsSample = 0;
         int midiNote = 0;
+        int midiChannel = 1;
     };
 
     static constexpr int kMaxPendingTransportOffs = 256;

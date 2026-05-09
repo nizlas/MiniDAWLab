@@ -69,6 +69,17 @@ struct ProjectFileExperimentalInstrumentNoteV1
     int lengthSteps = 1;
 };
 
+/// v12: editable tick-domain notes (I3f). Omitted in JSON when empty (legacy step-only clips).
+struct ProjectFileExperimentalTimelineNoteV12
+{
+    int midiNote = 60;
+    int velocity = 100;
+    /// 1 … 16 saved as JSON int.
+    int channel = 1;
+    std::int64_t startTick = 0;
+    std::int64_t durationTicks = 240;
+};
+
 struct ProjectFileExperimentalInstrumentClipV1
 {
     std::uint64_t id = 0;
@@ -83,6 +94,9 @@ struct ProjectFileExperimentalInstrumentClipV1
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
     std::vector<ProjectFileExperimentalInstrumentNoteV1> notes;
+    /// v12: internal PPQ domain (default 960).
+    int ticksPerQuarter = 960;
+    std::vector<ProjectFileExperimentalTimelineNoteV12> timelineNotes;
 };
 
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).
@@ -106,7 +120,7 @@ struct ProjectFileExperimentalInstrumentTrackV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    static constexpr int kCurrentVersion = 11;
+    static constexpr int kCurrentVersion = 12;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

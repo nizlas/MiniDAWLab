@@ -8,6 +8,8 @@
 
 #include <cmath>
 
+#include <algorithm>
+
 namespace
 {
     constexpr bool kMidiEditorVerbosePianoRollMouseLog = false;
@@ -240,6 +242,7 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     sessionTransportSnapshotValid_ = false;
     clipGeometrySnapshotValid_ = false;
     lastObservedNoteCountUi_ = -1;
+    lastObservedTimelineNoteCountUi_ = -1;
     if (transport_ != nullptr && timelineClip_ != nullptr && session_ != nullptr)
     {
         const std::int64_t ph = transport_->readPlayheadSamplesForUi();
@@ -271,6 +274,7 @@ void ExperimentalPianoRollView::seedOrResetViewport()
     sessionTransportSnapshotValid_ = false;
     clipGeometrySnapshotValid_ = false;
     lastObservedNoteCountUi_ = -1;
+    lastObservedTimelineNoteCountUi_ = -1;
     repaint();
 }
 
@@ -453,9 +457,11 @@ void ExperimentalPianoRollView::timerCallback()
     }
 
     const int noteCount = (int)pattern_.notes.size();
-    if (noteCount != lastObservedNoteCountUi_)
+    const int tnCount = (int)pattern_.timelineNotes.size();
+    if (noteCount != lastObservedNoteCountUi_ || tnCount != lastObservedTimelineNoteCountUi_)
     {
         lastObservedNoteCountUi_ = noteCount;
+        lastObservedTimelineNoteCountUi_ = tnCount;
         structuralRepaint = true;
     }
 
@@ -573,6 +579,128 @@ int ExperimentalPianoRollView::stepAtTimelineX(const int x) const
     return step;
 }
 
+void ExperimentalPianoRollView::setMusicalSnapComboId(const int id) noexcept
+{
+    musicalSnapComboId_ = juce::jlimit(1, 4, id);
+    repaint();
+}
+
+void ExperimentalPianoRollView::setTimelineNotesDisplayComboId(const int id) noexcept
+{
+    timelineNotesDisplayComboId_ = juce::jlimit(1, 2, id);
+    repaint();
+}
+
+std::int64_t ExperimentalPianoRollView::musicalSnapGridTicks() const noexcept
+{
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    switch (musicalSnapComboId_)
+    {
+    case 2:
+        return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 2));
+    case 3:
+        return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 4));
+    case 4:
+        return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 8));
+    default:
+        return 0;
+    }
+}
+
+std::int64_t ExperimentalPianoRollView::referenceTimelineGridTicks() const noexcept
+{
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t snap = musicalSnapGridTicks();
+    if (snap > 0)
+    {
+        return snap;
+    }
+    return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 4));
+}
+
+void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEvent& e)
+{
+    if (timelineClip_ == nullptr)
+    {
+        return;
+    }
+    const int pitch = pitchAtY(e.getPosition().getY());
+    if (pitch < kPitchLow || pitch > kPitchHigh)
+    {
+        return;
+    }
+
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+
+    const std::int64_t absClick = sampleAtGridX((float)e.getPosition().getX());
+    const std::int64_t relSamples = absClick - timelineClip_->startSamples;
+    if (relSamples < 0)
+    {
+        return;
+    }
+
+    for (int i = (int)pattern_.timelineNotes.size() - 1; i >= 0; --i)
+    {
+        const auto& tn = pattern_.timelineNotes[(size_t)i];
+        if (tn.midiNote != pitch)
+        {
+            continue;
+        }
+        const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->startSamples, tn, pattern_, sr);
+        const std::int64_t durS = ticksToRelativeSamples(
+            juce::jmax<std::int64_t>(1, tn.durationTicks), bpm, tpq, sr);
+        const std::int64_t a1 = a0 + juce::jmax<std::int64_t>(1, durS);
+        if (absClick >= a0 && absClick < a1)
+        {
+            pattern_.timelineNotes.erase(pattern_.timelineNotes.begin() + i);
+            if (instrumentTrackController_ != nullptr)
+            {
+                instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+            }
+            repaint();
+            return;
+        }
+    }
+
+    std::int64_t rawTick = relativeSamplesToTicks(relSamples, bpm, tpq, sr);
+    const std::int64_t snapG = musicalSnapGridTicks();
+    if (snapG > 0)
+    {
+        rawTick = (std::int64_t)std::llround((double)rawTick / (double)snapG) * snapG;
+    }
+    rawTick = juce::jmax<std::int64_t>(0, rawTick);
+
+    TimelineMidiNote nn;
+    nn.midiNote = pitch;
+    nn.velocity = 100;
+    nn.channel = 10;
+    nn.startTick = rawTick;
+    nn.durationTicks = snapG > 0 ? snapG : 240;
+
+    pattern_.timelineNotes.push_back(nn);
+    std::sort(
+        pattern_.timelineNotes.begin(), pattern_.timelineNotes.end(),
+        [](const TimelineMidiNote& a, const TimelineMidiNote& b) noexcept {
+            if (a.startTick != b.startTick)
+            {
+                return a.startTick < b.startTick;
+            }
+            if (a.midiNote != b.midiNote)
+            {
+                return a.midiNote < b.midiNote;
+            }
+            return a.channel < b.channel;
+        });
+
+    if (instrumentTrackController_ != nullptr)
+    {
+        instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+    }
+    repaint();
+}
+
 void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
@@ -580,6 +708,11 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
     if (gr.contains(pos))
     {
+        if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr)
+        {
+            handleTimelineNotesMouseDown(e);
+            return;
+        }
         const int step = useAbsoluteTimeline() ? stepAtTimelineX(pos.getX()) : stepAtPatternX(pos.getX());
         const int pitch = pitchAtY(pos.getY());
         if (kMidiEditorVerbosePianoRollMouseLog)
@@ -899,24 +1032,55 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
     }
     else if (timelineClip_ != nullptr)
     {
-        const std::int64_t lenPat = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-        for (int s = 0; s <= nSteps; ++s)
+        if (pattern_.usesTimelineNotes() && samplesPerPixel_ > 0.0)
         {
-            const std::int64_t rel
-                = (std::int64_t)std::llround((double)s * (double)lenPat / (double)nSteps);
-            const std::int64_t absS = timelineClip_->startSamples + rel;
-            const float x = xForSessionSample(absS);
-            juce::Colour c = juce::Colour(0xff333340);
-            if (s % 4 == 0)
+            const double sr = effectiveDeviceSampleRate(deviceManager_);
+            const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+            const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+            const std::int64_t stepTicks = referenceTimelineGridTicks();
+            const std::int64_t lenPat = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+            const std::int64_t maxTick =
+                relativeSamplesToTicks(lenPat, bpm, tpq, sr) + stepTicks * 4;
+            for (std::int64_t tk = 0; tk <= maxTick; tk += stepTicks)
             {
-                c = juce::Colour(0xff454552);
+                const std::int64_t absS =
+                    timelineClip_->startSamples + ticksToRelativeSamples(tk, bpm, tpq, sr);
+                const float x = xForSessionSample(absS);
+                if (x < (float)gr.getX() - 2.0f || x > (float)gr.getRight() + 2.0f)
+                {
+                    continue;
+                }
+                const bool beat = (tpq > 0) && (tk % (std::int64_t)tpq == 0);
+                juce::Colour c = beat ? juce::Colour(0xff505060) : juce::Colour(0xff333340);
+                if (!beat && tpq >= 4 && (tk % ((std::int64_t)tpq / 2) == 0))
+                {
+                    c = juce::Colour(0xff454552);
+                }
+                g.setColour(c);
+                g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
             }
-            if (s == 0 || s == nSteps)
+        }
+        else
+        {
+            const std::int64_t lenPat = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+            for (int s = 0; s <= nSteps; ++s)
             {
-                c = juce::Colour(0xff505060);
+                const std::int64_t rel =
+                    (std::int64_t)std::llround((double)s * (double)lenPat / (double)nSteps);
+                const std::int64_t absS = timelineClip_->startSamples + rel;
+                const float x = xForSessionSample(absS);
+                juce::Colour c = juce::Colour(0xff333340);
+                if (s % 4 == 0)
+                {
+                    c = juce::Colour(0xff454552);
+                }
+                if (s == 0 || s == nSteps)
+                {
+                    c = juce::Colour(0xff505060);
+                }
+                g.setColour(c);
+                g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
             }
-            g.setColour(c);
-            g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
         }
     }
 
@@ -940,47 +1104,113 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         }
     }
 
-    // --- drawNotes
+    // --- drawNotes (step diamonds and/or timeline bars)
     float cellWForDiamond = cw;
-    if (absTime && timelineClip_ != nullptr && nSteps > 0 && samplesPerPixel_ > 0.0)
+    if (!pattern_.usesTimelineNotes() && absTime && timelineClip_ != nullptr && nSteps > 0
+        && samplesPerPixel_ > 0.0)
     {
         const std::int64_t len = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
         const float x0 = xForSessionSample(timelineClip_->startSamples);
         const float x1 = xForSessionSample(timelineClip_->startSamples + len / nSteps);
         cellWForDiamond = juce::jmax(3.0f, std::fabs(x1 - x0));
     }
-    const float halfW
-        = juce::jmax(3.0f, juce::jmin(cellWForDiamond * 0.55f, (float)kRowHeight * 0.85f) * 0.5f);
+    const float halfW =
+        juce::jmax(3.0f, juce::jmin(cellWForDiamond * 0.55f, (float)kRowHeight * 0.85f) * 0.5f);
     const float halfH = juce::jmax(3.0f, (float)kRowHeight * 0.75f * 0.5f);
 
-    for (const auto& hit : pattern_.notes)
+    if (pattern_.usesTimelineNotes() && timelineClip_ != nullptr && samplesPerPixel_ > 0.0)
     {
-        if (hit.midiNote < kPitchLow || hit.midiNote > kPitchHigh)
+        const double sr = effectiveDeviceSampleRate(deviceManager_);
+        const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+        const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+        const bool paintBars = (timelineNotesDisplayComboId_ == 2);
+        const float hitHalfW = juce::jmax(3.5f, juce::jmin(6.0f, (float)kRowHeight * 0.42f));
+        const float hitHalfH = juce::jmax(3.5f, (float)kRowHeight * 0.4f);
+        for (const auto& tn : pattern_.timelineNotes)
         {
-            continue;
-        }
-        const auto rr = rowRect(hit.midiNote);
-        float cx;
-        if (absTime && timelineClip_ != nullptr)
-        {
-            const std::int64_t lenClip = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-            const std::int64_t absNote = absoluteSampleForNoteInClip(
-                timelineClip_->startSamples, hit.step, pattern_.numSteps, lenClip);
-            cx = xForSessionSample(absNote);
-        }
-        else
-        {
-            cx = (float)gr.getX() + ((float)hit.step + 0.5f) * cw;
-        }
-        const float cy = (float)rr.getCentreY();
+            if (tn.midiNote < kPitchLow || tn.midiNote > kPitchHigh)
+            {
+                continue;
+            }
+            const auto rr = rowRect(tn.midiNote);
+            const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->startSamples, tn, pattern_, sr);
+            const float velA = juce::jlimit(0.28f, 1.0f, (float)tn.velocity / 127.0f);
 
-        juce::Path diamond;
-        diamond.addQuadrilateral(cx, cy - halfH, cx + halfW, cy, cx, cy + halfH, cx - halfW, cy);
-
-        g.setColour(juce::Colour(0xff8a2c46));
-        g.strokePath(diamond, juce::PathStrokeType(1.2f));
-        g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.92f));
-        g.fillPath(diamond);
+            if (paintBars)
+            {
+                const std::int64_t durS = ticksToRelativeSamples(
+                    juce::jmax<std::int64_t>(1, tn.durationTicks), bpm, tpq, sr);
+                const std::int64_t a1 = a0 + juce::jmax<std::int64_t>(1, durS);
+                float xL = xForSessionSample(a0);
+                float xR = xForSessionSample(a1);
+                if (xR < xL)
+                {
+                    std::swap(xL, xR);
+                }
+                xL = juce::jmax(xL, (float)gr.getX());
+                xR = juce::jmin(xR, (float)gr.getRight());
+                if (xR <= (float)gr.getX() || xL >= (float)gr.getRight())
+                {
+                    continue;
+                }
+                auto noteRect =
+                    juce::Rectangle<float>(xL, (float)rr.getY() + 2.0f, xR - xL, (float)rr.getHeight() - 4.0f);
+                if (noteRect.getWidth() < 3.0f)
+                {
+                    noteRect = noteRect.withSizeKeepingCentre(4.0f, noteRect.getHeight());
+                }
+                g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.78f * velA));
+                g.fillRoundedRectangle(noteRect, 2.0f);
+                g.setColour(juce::Colour(0xff8a2c46).withAlpha(0.9f));
+                g.drawRoundedRectangle(noteRect, 2.0f, 1.1f);
+            }
+            else
+            {
+                const float cx = xForSessionSample(a0);
+                if (cx < (float)gr.getX() - hitHalfW - 2.0f || cx > (float)gr.getRight() + hitHalfW + 2.0f)
+                {
+                    continue;
+                }
+                /// Compact drum-style marker at note onset; `durationTicks` unchanged in model.
+                const float cy = (float)rr.getCentreY();
+                juce::Path diamond;
+                diamond.addQuadrilateral(cx, cy - hitHalfH, cx + hitHalfW, cy, cx, cy + hitHalfH, cx - hitHalfW, cy);
+                g.setColour(juce::Colour(0xff8a2c46).withAlpha(0.85f + 0.15f * velA));
+                g.strokePath(diamond, juce::PathStrokeType(1.15f));
+                g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.65f + 0.35f * velA));
+                g.fillPath(diamond);
+            }
+        }
+    }
+    else
+    {
+        for (const auto& hit : pattern_.notes)
+        {
+            if (hit.midiNote < kPitchLow || hit.midiNote > kPitchHigh)
+            {
+                continue;
+            }
+            const auto rr = rowRect(hit.midiNote);
+            float cx;
+            if (absTime && timelineClip_ != nullptr)
+            {
+                const std::int64_t lenClip = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+                const std::int64_t absNote = absoluteSampleForNoteInClip(
+                    timelineClip_->startSamples, hit.step, pattern_.numSteps, lenClip);
+                cx = xForSessionSample(absNote);
+            }
+            else
+            {
+                cx = (float)gr.getX() + ((float)hit.step + 0.5f) * cw;
+            }
+            const float cy = (float)rr.getCentreY();
+            juce::Path diamond;
+            diamond.addQuadrilateral(cx, cy - halfH, cx + halfW, cy, cx, cy + halfH, cx - halfW, cy);
+            g.setColour(juce::Colour(0xff8a2c46));
+            g.strokePath(diamond, juce::PathStrokeType(1.2f));
+            g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.92f));
+            g.fillPath(diamond);
+        }
     }
 
     // --- drawGlobalPlayhead (grid)

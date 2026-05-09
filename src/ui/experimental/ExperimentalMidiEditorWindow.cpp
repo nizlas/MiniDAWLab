@@ -1,4 +1,5 @@
 #include "ExperimentalMidiEditorWindow.h"
+#include "ExperimentalMidiImport.h"
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
 #include "ExperimentalPianoRollView.h"
@@ -64,7 +65,44 @@ public:
         bpmSlider_.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 56, 22);
         bpmSlider_.onValueChange = [this] {
             activePattern().bpm = bpmSlider_.getValue();
+            if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
+                && activePattern().usesTimelineNotes())
+            {
+                instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
+            }
+            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+            {
+                rv->repaint();
+            }
         };
+
+        addAndMakeVisible(importButton_);
+        importButton_.setButtonText("Import MIDI…");
+        importButton_.onClick = [this] { beginImportMidi(); };
+
+        addAndMakeVisible(snapLabel_);
+        snapLabel_.setText("Snap", juce::dontSendNotification);
+        snapLabel_.setJustificationType(juce::Justification::centredRight);
+        snapLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+        addAndMakeVisible(snapBox_);
+        snapBox_.addItem("Off", 1);
+        snapBox_.addItem("1/8", 2);
+        snapBox_.addItem("1/16", 3);
+        snapBox_.addItem("1/32", 4);
+        snapBox_.setSelectedId(1, juce::dontSendNotification);
+        snapBox_.onChange = [this] { pushSnapToRoll(); };
+
+        addAndMakeVisible(displayLabel_);
+        displayLabel_.setText("Display", juce::dontSendNotification);
+        displayLabel_.setJustificationType(juce::Justification::centredRight);
+        displayLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+        addAndMakeVisible(displayBox_);
+        displayBox_.addItem("Hits", 1);
+        displayBox_.addItem("Bars", 2);
+        displayBox_.setSelectedId(1, juce::dontSendNotification);
+        displayBox_.onChange = [this] { pushDisplayToRoll(); };
 
         addAndMakeVisible(stepsLabel_);
         stepsLabel_.setText("Steps", juce::dontSendNotification);
@@ -76,6 +114,10 @@ public:
         stepsBox_.addItem("32 steps", 2);
         stepsBox_.setSelectedId(1, juce::dontSendNotification);
         stepsBox_.onChange = [this] {
+            if (activePattern().usesTimelineNotes())
+            {
+                return;
+            }
             const int id = stepsBox_.getSelectedId();
             const int newSteps = (id == 2) ? 32 : 16;
             if (newSteps == activePattern().numSteps)
@@ -271,6 +313,7 @@ public:
         lastRequiredKitName_ = requiredKitForUi;
 
         playButton_.setEnabled(canPlayPattern);
+        importButton_.setEnabled(clipBound);
 
         juce::String instPart;
         if (!clipBound)
@@ -323,10 +366,9 @@ public:
             canPlayPattern ? juce::Colour(0xffc8c8d8) : juce::Colour(0xffffaa88);
 
         modeLabel_.setText(
-            juce::String("I3d1: roll X = session samples (zoom/pan here is separate from main timeline). ")
-                + "Clip length in samples is locked when BPM changes; grid splits that length into equal time steps. "
-                  "Changing Steps recomputes musical length. Preview timing follows BPM and may diverge from the "
-                  "absolute grid after BPM edits.\n"
+            juce::String("I3f: timeline MIDI — Import MIDI for tick-accurate clips (960 PPQ internal). ")
+                + "When the clip has timeline notes they drive transport; step grid is for empty/legacy clips only. "
+                  "Snap applies to click‑to‑add timing. Preview uses step timing; main Play uses the timeline.\n"
                 + instPart + "\n"
                 + "Timing: ~4 ms message timer; not sample-accurate." + kitLine,
             juce::dontSendNotification);
@@ -366,6 +408,11 @@ public:
         toolbar.reduce(6, 4);
         playButton_.setBounds(toolbar.removeFromLeft(110).reduced(0, 2));
         stopButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
+        importButton_.setBounds(toolbar.removeFromLeft(108).reduced(0, 2));
+        snapLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
+        snapBox_.setBounds(toolbar.removeFromLeft(76).reduced(0, 2));
+        displayLabel_.setBounds(toolbar.removeFromLeft(52).reduced(0, 4));
+        displayBox_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         stepsLabel_.setBounds(toolbar.removeFromLeft(44).reduced(0, 4));
         stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
         followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
@@ -421,6 +468,13 @@ public:
     }
 
 private:
+    void syncStepsAndSnapUiForPattern();
+    void pushSnapToRoll();
+    void pushDisplayToRoll();
+    void beginImportMidi();
+    void launchMidiFileChooserAfterConfirm();
+    void applyMidiImportResult(const ExperimentalMidiImportResult& result);
+
     InstrumentTrackController* instrumentTrackForClipBind_ = nullptr;
     InstrumentMidiClip* boundTimelineClip_ = nullptr;
     Session* sessionForRoll_ = nullptr;
@@ -431,6 +485,7 @@ private:
     {
         bpmSlider_.setValue(activePattern().bpm, juce::dontSendNotification);
         stepsBox_.setSelectedId(activePattern().numSteps == 32 ? 2 : 1, juce::dontSendNotification);
+        syncStepsAndSnapUiForPattern();
     }
 
     void rebuildPlayerAndRoll()
@@ -455,6 +510,8 @@ private:
             boundTimelineClip_, sessionForRoll_, transportForRoll_, deviceManagerForRoll_, instrumentTrackForClipBind_);
         roll->setFollowPlayheadEnabled(followPlayheadToggle_.getToggleState());
         viewport_.setViewedComponent(roll, true);
+        roll->setMusicalSnapComboId(snapBox_.getSelectedId());
+        roll->setTimelineNotesDisplayComboId(displayBox_.getSelectedId());
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: setViewedComponent rollPtr=" + ptrToLog(roll) + " width="
@@ -473,6 +530,11 @@ private:
 
     juce::TextButton playButton_;
     juce::TextButton stopButton_;
+    juce::TextButton importButton_;
+    juce::Label snapLabel_;
+    juce::ComboBox snapBox_;
+    juce::Label displayLabel_;
+    juce::ComboBox displayBox_;
     juce::Label bpmLabel_;
     juce::Slider bpmSlider_;
     juce::Label stepsLabel_;
@@ -480,7 +542,138 @@ private:
     juce::TextButton followPlayheadToggle_;
     juce::Label modeLabel_;
     juce::Viewport viewport_;
+
+    std::unique_ptr<juce::FileChooser> midiImportChooser_;
 };
+
+void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
+{
+    const bool tl = activePattern().usesTimelineNotes();
+    stepsBox_.setEnabled(!tl);
+    stepsLabel_.setEnabled(!tl);
+}
+
+void ExperimentalMidiEditorWindow::Body::pushSnapToRoll()
+{
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->setMusicalSnapComboId(snapBox_.getSelectedId());
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::pushDisplayToRoll()
+{
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->setTimelineNotesDisplayComboId(displayBox_.getSelectedId());
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::beginImportMidi()
+{
+    if (externalPattern_ == nullptr || boundTimelineClip_ == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                               "Import MIDI",
+                                               "Open this editor from a clip on the instrument track to import MIDI.");
+        return;
+    }
+
+    const bool haveContent =
+        activePattern().usesTimelineNotes() || !activePattern().notes.empty();
+    if (haveContent)
+    {
+        const int ok = juce::AlertWindow::showOkCancelBox(
+            juce::AlertWindow::WarningIcon,
+            "Import MIDI",
+            "Replace this clip's pattern with the imported MIDI?\n\n"
+            "Existing step and timeline notes will be cleared.",
+            "Replace",
+            "Cancel",
+            nullptr,
+            nullptr);
+        if (ok == 0)
+        {
+            return;
+        }
+    }
+
+    launchMidiFileChooserAfterConfirm();
+}
+
+void ExperimentalMidiEditorWindow::Body::launchMidiFileChooserAfterConfirm()
+{
+    midiImportChooser_ = std::make_unique<juce::FileChooser>(
+        "Import MIDI", juce::File{}, "*.mid;*.midi", true, false, this);
+
+    const auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+
+    const juce::Component::SafePointer<Body> safeThis(this);
+    midiImportChooser_->launchAsync(flags, [safeThis](const juce::FileChooser& fc) {
+        if (safeThis == nullptr)
+        {
+            return;
+        }
+        const juce::File file = fc.getResult();
+        safeThis->midiImportChooser_.reset();
+
+        if (!file.existsAsFile())
+        {
+            return;
+        }
+
+        ExperimentalMidiImportResult r =
+            experimentalImportMidiFile(file, kDefaultExperimentalTicksPerQuarter);
+        if (!r.ok)
+        {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                   "MIDI import failed",
+                                                   r.combinedUserMessageLine());
+            return;
+        }
+
+        safeThis->applyMidiImportResult(r);
+
+        if (r.warningMessage.isNotEmpty())
+        {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                                   "MIDI import",
+                                                   r.warningMessage);
+        }
+    });
+}
+
+void ExperimentalMidiEditorWindow::Body::applyMidiImportResult(const ExperimentalMidiImportResult& result)
+{
+    ExperimentalMidiPattern& p = activePattern();
+    p.notes.clear();
+    p.timelineNotes = result.notes;
+    p.ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+    if (result.firstTempoBpm > 0.0 && std::isfinite(result.firstTempoBpm))
+    {
+        p.bpm = result.firstTempoBpm;
+    }
+
+    bpmSlider_.setValue(p.bpm, juce::dontSendNotification);
+    syncStepsAndSnapUiForPattern();
+
+    if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr)
+    {
+        instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
+        instrumentTrackForClipBind_->sendChangeMessage();
+    }
+
+    rebuildPlayerAndRoll();
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->seedOrResetViewport();
+        rv->repaint();
+    }
+
+    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+        "midi-editor: import applied timelineNotes=" + juce::String((int)p.timelineNotes.size()) + " bpm="
+        + juce::String(p.bpm, 2));
+}
 
 ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumentHost& host)
     : DocumentWindow("I2 MIDI editor (Drum hits)",

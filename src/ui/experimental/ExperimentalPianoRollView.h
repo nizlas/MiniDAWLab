@@ -48,6 +48,12 @@ public:
 
     void seedOrResetViewport();
 
+    /// I3f: musical snap for timeline editing (combo ids: 1=Off, 2=1/8, 3=1/16, 4=1/32 at current PPQ).
+    void setMusicalSnapComboId(int id) noexcept;
+
+    /// Timeline paint only: 1 = compact hits (drums), 2 = duration bars (melodic). Does not change data or playback.
+    void setTimelineNotesDisplayComboId(int id) noexcept;
+
     [[nodiscard]] std::int64_t getViewportVisibleStartSamples() const noexcept { return visibleStartSamples_; }
     [[nodiscard]] double getViewportSamplesPerPixel() const noexcept { return samplesPerPixel_; }
 
@@ -68,6 +74,9 @@ private:
     [[nodiscard]] juce::Rectangle<int> gridBounds() const;
     [[nodiscard]] std::int64_t visibleEndSamples() const noexcept;
     [[nodiscard]] float cellWidth() const;
+    [[nodiscard]] std::int64_t musicalSnapGridTicks() const noexcept;
+    [[nodiscard]] std::int64_t referenceTimelineGridTicks() const noexcept;
+    void handleTimelineNotesMouseDown(const juce::MouseEvent& e);
 
     /// Sub-sample horizontal mapping for UI-smoothed playhead (same linear map as integer path).
     [[nodiscard]] float xForSessionSampleD(double s) const noexcept;
@@ -100,6 +109,11 @@ private:
     int lastObservedNoteCountUi_ = -1;
 
     int lastResizeComponentWidth_ = -1;
+
+    int musicalSnapComboId_ = 1;
+    /// 1 = Hits (default), 2 = Bars.
+    int timelineNotesDisplayComboId_ = 1;
+    int lastObservedTimelineNoteCountUi_ = -1;
 
     /// Last `startTimerHz` value; updated when switching between idle and playback animation rates.
     int uiTimerHzConfigured_ = -1;

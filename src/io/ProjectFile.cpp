@@ -464,6 +464,61 @@ namespace
                                 }
                             }
                         }
+                        c.ticksPerQuarter = 960;
+                        const juce::var& tpqV = cv.getProperty("ticksPerQuarter", {});
+                        if (tpqV.isInt() || tpqV.isInt64() || tpqV.isDouble())
+                        {
+                            c.ticksPerQuarter = juce::jmax(1, (int)static_cast<double>(tpqV));
+                        }
+                        const juce::var& tnv = cv.getProperty("timelineNotes", {});
+                        if (tnv.isArray())
+                        {
+                            const juce::Array<juce::var>* tnarr = tnv.getArray();
+                            if (tnarr != nullptr)
+                            {
+                                for (const juce::var& tvn : *tnarr)
+                                {
+                                    if (!tvn.isObject())
+                                    {
+                                        continue;
+                                    }
+                                    ProjectFileExperimentalTimelineNoteV12 tnn;
+                                    const juce::var& mn2 = tvn.getProperty("midiNote", {});
+                                    if (mn2.isInt() || mn2.isInt64() || mn2.isDouble())
+                                    {
+                                        tnn.midiNote = (int)static_cast<double>(mn2);
+                                    }
+                                    const juce::var& vv = tvn.getProperty("velocity", {});
+                                    if (vv.isInt() || vv.isInt64() || vv.isDouble())
+                                    {
+                                        tnn.velocity = (int)static_cast<double>(vv);
+                                    }
+                                    const juce::var& chv = tvn.getProperty("channel", {});
+                                    if (chv.isInt() || chv.isInt64() || chv.isDouble())
+                                    {
+                                        tnn.channel = juce::jlimit(
+                                            1, 16, (int)static_cast<double>(chv));
+                                    }
+                                    bool stOk = false;
+                                    const std::int64_t stTick
+                                        = int64FromVarId(tvn.getProperty("startTick", {}), stOk);
+                                    if (stOk)
+                                    {
+                                        tnn.startTick = stTick;
+                                    }
+                                    bool dtOk = false;
+                                    const std::int64_t dt
+                                        = int64FromVarId(tvn.getProperty("durationTicks", {}), dtOk);
+                                    if (dtOk)
+                                    {
+                                        tnn.durationTicks = juce::jmax<std::int64_t>(
+                                            1,
+                                            dt);
+                                    }
+                                    c.timelineNotes.push_back(tnn);
+                                }
+                            }
+                        }
                         et.clips.push_back(std::move(c));
                     }
                 }
@@ -582,6 +637,22 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     noteVars.add(juce::var(no.get()));
                 }
                 co->setProperty("notes", juce::var(noteVars));
+                co->setProperty("ticksPerQuarter", cl.ticksPerQuarter);
+                if (!cl.timelineNotes.empty())
+                {
+                    juce::Array<juce::var> tnoteVars;
+                    for (const auto& tn : cl.timelineNotes)
+                    {
+                        juce::DynamicObject::Ptr tnO = new juce::DynamicObject();
+                        tnO->setProperty("midiNote", tn.midiNote);
+                        tnO->setProperty("velocity", tn.velocity);
+                        tnO->setProperty("channel", tn.channel);
+                        tnO->setProperty("startTick", static_cast<juce::int64>(tn.startTick));
+                        tnO->setProperty("durationTicks", static_cast<juce::int64>(tn.durationTicks));
+                        tnoteVars.add(juce::var(tnO.get()));
+                    }
+                    co->setProperty("timelineNotes", juce::var(tnoteVars));
+                }
                 clipVars.add(juce::var(co.get()));
             }
             eo->setProperty("clips", juce::var(clipVars));
