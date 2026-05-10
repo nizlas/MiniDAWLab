@@ -1,9 +1,11 @@
 #pragma once
 
 #include "ui/experimental/ExperimentalMidiPattern.h"
+#include "ui/CollapsibleSideStrip.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -11,6 +13,7 @@
 namespace juce
 {
 class AudioDeviceManager;
+class TextEditor;
 }
 
 class ExperimentalMidiPatternPlayer;
@@ -23,13 +26,28 @@ class TimelineViewportModel;
 /// Drum hits mode: diamonds at step centers; piano-style rows 24..72.
 /// I3d1: when bound to an `InstrumentMidiClip` + session/transport, X is **session-absolute samples**
 /// with an **independent** zoom/pan (not `TimelineViewportModel`).
-class ExperimentalPianoRollView final : public juce::Component, private juce::Timer
+class ExperimentalPianoRollView final : public juce::Component,
+                                          public juce::SettableTooltipClient,
+                                          private juce::Timer,
+                                          private juce::TextEditor::Listener
 {
 public:
     static constexpr int kPitchLow = 24;
     static constexpr int kPitchHigh = 72;
     static constexpr int kRowHeight = 14;
-    static constexpr int kKeyboardWidth = 40;
+
+    /// Legacy maximum piano strip width (also the resizable upper bound in Piano row mode).
+    static constexpr int kMidiEditorKeyboardLaneWidthPianoMax = 40;
+    /// Default ~half of the legacy 40px strip.
+    static constexpr int kMidiEditorKeyboardLaneWidthPianoDefault = 20;
+    static constexpr int kMidiEditorKeyboardLaneWidthPianoMin = 18;
+
+    /// Legacy maximum drum-name column width (former fixed width); user can drag up to this for long labels.
+    static constexpr int kMidiEditorKeyboardLaneWidthDrumNamesMax = 120;
+    /// Default ~half of the legacy 120px drum name lane.
+    static constexpr int kMidiEditorKeyboardLaneWidthDrumNamesDefault = 60;
+    static constexpr int kMidiEditorKeyboardLaneWidthDrumNamesMin = 44;
+
     /// Absolute-timeline mode only (0 in legacy step-local mode).
     static constexpr int kRulerHeight = 22;
 
@@ -39,6 +57,9 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseDoubleClick(const juce::MouseEvent& e) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     void resized() override;
 
@@ -78,6 +99,20 @@ public:
     /// Timeline paint only: 1 = compact hits (drums), 2 = duration bars (melodic). Does not change data or playback.
     void setTimelineNotesDisplayComboId(int id) noexcept;
 
+    /// 1 = piano-style row labels (default), 2 = drum names (per-row text).
+    void setRowLabelMode(int comboId) noexcept;
+
+    /// Effective label for `midiNote` (used in Drum Names mode). Piano mode ignores this for paint.
+    void setRowLabelProvider(std::function<juce::String(int midiNote)> fn) noexcept;
+
+    /// Optional: hover text for drum-name rows (e.g. MIDI note + piano name when the visible label is blank).
+    void setRowLabelTooltipProvider(std::function<juce::String(int midiNote)> fn) noexcept;
+
+    /// Commits renamed row; pass empty string to clear user override (reset).
+    void setOnCommitRowLabelEdit(std::function<void(int midiNote, juce::String newName)> fn) noexcept;
+
+    [[nodiscard]] int rowLabelMode() const noexcept { return rowLabelMode_; }
+
     /// I3i: when set, note/step mutations are wrapped for global instrument undo (clip-bound editor only).
     void setUndoablePatternEditHandler(
         std::function<void(const juce::String&, std::function<bool()>)> handler) noexcept;
@@ -85,8 +120,23 @@ public:
     [[nodiscard]] std::int64_t getViewportVisibleStartSamples() const noexcept { return visibleStartSamples_; }
     [[nodiscard]] double getViewportSamplesPerPixel() const noexcept { return samplesPerPixel_; }
 
+    /// Note-name / piano key column content width (excludes splitter chrome; zero when fully collapsed).
+    [[nodiscard]] int keyboardColumnWidth() const noexcept;
+    /// Runtime-only UI preference (expand/collapse + lane width). App-wide persistence is a future follow-up.
+    [[nodiscard]] bool isKeyboardLaneCollapsed() const noexcept { return sideStripTotalNow() == 0; }
+
+    /// MIDI editor window (`Body`) owns strip width; the roll only mirrors it for layout/paint.
+    void setSideStripTotalWidthForUiOnly(int totalIncludingSplitter) noexcept;
+
 private:
     void timerCallback() override;
+
+    void textEditorReturnKeyPressed(juce::TextEditor&) override;
+    void textEditorEscapeKeyPressed(juce::TextEditor&) override;
+    void textEditorFocusLost(juce::TextEditor&) override;
+
+    void beginRowLabelInlineEdit(int midiNote);
+    void dismissRowLabelEditor(bool commit);
 
     [[nodiscard]] bool useAbsoluteTimeline() const noexcept;
     void seedViewportFromMainTimelineOrFallback();
@@ -94,6 +144,8 @@ private:
     [[nodiscard]] std::int64_t sampleAtGridX(float localX) const noexcept;
     [[nodiscard]] float xForSessionSample(std::int64_t s) const noexcept;
     [[nodiscard]] int pitchAtY(int y) const;
+    [[nodiscard]] int sideStripTotalNow() const noexcept;
+    [[nodiscard]] int sideStripContentWidthNow() const noexcept;
     [[nodiscard]] int stepAtPatternX(int x) const;
     [[nodiscard]] int stepAtTimelineX(int x) const;
     [[nodiscard]] int timelineRulerHeight() const noexcept;
@@ -126,6 +178,9 @@ private:
     };
     RulerGestureMode rulerGestureMode_ = RulerGestureMode::None;
     std::function<bool()> transportGestureBlock_;
+
+    /// Total left strip width (content + splitter), inspector-style; **0** = collapsed. Owned/mirrored from MIDI editor `Body`.
+    int currentSideStripTotal_ = kMidiEditorKeyboardLaneWidthPianoDefault + collapsible_side_strip::kSplitterWidth;
 
     /// Sub-sample horizontal mapping for UI-smoothed playhead (same linear map as integer path).
     [[nodiscard]] float xForSessionSampleD(double s) const noexcept;
@@ -189,6 +244,13 @@ private:
 
     /// Last frame transport playhead was considered “in view” for off-screen repaint skipping.
     bool lastOffscreenGatePlayheadInView_ = true;
+
+    int rowLabelMode_ = 1;
+    std::function<juce::String(int)> rowLabelProvider_;
+    std::function<juce::String(int)> rowLabelTooltipProvider_;
+    std::function<void(int, juce::String)> onCommitRowLabelEdit_;
+    std::unique_ptr<juce::TextEditor> rowLabelEditor_;
+    int rowLabelEditorPitch_ = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExperimentalPianoRollView)
 };

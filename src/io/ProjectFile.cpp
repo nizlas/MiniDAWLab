@@ -346,6 +346,25 @@ namespace
             {
                 et.muted = static_cast<int>(static_cast<double>(mu) + 0.5) != 0;
             }
+            const juce::var& dnm = tv.getProperty("drumNoteNames", {});
+            if (dnm.isObject())
+            {
+                if (const auto* dynObj = dnm.getDynamicObject())
+                {
+                    for (const auto& nv : dynObj->getProperties())
+                    {
+                        const int note = nv.name.toString().getIntValue();
+                        if (note >= 0 && note <= 127)
+                        {
+                            const juce::String nm = nv.value.toString().trim();
+                            if (nm.isNotEmpty())
+                            {
+                                et.drumNoteNameOverrides.push_back({note, nm});
+                            }
+                        }
+                    }
+                }
+            }
             const juce::var& clipsV = tv.getProperty("clips", {});
             if (clipsV.isArray())
             {
@@ -622,6 +641,21 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             if (et.muted)
             {
                 eo->setProperty("muted", true);
+            }
+            if (!et.drumNoteNameOverrides.empty())
+            {
+                juce::DynamicObject::Ptr dnmObj = new juce::DynamicObject();
+                for (const auto& kv : et.drumNoteNameOverrides)
+                {
+                    if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
+                    {
+                        dnmObj->setProperty(juce::String(kv.first), kv.second);
+                    }
+                }
+                if (dnmObj->getProperties().size() > 0)
+                {
+                    eo->setProperty("drumNoteNames", juce::var(dnmObj.get()));
+                }
             }
             juce::Array<juce::var> clipVars;
             for (const auto& cl : et.clips)
@@ -977,6 +1011,7 @@ void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimental
     t.pluginStateBase64.clear();
     t.pluginWasLoadedOnSave = false;
     t.pluginBundlePath.clear();
+    t.drumNoteNameOverrides.clear();
 }
 
 namespace

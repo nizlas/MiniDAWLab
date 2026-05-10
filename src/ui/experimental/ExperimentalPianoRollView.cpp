@@ -67,9 +67,146 @@ ExperimentalPianoRollView::ExperimentalPianoRollView(ExperimentalMidiPattern& pa
     startTimerHz(kMidiRollTimerHzIdle);
 }
 
+void ExperimentalPianoRollView::setRowLabelMode(const int comboId) noexcept
+{
+    const int id = juce::jlimit(1, 2, comboId);
+    if (rowLabelMode_ == id)
+    {
+        return;
+    }
+    dismissRowLabelEditor(false);
+    rowLabelMode_ = id;
+    repaint();
+}
+
+void ExperimentalPianoRollView::setRowLabelProvider(std::function<juce::String(int)> fn) noexcept
+{
+    rowLabelProvider_ = std::move(fn);
+    repaint();
+}
+
+void ExperimentalPianoRollView::setRowLabelTooltipProvider(std::function<juce::String(int)> fn) noexcept
+{
+    rowLabelTooltipProvider_ = std::move(fn);
+}
+
+void ExperimentalPianoRollView::setOnCommitRowLabelEdit(
+    std::function<void(int, juce::String)> fn) noexcept
+{
+    onCommitRowLabelEdit_ = std::move(fn);
+}
+
+void ExperimentalPianoRollView::dismissRowLabelEditor(const bool commit)
+{
+    if (rowLabelEditor_ == nullptr)
+    {
+        return;
+    }
+    const int pitch = rowLabelEditorPitch_;
+    const juce::String text = rowLabelEditor_->getText().trim();
+    rowLabelEditor_->removeListener(this);
+    removeChildComponent(rowLabelEditor_.get());
+    rowLabelEditor_.reset();
+    rowLabelEditorPitch_ = -1;
+    if (commit && onCommitRowLabelEdit_)
+    {
+        onCommitRowLabelEdit_(pitch, text);
+    }
+    repaint();
+}
+
+void ExperimentalPianoRollView::beginRowLabelInlineEdit(const int midiNote)
+{
+    if (midiNote < kPitchLow || midiNote > kPitchHigh || rowLabelMode_ != 2 || !onCommitRowLabelEdit_)
+    {
+        return;
+    }
+    dismissRowLabelEditor(false);
+    rowLabelEditorPitch_ = midiNote;
+    rowLabelEditor_ = std::make_unique<juce::TextEditor>("rowLabelEdit");
+    rowLabelEditor_->setMultiLine(false);
+    rowLabelEditor_->setReturnKeyStartsNewLine(false);
+    const juce::String initial = rowLabelProvider_ ? rowLabelProvider_(midiNote)
+                                                   : juce::MidiMessage::getMidiNoteName(midiNote, true, true, 3);
+    rowLabelEditor_->setText(initial, false);
+    rowLabelEditor_->setSelectAllWhenFocused(true);
+    rowLabelEditor_->setFont(juce::Font(juce::FontOptions().withHeight(9.0f)));
+    rowLabelEditor_->addListener(this);
+    addAndMakeVisible(*rowLabelEditor_);
+    resized();
+    rowLabelEditor_->toFront(false);
+    rowLabelEditor_->grabKeyboardFocus();
+}
+
+void ExperimentalPianoRollView::textEditorReturnKeyPressed(juce::TextEditor& ed)
+{
+    if (rowLabelEditor_.get() == &ed)
+    {
+        dismissRowLabelEditor(true);
+    }
+}
+
+void ExperimentalPianoRollView::textEditorEscapeKeyPressed(juce::TextEditor& ed)
+{
+    if (rowLabelEditor_.get() == &ed)
+    {
+        dismissRowLabelEditor(false);
+    }
+}
+
+void ExperimentalPianoRollView::textEditorFocusLost(juce::TextEditor& ed)
+{
+    if (rowLabelEditor_.get() != &ed)
+    {
+        return;
+    }
+    // Escape / click-away: do not auto-commit renames (explicit Return only).
+    dismissRowLabelEditor(false);
+}
+
 int ExperimentalPianoRollView::timelineRulerHeight() const noexcept
 {
     return useAbsoluteTimeline() ? kRulerHeight : 0;
+}
+
+int ExperimentalPianoRollView::sideStripTotalNow() const noexcept
+{
+    return currentSideStripTotal_;
+}
+
+int ExperimentalPianoRollView::sideStripContentWidthNow() const noexcept
+{
+    const int S = sideStripTotalNow();
+    if (S <= 0)
+    {
+        return 0;
+    }
+    const int splitW = juce::jmin(collapsible_side_strip::kSplitterWidth, S);
+    return juce::jmax(0, S - splitW);
+}
+
+void ExperimentalPianoRollView::setSideStripTotalWidthForUiOnly(const int totalIncludingSplitter) noexcept
+{
+    const int cap = rowLabelMode_ == 2
+                        ? (kMidiEditorKeyboardLaneWidthDrumNamesMax + collapsible_side_strip::kSplitterWidth)
+                        : (kMidiEditorKeyboardLaneWidthPianoMax + collapsible_side_strip::kSplitterWidth);
+    const int nw = juce::jlimit(0, cap, totalIncludingSplitter);
+    if (nw == currentSideStripTotal_)
+    {
+        return;
+    }
+    if (nw == 0)
+    {
+        dismissRowLabelEditor(false);
+    }
+    currentSideStripTotal_ = nw;
+    resized();
+    repaint();
+}
+
+int ExperimentalPianoRollView::keyboardColumnWidth() const noexcept
+{
+    return sideStripContentWidthNow();
 }
 
 juce::Rectangle<int> ExperimentalPianoRollView::rulerCornerBounds() const
@@ -81,7 +218,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::rulerCornerBounds() const
         return {};
     }
     auto top = r.removeFromTop(rh);
-    return top.removeFromLeft(kKeyboardWidth);
+    return top.removeFromLeft(keyboardColumnWidth());
 }
 
 juce::Rectangle<int> ExperimentalPianoRollView::rulerTrackBounds() const
@@ -93,7 +230,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::rulerTrackBounds() const
         return {};
     }
     auto top = r.removeFromTop(rh);
-    top.removeFromLeft(kKeyboardWidth);
+    top.removeFromLeft(keyboardColumnWidth());
     return top;
 }
 
@@ -101,14 +238,14 @@ juce::Rectangle<int> ExperimentalPianoRollView::keyboardBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
-    return r.removeFromLeft(kKeyboardWidth);
+    return r.removeFromLeft(keyboardColumnWidth());
 }
 
 juce::Rectangle<int> ExperimentalPianoRollView::gridBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
-    r.removeFromLeft(kKeyboardWidth);
+    r.removeFromLeft(sideStripTotalNow());
     return r;
 }
 
@@ -133,6 +270,10 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     const bool changed = timelineClip_ != timelineClip || session_ != session || transport_ != transport
                          || deviceManager_ != deviceManager || instrumentTrackController_ != trackController
                          || mainTimelineViewport_ != mainTimelineViewport;
+    if (changed)
+    {
+        dismissRowLabelEditor(false);
+    }
     timelineClip_ = timelineClip;
     session_ = session;
     transport_ = transport;
@@ -620,6 +761,15 @@ void ExperimentalPianoRollView::timerCallback()
 void ExperimentalPianoRollView::resized()
 {
     Component::resized();
+    const int rh = timelineRulerHeight();
+    if (rowLabelEditor_ != nullptr && rowLabelEditorPitch_ >= kPitchLow && rowLabelEditorPitch_ <= kPitchHigh)
+    {
+        const auto kb = keyboardBounds();
+        const int rowFromTop = kPitchHigh - rowLabelEditorPitch_;
+        const int y = kb.getY() + rowFromTop * kRowHeight;
+        rowLabelEditor_->setBounds(kb.withY(y).withHeight(kRowHeight).reduced(1, 1));
+        rowLabelEditor_->toFront(false);
+    }
 }
 
 float ExperimentalPianoRollView::cellWidth() const
@@ -1062,6 +1212,29 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         juce::Logger::writeToLog("[MIDI roll] mouseDown ignored (stale clip binding)");
         return;
     }
+
+    const auto kb = keyboardBounds();
+    if (!kb.isEmpty() && kb.contains(pos) && rowLabelMode_ == 2 && e.mods.isPopupMenu() && onCommitRowLabelEdit_)
+    {
+        const int pitch = pitchAtY(pos.getY());
+        if (pitch >= kPitchLow && pitch <= kPitchHigh)
+        {
+            juce::PopupMenu menu;
+            menu.addItem(1, "Reset to default name");
+            juce::Component::SafePointer<ExperimentalPianoRollView> st(this);
+            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                               [st, pitch](const int r) {
+                                   if (st == nullptr || r != 1 || !st->onCommitRowLabelEdit_)
+                                   {
+                                       return;
+                                   }
+                                   st->onCommitRowLabelEdit_(pitch, {});
+                                   st->repaint();
+                               });
+        }
+        return;
+    }
+
     const auto rt = rulerTrackBounds();
     if (useAbsoluteTimeline() && !rt.isEmpty() && rt.contains(pos))
     {
@@ -1131,6 +1304,56 @@ void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
     juce::ignoreUnused(e);
     rulerGestureMode_ = RulerGestureMode::None;
+}
+
+void ExperimentalPianoRollView::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    const auto pos = e.getPosition();
+    if (useAbsoluteTimeline() && timelineClip_ != nullptr && instrumentTrackController_ != nullptr
+        && !isTimelineClipBindingFresh())
+    {
+        return;
+    }
+    const auto kb = keyboardBounds();
+    if (kb.isEmpty() || !kb.contains(pos) || rowLabelMode_ != 2)
+    {
+        return;
+    }
+    const int pitch = pitchAtY(pos.getY());
+    if (pitch >= kPitchLow && pitch <= kPitchHigh)
+    {
+        beginRowLabelInlineEdit(pitch);
+    }
+}
+
+void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
+{
+    if (rowLabelMode_ == 2 && rowLabelTooltipProvider_)
+    {
+        const auto kb = keyboardBounds();
+        if (kb.contains(e.getPosition()))
+        {
+            const int pitch = pitchAtY(e.getPosition().getY());
+            if (pitch >= kPitchLow && pitch <= kPitchHigh)
+            {
+                const juce::String tip = rowLabelTooltipProvider_(pitch);
+                if (tip.isNotEmpty())
+                {
+                    setTooltip(tip);
+                    return;
+                }
+            }
+        }
+    }
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    setTooltip(juce::String{});
+}
+
+void ExperimentalPianoRollView::mouseExit(const juce::MouseEvent& e)
+{
+    juce::ignoreUnused(e);
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    setTooltip(juce::String{});
 }
 
 void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -1563,39 +1786,50 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff2a2a32));
     g.fillRect(kb);
 
-    for (int pitch = kPitchHigh; pitch >= kPitchLow; --pitch)
+    if (sideStripContentWidthNow() > 0)
     {
-        const int rowFromTop = kPitchHigh - pitch;
-        const int y = kb.getY() + rowFromTop * kRowHeight;
-        auto wr = kb.withY(y).withHeight(kRowHeight);
+        for (int pitch = kPitchHigh; pitch >= kPitchLow; --pitch)
+        {
+            const int rowFromTop = kPitchHigh - pitch;
+            const int y = kb.getY() + rowFromTop * kRowHeight;
+            auto wr = kb.withY(y).withHeight(kRowHeight);
 
-        if (pitch == kPitchLow || pitch == kPitchHigh)
-        {
-            g.setColour(juce::Colours::black.withAlpha(0.5f));
-            g.fillRect(wr);
-        }
+            if (pitch == kPitchLow || pitch == kPitchHigh)
+            {
+                g.setColour(juce::Colours::black.withAlpha(0.5f));
+                g.fillRect(wr);
+            }
 
-        if (isBlackKey(pitch))
-        {
-            g.setColour(juce::Colour(0xff111118));
-            const int bh = juce::jmax(8, (int)((float)kRowHeight * 0.72f));
-            g.fillRoundedRectangle(wr.withSizeKeepingCentre(wr.getWidth() - 4, bh).toFloat(), 2.0f);
-        }
-        else
-        {
-            g.setColour(juce::Colour(0xfff0f0f5));
-            g.fillRoundedRectangle(wr.reduced(2, 1).toFloat(), 2.0f);
-            g.setColour(juce::Colour(0xff888899));
-            g.drawRoundedRectangle(wr.reduced(2, 1).toFloat(), 2.0f, 1.0f);
-        }
+            if (isBlackKey(pitch))
+            {
+                g.setColour(juce::Colour(0xff111118));
+                const int bh = juce::jmax(8, (int)((float)kRowHeight * 0.72f));
+                g.fillRoundedRectangle(wr.withSizeKeepingCentre(wr.getWidth() - 4, bh).toFloat(), 2.0f);
+            }
+            else
+            {
+                g.setColour(juce::Colour(0xfff0f0f5));
+                g.fillRoundedRectangle(wr.reduced(2, 1).toFloat(), 2.0f);
+                g.setColour(juce::Colour(0xff888899));
+                g.drawRoundedRectangle(wr.reduced(2, 1).toFloat(), 2.0f, 1.0f);
+            }
 
-        const int kk = ((pitch % 12) + 12) % 12;
-        if (kk == 0)
-        {
-            const juce::String label = juce::MidiMessage::getMidiNoteName(pitch, true, true, 3);
-            g.setColour(isBlackKey(pitch) ? juce::Colours::lightgrey : juce::Colours::black);
-            g.setFont(10.0f);
-            g.drawText(label, wr.reduced(2, 0), juce::Justification::centredLeft, true);
+            const int kk = ((pitch % 12) + 12) % 12;
+            if (rowLabelMode_ == 2)
+            {
+                const juce::String label = rowLabelProvider_ ? rowLabelProvider_(pitch)
+                                                            : juce::MidiMessage::getMidiNoteName(pitch, true, true, 3);
+                g.setColour(isBlackKey(pitch) ? juce::Colours::lightgrey : juce::Colours::black);
+                g.setFont(juce::Font(juce::FontOptions().withHeight(9.0f)));
+                g.drawText(label, wr.reduced(4, 0), juce::Justification::centredLeft, true);
+            }
+            else if (kk == 0)
+            {
+                const juce::String label = juce::MidiMessage::getMidiNoteName(pitch, true, true, 3);
+                g.setColour(isBlackKey(pitch) ? juce::Colours::lightgrey : juce::Colours::black);
+                g.setFont(juce::Font(juce::FontOptions().withHeight(10.0f)));
+                g.drawText(label, wr.reduced(2, 0), juce::Justification::centredLeft, true);
+            }
         }
     }
 }

@@ -188,6 +188,76 @@ void InstrumentTrackController::setRequiredKitName(juce::String name) noexcept
     requiredKitName_ = std::move(name);
 }
 
+int InstrumentTrackController::pluginNoteNameQueryChannel(const InstrumentMidiClip* contextClip) const noexcept
+{
+    const InstrumentMidiClip* clip = contextClip;
+    if (clip == nullptr && selectedClipId_ != 0)
+    {
+        clip = getClipById(selectedClipId_);
+    }
+    if (clip != nullptr && clip->pattern.usesTimelineNotes() && !clip->pattern.timelineNotes.empty())
+    {
+        int ch = -1;
+        for (const auto& tn : clip->pattern.timelineNotes)
+        {
+            const int cn = juce::jlimit(1, 16, (int)tn.channel);
+            if (ch < 0)
+            {
+                ch = cn;
+            }
+            else if (ch != cn)
+            {
+                ch = -2;
+                break;
+            }
+        }
+        if (ch >= 1 && ch <= 16)
+        {
+            return ch;
+        }
+    }
+    return 10;
+}
+
+juce::String InstrumentTrackController::getDrumNoteUserOverride(const int midiNote) const noexcept
+{
+    if (midiNote < 0 || midiNote > 127)
+    {
+        return {};
+    }
+    const auto it = drumNoteNameOverrides_.find(midiNote);
+    if (it == drumNoteNameOverrides_.end())
+    {
+        return {};
+    }
+    return it->second;
+}
+
+void InstrumentTrackController::setDrumNoteUserOverride(const int midiNote, juce::String displayName) noexcept
+{
+    if (midiNote < 0 || midiNote > 127)
+    {
+        return;
+    }
+    displayName = displayName.trim();
+    const auto it = drumNoteNameOverrides_.find(midiNote);
+    if (displayName.isEmpty())
+    {
+        if (it != drumNoteNameOverrides_.end())
+        {
+            drumNoteNameOverrides_.erase(it);
+            sendChangeMessage();
+        }
+        return;
+    }
+    if (it != drumNoteNameOverrides_.end() && it->second == displayName)
+    {
+        return;
+    }
+    drumNoteNameOverrides_[midiNote] = std::move(displayName);
+    sendChangeMessage();
+}
+
 void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
 {
     trackActive_ = false;
@@ -203,6 +273,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
     pendingPluginStateBase64_.clear();
+    drumNoteNameOverrides_.clear();
     publishRenderSnapshot();
 }
 
@@ -225,6 +296,13 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     }
     dto.powerOn = powerOn_;
     dto.muted = muted_;
+    for (const auto& kv : drumNoteNameOverrides_)
+    {
+        if (kv.second.isNotEmpty())
+        {
+            dto.drumNoteNameOverrides.push_back(kv);
+        }
+    }
     for (const auto& cptr : clips_)
     {
         if (cptr == nullptr)
@@ -302,6 +380,9 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
     {
         return;
     }
+
+    // `drumNoteNameOverrides_` is not loaded from `chosen`: musical undo DTOs strip overrides and
+    // equality ignores them, so row renames survive note undo/redo.
 
     powerOn_ = chosen->powerOn;
     muted_ = chosen->muted;
@@ -441,6 +522,15 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     pendingAdvisoryPluginBundlePath_ = chosen->pluginBundlePath;
     pendingInstrumentKind_ = chosen->instrumentKind;
     pendingPluginStateBase64_ = chosen->pluginStateBase64;
+
+    drumNoteNameOverrides_.clear();
+    for (const auto& kv : chosen->drumNoteNameOverrides)
+    {
+        if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
+        {
+            drumNoteNameOverrides_[kv.first] = kv.second;
+        }
+    }
 
     InstrumentMidiClipId maxId = 0;
     for (const auto& cdto : chosen->clips)
@@ -654,6 +744,11 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     }
 
     syncShellWithHostState();
+
+    if (loadResult.wasOk())
+    {
+        host.refreshPluginNoteNamesFromActiveInstrument();
+    }
 }
 
 void InstrumentTrackController::setTimelineSampleRate(const double sampleRate) noexcept

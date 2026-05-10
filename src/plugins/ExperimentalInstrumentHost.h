@@ -24,12 +24,23 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <functional>
+#include <map>
 #include <memory>
+#include <optional>
+#include <set>
+
+#include "diagnostics/DrumNameDiagnosticConfig.h"
 
 class ExperimentalInstrumentHost
 {
 public:
     static constexpr int kStereoChannels = 2;
+
+    /// Fallback MIDI pad row range when `derivePrimaryDrumPadDisplayNotesFromRawMap` cannot find a confident
+    /// primary cluster (legacy Groove Agent SE layout). Prefer metadata-derived display notes when available.
+    static constexpr int kFallbackPrimaryDrumPadDisplayMin = 36;
+    static constexpr int kFallbackPrimaryDrumPadDisplayMax = 51;
 
     ExperimentalInstrumentHost();
     ~ExperimentalInstrumentHost();
@@ -60,6 +71,29 @@ public:
 
     /// [Message thread] Base64 `getStateInformation` for the loaded instrument, or empty.
     [[nodiscard]] juce::String getCurrentInstrumentStateBase64() const;
+
+    /// [Message thread] Best-effort per-MIDI-note label from the **display** pitch-name map (derived primary-pad
+    /// set when confident, else [`kFallbackPrimaryDrumPadDisplayMin`, `kFallbackPrimaryDrumPadDisplayMax`]). Empty →
+    /// no plugin label for that row (GM/piano policy is decided in the MIDI editor from `hasPluginDrumNameMapAvailable`).
+    [[nodiscard]] std::optional<juce::String> getPluginNoteNameIfAvailable(int midiNote,
+                                                                           int midiChannel) const;
+
+    /// True when a plugin drum pitch-name map has been confirmed authoritative (not merely non-empty cache).
+    /// Drum row resolver suppresses GM fallback only in this state; see `refreshPluginNoteNamesFromActiveInstrumentImpl`.
+    [[nodiscard]] bool hasPluginDrumNameMapAvailable() const noexcept;
+
+    /// [Message thread] Rebuilds the transient plugin pitch-name map from the **current** `activeOwner_`
+    /// instance (call only after that owner is published). Safe when no instrument loaded (no-op).
+    void refreshPluginNoteNamesFromActiveInstrument();
+
+    /// [Message thread] Optional hook: called when `IUnitInfo` harvesting finds new pitch names after the
+    /// native plugin editor was opened (Phase B). Replace any existing callback (e.g. clear with `{}` on editor
+    /// teardown). Not invoked from the audio thread.
+    void setOnPluginPitchNamesCacheMayHaveChanged(std::function<void()> callback);
+
+    /// [Message thread] When non-null, returning true means Phase C isolated audio probe must be skipped
+    /// (playback, recording, or count-in). Cleared on destroy / unload.
+    void setDrumNamePhaseCAudioProbeShouldSkip(std::function<bool()> shouldSkip);
 
     /// [Message thread] Runs `findAllTypesForFile` only (no `createPluginInstance`, no bus prep).
     /// Writes flushed boundary lines to `%APPDATA%\\MiniDAWLab\\experimental-vst3-scan-diagnostic.log`.
@@ -149,4 +183,41 @@ private:
 
     /// Advisory path for ProjectFile (experimental); not authoritative for loading.
     juce::String lastLoadedVst3OriginalPath_;
+
+    /// Full raw map from VST3 `getProgramPitchName` (diagnostics / authority heuristics). Cleared on unload / refresh.
+    std::map<int, juce::String> rawPluginPitchNamesByNote_;
+
+    /// Filtered map for UI and `getPluginNoteNameIfAvailable`: metadata-derived primary pads when confident, else
+    /// fallback range only. Cleared on unload / refresh.
+    std::map<int, juce::String> pluginPitchNamesByNote_;
+
+    /// Notes that receive plugin labels in `pluginPitchNamesByNote_` after the last transient refresh (derived set
+    /// or fallback-only notes present in the raw map).
+    std::set<int> primaryPadDisplayActiveNotes_;
+
+    bool pluginDrumNameMapAuthoritative_ = false;
+
+    std::function<void()> onPluginPitchNamesCacheMayHaveChanged_;
+    std::function<bool()> drumNamePhaseCAudioProbeShouldSkip_;
+
+    juce::PluginDescription lastLoadedPluginDescription_{};
+    bool lastLoadedPluginDescriptionValid_ = false;
+
+    /// Armed by `schedulePluginPitchNamesRefreshAfterNativeEditorOpened`; consumed by the next
+    /// `afterEditorOpen` refresh so Phase C runs at most once per scheduled editor-open probe.
+    bool drumNamePhaseCPendingAfterEditorOpen_ = false;
+
+    void refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase phase,
+                                                        bool updateTransientNameCache);
+
+    void runDrumNamePhaseCDiagnosticsIfEligible(drum_name_diag::DrumNameRefreshPhase phase,
+                                                bool updateTransientNameCache,
+                                                juce::AudioPluginInstance& liveInst);
+    void runDrumNamePhaseCAudioProbeIsolated(const std::set<int>& metadataCandidateNotes,
+                                             juce::AudioPluginInstance& liveInst);
+
+    void scheduleDrumNameDiagLifecyclePhasesAfterRefreshIfEnabled();
+
+    /// After native VST3 editor is shown, harvested pitch names may only exist once UI exists (e.g. Groove Agent).
+    void schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
 };

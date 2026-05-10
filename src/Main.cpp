@@ -67,6 +67,7 @@
 #include "ui/ClipWaveformView.h"
 #include "ui/TrackLanesView.h"
 #include "ui/TrackHeaderView.h"
+#include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
 #include "audio/LatencySettingsStore.h"
@@ -575,7 +576,8 @@ private:
     // (async) → `Transport::readPlayheadSamplesForUi` once, then `addClipFromFileAtPlayhead`.
     class TransportControlsContent : public juce::Component,
                                      public juce::ChangeListener,
-                                     private juce::Timer
+                                     private juce::Timer,
+                                     public collapsible_side_strip::Host
     {
     private:
         enum class InsertPickerMode
@@ -586,117 +588,16 @@ private:
 
         static constexpr int kInspectorMaxW = 360;
         static constexpr int kInspectorDefaultW = 90;
-        static constexpr int kSplitterW = 6;
 
-        friend class InspectorResizeSplitter;
-        friend class InspectorCollapsedKnob;
+        [[nodiscard]] int getSideStripWidth() const noexcept override { return inspectorCurrentWidth_; }
 
-        class InspectorResizeSplitter final : public juce::Component
-        {
-        public:
-            explicit InspectorResizeSplitter(TransportControlsContent& owner) noexcept
-                : owner_(owner)
-            {
-                setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
-            }
+        void setSideStripWidth(int w) noexcept override { inspectorCurrentWidth_ = w; }
 
-            void mouseDown(const juce::MouseEvent&) override
-            {
-                anchorW_ = owner_.inspectorCurrentWidth_;
-            }
+        [[nodiscard]] int getSideStripMaxWidth() const noexcept override { return kInspectorMaxW; }
 
-            void mouseDrag(const juce::MouseEvent& e) override
-            {
-                const int w = juce::jlimit(
-                    0,
-                    kInspectorMaxW,
-                    anchorW_ + e.getDistanceFromDragStartX());
-                if (w != owner_.inspectorCurrentWidth_)
-                {
-                    owner_.inspectorCurrentWidth_ = w;
-                    owner_.resized();
-                }
-            }
+        [[nodiscard]] int getSideStripDefaultWidth() const noexcept override { return kInspectorDefaultW; }
 
-            void paint(juce::Graphics& g) override
-            {
-                juce::ignoreUnused(g);
-            }
-
-        private:
-            TransportControlsContent& owner_;
-            int anchorW_ = kInspectorDefaultW;
-        };
-
-        class InspectorCollapsedKnob final : public juce::Component
-        {
-        public:
-            explicit InspectorCollapsedKnob(TransportControlsContent& owner) noexcept
-                : owner_(owner)
-            {
-                setInterceptsMouseClicks(true, true);
-            }
-
-            void mouseEnter(const juce::MouseEvent&) override
-            {
-                setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
-            }
-
-            void mouseExit(const juce::MouseEvent&) override
-            {
-                setMouseCursor(juce::MouseCursor::NormalCursor);
-            }
-
-            void mouseDown(const juce::MouseEvent&) override
-            {
-                dragAnchorW_ = owner_.inspectorCurrentWidth_;
-            }
-
-            void mouseDrag(const juce::MouseEvent& e) override
-            {
-                const int w = juce::jlimit(
-                    0,
-                    kInspectorMaxW,
-                    dragAnchorW_ + e.getDistanceFromDragStartX());
-                if (w != owner_.inspectorCurrentWidth_)
-                {
-                    owner_.inspectorCurrentWidth_ = w;
-                    owner_.resized();
-                }
-            }
-
-            void mouseUp(const juce::MouseEvent& e) override
-            {
-                if (owner_.inspectorCurrentWidth_ != 0)
-                {
-                    return;
-                }
-                if (e.getDistanceFromDragStart() >= 4.0f)
-                {
-                    return;
-                }
-                owner_.inspectorCurrentWidth_ = kInspectorDefaultW;
-                owner_.resized();
-            }
-
-            void paint(juce::Graphics& g) override
-            {
-                const auto r = getLocalBounds().toFloat();
-                if (r.getWidth() <= 0.f || r.getHeight() <= 0.f)
-                {
-                    return;
-                }
-                const float rad = juce::jmin(3.f, r.getWidth() * 0.42f, r.getHeight() * 0.4f);
-                g.setColour(juce::Colours::grey.withAlpha(0.70f));
-                g.fillRoundedRectangle(r, rad);
-                g.setColour(juce::Colours::darkgrey.withAlpha(0.88f));
-                g.drawRoundedRectangle(r, rad, 1.f);
-            }
-
-        private:
-            TransportControlsContent& owner_;
-            int dragAnchorW_ = 0;
-        };
+        void sideStripLayoutChanged() override { resized(); }
 
     public:
         TransportControlsContent(Transport& transportIn,
@@ -742,6 +643,10 @@ private:
             , inspectorCollapsedKnob_(*this)
             , instrumentMidiEventLane_(*this, instrumentTrackController_)
         {
+            experimentalInstrumentHostIn.setDrumNamePhaseCAudioProbeShouldSkip([this] {
+                return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording()
+                    || isCountInActive();
+            });
             trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
                 return recorder_.isRecording() || isCountInActive();
             });
@@ -1731,7 +1636,7 @@ private:
             if (inspectorCurrentWidth_ > 0)
             {
                 auto inspectorStrip = area.removeFromLeft(inspectorCurrentWidth_);
-                const int splitW = juce::jmin(kSplitterW, inspectorStrip.getWidth());
+                const int splitW = juce::jmin(collapsible_side_strip::kSplitterWidth, inspectorStrip.getWidth());
                 const int contentW = juce::jmax(0, inspectorStrip.getWidth() - splitW);
                 inspectorView_.setBounds(
                     inspectorStrip.getX(),
@@ -1791,11 +1696,14 @@ private:
             trackLanesView.setBounds(area);
             if (inspectorCurrentWidth_ == 0)
             {
-                constexpr int kKnobW = 6;
-                constexpr int kKnobH = 25;
                 const int knobX = trackLanesView.getBounds().getX();
-                const int knobY = trackLanesView.getBounds().getCentreY() - kKnobH / 2;
-                inspectorCollapsedKnob_.setBounds(knobX, knobY, kKnobW, kKnobH);
+                const int knobY = trackLanesView.getBounds().getCentreY()
+                                  - collapsible_side_strip::kCollapsedKnobHeight / 2;
+                inspectorCollapsedKnob_.setBounds(
+                    knobX,
+                    knobY,
+                    collapsible_side_strip::kCollapsedKnobWidth,
+                    collapsible_side_strip::kCollapsedKnobHeight);
                 inspectorCollapsedKnob_.setVisible(true);
                 inspectorCollapsedKnob_.toFront(false);
             }
@@ -3862,6 +3770,10 @@ private:
                 juce::String experimentalInstrumentAutoloadNote;
                 instrumentTrackController_.runPendingGrooveAgentProjectAutoload(
                     experimentalInstrumentHost_, experimentalInstrumentAutoloadNote);
+                if (experimentalMidiEditorWindow_ != nullptr)
+                {
+                    experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+                }
                 if (experimentalInstrumentAutoloadNote.isNotEmpty())
                 {
                     if (infoNote.isNotEmpty())
@@ -4579,8 +4491,8 @@ private:
         TimelineRulerView rulerView;
         TrackLanesView trackLanesView;
         InspectorView inspectorView_;
-        InspectorResizeSplitter inspectorResizeSplitter_;
-        InspectorCollapsedKnob inspectorCollapsedKnob_;
+        collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
+        collapsible_side_strip::CollapsedKnob inspectorCollapsedKnob_;
         int inspectorCurrentWidth_ = kInspectorDefaultW;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)

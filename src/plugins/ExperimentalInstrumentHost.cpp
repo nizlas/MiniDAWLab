@@ -12,10 +12,1220 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
+#include <cmath>
 #include <exception>
+#include <functional>
+#include <set>
+#include <vector>
+
+#include "diagnostics/DrumNameDiagnosticConfig.h"
+#include "diagnostics/DrumNameDiagnosticFileLog.h"
+#include "ui/experimental/DrumNoteNames.h"
+
+#if JUCE_PLUGINHOST_VST3 && (JUCE_WINDOWS || JUCE_MAC || JUCE_LINUX || JUCE_BSD)
+// juce_audio_processors.cpp already compiles the Steinberg SDK .cpp sources; including the default
+// juce_VST3Headers.h here would paste those implementations again → LNK2005 multiply-defined symbols.
+#define JUCE_VST3HEADERS_INCLUDE_HEADERS_ONLY 1
+#include <juce_audio_processors/format_types/juce_VST3Headers.h>
+#include <pluginterfaces/vst/ivstnoteexpression.h>
+#endif
+
+namespace experimental_instrument_host_detail
+{
+struct DrumNameVst3ProbeDetails
+{
+    bool vst3IComponentPresent = false;
+    bool editControllerPresent = false;
+    /// "none", "visitor" (JUCE-resolved IUnitInfo), "component", "controller"
+    juce::String unitInfoSource;
+    int activeProgramIndex = -1;
+    int programListCount = 0;
+    int selectedListId = -1;
+    int selectedProgramIndex = -1;
+    juce::String selectedProgramName;
+    bool sawProgramListWithPitchNameSupport = false;
+    int getProgramPitchNameOkCount = 0;
+    juce::String zeroReason;
+
+    // Phase A (filled when verbose diagnostics run)
+    int unitCount = -1;
+    juce::String selectedUnitIdStr{"n/a"};
+    bool keyswitchControllerPresent = false;
+    int keyswitchCountBus0Ch0 = -1;
+    int keyswitchCountBus0Ch9 = -1;
+    bool programListDataOnComponent = false;
+    bool programListDataOnController = false;
+    bool noteExpressionControllerOnEdit = false;
+    int noteExpressionCountBus0Ch0 = -1;
+    int noteExpressionCountBus0Ch9 = -1;
+    bool midiMappingOnComponent = false;
+    bool midiMappingOnController = false;
+};
+
+#if JUCE_PLUGINHOST_VST3 && (JUCE_WINDOWS || JUCE_MAC || JUCE_LINUX || JUCE_BSD)
+using namespace Steinberg;
+
+[[nodiscard]] int string128RawCodeUnitCountBeforeNul(const Vst::String128& raw)
+{
+    int len = 0;
+    while (len < 128 && raw[len] != 0)
+    {
+        ++len;
+    }
+    return len;
+}
+
+[[nodiscard]] juce::String string128ToJuce(const Vst::String128& raw)
+{
+    const int len = string128RawCodeUnitCountBeforeNul(raw);
+    if (len <= 0)
+    {
+        return {};
+    }
+    return juce::String(
+        juce::CharPointer_UTF16(reinterpret_cast<const juce::CharPointer_UTF16::CharType*>(raw)),
+        juce::CharPointer_UTF16(reinterpret_cast<const juce::CharPointer_UTF16::CharType*>(raw + len)));
+}
+
+/// First `maxUnits` UTF-16 code units as 4-digit hex (for diagnostics; String128 is UTF-16 per VST3).
+[[nodiscard]] juce::String string128Utf16HexPreview(const Vst::String128& raw, int maxUnits = 16)
+{
+    juce::String s;
+    const int n = juce::jmin(maxUnits, 128);
+    for (int i = 0; i < n; ++i)
+    {
+        const auto cu = (unsigned int)(char16_t)raw[i];
+        if (cu == 0U)
+        {
+            break;
+        }
+        if (s.isNotEmpty())
+        {
+            s << " ";
+        }
+        s << juce::String::toHexString((int)cu).paddedLeft('0', 4);
+    }
+    return s;
+}
+
+[[nodiscard]] juce::String tresultSymbolicName(tresult rc)
+{
+    if (rc == static_cast<tresult>(-1))
+    {
+        return "undocumented_minus_one";
+    }
+    if (rc == kResultOk)
+    {
+        return "kResultOk";
+    }
+    if (rc == kResultFalse)
+    {
+        return "kResultFalse";
+    }
+    if (rc == kInvalidArgument)
+    {
+        return "kInvalidArgument";
+    }
+    if (rc == kNotImplemented)
+    {
+        return "kNotImplemented";
+    }
+    if (rc == kInternalError)
+    {
+        return "kInternalError";
+    }
+    if (rc == kNotInitialized)
+    {
+        return "kNotInitialized";
+    }
+    if (rc == kOutOfMemory)
+    {
+        return "kOutOfMemory";
+    }
+    if (rc == kNoInterface)
+    {
+        return "kNoInterface";
+    }
+    return "unknown(rc=" + juce::String((int)rc) + ")";
+}
+
+template <typename Iface>
+[[nodiscard]] bool vst3QueryPresence(FUnknown* obj)
+{
+    if (obj == nullptr)
+    {
+        return false;
+    }
+    void* ptr = nullptr;
+    if (obj->queryInterface(Iface::iid, &ptr) != kResultOk || ptr == nullptr)
+    {
+        return false;
+    }
+    static_cast<Iface*>(ptr)->release();
+    return true;
+}
+
+[[nodiscard]] bool findFirstProgramListForPitchRetest(Vst::IUnitInfo* unitInfo,
+                                                      int programListCount,
+                                                      Vst::ProgramListID& outListId,
+                                                      int32& outProgramIndex)
+{
+    for (int li = 0; li < programListCount; ++li)
+    {
+        Vst::ProgramListInfo pli{};
+        if (unitInfo->getProgramListInfo(li, pli) != kResultOk)
+        {
+            continue;
+        }
+        for (int32 pi = 0; pi < pli.programCount; ++pi)
+        {
+            if (unitInfo->hasProgramPitchNames(pli.id, pi) == kResultTrue)
+            {
+                outListId = pli.id;
+                outProgramIndex = pi;
+                return true;
+            }
+        }
+    }
+    if (programListCount <= 0)
+    {
+        return false;
+    }
+    Vst::ProgramListInfo pli{};
+    if (unitInfo->getProgramListInfo(0, pli) != kResultOk)
+    {
+        return false;
+    }
+    outListId = pli.id;
+    outProgramIndex = 0;
+    return true;
+}
+
+static void runDrumNamePhaseAHostInterfaceProbes(Vst::IComponent* component,
+                                                 Vst::IEditController* editController,
+                                                 DrumNameVst3ProbeDetails& details,
+                                                 const std::function<void(const juce::String&)>& logLine)
+{
+    details.programListDataOnComponent = vst3QueryPresence<Vst::IProgramListData>(component);
+    details.programListDataOnController = vst3QueryPresence<Vst::IProgramListData>(editController);
+    details.midiMappingOnComponent = vst3QueryPresence<Vst::IMidiMapping>(component);
+    details.midiMappingOnController = vst3QueryPresence<Vst::IMidiMapping>(editController);
+
+    if (editController != nullptr)
+    {
+        Vst::INoteExpressionController* ne = nullptr;
+        if (editController->queryInterface(Vst::INoteExpressionController::iid, (void**)&ne) == kResultOk
+            && ne != nullptr)
+        {
+            details.noteExpressionControllerOnEdit = true;
+            details.noteExpressionCountBus0Ch0 = (int)ne->getNoteExpressionCount(0, 0);
+            details.noteExpressionCountBus0Ch9 = (int)ne->getNoteExpressionCount(0, 9);
+            ne->release();
+        }
+    }
+
+    logLine("drum-names: phaseA IProgramListData component=" + juce::String(details.programListDataOnComponent ? "present" : "absent")
+            + " controller=" + juce::String(details.programListDataOnController ? "present" : "absent"));
+    logLine("drum-names: phaseA IMidiMapping component=" + juce::String(details.midiMappingOnComponent ? "present" : "absent")
+            + " controller=" + juce::String(details.midiMappingOnController ? "present" : "absent"));
+    logLine("drum-names: phaseA INoteExpressionController editController="
+            + juce::String(details.noteExpressionControllerOnEdit ? "present" : "absent")
+            + " noteExprCount bus0 ch0=" + juce::String(details.noteExpressionCountBus0Ch0) + " ch9="
+            + juce::String(details.noteExpressionCountBus0Ch9));
+
+    if (editController != nullptr)
+    {
+        Vst::IKeyswitchController* ksw = nullptr;
+        if (editController->queryInterface(Vst::IKeyswitchController::iid, (void**)&ksw) == kResultOk
+            && ksw != nullptr)
+        {
+            details.keyswitchControllerPresent = true;
+            details.keyswitchCountBus0Ch0 = (int)ksw->getKeyswitchCount(0, 0);
+            details.keyswitchCountBus0Ch9 = (int)ksw->getKeyswitchCount(0, 9);
+            logLine("drum-names: phaseA IKeyswitchController present keyswitchCount busIndex=0 ch0="
+                    + juce::String(details.keyswitchCountBus0Ch0) + " ch9=" + juce::String(details.keyswitchCountBus0Ch9));
+            constexpr int kMaxKeyswitchSamples = 8;
+            for (int16 ch : { (int16)0, (int16)9 })
+            {
+                const int cnt = (int)ksw->getKeyswitchCount(0, ch);
+                const int lim = juce::jmin(cnt, kMaxKeyswitchSamples);
+                for (int ki = 0; ki < lim; ++ki)
+                {
+                    Vst::KeyswitchInfo kiInf{};
+                    const tresult infRc = ksw->getKeyswitchInfo(0, ch, ki, kiInf);
+                    const juce::String title = (infRc == kResultOk) ? string128ToJuce(kiInf.title).trim() : juce::String();
+                    logLine("drum-names: phaseA keyswitchSample bus=0 ch=" + juce::String((int)ch) + " idx=" + juce::String(ki)
+                            + " getKeyswitchInfo rc=" + juce::String((int)infRc) + "("
+                            + tresultSymbolicName(infRc) + ") title=\"" + title + "\" keyswitchMin="
+                            + juce::String(kiInf.keyswitchMin) + " keyswitchMax=" + juce::String(kiInf.keyswitchMax));
+                }
+            }
+            ksw->release();
+        }
+        else
+        {
+            logLine("drum-names: phaseA IKeyswitchController absent on IEditController");
+        }
+    }
+}
+
+static void runDrumNamePhaseAUnitTreeLog(Vst::IUnitInfo* unitInfo, DrumNameVst3ProbeDetails& details,
+                                         const std::function<void(const juce::String&)>& logLine)
+{
+    details.unitCount = (int)unitInfo->getUnitCount();
+    const Vst::UnitID selectedBefore = unitInfo->getSelectedUnit();
+    details.selectedUnitIdStr = juce::String((int)selectedBefore);
+    logLine("drum-names: phaseA unitTree unitCount=" + juce::String(details.unitCount) + " getSelectedUnit unitId="
+            + details.selectedUnitIdStr);
+    for (int32 ui = 0; ui < (int32)details.unitCount; ++ui)
+    {
+        Vst::UnitInfo uinf{};
+        if (unitInfo->getUnitInfo(ui, uinf) != kResultOk)
+        {
+            logLine("drum-names: phaseA unitTree unitIndex=" + juce::String(ui) + " getUnitInfo non_ok");
+            continue;
+        }
+        const juce::String unm = string128ToJuce(uinf.name).trim();
+        logLine("drum-names: phaseA unitTree unitIndex=" + juce::String(ui) + " id=" + juce::String((int)uinf.id)
+                + " parentUnitId=" + juce::String((int)uinf.parentUnitId)
+                + " programListId=" + juce::String((int)uinf.programListId) + " name=\"" + unm + "\"");
+    }
+}
+
+static void runDrumNamePhaseASelectUnitPitchRetest(Vst::IUnitInfo* unitInfo,
+                                                   int programListCount,
+                                                   DrumNameVst3ProbeDetails& details,
+                                                   const std::function<void(const juce::String&)>& logLine)
+{
+    const Vst::UnitID selectedBefore = unitInfo->getSelectedUnit();
+    Vst::ProgramListID retestListId{};
+    int32 retestProgIx = 0;
+    const bool haveRetestPair = findFirstProgramListForPitchRetest(unitInfo, programListCount, retestListId, retestProgIx);
+    logLine("drum-names: phaseA selectUnitRetest retestListId="
+            + juce::String(haveRetestPair ? (int)retestListId : -1) + " retestProgramIndex="
+            + juce::String(haveRetestPair ? (int)retestProgIx : -1));
+
+    if (details.unitCount > 0 && haveRetestPair)
+    {
+        constexpr int kProbeNotes[] = {36, 38, 42, 46};
+        for (int32 ui = 0; ui < (int32)details.unitCount; ++ui)
+        {
+            Vst::UnitInfo uinf{};
+            if (unitInfo->getUnitInfo(ui, uinf) != kResultOk)
+            {
+                continue;
+            }
+            const tresult sru = unitInfo->selectUnit(uinf.id);
+            logLine("drum-names: phaseA selectUnitRetest selectUnit(unitId=" + juce::String((int)uinf.id) + ") rc="
+                    + juce::String((int)sru) + "(" + tresultSymbolicName(sru) + ")");
+            for (int note : kProbeNotes)
+            {
+                Vst::String128 nm{};
+                const tresult prc = unitInfo->getProgramPitchName(retestListId, retestProgIx, (int16)note, nm);
+                logLine("drum-names: phaseA selectUnitRetest afterSelect unitId=" + juce::String((int)uinf.id) + " note="
+                        + juce::String(note) + " getProgramPitchName rc=" + juce::String((int)prc) + "("
+                        + tresultSymbolicName(prc) + ") rawCodeUnits=" + juce::String(string128RawCodeUnitCountBeforeNul(nm)));
+            }
+        }
+        const tresult restoreRc = unitInfo->selectUnit(selectedBefore);
+        logLine("drum-names: phaseA selectUnitRetest restore selectUnit(originalUnitId="
+                + juce::String((int)selectedBefore) + ") rc=" + juce::String((int)restoreRc) + "("
+                + tresultSymbolicName(restoreRc) + ")");
+    }
+    else
+    {
+        logLine("drum-names: phaseA selectUnitRetest skipped (no units or no program list for pitch retest)");
+    }
+}
+
+static void runDrumNameProgramListVerboseScan(Vst::IUnitInfo* unitInfo,
+                                              int programListCount,
+                                              const std::function<void(const juce::String&)>& logLine)
+{
+    static_assert(sizeof(char16_t) == 2, "VST3 String128 uses char16_t UTF-16 code units");
+    logLine(
+        "drum-names: String128 note: char16_t code units UTF-16; we build juce::String from units before first "
+        "0x0000 via CharPointer_UTF16 (if kResultOk but conv empty while rawCodeUnits>0, treat as conversion issue)");
+
+    for (int li = 0; li < programListCount; ++li)
+    {
+        Vst::ProgramListInfo pli{};
+        if (unitInfo->getProgramListInfo(li, pli) != kResultOk)
+        {
+            logLine("drum-names: programList[listIndex=" + juce::String(li) + "] getProgramListInfo non_ok");
+            continue;
+        }
+
+        const juce::String listName = string128ToJuce(pli.name).trim();
+        logLine("drum-names: programList listIndex=" + juce::String(li) + " listId=" + juce::String((int)pli.id)
+                + " listName=\"" + listName + "\" programCount=" + juce::String((int)pli.programCount));
+
+        for (int pi = 0; pi < pli.programCount; ++pi)
+        {
+            Vst::String128 progNmRaw{};
+            const tresult nameRc = unitInfo->getProgramName(pli.id, pi, progNmRaw);
+            juce::String programName;
+            if (nameRc == kResultOk)
+            {
+                programName = string128ToJuce(progNmRaw).trim();
+            }
+            else
+            {
+                programName = "(getProgramName non_ok rc=" + juce::String((int)nameRc) + ")";
+            }
+
+            const tresult hasPitch = unitInfo->hasProgramPitchNames(pli.id, pi);
+            juce::String hasPitchS = "unknown";
+            if (hasPitch == kResultTrue)
+            {
+                hasPitchS = "true";
+            }
+            else if (hasPitch == kResultFalse)
+            {
+                hasPitchS = "false";
+            }
+
+            int cNonOk = 0;
+            int cOkApiEmptyBuffer = 0;
+            int cOkNonEmptyAfterTrim = 0;
+            int cOkRawHasTrimEmpty = 0;
+            int cOkRawHasConvEmpty = 0;
+            for (int pitch = 0; pitch <= 127; ++pitch)
+            {
+                Vst::String128 nm{};
+                const tresult prc = unitInfo->getProgramPitchName(pli.id, pi, (int16)pitch, nm);
+                if (prc != kResultOk)
+                {
+                    ++cNonOk;
+                    continue;
+                }
+                const int rawLen = string128RawCodeUnitCountBeforeNul(nm);
+                if (rawLen == 0)
+                {
+                    ++cOkApiEmptyBuffer;
+                    continue;
+                }
+                const juce::String conv = string128ToJuce(nm);
+                const juce::String trimmed = conv.trim();
+                if (trimmed.isNotEmpty())
+                {
+                    ++cOkNonEmptyAfterTrim;
+                    continue;
+                }
+                ++cOkRawHasTrimEmpty;
+                if (conv.isEmpty())
+                {
+                    ++cOkRawHasConvEmpty;
+                }
+            }
+
+            logLine("drum-names:  program listId=" + juce::String((int)pli.id) + " programIndex=" + juce::String(pi)
+                    + " programName=\"" + programName + "\" hasProgramPitchNames=" + hasPitchS
+                    + " getProgramPitchName(0-127) nonOk=" + juce::String(cNonOk)
+                    + " okApiEmptyBuffer=" + juce::String(cOkApiEmptyBuffer)
+                    + " okNonEmptyAfterTrim=" + juce::String(cOkNonEmptyAfterTrim)
+                    + " okRawHadCharsTrimEmpty=" + juce::String(cOkRawHasTrimEmpty)
+                    + " ofWhich_okButJuceConvEmptyWhileRawHadUnits=" + juce::String(cOkRawHasConvEmpty));
+
+            constexpr int kSampleNotes[] = {36, 38, 42, 46};
+            for (int note : kSampleNotes)
+            {
+                Vst::String128 nm{};
+                const tresult prc = unitInfo->getProgramPitchName(pli.id, pi, (int16)note, nm);
+                const int rawLen = string128RawCodeUnitCountBeforeNul(nm);
+                const juce::String rawHex = string128Utf16HexPreview(nm, 16);
+                const juce::String conv = (prc == kResultOk) ? string128ToJuce(nm) : juce::String();
+                const juce::String trimmed = conv.trim();
+                juce::String cls;
+                if (prc != kResultOk)
+                {
+                    cls = "non_ok";
+                }
+                else if (rawLen == 0)
+                {
+                    cls = "ok_apiEmptyBuffer";
+                }
+                else if (trimmed.isNotEmpty())
+                {
+                    cls = "ok_nonEmpty";
+                }
+                else if (conv.isEmpty())
+                {
+                    cls = "ok_rawHadUnits_juceConvEmpty";
+                }
+                else
+                {
+                    cls = "ok_whitespaceOnly";
+                }
+
+                logLine("drum-names:  pitchSample listId=" + juce::String((int)pli.id)
+                        + " programIndex=" + juce::String(pi) + " note=" + juce::String(note)
+                        + " rc=" + juce::String((int)prc) + "(" + tresultSymbolicName(prc) + ")"
+                        + " rawCodeUnits=" + juce::String(rawLen)
+                        + " rawUtf16Hex=\"" + rawHex + "\" convNoTrim=\"" + conv + "\" convTrimmed=\"" + trimmed
+                        + "\" class=" + cls);
+            }
+        }
+    }
+}
+
+struct Vst3DrumNameInterfacesCapture final : juce::ExtensionsVisitor
+{
+    Vst::IComponent* component = nullptr;
+    Vst::IEditController* editController = nullptr;
+    Vst::IUnitInfo* unitInfoFromVisitor = nullptr;
+
+    void visitVST3Client(const VST3Client& c) override
+    {
+        component = c.getIComponentPtr();
+        editController = c.getIEditControllerPtr();
+        unitInfoFromVisitor = c.getIUnitInfoPtr();
+    }
+};
+
+struct ScopedVst3UnitInfoQuery
+{
+    Vst::IUnitInfo* p = nullptr;
+    bool ownsAddRef = false;
+    ~ScopedVst3UnitInfoQuery()
+    {
+        if (ownsAddRef && p != nullptr)
+        {
+            p->release();
+        }
+    }
+};
+
+/// Returns number of MIDI notes (0-127) with a non-empty pitch name. `outMap` is replaced.
+[[nodiscard]] int tryFillPitchNamesFromVst3UnitInfo(
+    juce::AudioPluginInstance& inst,
+    std::map<int, juce::String>& outMap,
+    DrumNameVst3ProbeDetails& details,
+    const std::function<void(const juce::String&)>* verboseLog /* nullable; message thread */)
+{
+    outMap.clear();
+    details = {};
+    details.unitInfoSource = "none";
+
+    Vst3DrumNameInterfacesCapture cap;
+    inst.getExtensions(cap);
+    details.vst3IComponentPresent = cap.component != nullptr;
+    details.editControllerPresent = cap.editController != nullptr;
+    if (cap.component == nullptr)
+    {
+        details.zeroReason = "VST3 IComponent missing (getExtensions did not provide a VST3 client pointer)";
+        return 0;
+    }
+
+    ScopedVst3UnitInfoQuery unitInfoHolder;
+    if (cap.unitInfoFromVisitor != nullptr)
+    {
+        unitInfoHolder.p = cap.unitInfoFromVisitor;
+        unitInfoHolder.ownsAddRef = false;
+        details.unitInfoSource = "visitor";
+    }
+    else
+    {
+        if (cap.component->queryInterface(Vst::IUnitInfo::iid, (void**)&unitInfoHolder.p) == kResultOk
+            && unitInfoHolder.p != nullptr)
+        {
+            unitInfoHolder.ownsAddRef = true;
+            details.unitInfoSource = "component";
+        }
+        else if (cap.editController != nullptr
+                 && cap.editController->queryInterface(Vst::IUnitInfo::iid, (void**)&unitInfoHolder.p) == kResultOk
+                 && unitInfoHolder.p != nullptr)
+        {
+            unitInfoHolder.ownsAddRef = true;
+            details.unitInfoSource = "controller";
+        }
+    }
+
+    Vst::IUnitInfo* const unitInfo = unitInfoHolder.p;
+    if (unitInfo == nullptr)
+    {
+        details.zeroReason = "IUnitInfo unavailable: JUCE visitor had no IUnitInfo and queryInterface failed on "
+                             "IComponent and IEditController (typical for split component/controller if not resolved)";
+        return 0;
+    }
+
+    if (cap.editController != nullptr)
+    {
+        const int n = cap.editController->getParameterCount();
+        for (int idx = 0; idx < n; ++idx)
+        {
+            Vst::ParameterInfo paramInfo{};
+            if (cap.editController->getParameterInfo(idx, paramInfo) != kResultOk)
+            {
+                continue;
+            }
+            if ((paramInfo.flags & Vst::ParameterInfo::kIsProgramChange) == 0)
+            {
+                continue;
+            }
+            const int sc = (int)paramInfo.stepCount;
+            if (sc <= 0)
+            {
+                details.activeProgramIndex = 0;
+            }
+            else
+            {
+                const double norm = (double)cap.editController->getParamNormalized(paramInfo.id);
+                int pi = (int)std::lround(norm * (double)sc);
+                pi = juce::jlimit(0, sc, pi);
+                details.activeProgramIndex = pi;
+            }
+            break;
+        }
+    }
+
+    details.programListCount = (int)unitInfo->getProgramListCount();
+
+    if (verboseLog != nullptr)
+    {
+        runDrumNamePhaseAHostInterfaceProbes(cap.component, cap.editController, details, *verboseLog);
+        runDrumNamePhaseAUnitTreeLog(unitInfo, details, *verboseLog);
+    }
+
+    if (details.programListCount <= 0)
+    {
+        details.zeroReason = "IUnitInfo reports no program lists";
+        return 0;
+    }
+
+    if (verboseLog != nullptr)
+    {
+        runDrumNameProgramListVerboseScan(unitInfo, details.programListCount, *verboseLog);
+        runDrumNamePhaseASelectUnitPitchRetest(unitInfo, details.programListCount, details, *verboseLog);
+    }
+    for (int li = 0; li < details.programListCount; ++li)
+    {
+        Vst::ProgramListInfo pli{};
+        if (unitInfo->getProgramListInfo(li, pli) != kResultOk)
+        {
+            continue;
+        }
+
+        juce::Array<int> piOrder;
+        const int pref = details.activeProgramIndex;
+        if (pref >= 0 && pref < pli.programCount)
+        {
+            piOrder.add(pref);
+        }
+        for (int pi = 0; pi < pli.programCount; ++pi)
+        {
+            if (pi != pref)
+            {
+                piOrder.add(pi);
+            }
+        }
+
+        for (int opi = 0; opi < piOrder.size(); ++opi)
+        {
+            const int pi = piOrder[opi];
+            if (unitInfo->hasProgramPitchNames(pli.id, pi) != kResultTrue)
+            {
+                continue;
+            }
+
+            details.sawProgramListWithPitchNameSupport = true;
+            details.selectedListId = (int)pli.id;
+            details.selectedProgramIndex = pi;
+            details.selectedProgramName.clear();
+            Vst::String128 progNmRaw{};
+            if (unitInfo->getProgramName(pli.id, pi, progNmRaw) == kResultOk)
+            {
+                details.selectedProgramName = string128ToJuce(progNmRaw).trim();
+            }
+            details.getProgramPitchNameOkCount = 0;
+
+            std::map<int, juce::String> chunk;
+            for (int pitch = 0; pitch <= 127; ++pitch)
+            {
+                Vst::String128 nm{};
+                if (unitInfo->getProgramPitchName(pli.id, pi, (int16)pitch, nm) != kResultOk)
+                {
+                    continue;
+                }
+                ++details.getProgramPitchNameOkCount;
+                juce::String s = string128ToJuce(nm).trim();
+                if (s.isEmpty())
+                {
+                    continue;
+                }
+                chunk[pitch] = std::move(s);
+            }
+
+            if (!chunk.empty())
+            {
+                outMap = std::move(chunk);
+                details.zeroReason.clear();
+                return (int)outMap.size();
+            }
+        }
+    }
+
+    if (!details.sawProgramListWithPitchNameSupport)
+    {
+        details.zeroReason = "no program/list index has hasProgramPitchNames; kit may not expose VST3 pitch names";
+    }
+    else
+    {
+        details.zeroReason = "hasProgramPitchNames was true for at least one program but getProgramPitchName returned "
+                             "no non-empty names for MIDI 0-127 (all empty or non-ok)";
+    }
+    return 0;
+}
+
+void runPhaseCMetadataDiagnostics(
+    juce::AudioPluginInstance& inst,
+    const std::map<int, juce::String>& rawMap,
+    std::set<int>& outCandidateNotes,
+    juce::String& outReason,
+    const std::function<void(const juce::String&)>& logLine)
+{
+    using Vst::IUnitInfo;
+    outCandidateNotes.clear();
+    outReason.clear();
+    std::set<int> keyswitchGrooveExclude;
+
+    auto countBuckets = [](IUnitInfo* ui, Vst::ProgramListID lid, const int32 pi, int& o0, int& o24, int& o36,
+                           int& o52) {
+        o0 = o24 = o36 = o52 = 0;
+        for (int pitch = 0; pitch <= 127; ++pitch)
+        {
+            Vst::String128 nm{};
+            if (ui->getProgramPitchName(lid, pi, (int16)pitch, nm) != kResultOk)
+            {
+                continue;
+            }
+            if (string128ToJuce(nm).trim().isEmpty())
+            {
+                continue;
+            }
+            if (pitch <= 23)
+            {
+                ++o0;
+            }
+            else if (pitch <= 35)
+            {
+                ++o24;
+            }
+            else if (pitch <= 51)
+            {
+                ++o36;
+            }
+            else
+            {
+                ++o52;
+            }
+        }
+    };
+
+    Vst3DrumNameInterfacesCapture cap;
+    inst.getExtensions(cap);
+    if (cap.component == nullptr)
+    {
+        logLine("drum-names: phaseC metadata aborted reason=noIComponent");
+        outReason = "noIComponent";
+        return;
+    }
+
+    ScopedVst3UnitInfoQuery holder;
+    if (cap.unitInfoFromVisitor != nullptr)
+    {
+        holder.p = cap.unitInfoFromVisitor;
+        holder.ownsAddRef = false;
+    }
+    else if (cap.component->queryInterface(IUnitInfo::iid, (void**)&holder.p) == kResultOk && holder.p != nullptr)
+    {
+        holder.ownsAddRef = true;
+    }
+    else if (cap.editController != nullptr
+             && cap.editController->queryInterface(IUnitInfo::iid, (void**)&holder.p) == kResultOk
+             && holder.p != nullptr)
+    {
+        holder.ownsAddRef = true;
+    }
+
+    IUnitInfo* const ui = holder.p;
+    if (ui == nullptr)
+    {
+        logLine("drum-names: phaseC metadata aborted reason=noIUnitInfo");
+        outReason = "noIUnitInfo";
+        return;
+    }
+
+    const int plc = (int)ui->getProgramListCount();
+    logLine("drum-names: phaseC multiList programListCount=" + juce::String(plc));
+
+    for (int li = 0; li < plc; ++li)
+    {
+        Vst::ProgramListInfo pli{};
+        if (ui->getProgramListInfo(li, pli) != kResultOk)
+        {
+            continue;
+        }
+        const juce::String listName = string128ToJuce(pli.name).trim();
+        for (int32 pi = 0; pi < pli.programCount; ++pi)
+        {
+            const tresult hp = ui->hasProgramPitchNames(pli.id, pi);
+            const juce::String hpS
+                = (hp == kResultTrue) ? "true" : ((hp == kResultFalse) ? "false" : "unknown");
+            if (hp != kResultTrue)
+            {
+                logLine("drum-names: phaseC multiList listIndex=" + juce::String(li) + " listId="
+                        + juce::String((int)pli.id) + " listName=\"" + listName + "\" programIndex="
+                        + juce::String((int)pi) + " hasProgramPitchNames=" + hpS + " buckets=skipped");
+                continue;
+            }
+            int b0 = 0, b24 = 0, b36 = 0, b52 = 0;
+            countBuckets(ui, pli.id, pi, b0, b24, b36, b52);
+            juce::String progNm;
+            Vst::String128 progNmRaw{};
+            if (ui->getProgramName(pli.id, pi, progNmRaw) == kResultOk)
+            {
+                progNm = string128ToJuce(progNmRaw).trim();
+            }
+            logLine("drum-names: phaseC multiList listIndex=" + juce::String(li) + " listId="
+                    + juce::String((int)pli.id) + " listName=\"" + listName + "\" programIndex="
+                    + juce::String((int)pi) + " programName=\"" + progNm + "\" hasProgramPitchNames=" + hpS
+                    + " bucket0_23=" + juce::String(b0) + " bucket24_35=" + juce::String(b24)
+                    + " bucket36_51=" + juce::String(b36) + " bucket52_127=" + juce::String(b52));
+
+            static const char* attrKeys[] = {"Instrument", "Style",     "Character",
+                                             "Name",       "FilePath", "FilePathStringType"};
+            for (const char* ak : attrKeys)
+            {
+                Vst::String128 aval{};
+                if (ui->getProgramInfo(pli.id, pi, ak, aval) != kResultOk)
+                {
+                    continue;
+                }
+                const juce::String av = string128ToJuce(aval).trim();
+                if (av.isEmpty())
+                {
+                    continue;
+                }
+                logLine("drum-names: phaseC programAttr listId=" + juce::String((int)pli.id) + " programIndex="
+                        + juce::String((int)pi) + " key=\"" + juce::String(ak) + "\" value=\"" + av + "\"");
+            }
+        }
+    }
+
+    for (int ch = 0; ch < 16; ++ch)
+    {
+        Vst::UnitID uid = (Vst::UnitID)-1;
+        const tresult tr = ui->getUnitByBus((Vst::MediaType)1, (Vst::BusDirection)0, 0, ch, uid);
+        logLine("drum-names: phaseC unitByBus type=kEvent dir=kInput busIndex=0 channel=" + juce::String(ch)
+                + " rc=" + juce::String((int)tr) + "(" + tresultSymbolicName(tr) + ") unitId="
+                + juce::String((int)uid));
+    }
+
+    if (cap.editController != nullptr)
+    {
+        Vst::IKeyswitchController* ksw = nullptr;
+        if (cap.editController->queryInterface(Vst::IKeyswitchController::iid, (void**)&ksw) == kResultOk
+            && ksw != nullptr)
+        {
+            for (int16 ch : { (int16)0, (int16)9 })
+            {
+                const int cnt = (int)ksw->getKeyswitchCount(0, ch);
+                for (int ki = 0; ki < cnt; ++ki)
+                {
+                    Vst::KeyswitchInfo kiInf{};
+                    const tresult ir = ksw->getKeyswitchInfo(0, ch, ki, kiInf);
+                    const juce::String title
+                        = (ir == kResultOk) ? string128ToJuce(kiInf.title).trim() : juce::String{};
+                    logLine("drum-names: phaseC keyswitch bus=0 ch=" + juce::String((int)ch) + " idx="
+                            + juce::String(ki) + " rc=" + juce::String((int)ir) + " title=\"" + title + "\" min="
+                            + juce::String((int)kiInf.keyswitchMin) + " max=" + juce::String((int)kiInf.keyswitchMax));
+                    if (title.containsIgnoreCase("groove"))
+                    {
+                        const int mn = (int)kiInf.keyswitchMin;
+                        const int mx = (int)kiInf.keyswitchMax;
+                        for (int n = mn; n <= mx; ++n)
+                        {
+                            if (n >= 0 && n <= 127)
+                            {
+                                keyswitchGrooveExclude.insert(n);
+                            }
+                        }
+                    }
+                }
+            }
+            ksw->release();
+        }
+    }
+
+    std::map<juce::String, std::vector<int>> byName;
+    for (const auto& kv : rawMap)
+    {
+        byName[kv.second].push_back(kv.first);
+    }
+    for (auto& pr : byName)
+    {
+        auto& notes = pr.second;
+        if (notes.size() < 2)
+        {
+            continue;
+        }
+        std::sort(notes.begin(), notes.end());
+        juce::String line = "drum-names: phaseC duplicateRawName name=\"" + pr.first + "\" notes=";
+        for (size_t i = 0; i < notes.size(); ++i)
+        {
+            if (i > 0)
+            {
+                line << ",";
+            }
+            line << notes[i];
+        }
+        logLine(line);
+    }
+
+    std::set<int> stage1;
+    for (auto& pr : byName)
+    {
+        const juce::String& name = pr.first;
+        auto notes = pr.second;
+        std::sort(notes.begin(), notes.end());
+        bool anyInPad = false;
+        for (int n : notes)
+        {
+            if (n >= 36 && n <= 51)
+            {
+                anyInPad = true;
+                break;
+            }
+        }
+        if (anyInPad)
+        {
+            for (int n : notes)
+            {
+                if (n >= 36 && n <= 51)
+                {
+                    stage1.insert(n);
+                }
+            }
+        }
+        else
+        {
+            if (name.toLowerCase().startsWith("groove"))
+            {
+                continue;
+            }
+            for (int n : notes)
+            {
+                stage1.insert(n);
+            }
+        }
+    }
+
+    for (int n : keyswitchGrooveExclude)
+    {
+        stage1.erase(n);
+    }
+
+    outCandidateNotes = std::move(stage1);
+    outReason = "heuristic=name_duplicate_prefers_36_51;groove_prefix_excluded;keyswitch_groove_title_notes_excluded="
+                + juce::String((int)keyswitchGrooveExclude.size());
+}
+#else
+[[nodiscard]] int tryFillPitchNamesFromVst3UnitInfo(
+    juce::AudioPluginInstance&,
+    std::map<int, juce::String>& outMap,
+    DrumNameVst3ProbeDetails& details,
+    const std::function<void(const juce::String&)>* /*verboseLog*/)
+{
+    outMap.clear();
+    details = {};
+    details.zeroReason = "VST3 host disabled or unsupported platform build";
+    return 0;
+}
+#endif
+} // namespace experimental_instrument_host_detail
 
 namespace
 {
+    [[nodiscard]] int countKeyPadNotesWithNonEmptyNames(const std::map<int, juce::String>& m) noexcept
+    {
+        static constexpr int kNotes[] = {36, 38, 42, 46};
+        int c = 0;
+        for (const int note : kNotes)
+        {
+            const auto it = m.find(note);
+            if (it != m.end() && it->second.isNotEmpty())
+            {
+                ++c;
+            }
+        }
+        return c;
+    }
+
+    struct PluginDrumMapAuthorityEval
+    {
+        bool authoritative = false;
+        juce::String reason;
+    };
+
+    [[nodiscard]] PluginDrumMapAuthorityEval evaluatePluginDrumMapAuthority(
+        const drum_name_diag::DrumNameRefreshPhase phase,
+        const int namesFound,
+        const std::map<int, juce::String>& m)
+    {
+        PluginDrumMapAuthorityEval r;
+        if (namesFound <= 0 || m.empty())
+        {
+            r.reason = "empty_map";
+            return r;
+        }
+
+        const int keyPads = countKeyPadNotesWithNonEmptyNames(m);
+        const bool afterEditorOpen = (phase == drum_name_diag::DrumNameRefreshPhase::afterEditorOpen);
+
+        if (afterEditorOpen)
+        {
+            if (namesFound >= 16)
+            {
+                r.authoritative = true;
+                r.reason = "afterEditorOpen_namesFound>=16";
+                return r;
+            }
+            if (namesFound >= 8 && keyPads >= 2)
+            {
+                r.authoritative = true;
+                r.reason = "afterEditorOpen_namesFound>=8_keyPadsNonEmpty>=2";
+                return r;
+            }
+            if (namesFound >= 6 && keyPads >= 3)
+            {
+                r.authoritative = true;
+                r.reason = "afterEditorOpen_namesFound>=6_keyPadsNonEmpty>=3";
+                return r;
+            }
+            r.reason = "afterEditorOpen_insufficient namesFound=" + juce::String(namesFound)
+                       + " keyPadsNonEmpty=" + juce::String(keyPads);
+            return r;
+        }
+
+        r.authoritative = false;
+        r.reason = "phase_not_afterEditorOpen namesFound=" + juce::String(namesFound)
+                   + " keyPadsNonEmpty=" + juce::String(keyPads)
+                   + " phase=" + juce::String(drum_name_diag::drumNameRefreshPhaseTag(phase));
+        return r;
+    }
+
+    [[nodiscard]] drum_name_diag::PluginDrumNameMapTrust trustLevelForMap(
+        const bool authoritative,
+        const std::map<int, juce::String>& m) noexcept
+    {
+        if (m.empty())
+        {
+            return drum_name_diag::PluginDrumNameMapTrust::none;
+        }
+        if (authoritative)
+        {
+            return drum_name_diag::PluginDrumNameMapTrust::authoritative;
+        }
+        return drum_name_diag::PluginDrumNameMapTrust::candidate;
+    }
+
+    [[nodiscard]] bool isGroovePatternTriggerPitchName(const juce::String& rawName) noexcept
+    {
+        return rawName.trim().startsWithIgnoreCase("Groove ");
+    }
+
+    struct DerivePrimaryPadDisplayResult
+    {
+        std::set<int> notes;
+        juce::String reason;
+        bool ok = false;
+    };
+
+    /// Infers visible primary drum pads from duplicate pitch-name structure (secondary low zone vs higher pads).
+    /// Does not return a hardcoded 36–51 constant; Groove-style maps satisfy structural confidence checks.
+    [[nodiscard]] DerivePrimaryPadDisplayResult derivePrimaryDrumPadDisplayNotesFromRawMap(
+        const std::map<int, juce::String>& raw)
+    {
+        DerivePrimaryPadDisplayResult r;
+        std::map<juce::String, std::vector<int>> byName;
+        for (const auto& kv : raw)
+        {
+            if (kv.second.isEmpty() || isGroovePatternTriggerPitchName(kv.second))
+            {
+                continue;
+            }
+            byName[kv.second].push_back(kv.first);
+        }
+
+        std::vector<int> anchors;
+        int wideDuplicateGroups = 0;
+        for (auto& pr : byName)
+        {
+            auto& notes = pr.second;
+            if (notes.size() < 2)
+            {
+                continue;
+            }
+            std::sort(notes.begin(), notes.end());
+            if (notes.back() - notes.front() >= 6)
+            {
+                ++wideDuplicateGroups;
+            }
+            anchors.push_back(notes.back());
+        }
+
+        if ((int)anchors.size() < 8)
+        {
+            r.reason = "insufficient_duplicate_groups";
+            return r;
+        }
+        if (wideDuplicateGroups < 4)
+        {
+            r.reason = "insufficient_wide_duplicate_separation";
+            return r;
+        }
+
+        const int lo = *std::min_element(anchors.begin(), anchors.end());
+        const int hi = *std::max_element(anchors.begin(), anchors.end());
+        if (hi - lo < 7)
+        {
+            r.reason = "cluster_span_too_small";
+            return r;
+        }
+        if (lo < 24)
+        {
+            r.reason = "cluster_starts_too_low";
+            return r;
+        }
+
+        std::set<int> cluster;
+        for (const auto& kv : raw)
+        {
+            const int n = kv.first;
+            if (n < lo || n > hi || kv.second.isEmpty() || isGroovePatternTriggerPitchName(kv.second))
+            {
+                continue;
+            }
+            cluster.insert(n);
+        }
+
+        if ((int)cluster.size() < 8)
+        {
+            r.reason = "insufficient_cluster_named_notes";
+            return r;
+        }
+
+        juce::String blob;
+        for (const int n : cluster)
+        {
+            const auto it = raw.find(n);
+            if (it != raw.end())
+            {
+                blob << it->second.toLowerCase();
+            }
+        }
+        int categoryHits = 0;
+        if (blob.contains("kick"))
+        {
+            ++categoryHits;
+        }
+        if (blob.contains("snare"))
+        {
+            ++categoryHits;
+        }
+        if (blob.contains("hihat") || blob.contains("hi hat") || blob.contains("hi-hat"))
+        {
+            ++categoryHits;
+        }
+        if (blob.contains("crash"))
+        {
+            ++categoryHits;
+        }
+        if (blob.contains("ride"))
+        {
+            ++categoryHits;
+        }
+        if (blob.contains("tom"))
+        {
+            ++categoryHits;
+        }
+        if (categoryHits < 3)
+        {
+            r.reason = "missing_drum_name_token_evidence";
+            return r;
+        }
+
+        r.notes = std::move(cluster);
+        r.ok = true;
+        r.reason = "duplicate_names_prefer_higher_primary_cluster";
+        return r;
+    }
+
+    void buildPrimaryPadDisplayMapFromNoteSet(const std::map<int, juce::String>& raw,
+                                              std::map<int, juce::String>& outDisplay,
+                                              const std::set<int>& noteSet)
+    {
+        outDisplay.clear();
+        for (const int n : noteSet)
+        {
+            const auto it = raw.find(n);
+            if (it != raw.end() && it->second.isNotEmpty())
+            {
+                outDisplay[n] = it->second;
+            }
+        }
+    }
+
+    void buildPrimaryPadDisplayMap(const std::map<int, juce::String>& raw,
+                                   std::map<int, juce::String>& outDisplay,
+                                   const int padMin,
+                                   const int padMax)
+    {
+        outDisplay.clear();
+        for (const auto& kv : raw)
+        {
+            if (kv.first >= padMin && kv.first <= padMax && kv.second.isNotEmpty())
+            {
+                outDisplay[kv.first] = kv.second;
+            }
+        }
+    }
+
+    [[nodiscard]] std::set<int> fallbackPrimaryPadNoteSetFromRaw(const std::map<int, juce::String>& raw,
+                                                               const int padMin,
+                                                               const int padMax)
+    {
+        std::set<int> s;
+        for (int n = padMin; n <= padMax; ++n)
+        {
+            const auto it = raw.find(n);
+            if (it != raw.end() && it->second.isNotEmpty())
+            {
+                s.insert(n);
+            }
+        }
+        return s;
+    }
+
+    [[nodiscard]] juce::String formatIntSetForDiagLog(const std::set<int>& s)
+    {
+        juce::String r = "{";
+        bool first = true;
+        for (const int n : s)
+        {
+            if (!first)
+            {
+                r << ",";
+            }
+            first = false;
+            r << n;
+        }
+        r << "}";
+        return r;
+    }
+
     [[nodiscard]] juce::File getExperimentalInstrumentLogFile()
     {
         return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -385,6 +1595,8 @@ ExperimentalInstrumentHost::ExperimentalInstrumentHost()
 
 ExperimentalInstrumentHost::~ExperimentalInstrumentHost()
 {
+    onPluginPitchNamesCacheMayHaveChanged_ = {};
+    drumNamePhaseCAudioProbeShouldSkip_ = {};
     unloadInstrument();
     writeExperimentalInstrumentLogLine("shutdown: ExperimentalInstrumentHost destroyed");
 }
@@ -634,6 +1846,9 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
         "load: COMPLETED OK plugin=\"" + owner->inst->getName() + "\" totalOutCh=" + juce::String(totalCh));
 
     lastLoadedVst3OriginalPath_ = vst3File.getFullPathName();
+    lastLoadedPluginDescription_ = desc;
+    lastLoadedPluginDescriptionValid_ = true;
+    refreshPluginNoteNamesFromActiveInstrument();
     return juce::Result::ok();
 }
 
@@ -876,6 +2091,9 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         "load: COMPLETED OK plugin=\"" + owner->inst->getName() + "\" totalOutCh=" + juce::String(totalCh));
 
     lastLoadedVst3OriginalPath_ = originalPath.getFullPathName();
+    lastLoadedPluginDescription_ = desc;
+    lastLoadedPluginDescriptionValid_ = true;
+    refreshPluginNoteNamesFromActiveInstrument();
     return juce::Result::ok();
 }
 
@@ -950,7 +2168,16 @@ void ExperimentalInstrumentHost::unloadInstrument()
 
     writeExperimentalInstrumentLogLine("unload: requested");
 
+    rawPluginPitchNamesByNote_.clear();
+    pluginPitchNamesByNote_.clear();
+    pluginDrumNameMapAuthoritative_ = false;
+    writeDrumNameDiagnosticLogLine("drum-names: cleared (instrument unload)");
+
     lastLoadedVst3OriginalPath_.clear();
+    lastLoadedPluginDescriptionValid_ = false;
+    lastLoadedPluginDescription_ = {};
+    drumNamePhaseCPendingAfterEditorOpen_ = false;
+    primaryPadDisplayActiveNotes_.clear();
 
     closeNativeEditor();
     if (testKickNoteOffTimer_ != nullptr)
@@ -994,6 +2221,578 @@ juce::String ExperimentalInstrumentHost::getInstrumentNameForUi() const
     return o->inst->getName();
 }
 
+void ExperimentalInstrumentHost::setOnPluginPitchNamesCacheMayHaveChanged(std::function<void()> callback)
+{
+    onPluginPitchNamesCacheMayHaveChanged_ = std::move(callback);
+}
+
+void ExperimentalInstrumentHost::setDrumNamePhaseCAudioProbeShouldSkip(std::function<bool()> shouldSkip)
+{
+    drumNamePhaseCAudioProbeShouldSkip_ = std::move(shouldSkip);
+}
+
+void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrument()
+{
+    refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::immediate, true);
+}
+
+void ExperimentalInstrumentHost::scheduleDrumNameDiagLifecyclePhasesAfterRefreshIfEnabled()
+{
+    if (!drum_name_diag::kDrumNamesDiag)
+    {
+        return;
+    }
+
+    auto* const self = this;
+    juce::Timer::callAfterDelay(250, [self] {
+        if (self == nullptr || !drum_name_diag::kDrumNamesDiag)
+        {
+            return;
+        }
+        self->refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::delayed250, false);
+    });
+    juce::Timer::callAfterDelay(1000, [self] {
+        if (self == nullptr || !drum_name_diag::kDrumNamesDiag)
+        {
+            return;
+        }
+        self->refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::delayed1000, false);
+    });
+}
+
+void ExperimentalInstrumentHost::schedulePluginPitchNamesRefreshAfterNativeEditorOpened()
+{
+    drumNamePhaseCPendingAfterEditorOpen_ = true;
+    auto* const self = this;
+    juce::Timer::callAfterDelay(150, [self] {
+        if (self == nullptr)
+        {
+            return;
+        }
+        self->refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::afterEditorOpen,
+                                                            true);
+    });
+}
+
+void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrumentImpl(
+    const drum_name_diag::DrumNameRefreshPhase phase,
+    const bool updateTransientNameCache)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+
+    auto o = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    if (o == nullptr || o->inst == nullptr || !o->layoutOk)
+    {
+        writeDrumNameDiagnosticLogLine(
+            juce::String("drum-names: refresh skipped reason=active instrument missing or layout not ok phase=")
+            + drum_name_diag::drumNameRefreshPhaseTag(phase));
+        return;
+    }
+
+    if (updateTransientNameCache)
+    {
+        rawPluginPitchNamesByNote_.clear();
+        pluginPitchNamesByNote_.clear();
+        primaryPadDisplayActiveNotes_.clear();
+        pluginDrumNameMapAuthoritative_ = false;
+    }
+
+    std::map<int, juce::String> rawMap;
+    experimental_instrument_host_detail::DrumNameVst3ProbeDetails probe{};
+    const std::function<void(const juce::String&)> drumNameVerboseSink = [](const juce::String& line) {
+        writeDrumNameDiagnosticLogLine(line);
+    };
+    const std::function<void(const juce::String&)>* verbosePtr
+        = drum_name_diag::kDrumNamesDiag ? &drumNameVerboseSink : nullptr;
+    const int nRaw = experimental_instrument_host_detail::tryFillPitchNamesFromVst3UnitInfo(
+        *o->inst,
+        rawMap,
+        probe,
+        verbosePtr);
+    const juce::String instName = o->inst->getName();
+
+    const PluginDrumMapAuthorityEval authorityEval = evaluatePluginDrumMapAuthority(phase, nRaw, rawMap);
+
+    const DerivePrimaryPadDisplayResult derivedPads = derivePrimaryDrumPadDisplayNotesFromRawMap(rawMap);
+    std::map<int, juce::String> displayScratch;
+    juce::String displaySourceStr;
+    juce::String derivationLogReason = derivedPads.reason;
+    if (derivedPads.ok)
+    {
+        buildPrimaryPadDisplayMapFromNoteSet(rawMap, displayScratch, derivedPads.notes);
+        displaySourceStr = "metadataDerived";
+    }
+    else
+    {
+        buildPrimaryPadDisplayMap(
+            rawMap,
+            displayScratch,
+            ExperimentalInstrumentHost::kFallbackPrimaryDrumPadDisplayMin,
+            ExperimentalInstrumentHost::kFallbackPrimaryDrumPadDisplayMax);
+        displaySourceStr = "fallbackRange";
+        if (derivationLogReason.isEmpty())
+        {
+            derivationLogReason = "fallback";
+        }
+    }
+    const int nDisplayFromProbe = (int)displayScratch.size();
+
+    juce::String authorityReasonForLog;
+    if (updateTransientNameCache)
+    {
+        rawPluginPitchNamesByNote_ = std::move(rawMap);
+        pluginPitchNamesByNote_ = std::move(displayScratch);
+        if (derivedPads.ok)
+        {
+            primaryPadDisplayActiveNotes_ = derivedPads.notes;
+        }
+        else
+        {
+            primaryPadDisplayActiveNotes_
+                = fallbackPrimaryPadNoteSetFromRaw(rawPluginPitchNamesByNote_,
+                                                   ExperimentalInstrumentHost::kFallbackPrimaryDrumPadDisplayMin,
+                                                   ExperimentalInstrumentHost::kFallbackPrimaryDrumPadDisplayMax);
+        }
+        pluginDrumNameMapAuthoritative_ = authorityEval.authoritative;
+        authorityReasonForLog = authorityEval.reason;
+    }
+    else
+    {
+        authorityReasonForLog = "transient_cache_not_updated eval_if_applied_would_be=\""
+                                + authorityEval.reason + "\" currentAuthoritative="
+                                + juce::String(pluginDrumNameMapAuthoritative_ ? "true" : "false");
+    }
+
+    if (drum_name_diag::kDrumNamesDiag)
+    {
+        const int nDisplayForSummary
+            = updateTransientNameCache ? (int)pluginPitchNamesByNote_.size() : nDisplayFromProbe;
+
+        juce::String displayRangeStr = "empty";
+        if (!displayScratch.empty())
+        {
+            displayRangeStr = juce::String(displayScratch.begin()->first) + "-"
+                              + juce::String(displayScratch.rbegin()->first);
+        }
+
+        const drum_name_diag::PluginDrumNameMapTrust mapTrust
+            = trustLevelForMap(pluginDrumNameMapAuthoritative_, pluginPitchNamesByNote_);
+
+        juce::String programSelection = "selectedListId=none programIndex=none programName=\"\"";
+        if (probe.selectedListId >= 0 && probe.selectedProgramIndex >= 0)
+        {
+            programSelection = "selectedListId=" + juce::String(probe.selectedListId)
+                               + " programIndex=" + juce::String(probe.selectedProgramIndex);
+            if (probe.selectedProgramName.isNotEmpty())
+            {
+                programSelection << " programName=\"" << probe.selectedProgramName << "\"";
+            }
+            else
+            {
+                programSelection << " programName=\"\"";
+            }
+        }
+
+        juce::String summary = "drum-names: summary phase=" + juce::String(drum_name_diag::drumNameRefreshPhaseTag(phase))
+                               + " instance=\"" + instName + "\" rawNamesFound=" + juce::String(nRaw)
+                               + " displayNamesFound=" + juce::String(nDisplayForSummary)
+                               + " displayRange=" + displayRangeStr + " displaySource=" + displaySourceStr
+                               + " derivationReason=\"" + derivationLogReason + "\" derivedDisplayNotes="
+                               + formatIntSetForDiagLog(derivedPads.ok ? derivedPads.notes : std::set<int>{})
+                               + " pluginMapAuthoritative=" + juce::String(pluginDrumNameMapAuthoritative_ ? "true" : "false")
+                               + " mapTrust=" + juce::String(drum_name_diag::pluginDrumNameMapTrustTag(mapTrust))
+                               + " authorityReason=\"" + authorityReasonForLog + "\" " + programSelection
+                               + " vst3IComponent=" + juce::String(probe.vst3IComponentPresent ? "true" : "false")
+                               + " editController=" + juce::String(probe.editControllerPresent ? "true" : "false")
+                               + " unitInfoSource=" + probe.unitInfoSource
+                               + " activeProgramIndex=" + juce::String(probe.activeProgramIndex)
+                               + " programLists=" + juce::String(probe.programListCount);
+        summary << " unitCount=" << juce::String(probe.unitCount) << " selectedUnit=" << probe.selectedUnitIdStr
+                << " keyswitchController=" << juce::String(probe.keyswitchControllerPresent ? "true" : "false")
+                << " keyswitchCountBus0Ch0=" << juce::String(probe.keyswitchCountBus0Ch0)
+                << " keyswitchCountBus0Ch9=" << juce::String(probe.keyswitchCountBus0Ch9);
+        if (nRaw == 0 && probe.zeroReason.isNotEmpty())
+        {
+            summary << " reason=\"" << probe.zeroReason << "\"";
+        }
+        writeDrumNameDiagnosticLogLine(summary);
+
+        writeDrumNameDiagnosticLogLine("drum-names: enabled");
+        writeDrumNameDiagnosticLogLine("drum-names: refreshing plugin names phase="
+                                       + juce::String(drum_name_diag::drumNameRefreshPhaseTag(phase)) + " instance=\""
+                                       + instName + "\" updateTransientNameCache="
+                                       + juce::String(updateTransientNameCache ? "true" : "false"));
+        writeDrumNameDiagnosticLogLine("drum-names: vst3IComponent="
+                                       + juce::String(probe.vst3IComponentPresent ? "true" : "false"));
+        writeDrumNameDiagnosticLogLine("drum-names: editController="
+                                       + juce::String(probe.editControllerPresent ? "true" : "false"));
+        writeDrumNameDiagnosticLogLine("drum-names: unitInfoSource=" + probe.unitInfoSource);
+        writeDrumNameDiagnosticLogLine("drum-names: activeProgramIndex=" + juce::String(probe.activeProgramIndex));
+        writeDrumNameDiagnosticLogLine("drum-names: programLists=" + juce::String(probe.programListCount));
+        if (probe.selectedListId >= 0 && probe.selectedProgramIndex >= 0)
+        {
+            juce::String sel = "drum-names: selected listId=" + juce::String(probe.selectedListId)
+                               + " programIndex=" + juce::String(probe.selectedProgramIndex);
+            if (probe.selectedProgramName.isNotEmpty())
+            {
+                sel << " programName=\"" << probe.selectedProgramName << "\"";
+            }
+            writeDrumNameDiagnosticLogLine(sel);
+        }
+        else
+        {
+            writeDrumNameDiagnosticLogLine("drum-names: selected listId=none programIndex=none");
+        }
+        writeDrumNameDiagnosticLogLine("drum-names: rawNamesFound=" + juce::String(nRaw) + " displayNamesFound="
+                                         + juce::String(nDisplayForSummary) + " displayRange=" + displayRangeStr
+                                         + " displaySource=" + displaySourceStr + " derivationReason=\""
+                                         + derivationLogReason + "\" derivedDisplayNotes="
+                                         + formatIntSetForDiagLog(derivedPads.ok ? derivedPads.notes : std::set<int>{}));
+        writeDrumNameDiagnosticLogLine("drum-names: getProgramPitchNameOkCalls="
+                                       + juce::String(probe.getProgramPitchNameOkCount));
+        if (probe.zeroReason.isNotEmpty())
+        {
+            writeDrumNameDiagnosticLogLine("drum-names: zeroReason=\"" + probe.zeroReason + "\"");
+        }
+        const std::map<int, juce::String>& rawForDiag
+            = updateTransientNameCache ? rawPluginPitchNamesByNote_ : rawMap;
+        const std::map<int, juce::String>& displayForDiag
+            = updateTransientNameCache ? pluginPitchNamesByNote_ : displayScratch;
+        constexpr int chLog = 10;
+        for (int note = 24; note <= 84; ++note)
+        {
+            const auto it = rawForDiag.find(note);
+            const juce::String rawN = (it != rawForDiag.end()) ? it->second : juce::String{};
+            const juce::String gm = drum_note_names::gmPercussionName(note);
+            if (note <= 55)
+            {
+                const auto pIt = displayForDiag.find(note);
+                const juce::String displayN
+                    = (pIt != displayForDiag.end() && pIt->second.isNotEmpty()) ? pIt->second : juce::String{};
+                writeDrumNameDiagnosticLogLine("drum-names: note=" + juce::String(note) + " ch="
+                                               + juce::String(chLog) + " raw=\"" + rawN + "\" display=\"" + displayN
+                                               + "\" gm=\"" + gm + "\"");
+            }
+            else
+            {
+                writeDrumNameDiagnosticLogLine("drum-names: note=" + juce::String(note) + " ch="
+                                               + juce::String(chLog) + " raw=\"" + rawN + "\" gm=\"" + gm + "\"");
+            }
+        }
+    }
+
+    if (updateTransientNameCache && drum_name_diag::kDrumNamesDiag)
+    {
+        scheduleDrumNameDiagLifecyclePhasesAfterRefreshIfEnabled();
+    }
+
+    if (phase == drum_name_diag::DrumNameRefreshPhase::afterEditorOpen && updateTransientNameCache
+        && onPluginPitchNamesCacheMayHaveChanged_)
+    {
+        onPluginPitchNamesCacheMayHaveChanged_();
+    }
+
+    if (phase == drum_name_diag::DrumNameRefreshPhase::afterEditorOpen && updateTransientNameCache && o != nullptr
+        && o->inst != nullptr && o->layoutOk)
+    {
+        if (drumNamePhaseCPendingAfterEditorOpen_)
+        {
+            drumNamePhaseCPendingAfterEditorOpen_ = false;
+            if (drum_name_diag::kDrumNamesDiag)
+            {
+                runDrumNamePhaseCDiagnosticsIfEligible(phase, updateTransientNameCache, *o->inst);
+            }
+        }
+    }
+}
+
+void ExperimentalInstrumentHost::runDrumNamePhaseCDiagnosticsIfEligible(
+    const drum_name_diag::DrumNameRefreshPhase phase,
+    const bool updateTransientNameCache,
+    juce::AudioPluginInstance& liveInst)
+{
+    juce::ignoreUnused(phase);
+    if (!drum_name_diag::kDrumNamesDiag || !updateTransientNameCache)
+    {
+        return;
+    }
+
+    writeDrumNameDiagnosticLogLine("drum-names: phaseC begin");
+
+    std::set<int> metaCand;
+    juce::String metaReason;
+#if JUCE_PLUGINHOST_VST3 && (JUCE_WINDOWS || JUCE_MAC || JUCE_LINUX || JUCE_BSD)
+    experimental_instrument_host_detail::runPhaseCMetadataDiagnostics(
+        liveInst,
+        rawPluginPitchNamesByNote_,
+        metaCand,
+        metaReason,
+        [](const juce::String& ln) { writeDrumNameDiagnosticLogLine(ln); });
+#else
+    metaReason = "no_vst3_build";
+#endif
+    writeDrumNameDiagnosticLogLine("drum-names: phaseC metadata candidateActiveByMetadata="
+                                   + formatIntSetForDiagLog(metaCand) + " reason=\"" + metaReason + "\"");
+
+    if (!pluginDrumNameMapAuthoritative_)
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe skipped reason=\"not authoritative\"");
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC end");
+        return;
+    }
+    if (drumNamePhaseCAudioProbeShouldSkip_ != nullptr && drumNamePhaseCAudioProbeShouldSkip_())
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe skipped reason=\"transport active\"");
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC end");
+        return;
+    }
+    if (!lastLoadedPluginDescriptionValid_)
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe skipped reason=\"no_plugin_description\"");
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC end");
+        return;
+    }
+
+#if JUCE_PLUGINHOST_VST3 && (JUCE_WINDOWS || JUCE_MAC || JUCE_LINUX || JUCE_BSD)
+    runDrumNamePhaseCAudioProbeIsolated(metaCand, liveInst);
+#else
+    writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe skipped reason=\"no_vst3_build\"");
+#endif
+    writeDrumNameDiagnosticLogLine("drum-names: phaseC end");
+}
+
+void ExperimentalInstrumentHost::runDrumNamePhaseCAudioProbeIsolated(
+    const std::set<int>& metadataCandidateNotes,
+    juce::AudioPluginInstance& liveInst)
+{
+#if !JUCE_PLUGINHOST_VST3 || (!JUCE_WINDOWS && !JUCE_MAC && !JUCE_LINUX && !JUCE_BSD)
+    juce::ignoreUnused(metadataCandidateNotes, liveInst);
+    return;
+#else
+    juce::String err;
+    const double srU = effectiveSr(sampleRate_);
+    const int bsU = effectiveBs(blockSize_);
+
+    std::unique_ptr<juce::AudioPluginInstance> probe;
+    try
+    {
+        probe = formatManager_.createPluginInstance(lastLoadedPluginDescription_, srU, bsU, err);
+    }
+    catch (const std::exception& e)
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe FAILED reason=createPluginInstance_exception msg=\""
+                                       + juce::String(e.what()) + "\"");
+        return;
+    }
+    catch (...)
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe FAILED reason=createPluginInstance_unknown");
+        return;
+    }
+
+    if (probe == nullptr || probe->getPluginDescription().name.isEmpty())
+    {
+        writeDrumNameDiagnosticLogLine(
+            "drum-names: phaseC audio probe FAILED reason=createPluginInstance err=\"" + err + "\"");
+        return;
+    }
+
+    try
+    {
+        juce::MemoryBlock state;
+        liveInst.getStateInformation(state);
+        if (state.getSize() > 0)
+        {
+            probe->setStateInformation(state.getData(), (int)state.getSize());
+        }
+    }
+    catch (const std::exception& e)
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe FAILED reason=setState_exception msg=\""
+                                       + juce::String(e.what()) + "\"");
+        probe->releaseResources();
+        return;
+    }
+    catch (...)
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe FAILED reason=setState_unknown");
+        probe->releaseResources();
+        return;
+    }
+
+    if (!tryPrepareInstrumentLayout(*probe, sampleRate_, blockSize_))
+    {
+        writeDrumNameDiagnosticLogLine("drum-names: phaseC audio probe FAILED reason=prepare_layout");
+        probe->releaseResources();
+        return;
+    }
+
+    const int totalCh = juce::jmax(kStereoChannels, probe->getTotalNumOutputChannels());
+    const int bs = effectiveBs(blockSize_);
+    juce::AudioBuffer<float> buf(totalCh, bs);
+
+    constexpr int kMidiChannel = 10;
+
+    auto flushAllSound = [&](juce::AudioPluginInstance& p) {
+        juce::MidiBuffer mb;
+        mb.addEvent(juce::MidiMessage::allNotesOff(kMidiChannel), 0);
+        mb.addEvent(juce::MidiMessage::allSoundOff(kMidiChannel), 0);
+        for (int pass = 0; pass < 4; ++pass)
+        {
+            buf.setSize(totalCh, bs, false, false, true);
+            buf.clear();
+            p.processBlock(buf, mb);
+            mb.clear();
+        }
+    };
+
+    const int onSamples = (int)std::ceil(srU * 0.15);
+    const int tailSamples = (int)std::ceil(srU * 0.20);
+    const int latencyGate = (int)std::ceil(srU * 0.025);
+
+    for (int note = 24; note <= 55; ++note)
+    {
+        flushAllSound(*probe);
+
+        juce::String rawN;
+        if (const auto it = rawPluginPitchNamesByNote_.find(note); it != rawPluginPitchNamesByNote_.end())
+        {
+            rawN = it->second;
+        }
+        const bool inFallbackPadRange = (note >= kFallbackPrimaryDrumPadDisplayMin
+                                         && note <= kFallbackPrimaryDrumPadDisplayMax);
+        const bool metaActive = metadataCandidateNotes.find(note) != metadataCandidateNotes.end();
+
+        float peak = 0.f;
+        double sumSq = 0.0;
+        juce::int64 sampCount = 0;
+        int firstNonzero = -1;
+        int globalS = 0;
+        bool sustainAfterNoteOff = false;
+        float peakAfterNoteOffPhase = 0.f;
+
+        auto measureRange = [&](const int nSamp) {
+            for (int c = 0; c < buf.getNumChannels(); ++c)
+            {
+                const float* d = buf.getReadPointer(c);
+                for (int i = 0; i < nSamp; ++i)
+                {
+                    const float x = d[i];
+                    const float ax = std::abs(x);
+                    peak = juce::jmax(peak, ax);
+                    sumSq += (double)x * (double)x;
+                    ++sampCount;
+                    if (firstNonzero < 0 && ax > 1.0e-4f)
+                    {
+                        firstNonzero = globalS + i;
+                    }
+                }
+            }
+            globalS += nSamp;
+        };
+
+        auto processBlock = [&](const int nSamp, juce::MidiBuffer& mb, juce::AudioPluginInstance& p) {
+            buf.setSize(totalCh, nSamp, false, false, true);
+            buf.clear();
+            p.processBlock(buf, mb);
+            measureRange(nSamp);
+        };
+
+        bool noteOnSent = false;
+        int pos = 0;
+        while (pos < onSamples)
+        {
+            const int n = juce::jmin(bs, onSamples - pos);
+            juce::MidiBuffer mb;
+            if (!noteOnSent)
+            {
+                mb.addEvent(juce::MidiMessage::noteOn(kMidiChannel, note, (juce::uint8)100), 0);
+                noteOnSent = true;
+            }
+            processBlock(n, mb, *probe);
+            pos += n;
+        }
+
+        bool noteOffSent = false;
+        int pos2 = 0;
+        while (pos2 < tailSamples)
+        {
+            const int n = juce::jmin(bs, tailSamples - pos2);
+            juce::MidiBuffer mb;
+            if (!noteOffSent)
+            {
+                mb.addEvent(juce::MidiMessage::noteOff(kMidiChannel, note, (juce::uint8)0), 0);
+                noteOffSent = true;
+            }
+            const float peakBefore = peak;
+            juce::ignoreUnused(peakBefore);
+            processBlock(n, mb, *probe);
+            if (noteOffSent && pos2 == 0)
+            {
+                for (int c = 0; c < buf.getNumChannels(); ++c)
+                {
+                    const float* d = buf.getReadPointer(c);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        peakAfterNoteOffPhase = juce::jmax(peakAfterNoteOffPhase, std::abs(d[i]));
+                    }
+                }
+            }
+            pos2 += n;
+        }
+        sustainAfterNoteOff = peakAfterNoteOffPhase > 0.001f;
+
+        flushAllSound(*probe);
+
+        const float rms = sampCount > 0 ? (float)std::sqrt(sumSq / (double)juce::jmax<juce::int64>(1, sampCount)) : 0.f;
+        const bool rawNonEmpty = rawN.isNotEmpty();
+        const bool probeActive = rawNonEmpty && peak >= 0.005f && firstNonzero >= 0 && firstNonzero < latencyGate;
+        const bool finalProposedDisplay = rawNonEmpty && (metaActive || probeActive);
+
+        writeDrumNameDiagnosticLogLine(
+            juce::String("drum-names: phaseC audio note=") + juce::String(note) + " raw=\"" + rawN
+            + "\" inFallbackPadRange=" + juce::String(inFallbackPadRange ? "true" : "false") + " metadataActive="
+            + juce::String(metaActive ? "true" : "false") + " peak=" + juce::String(peak, 6) + " rms="
+            + juce::String(rms, 6) + " firstNonzeroSample=" + juce::String(firstNonzero) + " sustainAfterNoteOff="
+            + juce::String(sustainAfterNoteOff ? "true" : "false") + " probeActive="
+            + juce::String(probeActive ? "true" : "false") + " finalProposedDisplay="
+            + juce::String(finalProposedDisplay ? "true" : "false"));
+    }
+
+    probe->releaseResources();
+#endif
+}
+
+bool ExperimentalInstrumentHost::hasPluginDrumNameMapAvailable() const noexcept
+{
+    return pluginDrumNameMapAuthoritative_;
+}
+
+std::optional<juce::String> ExperimentalInstrumentHost::getPluginNoteNameIfAvailable(const int midiNote,
+                                                                                     const int midiChannel) const
+{
+    juce::ignoreUnused(midiChannel);
+    if (midiNote < 0 || midiNote > 127)
+    {
+        return std::nullopt;
+    }
+    auto o = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    if (o == nullptr || o->inst == nullptr || !o->layoutOk)
+    {
+        return std::nullopt;
+    }
+    const auto it = pluginPitchNamesByNote_.find(midiNote);
+    if (it == pluginPitchNamesByNote_.end() || it->second.isEmpty())
+    {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
 void ExperimentalInstrumentHost::openNativeEditor()
 {
     if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
@@ -1016,6 +2815,7 @@ void ExperimentalInstrumentHost::openNativeEditor()
     {
         writeExperimentalInstrumentLogLine("native editor: toFront (already open)");
         editorWindow_->toFront(true);
+        schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
         return;
     }
     std::unique_ptr<juce::AudioProcessorEditor> ed(owner->inst->createEditor());
@@ -1030,6 +2830,7 @@ void ExperimentalInstrumentHost::openNativeEditor()
     }
     editorWindow_ = std::make_unique<ExperimentalPluginEditorWindow>(*this, *owner->inst, std::move(ed));
     writeExperimentalInstrumentLogLine("native editor: open succeeded");
+    schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
 }
 
 void ExperimentalInstrumentHost::triggerTestKick()

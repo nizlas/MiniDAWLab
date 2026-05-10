@@ -7,10 +7,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# Non-owning IEditController* / IUnitInfo* on ExtensionsVisitor::VST3Client (see cmake/patches). Checkout first so
+# `git apply` stays idempotent if those files were already patched in the FetchContent working tree.
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG 8.0.4
+    PATCH_COMMAND git checkout HEAD --
+        modules/juce_audio_processors/utilities/juce_ExtensionsVisitor.h
+        modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp
+        && git apply --ignore-whitespace
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/juce-8.0.4-vst3-extensions-visitor.patch"
+    UPDATE_DISCONNECTED 1
 )
 FetchContent_MakeAvailable(JUCE)
 
@@ -41,6 +49,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/Session.cpp
     src/domain/SessionHistory.cpp
     src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/diagnostics/DrumNameDiagnosticFileLog.cpp
     src/domain/SessionSnapshot.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp
@@ -57,6 +66,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/TimelineRulerView.cpp
     src/ui/TimelineLocatorPainter.cpp
     src/ui/LatencySettingsView.cpp
+    src/ui/CollapsibleSideStrip.cpp
     src/ui/InspectorView.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp

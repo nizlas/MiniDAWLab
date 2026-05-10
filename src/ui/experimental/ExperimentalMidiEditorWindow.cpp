@@ -4,6 +4,7 @@
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
 #include "ExperimentalPianoRollView.h"
+#include "DrumNoteNames.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
@@ -11,6 +12,7 @@
 #include "transport/Transport.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TransportShortcutKeys.h"
+#include "ui/CollapsibleSideStrip.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 
@@ -33,6 +35,7 @@ namespace
 } // namespace
 
 class ExperimentalMidiEditorWindow::Body final : public juce::Component,
+                                                 public collapsible_side_strip::Host,
                                                  private juce::Timer,
                                                  private juce::Slider::Listener
 {
@@ -42,6 +45,8 @@ public:
     explicit Body(ExperimentalInstrumentHost& hostIn)
         : host_(hostIn)
         , player_(std::make_unique<ExperimentalMidiPatternPlayer>(hostIn, pattern_))
+        , midiRollResizeSplitter_(*this)
+        , midiRollCollapsedKnob_(*this)
     {
         pattern_.numSteps = 16;
         pattern_.stepDenom = 16;
@@ -51,6 +56,10 @@ public:
         player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
 
         addAndMakeVisible(viewport_);
+        addAndMakeVisible(midiRollResizeSplitter_);
+        midiRollResizeSplitter_.setVisible(false);
+        addAndMakeVisible(midiRollCollapsedKnob_);
+        midiRollCollapsedKnob_.setVisible(false);
 
         addAndMakeVisible(transportPlayButton_);
         transportPlayButton_.setButtonText("Play");
@@ -151,6 +160,17 @@ public:
         displayBox_.addItem("Bars", 2);
         displayBox_.setSelectedId(1, juce::dontSendNotification);
         displayBox_.onChange = [this] { pushDisplayToRoll(); };
+
+        addAndMakeVisible(rowsLabel_);
+        rowsLabel_.setText("Rows", juce::dontSendNotification);
+        rowsLabel_.setJustificationType(juce::Justification::centredRight);
+        rowsLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+        addAndMakeVisible(rowsBox_);
+        rowsBox_.addItem("Piano", 1);
+        rowsBox_.addItem("Drum Names", 2);
+        rowsBox_.setSelectedId(1, juce::dontSendNotification);
+        rowsBox_.onChange = [this] { pushRowsModeToRoll(); };
 
         addAndMakeVisible(stepsLabel_);
         stepsLabel_.setText("Steps", juce::dontSendNotification);
@@ -262,6 +282,7 @@ public:
                 instrumentTrackForClipBind_,
                 mainTimelineViewportForRoll_);
             pushTransportGestureBlockToRoll();
+            pushRowsModeToRoll();
         }
     }
 
@@ -534,6 +555,8 @@ public:
         snapBox_.setBounds(toolbar.removeFromLeft(76).reduced(0, 2));
         displayLabel_.setBounds(toolbar.removeFromLeft(52).reduced(0, 4));
         displayBox_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
+        rowsLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
+        rowsBox_.setBounds(toolbar.removeFromLeft(104).reduced(0, 2));
         stepsLabel_.setBounds(toolbar.removeFromLeft(44).reduced(0, 4));
         stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
         followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
@@ -574,7 +597,7 @@ public:
             const int rw = juce::jmax(1, budgetW);
             const int rh = juce::jmax(rollMinH, budgetH);
             rv->setSize(rw, rh);
-            viewport_.setViewPosition(0, 0);
+            viewport_.setViewPosition(viewport_.getViewPositionX(), 0);
 
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
                 "midi-editor: resized viewportBounds=" + viewport_.getBounds().toString() + " maxVisible="
@@ -588,9 +611,24 @@ public:
                 + juce::String(rv->getViewportVisibleStartSamples()) + " spp="
                 + juce::String(rv->getViewportSamplesPerPixel()));
         }
+        pushActiveSideStripWidthToRoll();
+        layoutMidiSideStripChrome();
     }
 
 private:
+    // collapsible_side_strip::Host (stable Body owns strip chrome + per-mode widths, like `TransportControlsContent`).
+    [[nodiscard]] int getSideStripWidth() const noexcept override { return midiRollActiveSideStripTotal(); }
+    void setSideStripWidth(int w) noexcept override { midiRollSetActiveSideStripTotal(w); }
+    [[nodiscard]] int getSideStripMaxWidth() const noexcept override { return midiRollActiveSideStripMax(); }
+    [[nodiscard]] int getSideStripDefaultWidth() const noexcept override;
+    void sideStripLayoutChanged() override;
+
+    void pushActiveSideStripWidthToRoll();
+    void layoutMidiSideStripChrome();
+    [[nodiscard]] int midiRollActiveSideStripTotal() const noexcept;
+    [[nodiscard]] int midiRollActiveSideStripMax() const noexcept;
+    void midiRollSetActiveSideStripTotal(int w) noexcept;
+
     void timerCallback() override;
     void setTransportCommands(ExperimentalMidiTransportCommands commands);
     void pushTransportGestureBlockToRoll();
@@ -615,6 +653,9 @@ private:
     void syncStepsAndSnapUiForPattern();
     void pushSnapToRoll();
     void pushDisplayToRoll();
+    void pushRowsModeToRoll();
+    [[nodiscard]] juce::String resolveDrumRowDisplayName(int midiNote, int pluginQueryChannel) const noexcept;
+    [[nodiscard]] juce::String resolveDrumRowHoverTooltip(int midiNote, int pluginQueryChannel) const noexcept;
     void beginImportMidi();
     void launchMidiFileChooserAfterConfirm();
     void applyMidiImportResultToPattern(const ExperimentalMidiImportResult& result);
@@ -673,6 +714,7 @@ private:
             "midi-editor: setViewedComponent rollPtr=" + ptrToLog(roll) + " width="
             + juce::String(roll->getWidth()) + " height=" + juce::String(roll->getHeight()));
         applyInstrumentUndoGatewayToRoll();
+        pushRowsModeToRoll();
     }
 
     ExperimentalInstrumentHost& host_;
@@ -697,12 +739,16 @@ private:
     juce::ComboBox snapBox_;
     juce::Label displayLabel_;
     juce::ComboBox displayBox_;
+    juce::Label rowsLabel_;
+    juce::ComboBox rowsBox_;
     juce::Label bpmLabel_;
     juce::Slider bpmSlider_;
     juce::Label stepsLabel_;
     juce::ComboBox stepsBox_;
     juce::TextButton followPlayheadToggle_;
     juce::Label modeLabel_;
+    collapsible_side_strip::ResizeSplitter midiRollResizeSplitter_;
+    collapsible_side_strip::CollapsedKnob midiRollCollapsedKnob_;
     juce::Viewport viewport_;
 
     std::unique_ptr<juce::FileChooser> midiImportChooser_;
@@ -721,8 +767,95 @@ private:
     /// controller may have freed clip storage (`applyExperimentalInstrumentMusicalUndoBlock`).
     std::uint64_t persistentInstrumentClipIdForRebind_ = 0;
 
+    /// Stable per–row-mode strip totals (content + splitter); survives piano roll rebuilds.
+    int midiRollSideStripTotalPiano_ =
+        ExperimentalPianoRollView::kMidiEditorKeyboardLaneWidthPianoDefault + collapsible_side_strip::kSplitterWidth;
+    int midiRollSideStripTotalDrum_ = ExperimentalPianoRollView::kMidiEditorKeyboardLaneWidthDrumNamesDefault
+                                      + collapsible_side_strip::kSplitterWidth;
+    /// 1 = piano row labels, 2 = drum names — mirrors `rowsBox_`; selects which total width bucket is active.
+    int midiRollRowLabelMode_ = 1;
+
     ExperimentalMidiTransportCommands transportCommands_{};
 };
+
+int ExperimentalMidiEditorWindow::Body::getSideStripDefaultWidth() const noexcept
+{
+    return midiRollRowLabelMode_ == 2
+               ? (ExperimentalPianoRollView::kMidiEditorKeyboardLaneWidthDrumNamesDefault
+                  + collapsible_side_strip::kSplitterWidth)
+               : (ExperimentalPianoRollView::kMidiEditorKeyboardLaneWidthPianoDefault
+                  + collapsible_side_strip::kSplitterWidth);
+}
+
+void ExperimentalMidiEditorWindow::Body::sideStripLayoutChanged()
+{
+    resized();
+}
+
+int ExperimentalMidiEditorWindow::Body::midiRollActiveSideStripTotal() const noexcept
+{
+    return midiRollRowLabelMode_ == 2 ? midiRollSideStripTotalDrum_ : midiRollSideStripTotalPiano_;
+}
+
+int ExperimentalMidiEditorWindow::Body::midiRollActiveSideStripMax() const noexcept
+{
+    return midiRollRowLabelMode_ == 2
+               ? (ExperimentalPianoRollView::kMidiEditorKeyboardLaneWidthDrumNamesMax
+                  + collapsible_side_strip::kSplitterWidth)
+               : (ExperimentalPianoRollView::kMidiEditorKeyboardLaneWidthPianoMax
+                  + collapsible_side_strip::kSplitterWidth);
+}
+
+void ExperimentalMidiEditorWindow::Body::midiRollSetActiveSideStripTotal(const int w) noexcept
+{
+    const int nw = juce::jlimit(0, midiRollActiveSideStripMax(), w);
+    if (midiRollRowLabelMode_ == 2)
+    {
+        midiRollSideStripTotalDrum_ = nw;
+    }
+    else
+    {
+        midiRollSideStripTotalPiano_ = nw;
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::pushActiveSideStripWidthToRoll()
+{
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->setSideStripTotalWidthForUiOnly(midiRollActiveSideStripTotal());
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::layoutMidiSideStripChrome()
+{
+    const int S = midiRollActiveSideStripTotal();
+    const auto vr = viewport_.getBounds();
+    const int rh = ExperimentalPianoRollView::kRulerHeight;
+    if (S <= 0)
+    {
+        midiRollResizeSplitter_.setVisible(false);
+        midiRollResizeSplitter_.setBounds(0, 0, 0, 0);
+        const int kY = vr.getCentreY() - collapsible_side_strip::kCollapsedKnobHeight / 2;
+        midiRollCollapsedKnob_.setBounds(
+            vr.getX(),
+            kY,
+            collapsible_side_strip::kCollapsedKnobWidth,
+            collapsible_side_strip::kCollapsedKnobHeight);
+        midiRollCollapsedKnob_.setVisible(true);
+        midiRollCollapsedKnob_.toFront(false);
+    }
+    else
+    {
+        midiRollCollapsedKnob_.setVisible(false);
+        const int splitW = juce::jmin(collapsible_side_strip::kSplitterWidth, S);
+        const int contentW = juce::jmax(0, S - splitW);
+        const int bodyH = juce::jmax(0, vr.getHeight() - rh);
+        midiRollResizeSplitter_.setBounds(vr.getX() + contentW, vr.getY() + rh, splitW, bodyH);
+        midiRollResizeSplitter_.setVisible(true);
+        midiRollResizeSplitter_.toFront(false);
+    }
+}
 
 void ExperimentalMidiEditorWindow::Body::timerCallback()
 {
@@ -987,6 +1120,98 @@ void ExperimentalMidiEditorWindow::Body::pushDisplayToRoll()
     }
 }
 
+juce::String ExperimentalMidiEditorWindow::Body::resolveDrumRowDisplayName(const int midiNote,
+                                                                           const int pluginQueryChannel) const noexcept
+{
+    if (instrumentTrackForClipBind_ != nullptr)
+    {
+        const juce::String o = instrumentTrackForClipBind_->getDrumNoteUserOverride(midiNote);
+        if (o.isNotEmpty())
+        {
+            return o;
+        }
+    }
+    const bool pluginAuthoritative = host_.hasPluginDrumNameMapAvailable();
+    if (pluginAuthoritative)
+    {
+        if (auto opt = host_.getPluginNoteNameIfAvailable(midiNote, pluginQueryChannel))
+        {
+            return *opt;
+        }
+        return {};
+    }
+    const juce::String gm = drum_note_names::gmPercussionName(midiNote);
+    if (gm.isNotEmpty())
+    {
+        return gm;
+    }
+    return juce::MidiMessage::getMidiNoteName(midiNote, true, true, 3);
+}
+
+juce::String ExperimentalMidiEditorWindow::Body::resolveDrumRowHoverTooltip(
+    const int midiNote,
+    const int pluginQueryChannel) const noexcept
+{
+    if (!host_.hasPluginDrumNameMapAvailable())
+    {
+        return {};
+    }
+    if (instrumentTrackForClipBind_ != nullptr
+        && instrumentTrackForClipBind_->getDrumNoteUserOverride(midiNote).isNotEmpty())
+    {
+        return {};
+    }
+    if (auto opt = host_.getPluginNoteNameIfAvailable(midiNote, pluginQueryChannel))
+    {
+        if (opt->isNotEmpty())
+        {
+            return {};
+        }
+    }
+    juce::String s = "MIDI " + juce::String(midiNote);
+    const juce::String piano = juce::MidiMessage::getMidiNoteName(midiNote, true, true, 3);
+    if (piano.isNotEmpty())
+    {
+        s << " | " << piano;
+    }
+    return s;
+}
+
+void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
+{
+    midiRollRowLabelMode_ = juce::jlimit(1, 2, rowsBox_.getSelectedId());
+    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        rv->setRowLabelMode(midiRollRowLabelMode_);
+        rv->setSideStripTotalWidthForUiOnly(midiRollActiveSideStripTotal());
+        const int pluginCh = instrumentTrackForClipBind_ != nullptr
+                                 ? instrumentTrackForClipBind_->pluginNoteNameQueryChannel(boundTimelineClip_)
+                                 : 10;
+        rv->setRowLabelProvider([this, pluginCh](const int note) {
+            return resolveDrumRowDisplayName(note, pluginCh);
+        });
+        if (rowsBox_.getSelectedId() == 2)
+        {
+            rv->setRowLabelTooltipProvider([this, pluginCh](const int note) {
+                return resolveDrumRowHoverTooltip(note, pluginCh);
+            });
+        }
+        else
+        {
+            rv->setRowLabelTooltipProvider({});
+        }
+        rv->setOnCommitRowLabelEdit([this](const int note, juce::String name) {
+            if (instrumentTrackForClipBind_ == nullptr)
+            {
+                return;
+            }
+            instrumentTrackForClipBind_->setDrumNoteUserOverride(note, std::move(name));
+        });
+        rv->repaint();
+    }
+    layoutMidiSideStripChrome();
+}
+
 void ExperimentalMidiEditorWindow::Body::beginImportMidi()
 {
     if (externalPattern_ == nullptr || boundTimelineClip_ == nullptr)
@@ -1198,6 +1423,7 @@ ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumen
                      juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                          juce::ResizableWindow::backgroundColourId),
                      DocumentWindow::allButtons)
+    , host_(host)
 {
     setUsingNativeTitleBar(true);
     addKeyListener(this);
@@ -1206,10 +1432,13 @@ ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumen
     setResizable(true, true);
     setResizeLimits(640, 420, 10000, 10000);
     centreWithSize(kInitialEditorWidth, kInitialEditorHeight);
+
+    host_.setOnPluginPitchNamesCacheMayHaveChanged([this] { syncInstrumentStateFromHost(); });
 }
 
 ExperimentalMidiEditorWindow::~ExperimentalMidiEditorWindow()
 {
+    host_.setOnPluginPitchNamesCacheMayHaveChanged({});
     removeKeyListener(this);
 }
 

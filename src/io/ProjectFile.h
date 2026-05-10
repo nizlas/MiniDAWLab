@@ -120,6 +120,8 @@ struct ProjectFileExperimentalInstrumentTrackV1
     bool pluginWasLoadedOnSave = false;
     bool powerOn = true;
     bool muted = false;
+    /// v12+ optional: user drum-row label overrides keyed by MIDI note (0–127). Omitted when empty.
+    std::vector<std::pair<int, juce::String>> drumNoteNameOverrides;
     std::vector<ProjectFileExperimentalInstrumentClipV1> clips;
 };
 

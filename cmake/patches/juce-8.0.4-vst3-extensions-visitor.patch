@@ -1,0 +1,38 @@
+diff --git a/modules/juce_audio_processors/utilities/juce_ExtensionsVisitor.h b/modules/juce_audio_processors/utilities/juce_ExtensionsVisitor.h
+--- a/modules/juce_audio_processors/utilities/juce_ExtensionsVisitor.h
++++ b/modules/juce_audio_processors/utilities/juce_ExtensionsVisitor.h
+@@ -37,6 +37,8 @@
+ namespace Steinberg::Vst
+ {
+     class IComponent;
++    class IEditController;
++    class IUnitInfo;
+ } // namespace Steinberg::Vst
+ 
+ #endif
+@@ -99,6 +101,8 @@ struct ExtensionsVisitor
+     {
+         virtual ~VST3Client() = default;
+         virtual Steinberg::Vst::IComponent* getIComponentPtr() const noexcept = 0;
++        virtual Steinberg::Vst::IEditController* getIEditControllerPtr() const noexcept { return nullptr; }
++        virtual Steinberg::Vst::IUnitInfo* getIUnitInfoPtr() const noexcept { return nullptr; }
+ 
+         virtual MemoryBlock getPreset() const = 0;
+         virtual bool setPreset (const MemoryBlock&) const = 0;
+diff --git a/modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp b/modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp
+--- a/modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp
++++ b/modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp
+@@ -2704,6 +2704,12 @@
+         {
+             explicit Extensions (const VST3PluginInstance* instanceIn) : instance (instanceIn) {}
+ 
+             Vst::IComponent* getIComponentPtr() const noexcept override   { return instance->holder->component.get(); }
++
++            Vst::IEditController* getIEditControllerPtr() const noexcept override
++            { return instance->editController.get(); }
++
++            Vst::IUnitInfo* getIUnitInfoPtr() const noexcept override
++            { return instance->unitInfo.get(); }
+ 
+             MemoryBlock getPreset() const override             { return instance->getStateForPresetFile(); }
+ 

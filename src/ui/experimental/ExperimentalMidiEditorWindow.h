@@ -93,5 +93,7 @@ public:
 private:
     class Body;
 
+    ExperimentalInstrumentHost& host_;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExperimentalMidiEditorWindow)
 };
