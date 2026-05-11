@@ -1,7 +1,9 @@
 #include "plugins/Vst3ChildProcessScan.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_cryptography/juce_cryptography.h>
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -188,6 +190,179 @@ namespace
     }
 } // namespace
 
+namespace vst3_experimental_desc_cache
+{
+    [[nodiscard]] juce::String experimentalCacheRootTag() noexcept
+    {
+        return "MiniDAWExperimentalVst3Descriptions";
+    }
+
+    [[nodiscard]] juce::String scanOutcomeToAttributeString(const Vst3ExperimentalCacheScanOutcome o) noexcept
+    {
+        return o == Vst3ExperimentalCacheScanOutcome::Success ? "success" : "failed";
+    }
+
+    [[nodiscard]] std::unique_ptr<juce::XmlElement> pluginCapabilitiesToXmlElement(const PluginCapabilities& caps)
+    {
+        auto root = std::make_unique<juce::XmlElement>("capabilities");
+        if (caps.drumNoteDisplay.has_value())
+        {
+            root->addChildElement(std::make_unique<juce::XmlElement>("drumNoteDisplay").release());
+        }
+        if (caps.rawPitchMap.has_value())
+        {
+            root->addChildElement(std::make_unique<juce::XmlElement>("rawPitchMap").release());
+        }
+        if (caps.playableRange.has_value())
+        {
+            root->addChildElement(std::make_unique<juce::XmlElement>("playableRange").release());
+        }
+        if (caps.programList.has_value())
+        {
+            root->addChildElement(std::make_unique<juce::XmlElement>("programList").release());
+        }
+        return root;
+    }
+
+    /// Phase 2 wrapper only — must be lowercase `plugin`. JUCE persists descriptions as uppercase `PLUGIN`.
+    [[nodiscard]] bool isPhase2PluginWrapperElement(const juce::XmlElement* e) noexcept
+    {
+        return e != nullptr && e->getTagName() == juce::String("plugin");
+    }
+
+    [[nodiscard]] bool isCapabilitiesElement(const juce::XmlElement* e) noexcept
+    {
+        return e != nullptr && e->getTagName() == juce::String("capabilities");
+    }
+
+    void collectPluginDescriptionsFromBundle(juce::XmlElement* bundle,
+                                             std::vector<juce::PluginDescription>& descriptionsOut)
+    {
+        descriptionsOut.clear();
+        if (bundle == nullptr || !bundle->hasTagName("bundle"))
+        {
+            return;
+        }
+        bool anyPhase2Wrapper = false;
+        for (auto* e : bundle->getChildIterator())
+        {
+            if (isPhase2PluginWrapperElement(e))
+            {
+                anyPhase2Wrapper = true;
+                break;
+            }
+        }
+        if (anyPhase2Wrapper)
+        {
+            for (auto* e : bundle->getChildIterator())
+            {
+                if (!isPhase2PluginWrapperElement(e))
+                {
+                    continue;
+                }
+                for (auto* inner : e->getChildIterator())
+                {
+                    if (inner == nullptr || isCapabilitiesElement(inner))
+                    {
+                        continue;
+                    }
+                    juce::PluginDescription d;
+                    if (d.loadFromXml(*inner))
+                    {
+                        descriptionsOut.push_back(std::move(d));
+                    }
+                }
+            }
+            return;
+        }
+        for (auto* e : bundle->getChildIterator())
+        {
+            if (e == nullptr)
+            {
+                continue;
+            }
+            juce::PluginDescription d;
+            if (d.loadFromXml(*e))
+            {
+                descriptionsOut.push_back(std::move(d));
+            }
+        }
+    }
+
+    void applyFingerprintAttributesToBundle(juce::XmlElement& bundle,
+                                            const Vst3BundleFileFingerprint& fp,
+                                            const juce::String& lastScanIso,
+                                            const Vst3ExperimentalCacheScanOutcome outcome)
+    {
+        bundle.setAttribute("schemaVersion", 2);
+        bundle.setAttribute("fileSize", juce::String(fp.fileSizeBytes));
+        bundle.setAttribute("fileMtimeIso", fp.fileMtimeIso);
+        bundle.setAttribute("fileSha256Prefix", fp.fileSha256Prefix16Hex);
+        bundle.setAttribute("lastScanIso", lastScanIso);
+        bundle.setAttribute("scanOutcome", scanOutcomeToAttributeString(outcome));
+    }
+
+    void appendSortedDescriptionsToV2Bundle(juce::XmlElement& bundle,
+                                            const std::vector<juce::PluginDescription>& descriptionsSorted,
+                                            const PluginCapabilities& defaultCaps)
+    {
+        for (const auto& d : descriptionsSorted)
+        {
+            if (auto leg = d.createXml())
+            {
+                bundle.addChildElement(leg.release());
+            }
+            auto* wrap = new juce::XmlElement("plugin");
+            wrap->setAttribute("identifier", d.createIdentifierString());
+            wrap->setAttribute(
+                "uid",
+                juce::String::formatted("%08x", static_cast<unsigned int>(d.uniqueId) & 0xffffffffu));
+            wrap->setAttribute("nameLower", d.name.toLowerCase());
+            if (auto innerPd = d.createXml())
+            {
+                wrap->addChildElement(innerPd.release());
+            }
+            if (auto capsXml = pluginCapabilitiesToXmlElement(defaultCaps))
+            {
+                wrap->addChildElement(capsXml.release());
+            }
+            bundle.addChildElement(wrap);
+        }
+    }
+} // namespace vst3_experimental_desc_cache
+
+Vst3BundleFileFingerprint computeVst3BundleFileFingerprint(const juce::File& vst3Bundle) noexcept
+{
+    Vst3BundleFileFingerprint fp;
+    if (!vst3Bundle.exists())
+    {
+        return fp;
+    }
+    fp.fileSizeBytes = vst3Bundle.getSize();
+    fp.fileMtimeIso = juce::Time(vst3Bundle.getLastModificationTime()).toISO8601(true);
+    if (!vst3Bundle.isDirectory())
+    {
+        constexpr juce::int64 kMaxHashBytes = 64 * 1024 * 1024;
+        const juce::int64 sz = vst3Bundle.getSize();
+        if (sz > 0 && sz <= kMaxHashBytes)
+        {
+            juce::MemoryBlock mb;
+            if (vst3Bundle.loadFileAsData(mb) && mb.getSize() > 0)
+            {
+                try
+                {
+                    juce::SHA256 sha(mb.getData(), (size_t)mb.getSize());
+                    fp.fileSha256Prefix16Hex = sha.toHexString().substring(0, 16);
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+    }
+    return fp;
+}
+
 juce::StringArray rawScanWorkerArgsFromCommandLine(const juce::String& commandLine)
 {
     juce::StringArray out = splitCommandLineToArgs(commandLine);
@@ -278,12 +453,26 @@ bool tryLoadExperimentalVst3DescriptionsFromCache(const juce::File& vst3Bundle,
     }
 
     const std::unique_ptr<juce::XmlElement> root = juce::parseXML(cacheFile);
-    if (root == nullptr || !root->hasTagName("MiniDAWExperimentalVst3Descriptions"))
+    if (root == nullptr || !root->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
     {
         return false;
     }
 
+    int bundleCount = 0;
+    for (juce::XmlElement* b = root->getFirstChildElement(); b != nullptr; b = b->getNextElement())
+    {
+        if (b->hasTagName("bundle"))
+        {
+            ++bundleCount;
+        }
+    }
+
     const juce::String key = vst3Bundle.getFullPathName();
+    writeVst3OopScanDiagnosticLogLine(
+        "cache parse: root tag=\"" + root->getTagName() + "\" version=\""
+        + root->getStringAttribute("version", "(none)") + "\" bundleCount=" + juce::String(bundleCount)
+        + " targetPath=\"" + key + "\"");
+
     for (juce::XmlElement* bundle = root->getFirstChildElement(); bundle != nullptr;
          bundle = bundle->getNextElement())
     {
@@ -293,29 +482,31 @@ bool tryLoadExperimentalVst3DescriptionsFromCache(const juce::File& vst3Bundle,
         }
         const juce::String stored = bundle->getStringAttribute("vst3Path");
 #if JUCE_WINDOWS
-        if (stored.compareIgnoreCase(key) != 0)
+        const bool pathMatched = (stored.compareIgnoreCase(key) == 0);
 #else
-        if (stored != key)
+        const bool pathMatched = (stored == key);
 #endif
+        writeVst3OopScanDiagnosticLogLine(
+            "cache parse: bundle vst3Path=\"" + stored + "\" pathMatched="
+            + juce::String(pathMatched ? "yes" : "no"));
+        if (!pathMatched)
         {
             continue;
         }
 
-        for (auto* e : bundle->getChildIterator())
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(bundle, descriptionsOut);
+        juce::String firstLoaded;
+        if (!descriptionsOut.empty())
         {
-            if (e == nullptr)
-            {
-                continue;
-            }
-            juce::PluginDescription d;
-            if (d.loadFromXml(*e))
-            {
-                descriptionsOut.push_back(std::move(d));
-            }
+            const auto& d0 = descriptionsOut.front();
+            firstLoaded = " firstLoaded name=\"" + d0.name + "\" file=\"" + d0.fileOrIdentifier + "\"";
         }
+        writeVst3OopScanDiagnosticLogLine("cache parse: matched bundle descriptionsLoaded="
+                                          + juce::String((int)descriptionsOut.size()) + firstLoaded);
         return !descriptionsOut.empty();
     }
 
+    writeVst3OopScanDiagnosticLogLine("cache parse: no matching bundle for targetPath=\"" + key + "\"");
     return false;
 }
 
@@ -433,10 +624,23 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
         return false;
     }
     const std::unique_ptr<juce::XmlElement> xmlRoot = juce::parseXML(cacheFile);
-    if (xmlRoot == nullptr || !xmlRoot->hasTagName("MiniDAWExperimentalVst3Descriptions"))
+    if (xmlRoot == nullptr || !xmlRoot->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
     {
         return false;
     }
+
+    int bundleCount = 0;
+    for (juce::XmlElement* b = xmlRoot->getFirstChildElement(); b != nullptr; b = b->getNextElement())
+    {
+        if (b->hasTagName("bundle"))
+        {
+            ++bundleCount;
+        }
+    }
+    writeVst3OopScanDiagnosticLogLine(
+        "groove full-cache scan: root tag=\"" + xmlRoot->getTagName() + "\" version=\""
+        + xmlRoot->getStringAttribute("version", "(none)") + "\" bundleCount=" + juce::String(bundleCount));
+
     for (juce::XmlElement* bundle = xmlRoot->getFirstChildElement(); bundle != nullptr;
          bundle = bundle->getNextElement())
     {
@@ -444,62 +648,82 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
         {
             continue;
         }
+        const juce::String stored = bundle->getStringAttribute("vst3Path");
         std::vector<juce::PluginDescription> oneBundle;
-        for (auto* e : bundle->getChildIterator())
-        {
-            if (e == nullptr)
-            {
-                continue;
-            }
-            juce::PluginDescription d;
-            if (d.loadFromXml(*e))
-            {
-                oneBundle.push_back(std::move(d));
-            }
-        }
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(bundle, oneBundle);
+        writeVst3OopScanDiagnosticLogLine(
+            "groove full-cache scan: bundle vst3Path=\"" + stored + "\" descriptionsLoaded="
+            + juce::String((int)oneBundle.size()));
         for (const auto& d : oneBundle)
         {
             if (d.name.containsIgnoreCase("Groove Agent SE"))
             {
                 descriptionsOut = std::move(oneBundle);
-                bundleKeyAttributeOut = bundle->getStringAttribute("vst3Path");
+                bundleKeyAttributeOut = stored;
+                juce::String firstLoaded;
+                if (!descriptionsOut.empty())
+                {
+                    const auto& d0 = descriptionsOut.front();
+                    firstLoaded = " firstLoaded name=\"" + d0.name + "\" file=\"" + d0.fileOrIdentifier + "\"";
+                }
+                writeVst3OopScanDiagnosticLogLine("groove full-cache scan: HIT name match bundleKey=\""
+                                                  + bundleKeyAttributeOut + "\" descriptionsLoaded="
+                                                  + juce::String((int)descriptionsOut.size()) + firstLoaded);
                 return !descriptionsOut.empty();
             }
         }
     }
+
+    writeVst3OopScanDiagnosticLogLine("groove full-cache scan: no Groove Agent SE entry found");
     return false;
 }
 
 void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
-                                                    const std::vector<juce::PluginDescription>& descriptions)
+                                                    const std::vector<juce::PluginDescription>& descriptions,
+                                                    const Vst3ExperimentalCacheScanOutcome scanOutcome)
 {
     if (descriptions.empty())
     {
         return;
     }
-
-    auto* newBundle = new juce::XmlElement{ "bundle" };
-    newBundle->setAttribute("vst3Path", vst3Bundle.getFullPathName());
+    std::vector<juce::PluginDescription> sorted = descriptions;
+    std::sort(
+        sorted.begin(),
+        sorted.end(),
+        [](const juce::PluginDescription& a, const juce::PluginDescription& b) {
+            const int c = a.createIdentifierString().compare(b.createIdentifierString());
+            if (c != 0)
+            {
+                return c < 0;
+            }
+            return a.name.compare(b.name) < 0;
+        });
 
     int xmlCount = 0;
-    for (const auto& d : descriptions)
+    for (const auto& d : sorted)
     {
-        auto one = d.createXml();
-        if (one != nullptr)
+        if (d.createXml() != nullptr)
         {
-            newBundle->addChildElement(one.release());
             ++xmlCount;
         }
     }
-
     if (xmlCount == 0)
     {
-        delete newBundle;
         writeVst3OopScanDiagnosticLogLine(
             "parent: experimental-vst3-descriptions.xml not updated (PluginDescription::createXml returned "
             "nothing for all descriptions)");
         return;
     }
+
+    const Vst3BundleFileFingerprint fp = computeVst3BundleFileFingerprint(vst3Bundle);
+    const juce::String lastScanIso = juce::Time::getCurrentTime().toISO8601(true);
+    const PluginCapabilities emptyCaps;
+
+    auto* newBundle = new juce::XmlElement("bundle");
+    newBundle->setAttribute("vst3Path", vst3Bundle.getFullPathName());
+    vst3_experimental_desc_cache::applyFingerprintAttributesToBundle(
+        *newBundle, fp, lastScanIso, scanOutcome);
+    vst3_experimental_desc_cache::appendSortedDescriptionsToV2Bundle(*newBundle, sorted, emptyCaps);
 
     const juce::File cacheFile = getExperimentalVst3DescriptionsCacheFile();
     try
@@ -515,11 +739,11 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
             root = juce::parseXML(cacheFile);
         }
 
-        if (root == nullptr || !root->hasTagName("MiniDAWExperimentalVst3Descriptions"))
+        if (root == nullptr || !root->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
         {
-            root = std::make_unique<juce::XmlElement>("MiniDAWExperimentalVst3Descriptions");
-            root->setAttribute("version", 1);
+            root = std::make_unique<juce::XmlElement>(vst3_experimental_desc_cache::experimentalCacheRootTag());
         }
+        root->setAttribute("version", 2);
 
         juce::XmlElement* walk = root->getFirstChildElement();
         while (walk != nullptr)
@@ -545,7 +769,7 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
 
         writeVst3OopScanDiagnosticLogLine(
             "parent: experimental-vst3-descriptions.xml updated vst3Path=\"" + vst3Bundle.getFullPathName()
-            + "\" pluginXmlCount=" + juce::String(xmlCount));
+            + "\" pluginXmlCount=" + juce::String(xmlCount) + " cacheSchema=v2");
     }
     catch (...)
     {
@@ -553,6 +777,251 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
             "parent: experimental-vst3-descriptions.xml update threw (path=\"" + cacheFile.getFullPathName()
             + "\")");
     }
+}
+
+void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
+                                 const juce::PluginDescription& forPlugin,
+                                 const PluginCapabilities& caps)
+{
+    const juce::File cacheFile = getExperimentalVst3DescriptionsCacheFile();
+    if (!cacheFile.existsAsFile())
+    {
+        return;
+    }
+    try
+    {
+        std::unique_ptr<juce::XmlElement> root = juce::parseXML(cacheFile);
+        if (root == nullptr || !root->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
+        {
+            return;
+        }
+        juce::XmlElement* bundleEl = nullptr;
+        for (auto* b = root->getFirstChildElement(); b != nullptr; b = b->getNextElement())
+        {
+            if (b->hasTagName("bundle") && experimentalBundleXmlKeyMatches(b->getStringAttribute("vst3Path"), vst3Bundle))
+            {
+                bundleEl = b;
+                break;
+            }
+        }
+        if (bundleEl == nullptr)
+        {
+            return;
+        }
+        bool anyPluginWrapper = false;
+        for (auto* e : bundleEl->getChildIterator())
+        {
+            if (vst3_experimental_desc_cache::isPhase2PluginWrapperElement(e))
+            {
+                anyPluginWrapper = true;
+                break;
+            }
+        }
+        if (!anyPluginWrapper)
+        {
+            return;
+        }
+        const juce::String wantId = forPlugin.createIdentifierString();
+        juce::XmlElement* targetPlugin = nullptr;
+        for (auto* e : bundleEl->getChildIterator())
+        {
+            if (!vst3_experimental_desc_cache::isPhase2PluginWrapperElement(e))
+            {
+                continue;
+            }
+            if (e->getStringAttribute("identifier") == wantId)
+            {
+                targetPlugin = e;
+                break;
+            }
+        }
+        if (targetPlugin == nullptr)
+        {
+            return;
+        }
+        juce::XmlElement* capToRemove = nullptr;
+        for (auto* ch : targetPlugin->getChildIterator())
+        {
+            if (ch != nullptr && vst3_experimental_desc_cache::isCapabilitiesElement(ch))
+            {
+                capToRemove = ch;
+                break;
+            }
+        }
+        if (capToRemove != nullptr)
+        {
+            targetPlugin->removeChildElement(capToRemove, true);
+        }
+        if (auto capXml = vst3_experimental_desc_cache::pluginCapabilitiesToXmlElement(caps))
+        {
+            targetPlugin->addChildElement(capXml.release());
+        }
+        if (!root->writeTo(cacheFile))
+        {
+            return;
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+bool verifyExperimentalVst3DescriptionsCachePhase2() noexcept
+{
+    try
+    {
+        juce::XmlElement rootV1(vst3_experimental_desc_cache::experimentalCacheRootTag());
+        rootV1.setAttribute("version", 1);
+        auto* b1 = rootV1.createNewChildElement("bundle");
+        b1->setAttribute("vst3Path", "C:/unittest/LegacyPlugin.vst3");
+        juce::PluginDescription dLegacy;
+        dLegacy.name = "LegacyPlugin";
+        dLegacy.pluginFormatName = "VST3";
+        dLegacy.manufacturerName = "Mfgr";
+        if (auto dx = dLegacy.createXml())
+        {
+            b1->addChildElement(dx.release());
+        }
+        std::vector<juce::PluginDescription> v1Out;
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(b1, v1Out);
+        if (v1Out.size() != 1 || v1Out[0].name != "LegacyPlugin")
+        {
+            return false;
+        }
+
+        juce::XmlElement rootV2(vst3_experimental_desc_cache::experimentalCacheRootTag());
+        rootV2.setAttribute("version", 2);
+        auto* b2 = rootV2.createNewChildElement("bundle");
+        b2->setAttribute("vst3Path", "C:/unittest/WrapPlugin.vst3");
+        b2->setAttribute("schemaVersion", 2);
+        b2->setAttribute("fileSize", "4096");
+        b2->setAttribute("fileMtimeIso", "2026-05-10T12:00:00+0000");
+        b2->setAttribute("fileSha256Prefix", "deadbeefcafebabe");
+        b2->setAttribute("lastScanIso", "2026-05-10T12:01:00+0000");
+        b2->setAttribute("scanOutcome", "success");
+        juce::PluginDescription dWrap;
+        dWrap.name = "WrapPlugin";
+        dWrap.pluginFormatName = "VST3";
+        dWrap.manufacturerName = "Mfgr";
+        dWrap.uniqueId = 0x12345678;
+        if (auto leg = dWrap.createXml())
+        {
+            b2->addChildElement(leg.release());
+        }
+        auto* plug = b2->createNewChildElement("plugin");
+        plug->setAttribute("identifier", dWrap.createIdentifierString());
+        plug->setAttribute("uid", juce::String::formatted("%08x", static_cast<unsigned int>(dWrap.uniqueId) & 0xffffffffu));
+        plug->setAttribute("nameLower", dWrap.name.toLowerCase());
+        if (auto inner = dWrap.createXml())
+        {
+            plug->addChildElement(inner.release());
+        }
+        if (auto cap = vst3_experimental_desc_cache::pluginCapabilitiesToXmlElement({}))
+        {
+            plug->addChildElement(cap.release());
+        }
+        if (rootV2.getStringAttribute("version") != "2")
+        {
+            return false;
+        }
+        if (b2->getStringAttribute("fileSha256Prefix") != "deadbeefcafebabe")
+        {
+            return false;
+        }
+        int bareLegacyPd = 0;
+        int pluginWrappers = 0;
+        for (auto* ch : b2->getChildIterator())
+        {
+            if (ch == nullptr)
+            {
+                continue;
+            }
+            if (vst3_experimental_desc_cache::isPhase2PluginWrapperElement(ch))
+            {
+                ++pluginWrappers;
+                continue;
+            }
+            juce::PluginDescription probe;
+            if (probe.loadFromXml(*ch))
+            {
+                ++bareLegacyPd;
+            }
+        }
+        if (bareLegacyPd != 1 || pluginWrappers != 1)
+        {
+            return false;
+        }
+        std::vector<juce::PluginDescription> v2Out;
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(b2, v2Out);
+        if (v2Out.size() != 1 || v2Out[0].name != "WrapPlugin")
+        {
+            return false;
+        }
+
+        auto* bDup = rootV2.createNewChildElement("bundle");
+        bDup->setAttribute("vst3Path", "C:/unittest/DupPlugin.vst3");
+        if (auto leg2 = dWrap.createXml())
+        {
+            bDup->addChildElement(leg2.release());
+        }
+        auto* plug2 = bDup->createNewChildElement("plugin");
+        plug2->setAttribute("identifier", dWrap.createIdentifierString());
+        if (auto inner2 = dWrap.createXml())
+        {
+            plug2->addChildElement(inner2.release());
+        }
+        std::vector<juce::PluginDescription> dupOut;
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(bDup, dupOut);
+        if (dupOut.size() != 1)
+        {
+            return false;
+        }
+
+        const juce::String xml = rootV2.toString();
+        juce::TemporaryFile tmpFile(".xml");
+        if (!tmpFile.getFile().replaceWithText(xml))
+        {
+            return false;
+        }
+        const std::unique_ptr<juce::XmlElement> parsed = juce::parseXML(tmpFile.getFile());
+        if (parsed == nullptr || parsed->getStringAttribute("version") != "2")
+        {
+            return false;
+        }
+        juce::XmlElement* bundleWalk = nullptr;
+        for (auto* c = parsed->getFirstChildElement(); c != nullptr; c = c->getNextElement())
+        {
+            if (c->hasTagName("bundle") && c->getStringAttribute("vst3Path") == "C:/unittest/WrapPlugin.vst3")
+            {
+                bundleWalk = c;
+                break;
+            }
+        }
+        if (bundleWalk == nullptr)
+        {
+            return false;
+        }
+        std::vector<juce::PluginDescription> roundTrip;
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(bundleWalk, roundTrip);
+        if (roundTrip.size() != 1 || roundTrip[0].name != "WrapPlugin")
+        {
+            return false;
+        }
+
+        PluginCapabilities onlyDrum;
+        onlyDrum.drumNoteDisplay = DrumNoteDisplayCapability{};
+        auto capXml = vst3_experimental_desc_cache::pluginCapabilitiesToXmlElement(onlyDrum);
+        if (capXml == nullptr || capXml->getNumChildElements() != 1
+            || !capXml->getChildElement(0)->hasTagName("drumNoteDisplay"))
+        {
+            return false;
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return true;
 }
 
 bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(

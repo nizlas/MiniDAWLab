@@ -93,6 +93,7 @@ target_link_libraries(MiniDAWLab
         juce::juce_audio_processors
         juce::juce_audio_formats
         juce::juce_gui_extra
+        juce::juce_cryptography
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
