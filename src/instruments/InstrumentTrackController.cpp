@@ -645,14 +645,12 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     const juce::String pendingB64 = pendingPluginStateBase64_;
     pendingPluginStateBase64_.clear();
 
-    std::vector<juce::PluginDescription> descs;
-    juce::File bundle;
+    mini_daw::Vst3GrooveCacheLoadCandidate v2Cand;
+    mini_daw::Vst3GrooveCacheLoadCandidate v1Cand;
     juce::String info;
-    bool pathRepairUsed = false;
     const juce::File advisory(pendingAdvisoryPluginBundlePath_);
 
-    if (!mini_daw::tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
-            advisory, pendingInstrumentKind_, descs, bundle, info, &pathRepairUsed))
+    if (!mini_daw::tryLoadGrooveAgentCacheCandidates(advisory, v2Cand, v1Cand, info))
     {
         if (info.isNotEmpty())
         {
@@ -660,11 +658,6 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
         }
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: failed, project remains editable");
         juce::Logger::writeToLog("[project-autoload] Groove Agent SE autoload skipped: " + info);
-        syncShellWithHostState();
-        return;
-    }
-    if (descs.empty())
-    {
         syncShellWithHostState();
         return;
     }
@@ -701,31 +694,119 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
         ExperimentalInstrumentHost::appendInstrumentHostLogLine("plugin-state: restore skipped reason=no-state");
     }
 
-    const char* const tag = pathRepairUsed ? "project-autoload-repaired-cache" : "project-autoload-cached";
-    const juce::Result loadResult = host.loadInstrumentFromDescription(
-        descs.front(),
-        bundle,
-        tag,
-        statePtr,
-        (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
-    if (loadResult.wasOk())
-    {
-        mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: load result ok");
-        if (pathRepairUsed)
+    const auto buildTag = [](const mini_daw::Vst3GrooveCacheLoadCandidate& c) -> const char* {
+        if (c.tier == mini_daw::Vst3ExperimentalCacheTier::V2)
         {
-            mini_daw::mergeExperimentalVst3DescriptionsCacheBundle(bundle, descs);
-            mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: cache updated with repaired path");
+            return c.pathRepairUsed ? "project-autoload-repaired-cache-v2" : "project-autoload-cached-v2";
+        }
+        return c.pathRepairUsed ? "project-autoload-repaired-cache-v1" : "project-autoload-cached-v1";
+    };
+
+    const auto tryLoadFromCandidate = [&](const mini_daw::Vst3GrooveCacheLoadCandidate& cand) -> juce::Result {
+        if (!cand.valid || cand.descriptions.empty())
+        {
+            return juce::Result::fail("no candidate");
+        }
+        return host.loadInstrumentFromDescription(
+            cand.descriptions.front(),
+            cand.resolvedBundle,
+            buildTag(cand),
+            statePtr,
+            (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
+    };
+
+    juce::Result loadResult = juce::Result::fail("");
+
+    if (v2Cand.valid)
+    {
+        loadResult = tryLoadFromCandidate(v2Cand);
+        if (loadResult.wasOk())
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: cache source=v2 load=ok");
+        }
+        else
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload: cache source=v2 load=failed falling_back=v1 message=\""
+                + loadResult.getErrorMessage() + "\"");
         }
     }
-    else
+
+    if (!loadResult.wasOk() && !v2Cand.valid)
+    {
+        const juce::File scanTarget = [&]() -> juce::File {
+            if (advisory.exists())
+            {
+                return advisory;
+            }
+            if (v1Cand.valid && v1Cand.resolvedBundle.exists())
+            {
+                return v1Cand.resolvedBundle;
+            }
+            return mini_daw::getGrooveAgentSeVst3BundlePathForOopScanFallback();
+        }();
+
+        if (scanTarget.exists())
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload: v2 cache miss, OOP scan start target=\"" + scanTarget.getFullPathName() + "\"");
+            const mini_daw::Vst3OopScanResult scanOut = mini_daw::runVst3OopScanBlocking(scanTarget);
+            const bool scanOk = (scanOut.outcome == mini_daw::Vst3OopScanOutcome::Success)
+                                 && !scanOut.descriptions.empty();
+            if (scanOk)
+            {
+                loadResult = host.loadInstrumentFromDescription(
+                    scanOut.descriptions.front(),
+                    scanTarget,
+                    "project-autoload-oop-fresh-v2",
+                    statePtr,
+                    (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
+                if (loadResult.wasOk())
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "project-autoload: cache source=v2-fresh-scan load=ok");
+                }
+                else
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "project-autoload: v2 fresh scan load=failed message=\"" + loadResult.getErrorMessage()
+                        + "\" falling_back=v1");
+                }
+            }
+            else
+            {
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "project-autoload: OOP scan did not yield usable descriptions; falling_back=v1");
+            }
+        }
+        else
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload: v2 cache miss, no OOP scan target on disk; falling_back=v1");
+        }
+    }
+
+    if (!loadResult.wasOk() && v1Cand.valid)
+    {
+        loadResult = tryLoadFromCandidate(v1Cand);
+        if (loadResult.wasOk())
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: cache source=v1 load=ok");
+        }
+        else
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload: cache source=v1 load=failed message=\"" + loadResult.getErrorMessage() + "\"");
+        }
+    }
+
+    if (!loadResult.wasOk())
     {
         if (outWarning.isNotEmpty())
         {
             outWarning << "\n\n";
         }
         outWarning << loadResult.getErrorMessage();
-        mini_daw::writeVst3OopScanDiagnosticLogLine(
-            "project-autoload: load result failed message=\"" + loadResult.getErrorMessage() + "\"");
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: failed, project remains editable");
         juce::Logger::writeToLog("[project-autoload] Groove Agent load failed: " + loadResult.getErrorMessage());
     }

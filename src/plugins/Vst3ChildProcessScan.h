@@ -40,7 +40,7 @@ struct Vst3OopScanResult
     juce::String rawXmlHint;
 };
 
-/// Optional file fingerprint for `experimental-vst3-descriptions.xml` bundle rows (Phase 2 cache).
+/// Optional file fingerprint for v2 cache bundle rows (`experimental-vst3-descriptions-v2.xml`).
 struct Vst3BundleFileFingerprint
 {
     juce::int64 fileSizeBytes = 0;
@@ -93,29 +93,69 @@ struct PluginCapabilities
 
 void writeVst3OopScanDiagnosticLogLine(const juce::String& message);
 
+/// Windows: locate `Groove Agent SE.vst3` under common VST3 install folders (for OOP scan target fallback).
+/// Empty file on other platforms or when not found.
+[[nodiscard]] juce::File getGrooveAgentSeVst3BundlePathForOopScanFallback() noexcept;
+
 /// Cheap bundle metadata for cache validity (size, mtime, short hash). Hash may be empty on failure.
 [[nodiscard]] Vst3BundleFileFingerprint computeVst3BundleFileFingerprint(const juce::File& vst3Bundle) noexcept;
 
-/// `%APPDATA%\\MiniDAWLab\\experimental-vst3-descriptions.xml` — experimental instrument-path cache
-/// (filled when raw OOP scan succeeds; entries keyed by VST3 bundle path).
+/// `%APPDATA%\\MiniDAWLab\\experimental-vst3-descriptions.xml` — legacy v1 cache (read-only in app code;
+/// never written or migrated by this phase).
+[[nodiscard]] juce::File getExperimentalVst3DescriptionsV1CacheFile();
+
+/// `%APPDATA%\\MiniDAWLab\\experimental-vst3-descriptions-v2.xml` — writable v2 cache (successful OOP scan only).
+[[nodiscard]] juce::File getExperimentalVst3DescriptionsV2CacheFile();
+
+/// Same path as v1. Prefer the explicit `...V1...` name in new code; this alias remains for existing callers.
 [[nodiscard]] juce::File getExperimentalVst3DescriptionsCacheFile();
 
-/// Reload cached `PluginDescription`s for `vst3Bundle` if that path exists in the cache file.
-/// Experimental only; does not perform an OOP scan.
-/// v2: reads `<plugin>` entries when present (no duplicate bare + wrapped descriptions).
+enum class Vst3ExperimentalCacheTier
+{
+    V1,
+    V2,
+};
+
+/// One resolved Groove-agent cache entry (direct bundle match or full-cache name scan + optional path repair).
+struct Vst3GrooveCacheLoadCandidate
+{
+    bool valid = false;
+    std::vector<juce::PluginDescription> descriptions;
+    juce::File resolvedBundle;
+    bool pathRepairUsed = false;
+    Vst3ExperimentalCacheTier tier = Vst3ExperimentalCacheTier::V1;
+};
+
+/// Reload v1 cache only (`experimental-vst3-descriptions.xml`). Legacy `<PLUGIN>` children under `<bundle>`.
+[[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromV1Cache(
+    const juce::File& vst3Bundle,
+    std::vector<juce::PluginDescription>& descriptionsOut);
+
+/// Reload v2 cache only (`experimental-vst3-descriptions-v2.xml`). Prefers lowercase `<plugin>` wrappers when present.
+[[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromV2Cache(
+    const juce::File& vst3Bundle,
+    std::vector<juce::PluginDescription>& descriptionsOut);
+
+/// Try v2, then v1 (for UI badge / generic lookup). Does not run OOP scan.
 [[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromCache(
     const juce::File& vst3Bundle,
     std::vector<juce::PluginDescription>& descriptionsOut);
 
-/// Merge / replace one `bundle` entry in `experimental-vst3-descriptions.xml` (used after OOP scan or path repair).
-/// Writes v2 structure with legacy bare `<PluginDescription/>` children preserved for older readers.
+/// Build independent Groove candidates from the v2 file and the v1 file (path repair in-memory only; never writes caches).
+[[nodiscard]] bool tryLoadGrooveAgentCacheCandidates(const juce::File& savedOrAdvisoryBundle,
+                                                     Vst3GrooveCacheLoadCandidate& v2Out,
+                                                     Vst3GrooveCacheLoadCandidate& v1Out,
+                                                     juce::String& infoOrWarningOut);
+
+/// Merge / replace one `bundle` in **v2 only** (`experimental-vst3-descriptions-v2.xml`), via temp file + replace.
+/// Call only after a **successful** OOP scan. Never writes or modifies the v1 legacy file.
 void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
                                                   const std::vector<juce::PluginDescription>& descriptions,
                                                   Vst3ExperimentalCacheScanOutcome scanOutcome
                                                   = Vst3ExperimentalCacheScanOutcome::Success);
 
-/// Phase 2: merge/replace `<capabilities>` under the matching v2 `<plugin>` (identifier match).
-/// No-op if cache or bundle or plugin row is missing, or if the bundle has no `<plugin>` wrappers (v1-only).
+/// Merge/replace `<capabilities>` under a v2 `<plugin>` wrapper in **v2 cache file only**. No-op if v2 missing,
+/// corrupt, or bundle has no wrappers.
 void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
                                  const juce::PluginDescription& forPlugin,
                                  const PluginCapabilities& caps);

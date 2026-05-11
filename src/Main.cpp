@@ -3355,20 +3355,90 @@ private:
                 return;
             }
             const juce::String pathStr = vst3Bundle.getFullPathName();
-            std::vector<juce::PluginDescription> cached;
-            const bool hit = mini_daw::tryLoadExperimentalVst3DescriptionsFromCache(vst3Bundle, cached);
+            std::vector<juce::PluginDescription> v2d;
+            std::vector<juce::PluginDescription> v1d;
+            const bool v2hit = mini_daw::tryLoadExperimentalVst3DescriptionsFromV2Cache(vst3Bundle, v2d);
+            const bool v1hit = mini_daw::tryLoadExperimentalVst3DescriptionsFromV1Cache(vst3Bundle, v1d);
             mini_daw::writeVst3OopScanDiagnosticLogLine(
-                "parent: cached-load lookup path=\"" + pathStr + "\" hit=" + juce::String(hit ? "true" : "false")
-                + " count=" + juce::String((int)cached.size()));
+                "parent: cached-load path=\"" + pathStr + "\" v2hit=" + juce::String(v2hit ? "true" : "false")
+                + " v2count=" + juce::String((int)v2d.size()) + " v1hit=" + juce::String(v1hit ? "true" : "false")
+                + " v1count=" + juce::String((int)v1d.size()));
 
-            if (!hit || cached.empty())
+            juce::Result r = juce::Result::fail("");
+
+            if (v2hit && v2d.size() == 1)
             {
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                       "Experimental instrument",
-                                                       "No cached description found; run OOP scan-only once.");
-                return;
+                const auto& d = v2d.front();
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "parent: cached-load try v2 name=\"" + d.name + "\" fileOrIdentifier=\"" + d.fileOrIdentifier
+                    + "\"");
+                r = experimentalInstrumentHost_.loadInstrumentFromDescription(
+                    d, vst3Bundle, "cached-oop-description-v2");
+                refreshExperimentalInstrumentUi();
+                if (r.wasOk())
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine("parent: cached-load source=v2 load=ok");
+                    return;
+                }
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "parent: cached-load v2 load failed, falling back to v1/OOP message=\"" + r.getErrorMessage()
+                    + "\"");
             }
-            if (cached.size() > 1U)
+            else if (v2hit && v2d.size() > 1)
+            {
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "parent: cached-load v2 multiple entries; attempting v1 only");
+            }
+
+            if (!v2hit)
+            {
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "parent: cached-load v2 miss, OOP scan start path=\"" + pathStr + "\"");
+                const mini_daw::Vst3OopScanResult scanOut = mini_daw::runVst3OopScanBlocking(vst3Bundle);
+                const bool scanOk = (scanOut.outcome == mini_daw::Vst3OopScanOutcome::Success)
+                                     && !scanOut.descriptions.empty();
+                if (scanOk)
+                {
+                    const juce::PluginDescription& d = scanOut.descriptions.front();
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "parent: cached-load try v2-fresh name=\"" + d.name + "\" fileOrIdentifier=\""
+                        + d.fileOrIdentifier + "\"");
+                    r = experimentalInstrumentHost_.loadInstrumentFromDescription(
+                        d, vst3Bundle, "cached-oop-description-fresh-v2");
+                    refreshExperimentalInstrumentUi();
+                    if (r.wasOk())
+                    {
+                        mini_daw::writeVst3OopScanDiagnosticLogLine(
+                            "parent: cached-load source=v2-fresh-scan load=ok");
+                        return;
+                    }
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "parent: cached-load v2-fresh load failed message=\"" + r.getErrorMessage()
+                        + "\" falling_back=v1");
+                }
+                else
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "parent: cached-load OOP scan did not yield usable descriptions; falling_back=v1");
+                }
+            }
+
+            if (v1hit && v1d.size() == 1)
+            {
+                const auto& d = v1d.front();
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "parent: cached-load try v1 name=\"" + d.name + "\" fileOrIdentifier=\"" + d.fileOrIdentifier
+                    + "\"");
+                r = experimentalInstrumentHost_.loadInstrumentFromDescription(
+                    d, vst3Bundle, "cached-oop-description-v1");
+                refreshExperimentalInstrumentUi();
+                if (r.wasOk())
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine("parent: cached-load source=v1 load=ok");
+                    return;
+                }
+            }
+            else if (v1hit && v1d.size() > 1)
             {
                 juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
                                                        "Experimental instrument",
@@ -3377,19 +3447,17 @@ private:
                 return;
             }
 
-            const juce::PluginDescription& d = cached.front();
-            mini_daw::writeVst3OopScanDiagnosticLogLine(
-                "parent: cached-load selected name=\"" + d.name + "\" manufacturer=\"" + d.manufacturerName
-                + "\" fileOrIdentifier=\"" + d.fileOrIdentifier + "\"");
-
-            const juce::Result r = experimentalInstrumentHost_.loadInstrumentFromDescription(
-                d, vst3Bundle, "cached-oop-description");
-            refreshExperimentalInstrumentUi();
-            if (!r.wasOk())
+            if (!v1hit && !v2hit)
             {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Experimental instrument", r.getErrorMessage());
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "Experimental instrument",
+                                                       "No cached description and OOP scan did not succeed; "
+                                                       "check the plug-in path or try scan-only from the menu.");
+                return;
             }
+
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon, "Experimental instrument", r.getErrorMessage());
         }
 
         void beginExperimentalCachedLoadFromFile()
