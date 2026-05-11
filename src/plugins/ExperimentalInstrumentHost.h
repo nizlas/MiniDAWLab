@@ -31,6 +31,12 @@
 #include <set>
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
+#include "plugins/Vst3ChildProcessScan.h"
+
+namespace experimental_instrument_host_detail
+{
+struct DrumNameVst3ProbeDetails;
+}
 
 class ExperimentalInstrumentHost
 {
@@ -85,6 +91,11 @@ public:
     /// [Message thread] Rebuilds the transient plugin pitch-name map from the **current** `activeOwner_`
     /// instance (call only after that owner is published). Safe when no instrument loaded (no-op).
     void refreshPluginNoteNamesFromActiveInstrument();
+
+    /// [Message thread] Seeds drum row maps from v2 cache `<capabilities>` (high-confidence only).
+    /// Used so the MIDI editor can show pad names before the native Groove Agent editor opens.
+    /// No-op if validation fails; does not block load.
+    void seedDrumDisplayFromCachedCapability(const mini_daw::PluginCapabilities& caps);
 
     /// [Message thread] Optional hook: called when `IUnitInfo` harvesting finds new pitch names after the
     /// native plugin editor was opened (Phase B). Replace any existing callback (e.g. clear with `{}` on editor
@@ -197,6 +208,9 @@ private:
 
     bool pluginDrumNameMapAuthoritative_ = false;
 
+    /// Stable key for v2 drum capability merge deduplication (cleared on unload).
+    juce::String lastGrooveDrumCapabilityPersistKey_;
+
     std::function<void()> onPluginPitchNamesCacheMayHaveChanged_;
     std::function<bool()> drumNamePhaseCAudioProbeShouldSkip_;
 
@@ -209,6 +223,10 @@ private:
 
     void refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase phase,
                                                         bool updateTransientNameCache);
+
+    void maybePersistGrooveDrumCapabilitiesToV2Cache(
+        const experimental_instrument_host_detail::DrumNameVst3ProbeDetails& probe,
+        const juce::String& derivationLogReason);
 
     void runDrumNamePhaseCDiagnosticsIfEligible(drum_name_diag::DrumNameRefreshPhase phase,
                                                 bool updateTransientNameCache,

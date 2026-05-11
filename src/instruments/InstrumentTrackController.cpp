@@ -716,12 +716,14 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     };
 
     juce::Result loadResult = juce::Result::fail("");
+    bool loadedFromV2Candidate = false;
 
     if (v2Cand.valid)
     {
         loadResult = tryLoadFromCandidate(v2Cand);
         if (loadResult.wasOk())
         {
+            loadedFromV2Candidate = true;
             mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: cache source=v2 load=ok");
         }
         else
@@ -828,7 +830,14 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
 
     if (loadResult.wasOk())
     {
-        host.refreshPluginNoteNamesFromActiveInstrument();
+        if (loadedFromV2Candidate && v2Cand.maybeGrooveCachedCapabilities.has_value())
+        {
+            host.seedDrumDisplayFromCachedCapability(*v2Cand.maybeGrooveCachedCapabilities);
+        }
+        else
+        {
+            host.refreshPluginNoteNamesFromActiveInstrument();
+        }
     }
 }
 

@@ -219,11 +219,49 @@ namespace vst3_experimental_desc_cache
         auto root = std::make_unique<juce::XmlElement>("capabilities");
         if (caps.drumNoteDisplay.has_value())
         {
-            root->addChildElement(std::make_unique<juce::XmlElement>("drumNoteDisplay").release());
+            const auto& dnd = *caps.drumNoteDisplay;
+            auto* el = new juce::XmlElement("drumNoteDisplay");
+            if (dnd.derivation.isNotEmpty())
+            {
+                el->setAttribute("derivation", dnd.derivation);
+            }
+            if (dnd.confidence.isNotEmpty())
+            {
+                el->setAttribute("confidence", dnd.confidence);
+            }
+            for (const auto& n : dnd.activeNotes)
+            {
+                auto* an = el->createNewChildElement("activeNote");
+                an->setAttribute("midi", n.midi);
+                if (n.rawName.isNotEmpty())
+                {
+                    an->setAttribute("rawName", n.rawName);
+                }
+            }
+            root->addChildElement(el);
         }
         if (caps.rawPitchMap.has_value())
         {
-            root->addChildElement(std::make_unique<juce::XmlElement>("rawPitchMap").release());
+            const auto& rpm = *caps.rawPitchMap;
+            auto* el = new juce::XmlElement("rawPitchMap");
+            if (rpm.source.isNotEmpty())
+            {
+                el->setAttribute("source", rpm.source);
+            }
+            if (rpm.programIndex >= 0)
+            {
+                el->setAttribute("programIndex", rpm.programIndex);
+            }
+            for (const auto& n : rpm.notes)
+            {
+                auto* nn = el->createNewChildElement("note");
+                nn->setAttribute("midi", n.midi);
+                if (n.name.isNotEmpty())
+                {
+                    nn->setAttribute("name", n.name);
+                }
+            }
+            root->addChildElement(el);
         }
         if (caps.playableRange.has_value())
         {
@@ -245,6 +283,92 @@ namespace vst3_experimental_desc_cache
     [[nodiscard]] bool isCapabilitiesElement(const juce::XmlElement* e) noexcept
     {
         return e != nullptr && e->getTagName() == juce::String("capabilities");
+    }
+
+    [[nodiscard]] std::optional<PluginCapabilities> parsePluginCapabilitiesFromXmlElement(
+        const juce::XmlElement* capsEl)
+    {
+        if (capsEl == nullptr || !isCapabilitiesElement(capsEl))
+        {
+            return std::nullopt;
+        }
+        PluginCapabilities c;
+        for (auto* ch = capsEl->getFirstChildElement(); ch != nullptr; ch = ch->getNextElement())
+        {
+            if (ch->hasTagName("drumNoteDisplay"))
+            {
+                DrumNoteDisplayCapability d;
+                d.derivation = ch->getStringAttribute("derivation");
+                d.confidence = ch->getStringAttribute("confidence");
+                for (auto* an = ch->getFirstChildElement(); an != nullptr; an = an->getNextElement())
+                {
+                    if (!an->hasTagName("activeNote"))
+                    {
+                        continue;
+                    }
+                    DrumNoteDisplayActiveNote n;
+                    n.midi = an->getIntAttribute("midi", -1);
+                    n.rawName = an->getStringAttribute("rawName");
+                    d.activeNotes.push_back(std::move(n));
+                }
+                c.drumNoteDisplay = std::move(d);
+            }
+            else if (ch->hasTagName("rawPitchMap"))
+            {
+                RawPitchMapCapability r;
+                r.source = ch->getStringAttribute("source");
+                r.programIndex = ch->getIntAttribute("programIndex", -1);
+                for (auto* nn = ch->getFirstChildElement(); nn != nullptr; nn = nn->getNextElement())
+                {
+                    if (!nn->hasTagName("note"))
+                    {
+                        continue;
+                    }
+                    RawPitchMapNoteEntry e;
+                    e.midi = nn->getIntAttribute("midi", -1);
+                    e.name = nn->getStringAttribute("name");
+                    r.notes.push_back(std::move(e));
+                }
+                c.rawPitchMap = std::move(r);
+            }
+        }
+        return c;
+    }
+
+    [[nodiscard]] bool findAndParseCapabilitiesForPluginIdentifier(juce::XmlElement* bundle,
+                                                                  const juce::String& wantIdentifier,
+                                                                  PluginCapabilities& capsOut)
+    {
+        capsOut = {};
+        if (bundle == nullptr || wantIdentifier.isEmpty())
+        {
+            return false;
+        }
+        for (auto* e : bundle->getChildIterator())
+        {
+            if (!isPhase2PluginWrapperElement(e))
+            {
+                continue;
+            }
+            if (e->getStringAttribute("identifier") != wantIdentifier)
+            {
+                continue;
+            }
+            for (auto* ch : e->getChildIterator())
+            {
+                if (!isCapabilitiesElement(ch))
+                {
+                    continue;
+                }
+                if (auto parsed = parsePluginCapabilitiesFromXmlElement(ch))
+                {
+                    capsOut = std::move(*parsed);
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
     }
 
     void collectPluginDescriptionsFromBundle(juce::XmlElement* bundle,
@@ -639,6 +763,106 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
     return false;
 }
 
+bool tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(const juce::File& bundlePathKey,
+                                                         const juce::PluginDescription& forPlugin,
+                                                         PluginCapabilities& capsOut)
+{
+    capsOut = {};
+    const juce::File cacheFile = getExperimentalVst3DescriptionsV2CacheFile();
+    if (!cacheFile.existsAsFile())
+    {
+        writeVst3OopScanDiagnosticLogLine("v2 capability read: skipped reason=v2_file_missing");
+        return false;
+    }
+
+    const std::unique_ptr<juce::XmlElement> root = juce::parseXML(cacheFile);
+    if (root == nullptr || !root->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
+    {
+        writeVst3OopScanDiagnosticLogLine("v2 capability read: skipped reason=v2_parse_failed");
+        return false;
+    }
+
+    const juce::String key = bundlePathKey.getFullPathName();
+    const juce::String wantId = forPlugin.createIdentifierString();
+    for (juce::XmlElement* bundle = root->getFirstChildElement(); bundle != nullptr;
+         bundle = bundle->getNextElement())
+    {
+        if (!bundle->hasTagName("bundle"))
+        {
+            continue;
+        }
+        const juce::String stored = bundle->getStringAttribute("vst3Path");
+#if JUCE_WINDOWS
+        const bool pathMatched = (stored.compareIgnoreCase(key) == 0);
+#else
+        const bool pathMatched = (stored == key);
+#endif
+        if (!pathMatched)
+        {
+            continue;
+        }
+
+        if (!vst3_experimental_desc_cache::findAndParseCapabilitiesForPluginIdentifier(
+                bundle,
+                wantId,
+                capsOut))
+        {
+            writeVst3OopScanDiagnosticLogLine(
+                "v2 capability read: skipped reason=no_capabilities pluginId=\"" + wantId + "\"");
+            return false;
+        }
+
+        const int rawCount = capsOut.rawPitchMap.has_value() ? (int)capsOut.rawPitchMap->notes.size() : 0;
+        const int displayCount
+            = capsOut.drumNoteDisplay.has_value() ? (int)capsOut.drumNoteDisplay->activeNotes.size() : 0;
+        juce::String der;
+        juce::String conf;
+        if (capsOut.drumNoteDisplay.has_value())
+        {
+            der = capsOut.drumNoteDisplay->derivation;
+            conf = capsOut.drumNoteDisplay->confidence;
+        }
+        writeVst3OopScanDiagnosticLogLine("v2 capability parsed rawCount=" + juce::String(rawCount)
+                                            + " displayCount=" + juce::String(displayCount) + " derivation=\""
+                                            + der + "\" confidence=\"" + conf + "\"");
+        return true;
+    }
+
+    writeVst3OopScanDiagnosticLogLine("v2 capability read: skipped reason=no_matching_bundle");
+    return false;
+}
+
+static void tryAttachV2GrooveCapabilitiesToCandidate(
+    Vst3GrooveCacheLoadCandidate& cand,
+    const juce::String& cacheKeyForPrefix)
+{
+    if (!cand.valid || cand.tier != Vst3ExperimentalCacheTier::V2 || cand.descriptions.empty()
+        || cacheKeyForPrefix.isEmpty())
+    {
+        return;
+    }
+
+    const juce::PluginDescription* grooveDesc = nullptr;
+    for (const auto& d : cand.descriptions)
+    {
+        if (d.name.containsIgnoreCase("Groove Agent SE"))
+        {
+            grooveDesc = &d;
+            break;
+        }
+    }
+    if (grooveDesc == nullptr)
+    {
+        grooveDesc = &cand.descriptions.front();
+    }
+
+    PluginCapabilities caps;
+    if (tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(juce::File(cacheKeyForPrefix), *grooveDesc, caps))
+    {
+        cand.maybeGrooveCachedCapabilities = std::move(caps);
+    }
+}
+
 [[nodiscard]] static bool tryScanEntireCacheFileForGrooveAgentSE(const juce::File& cacheFile,
                                                                  const juce::String& tierLabel,
                                                                  std::vector<juce::PluginDescription>& descriptionsOut,
@@ -754,6 +978,10 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
         cand.descriptions = std::move(descs);
         cand.resolvedBundle = cacheKeyAsFile;
         cand.pathRepairUsed = false;
+        if (tier == Vst3ExperimentalCacheTier::V2)
+        {
+            tryAttachV2GrooveCapabilitiesToCandidate(cand, cacheKeyForPrefix);
+        }
         return true;
     }
 
@@ -789,6 +1017,10 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
     cand.descriptions = std::move(descs);
     cand.resolvedBundle = found;
     cand.pathRepairUsed = true;
+    if (tier == Vst3ExperimentalCacheTier::V2)
+    {
+        tryAttachV2GrooveCapabilitiesToCandidate(cand, cacheKeyForPrefix);
+    }
     return true;
 }
 
@@ -974,21 +1206,27 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
     }
 }
 
-void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
+bool mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
                                  const juce::PluginDescription& forPlugin,
                                  const PluginCapabilities& caps)
 {
+    const juce::String wantId = forPlugin.createIdentifierString();
+    writeVst3OopScanDiagnosticLogLine("v2 capability merge: attempted vst3Path=\"" + vst3Bundle.getFullPathName()
+                                      + "\" pluginId=\"" + wantId + "\"");
+
     const juce::File cacheFile = getExperimentalVst3DescriptionsV2CacheFile();
     if (!cacheFile.existsAsFile())
     {
-        return;
+        writeVst3OopScanDiagnosticLogLine("v2 capability merge: no-op reason=v2_file_missing");
+        return false;
     }
     try
     {
         std::unique_ptr<juce::XmlElement> root = juce::parseXML(cacheFile);
         if (root == nullptr || !root->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
         {
-            return;
+            writeVst3OopScanDiagnosticLogLine("v2 capability merge: no-op reason=v2_parse_failed");
+            return false;
         }
         juce::XmlElement* bundleEl = nullptr;
         for (auto* b = root->getFirstChildElement(); b != nullptr; b = b->getNextElement())
@@ -1002,7 +1240,8 @@ void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
         }
         if (bundleEl == nullptr)
         {
-            return;
+            writeVst3OopScanDiagnosticLogLine("v2 capability merge: no-op reason=no_matching_bundle");
+            return false;
         }
         bool anyPluginWrapper = false;
         for (auto* e : bundleEl->getChildIterator())
@@ -1015,9 +1254,9 @@ void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
         }
         if (!anyPluginWrapper)
         {
-            return;
+            writeVst3OopScanDiagnosticLogLine("v2 capability merge: no-op reason=no_plugin_wrappers");
+            return false;
         }
-        const juce::String wantId = forPlugin.createIdentifierString();
         juce::XmlElement* targetPlugin = nullptr;
         for (auto* e : bundleEl->getChildIterator())
         {
@@ -1033,7 +1272,8 @@ void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
         }
         if (targetPlugin == nullptr)
         {
-            return;
+            writeVst3OopScanDiagnosticLogLine("v2 capability merge: no-op reason=no_matching_plugin_id");
+            return false;
         }
         juce::XmlElement* capToRemove = nullptr;
         for (auto* ch : targetPlugin->getChildIterator())
@@ -1053,18 +1293,31 @@ void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
             targetPlugin->addChildElement(capXml.release());
         }
 
+        const int rawCount = caps.rawPitchMap.has_value() ? (int)caps.rawPitchMap->notes.size() : 0;
+        const int displayCount
+            = caps.drumNoteDisplay.has_value() ? (int)caps.drumNoteDisplay->activeNotes.size() : 0;
+
         juce::TemporaryFile tmpV2(cacheFile, juce::TemporaryFile::useHiddenFile);
         if (!root->writeTo(tmpV2.getFile()))
         {
-            return;
+            writeVst3OopScanDiagnosticLogLine("v2 capability merge: FAILED reason=temp_write_failed rawCount="
+                                              + juce::String(rawCount) + " displayCount=" + juce::String(displayCount));
+            return false;
         }
         if (!tmpV2.overwriteTargetFileWithTemporary())
         {
-            return;
+            writeVst3OopScanDiagnosticLogLine("v2 capability merge: FAILED reason=replace_failed rawCount="
+                                              + juce::String(rawCount) + " displayCount=" + juce::String(displayCount));
+            return false;
         }
+        writeVst3OopScanDiagnosticLogLine("v2 capability merge: ok rawCount=" + juce::String(rawCount)
+                                          + " displayCount=" + juce::String(displayCount));
+        return true;
     }
     catch (...)
     {
+        writeVst3OopScanDiagnosticLogLine("v2 capability merge: FAILED reason=exception");
+        return false;
     }
 }
 

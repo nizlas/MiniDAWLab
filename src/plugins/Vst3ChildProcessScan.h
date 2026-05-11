@@ -53,12 +53,37 @@ struct Vst3BundleFileFingerprint
 // Phase 2 — general plugin capabilities (optional fields; mostly empty until later phases).
 // -----------------------------------------------------------------------------
 
-struct DrumNoteDisplayCapability
+struct RawPitchMapNoteEntry
 {
+    int midi = 0;
+    juce::String name;
 };
 
 struct RawPitchMapCapability
 {
+    /// e.g. `iUnitInfoProgramPitchName`
+    juce::String source;
+    /// Selected program index used when harvesting names (-1 if unknown).
+    int programIndex = -1;
+    /// Typically pitch names for MIDI notes 24–51 when present; may include other notes.
+    std::vector<RawPitchMapNoteEntry> notes;
+};
+
+struct DrumNoteDisplayActiveNote
+{
+    int midi = 0;
+    /// Name from the plugin raw pitch map (`getProgramPitchName`) for this MIDI note.
+    juce::String rawName;
+};
+
+struct DrumNoteDisplayCapability
+{
+    /// e.g. structural cluster reason from derivation, or `fallback`.
+    juce::String derivation;
+    /// e.g. `high` when `pluginDrumNameMapAuthoritative_` is true at persist time.
+    juce::String confidence;
+    /// Active display pad notes (e.g. 36–51 for Groove Agent SE).
+    std::vector<DrumNoteDisplayActiveNote> activeNotes;
 };
 
 struct PlayableRangeCapability
@@ -124,6 +149,8 @@ struct Vst3GrooveCacheLoadCandidate
     juce::File resolvedBundle;
     bool pathRepairUsed = false;
     Vst3ExperimentalCacheTier tier = Vst3ExperimentalCacheTier::V1;
+    /// V2 only: drum/raw pitch capabilities read from `<capabilities>` when present (Slice B).
+    std::optional<PluginCapabilities> maybeGrooveCachedCapabilities;
 };
 
 /// Reload v1 cache only (`experimental-vst3-descriptions.xml`). Legacy `<PLUGIN>` children under `<bundle>`.
@@ -135,6 +162,13 @@ struct Vst3GrooveCacheLoadCandidate
 [[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromV2Cache(
     const juce::File& vst3Bundle,
     std::vector<juce::PluginDescription>& descriptionsOut);
+
+/// Read `<capabilities>` for `forPlugin` from the v2 cache bundle row matching `bundlePathKey` (`vst3Path` attribute).
+/// Does not read or modify v1. Returns false if file missing, no bundle match, no wrapper, or no capabilities XML.
+[[nodiscard]] bool tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(
+    const juce::File& bundlePathKey,
+    const juce::PluginDescription& forPlugin,
+    PluginCapabilities& capsOut);
 
 /// Try v2, then v1 (for UI badge / generic lookup). Does not run OOP scan.
 [[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromCache(
@@ -155,10 +189,10 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
                                                   = Vst3ExperimentalCacheScanOutcome::Success);
 
 /// Merge/replace `<capabilities>` under a v2 `<plugin>` wrapper in **v2 cache file only**. No-op if v2 missing,
-/// corrupt, or bundle has no wrappers.
-void mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
-                                 const juce::PluginDescription& forPlugin,
-                                 const PluginCapabilities& caps);
+/// corrupt, or bundle has no wrappers. Returns true only when the v2 cache file was replaced successfully.
+[[nodiscard]] bool mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
+                                              const juce::PluginDescription& forPlugin,
+                                              const PluginCapabilities& caps);
 
 /// Dev / CI: in-memory + temp-file checks for v1/v2 cache XML (does not touch the user cache file).
 [[nodiscard]] bool verifyExperimentalVst3DescriptionsCachePhase2() noexcept;

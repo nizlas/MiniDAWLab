@@ -21,6 +21,7 @@
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
 #include "diagnostics/DrumNameDiagnosticFileLog.h"
+#include "plugins/Vst3ChildProcessScan.h"
 #include "ui/experimental/DrumNoteNames.h"
 
 #if JUCE_PLUGINHOST_VST3 && (JUCE_WINDOWS || JUCE_MAC || JUCE_LINUX || JUCE_BSD)
@@ -2171,6 +2172,7 @@ void ExperimentalInstrumentHost::unloadInstrument()
     rawPluginPitchNamesByNote_.clear();
     pluginPitchNamesByNote_.clear();
     pluginDrumNameMapAuthoritative_ = false;
+    lastGrooveDrumCapabilityPersistKey_.clear();
     writeDrumNameDiagnosticLogLine("drum-names: cleared (instrument unload)");
 
     lastLoadedVst3OriginalPath_.clear();
@@ -2234,6 +2236,115 @@ void ExperimentalInstrumentHost::setDrumNamePhaseCAudioProbeShouldSkip(std::func
 void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrument()
 {
     refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::immediate, true);
+}
+
+void ExperimentalInstrumentHost::seedDrumDisplayFromCachedCapability(const mini_daw::PluginCapabilities& caps)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+
+    auto o = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    if (o == nullptr || o->inst == nullptr || !o->layoutOk)
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine(
+            "cached drum capability seed: skipped reason=no_active_instrument");
+        return;
+    }
+
+    if (!o->inst->getName().containsIgnoreCase("Groove Agent"))
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("cached drum capability seed: skipped reason=not_groove_agent");
+        return;
+    }
+
+    if (!caps.drumNoteDisplay.has_value())
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine(
+            "cached drum capability seed: skipped reason=missing_drumNoteDisplay");
+        return;
+    }
+
+    const auto& dnd = *caps.drumNoteDisplay;
+    if (!dnd.confidence.equalsIgnoreCase("high"))
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("cached drum capability seed: skipped reason=low_confidence confidence=\""
+                                                    + dnd.confidence + "\"");
+        return;
+    }
+
+    int validActive = 0;
+    for (const auto& an : dnd.activeNotes)
+    {
+        if (an.midi >= 0 && an.midi <= 127)
+        {
+            ++validActive;
+        }
+    }
+    if (validActive == 0)
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("cached drum capability seed: skipped reason=empty_active_notes");
+        return;
+    }
+
+    try
+    {
+        rawPluginPitchNamesByNote_.clear();
+        if (caps.rawPitchMap.has_value())
+        {
+            for (const auto& e : caps.rawPitchMap->notes)
+            {
+                if (e.midi >= 0 && e.midi <= 127 && e.name.isNotEmpty())
+                {
+                    rawPluginPitchNamesByNote_[e.midi] = e.name;
+                }
+            }
+        }
+
+        pluginPitchNamesByNote_.clear();
+        primaryPadDisplayActiveNotes_.clear();
+        for (const auto& an : dnd.activeNotes)
+        {
+            if (an.midi < 0 || an.midi > 127)
+            {
+                continue;
+            }
+            primaryPadDisplayActiveNotes_.insert(an.midi);
+            juce::String label = an.rawName;
+            if (label.isEmpty())
+            {
+                const auto it = rawPluginPitchNamesByNote_.find(an.midi);
+                if (it != rawPluginPitchNamesByNote_.end())
+                {
+                    label = it->second;
+                }
+            }
+            if (label.isNotEmpty())
+            {
+                pluginPitchNamesByNote_[an.midi] = label;
+            }
+        }
+
+        pluginDrumNameMapAuthoritative_ = true;
+
+        const int rawCount = (int)rawPluginPitchNamesByNote_.size();
+        const int displayCount = (int)pluginPitchNamesByNote_.size();
+
+        mini_daw::writeVst3OopScanDiagnosticLogLine("cached drum capability seeded rawCount=" + juce::String(rawCount)
+                                                    + " displayCount=" + juce::String(displayCount) + " activePadCount="
+                                                    + juce::String((int)primaryPadDisplayActiveNotes_.size()));
+
+        if (onPluginPitchNamesCacheMayHaveChanged_ != nullptr)
+        {
+            onPluginPitchNamesCacheMayHaveChanged_();
+        }
+    }
+    catch (...)
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("cached drum capability seed: skipped reason=exception");
+    }
 }
 
 void ExperimentalInstrumentHost::scheduleDrumNameDiagLifecyclePhasesAfterRefreshIfEnabled()
@@ -2359,6 +2470,11 @@ void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrumentImpl(
         }
         pluginDrumNameMapAuthoritative_ = authorityEval.authoritative;
         authorityReasonForLog = authorityEval.reason;
+
+        if (pluginDrumNameMapAuthoritative_)
+        {
+            maybePersistGrooveDrumCapabilitiesToV2Cache(probe, derivationLogReason);
+        }
     }
     else
     {
@@ -2507,6 +2623,120 @@ void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrumentImpl(
                 runDrumNamePhaseCDiagnosticsIfEligible(phase, updateTransientNameCache, *o->inst);
             }
         }
+    }
+}
+
+void ExperimentalInstrumentHost::maybePersistGrooveDrumCapabilitiesToV2Cache(
+    const experimental_instrument_host_detail::DrumNameVst3ProbeDetails& probe,
+    const juce::String& derivationLogReason)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+
+    if (!pluginDrumNameMapAuthoritative_ || !lastLoadedPluginDescriptionValid_)
+    {
+        return;
+    }
+
+    const juce::String& plugName = lastLoadedPluginDescription_.name;
+    if (!plugName.containsIgnoreCase("Groove Agent"))
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("v2 capability persist: skipped reason=not_groove_agent");
+        return;
+    }
+
+    const juce::File bundle(lastLoadedVst3OriginalPath_);
+    if (lastLoadedVst3OriginalPath_.isEmpty() || !bundle.exists())
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("v2 capability persist: skipped reason=no_bundle_path path=\""
+                                                    + lastLoadedVst3OriginalPath_ + "\"");
+        return;
+    }
+
+    juce::String derivationAttr = derivationLogReason;
+    if (derivationLogReason == "duplicate_names_prefer_higher_primary_cluster")
+    {
+        derivationAttr = "cluster";
+    }
+
+    const int programIndexForXml
+        = probe.selectedProgramIndex >= 0 ? probe.selectedProgramIndex : probe.activeProgramIndex;
+
+    juce::String hashKey;
+    for (int n = 24; n <= 51; ++n)
+    {
+        const auto it = rawPluginPitchNamesByNote_.find(n);
+        if (it != rawPluginPitchNamesByNote_.end())
+        {
+            hashKey << n << "=" << it->second << "|";
+        }
+    }
+    hashKey << "##";
+    for (const int n : primaryPadDisplayActiveNotes_)
+    {
+        const auto it = rawPluginPitchNamesByNote_.find(n);
+        hashKey << n << "=" << (it != rawPluginPitchNamesByNote_.end() ? it->second : juce::String{}) << "|";
+    }
+    hashKey << "##pi=" << programIndexForXml << "##d=" << derivationAttr;
+
+    if (hashKey.isNotEmpty() && hashKey == lastGrooveDrumCapabilityPersistKey_)
+    {
+        return;
+    }
+
+    mini_daw::PluginCapabilities caps;
+    mini_daw::RawPitchMapCapability rpm;
+    rpm.source = "iUnitInfoProgramPitchName";
+    rpm.programIndex = programIndexForXml;
+    for (int n = 24; n <= 51; ++n)
+    {
+        const auto it = rawPluginPitchNamesByNote_.find(n);
+        if (it != rawPluginPitchNamesByNote_.end() && it->second.isNotEmpty())
+        {
+            rpm.notes.push_back({n, it->second});
+        }
+    }
+    caps.rawPitchMap = std::move(rpm);
+
+    mini_daw::DrumNoteDisplayCapability dnd;
+    dnd.derivation = derivationAttr;
+    dnd.confidence = "high";
+    for (const int n : primaryPadDisplayActiveNotes_)
+    {
+        mini_daw::DrumNoteDisplayActiveNote an;
+        an.midi = n;
+        const auto it = rawPluginPitchNamesByNote_.find(n);
+        if (it != rawPluginPitchNamesByNote_.end())
+        {
+            an.rawName = it->second;
+        }
+        dnd.activeNotes.push_back(std::move(an));
+    }
+    caps.drumNoteDisplay = std::move(dnd);
+
+    if ((!caps.rawPitchMap.has_value() || caps.rawPitchMap->notes.empty())
+        && (!caps.drumNoteDisplay.has_value() || caps.drumNoteDisplay->activeNotes.empty()))
+    {
+        return;
+    }
+
+    bool wrote = false;
+    try
+    {
+        wrote = mini_daw::mergeCapabilitiesIntoBundle(bundle, lastLoadedPluginDescription_, caps);
+    }
+    catch (...)
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine("v2 capability persist: merge threw (non-fatal)");
+        return;
+    }
+
+    if (wrote)
+    {
+        lastGrooveDrumCapabilityPersistKey_ = hashKey;
     }
 }
 

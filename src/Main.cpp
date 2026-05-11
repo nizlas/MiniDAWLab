@@ -3374,6 +3374,14 @@ private:
                     + "\"");
                 r = experimentalInstrumentHost_.loadInstrumentFromDescription(
                     d, vst3Bundle, "cached-oop-description-v2");
+                if (r.wasOk() && d.name.containsIgnoreCase("Groove Agent"))
+                {
+                    mini_daw::PluginCapabilities caps;
+                    if (mini_daw::tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(vst3Bundle, d, caps))
+                    {
+                        experimentalInstrumentHost_.seedDrumDisplayFromCachedCapability(caps);
+                    }
+                }
                 refreshExperimentalInstrumentUi();
                 if (r.wasOk())
                 {
