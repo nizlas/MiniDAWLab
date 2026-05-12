@@ -3,7 +3,7 @@
 // =============================================================================
 // TrackHeaderView — shared track header chrome (audio + experimental instrument)
 // =============================================================================
-// Visual: name (and optional subtitle), active accent, **[Power][M][R]** strip.
+// Visual: name (and optional subtitle), active accent; optional **[Instrument][Power][M][R]** strip (audio: no Instrument).
 // State comes from `TrackHeaderModelProvider`; actions from `TrackHeaderCallbacks`.
 // Optional `TrackHeaderDragHost` + `dragTrackId` enable header-drag reorder (audio lanes).
 // =============================================================================
@@ -11,8 +11,9 @@
 #include "domain/Track.h"
 
 #include <functional>
-#include <juce_gui_basics/juce_gui_basics.h>
 #include <optional>
+#include <vector>
+#include <juce_gui_basics/juce_gui_basics.h>
 
 class TrackHeaderView;
 
@@ -46,18 +47,22 @@ struct TrackHeaderModel
     bool powerInteractable = true;
     bool muteInteractable = true;
     bool armInteractable = true;
+    /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
+    bool instrumentEditorAvailable = false;
 };
 
 using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;
 
 struct TrackHeaderCallbacks
 {
-    /// Left-click on name strip (not on **[Power][M][R]**). Null = no-op.
+    /// Left-click on name strip (not on **[Instrument][Power][Mute][R]** strip). Null = no-op.
     std::function<void()> onActivateName;
     /// Return true if the click was handled (blocks promoting to header-drag); false = ignored.
     std::function<bool()> onTogglePower;
     std::function<void()> onToggleMute;
     std::function<void()> onToggleArm;
+    /// Optional: opens native instrument / plugin UI (Groove Agent row). Omit for audio lanes.
+    std::function<void()> onOpenInstrumentEditor;
     /// Right-click; null = ignore context menu entirely.
     std::function<void(TrackHeaderView&, const juce::MouseEvent&)> onShowContextMenu;
 };
@@ -76,6 +81,11 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+
+    /// Empty when instrument editor strip cell is inactive (audio tracks or no instrument).
+    [[nodiscard]] juce::Rectangle<int> getInstrumentEditorButtonBounds() const noexcept;
 
     void setSourceForbiddenForHeaderDrag() noexcept;
     void restoreSourceCursorAfterHeaderDrag() noexcept;
@@ -89,13 +99,51 @@ private:
         Power
     };
 
+    enum class TrackHeaderButtonKind : std::uint8_t
+    {
+        InstrumentEditor,
+        Power,
+        Mute,
+        Arm,
+    };
+
+    struct TrackHeaderStripButtonSpec
+    {
+        TrackHeaderButtonKind kind = TrackHeaderButtonKind::Power;
+        bool enabled = false;
+        /// State for palette only (`Power`=standby/off, `Mute`=muted, `Arm`=armed). Instrument ignores bits.
+        bool powerStandby = false;
+        bool muteActive = false;
+        bool armActive = false;
+        juce::Rectangle<int> cellBounds;
+    };
+
+    [[nodiscard]] int computeRightStripCellCount() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getRightControlsStripBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getPowerVisualCircleBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getMuteVisualCircleBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getArmVisualCircleBounds() const noexcept;
+
+    [[nodiscard]] juce::Rectangle<int>
+    squareStripButtonBodyFromCell(juce::Rectangle<int> cell) const noexcept;
+    [[nodiscard]] std::vector<TrackHeaderStripButtonSpec> buildStripControlSpecs() const noexcept;
+    [[nodiscard]] const TrackHeaderStripButtonSpec*
+    findStripControlSpec(std::vector<TrackHeaderStripButtonSpec> const& specs,
+                         TrackHeaderButtonKind kind) const noexcept;
+    [[nodiscard]] juce::Rectangle<int>
+    stripButtonCellBounds(TrackHeaderButtonKind kind,
+                          std::vector<TrackHeaderStripButtonSpec> const& specs) const noexcept;
+
+    void drawStripControlButton(juce::Graphics& g,
+                                TrackHeaderStripButtonSpec const& spec,
+                                bool hoverThis,
+                                juce::Colour const& ctlEdgeNeutral) noexcept;
+    [[nodiscard]] bool dispatchStripClick(juce::Point<int> position,
+                                          std::vector<TrackHeaderStripButtonSpec>&& specs) noexcept;
+
+    void repaintStripHoverCell(std::optional<TrackHeaderButtonKind> kind) noexcept;
+    void updateStripHoverFromPosition(juce::Point<int> position) noexcept;
+    void clearStripHover() noexcept;
 
     TrackHeaderModelProvider modelProvider_;
     TrackHeaderCallbacks callbacks_;
@@ -103,6 +151,7 @@ private:
     std::optional<TrackHeaderDragHost> dragHost_;
     bool headerDragInProgress_ = false;
     DragBlocker dragBlocker_ = DragBlocker::None;
+    std::optional<TrackHeaderButtonKind> stripHoveredButton_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackHeaderView)
 };

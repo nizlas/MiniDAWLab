@@ -685,6 +685,7 @@ private:
                 };
                 hdrCb.onToggleArm = nullptr;
                 hdrCb.onShowContextMenu = nullptr;
+                hdrCb.onOpenInstrumentEditor = [this] { experimentalInstrumentHost_.openNativeEditor(); };
 
                 instrumentTrackHeader_ = std::make_unique<TrackHeaderView>(
                     [this]() -> TrackHeaderModel {
@@ -698,6 +699,7 @@ private:
                         m.powerInteractable = true;
                         m.muteInteractable = true;
                         m.armInteractable = false;
+                        m.instrumentEditorAvailable = experimentalInstrumentHost_.hasInstrument();
                         return m;
                     },
                     std::move(hdrCb),
@@ -779,10 +781,6 @@ private:
             addAndMakeVisible(experimentalInstrumentScanOnlyButton_);
             experimentalInstrumentScanOnlyButton_.onClick = [this] {
                 showExperimentalVst3ScanDiagnosticPicker(this);
-            };
-            addAndMakeVisible(experimentalInstrumentEditorButton_);
-            experimentalInstrumentEditorButton_.onClick = [this] {
-                experimentalInstrumentHost_.openNativeEditor();
             };
             addAndMakeVisible(experimentalInstrumentMidiEditorButton_);
             experimentalInstrumentMidiEditorButton_.onClick = [this] { openInstrumentMidiEditorFromToolbar(); };
@@ -1627,14 +1625,12 @@ private:
             constexpr int kExpScanW = 86;
             constexpr int kExpLoadW = 108;
             constexpr int kExpRescanW = 118;
-            constexpr int kExpEdW = 72;
             constexpr int kExpMidiW = 100;
             constexpr int kExpScratchW = 124;
             constexpr int kExpKickW = 152;
             constexpr int kExpUnlW = 72;
             experimentalInstrumentScanOnlyButton_.setBounds(expBtn.removeFromLeft(kExpScanW).reduced(2, 0));
             experimentalInstrumentLoadButton_.setBounds(expBtn.removeFromLeft(kExpLoadW).reduced(2, 0));
-            experimentalInstrumentEditorButton_.setBounds(expBtn.removeFromLeft(kExpEdW).reduced(2, 0));
             experimentalInstrumentMidiEditorButton_.setBounds(expBtn.removeFromLeft(kExpMidiW).reduced(2, 0));
             experimentalInstrumentScratchMidiEditorButton_.setBounds(expBtn.removeFromLeft(kExpScratchW).reduced(2, 0));
             experimentalInstrumentTestKickButton_.setBounds(expBtn.removeFromLeft(kExpKickW).reduced(2, 0));
@@ -2793,6 +2789,10 @@ private:
             if (instrumentTrackHeader_ != nullptr)
             {
                 instrumentTrackHeader_->setVisible(showInst);
+                if (showInst)
+                {
+                    instrumentTrackHeader_->repaint();
+                }
             }
             instrumentMidiEventLane_.setVisible(showInst);
 
@@ -2800,7 +2800,6 @@ private:
             const juce::File instBundle(experimentalInstrumentHost_.getLastLoadedVst3OriginalPath());
             const bool canRescanDesc = has && instBundle.exists() && !experimentalOopScanBusy_.load();
             experimentalInstrumentRescanDescriptionButton_.setEnabled(canRescanDesc);
-            experimentalInstrumentEditorButton_.setEnabled(has);
             const bool canOpenClipMidiRoll
                 = showInst && !instrumentTrackController_.getClips().empty();
             experimentalInstrumentMidiEditorButton_.setEnabled(canOpenClipMidiRoll);
@@ -4700,7 +4699,6 @@ private:
         juce::Label experimentalInstrumentTitleLabel_;
         juce::TextButton experimentalInstrumentLoadButton_{ "Load VST3..." };
         juce::TextButton experimentalInstrumentScanOnlyButton_{ "Scan only..." };
-        juce::TextButton experimentalInstrumentEditorButton_{ "Editor" };
         juce::TextButton experimentalInstrumentMidiEditorButton_{ "MIDI roll..." };
         juce::TextButton experimentalInstrumentScratchMidiEditorButton_{ "Scratch MIDI roll..." };
         juce::TextButton experimentalInstrumentTestKickButton_{ "Test Kick (MIDI 36)" };
