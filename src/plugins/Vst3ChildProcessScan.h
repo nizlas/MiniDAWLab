@@ -50,7 +50,9 @@ struct Vst3BundleFileFingerprint
 };
 
 // -----------------------------------------------------------------------------
-// Phase 2 — general plugin capabilities (optional fields; mostly empty until later phases).
+// Phase 2 — optional `<capabilities>` under v2 `<plugin>` (fingerprints, future per-track maps).
+// Global v2 drum capabilities (rawPitchMap / drumNoteDisplay) are NOT canonical for production:
+// they are ignored for automatic drum-row display. OOP / Rescan continue to refresh PluginDescription only.
 // -----------------------------------------------------------------------------
 
 struct RawPitchMapNoteEntry
@@ -149,8 +151,6 @@ struct Vst3GrooveCacheLoadCandidate
     juce::File resolvedBundle;
     bool pathRepairUsed = false;
     Vst3ExperimentalCacheTier tier = Vst3ExperimentalCacheTier::V1;
-    /// V2 only: drum/raw pitch capabilities read from `<capabilities>` when present (Slice B).
-    std::optional<PluginCapabilities> maybeGrooveCachedCapabilities;
 };
 
 /// Reload v1 cache only (`experimental-vst3-descriptions.xml`). Legacy `<PLUGIN>` children under `<bundle>`.
@@ -163,8 +163,8 @@ struct Vst3GrooveCacheLoadCandidate
     const juce::File& vst3Bundle,
     std::vector<juce::PluginDescription>& descriptionsOut);
 
-/// Read `<capabilities>` for `forPlugin` from the v2 cache bundle row matching `bundlePathKey` (`vst3Path` attribute).
-/// Does not read or modify v1. Returns false if file missing, no bundle match, no wrapper, or no capabilities XML.
+/// Bootstrap / tests only: parsed `<capabilities>` XML from v2. **Not used for production drum UI**
+/// (global cache is not authoritative; future model is per-track / project-local drum maps).
 [[nodiscard]] bool tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(
     const juce::File& bundlePathKey,
     const juce::PluginDescription& forPlugin,
@@ -190,6 +190,8 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
 
 /// Merge/replace `<capabilities>` under a v2 `<plugin>` wrapper in **v2 cache file only**. No-op if v2 missing,
 /// corrupt, or bundle has no wrappers. Returns true only when the v2 cache file was replaced successfully.
+/// Note: production drum-row UI **does not** read global v2 drum capabilities; callers that persist them are gated
+/// (e.g. `kPersistGlobalDrumCapabilityHints` in `ExperimentalInstrumentHost`).
 [[nodiscard]] bool mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
                                               const juce::PluginDescription& forPlugin,
                                               const PluginCapabilities& caps);

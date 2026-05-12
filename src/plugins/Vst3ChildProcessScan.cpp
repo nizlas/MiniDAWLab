@@ -763,6 +763,8 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
     return false;
 }
 
+// Bootstrap / tests / legacy diagnostics only — production autoload, cached-load, and rescan must not use this
+// to seed the MIDI editor drum map (global v2 hints are not canonical).
 bool tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(const juce::File& bundlePathKey,
                                                          const juce::PluginDescription& forPlugin,
                                                          PluginCapabilities& capsOut)
@@ -830,37 +832,6 @@ bool tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(const juce::File& bund
 
     writeVst3OopScanDiagnosticLogLine("v2 capability read: skipped reason=no_matching_bundle");
     return false;
-}
-
-static void tryAttachV2GrooveCapabilitiesToCandidate(
-    Vst3GrooveCacheLoadCandidate& cand,
-    const juce::String& cacheKeyForPrefix)
-{
-    if (!cand.valid || cand.tier != Vst3ExperimentalCacheTier::V2 || cand.descriptions.empty()
-        || cacheKeyForPrefix.isEmpty())
-    {
-        return;
-    }
-
-    const juce::PluginDescription* grooveDesc = nullptr;
-    for (const auto& d : cand.descriptions)
-    {
-        if (d.name.containsIgnoreCase("Groove Agent SE"))
-        {
-            grooveDesc = &d;
-            break;
-        }
-    }
-    if (grooveDesc == nullptr)
-    {
-        grooveDesc = &cand.descriptions.front();
-    }
-
-    PluginCapabilities caps;
-    if (tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(juce::File(cacheKeyForPrefix), *grooveDesc, caps))
-    {
-        cand.maybeGrooveCachedCapabilities = std::move(caps);
-    }
 }
 
 [[nodiscard]] static bool tryScanEntireCacheFileForGrooveAgentSE(const juce::File& cacheFile,
@@ -978,10 +949,6 @@ static void tryAttachV2GrooveCapabilitiesToCandidate(
         cand.descriptions = std::move(descs);
         cand.resolvedBundle = cacheKeyAsFile;
         cand.pathRepairUsed = false;
-        if (tier == Vst3ExperimentalCacheTier::V2)
-        {
-            tryAttachV2GrooveCapabilitiesToCandidate(cand, cacheKeyForPrefix);
-        }
         return true;
     }
 
@@ -1017,10 +984,6 @@ static void tryAttachV2GrooveCapabilitiesToCandidate(
     cand.descriptions = std::move(descs);
     cand.resolvedBundle = found;
     cand.pathRepairUsed = true;
-    if (tier == Vst3ExperimentalCacheTier::V2)
-    {
-        tryAttachV2GrooveCapabilitiesToCandidate(cand, cacheKeyForPrefix);
-    }
     return true;
 }
 

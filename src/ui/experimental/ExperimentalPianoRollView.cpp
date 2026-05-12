@@ -761,7 +761,6 @@ void ExperimentalPianoRollView::timerCallback()
 void ExperimentalPianoRollView::resized()
 {
     Component::resized();
-    const int rh = timelineRulerHeight();
     if (rowLabelEditor_ != nullptr && rowLabelEditorPitch_ >= kPitchLow && rowLabelEditorPitch_ <= kPitchHigh)
     {
         const auto kb = keyboardBounds();

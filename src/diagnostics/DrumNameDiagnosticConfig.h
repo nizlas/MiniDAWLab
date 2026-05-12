@@ -5,7 +5,8 @@
 // Verbose drum-name probe (Phase A/B/C, per-note 24-84, summaries). When `kDrumNamesDiag` is true, lines go to:
 //   %APPDATA%\MiniDAWLab\drum-name-diagnostics.log
 // via writeDrumNameDiagnosticLogLine (see DrumNameDiagnosticFileLog.cpp). Not juce::Logger.
-// Normal builds keep `kDrumNamesDiag=false` so refresh/editor-open work without log I/O or Phase C audio probe.
+// Normal builds keep `kDrumNamesDiag=false`: no verbose drum-name log I/O, no Phase C audio probe, and no
+// automatic plugin→MIDI-editor drum map refresh on native editor open (that scheduling is diagnostic-only).
 
 namespace drum_name_diag
 {

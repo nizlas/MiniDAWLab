@@ -89,18 +89,25 @@ public:
     [[nodiscard]] bool hasPluginDrumNameMapAvailable() const noexcept;
 
     /// [Message thread] Rebuilds the transient plugin pitch-name map from the **current** `activeOwner_`
-    /// instance (call only after that owner is published). Safe when no instrument loaded (no-op).
+    /// via VST3 unit-info / pitch-name probes. **Not invoked automatically in production** (load, rescan,
+    /// cached load, editor open); reserved for future explicit “Import names from loaded plugin” and for
+    /// `kDrumNamesDiag` scheduling when enabled.
     void refreshPluginNoteNamesFromActiveInstrument();
 
-    /// [Message thread] Seeds drum row maps from v2 cache `<capabilities>` (high-confidence only).
-    /// Used so the MIDI editor can show pad names before the native Groove Agent editor opens.
-    /// No-op if validation fails; does not block load.
+    /// [Message thread] Experimental/bootstrap only: seeds drum row maps from parsed v2 `<capabilities>`.
+    /// **Not invoked in production.** Automatic plugin-reported names are also disabled; future model is
+    /// per-track / project-local maps and optional explicit import.
     void seedDrumDisplayFromCachedCapability(const mini_daw::PluginCapabilities& caps);
 
-    /// [Message thread] Optional hook: called when `IUnitInfo` harvesting finds new pitch names after the
-    /// native plugin editor was opened (Phase B). Replace any existing callback (e.g. clear with `{}` on editor
-    /// teardown). Not invoked from the audio thread.
+    /// [Message thread] Optional hook: invoked after diagnostic `afterEditorOpen` refresh when
+    /// `kDrumNamesDiag` is enabled (production keeps this unset). Not invoked from the audio thread.
     void setOnPluginPitchNamesCacheMayHaveChanged(std::function<void()> callback);
+
+    /// [Message thread] After native plugin editor opens, a deferred harvest probes the **loaded instance**
+    /// (VST3 IUnitInfo / program pitch names) and merges non-empty names into `InstrumentTrackController`
+    /// as `autoPlugin` labels via this callback. Does not populate global v2 capabilities.
+    void setOnPluginDrumNamesDiscovered(
+        std::function<void(const std::map<int, juce::String>&)> callback);
 
     /// [Message thread] When non-null, returning true means Phase C isolated audio probe must be skipped
     /// (playback, recording, or count-in). Cleared on destroy / unload.
@@ -121,6 +128,9 @@ public:
     /// Bundle / file path last passed to a successful `loadInstrumentFromVst3File` or
     /// `loadInstrumentFromDescription` (empty after unload). Used for advisory project save only.
     [[nodiscard]] juce::String getLastLoadedVst3OriginalPath() const noexcept;
+
+    /// Last successful load description (valid until unload). For cache rescan / capability lookup only.
+    [[nodiscard]] bool getLastLoadedPluginDescription(juce::PluginDescription& out) const noexcept;
 
     void openNativeEditor();
     void editorWindowClosing();
@@ -212,6 +222,7 @@ private:
     juce::String lastGrooveDrumCapabilityPersistKey_;
 
     std::function<void()> onPluginPitchNamesCacheMayHaveChanged_;
+    std::function<void(const std::map<int, juce::String>&)> onPluginDrumNamesDiscovered_;
     std::function<bool()> drumNamePhaseCAudioProbeShouldSkip_;
 
     juce::PluginDescription lastLoadedPluginDescription_{};
@@ -224,6 +235,8 @@ private:
     void refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase phase,
                                                         bool updateTransientNameCache);
 
+    /// Gated by `kPersistGlobalDrumCapabilityHints` (default false): global v2 drum `<capabilities>` are not
+    /// used for production drum-row display even if present on disk.
     void maybePersistGrooveDrumCapabilitiesToV2Cache(
         const experimental_instrument_host_detail::DrumNameVst3ProbeDetails& probe,
         const juce::String& derivationLogReason);
@@ -236,6 +249,8 @@ private:
 
     void scheduleDrumNameDiagLifecyclePhasesAfterRefreshIfEnabled();
 
-    /// After native VST3 editor is shown, harvested pitch names may only exist once UI exists (e.g. Groove Agent).
+    /// After native VST3 editor is shown (or brought to front): schedules a deferred `afterEditorOpen` harvest from
+    /// the loaded instance for track-local discovery (`setOnPluginDrumNamesDiscovered`). When `kDrumNamesDiag` is true,
+    /// the transient host pitch-name caches are also rebuilt for diagnostics only.
     void schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
 };

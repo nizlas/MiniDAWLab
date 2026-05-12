@@ -32,6 +32,18 @@
 #include <pluginterfaces/vst/ivstnoteexpression.h>
 #endif
 
+namespace
+{
+/// When true, writes global drum `<capabilities>` into v2 after runtime name harvest. **Default false:**
+/// global cached drum maps are not kit/preset canonical and are not used for production drum-row display;
+/// the intended model is per-instrument-track / project-local (future work).
+constexpr bool kPersistGlobalDrumCapabilityHints = false;
+
+/// Production does **not** auto-harvest plugin pitch/pad names into MIDI editor drum rows on load, rescan,
+/// cached load, or native editor open. Plugin-reported names may later be imported via an explicit UI action;
+/// until then `pluginPitchNamesByNote_` stays empty unless diagnostics (`kDrumNamesDiag`) drive refresh.
+} // namespace
+
 namespace experimental_instrument_host_detail
 {
 struct DrumNameVst3ProbeDetails
@@ -1849,13 +1861,22 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
     lastLoadedVst3OriginalPath_ = vst3File.getFullPathName();
     lastLoadedPluginDescription_ = desc;
     lastLoadedPluginDescriptionValid_ = true;
-    refreshPluginNoteNamesFromActiveInstrument();
     return juce::Result::ok();
 }
 
 juce::String ExperimentalInstrumentHost::getLastLoadedVst3OriginalPath() const noexcept
 {
     return lastLoadedVst3OriginalPath_;
+}
+
+bool ExperimentalInstrumentHost::getLastLoadedPluginDescription(juce::PluginDescription& out) const noexcept
+{
+    if (!lastLoadedPluginDescriptionValid_)
+    {
+        return false;
+    }
+    out = lastLoadedPluginDescription_;
+    return true;
 }
 
 void ExperimentalInstrumentHost::appendInstrumentHostLogLine(const juce::String& message)
@@ -2094,7 +2115,6 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     lastLoadedVst3OriginalPath_ = originalPath.getFullPathName();
     lastLoadedPluginDescription_ = desc;
     lastLoadedPluginDescriptionValid_ = true;
-    refreshPluginNoteNamesFromActiveInstrument();
     return juce::Result::ok();
 }
 
@@ -2228,6 +2248,12 @@ void ExperimentalInstrumentHost::setOnPluginPitchNamesCacheMayHaveChanged(std::f
     onPluginPitchNamesCacheMayHaveChanged_ = std::move(callback);
 }
 
+void ExperimentalInstrumentHost::setOnPluginDrumNamesDiscovered(
+    std::function<void(const std::map<int, juce::String>&)> callback)
+{
+    onPluginDrumNamesDiscovered_ = std::move(callback);
+}
+
 void ExperimentalInstrumentHost::setDrumNamePhaseCAudioProbeShouldSkip(std::function<bool()> shouldSkip)
 {
     drumNamePhaseCAudioProbeShouldSkip_ = std::move(shouldSkip);
@@ -2235,9 +2261,12 @@ void ExperimentalInstrumentHost::setDrumNamePhaseCAudioProbeShouldSkip(std::func
 
 void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrument()
 {
+    // Not invoked automatically in production (load / rescan / editor). Reserved for future explicit
+    // "Import names from plugin" and for `kDrumNamesDiag` scheduling paths.
     refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::immediate, true);
 }
 
+// Production code must not call this for autoload/rescan; global cached capabilities are not authoritative.
 void ExperimentalInstrumentHost::seedDrumDisplayFromCachedCapability(const mini_daw::PluginCapabilities& caps)
 {
     if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
@@ -2380,8 +2409,10 @@ void ExperimentalInstrumentHost::schedulePluginPitchNamesRefreshAfterNativeEdito
         {
             return;
         }
+        // Production: transient host pitch-name caches are diagnostic-only (`kDrumNamesDiag`).
+        // Track-local `autoPlugin` labels always use the deferred `afterEditorOpen` probe (see discovery block in impl).
         self->refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::afterEditorOpen,
-                                                            true);
+                                                            drum_name_diag::kDrumNamesDiag);
     });
 }
 
@@ -2452,6 +2483,42 @@ void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrumentImpl(
     }
     const int nDisplayFromProbe = (int)displayScratch.size();
 
+    if (phase == drum_name_diag::DrumNameRefreshPhase::afterEditorOpen)
+    {
+        std::map<int, juce::String> forTrack;
+        for (const auto& kv : displayScratch)
+        {
+            juce::String t = kv.second.trim();
+            if (t.isNotEmpty())
+                forTrack.emplace(kv.first, std::move(t));
+        }
+        if (forTrack.empty())
+        {
+            juce::String reason;
+            if (nRaw <= 0)
+                reason = probe.zeroReason.isNotEmpty() ? ("reason=probe_empty detail=\"" + probe.zeroReason + "\"")
+                                                       : juce::String{"reason=probe_empty detail=none"};
+            else
+                reason = juce::String{"reason=no_non_empty_display_names rawCount="} + juce::String{nRaw}
+                         + juce::String{" derivedOk="}
+                         + juce::String{derivedPads.ok ? "true" : "false"}
+                         + juce::String{" displaySource="} + displaySourceStr;
+
+            appendInstrumentHostLogLine(
+                juce::String{"drum-map: plugin names skipped "} + reason + juce::String{" trigger=afterEditorOpen"});
+        }
+        else
+        {
+            appendInstrumentHostLogLine(
+                juce::String{"drum-map: plugin names discovered source=loaded_plugin count="}
+                + juce::String(static_cast<int>(forTrack.size())) + juce::String{" trigger=afterEditorOpen"});
+            if (onPluginDrumNamesDiscovered_)
+            {
+                onPluginDrumNamesDiscovered_(forTrack);
+            }
+        }
+    }
+
     juce::String authorityReasonForLog;
     if (updateTransientNameCache)
     {
@@ -2471,7 +2538,8 @@ void ExperimentalInstrumentHost::refreshPluginNoteNamesFromActiveInstrumentImpl(
         pluginDrumNameMapAuthoritative_ = authorityEval.authoritative;
         authorityReasonForLog = authorityEval.reason;
 
-        if (pluginDrumNameMapAuthoritative_)
+        if (pluginDrumNameMapAuthoritative_
+            && phase != drum_name_diag::DrumNameRefreshPhase::afterEditorOpen)
         {
             maybePersistGrooveDrumCapabilitiesToV2Cache(probe, derivationLogReason);
         }
@@ -2630,6 +2698,11 @@ void ExperimentalInstrumentHost::maybePersistGrooveDrumCapabilitiesToV2Cache(
     const experimental_instrument_host_detail::DrumNameVst3ProbeDetails& probe,
     const juce::String& derivationLogReason)
 {
+    if (!kPersistGlobalDrumCapabilityHints)
+    {
+        return;
+    }
+
     if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
         || !juce::MessageManager::getInstance()->isThisTheMessageThread())
     {

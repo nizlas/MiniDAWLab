@@ -5,6 +5,8 @@
 // =============================================================================
 // MIDI note numbers 35–81 per the GM level 1 percussion map. Returns an empty
 // string outside that range.
+// The experimental MIDI editor Drum Names row mode does **not** use this table in production
+// (blank labels until a saved user/project label or accepted plugin map entry exists).
 // =============================================================================
 
 #include <juce_core/juce_core.h>

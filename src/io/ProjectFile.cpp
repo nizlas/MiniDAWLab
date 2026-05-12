@@ -365,6 +365,25 @@ namespace
                     }
                 }
             }
+            const juce::var& dna = tv.getProperty("drumNoteNamesAutoPlugin", {});
+            if (dna.isObject())
+            {
+                if (const auto* dynObjA = dna.getDynamicObject())
+                {
+                    for (const auto& nv : dynObjA->getProperties())
+                    {
+                        const int note = nv.name.toString().getIntValue();
+                        if (note >= 0 && note <= 127)
+                        {
+                            const juce::String nm = nv.value.toString().trim();
+                            if (nm.isNotEmpty())
+                            {
+                                et.drumNoteNameAutoPlugin.push_back({note, nm});
+                            }
+                        }
+                    }
+                }
+            }
             const juce::var& clipsV = tv.getProperty("clips", {});
             if (clipsV.isArray())
             {
@@ -655,6 +674,21 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 if (dnmObj->getProperties().size() > 0)
                 {
                     eo->setProperty("drumNoteNames", juce::var(dnmObj.get()));
+                }
+            }
+            if (!et.drumNoteNameAutoPlugin.empty())
+            {
+                juce::DynamicObject::Ptr dnAutoObj = new juce::DynamicObject();
+                for (const auto& kv : et.drumNoteNameAutoPlugin)
+                {
+                    if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
+                    {
+                        dnAutoObj->setProperty(juce::String(kv.first), kv.second);
+                    }
+                }
+                if (dnAutoObj->getProperties().size() > 0)
+                {
+                    eo->setProperty("drumNoteNamesAutoPlugin", juce::var(dnAutoObj.get()));
                 }
             }
             juce::Array<juce::var> clipVars;
@@ -1012,6 +1046,7 @@ void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimental
     t.pluginWasLoadedOnSave = false;
     t.pluginBundlePath.clear();
     t.drumNoteNameOverrides.clear();
+    t.drumNoteNameAutoPlugin.clear();
 }
 
 namespace

@@ -225,37 +225,124 @@ juce::String InstrumentTrackController::getDrumNoteUserOverride(const int midiNo
     {
         return {};
     }
-    const auto it = drumNoteNameOverrides_.find(midiNote);
-    if (it == drumNoteNameOverrides_.end())
+    const auto it = drumLabels_.find(midiNote);
+    if (it == drumLabels_.end())
     {
         return {};
     }
-    return it->second;
+    return it->second.manual;
 }
 
 void InstrumentTrackController::setDrumNoteUserOverride(const int midiNote, juce::String displayName) noexcept
+{
+    setDrumLabelManual(midiNote, std::move(displayName));
+}
+
+void InstrumentTrackController::setDrumLabelManual(const int midiNote, juce::String name) noexcept
 {
     if (midiNote < 0 || midiNote > 127)
     {
         return;
     }
-    displayName = displayName.trim();
-    const auto it = drumNoteNameOverrides_.find(midiNote);
-    if (displayName.isEmpty())
+    name = name.trim();
+
+    DrumLabelLayers& layers = drumLabels_[midiNote]; // inserts empty layers when first touched
+
+    if (name.isEmpty())
     {
-        if (it != drumNoteNameOverrides_.end())
+        if (layers.manual.isEmpty())
         {
-            drumNoteNameOverrides_.erase(it);
-            sendChangeMessage();
+            return;
         }
+        layers.manual.clear();
+        pruneDrumLabelLayersIfUnused(midiNote);
+        sendChangeMessage();
         return;
     }
-    if (it != drumNoteNameOverrides_.end() && it->second == displayName)
+
+    if (layers.manual == name)
     {
         return;
     }
-    drumNoteNameOverrides_[midiNote] = std::move(displayName);
+    layers.manual = std::move(name);
     sendChangeMessage();
+}
+
+void InstrumentTrackController::mergeAutoPluginDrumLabels(const std::map<int, juce::String>& discovered,
+                                                           const juce::String& pluginIdentifier)
+{
+    juce::ignoreUnused(pluginIdentifier);
+    bool anyChanged = false;
+    for (const auto& kv : discovered)
+    {
+        const int note = kv.first;
+        if (note < 0 || note > 127)
+        {
+            continue;
+        }
+        const juce::String trimmed = kv.second.trim();
+        if (trimmed.isEmpty())
+        {
+            continue;
+        }
+
+        DrumLabelLayers& layers = drumLabels_[note];
+
+        // Manual edits always win until cleared.
+        if (layers.manual.isNotEmpty())
+        {
+            continue;
+        }
+
+        if (layers.autoPlugin == trimmed)
+        {
+            continue;
+        }
+        layers.autoPlugin = trimmed;
+        anyChanged = true;
+    }
+
+    if (anyChanged)
+    {
+        sendChangeMessage();
+    }
+}
+
+std::optional<std::pair<juce::String, DrumLabelSource>> InstrumentTrackController::getEffectiveDrumLabel(
+    const int midiNote) const
+{
+    if (midiNote < 0 || midiNote > 127)
+    {
+        return std::nullopt;
+    }
+    const auto it = drumLabels_.find(midiNote);
+    if (it == drumLabels_.end())
+    {
+        return std::nullopt;
+    }
+    const DrumLabelLayers& layer = it->second;
+    if (layer.manual.isNotEmpty())
+    {
+        return std::make_pair(layer.manual, DrumLabelSource::manual);
+    }
+    if (layer.autoPlugin.isNotEmpty())
+    {
+        return std::make_pair(layer.autoPlugin, DrumLabelSource::autoPlugin);
+    }
+    return std::nullopt;
+}
+
+void InstrumentTrackController::pruneDrumLabelLayersIfUnused(const int midiNote) noexcept
+{
+    const auto it = drumLabels_.find(midiNote);
+    if (it == drumLabels_.end())
+    {
+        return;
+    }
+    if (it->second.manual.isEmpty() && it->second.autoPlugin.isEmpty())
+    {
+        drumLabels_.erase(it);
+    }
 }
 
 void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
@@ -273,7 +360,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
     pendingPluginStateBase64_.clear();
-    drumNoteNameOverrides_.clear();
+    drumLabels_.clear();
     publishRenderSnapshot();
 }
 
@@ -296,11 +383,15 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     }
     dto.powerOn = powerOn_;
     dto.muted = muted_;
-    for (const auto& kv : drumNoteNameOverrides_)
+    for (const auto& kv : drumLabels_)
     {
-        if (kv.second.isNotEmpty())
+        if (kv.second.manual.isNotEmpty())
         {
-            dto.drumNoteNameOverrides.push_back(kv);
+            dto.drumNoteNameOverrides.push_back({ kv.first, kv.second.manual });
+        }
+        if (kv.second.autoPlugin.isNotEmpty())
+        {
+            dto.drumNoteNameAutoPlugin.push_back({ kv.first, kv.second.autoPlugin });
         }
     }
     for (const auto& cptr : clips_)
@@ -381,7 +472,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         return;
     }
 
-    // `drumNoteNameOverrides_` is not loaded from `chosen`: musical undo DTOs strip overrides and
+    // `drumLabels_` (manual + auto layers) is not loaded from `chosen`: musical undo DTOs strip overrides and
     // equality ignores them, so row renames survive note undo/redo.
 
     powerOn_ = chosen->powerOn;
@@ -523,12 +614,19 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     pendingInstrumentKind_ = chosen->instrumentKind;
     pendingPluginStateBase64_ = chosen->pluginStateBase64;
 
-    drumNoteNameOverrides_.clear();
+    drumLabels_.clear();
     for (const auto& kv : chosen->drumNoteNameOverrides)
     {
         if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
         {
-            drumNoteNameOverrides_[kv.first] = kv.second;
+            drumLabels_[kv.first].manual = kv.second;
+        }
+    }
+    for (const auto& kv : chosen->drumNoteNameAutoPlugin)
+    {
+        if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
+        {
+            drumLabels_[kv.first].autoPlugin = kv.second;
         }
     }
 
@@ -716,14 +814,12 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     };
 
     juce::Result loadResult = juce::Result::fail("");
-    bool loadedFromV2Candidate = false;
 
     if (v2Cand.valid)
     {
         loadResult = tryLoadFromCandidate(v2Cand);
         if (loadResult.wasOk())
         {
-            loadedFromV2Candidate = true;
             mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: cache source=v2 load=ok");
         }
         else
@@ -827,18 +923,6 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
     }
 
     syncShellWithHostState();
-
-    if (loadResult.wasOk())
-    {
-        if (loadedFromV2Candidate && v2Cand.maybeGrooveCachedCapabilities.has_value())
-        {
-            host.seedDrumDisplayFromCachedCapability(*v2Cand.maybeGrooveCachedCapabilities);
-        }
-        else
-        {
-            host.refreshPluginNoteNamesFromActiveInstrument();
-        }
-    }
 }
 
 void InstrumentTrackController::setTimelineSampleRate(const double sampleRate) noexcept

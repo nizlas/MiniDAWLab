@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include <juce_events/juce_events.h>
@@ -74,6 +76,21 @@ struct InstrumentTrackRenderSnapshot
     int gateSamples = 4800;
     /// Sorted by `startSamples`. Notes sorted by `absSample` within each clip.
     std::vector<InstrumentClipRenderPlan> clips;
+};
+
+/// Tracks whether a MIDI editor drum-row label came from the user vs plugin discovery (`mergeAutoPluginDrumLabels`).
+enum class DrumLabelSource
+{
+    manual,
+    autoPlugin
+};
+
+/// One visible drum label + its source (what `getEffectiveDrumLabel` returns).
+/// Per-note storage is layered: manual and autoPlugin may both exist internally; manual shadows autoPlugin until cleared.
+struct InstrumentTrackDrumLabel
+{
+    juce::String name;
+    DrumLabelSource source = DrumLabelSource::manual;
 };
 
 class InstrumentTrackController : public juce::ChangeBroadcaster
@@ -136,9 +153,23 @@ public:
     /// when `contextClip` has timeline notes and they share a single channel, that channel is used.
     [[nodiscard]] int pluginNoteNameQueryChannel(const InstrumentMidiClip* contextClip = nullptr) const noexcept;
 
-    /// User drum-row label overrides (MIDI note 0-127). Empty string erases. Display / project only.
+    /// User drum-row label overrides (shim → `setDrumLabelManual` / manual layer only). MIDI note 0–127 only.
+    /// Empty string erases the manual label only (`autoPlugin` may still appear via `getEffectiveDrumLabel`).
     [[nodiscard]] juce::String getDrumNoteUserOverride(int midiNote) const noexcept;
     void setDrumNoteUserOverride(int midiNote, juce::String displayName) noexcept;
+
+    /// Manual drum label for `midiNote` (0–127). Non-empty replaces manual; empty erases manual and reveals any
+    /// `autoPlugin` label for that note. Does not mutate `autoPlugin` entries except via `mergeAutoPluginDrumLabels`.
+    void setDrumLabelManual(int midiNote, juce::String name) noexcept;
+
+    /// Merge discovered names from the live plugin instance (future). Does not overwrite manual labels, does not
+    /// erase existing autoPlugin rows for notes absent from `discovered`, ignores empty discovered names.
+    /// `pluginIdentifier` is accepted for forward use; not persisted in this slice.
+    void mergeAutoPluginDrumLabels(const std::map<int, juce::String>& discovered,
+                                   const juce::String& pluginIdentifier);
+
+    /// Effective label for Drum Names UI: manual if set, else autoPlugin if set; `std::nullopt` if neither.
+    [[nodiscard]] std::optional<std::pair<juce::String, DrumLabelSource>> getEffectiveDrumLabel(int midiNote) const;
 
     /// One enabled row for `experimentalInstrumentTracks` when `hasInstrumentTrack()`.
     [[nodiscard]] ProjectFileExperimentalInstrumentTrackV1 buildExperimentalInstrumentProjectBlock() const;
@@ -212,8 +243,17 @@ private:
 
     double timelineSampleRate_ = 48000.0;
 
-    /// Piano-roll drum name overrides; not part of musical undo.
-    std::map<int, juce::String> drumNoteNameOverrides_;
+    /// Per MIDI note (0–127): optional manual label and optional autoPlugin label (both may exist; manual wins in UI).
+    /// Distinct keys are erased when both strings are empty. Not part of musical undo snapshots.
+    struct DrumLabelLayers
+    {
+        juce::String manual;
+        juce::String autoPlugin;
+    };
+
+    std::map<int, DrumLabelLayers> drumLabels_;
+
+    void pruneDrumLabelLayersIfUnused(int midiNote) noexcept;
 
     std::atomic<std::shared_ptr<const InstrumentTrackRenderSnapshot>> renderSnapshot_;
     std::uint32_t nextSnapshotRevision_ = 1;

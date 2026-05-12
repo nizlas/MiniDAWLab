@@ -4,7 +4,6 @@
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
 #include "ExperimentalPianoRollView.h"
-#include "DrumNoteNames.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
@@ -15,6 +14,7 @@
 #include "ui/CollapsibleSideStrip.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
+#include "diagnostics/DrumNameDiagnosticConfig.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
@@ -37,7 +37,8 @@ namespace
 class ExperimentalMidiEditorWindow::Body final : public juce::Component,
                                                  public collapsible_side_strip::Host,
                                                  private juce::Timer,
-                                                 private juce::Slider::Listener
+                                                 private juce::Slider::Listener,
+                                                 private juce::ChangeListener
 {
     friend class ExperimentalMidiEditorWindow;
 
@@ -253,6 +254,9 @@ public:
 
     ~Body() override
     {
+        if (instrumentTrackForClipBind_ != nullptr)
+            instrumentTrackForClipBind_->removeChangeListener(this);
+
         bpmSlider_.removeListener(this);
         stopTimer();
         player_->stopPlayback("window-closed");
@@ -321,7 +325,17 @@ public:
         }
 
         externalPattern_ = p;
+        InstrumentTrackController* const oldInstrumentTrackGate = instrumentTrackForClipBind_;
         instrumentTrackForClipBind_ = gatePtr;
+        if (oldInstrumentTrackGate != instrumentTrackForClipBind_)
+        {
+            if (oldInstrumentTrackGate != nullptr)
+                oldInstrumentTrackGate->removeChangeListener(this);
+
+            if (instrumentTrackForClipBind_ != nullptr)
+                instrumentTrackForClipBind_->addChangeListener(this);
+        }
+
         boundTimelineClip_ = timelineClip;
         persistentInstrumentClipIdForRebind_ = (timelineClip != nullptr)
                                                    ? static_cast<std::uint64_t>(timelineClip->id)
@@ -388,6 +402,10 @@ public:
             }
         }
         externalPattern_ = nullptr;
+        if (instrumentTrackForClipBind_ != nullptr)
+        {
+            instrumentTrackForClipBind_->removeChangeListener(this);
+        }
         instrumentTrackForClipBind_ = nullptr;
         boundTimelineClip_ = nullptr;
         persistentInstrumentClipIdForRebind_ = 0;
@@ -630,6 +648,7 @@ private:
     void midiRollSetActiveSideStripTotal(int w) noexcept;
 
     void timerCallback() override;
+    void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void setTransportCommands(ExperimentalMidiTransportCommands commands);
     void pushTransportGestureBlockToRoll();
     void applyInstrumentUndoGatewayToRoll();
@@ -872,6 +891,16 @@ void ExperimentalMidiEditorWindow::Body::timerCallback()
     }
     const bool cyc = transportCommands_.transport->readCycleEnabledForUi();
     cycleToggleButton_.setButtonText(cyc ? "Cycle: On" : "Cycle: Off");
+}
+
+void ExperimentalMidiEditorWindow::Body::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    juce::ignoreUnused(source);
+    if (rowsBox_.getSelectedId() != 2)
+    {
+        return;
+    }
+    pushRowsModeToRoll();
 }
 
 void ExperimentalMidiEditorWindow::Body::setTransportCommands(ExperimentalMidiTransportCommands commands)
@@ -1123,58 +1152,24 @@ void ExperimentalMidiEditorWindow::Body::pushDisplayToRoll()
 juce::String ExperimentalMidiEditorWindow::Body::resolveDrumRowDisplayName(const int midiNote,
                                                                            const int pluginQueryChannel) const noexcept
 {
-    if (instrumentTrackForClipBind_ != nullptr)
-    {
-        const juce::String o = instrumentTrackForClipBind_->getDrumNoteUserOverride(midiNote);
-        if (o.isNotEmpty())
-        {
-            return o;
-        }
-    }
-    const bool pluginAuthoritative = host_.hasPluginDrumNameMapAvailable();
-    if (pluginAuthoritative)
-    {
-        if (auto opt = host_.getPluginNoteNameIfAvailable(midiNote, pluginQueryChannel))
-        {
-            return *opt;
-        }
+    juce::ignoreUnused(pluginQueryChannel);
+
+    if (instrumentTrackForClipBind_ == nullptr)
         return {};
-    }
-    const juce::String gm = drum_note_names::gmPercussionName(midiNote);
-    if (gm.isNotEmpty())
-    {
-        return gm;
-    }
-    return juce::MidiMessage::getMidiNoteName(midiNote, true, true, 3);
+
+    const auto eff = instrumentTrackForClipBind_->getEffectiveDrumLabel(midiNote);
+    if (eff.has_value() && eff->first.isNotEmpty())
+        return eff->first;
+
+    return {};
 }
 
 juce::String ExperimentalMidiEditorWindow::Body::resolveDrumRowHoverTooltip(
     const int midiNote,
     const int pluginQueryChannel) const noexcept
 {
-    if (!host_.hasPluginDrumNameMapAvailable())
-    {
-        return {};
-    }
-    if (instrumentTrackForClipBind_ != nullptr
-        && instrumentTrackForClipBind_->getDrumNoteUserOverride(midiNote).isNotEmpty())
-    {
-        return {};
-    }
-    if (auto opt = host_.getPluginNoteNameIfAvailable(midiNote, pluginQueryChannel))
-    {
-        if (opt->isNotEmpty())
-        {
-            return {};
-        }
-    }
-    juce::String s = "MIDI " + juce::String(midiNote);
-    const juce::String piano = juce::MidiMessage::getMidiNoteName(midiNote, true, true, 3);
-    if (piano.isNotEmpty())
-    {
-        s << " | " << piano;
-    }
-    return s;
+    juce::ignoreUnused(midiNote, pluginQueryChannel);
+    return {};
 }
 
 void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
@@ -1208,6 +1203,44 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
             instrumentTrackForClipBind_->setDrumNoteUserOverride(note, std::move(name));
         });
         rv->repaint();
+    }
+    if (rowsBox_.getSelectedId() == 2)
+    {
+        const int pitchLow = ExperimentalPianoRollView::kPitchLow;
+        const int pitchHigh = ExperimentalPianoRollView::kPitchHigh;
+        int manualLabelled = 0;
+        int autoPluginLabelled = 0;
+        int blank = 0;
+        for (int n = pitchLow; n <= pitchHigh; ++n)
+        {
+            if (instrumentTrackForClipBind_ == nullptr)
+            {
+                ++blank;
+                continue;
+            }
+
+            const auto eff = instrumentTrackForClipBind_->getEffectiveDrumLabel(n);
+            if (!eff.has_value() || eff->first.isEmpty())
+            {
+                ++blank;
+            }
+            else if (eff->second == DrumLabelSource::manual)
+            {
+                ++manualLabelled;
+            }
+            else
+            {
+                ++autoPluginLabelled;
+            }
+        }
+
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            juce::String{"midi-editor: drum-rows mode=DrumNames labelSource=track_local manualLabelled="}
+            + juce::String(manualLabelled) + juce::String{" autoPluginLabelled="} + juce::String(autoPluginLabelled)
+            + juce::String{" blank="} + juce::String(blank)
+            + juce::String{" gmPercussionFallback=disabled noteFallback=disabled hostMapConsulted=false"
+                           " pitchRange="}
+            + juce::String(pitchLow) + juce::String{"-"} + juce::String(pitchHigh));
     }
     layoutMidiSideStripChrome();
 }
@@ -1433,7 +1466,10 @@ ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumen
     setResizeLimits(640, 420, 10000, 10000);
     centreWithSize(kInitialEditorWidth, kInitialEditorHeight);
 
-    host_.setOnPluginPitchNamesCacheMayHaveChanged([this] { syncInstrumentStateFromHost(); });
+    if (drum_name_diag::kDrumNamesDiag)
+    {
+        host_.setOnPluginPitchNamesCacheMayHaveChanged([this] { syncInstrumentStateFromHost(); });
+    }
 }
 
 ExperimentalMidiEditorWindow::~ExperimentalMidiEditorWindow()
