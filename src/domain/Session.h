@@ -121,6 +121,12 @@ public:
     // of range.
     [[nodiscard]] TrackId getTrackIdAtIndex(int index) const noexcept;
 
+    [[nodiscard]] TrackKind getTrackKindAtIndex(int index) const noexcept;
+
+    /// Append an empty `TrackKind::Instrument` lane at the end — **experimental single shell** slice
+    /// (refuses while any `Instrument` track already exists). Returns the new stable id when published.
+    [[nodiscard]] std::optional<TrackId> appendExperimentalInstrumentShellTrack(juce::String trackDisplayName) noexcept;
+
     // [Message thread] Move one placed clip in **timeline sample** space. Ordering (promote to 0
     // if isolated) is **only** in `SessionSnapshot::withClipMoved` **within the clip’s own track** —
     // the UI does not implement policy. Invalid or unknown id: no publish (see factory jasserts).

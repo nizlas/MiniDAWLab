@@ -101,6 +101,14 @@ public:
         TrackId newTrackId,
         juce::String newTrackName) noexcept;
 
+    /// Append an empty track at the end with explicit `kind` (`Audio`: timeline WAV lanes;
+    /// `Instrument`: experimental shell lane — clips must remain empty in this slice).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackAdded(
+        const SessionSnapshot& previous,
+        TrackId newTrackId,
+        juce::String newTrackName,
+        TrackKind kind) noexcept;
+
     // [Message thread] Drops the `TrackId` row and all its `PlacedClip`s. Unknown id: same snapshot
     // pointer shape (tracks copied verbatim). Removing the last lane yields `createEmpty()`.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRemoved(

@@ -46,6 +46,8 @@ struct ProjectFileTrackV1
 {
     TrackId id = kInvalidTrackId;
     juce::String name;
+    /// v13: `"audio"` (default when absent) or `"instrument"` experimental shell lane.
+    juce::String kind;
     std::vector<ProjectFileClipV1> clips;
     // v5: linear gain at channel-fader point (mixer). Omitted in JSON when ~ unity (see writer).
     float channelFaderGain = kTrackChannelVolumeUnityGain;
@@ -109,6 +111,8 @@ struct ProjectFileExperimentalInstrumentClipV1
 /// Optional `pluginStateBase64`: Base64 `AudioPluginInstance::getStateInformation` when saved with plug-in loaded.
 struct ProjectFileExperimentalInstrumentTrackV1
 {
+    /// v13+: binding row in `tracks[]`; 0 before migration / legacy payloads.
+    TrackId trackId = kInvalidTrackId;
     bool enabled = true;
     juce::String name { "Groove Agent SE" };
     juce::String instrumentKind { "GrooveAgentSE" };
@@ -131,8 +135,9 @@ struct ProjectFileExperimentalInstrumentTrackV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// New optional JSON keys may be added at this version when missing properties default safely for older writers/readers (no bump required — see experimental clip `midiRoll*` keys).
-    static constexpr int kCurrentVersion = 12;
+    /// Current JSON writer version (**13** introduces `tracks[].kind` + `experimentalInstrumentTracks[].trackId`).
+    /// Read path accepts `< 13`; see `migrateProjectFileExperimentalInstrumentLanePreV13` in `ProjectFile.cpp`.
+    static constexpr int kCurrentVersion = 13;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

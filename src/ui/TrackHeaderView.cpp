@@ -514,6 +514,21 @@ TrackHeaderView::TrackHeaderView(TrackHeaderModelProvider modelProvider,
     }
 }
 
+void TrackHeaderView::setHeaderReorderDrag(
+    std::optional<TrackHeaderDragHost> host,
+    TrackId const dragTrackIdForwarded) noexcept
+{
+    dragHost_ = std::move(host);
+    dragTrackId_ = dragTrackIdForwarded;
+    if (dragHost_.has_value())
+    {
+        jassert(dragTrackId_ != kInvalidTrackId);
+        jassert(dragHost_->onHeaderDragBegan != nullptr);
+        jassert(dragHost_->onHeaderDragMoved != nullptr);
+        jassert(dragHost_->onHeaderDragEnded != nullptr);
+    }
+}
+
 void TrackHeaderView::paint(juce::Graphics& g)
 {
     TrackHeaderModel const m = modelProvider_();

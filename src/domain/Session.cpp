@@ -164,6 +164,14 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     {
         return juce::Result::fail("Internal error: no session snapshot.");
     }
+    {
+        const int aIdx = current->findTrackIndexById(activeTrackId_);
+        if (aIdx >= 0 && current->getTrack(aIdx).getKind() != TrackKind::Audio)
+        {
+            return juce::Result::fail(
+                "Add clip targets an audio lane; activate an audio track header first.");
+        }
+    }
     try
     {
         const std::shared_ptr<const SessionSnapshot> next
@@ -238,6 +246,14 @@ juce::Result Session::addRecordedTakeAtSample(
     if (current->findTrackIndexById(targetTrackId) < 0)
     {
         return juce::Result::fail("Target track does not exist.");
+    }
+    {
+        const int tIx = current->findTrackIndexById(targetTrackId);
+        jassert(tIx >= 0);
+        if (tIx >= 0 && current->getTrack(tIx).getKind() != TrackKind::Audio)
+        {
+            return juce::Result::fail("Recorded takes can only target audio tracks.");
+        }
     }
     const PlacedClipId newId = nextPlacedClipId_++;
     jassert(newId != kInvalidPlacedClipId);
@@ -318,6 +334,14 @@ juce::Result Session::addPlacedClipFromExistingMaterial(
     if (current->findTrackIndexById(targetTrackId) < 0)
     {
         return juce::Result::fail("Target track does not exist.");
+    }
+    {
+        const int tIx = current->findTrackIndexById(targetTrackId);
+        jassert(tIx >= 0);
+        if (tIx >= 0 && current->getTrack(tIx).getKind() != TrackKind::Audio)
+        {
+            return juce::Result::fail("Timeline audio clips attach to audio lanes only.");
+        }
     }
     const PlacedClipId newId = nextPlacedClipId_++;
     jassert(newId != kInvalidPlacedClipId);
@@ -410,6 +434,59 @@ TrackId Session::getTrackIdAtIndex(const int index) const noexcept
     return s->getTrack(index).getId();
 }
 
+TrackKind Session::getTrackKindAtIndex(const int index) const noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
+    if (s == nullptr || index < 0 || index >= s->getNumTracks())
+    {
+        return TrackKind::Audio;
+    }
+    return s->getTrack(index).getKind();
+}
+
+std::optional<TrackId> Session::appendExperimentalInstrumentShellTrack(juce::String trackDisplayName) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return std::nullopt;
+    }
+    for (int i = 0; i < current->getNumTracks(); ++i)
+    {
+        if (current->getTrack(i).getKind() == TrackKind::Instrument)
+        {
+            return std::nullopt;
+        }
+    }
+
+    const TrackId newId = nextTrackId_;
+    jassert(newId != kInvalidTrackId);
+    if (trackDisplayName.isEmpty())
+    {
+        trackDisplayName = juce::String("Groove Agent SE");
+    }
+    try
+    {
+        const std::shared_ptr<const SessionSnapshot> next
+            = SessionSnapshot::withTrackAdded(*current,
+                                                newId,
+                                                std::move(trackDisplayName),
+                                                TrackKind::Instrument);
+        if (next == nullptr)
+        {
+            jassert(false);
+            return std::nullopt;
+        }
+        std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+    nextTrackId_ = newId + 1;
+    return newId;
+}
+
 void Session::moveClip(const PlacedClipId id, const std::int64_t newStartSampleOnTimeline) noexcept
 {
     if (id == kInvalidPlacedClipId)
@@ -468,6 +545,17 @@ void Session::moveClipToTrack(
     {
         // Same track: `withClipMovedToTrack` is not used; UI should call `moveClip` instead.
         return;
+    }
+    {
+        const int targIdx = current->findTrackIndexById(targetTrackId);
+        if (targIdx < 0)
+        {
+            return;
+        }
+        if (current->getTrack(targIdx).getKind() != TrackKind::Audio)
+        {
+            return;
+        }
     }
     const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withClipMovedToTrack(
         *current, id, newStartSampleOnTimeline, targetTrackId);
@@ -882,58 +970,73 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.id = t.getId();
         tr.name = t.getName();
         tr.channelFaderGain = t.getChannelFaderGain();
-        for (int j = 0; j < t.getNumPlacedClips(); ++j)
-        {
-            const PlacedClip& p = t.getPlacedClip(j);
-            ProjectFileClipV1 c;
-            c.id = p.getId();
-            c.startSample = p.getStartSample();
-            {
-                const juce::File src(p.getAudioClip().getSourceFilePath());
-                if (src.getFullPathName().isEmpty())
-                {
-                    return juce::Result::fail("A clip in the session has no source file path; cannot save.");
-                }
-                const juce::File projectFolder = file.getParentDirectory();
-                if (!isClipSourceFileUnderProjectAudio(src, projectFolder))
-                {
-                    return juce::Result::fail(
-                        "Cannot save project because an audio clip refers to a file outside "
-                        "the project Audio folder: "
-                        + src.getFullPathName());
-                }
+        tr.off = t.isTrackOff();
+        tr.muted = t.isMuted();
+        tr.kind = (t.getKind() == TrackKind::Instrument) ? juce::String("instrument") : juce::String("audio");
 
-                const juce::String storedRel = toProjectAudioStoredPath(src, projectFolder);
-                if (!storedRel.startsWith("Audio/"))
-                {
-                    return juce::Result::fail(
-                        "Cannot save project: clip source must lie under Audio/ relative to "
-                        "the project file (unexpected path derivation for "
-                        + src.getFullPathName()
-                        + ").");
-                }
-                c.sourcePath = storedRel;
-            }
-            const int matN = p.getMaterialLengthSamples();
-            const std::int64_t eff = p.getEffectiveLengthSamples();
-            const std::int64_t ltrim = p.getLeftTrimSamples();
-            const std::int64_t fullTail
-                = (matN > 0) ? (static_cast<std::int64_t>(matN) - ltrim) : std::int64_t{ 0 };
-            c.leftTrimSamples = ltrim;
-            const std::int64_t ws = p.getMaterialWindowStartSamples();
-            const std::int64_t we = p.getMaterialWindowEndExclusiveSamples();
-            const bool narrowedFullMaterial
-                = (matN > 0 && !(ws == 0 && we == static_cast<std::int64_t>(matN)));
-            if (narrowedFullMaterial)
+        const bool timelineAudioLane = (t.getKind() == TrackKind::Audio);
+
+        if (timelineAudioLane)
+        {
+            for (int j = 0; j < t.getNumPlacedClips(); ++j)
             {
-                c.hasMaterialWindowInFile = true;
-                c.materialWindowStartSamples = ws;
-                c.materialWindowEndExclusiveSamples = we;
+                const PlacedClip& p = t.getPlacedClip(j);
+                ProjectFileClipV1 c;
+                c.id = p.getId();
+                c.startSample = p.getStartSample();
+                {
+                    const juce::File src(p.getAudioClip().getSourceFilePath());
+                    if (src.getFullPathName().isEmpty())
+                    {
+                        return juce::Result::fail("A clip in the session has no source file path; cannot save.");
+                    }
+                    const juce::File projectFolder = file.getParentDirectory();
+                    if (!isClipSourceFileUnderProjectAudio(src, projectFolder))
+                    {
+                        return juce::Result::fail(
+                            "Cannot save project because an audio clip refers to a file outside "
+                            "the project Audio folder: "
+                            + src.getFullPathName());
+                    }
+
+                    const juce::String storedRel = toProjectAudioStoredPath(src, projectFolder);
+                    if (!storedRel.startsWith("Audio/"))
+                    {
+                        return juce::Result::fail(
+                            "Cannot save project: clip source must lie under Audio/ relative to "
+                            "the project file (unexpected path derivation for "
+                            + src.getFullPathName()
+                            + ").");
+                    }
+                    c.sourcePath = storedRel;
+                }
+                const int matN = p.getMaterialLengthSamples();
+                const std::int64_t eff = p.getEffectiveLengthSamples();
+                const std::int64_t ltrim = p.getLeftTrimSamples();
+                const std::int64_t fullTail
+                    = (matN > 0) ? (static_cast<std::int64_t>(matN) - ltrim) : std::int64_t{ 0 };
+                c.leftTrimSamples = ltrim;
+                const std::int64_t ws = p.getMaterialWindowStartSamples();
+                const std::int64_t we = p.getMaterialWindowEndExclusiveSamples();
+                const bool narrowedFullMaterial
+                    = (matN > 0 && !(ws == 0 && we == static_cast<std::int64_t>(matN)));
+                if (narrowedFullMaterial)
+                {
+                    c.hasMaterialWindowInFile = true;
+                    c.materialWindowStartSamples = ws;
+                    c.materialWindowEndExclusiveSamples = we;
+                }
+                c.visibleLengthSamples = (matN > 0 && eff < fullTail) ? eff : 0;
+                tr.clips.push_back(std::move(c));
             }
-            c.visibleLengthSamples = (matN > 0 && eff < fullTail) ? eff : 0;
-            tr.clips.push_back(std::move(c));
         }
-        if (pluginHost != nullptr)
+        else if (t.getNumPlacedClips() > 0)
+        {
+            return juce::Result::fail(
+                "Internal error: instrument lane carries timeline audio clips; save aborted.");
+        }
+
+        if (pluginHost != nullptr && timelineAudioLane)
         {
             const PluginTrackChain ch = pluginHost->exportChain(tr.id);
             for (const auto& d : ch.slots)
@@ -1017,76 +1120,104 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     std::vector<Track> built;
     built.reserve(parsed.tracks.size());
 
+    int persistedInstrumentLanesSeenLoad = 0;
     for (const auto& trDto : parsed.tracks)
     {
-        std::vector<PlacedClip> placed;
-        for (const auto& cDto : trDto.clips)
+        TrackKind tk = TrackKind::Audio;
+        if (trDto.kind.equalsIgnoreCase("instrument"))
         {
-            const juce::String& stored = cDto.sourcePath;
-            if (juce::File::isAbsolutePath(stored))
+            tk = TrackKind::Instrument;
+            ++persistedInstrumentLanesSeenLoad;
+            if (persistedInstrumentLanesSeenLoad > 1)
             {
-                outSkippedClipDetails.add(stored
-                                          + " - Absolute audio paths are not allowed in project "
-                                            "files (expected Audio/... relative to project folder).");
-                continue;
-            }
-            if (!isRelativeAudioPath(stored))
-            {
-                outSkippedClipDetails.add(stored
-                                          + " - Invalid audio path (must be Audio/<name> with "
-                                            "forward slashes only, no parent-directory segments).");
-                continue;
-            }
-
-            const juce::File f = resolveProjectAudioStoredPath(stored, file.getParentDirectory());
-            std::unique_ptr<AudioClip> loaded;
-            const juce::Result lr = AudioFileLoader::loadFromFile(f, deviceSampleRate, loaded);
-            if (!lr.wasOk())
-            {
-                outSkippedClipDetails.add(
-                    cDto.sourcePath + " - " + lr.getErrorMessage());
-                continue;
-            }
-            const std::shared_ptr<const AudioClip> material(std::move(loaded));
-            const int matN = material->getNumSamples();
-            const std::int64_t lRaw = cDto.leftTrimSamples;
-            const std::int64_t l
-                = (matN > 0) ? juce::jlimit(std::int64_t{0},
-                                            static_cast<std::int64_t>(matN) - 1,
-                                            lRaw)
-                             : 0;
-            if (parsed.version >= 7 && cDto.hasMaterialWindowInFile && matN > 0)
-            {
-                const std::int64_t reqV = cDto.visibleLengthSamples > 0
-                                              ? cDto.visibleLengthSamples
-                                              : static_cast<std::int64_t>(-1);
-                placed.emplace_back(
-                    cDto.id,
-                    material,
-                    cDto.startSample,
-                    l,
-                    reqV,
-                    cDto.materialWindowStartSamples,
-                    cDto.materialWindowEndExclusiveSamples);
-            }
-            else if (cDto.visibleLengthSamples > 0)
-            {
-                placed.emplace_back(
-                    cDto.id, material, cDto.startSample, l, cDto.visibleLengthSamples);
-            }
-            else
-            {
-                placed.emplace_back(
-                    cDto.id, material, cDto.startSample, l, static_cast<std::int64_t>(-1));
+                tk = TrackKind::Audio;
+                juce::Logger::writeToLog(
+                    "[Session] Loaded project has multiple instrument lanes — coercing extras to Audio "
+                    "in this slice (track id="
+                    + juce::String((juce::int64)trDto.id) + ").");
             }
         }
+
+        std::vector<PlacedClip> placed;
+
+        if (tk == TrackKind::Audio)
+        {
+            for (const auto& cDto : trDto.clips)
+            {
+                const juce::String& stored = cDto.sourcePath;
+                if (juce::File::isAbsolutePath(stored))
+                {
+                    outSkippedClipDetails.add(stored
+                                              + " - Absolute audio paths are not allowed in project "
+                                                "files (expected Audio/... relative to project folder).");
+                    continue;
+                }
+                if (!isRelativeAudioPath(stored))
+                {
+                    outSkippedClipDetails.add(stored
+                                              + " - Invalid audio path (must be Audio/<name> with "
+                                                "forward slashes only, no parent-directory segments).");
+                    continue;
+                }
+
+                const juce::File f = resolveProjectAudioStoredPath(stored, file.getParentDirectory());
+                std::unique_ptr<AudioClip> loaded;
+                const juce::Result lr = AudioFileLoader::loadFromFile(f, deviceSampleRate, loaded);
+                if (!lr.wasOk())
+                {
+                    outSkippedClipDetails.add(
+                        cDto.sourcePath + " - " + lr.getErrorMessage());
+                    continue;
+                }
+                const std::shared_ptr<const AudioClip> material(std::move(loaded));
+                const int matN = material->getNumSamples();
+                const std::int64_t lRaw = cDto.leftTrimSamples;
+                const std::int64_t l
+                    = (matN > 0) ? juce::jlimit(std::int64_t{0},
+                                                static_cast<std::int64_t>(matN) - 1,
+                                                lRaw)
+                                 : 0;
+                if (parsed.version >= 7 && cDto.hasMaterialWindowInFile && matN > 0)
+                {
+                    const std::int64_t reqV = cDto.visibleLengthSamples > 0
+                                                  ? cDto.visibleLengthSamples
+                                                  : static_cast<std::int64_t>(-1);
+                    placed.emplace_back(
+                        cDto.id,
+                        material,
+                        cDto.startSample,
+                        l,
+                        reqV,
+                        cDto.materialWindowStartSamples,
+                        cDto.materialWindowEndExclusiveSamples);
+                }
+                else if (cDto.visibleLengthSamples > 0)
+                {
+                    placed.emplace_back(
+                        cDto.id, material, cDto.startSample, l, cDto.visibleLengthSamples);
+                }
+                else
+                {
+                    placed.emplace_back(
+                        cDto.id, material, cDto.startSample, l, static_cast<std::int64_t>(-1));
+                }
+            }
+        }
+        else if (!trDto.clips.empty())
+        {
+            outSkippedClipDetails.add(
+                juce::String("[track ") + juce::String((juce::int64)trDto.id)
+                + "] Skipping WAV clips stored on instrument lane.");
+        }
+
         built.emplace_back(
             trDto.id,
             trDto.name,
             std::move(placed),
             juce::jlimit(0.0f, kTrackChannelFaderGainMax, trDto.channelFaderGain),
             trDto.off,
-            trDto.muted);
+            trDto.muted,
+            tk);
     }
 
     if (built.empty())
@@ -1136,6 +1267,11 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     {
         for (const auto& trDto : parsed.tracks)
         {
+            if (trDto.kind.equalsIgnoreCase("instrument"))
+            {
+                continue;
+            }
+
             PluginTrackChain chain;
             for (const auto& ins : trDto.inserts)
             {

@@ -44,6 +44,12 @@ inline constexpr TrackId kInvalidTrackId = 0;
 inline constexpr float kTrackChannelVolumeUnityGain = 1.0f;
 inline constexpr float kTrackChannelFaderGainMax = 8.0f;
 
+enum class TrackKind : std::uint8_t
+{
+    Audio,
+    Instrument,
+};
+
 // ---------------------------------------------------------------------------
 // Track — one lane’s clips (session timeline samples; front-most at index 0 within this track)
 // ---------------------------------------------------------------------------
@@ -61,7 +67,10 @@ public:
                    std::vector<PlacedClip> placedClips,
                    float channelFaderGain,
                    bool trackOff = false,
-                   bool trackMuted = false) noexcept;
+                   bool trackMuted = false,
+                   TrackKind kind = TrackKind::Audio) noexcept;
+
+    [[nodiscard]] TrackKind getKind() const noexcept { return kind_; }
 
     [[nodiscard]] TrackId getId() const noexcept { return id_; }
     [[nodiscard]] const juce::String& getName() const noexcept { return name_; }
@@ -85,4 +94,5 @@ private:
     float channelFaderGain_ = kTrackChannelVolumeUnityGain;
     bool trackOff_ = false;
     bool trackMuted_ = false;
+    TrackKind kind_ = TrackKind::Audio;
 };

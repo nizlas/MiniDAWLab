@@ -5,7 +5,8 @@
 // =============================================================================
 // Visual: name (and optional subtitle), active accent; optional **[Instrument][Power][M][R]** strip (audio: no Instrument).
 // State comes from `TrackHeaderModelProvider`; actions from `TrackHeaderCallbacks`.
-// Optional `TrackHeaderDragHost` + `dragTrackId` enable header-drag reorder (audio lanes).
+// Optional `TrackHeaderDragHost` + non-`kInvalidTrackId` `dragTrackId` enable header-drag reorder
+// (`setHeaderReorderDrag` can attach drag after construction for experimental instrument shells).
 // =============================================================================
 
 #include "domain/Track.h"
@@ -71,7 +72,7 @@ class TrackHeaderView : public juce::Component
 {
 public:
     /// `dragTrackId` is forwarded to `TrackHeaderDragHost`. Use `kInvalidTrackId` when there is no
-    /// drag host (e.g. experimental instrument stripe).
+    /// reorder drag initially (e.g. until the owning view calls `setHeaderReorderDrag`).
     TrackHeaderView(TrackHeaderModelProvider modelProvider,
                     TrackHeaderCallbacks callbacks,
                     TrackId dragTrackId,
@@ -89,6 +90,11 @@ public:
 
     void setSourceForbiddenForHeaderDrag() noexcept;
     void restoreSourceCursorAfterHeaderDrag() noexcept;
+
+    /// [Message thread] Non-audio rows (e.g. experimental instrument shell) can attach header reorder
+    /// drag after construction. `dragTrackIdForwarded` must not be `kInvalidTrackId` when `host` set.
+    void setHeaderReorderDrag(std::optional<TrackHeaderDragHost> host,
+                              TrackId dragTrackIdForwarded) noexcept;
 
 private:
     enum class DragBlocker : std::uint8_t

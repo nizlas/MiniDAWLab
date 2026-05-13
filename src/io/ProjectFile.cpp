@@ -41,6 +41,11 @@ namespace
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
         to->setProperty("id", static_cast<std::int64_t>(t.id));
         to->setProperty("name", t.name);
+        if (fileVersion >= 13)
+        {
+            const juce::String k = t.kind.isNotEmpty() ? t.kind : juce::String("audio");
+            to->setProperty("kind", k);
+        }
         to->setProperty("clips", juce::var(clipVars));
         constexpr double kUnityChannelFaderOmitEpsilon = 1.0e-6;
         if (std::fabs((double)t.channelFaderGain - 1.0) > kUnityChannelFaderOmitEpsilon)
@@ -200,6 +205,68 @@ namespace
         trk.inserts.push_back(std::move(mig));
     }
 
+    /// Reads **\< v13** payloads that kept the experimental instrument “below” tracks only in the
+    /// `experimentalInstrumentTracks` blob. We append one **Instrument** lane to `tracks` and bind `trackId`
+    /// before the timeline is built (`Session::loadProjectFromFile`), while remaining on disk format v12.
+    /// v13 saves carry real mixed order explicitly.
+    void migrateProjectFileExperimentalInstrumentLanePreV13(ProjectFileV1& out) noexcept
+    {
+        if (out.version >= 13)
+        {
+            return;
+        }
+        TrackId maxExisting = 0;
+        for (const auto& tr : out.tracks)
+        {
+            maxExisting = juce::jmax(maxExisting, tr.id);
+        }
+
+        bool primaryBound = false;
+        for (auto& et : out.experimentalInstrumentTracks)
+        {
+            if (!et.enabled || et.instrumentKind != "GrooveAgentSE")
+            {
+                continue;
+            }
+
+            if (primaryBound)
+            {
+                if (et.trackId == 0 || et.trackId == kInvalidTrackId)
+                {
+                    juce::Logger::writeToLog(
+                        "[ProjectFile] v12 migration: ignoring extra experimentalInstrumentTracks "
+                        "(single-instrument slice).");
+                }
+                continue;
+            }
+
+            TrackId nid = et.trackId;
+            if (nid == 0 || nid == kInvalidTrackId)
+            {
+                nid = juce::jmax(out.nextTrackId, maxExisting + 1);
+                maxExisting = nid;
+
+                ProjectFileTrackV1 shell;
+                shell.id = nid;
+                shell.name = et.name.isNotEmpty() ? et.name : juce::String("Groove Agent SE");
+                shell.kind = "instrument";
+                shell.off = !et.powerOn;
+                shell.muted = et.muted;
+                shell.channelFaderGain = kTrackChannelVolumeUnityGain;
+
+                out.tracks.push_back(std::move(shell));
+                out.nextTrackId = juce::jmax(out.nextTrackId, nid + 1);
+
+                juce::Logger::writeToLog(
+                    "[ProjectFile] v12 migration: appended Instrument lane id="
+                    + juce::String((juce::int64)nid));
+            }
+
+            et.trackId = nid;
+            primaryBound = true;
+        }
+    }
+
     [[nodiscard]] juce::Result clipFromVar(
         const juce::var& v,
         ProjectFileClipV1& out,
@@ -345,6 +412,13 @@ namespace
             else if (mu.isInt() || mu.isInt64() || mu.isDouble())
             {
                 et.muted = static_cast<int>(static_cast<double>(mu) + 0.5) != 0;
+            }
+            if (fileVersion >= 13)
+            {
+                bool tidOk = false;
+                const std::int64_t tidRaw = int64FromVarId(tv.getProperty("trackId", {}), tidOk);
+                et.trackId
+                    = (tidOk && tidRaw > 0) ? static_cast<TrackId>(tidRaw) : kInvalidTrackId;
             }
             const juce::var& dnm = tv.getProperty("drumNoteNames", {});
             if (dnm.isObject())
@@ -641,6 +715,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             eo->setProperty("name", et.name);
             eo->setProperty("instrumentKind", et.instrumentKind);
             eo->setProperty("requiredKitName", et.requiredKitName);
+            if (data.version >= 13 && et.trackId != 0 && et.trackId != kInvalidTrackId)
+            {
+                eo->setProperty("trackId", static_cast<std::int64_t>(et.trackId));
+            }
             if (et.pluginBundlePath.isNotEmpty())
             {
                 eo->setProperty("pluginBundlePath", et.pluginBundlePath);
@@ -945,6 +1023,10 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         {
             trk.name = "Track " + juce::String(trk.id);
         }
+        if (ver >= 13)
+        {
+            trk.kind = tv.getProperty("kind", {}).toString().trim().toLowerCase();
+        }
         trk.channelFaderGain = kTrackChannelVolumeUnityGain;
         if (ver >= 5)
         {
@@ -1023,6 +1105,8 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
 
+    migrateProjectFileExperimentalInstrumentLanePreV13(out);
+
     {
         std::unordered_set<PlacedClipId> globalClip;
         for (const auto& tr : out.tracks)
@@ -1100,7 +1184,8 @@ namespace
         const ProjectFileExperimentalInstrumentTrackV1& b) noexcept
     {
         if (a.enabled != b.enabled || a.name != b.name || a.instrumentKind != b.instrumentKind
-            || a.requiredKitName != b.requiredKitName || a.powerOn != b.powerOn || a.muted != b.muted)
+            || a.requiredKitName != b.requiredKitName || a.powerOn != b.powerOn || a.muted != b.muted
+            || a.trackId != b.trackId)
         {
             return false;
         }

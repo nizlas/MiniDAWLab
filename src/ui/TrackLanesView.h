@@ -14,13 +14,16 @@
 //   is not a lane — pointer over a header is not a valid drop). **Header drag** (track reorder) is
 //   a separate gesture: `TrackHeaderView` past-threshold drags are coordinated here (insert line in
 //   `paintOverChildren` only in the **header column** width (same as `kTrackHeaderWidth` cap in
-//   `resized`), `Session::moveTrack` on commit; lane / clip drag unchanged). No-op drag: red line
-//   follows pointer y; valid reorder: green line at snapped gap. **Delete track:** `TrackHeaderView`
-//   posts `onDeleteTrackRequested(TrackId)` from its context menu; `Main` wires that to
-//   `Session::removeTrack` (not keyboard Delete). Optional **VST3** actions via `setTrackHeaderPluginHost`.
+//   `resized`), `Main` publishes `Session::moveTrack` inside undo via a single-row move on commit —
+//   **including** the experimental Instrument lane (`TrackKind::Instrument` in `SessionSnapshot`).
+//   No-op drag: red line follows pointer y; valid reorder: green line at snapped gap. **Delete track:**
+//   `TrackHeaderView` posts `onDeleteTrackRequested(TrackId)` from its context menu; `Main` wires that
+//   to `Session::removeTrack` (not keyboard Delete). Optional **VST3**
+//   actions via `setTrackHeaderPluginHost`.
 //
 // See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`, `TrackHeaderView`.
-// Lane-column playhead line: drawn by `PlayheadOverlay` in the parent timeline shell (not this view).
+//   Same parent shell also owns the lane-column `PlayheadOverlay`. Optional **instrument timeline
+//   row** (when `attachInstrumentRow` is wired) shares the same visible stack and header-drag model.
 // =============================================================================
 
 #include "domain/Track.h"
@@ -48,6 +51,19 @@ class Transport;
 class TimelineViewportModel;
 class LatencySettingsStore;
 class AudioWaveformCache;
+class InstrumentTrackController;
+
+enum class VisibleTrackKind
+{
+    Audio,
+    Instrument,
+};
+
+struct VisibleTrackEntry
+{
+    VisibleTrackKind kind;
+    TrackId sessionTrackId = kInvalidTrackId;
+};
 
 // ---------------------------------------------------------------------------
 // TrackLanesView — vertical stack of per-track event lanes
@@ -150,6 +166,23 @@ public:
     /// `Session::setActiveTrack` succeeds. `Main` uses this to clear the instrument-row active flag.
     void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
 
+    /// Live row wired to `ExperimentalInstrumentHost` + `InstrumentTrackController` (single bridge).
+    /// Instrument header drag id is refreshed when `InstrumentTrackController` receives its domain shell id.
+    void attachInstrumentRow(InstrumentTrackController* controller,
+                             TrackHeaderView* header,
+                             juce::Component* midiLane) noexcept;
+
+    /// [Message thread] After shell id changes (`tryAddGrooveAgent…` / project restore), reinstall header-drag host.
+    void refreshInstrumentHeaderReorderAttachment() noexcept;
+
+    /// Undo-bundled reorder: publishes `session.moveTrack(movedId, destSessionIndex)` (see `Main`).
+    void setCommittedHeaderDragTrackReorder(std::function<void(TrackId movedId, int destSessionIndex)> fn) noexcept;
+    /// [Message thread] Rebuild visible track rows from canonical `SessionSnapshot::tracks_` order.
+    void rebuildVisibleTrackEntries() noexcept;
+
+    /** True when the instrument lane participates in visible layout (`hasInstrumentTrack` + bridged Instrument row). */
+    [[nodiscard]] bool isInstrumentTimelineRowVisible() const noexcept;
+
     /** True while a clip move or trim gesture is in flight on any lane (undo/redo should no-op). */
     [[nodiscard]] bool isClipEditGestureInProgress() const noexcept;
 
@@ -171,14 +204,16 @@ private:
     void setGhostOnLaneImpl(ClipWaveformView* target, std::int64_t startSample, std::int64_t lengthSamples);
     void clearAllGhostsImpl();
 
-    // [Message thread] Track-reorder by header drag: `movedId` is stable; recompute `s` from
-    // snapshot on each move. Green line: y from `insertGapK_` (0..N). Red no-op line: `noopLineY_`
-    // tracks pointer (valid header strip only).
+    // [Message thread] Track reorder by header drag (real `TrackId` for audio and instrument shells).
+    // Green line: snapped gap index in visible row count; red line follows pointer while no-op.
     void beginHeaderTrackDrag(TrackId movedId, TrackHeaderView& sourceView);
     void updateHeaderTrackDrag(TrackId movedId, juce::Point<int> screenPos);
     void endHeaderTrackDrag(TrackId movedId);
     void clearHeaderTrackDragState() noexcept;
-    [[nodiscard]] int yForInsertGapK(int k) const noexcept;
+    [[nodiscard]] int yForVisibleInsertGapK(int k) const noexcept;
+    [[nodiscard]] int audioLaneIndexFromTrackId(TrackId tid) const noexcept;
+    [[nodiscard]] int visibleRowPixelHeight(int visibleIndex) const noexcept;
+    [[nodiscard]] int findVisibleRowIndexForDragSource(TrackId movedId) const noexcept;
 
     Session& session_;
     Transport& transport_;
@@ -189,6 +224,13 @@ private:
     AudioWaveformCache& waveformCache_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
+
+    /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged singleton UI).
+    std::vector<VisibleTrackEntry> visibleTrackEntries_;
+
+    InstrumentTrackController* instrumentController_ = nullptr;
+    TrackHeaderView* instrumentHeader_ = nullptr;
+    juce::Component* instrumentMidiLane_ = nullptr;
 
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
     // while recording as `drainNextPreviewBlock` returns data. Not session state.
@@ -211,13 +253,14 @@ private:
     bool headerTrackDragActive_ = false;
     TrackId headerTrackDragId_ = kInvalidTrackId;
     TrackHeaderView* headerTrackDragSourceView_ = nullptr;
-    int headerTrackDragInsertGapK_ = -1; // 0..N for green snapped line; -1 when using noop pointer line
+    int headerTrackDragInsertGapK_ = -1; // 0..V for green snapped line; -1 when using noop pointer line
     int headerTrackDragNoopLineY_ = -1;  // valid when no-op + in valid strip: pointer y for red line
     bool headerTrackDragInvalidArea_ = true;
     bool headerTrackDragNoop_ = true;
-    int headerTrackDragDestIndex_ = -1; // for commit; valid when !invalid && !noop
 
     std::optional<std::pair<TrackId, PlacedClipId>> aggregatedSelectedPlacedClip_;
+
+    std::function<void(TrackId, int)> committedHeaderDragTrackReorder_;
 
     TrackHeaderPluginHost trackHeaderPluginHost_{};
     std::function<void(TrackId)> onDeleteTrackRequested_;

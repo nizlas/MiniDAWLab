@@ -11,6 +11,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "instruments/InstrumentTrackController.h"
 #include "domain/PlacedClip.h"
 #include "transport/Transport.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
@@ -184,6 +185,20 @@ TrackLanesView::~TrackLanesView()
 {
     stopTimer();
     clearCycleRecordingPreviewContext();
+    // `TrackLanesView`'s JUCE `Component` has no `removeFromParent()`; keep non-owned shell children
+    // alive for `TransportControlsContent`. `removeChildComponent` does not delete the child.
+    auto detachFromParentIfAny = [](juce::Component* c) noexcept {
+        if (c == nullptr)
+        {
+            return;
+        }
+        if (auto* const p = c->getParentComponent())
+        {
+            p->removeChildComponent(c);
+        }
+    };
+    detachFromParentIfAny(instrumentHeader_);
+    detachFromParentIfAny(instrumentMidiLane_);
 }
 
 void TrackLanesView::setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept
@@ -443,6 +458,113 @@ void TrackLanesView::setStructuralTimelineEditBlockedPredicate(std::function<boo
     structuralTimelineEditBlockedPredicate_ = std::move(fn);
 }
 
+void TrackLanesView::setCommittedHeaderDragTrackReorder(
+    std::function<void(TrackId, int)> fn) noexcept
+{
+    committedHeaderDragTrackReorder_ = std::move(fn);
+}
+
+void TrackLanesView::refreshInstrumentHeaderReorderAttachment() noexcept
+{
+    if (instrumentHeader_ == nullptr)
+    {
+        return;
+    }
+
+    const bool trioReady = instrumentController_ != nullptr
+        && instrumentController_->hasInstrumentTrack() && instrumentMidiLane_ != nullptr;
+    const TrackId dragId
+        = trioReady ? instrumentController_->getExperimentalInstrumentDomainTrackId() : kInvalidTrackId;
+
+    if (trioReady && dragId != kInvalidTrackId)
+    {
+        TrackHeaderDragHost dh;
+        dh.onHeaderDragBegan
+            = [this](const TrackId id, TrackHeaderView* src) { beginHeaderTrackDrag(id, *src); };
+        dh.onHeaderDragMoved
+            = [this](const TrackId id, const juce::Point<int> p) { updateHeaderTrackDrag(id, p); };
+        dh.onHeaderDragEnded = [this](const TrackId id) { endHeaderTrackDrag(id); };
+        instrumentHeader_->setHeaderReorderDrag(std::move(dh), dragId);
+    }
+    else
+    {
+        instrumentHeader_->setHeaderReorderDrag(std::nullopt, kInvalidTrackId);
+    }
+}
+
+void TrackLanesView::attachInstrumentRow(
+    InstrumentTrackController* controller,
+    TrackHeaderView* header,
+    juce::Component* midiLane) noexcept
+{
+    instrumentController_ = controller;
+    instrumentHeader_ = header;
+    instrumentMidiLane_ = midiLane;
+
+    if (instrumentHeader_ != nullptr)
+    {
+        addAndMakeVisible(*instrumentHeader_);
+    }
+    if (instrumentMidiLane_ != nullptr)
+    {
+        addAndMakeVisible(*instrumentMidiLane_);
+    }
+    refreshInstrumentHeaderReorderAttachment();
+    rebuildVisibleTrackEntries();
+    resized();
+}
+
+void TrackLanesView::rebuildVisibleTrackEntries() noexcept
+{
+    visibleTrackEntries_.clear();
+    const int n = session_.getNumTracks();
+    visibleTrackEntries_.reserve((size_t)juce::jmax(0, n));
+
+    for (int i = 0; i < n; ++i)
+    {
+        const TrackId tid = session_.getTrackIdAtIndex(i);
+        if (tid == kInvalidTrackId)
+        {
+            jassert(false);
+            continue;
+        }
+
+        if (session_.getTrackKindAtIndex(i) == TrackKind::Audio)
+        {
+            visibleTrackEntries_.push_back(
+                VisibleTrackEntry{ VisibleTrackKind::Audio, tid });
+            continue;
+        }
+
+        const bool trio = instrumentController_ != nullptr
+            && instrumentController_->hasInstrumentTrack() && instrumentHeader_ != nullptr
+            && instrumentMidiLane_ != nullptr;
+        const TrackId bridged = trio ? instrumentController_->getExperimentalInstrumentDomainTrackId()
+                                     : kInvalidTrackId;
+
+        if (!trio || bridged != tid)
+        {
+            juce::Logger::writeToLog(
+                juce::String("[TrackLanesView] Snapshot Instrument row id=") + juce::String((juce::int64)tid)
+                + " has no bridged singleton controller/header — row hidden.");
+            continue;
+        }
+
+        visibleTrackEntries_.push_back(
+            VisibleTrackEntry{ VisibleTrackKind::Instrument, tid });
+    }
+}
+
+bool TrackLanesView::isInstrumentTimelineRowVisible() const noexcept
+{
+    if (instrumentController_ == nullptr || !instrumentController_->hasInstrumentTrack())
+        return false;
+    for (const VisibleTrackEntry& entry : visibleTrackEntries_)
+        if (entry.kind == VisibleTrackKind::Instrument)
+            return true;
+    return false;
+}
+
 bool TrackLanesView::isStructuralTimelineEditBlocked() const noexcept
 {
     if (structuralTimelineEditBlockedPredicate_)
@@ -511,14 +633,30 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         headers_.clear();
         lanes_.clear();
         aggregatedSelectedPlacedClip_.reset();
+        rebuildVisibleTrackEntries();
         return;
     }
-    bool need = ((int)lanes_.size() != n || (int)headers_.size() != n);
+    std::vector<TrackId> audioTrackIds;
+    audioTrackIds.reserve((size_t)n);
+    for (int i = 0; i < n; ++i)
+    {
+        if (session_.getTrackKindAtIndex(i) == TrackKind::Audio)
+        {
+            const TrackId tid = session_.getTrackIdAtIndex(i);
+            if (tid != kInvalidTrackId)
+            {
+                audioTrackIds.push_back(tid);
+            }
+        }
+    }
+
+    bool need = (((int)lanes_.size() != (int)audioTrackIds.size())
+                 || ((int)headers_.size() != (int)audioTrackIds.size()));
     if (!need)
     {
-        for (int i = 0; i < n; ++i)
+        for (int i = 0; i < (int)audioTrackIds.size(); ++i)
         {
-            if (lanes_[(size_t)i]->getTrackId() != session_.getTrackIdAtIndex(i))
+            if (lanes_[(size_t)i]->getTrackId() != audioTrackIds[(size_t)i])
             {
                 need = true;
                 break;
@@ -527,14 +665,16 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     }
     if (!need)
     {
+        rebuildVisibleTrackEntries();
+        refreshInstrumentHeaderReorderAttachment();
         return;
     }
     headers_.clear();
     lanes_.clear();
     aggregatedSelectedPlacedClip_.reset();
-    for (int i = 0; i < n; ++i)
+
+    for (const TrackId tid : audioTrackIds)
     {
-        const TrackId tid = session_.getTrackIdAtIndex(i);
         if (tid == kInvalidTrackId)
         {
             jassert(false);
@@ -840,6 +980,8 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         addAndMakeVisible(*ptr);
         lanes_.push_back(std::move(ptr));
     }
+    rebuildVisibleTrackEntries();
+    refreshInstrumentHeaderReorderAttachment();
 }
 
 ClipWaveformView* TrackLanesView::findLaneAtScreenPosition(const juce::Point<int> screenPos)
@@ -888,30 +1030,139 @@ void TrackLanesView::clearAllGhostsImpl()
 void TrackLanesView::resized()
 {
     rebuildChildLanesIfNeeded();
+    rebuildVisibleTrackEntries();
+
     auto area = getLocalBounds();
-    const int n = (int)lanes_.size();
-    if (n <= 0 || area.getHeight() <= 0)
+    const int vr = static_cast<int>(visibleTrackEntries_.size());
+    bool instrumentBridgedInLayout = false;
+    for (const VisibleTrackEntry& entry : visibleTrackEntries_)
+    {
+        if (entry.kind == VisibleTrackKind::Instrument)
+        {
+            instrumentBridgedInLayout = true;
+            break;
+        }
+    }
+
+    const bool hasInst = instrumentController_ != nullptr
+        && instrumentController_->hasInstrumentTrack() && instrumentBridgedInLayout
+        && instrumentHeader_ != nullptr && instrumentMidiLane_ != nullptr;
+
+    if (instrumentHeader_ != nullptr)
+    {
+        instrumentHeader_->setVisible(hasInst);
+    }
+    if (instrumentMidiLane_ != nullptr)
+    {
+        instrumentMidiLane_->setVisible(hasInst);
+    }
+
+    if (area.getHeight() <= 0 || vr <= 0)
     {
         return;
     }
+
     const int totalH = area.getHeight();
     const int w = area.getWidth();
     const int leftW = juce::jmin(kTrackHeaderWidth, w);
-    int y = 0;
-    for (int i = 0; i < n; ++i)
+
+    int y = area.getY();
+    for (int vi = 0; vi < vr; ++vi)
     {
-        const int hh = (i == n - 1) ? (totalH - y) : juce::jmax(1, totalH / n);
+        const int hh = (vi == vr - 1)
+            ? (area.getBottom() - y)
+            : juce::jmax(1, totalH / juce::jmax(1, vr));
         juce::Rectangle row(area.getX(), y, w, hh);
-        headers_[(size_t)i]->setBounds(row.removeFromLeft(leftW));
-        lanes_[(size_t)i]->setBounds(row);
+        const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)vi];
+        if (e.kind == VisibleTrackKind::Instrument)
+        {
+            if (instrumentHeader_ != nullptr && instrumentMidiLane_ != nullptr)
+            {
+                instrumentHeader_->setBounds(row.removeFromLeft(leftW));
+                instrumentMidiLane_->setBounds(row);
+                instrumentHeader_->toFront(false);
+                instrumentMidiLane_->toFront(false);
+            }
+        }
+        else
+        {
+            const int si = audioLaneIndexFromTrackId(e.sessionTrackId);
+            if (si >= 0 && si < (int)headers_.size() && si < (int)lanes_.size()
+                && headers_[(size_t)si] != nullptr && lanes_[(size_t)si] != nullptr)
+            {
+                headers_[(size_t)si]->setBounds(row.removeFromLeft(leftW));
+                lanes_[(size_t)si]->setBounds(row);
+            }
+        }
         y += hh;
     }
+
     const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
     if (tw > 0)
     {
         timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
     }
 }
+
+int TrackLanesView::audioLaneIndexFromTrackId(const TrackId tid) const noexcept
+{
+    if (tid == kInvalidTrackId)
+    {
+        return -1;
+    }
+    int audioIx = -1;
+    const int n = session_.getNumTracks();
+    for (int i = 0; i < n; ++i)
+    {
+        if (session_.getTrackKindAtIndex(i) != TrackKind::Audio)
+        {
+            continue;
+        }
+        ++audioIx;
+        if (session_.getTrackIdAtIndex(i) == tid)
+        {
+            return audioIx;
+        }
+    }
+    return -1;
+}
+
+int TrackLanesView::visibleRowPixelHeight(const int visibleIndex) const noexcept
+{
+    if (visibleIndex < 0 || visibleIndex >= static_cast<int>(visibleTrackEntries_.size()))
+    {
+        return 0;
+    }
+    const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)visibleIndex];
+    if (e.kind == VisibleTrackKind::Instrument)
+    {
+        if (instrumentHeader_ != nullptr)
+        {
+            return instrumentHeader_->getHeight();
+        }
+        return instrumentMidiLane_ != nullptr ? instrumentMidiLane_->getHeight() : 0;
+    }
+    const int si = audioLaneIndexFromTrackId(e.sessionTrackId);
+    if (si < 0 || si >= (int)lanes_.size() || lanes_[(size_t)si] == nullptr)
+    {
+        return 0;
+    }
+    return lanes_[(size_t)si]->getHeight();
+}
+
+int TrackLanesView::findVisibleRowIndexForDragSource(const TrackId movedId) const noexcept
+{
+    for (int i = 0; i < static_cast<int>(visibleTrackEntries_.size()); ++i)
+    {
+        if (visibleTrackEntries_[(size_t)i].sessionTrackId == movedId)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
 
 void TrackLanesView::beginHeaderTrackDrag(const TrackId movedId, TrackHeaderView& sourceView)
 {
@@ -922,7 +1173,6 @@ void TrackLanesView::beginHeaderTrackDrag(const TrackId movedId, TrackHeaderView
     headerTrackDragNoopLineY_ = -1;
     headerTrackDragInvalidArea_ = true;
     headerTrackDragNoop_ = true;
-    headerTrackDragDestIndex_ = -1;
 }
 
 void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Point<int> screenPos)
@@ -938,7 +1188,6 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
         headerTrackDragInsertGapK_ = -1;
         headerTrackDragNoopLineY_ = -1;
         headerTrackDragNoop_ = true;
-        headerTrackDragDestIndex_ = -1;
         if (headerTrackDragSourceView_ != nullptr)
         {
             headerTrackDragSourceView_->setSourceForbiddenForHeaderDrag();
@@ -953,22 +1202,36 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
         headerTrackDragSourceView_->restoreSourceCursorAfterHeaderDrag();
     }
 
-    const int n = (int)lanes_.size();
-    if (n <= 0)
+    const int vr = static_cast<int>(visibleTrackEntries_.size());
+    if (vr <= 0)
     {
         return;
     }
-    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
-    if (snap == nullptr)
+
     {
-        return;
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr || snap->findTrackIndexById(movedId) < 0)
+        {
+            headerTrackDragInvalidArea_ = true;
+            headerTrackDragInsertGapK_ = -1;
+            headerTrackDragNoopLineY_ = -1;
+            headerTrackDragNoop_ = true;
+            if (headerTrackDragSourceView_ != nullptr)
+            {
+                headerTrackDragSourceView_->setSourceForbiddenForHeaderDrag();
+            }
+            repaint();
+            return;
+        }
     }
-    const int s = snap->findTrackIndexById(movedId);
-    if (s < 0)
+
+    const int sv = findVisibleRowIndexForDragSource(movedId);
+    if (sv < 0)
     {
         headerTrackDragInvalidArea_ = true;
         headerTrackDragInsertGapK_ = -1;
         headerTrackDragNoopLineY_ = -1;
+        headerTrackDragNoop_ = true;
         if (headerTrackDragSourceView_ != nullptr)
         {
             headerTrackDragSourceView_->setSourceForbiddenForHeaderDrag();
@@ -977,18 +1240,16 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
         return;
     }
 
-    std::vector<int> gapY;
-    gapY.resize((size_t)(n + 1));
+    std::vector<int> gapY((size_t)vr + 1u);
     gapY[0] = 0;
-    for (int i = 0; i < n; ++i)
+    for (int i = 0; i < vr; ++i)
     {
-        const int h = lanes_[(size_t)i]->getHeight();
-        gapY[(size_t)(i + 1)] = gapY[(size_t)i] + h;
+        gapY[(size_t)(i + 1)] = gapY[(size_t)i] + visibleRowPixelHeight(i);
     }
 
     int bestK = 0;
-    int bestAbs = 0x7ffffff;
-    for (int k = 0; k <= n; ++k)
+    int bestAbs = 0x7fffffff;
+    for (int k = 0; k <= vr; ++k)
     {
         const int d = local.y - gapY[(size_t)k];
         const int a = d < 0 ? -d : d;
@@ -999,21 +1260,12 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
         }
     }
 
-    int dest;
-    if (bestK <= s)
-    {
-        dest = bestK;
-    }
-    else
-    {
-        dest = bestK - 1;
-    }
-    const bool noop = (dest == s);
+    const int destVis = bestK <= sv ? bestK : (bestK - 1);
+    const bool noop = (destVis == sv);
     headerTrackDragNoop_ = noop;
-    headerTrackDragDestIndex_ = noop ? -1 : dest;
     if (noop)
     {
-        // Red: line tracks pointer (valid header column only). Green path uses snapped `bestK` below.
+        // Red: line tracks pointer (valid header column only). Green uses snapped gaps above.
         headerTrackDragInsertGapK_ = -1;
         const int h = getHeight();
         headerTrackDragNoopLineY_ = (h > 0) ? juce::jlimit(0, h - 1, local.y) : 0;
@@ -1038,19 +1290,22 @@ void TrackLanesView::endHeaderTrackDrag(const TrackId movedId)
         src->restoreSourceCursorAfterHeaderDrag();
     }
 
-    const bool commit
-        = (!headerTrackDragInvalidArea_) && !headerTrackDragNoop_ && (headerTrackDragDestIndex_ >= 0);
+    const int sv = findVisibleRowIndexForDragSource(movedId);
+    const bool commit = (!headerTrackDragInvalidArea_) && !headerTrackDragNoop_
+        && (headerTrackDragInsertGapK_ >= 0) && (sv >= 0);
     if (commit)
     {
-        session_.moveTrack(movedId, headerTrackDragDestIndex_);
+        const int k = headerTrackDragInsertGapK_;
+        const int destSessionIndex = (k <= sv) ? k : (k - 1);
+        if (committedHeaderDragTrackReorder_ != nullptr)
         {
-            const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
-            if (tw > 0)
-            {
-                timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
-            }
+            committedHeaderDragTrackReorder_(movedId, destSessionIndex);
         }
-        syncTracksFromSession();
+        const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+        if (tw > 0)
+        {
+            timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
+        }
     }
 
     clearHeaderTrackDragState();
@@ -1066,20 +1321,19 @@ void TrackLanesView::clearHeaderTrackDragState() noexcept
     headerTrackDragNoopLineY_ = -1;
     headerTrackDragInvalidArea_ = true;
     headerTrackDragNoop_ = true;
-    headerTrackDragDestIndex_ = -1;
 }
 
-int TrackLanesView::yForInsertGapK(const int k) const noexcept
+int TrackLanesView::yForVisibleInsertGapK(const int k) const noexcept
 {
-    const int n = (int)lanes_.size();
-    if (k < 0 || k > n)
+    const int vr = static_cast<int>(visibleTrackEntries_.size());
+    if (k < 0 || k > vr)
     {
         return 0;
     }
     int y = 0;
     for (int i = 0; i < k; ++i)
     {
-        y += lanes_[(size_t)i]->getHeight();
+        y += visibleRowPixelHeight(i);
     }
     return y;
 }
@@ -1112,7 +1366,7 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
             return;
         }
         g.setColour(juce::Colour(0xff40c040));
-        const int y = yForInsertGapK(headerTrackDragInsertGapK_);
+        const int y = yForVisibleInsertGapK(headerTrackDragInsertGapK_);
         yy = juce::jlimit(0, juce::jmax(0, h - 2), y - 1);
     }
     const int lineW = juce::jmin(kTrackHeaderWidth, getWidth());

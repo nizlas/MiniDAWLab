@@ -1,4 +1,6 @@
 #include "instruments/InstrumentTrackController.h"
+
+#include "domain/Session.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
@@ -50,10 +52,22 @@ juce::String InstrumentTrackController::getLaneHeaderText() const
 
 bool InstrumentTrackController::tryAddGrooveAgentInstrumentTrackShell()
 {
+    if (session_ == nullptr)
+    {
+        return false;
+    }
     if (trackActive_)
     {
         return false;
     }
+
+    const std::optional<TrackId> newId
+        = session_->appendExperimentalInstrumentShellTrack(juce::String("Groove Agent SE"));
+    if (!newId.has_value())
+    {
+        return false;
+    }
+    experimentalDomainTrackId_ = *newId;
 
     trackActive_ = true;
     powerOn_ = true;
@@ -158,6 +172,10 @@ void InstrumentTrackController::setPowerOn(const bool on) noexcept
         return;
     }
     powerOn_ = on;
+    if (session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
+    {
+        session_->setTrackOff(experimentalDomainTrackId_, !on);
+    }
     publishRenderSnapshot();
     sendChangeMessage();
 }
@@ -169,6 +187,10 @@ void InstrumentTrackController::setMuted(const bool muted) noexcept
         return;
     }
     muted_ = muted;
+    if (session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
+    {
+        session_->setTrackMuted(experimentalDomainTrackId_, muted);
+    }
     publishRenderSnapshot();
     sendChangeMessage();
 }
@@ -361,6 +383,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingInstrumentKind_.clear();
     pendingPluginStateBase64_.clear();
     drumLabels_.clear();
+    experimentalDomainTrackId_ = kInvalidTrackId;
     publishRenderSnapshot();
 }
 
@@ -372,6 +395,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         return dto;
     }
     dto.enabled = true;
+    dto.trackId = experimentalDomainTrackId_;
     dto.name = "Groove Agent SE";
     dto.instrumentKind = "GrooveAgentSE";
     dto.requiredKitName = requiredKitName_.isNotEmpty() ? requiredKitName_ : juce::String("FiftySixDegreesModified");
@@ -604,9 +628,59 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
         return;
     }
 
+    std::shared_ptr<const SessionSnapshot> snap;
+    if (session_ != nullptr)
+    {
+        snap = session_->loadSessionSnapshotForAudioThread();
+    }
+
+    TrackId bindId = chosen->trackId;
+    if (bindId == 0)
+    {
+        bindId = kInvalidTrackId;
+    }
+    if (snap != nullptr && bindId != kInvalidTrackId)
+    {
+        const int ixSnap = snap->findTrackIndexById(bindId);
+        if (ixSnap < 0 || snap->getTrack(ixSnap).getKind() != TrackKind::Instrument)
+        {
+            bindId = kInvalidTrackId;
+        }
+    }
+
+    if (bindId == kInvalidTrackId && snap != nullptr)
+    {
+        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+        {
+            const Track& tr = snap->getTrack(ti);
+            if (tr.getKind() == TrackKind::Instrument)
+            {
+                bindId = tr.getId();
+                juce::Logger::writeToLog(
+                    "[InstrumentTrack] Bound experimental payload to Instrument lane id="
+                    + juce::String((juce::int64)bindId));
+                break;
+            }
+        }
+    }
+
+    experimentalDomainTrackId_ = bindId;
+
     trackActive_ = true;
-    powerOn_ = chosen->powerOn;
-    muted_ = chosen->muted;
+    bool power = chosen->powerOn;
+    bool mute = chosen->muted;
+    if (snap != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
+    {
+        const int ix = snap->findTrackIndexById(experimentalDomainTrackId_);
+        if (ix >= 0)
+        {
+            const Track& tr = snap->getTrack(ix);
+            power = !tr.isTrackOff();
+            mute = tr.isMuted();
+        }
+    }
+    powerOn_ = power;
+    muted_ = mute;
     isActive_ = false;
     requiredKitName_ = chosen->requiredKitName.isNotEmpty() ? chosen->requiredKitName : juce::String("FiftySixDegreesModified");
     pendingProjectGrooveAutoload_ = chosen->pluginWasLoadedOnSave && chosen->instrumentKind == "GrooveAgentSE";

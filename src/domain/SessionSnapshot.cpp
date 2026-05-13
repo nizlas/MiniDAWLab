@@ -45,6 +45,14 @@ namespace
         return a0 < b1 && b0 < a1;
     }
 
+    /// One slice rule: WAV timeline clips attach only to `TrackKind::Audio` lanes. Experimental
+    /// instrument shells live in-session for ordering/until real multi-instrument work; they carry
+    /// no `PlacedClip` audio material in this architecture.
+    [[nodiscard]] bool trackAcceptsTimelineAudioClipMaterial(const Track& t) noexcept
+    {
+        return t.getKind() == TrackKind::Audio;
+    }
+
     // Same end-state policy as the old single-lane `withClipMoved`, applied to **one** lane’s clip
     // vector. Unknown id → jassert, return a copy of `tracks` (caller passes a deep copy to mutate).
     std::vector<PlacedClip> moveOneClipInLane(
@@ -116,7 +124,8 @@ namespace
                      t.getPlacedClips(),
                      t.getChannelFaderGain(),
                      t.isTrackOff(),
-                     t.isMuted());
+                     t.isMuted(),
+                     t.getKind());
     }
 
     [[nodiscard]] Track duplicateTrackWithMovedClips(const Track& t, std::vector<PlacedClip>&& clips)
@@ -126,7 +135,8 @@ namespace
                      std::move(clips),
                      t.getChannelFaderGain(),
                      t.isTrackOff(),
-                     t.isMuted());
+                     t.isMuted(),
+                     t.getKind());
     }
 
     [[nodiscard]] Track duplicateTrackSameClipsWithGain(const Track& t, const float linearGain)
@@ -137,7 +147,8 @@ namespace
                      t.getPlacedClips(),
                      g,
                      t.isTrackOff(),
-                     t.isMuted());
+                     t.isMuted(),
+                     t.getKind());
     }
 } // namespace
 
@@ -286,6 +297,13 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
             previous.tracks_, previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
     }
+    if (!trackAcceptsTimelineAudioClipMaterial(previous.getTrack(tIdx)))
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
     for (int i = 0; i < previous.getNumTracks(); ++i)
@@ -387,6 +405,13 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
             previous.tracks_, previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
     }
+    if (!trackAcceptsTimelineAudioClipMaterial(previous.getTrack(tIdx)))
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+    }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
     for (int i = 0; i < previous.getNumTracks(); ++i)
@@ -426,6 +451,15 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
     const TrackId newTrackId,
     juce::String newTrackName) noexcept
 {
+    return withTrackAdded(previous, newTrackId, std::move(newTrackName), TrackKind::Audio);
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
+    const SessionSnapshot& previous,
+    const TrackId newTrackId,
+    juce::String newTrackName,
+    TrackKind kind) noexcept
+{
     if (newTrackId == kInvalidTrackId)
     {
         jassert(false);
@@ -445,7 +479,13 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         const Track& t = previous.getTrack(i);
         out.push_back(duplicateTrackSameClips(t));
     }
-    out.emplace_back(newTrackId, std::move(newTrackName), std::vector<PlacedClip>{});
+    out.emplace_back(newTrackId,
+                     std::move(newTrackName),
+                     std::vector<PlacedClip>{},
+                     kTrackChannelVolumeUnityGain,
+                     false,
+                     false,
+                     kind);
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
@@ -995,7 +1035,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
                                 t.getPlacedClips(),
                                 t.getChannelFaderGain(),
                                 trackOff,
-                                t.isMuted()));
+                                t.isMuted(),
+                                t.getKind()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1041,7 +1082,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
                                 t.getPlacedClips(),
                                 t.getChannelFaderGain(),
                                 t.isTrackOff(),
-                                trackMuted));
+                                trackMuted,
+                                t.getKind()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(

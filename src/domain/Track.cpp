@@ -13,13 +13,15 @@ Track::Track(const TrackId id,
              std::vector<PlacedClip> placedClips,
              const float channelFaderGain,
              const bool trackOff,
-             const bool trackMuted) noexcept
+             const bool trackMuted,
+             const TrackKind kind) noexcept
     : id_(id)
     , name_(std::move(name))
     , placedClips_(std::move(placedClips))
     , channelFaderGain_(juce::jlimit(0.0f, kTrackChannelFaderGainMax, channelFaderGain))
     , trackOff_(trackOff)
     , trackMuted_(trackMuted)
+    , kind_(kind)
 {
     jassert(id_ != kInvalidTrackId);
 }

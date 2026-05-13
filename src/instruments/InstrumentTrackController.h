@@ -25,6 +25,7 @@
 #include <juce_events/juce_events.h>
 
 class ExperimentalInstrumentHost; // IWYU: full type in .cpp for autoload + I3e transport MIDI
+class Session;
 
 using InstrumentMidiClipId = std::uint64_t;
 
@@ -97,6 +98,14 @@ class InstrumentTrackController : public juce::ChangeBroadcaster
 {
 public:
     explicit InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept;
+
+    void setSession(Session* session) noexcept { session_ = session; }
+
+    /// Domain `TrackId` of the singleton experimental instrument shell (session order); invalid when inactive.
+    [[nodiscard]] TrackId getExperimentalInstrumentDomainTrackId() const noexcept
+    {
+        return experimentalDomainTrackId_;
+    }
 
     /// Instrument track row exists (Add Instrument Track succeeded).
     [[nodiscard]] bool hasInstrumentTrack() const noexcept { return trackActive_; }
@@ -226,6 +235,8 @@ private:
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
     ExperimentalInstrumentHost& host_;
+    Session* session_ = nullptr;
+    TrackId experimentalDomainTrackId_ = kInvalidTrackId;
     bool trackActive_ = false;
     bool instrumentLoaded_ = false;
     InstrumentMidiClipId nextClipId_ = 1;

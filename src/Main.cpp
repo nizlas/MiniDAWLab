@@ -47,6 +47,7 @@
 #include <cmath>
 
 #include "domain/Session.h"
+#include "domain/Track.h"
 #include "domain/SessionHistory.h"
 #include "domain/AudioClip.h"
 #include "domain/PlacedClip.h"
@@ -643,6 +644,7 @@ private:
             , inspectorCollapsedKnob_(*this)
             , instrumentMidiEventLane_(*this, instrumentTrackController_)
         {
+            instrumentTrackController_.setSession(&session);
             experimentalInstrumentHostIn.setDrumNamePhaseCAudioProbeShouldSkip([this] {
                 return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording()
                     || isCountInActive();
@@ -833,12 +835,10 @@ private:
             addAndMakeVisible(inspectorResizeSplitter_);
             addAndMakeVisible(rulerView);
             addAndMakeVisible(trackLanesView);
-            addAndMakeVisible(*instrumentTrackHeader_);
-            addAndMakeVisible(instrumentMidiEventLane_);
+            trackLanesView.attachInstrumentRow(
+                &instrumentTrackController_, instrumentTrackHeader_.get(), &instrumentMidiEventLane_);
             lanePlayheadOverlay_ = std::make_unique<PlayheadOverlay>(session, transport, timelineViewport_);
             addAndMakeVisible(*lanePlayheadOverlay_);
-            instrumentTrackHeader_->setVisible(false);
-            instrumentMidiEventLane_.setVisible(false);
             refreshExperimentalInstrumentUi();
             addAndMakeVisible(inspectorCollapsedKnob_);
             inspectorCollapsedKnob_.setVisible(false);
@@ -912,8 +912,43 @@ private:
                         {
                             return false;
                         }
+                        const int ix = snap->findTrackIndexById(tid);
+                        if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Instrument)
+                        {
+                            return false;
+                        }
                         pluginHost_.evictPluginForTrackNoUndo(tid);
                         session.removeTrack(tid);
+                        syncViewportFromSession();
+                        trackLanesView.syncTracksFromSession();
+                        rulerView.repaint();
+                        trackLanesView.repaint();
+                        inspectorView_.refreshFromSession();
+                        return true;
+                    });
+            });
+            trackLanesView.setCommittedHeaderDragTrackReorder([this](const TrackId movedId,
+                                                                     const int destSessionIndex) {
+                if (movedId == kInvalidTrackId || destSessionIndex < 0)
+                {
+                    return;
+                }
+                executeUndoableSessionEdit(
+                    "Reorder track",
+                    [this, movedId, destSessionIndex]() -> bool {
+                        const std::shared_ptr<const SessionSnapshot> before
+                            = session.loadSessionSnapshotForAudioThread();
+                        if (before == nullptr)
+                        {
+                            return false;
+                        }
+                        session.moveTrack(movedId, destSessionIndex);
+                        const std::shared_ptr<const SessionSnapshot> after
+                            = session.loadSessionSnapshotForAudioThread();
+                        if (after == nullptr || after == before)
+                        {
+                            return false;
+                        }
                         syncViewportFromSession();
                         trackLanesView.syncTracksFromSession();
                         rulerView.repaint();
@@ -1645,33 +1680,6 @@ private:
             auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
             timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);    
             rulerView.setBounds(timelineRow);
-            if (instrumentTrackController_.hasInstrumentTrack())
-            {
-                // Match audio lane row height: with N session tracks, each row in the band would be
-                // H/(N+1) if the instrument row shares the band evenly — same height as each audio header.
-                const int H = juce::jmax(0, area.getHeight());
-                const int nAudio = session.getNumTracks();
-                const int instH = (nAudio <= 0) ? H : juce::jmax(1, H / (nAudio + 1));
-                auto instRow = area.removeFromBottom(instH);
-                const int leftW = juce::jmin(TrackLanesView::kTrackHeaderWidth, instRow.getWidth());
-                auto headerCol = instRow.removeFromLeft(leftW);
-                if (instrumentTrackHeader_ != nullptr)
-                {
-                    instrumentTrackHeader_->setBounds(headerCol);
-                    instrumentTrackHeader_->setVisible(true);
-                    instrumentTrackHeader_->toFront(false);
-                }
-                instrumentMidiEventLane_.setBounds(instRow);
-                instrumentMidiEventLane_.setVisible(true);
-            }
-            else
-            {
-                if (instrumentTrackHeader_ != nullptr)
-                {
-                    instrumentTrackHeader_->setVisible(false);
-                }
-                instrumentMidiEventLane_.setVisible(false);
-            }
             trackLanesView.setBounds(area);
             if (lanePlayheadOverlay_ != nullptr)
             {
@@ -1679,7 +1687,6 @@ private:
                 const int leftStrip = juce::jmin(TrackLanesView::kTrackHeaderWidth, tw);
                 const int laneContentLeft = trackLanesView.getX() + leftStrip;
                 const int laneW = juce::jmax(0, tw - leftStrip);
-                const bool instRow = instrumentTrackController_.hasInstrumentTrack();
                 static constexpr bool kLogTransportLaneLayout = false;
                 if constexpr (kLogTransportLaneLayout)
                 {
@@ -1687,15 +1694,14 @@ private:
                         "Transport layout: trackLanes=" + trackLanesView.getBounds().toString()
                         + " kTrackHeaderWidth=" + juce::String(TrackLanesView::kTrackHeaderWidth)
                         + " laneContentLeft=" + juce::String(laneContentLeft)
-                        + " instrumentMidiX=" + juce::String(instrumentMidiEventLane_.getX())
-                        + " instrumentLane=" + instrumentMidiEventLane_.getBounds().toString()
+                        + " instrumentRowVisible="
+                        + juce::String(trackLanesView.isInstrumentTimelineRowVisible() ? 1 : 0)
                         + " ruler=" + rulerView.getBounds().toString()
                         + " laneW=" + juce::String(laneW));
                 }
 
                 const int topY = trackLanesView.getY();
-                const int bottomY
-                    = instRow ? instrumentMidiEventLane_.getBottom() : trackLanesView.getBottom();
+                const int bottomY = trackLanesView.getBottom();
                 if (laneW > 0 && bottomY > topY)
                 {
                     lanePlayheadOverlay_->setBounds(laneContentLeft, topY, laneW, bottomY - topY);
@@ -1860,7 +1866,7 @@ private:
             }
         }
 
-        /// Repaint sibling **TrackHeaderView** + MIDI lane (same row layout as `TrackLanesView`).
+        /// Repaint experimental instrument `TrackHeaderView` + MIDI lane (children of `trackLanesView`).
         void repaintInstrumentTrackRow()
         {
             if (instrumentTrackHeader_ != nullptr)
@@ -1870,7 +1876,7 @@ private:
             instrumentMidiEventLane_.repaint();
         }
 
-        /// MIDI clip lane only (same role as `ClipWaveformView`). Header is a sibling `TrackHeaderView`.
+        /// MIDI clip lane only (same role as `ClipWaveformView`). Header is embedded in `trackLanesView`.
         struct InstrumentMidiEventLane final : public juce::Component,
                                                private juce::ChangeListener,
                                                private juce::Timer
@@ -2711,16 +2717,9 @@ private:
         void refreshExperimentalInstrumentUi()
         {
             instrumentTrackController_.syncShellWithHostState();
-            const bool showInst = instrumentTrackController_.hasInstrumentTrack();
-            if (instrumentTrackHeader_ != nullptr)
-            {
-                instrumentTrackHeader_->setVisible(showInst);
-                if (showInst)
-                {
-                    instrumentTrackHeader_->repaint();
-                }
-            }
-            instrumentMidiEventLane_.setVisible(showInst);
+            trackLanesView.refreshInstrumentHeaderReorderAttachment();
+            trackLanesView.rebuildVisibleTrackEntries();
+            resized();
 
             if (experimentalMidiEditorWindow_ != nullptr)
             {

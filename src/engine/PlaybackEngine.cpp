@@ -453,6 +453,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
         {
             const Track& tr = sessionSnap->getTrack(ti);
+            if (tr.getKind() == TrackKind::Instrument)
+            {
+                continue;
+            }
             if (recorder_ != nullptr && recorder_->isRecording()
                 && tr.getId() == recorder_->getRecordingTrackId())
             {
