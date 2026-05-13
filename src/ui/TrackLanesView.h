@@ -20,6 +20,7 @@
 //   `Session::removeTrack` (not keyboard Delete). Optional **VST3** actions via `setTrackHeaderPluginHost`.
 //
 // See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`, `TrackHeaderView`.
+// Lane-column playhead line: drawn by `PlayheadOverlay` in the parent timeline shell (not this view).
 // =============================================================================
 
 #include "domain/Track.h"
@@ -47,7 +48,6 @@ class Transport;
 class TimelineViewportModel;
 class LatencySettingsStore;
 class AudioWaveformCache;
-class PlayheadOverlay;
 
 // ---------------------------------------------------------------------------
 // TrackLanesView — vertical stack of per-track event lanes
@@ -189,7 +189,6 @@ private:
     AudioWaveformCache& waveformCache_;
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
-    std::unique_ptr<PlayheadOverlay> playheadOverlay_;
 
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
     // while recording as `drainNextPreviewBlock` returns data. Not session state.

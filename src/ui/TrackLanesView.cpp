@@ -4,7 +4,6 @@
 
 #include "ui/TrackLanesView.h"
 
-#include "ui/PlayheadOverlay.h"
 #include "audio/LatencySettingsStore.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TimelineViewportModel.h"
@@ -177,8 +176,6 @@ TrackLanesView::TrackLanesView(
     , latencyStore_(latencySettingsStore)
     , waveformCache_(waveformCache)
 {
-    playheadOverlay_ = std::make_unique<PlayheadOverlay>(session_, transport_, timelineViewport_);
-    addAndMakeVisible(*playheadOverlay_);
     syncTracksFromSession();
     startTimerHz(kRecordingPreviewTimerHz);
 }
@@ -892,13 +889,6 @@ void TrackLanesView::resized()
 {
     rebuildChildLanesIfNeeded();
     auto area = getLocalBounds();
-    if (playheadOverlay_ != nullptr)
-    {
-        auto laneCol = area;
-        laneCol.removeFromLeft(juce::jmin(kTrackHeaderWidth, area.getWidth()));
-        playheadOverlay_->setBounds(laneCol);
-        playheadOverlay_->toFront(false);
-    }
     const int n = (int)lanes_.size();
     if (n <= 0 || area.getHeight() <= 0)
     {

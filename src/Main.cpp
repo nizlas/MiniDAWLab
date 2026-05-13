@@ -63,6 +63,7 @@
 #include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/PlayheadOverlay.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TrackLanesView.h"
@@ -834,6 +835,8 @@ private:
             addAndMakeVisible(trackLanesView);
             addAndMakeVisible(*instrumentTrackHeader_);
             addAndMakeVisible(instrumentMidiEventLane_);
+            lanePlayheadOverlay_ = std::make_unique<PlayheadOverlay>(session, transport, timelineViewport_);
+            addAndMakeVisible(*lanePlayheadOverlay_);
             instrumentTrackHeader_->setVisible(false);
             instrumentMidiEventLane_.setVisible(false);
             refreshExperimentalInstrumentUi();
@@ -1670,6 +1673,41 @@ private:
                 instrumentMidiEventLane_.setVisible(false);
             }
             trackLanesView.setBounds(area);
+            if (lanePlayheadOverlay_ != nullptr)
+            {
+                const int tw = trackLanesView.getWidth();
+                const int leftStrip = juce::jmin(TrackLanesView::kTrackHeaderWidth, tw);
+                const int laneContentLeft = trackLanesView.getX() + leftStrip;
+                const int laneW = juce::jmax(0, tw - leftStrip);
+                const bool instRow = instrumentTrackController_.hasInstrumentTrack();
+                static constexpr bool kLogTransportLaneLayout = false;
+                if constexpr (kLogTransportLaneLayout)
+                {
+                    juce::Logger::writeToLog(
+                        "Transport layout: trackLanes=" + trackLanesView.getBounds().toString()
+                        + " kTrackHeaderWidth=" + juce::String(TrackLanesView::kTrackHeaderWidth)
+                        + " laneContentLeft=" + juce::String(laneContentLeft)
+                        + " instrumentMidiX=" + juce::String(instrumentMidiEventLane_.getX())
+                        + " instrumentLane=" + instrumentMidiEventLane_.getBounds().toString()
+                        + " ruler=" + rulerView.getBounds().toString()
+                        + " laneW=" + juce::String(laneW));
+                }
+
+                const int topY = trackLanesView.getY();
+                const int bottomY
+                    = instRow ? instrumentMidiEventLane_.getBottom() : trackLanesView.getBottom();
+                if (laneW > 0 && bottomY > topY)
+                {
+                    lanePlayheadOverlay_->setBounds(laneContentLeft, topY, laneW, bottomY - topY);
+                    lanePlayheadOverlay_->setVisible(true);
+                    lanePlayheadOverlay_->toFront(false);
+                }
+                else
+                {
+                    lanePlayheadOverlay_->setBounds(0, 0, 0, 0);
+                    lanePlayheadOverlay_->setVisible(false);
+                }
+            }
             if (inspectorCurrentWidth_ == 0)
             {
                 const int knobX = trackLanesView.getBounds().getX();
@@ -1957,7 +1995,9 @@ private:
         private:
             [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const
             {
-                return getLocalBounds().reduced(8, 6);
+                // Horizontal: must match `ClipWaveformView` (full lane width for sample↔pixel map).
+                // A previous symmetric horizontal `reduced(8)` offset MIDI clips vs ruler/audio/playhead.
+                return getLocalBounds().reduced(0, 6);
             }
 
             [[nodiscard]] juce::Rectangle<int> getEventBoundsForClip(const InstrumentMidiClip& c,
@@ -3778,6 +3818,7 @@ private:
         AudioWaveformCache audioWaveformCache_;
         TimelineRulerView rulerView;
         TrackLanesView trackLanesView;
+        std::unique_ptr<PlayheadOverlay> lanePlayheadOverlay_;
         InspectorView inspectorView_;
         collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
         collapsible_side_strip::CollapsedKnob inspectorCollapsedKnob_;
