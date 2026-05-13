@@ -135,10 +135,6 @@ public:
     void openNativeEditor();
     void editorWindowClosing();
 
-    /// I1: one drum-oriented test note (MIDI 36). Note-off queued from the message thread after a
-    /// short delay — never touches plugin state off the audio thread except via queueMidiFromMessageThread.
-    void triggerTestKick();
-
     /// [Message thread] I2: enqueue MIDI for the next audio block. No-op if not on message thread
     /// or no instrument is loaded. Does not touch the plugin on the message thread.
     void enqueueMidiMessageFromMessageThread(const juce::MidiMessage& message);
@@ -190,11 +186,6 @@ private:
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
 
     std::unique_ptr<juce::DocumentWindow> editorWindow_;
-
-    /// Schedules MIDI 36 note-off on the message thread (see .cpp).
-    struct TestKickNoteOffTimer;
-    friend struct TestKickNoteOffTimer;
-    std::unique_ptr<TestKickNoteOffTimer> testKickNoteOffTimer_;
 
     /// [Message thread] Forwards into MidiMessageCollector (implementation in .cpp).
     void queueMidiFromMessageThread(const ::juce::MidiMessage& message);

@@ -1579,24 +1579,6 @@ struct ExperimentalInstrumentHost::MidiIoState
     juce::MidiBuffer uiPendingMidi;
 };
 
-struct ExperimentalInstrumentHost::TestKickNoteOffTimer final : juce::Timer
-{
-    explicit TestKickNoteOffTimer(ExperimentalInstrumentHost& ownerIn) noexcept
-        : owner(ownerIn)
-    {
-    }
-
-    void timerCallback() override
-    {
-        static constexpr int kChannel = 1;
-        static constexpr int kNote = 36;
-        owner.queueMidiFromMessageThread(::juce::MidiMessage::noteOff(kChannel, kNote, 0.0f));
-        stopTimer();
-    }
-
-    ExperimentalInstrumentHost& owner;
-};
-
 ExperimentalInstrumentHost::ExperimentalInstrumentHost()
     : midiIo_(std::make_unique<MidiIoState>())
 {
@@ -2202,11 +2184,6 @@ void ExperimentalInstrumentHost::unloadInstrument()
     primaryPadDisplayActiveNotes_.clear();
 
     closeNativeEditor();
-    if (testKickNoteOffTimer_ != nullptr)
-    {
-        testKickNoteOffTimer_->stopTimer();
-        testKickNoteOffTimer_.reset();
-    }
 
     std::shared_ptr<InstrumentOwner> prev = std::atomic_exchange_explicit(
         &activeOwner_, std::shared_ptr<InstrumentOwner>{}, std::memory_order_acq_rel);
@@ -3134,38 +3111,6 @@ void ExperimentalInstrumentHost::openNativeEditor()
     editorWindow_ = std::make_unique<ExperimentalPluginEditorWindow>(*this, *owner->inst, std::move(ed));
     writeExperimentalInstrumentLogLine("native editor: open succeeded");
     schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
-}
-
-void ExperimentalInstrumentHost::triggerTestKick()
-{
-    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
-        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
-    {
-        return;
-    }
-    if (!hasInstrument())
-    {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::InfoIcon, "Experimental instrument", "Load an instrument first.");
-        return;
-    }
-
-    static constexpr int kChannel = 1;
-    static constexpr int kNote = 36;
-    static constexpr float kVelFloat = 0.9f;
-    const int velMidi = juce::jlimit(1, 127, juce::roundToInt(kVelFloat * 127.0f));
-    writeExperimentalInstrumentLogLine(
-        "Test Kick: requested note=" + juce::String(kNote) + " velocityFloat=" + juce::String(kVelFloat, 4)
-        + " velocityMidi~=" + juce::String(velMidi));
-
-    queueMidiFromMessageThread(::juce::MidiMessage::noteOn(kChannel, kNote, kVelFloat));
-
-    if (testKickNoteOffTimer_ == nullptr)
-    {
-        testKickNoteOffTimer_ = std::make_unique<TestKickNoteOffTimer>(*this);
-    }
-    testKickNoteOffTimer_->stopTimer();
-    testKickNoteOffTimer_->startTimer(250);
 }
 
 void ExperimentalInstrumentHost::prepareForDevice(const double sampleRate, const int blockSize)
