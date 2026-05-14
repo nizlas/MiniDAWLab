@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
+#include "diagnostics/DiagnosticBuildFlags.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "diagnostics/DrumNameDiagnosticFileLog.h"
 #include "plugins/Vst3ChildProcessScan.h"
@@ -1242,12 +1243,14 @@ namespace
         return r;
     }
 
+#if MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
     [[nodiscard]] juce::File getExperimentalInstrumentLogFile()
     {
         return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
             .getChildFile("MiniDAWLab")
             .getChildFile("experimental-instrument.log");
     }
+#endif
 
     [[nodiscard]] juce::File getExperimentalVst3ScanDiagnosticLogFile()
     {
@@ -1258,6 +1261,9 @@ namespace
 
     void initExperimentalInstrumentSessionLog()
     {
+#if !MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
+        return;
+#else
         try
         {
             const juce::File f = getExperimentalInstrumentLogFile();
@@ -1276,10 +1282,14 @@ namespace
         catch (...)
         {
         }
+#endif
     }
 
     void writeExperimentalInstrumentLogLine(const juce::String& message)
     {
+#if !MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
+        (void)message;
+#else
         try
         {
             const juce::File f = getExperimentalInstrumentLogFile();
@@ -1294,11 +1304,15 @@ namespace
         catch (...)
         {
         }
+#endif
     }
 
     /// Scan / load boundary lines: append and close the stream each time so the log is not left buffered.
     void writeExperimentalInstrumentScanBoundaryLine(const juce::String& message)
     {
+#if !MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
+        (void)message;
+#else
         try
         {
             const juce::File f = getExperimentalInstrumentLogFile();
@@ -1321,6 +1335,7 @@ namespace
         catch (...)
         {
         }
+#endif
     }
 
     void writeScanDiagnosticScanBoundaryLine(const juce::String& message)
@@ -1785,6 +1800,9 @@ void ExperimentalInstrumentHost::messageThreadOnNativeEditorUserActivity()
         return;
     }
 
+#if !MINIDAW_DIAG_PLAYBACK_ROUTING
+    return;
+#else
     const juce::int64 nowMs = juce::Time::currentTimeMillis();
     if (diagLastRoutingLogBumpMs_ != 0 && (nowMs - diagLastRoutingLogBumpMs_) < 750)
         return;
@@ -1792,6 +1810,7 @@ void ExperimentalInstrumentHost::messageThreadOnNativeEditorUserActivity()
 
     appendExperimentalPlaybackRoutingLogLine(juce::String("instrument-editor-activity: event=uiMouseOrWheel ")
                                                + peekInstrumentAudioRoutingDiagLineForMessageThread());
+#endif
 }
 
 bool ExperimentalInstrumentHost::tryPrepareInstrumentLayout(juce::AudioPluginInstance& inst,

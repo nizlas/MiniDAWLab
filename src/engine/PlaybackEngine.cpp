@@ -367,7 +367,9 @@ namespace
             {
                 return;
             }
-
+#if !MINIDAW_DIAG_PLAYBACK_ROUTING
+            return;
+#else
             juce::String line = "playback-edge: playT0=";
             line << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(playEdgeT0)));
 
@@ -527,6 +529,7 @@ namespace
                         + trimmed);
                 }
             });
+#endif // MINIDAW_DIAG_PLAYBACK_ROUTING
         }
     };
 } // namespace

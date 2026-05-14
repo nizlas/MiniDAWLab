@@ -1294,6 +1294,7 @@ void InstrumentTrackController::publishRenderSnapshot()
     if (routingRenderFp != lastExperimentalPlaybackRoutingRenderFingerprint_)
     {
         lastExperimentalPlaybackRoutingRenderFingerprint_ = routingRenderFp;
+#if MINIDAW_DIAG_PLAYBACK_ROUTING
         const juce::String arrangeSpan
             = snap->clips.empty()
                   ? juce::String("plansEmpty=1")
@@ -1314,6 +1315,7 @@ void InstrumentTrackController::publishRenderSnapshot()
             + juce::String(" playbackEnabled=") + juce::String(snap->playbackEnabled ? "yes" : "no")
             + juce::String(" clipPlans=") + juce::String(static_cast<int>(snap->clips.size()))
             + juce::String(" noteEventsTotal=") + juce::String(routedNoteRows) + juce::String(" ") + arrangeSpan);
+#endif
     }
 
     std::atomic_store_explicit(&renderSnapshot_, std::shared_ptr<const InstrumentTrackRenderSnapshot>(std::move(snap)),

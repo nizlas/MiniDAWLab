@@ -79,7 +79,6 @@
 #include "ui/experimental/ExperimentalMidiEditorWindow.h"
 #include "ui/TransportShortcutKeys.h"
 #include "ui/TimelineClipEventChrome.h"
-#include "ui/experimental/ExperimentalMidiPatternPlayer.h"
 #include "io/ProjectAudioImport.h"
 #include "io/AudioWaveformCache.h"
 #include "io/ProjectFile.h"
@@ -600,10 +599,6 @@ private:
         [[nodiscard]] int getSideStripDefaultWidth() const noexcept override { return kInspectorDefaultW; }
 
         void sideStripLayoutChanged() override { resized(); }
-
-        [[nodiscard]] InstrumentTrackController* primaryInstrumentRuntimeForSessionApi() noexcept;
-
-        [[nodiscard]] ExperimentalInstrumentHost* primaryExperimentalInstrumentHostPointer() noexcept;
 
         void wireExperimentalInstrumentHost(ExperimentalInstrumentHost& host,
                                           InstrumentTrackController& ctrl) noexcept;
@@ -4316,46 +4311,6 @@ private:
 
 // MSVC: defining `MiniDAWLabApplication::TransportControlsContent::…` qualified members inside the
 // application class body (between sibling nested classes) is parsed incorrectly; define at TU scope instead.
-InstrumentTrackController* MiniDAWLabApplication::TransportControlsContent::primaryInstrumentRuntimeForSessionApi() noexcept
-{
-    InstrumentTrackController* keyed = [&]() noexcept -> InstrumentTrackController* {
-        const TrackId canon = canonicalInstrumentLaneTrackIdFromSession();
-        if (canon != kInvalidTrackId)
-        {
-            auto it = instrumentControllersByTrackId_.find(canon);
-            if (it != instrumentControllersByTrackId_.end())
-            {
-                return it->second.get();
-            }
-        }
-        return nullptr;
-    }();
-    if (keyed != nullptr && keyed->hasInstrumentTrack())
-    {
-        return keyed;
-    }
-    if (instrumentStagingController_ != nullptr && instrumentStagingController_->hasInstrumentTrack())
-    {
-        return instrumentStagingController_.get();
-    }
-    return keyed;
-}
-
-ExperimentalInstrumentHost* MiniDAWLabApplication::TransportControlsContent::primaryExperimentalInstrumentHostPointer()
-    noexcept
-{
-    const TrackId canon = canonicalInstrumentLaneTrackIdFromSession();
-    if (canon != kInvalidTrackId)
-    {
-        auto itHost = instrumentHostsByTrackId_.find(canon);
-        if (itHost != instrumentHostsByTrackId_.end())
-        {
-            return itHost->second.get();
-        }
-    }
-    return instrumentStagingHost_.get();
-}
-
 void MiniDAWLabApplication::TransportControlsContent::wireExperimentalInstrumentHost(ExperimentalInstrumentHost& host,
                                                                                       InstrumentTrackController& ctrl)
     noexcept
@@ -4783,7 +4738,9 @@ void MiniDAWLabApplication::TransportControlsContent::updateExperimentalPlayback
     if (routingPlaybackPublishFp != lastExperimentalPlaybackRoutingPublishFingerprint_)
     {
         lastExperimentalPlaybackRoutingPublishFingerprint_ = routingPlaybackPublishFp;
+#if MINIDAW_DIAG_PLAYBACK_ROUTING
         appendExperimentalPlaybackRoutingLogLine(routingPlaybackPublishFp);
+#endif
 #if !defined(NDEBUG)
         juce::Logger::writeToLog("[TransportControlsContent] Experimental playback snapshot entries changed "
                                  + routingPlaybackPublishFp);

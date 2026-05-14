@@ -8,6 +8,7 @@
 
 namespace
 {
+#if MINIDAW_DIAG_PLAYBACK_ROUTING
 [[nodiscard]] juce::File getExperimentalPlaybackRoutingLogFile()
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -16,10 +17,15 @@ namespace
 }
 
 juce::CriticalSection gExperimentalPlaybackRoutingLogLock;
+#endif
 } // namespace
 
 void appendExperimentalPlaybackRoutingLogLine(const juce::String& line)
 {
+#if !MINIDAW_DIAG_PLAYBACK_ROUTING
+    (void)line;
+    return;
+#else
     const juce::ScopedLock sl(gExperimentalPlaybackRoutingLogLock);
     try
     {
@@ -35,4 +41,5 @@ void appendExperimentalPlaybackRoutingLogLine(const juce::String& line)
     catch (...)
     {
     }
+#endif
 }

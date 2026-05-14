@@ -1,20 +1,27 @@
 #include "ExperimentalMidiPatternPlayer.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
+#include "diagnostics/DiagnosticBuildFlags.h"
+
 #include <cmath>
 
 namespace
 {
+#if MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
     [[nodiscard]] juce::File getExperimentalInstrumentLogFile()
     {
         return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
             .getChildFile("MiniDAWLab")
             .getChildFile("experimental-instrument.log");
     }
+#endif
 } // namespace
 
 void ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(const juce::String& message)
 {
+#if !MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
+    (void)message;
+#else
     try
     {
         const juce::File f = getExperimentalInstrumentLogFile();
@@ -28,6 +35,7 @@ void ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(const juce::String& m
     catch (...)
     {
     }
+#endif
 }
 
 ExperimentalMidiPatternPlayer::ExperimentalMidiPatternPlayer(ExperimentalInstrumentHost& host,
