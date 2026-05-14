@@ -33,6 +33,8 @@ juce_generate_juce_header(MiniDAWLab)
 target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_sources(MiniDAWLab PRIVATE
+    src/app/MainAppWindow.cpp
+    src/MiniDAWLabApplication.cpp
     src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
     src/instruments/InstrumentTrackController.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
@@ -59,6 +61,7 @@ target_sources(MiniDAWLab PRIVATE
     src/io/ProjectAudioImport.cpp
     src/io/InstrumentMidiClipExport.cpp
     src/engine/CountInClickOutput.cpp
+    src/playback/ExperimentalInstrumentPlaybackBridge.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/RecorderService.cpp
     src/ui/ClipWaveformView.cpp
