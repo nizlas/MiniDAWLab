@@ -40,14 +40,14 @@ Do **not** design new features around a single “the” instrument or “primar
 
 ## Instrument runtime (TrackId-keyed)
 
-- **Registry** (owned at app composition level, today in `TransportControlsContent` inside [src/Main.cpp](../src/Main.cpp)):
+- **Registry** (owned by [`InstrumentRuntimeCoordinator`](../src/app/InstrumentRuntimeCoordinator.h), constructed from `TransportControlsContent` in [src/app/MainAppWindow.cpp](../src/app/MainAppWindow.cpp)):
   - `std::unordered_map<TrackId, std::unique_ptr<ExperimentalInstrumentHost>> instrumentHostsByTrackId_`
   - `std::unordered_map<TrackId, std::unique_ptr<InstrumentTrackController>> instrumentControllersByTrackId_`
 - **`ExperimentalInstrumentHost`**: **one instance per instrument track**. Each instance holds **at most one loaded plugin** at a time (`activeOwner_`). Multi-track = **many host objects**, not one host managing many TrackIds internally.
 - **`InstrumentTrackController`**: **one per instrument track**; binds that lane’s MIDI clips / render snapshot to the paired host.
 - **Staging pair** (`instrumentStagingHost_` / `instrumentStagingController_`): used only around **first-time add / promotion** flows when a runtime is not yet bound to a timeline `TrackId`. It is **not** a second global instrument model alongside the TrackId registry.
 
-**Pointers:** [src/plugins/ExperimentalInstrumentHost.h](../src/plugins/ExperimentalInstrumentHost.h), [src/instruments/InstrumentTrackController.h](../src/instruments/InstrumentTrackController.h).
+**Pointers:** [src/app/InstrumentRuntimeCoordinator.h](../src/app/InstrumentRuntimeCoordinator.h), [src/plugins/ExperimentalInstrumentHost.h](../src/plugins/ExperimentalInstrumentHost.h), [src/instruments/InstrumentTrackController.h](../src/instruments/InstrumentTrackController.h).
 
 ---
 
@@ -73,10 +73,10 @@ Do **not** design new features around a single “the” instrument or “primar
 
 ## MIDI lane and editor
 
-- Per-track **MIDI event lanes** and **header actions** close over that lane’s **`TrackId`** (host/controller lookup by id).
-- The **MIDI editor window** is rebound when opening a clip so it uses the correct host/controller for that track (single window instance, track-scoped binding — not “whichever instrument is global”).
+- Per-track **MIDI event lanes** and **instrument header** widgets are owned by [`InstrumentTimelineRowCoordinator`](../src/app/InstrumentTimelineRowCoordinator.h) (private `MidiEventLane` + `TrackHeaderView` maps), embedded in `TrackLanesView`. They close over that lane’s **`TrackId`** (host/controller lookup via `InstrumentRuntimeCoordinator`).
+- **MIDI editor orchestration** lives in [`MidiEditorPresenter`](../src/app/MidiEditorPresenter.h); the **window** is [`ExperimentalMidiEditorWindow`](../src/ui/experimental/ExperimentalMidiEditorWindow.h). Opening a clip rebinds so the editor uses the correct host/controller for that track (single window instance, track-scoped binding — not “whichever instrument is global”).
 
-**Pointers:** [src/Main.cpp](../src/Main.cpp) (`InstrumentMidiEventLane`, editor open/wire helpers), [src/ui/experimental/ExperimentalMidiEditorWindow.h](../src/ui/experimental/ExperimentalMidiEditorWindow.h).
+**Pointers:** [src/app/MainAppWindow.cpp](../src/app/MainAppWindow.cpp) (wiring), [src/app/InstrumentTimelineRowCoordinator.cpp](../src/app/InstrumentTimelineRowCoordinator.cpp), [src/app/MidiEditorPresenter.h](../src/app/MidiEditorPresenter.h), [src/ui/experimental/ExperimentalMidiEditorWindow.h](../src/ui/experimental/ExperimentalMidiEditorWindow.h).
 
 ---
 
@@ -96,7 +96,7 @@ Do **not** design new features around a single “the” instrument or “primar
 - **Known risk**: the child process can crash or exit badly (e.g. during `findAllTypesForFile`). That fix is **out of scope** until explicitly scheduled.
 - **Required behavior today**: on failure, **parent** must **not** corrupt or replace the **loaded instance** or working cache; user messaging should state that existing state was left unchanged.
 
-**Pointers:** [src/Main.cpp](../src/Main.cpp) (`runExperimentalInstrumentPluginDescriptionRescanForTrack`), [src/plugins/Vst3ChildProcessScan.cpp](../src/plugins/Vst3ChildProcessScan.cpp).
+**Pointers:** [src/app/Vst3PluginPickerCoordinator.h](../src/app/Vst3PluginPickerCoordinator.h) (`runExperimentalInstrumentPluginDescriptionRescanForTrack`), [src/plugins/Vst3ChildProcessScan.cpp](../src/plugins/Vst3ChildProcessScan.cpp).
 
 ---
 
@@ -122,7 +122,7 @@ Some **API/class header comments** may lag multi-instrument reality (e.g. wordin
 ## Explicit non-goals (this document)
 
 - Does not define **HALion** or broad third-party instrument policy (future work).
-- Does not prescribe **Main.cpp** decomposition (planned refactors are separate).
+- Does not prescribe further **transport / MainAppWindow** decomposition (planned refactors are separate).
 - Does not replace [PHASE_PLAN.md](PHASE_PLAN.md) for historical phase narrative.
 
 ---
@@ -137,4 +137,4 @@ Some **API/class header comments** may lag multi-instrument reality (e.g. wordin
 | Instrument controller | [InstrumentTrackController.h/.cpp](../src/instruments/InstrumentTrackController.h) |
 | Playback + instrument snapshot | [PlaybackEngine.h/.cpp](../src/engine/PlaybackEngine.h) |
 | Project v13 + migration | [ProjectFile.h](../src/io/ProjectFile.h), [ProjectFile.cpp](../src/io/ProjectFile.cpp) |
-| Composition / registry / UI wiring | [Main.cpp](../src/Main.cpp) |
+| Composition / registry / UI wiring | [MainAppWindow.cpp](../src/app/MainAppWindow.cpp), [InstrumentRuntimeCoordinator](../src/app/InstrumentRuntimeCoordinator.h), [InstrumentTimelineRowCoordinator](../src/app/InstrumentTimelineRowCoordinator.h), [ProjectIoCoordinator](../src/app/ProjectIoCoordinator.h), [MidiEditorPresenter](../src/app/MidiEditorPresenter.h) |

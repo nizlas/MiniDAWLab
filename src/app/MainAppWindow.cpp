@@ -1,11 +1,13 @@
 ﻿#include "app/MainAppWindow.h"
+#include "app/MidiEditorPresenter.h"
+#include "app/InstrumentRuntimeCoordinator.h"
+#include "app/InstrumentTimelineRowCoordinator.h"
 #include <JuceHeader.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <algorithm>
-#include <cmath>
 
 #include "domain/Session.h"
 #include "domain/Track.h"
@@ -19,8 +21,6 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/InsertSlotId.h"
-#include "plugins/PluginDiscovery.h"
-#include "plugins/Vst3ChildProcessScan.h"
 #include "io/AudioFileLoader.h"
 #include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
@@ -29,7 +29,6 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TrackLanesView.h"
-#include "ui/TrackHeaderView.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
@@ -37,7 +36,7 @@
 #include "ui/LatencySettingsView.h"
 #include "ui/experimental/ExperimentalMidiEditorWindow.h"
 #include "ui/TransportShortcutKeys.h"
-#include "ui/TimelineClipEventChrome.h"
+
 #include "io/ProjectAudioImport.h"
 #include "io/AudioWaveformCache.h"
 #include "io/ProjectFile.h"
@@ -46,15 +45,13 @@
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 
 #include "app/ProjectIoCoordinator.h"
+#include "app/RecordingCoordinator.h"
+#include "app/Vst3PluginPickerCoordinator.h"
 
-#include <algorithm>
-#include <atomic>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <type_traits>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include "domain/SessionSnapshot.h"
 namespace
@@ -65,12 +62,6 @@ namespace
     // Temporary: log + on-screen line for keys reaching MainWindow::routeShortcut. Leave `false` in
     // normal use (no extra layout row; `if constexpr` strips the UI).
     constexpr bool kShowShortcutDiagnostics = false;
-
-    [[nodiscard]] juce::String instrumentVst3InsertBlockedMessage()
-    {
-        return juce::String{
-            "This plugin appears to be an instrument. MiniDAWLab does not support instrument inserts on audio tracks yet."};
-    }
 
     [[nodiscard]] juce::String hex8(const juce::uint32 x)
     {
@@ -166,170 +157,6 @@ namespace
         return cap;
     }
 
-    /// MIDI runtime clip: same outer chrome sequence as placed audio clips (ClipWaveformView); label only inside.
-    void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
-                                        juce::Rectangle<float> eb,
-                                        bool selected)
-    {
-        using namespace mini_daw::timeline_clip_chrome;
-        paintEventChromeBody(g, eb, midiLaneEventBodyFill());
-        if (selected)
-        {
-            paintEventChromeSelectionOverlay(g, eb);
-        }
-        g.setColour(juce::Colour(0xff242a33));
-        g.setFont(11.5f);
-        g.drawFittedText(
-            juce::String("MIDI 1"),
-            clipEventLabelBounds(eb).toNearestInt(),
-            juce::Justification::centredLeft,
-            1);
-    }
-
-    [[nodiscard]] juce::File makeUniqueTakeWavInProjectAudioDir(const juce::File& audioDir)
-    {
-        const juce::String t = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
-        juce::File f = audioDir.getChildFile("take_" + t + ".wav");
-        if (!f.existsAsFile())
-        {
-            return f;
-        }
-        for (int i = 1; i < 10000; ++i)
-        {
-            f = audioDir.getChildFile("take_" + t + "_" + juce::String(i) + ".wav");
-            if (!f.existsAsFile())
-            {
-                return f;
-            }
-        }
-        return audioDir.getChildFile("take_" + t + "_9999.wav");
-    }
-
-    // Offline split (after cycle OD finalize): independent mono 24‑bit WAVs in `Audio/`.
-    [[nodiscard]] juce::File makeUniqueCyclePassWavInProjectAudioDir(
-        const juce::File& audioDir,
-        const juce::String& batchStamp,
-        const int sliceIndex)
-    {
-        juce::File f = audioDir.getChildFile(
-            juce::String("cycle_pass_") + batchStamp + "_" + juce::String(sliceIndex) + ".wav");
-        if (!f.existsAsFile())
-        {
-            return f;
-        }
-        for (int i = 1; i < 10000; ++i)
-        {
-            f = audioDir.getChildFile(juce::String("cycle_pass_") + batchStamp + "_"
-                                      + juce::String(sliceIndex) + "_" + juce::String(i) + ".wav");
-            if (!f.existsAsFile())
-            {
-                return f;
-            }
-        }
-        return audioDir.getChildFile(
-            juce::String("cycle_pass_") + batchStamp + "_" + juce::String(sliceIndex)
-            + "_collision.wav");
-    }
-
-    // Defer-and-retry cleanup: the continuous WAV may briefly remain locked by Windows after the
-    // recorder writer is closed (AV scan / indexer / kernel handle release latency). One synchronous
-    // attempt + up to 1 s of message-thread retries (no audio-thread work, no sleeps), then
-    // rename to a `_debug_cycle_continuous_…` sibling as last resort.
-    class DeferredCycleMasterDeleter : private juce::Timer
-    {
-    public:
-        static void schedule(juce::File f)
-        {
-            std::unique_ptr<DeferredCycleMasterDeleter> p(new DeferredCycleMasterDeleter(std::move(f)));
-            p->startTimer(kRetryIntervalMs);
-            liveInstances().push_back(std::move(p));
-        }
-
-    private:
-        explicit DeferredCycleMasterDeleter(juce::File f) noexcept : file_(std::move(f)) {}
-
-        void timerCallback() override
-        {
-            ++attempts_;
-            if (!file_.existsAsFile())
-            {
-                retire();
-                return;
-            }
-            if (file_.deleteFile())
-            {
-                juce::Logger::writeToLog(
-                    "[Rec] cycle split: deleted continuous master WAV (deferred attempt "
-                    + juce::String(attempts_) + ", " + file_.getFileName() + ").");
-                retire();
-                return;
-            }
-            if (attempts_ >= kMaxAttempts)
-            {
-                const juce::File dbg = file_.getSiblingFile(
-                    "_debug_cycle_continuous_" + file_.getFileName());
-                if (dbg.existsAsFile())
-                {
-                    (void)dbg.deleteFile();
-                }
-                const bool renamed = file_.moveFileTo(dbg);
-                if (!renamed)
-                {
-                    juce::Logger::writeToLog(
-                        "[Rec] cycle split WARNING: continuous master could not be deleted or renamed: "
-                        + file_.getFullPathName());
-                }
-                else
-                {
-                    juce::Logger::writeToLog(
-                        "[Rec] cycle split: continuous master kept as debug file "
-                        + dbg.getFullPathName());
-                }
-                retire();
-            }
-        }
-
-        void retire()
-        {
-            stopTimer();
-            DeferredCycleMasterDeleter* self = this;
-            juce::MessageManager::callAsync([self]() {
-                auto& v = liveInstances();
-                v.erase(std::remove_if(v.begin(), v.end(),
-                                       [self](const std::unique_ptr<DeferredCycleMasterDeleter>& x) {
-                                           return x.get() == self;
-                                       }),
-                        v.end());
-            });
-        }
-
-        static std::vector<std::unique_ptr<DeferredCycleMasterDeleter>>& liveInstances() noexcept
-        {
-            static std::vector<std::unique_ptr<DeferredCycleMasterDeleter>> v;
-            return v;
-        }
-
-        juce::File file_;
-        int attempts_ = 0;
-        static constexpr int kMaxAttempts = 20;     // 20 * 50 ms = 1 s
-        static constexpr int kRetryIntervalMs = 50;
-    };
-
-    inline void scheduleCycleContinuousMasterCleanup(const juce::File& continuousWav)
-    {
-        if (continuousWav == juce::File() || !continuousWav.existsAsFile())
-        {
-            return;
-        }
-        if (continuousWav.deleteFile())
-        {
-            juce::Logger::writeToLog(
-                "[Rec] cycle split: deleted continuous master WAV (" + continuousWav.getFileName()
-                + ").");
-            return;
-        }
-        DeferredCycleMasterDeleter::schedule(continuousWav);
-    }
 } // namespace
 
 namespace
@@ -384,12 +211,6 @@ class TransportControlsContent : public juce::Component,
                                  public collapsible_side_strip::Host
 {
 private:
-    enum class InsertPickerMode
-    {
-        AddPre,
-        AddPost,
-    };
-
     static constexpr int kInspectorMaxW = 360;
     static constexpr int kInspectorDefaultW = 90;
 
@@ -402,9 +223,6 @@ private:
     [[nodiscard]] int getSideStripDefaultWidth() const noexcept override { return kInspectorDefaultW; }
 
     void sideStripLayoutChanged() override { resized(); }
-
-    void wireExperimentalInstrumentHost(ExperimentalInstrumentHost& host,
-                                      InstrumentTrackController& ctrl) noexcept;
 
     [[nodiscard]] TrackId canonicalInstrumentLaneTrackIdFromSession() const noexcept;
 
@@ -432,11 +250,7 @@ private:
 
     void releaseExperimentalInstrumentHostsDeviceResources() noexcept;
 
-    void reconcileInstrumentRegistryAgainstSessionRows() noexcept;
-
     void updateExperimentalPlaybackBridgeAfterRegistryChange();
-
-    void syncInstrumentTimelineRowAttachmentToSession() noexcept;
 
     [[nodiscard]] juce::String proposeNextGrooveAgentInstrumentTrackDisplayName() const;
     [[nodiscard]] bool tryCloneGrooveAgentFromAnyExistingInto(ExperimentalInstrumentHost& dest) noexcept;
@@ -446,11 +260,6 @@ private:
     static void stableSortInstrumentMusicalUndoVector(std::vector<ProjectFileExperimentalInstrumentTrackV1>& v);
     void applyInstrumentMusicalUndoVectorToAllKeyedControllers(
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept;
-
-    void ensureInstrumentTimelineHeaderAndLaneForTrack(TrackId tid);
-    void tearDownExperimentalInstrumentTimelineUiForTrack(TrackId tid) noexcept;
-
-    void runExperimentalInstrumentPluginDescriptionRescanForTrack(TrackId tid);
 
 public:
     TransportControlsContent(Transport& transportIn,
@@ -478,7 +287,9 @@ public:
               deviceManagerIn,
               timelineViewport_,
               [this]() {
-                  return recorder_.isRecording() || isCountInActive();
+                  return recorder_.isRecording()
+                         || (recordingCoordinator_ != nullptr
+                             && recordingCoordinator_->isCountInActive());
               })
         , trackLanesView(
               sessionIn,
@@ -492,15 +303,153 @@ public:
         , inspectorResizeSplitter_(*this)
         , inspectorCollapsedKnob_(*this)
     {
+        recordingCoordinator_ = std::make_unique<RecordingCoordinator>(
+            transport,
+            session,
+            deviceManager,
+            recorder_,
+            countInClicks_,
+            latencyStore_,
+            countInStatusLabel_,
+            RecordingCoordinator::Callbacks{
+                [this]() { updatePlayPauseButtonFromTransport(); },
+                [this]() { syncViewportFromSession(); },
+                [this]() {
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                },
+                [this](bool active,
+                       std::int64_t cycleLocL,
+                       std::int64_t cycleLocR,
+                       std::int64_t recordingStartSample,
+                       std::uint32_t lastSeenWrapCount) {
+                    trackLanesView.setCycleRecordingPreviewContext(
+                        active, cycleLocL, cycleLocR, recordingStartSample, lastSeenWrapCount);
+                },
+                [this]() { trackLanesView.clearCycleRecordingPreviewContext(); },
+            });
+
+        instrumentRuntimeCoordinator_ = std::make_unique<InstrumentRuntimeCoordinator>(
+            session,
+            playbackEngine_,
+            InstrumentRuntimeCoordinator::Callbacks{
+                [this]() noexcept {
+                    return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording()
+                           || recordingCoordinator_->isCountInActive();
+                },
+                [this]() {
+                    if (instrumentTimelineRowCoordinator_ != nullptr)
+                    {
+                        instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
+                    }
+                },
+            });
+
+        vst3PluginPickerCoordinator_ = std::make_unique<Vst3PluginPickerCoordinator>(
+            *this,
+            session,
+            pluginHost_,
+            Vst3PluginPickerCoordinator::Callbacks{
+                [this] {
+                    return recorder_.isRecording()
+                           || (recordingCoordinator_ != nullptr
+                               && recordingCoordinator_->isCountInActive());
+                },
+                [this] { inspectorView_.refreshFromSession(); },
+                [this](const TrackId tid) {
+                    juce::ignoreUnused(tid);
+                    refreshInstrumentUi();
+                },
+                [this](const TrackId tid) {
+                    juce::ignoreUnused(tid);
+                    instrumentRuntimeCoordinator_->updateExperimentalPlaybackBridgeAfterRegistryChange();
+                },
+                [this](const TrackId tid) {
+                    return instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(tid);
+                },
+                [this](const TrackId tid) { return instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid); },
+                [this] { refreshInstrumentUi(); },
+                [this]() { return instrumentRuntimeCoordinator_->canonicalInstrumentLaneTrackIdFromSession(); },
+            });
+        addChildComponent(*vst3PluginPickerCoordinator_);
+
+        instrumentTimelineRowCoordinator_ = std::make_unique<InstrumentTimelineRowCoordinator>(
+            session,
+            transport,
+            trackLanesView,
+            inspectorView_,
+            timelineViewport_,
+            *instrumentRuntimeCoordinator_,
+            InstrumentTimelineRowCoordinator::Callbacks{
+                [this](TrackId laneTid) {
+                    vst3PluginPickerCoordinator_->runExperimentalInstrumentPluginDescriptionRescanForTrack(laneTid);
+                },
+                [this]() {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->refreshInstrumentUiIfOpen();
+                    }
+                },
+                [this](TrackId timelineTid, InstrumentMidiClipId clipId) {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->openMidiEditorForInstrumentClip(timelineTid, clipId);
+                    }
+                },
+            });
+
+        midiEditorPresenter_ = std::make_unique<MidiEditorPresenter>(
+            transport,
+            session,
+            deviceManager,
+            recorder_,
+            timelineViewport_,
+            midiEditorWindow_,
+            MidiEditorPresenter::Callbacks{
+                [this](TrackId tid) { return getInstrumentControllerForTrack(tid); },
+                [this](TrackId tid) { return getInstrumentHostForTrack(tid); },
+                [this](const juce::String& lab, std::function<bool()> m) {
+                    executeUndoableInstrumentEdit(lab, std::move(m));
+                },
+                [this](const juce::String& lab,
+                      std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical) {
+                    commitInstrumentMusicalUndoPair(lab, std::move(beforeMusical));
+                },
+                [this] { return buildSortedInstrumentMusicalUndoSnapshot(); },
+                [this] { invokeUndoFromWindowShortcut(); },
+                [this] { invokeRedoFromWindowShortcut(); },
+                [this] { invokePlayPauseToggleFromWindowShortcut(); },
+                [this] { stopOrSeekFromStopButton(); },
+                [this] { invokeRecordToggleFromWindowShortcut(); },
+                [this] { invokeJumpToLeftLocatorFromWindowShortcut(); },
+                [this]() {
+                    return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
+                },
+                [this]() {
+                    return recorder_.isRecording()
+                           || (recordingCoordinator_ != nullptr
+                               && recordingCoordinator_->isCountInActive());
+                },
+                [this]() { instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow(); },
+                [this] { refreshInstrumentUi(); },
+                [this](double sr) {
+                    instrumentRuntimeCoordinator_->applyTimelineSampleRateToKeyedAndStaging(sr);
+                },
+            });
+
         playbackEngine_.setExperimentalInstrumentDeviceLifecycleHooks(
-            [this](const double sr, const int bs) { prepareExperimentalInstrumentHostsForDevice(sr, bs); },
-            [this] { releaseExperimentalInstrumentHostsDeviceResources(); },
+            [this](const double sr, const int bs) {
+                instrumentRuntimeCoordinator_->prepareExperimentalInstrumentHostsForDevice(sr, bs);
+            },
+            [this] { instrumentRuntimeCoordinator_->releaseExperimentalInstrumentHostsDeviceResources(); },
             [this](const int ns) {
-                experimentalBeginAudioBlockAllHosts(static_cast<std::int64_t>(ns));
+                instrumentRuntimeCoordinator_->experimentalBeginAudioBlockAllHosts(static_cast<std::int64_t>(ns));
             });
         trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
             // Power / delete / inserts are not realtime-safe paths: blocked while Playing (not mute).
-            return recorder_.isRecording() || isCountInActive()
+            return recorder_.isRecording()
+                   || (recordingCoordinator_ != nullptr
+                       && recordingCoordinator_->isCountInActive())
                    || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
         });
         setWantsKeyboardFocus(true);
@@ -508,7 +457,7 @@ public:
         timelineViewport_.setOnVisibleRangeChanged([this] {
             rulerView.repaint();
             trackLanesView.repaint();
-            repaintInstrumentTrackRow();
+            instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
         });
         addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
         addTrackButton.onClick = [this] {
@@ -549,28 +498,31 @@ public:
             ProjectIoCoordinator::Callbacks{
                 [this](TrackId tid) { return getInstrumentControllerForTrack(tid); },
                 [this] {
-                    if (experimentalMidiEditorWindow_ != nullptr)
+                    if (midiEditorPresenter_ != nullptr)
                     {
-                        experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
+                        midiEditorPresenter_->snapshotOpenClipViewportFromRollIfOpen();
                     }
                 },
                 [this] { clearExperimentalInstrumentRuntimesPreserveBridgeOnly(); },
-                [this](TrackId tid) { return getOrCreateInstrumentRuntimeForTrack(tid); },
+                [this](TrackId tid) { return instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(tid); },
                 [this] {
-                    if (experimentalMidiEditorWindow_ != nullptr)
+                    if (midiEditorPresenter_ != nullptr)
                     {
-                        experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+                        midiEditorPresenter_->refreshInstrumentUiIfOpen();
                     }
                 },
                 [this] { sessionHistory_.clear(); },
                 [this] {
                     syncViewportFromSession();
-                    syncInstrumentClipTimelineFromDevice();
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
+                    }
                     trackLanesView.syncTracksFromSession();
                     inspectorView_.refreshFromSession();
                     rulerView.repaint();
                     trackLanesView.repaint();
-                    refreshExperimentalInstrumentUi();
+                    refreshInstrumentUi();
                     resized();
                 },
             });
@@ -634,10 +586,10 @@ public:
         addAndMakeVisible(inspectorResizeSplitter_);
         addAndMakeVisible(rulerView);
         addAndMakeVisible(trackLanesView);
-        syncInstrumentTimelineRowAttachmentToSession();
+        instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
         lanePlayheadOverlay_ = std::make_unique<PlayheadOverlay>(session, transport, timelineViewport_);
         addAndMakeVisible(*lanePlayheadOverlay_);
-        refreshExperimentalInstrumentUi();
+        refreshInstrumentUi();
         addAndMakeVisible(inspectorCollapsedKnob_);
         inspectorCollapsedKnob_.setVisible(false);
         pluginHost_.setUndoRecorder(
@@ -658,7 +610,8 @@ public:
             [this] { invokeRedoFromWindowShortcut(); } });
         trackLanesView.setTrackHeaderPluginHost(
             { [this](const TrackId tid) {
-                  showVst3PluginPickerForTrack(tid, InsertPickerMode::AddPost, this);
+                  vst3PluginPickerCoordinator_->showVst3PluginPickerForTrack(
+                      tid, Vst3PluginPickerCoordinator::InsertPickerMode::AddPost, this);
               },
               [this](const TrackId tid) { pluginHost_.openNativeEditor(tid); },
               [this](const TrackId tid) { pluginHost_.openGenericParamsEditor(tid); },
@@ -679,9 +632,10 @@ public:
                 return rows;
             },
             [this](const TrackId tid, const InsertStage st) {
-                showVst3PluginPickerForTrack(
+                vst3PluginPickerCoordinator_->showVst3PluginPickerForTrack(
                     tid,
-                    st == InsertStage::Pre ? InsertPickerMode::AddPre : InsertPickerMode::AddPost,
+                    st == InsertStage::Pre ? Vst3PluginPickerCoordinator::InsertPickerMode::AddPre
+                                           : Vst3PluginPickerCoordinator::InsertPickerMode::AddPost,
                     &inspectorView_);
             },
             [this](const TrackId tid, const InsertSlotId sid) { pluginHost_.openNativeEditor(tid, sid); },
@@ -693,7 +647,7 @@ public:
                 pluginHost_.reorderInsertWithinStage(tid, sid, gapIndex);
             } });
         trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
-            if (recorder_.isRecording() || isCountInActive())
+            if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
             {
                 return;
             }
@@ -717,17 +671,15 @@ public:
                         {
                             mh->closeNativeEditor();
                         }
-                        if (midiEditorOpenedForInstrumentTrackId_.has_value()
-                            && midiEditorOpenedForInstrumentTrackId_.value() == tid)
+                        if (midiEditorPresenter_ != nullptr)
                         {
-                            experimentalMidiEditorWindow_.reset();
-                            midiEditorOpenedForInstrumentTrackId_.reset();
+                            midiEditorPresenter_->resetWindowAndBookingIfOpenOnTrack(tid);
                         }
-                        tearDownExperimentalInstrumentTimelineUiForTrack(tid);
+                        instrumentTimelineRowCoordinator_->tearDownExperimentalInstrumentTimelineUiForTrack(tid);
                         pluginHost_.evictPluginForTrackNoUndo(tid);
                         session.removeTrack(tid);
-                        removeInstrumentRuntimeForTrack(tid);
-                        refreshExperimentalInstrumentUi();
+                        instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
+                        refreshInstrumentUi();
                     }
                     else
                     {
@@ -776,7 +728,7 @@ public:
             [this](const PlacedClipId clipId,
                    const std::int64_t newStart,
                    const std::optional<TrackId> destTrack) -> bool {
-                if (recorder_.isRecording() || isCountInActive())
+                if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
                 {
                     return false;
                 }
@@ -846,7 +798,7 @@ public:
             });
         trackLanesView.setOnUndoableClipTrimRequested(
             [this](const PlacedClipId clipId, const ClipTrimEdge edge, const std::int64_t newVal) -> bool {
-                if (recorder_.isRecording() || isCountInActive())
+                if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
                 {
                     return false;
                 }
@@ -914,7 +866,7 @@ public:
             [this](const PlacedClipId clipId,
                    const std::int64_t splitSample,
                    const bool clipWasSelected) {
-                if (recorder_.isRecording() || isCountInActive())
+                if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
                 {
                     return;
                 }
@@ -996,36 +948,22 @@ public:
                     }
                 }
             });
-        // UI-only mutex with the experimental instrument header. Audio headers paint inactive
+        // UI-only mutex with the instrument timeline header row. Audio headers paint inactive
         // when the instrument row is the UI-active row; clicking any audio header clears it.
         // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.
         trackLanesView.setHeaderActiveSuppressProvider(
-            [this] {
-                for (const auto& kv : instrumentControllersByTrackId_)
-                {
-                    if (kv.second != nullptr && kv.second->isActive())
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            });
+            [this] { return instrumentRuntimeCoordinator_->hasAnyKeyedInstrumentControllerActive(); });
         trackLanesView.setOnAudioHeaderActivated(
-            [this] {
-                for (const auto& kv : instrumentControllersByTrackId_)
-                {
-                    if (kv.second != nullptr)
-                    {
-                        kv.second->setActive(false);
-                    }
-                }
-            });
+            [this] { instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly(); });
         deviceManager.addChangeListener(this);
         updatePlayPauseButtonFromTransport();
         startTimerHz(10);
         syncViewportFromSession();
-        syncInstrumentClipTimelineFromDevice();
-        syncInstrumentTimelineRowAttachmentToSession();
+        if (midiEditorPresenter_ != nullptr)
+        {
+            midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
+        }
+        instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
     }
 
     ~TransportControlsContent() override
@@ -1033,57 +971,27 @@ public:
         audioWaveformCache_.setOnPyramidReady({});
         playbackEngine_.setExperimentalInstrumentDeviceLifecycleHooks({}, {}, {});
         deviceManager.removeChangeListener(this);
-        cancelCountIn();
+        recordingCoordinator_->cancelCountIn();
         clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
-        if (cycleRecordingWrapTimer_ != nullptr)
-        {
-            cycleRecordingWrapTimer_->stopTimer();
-        }
     }
 
     // [Message thread] Invoked only from `MainWindow` shortcut router (not from child
     // `keyPressed` — avoids duplicate `numpadRecordToggled` on one physical keypress).
-    void invokeRecordToggleFromWindowShortcut() { numpadRecordToggled(); }
+    void invokeRecordToggleFromWindowShortcut() { recordingCoordinator_->numpadRecordToggled(); }
     // [Message thread] Space: when recording, commit (source tag `space`); else same as Play/Pause.
     void invokePlayPauseToggleFromWindowShortcut()
     {
         if (recorder_.isRecording())
         {
-            stopRecordingAndCommitFromUi("space");
+            recordingCoordinator_->stopRecordingAndCommitFromUi("space");
             return;
         }
         togglePlayPauseTransportOnly();
     }
 
-    /// I3h: same transport / seek / cycle / record entry points as the main window, for the
-    /// experimental MIDI editor (toolbar + piano-roll ruler). Does not duplicate transport state.
-    [[nodiscard]] ExperimentalMidiTransportCommands makeMidiEditorTransportCommands()
-    {
-        ExperimentalMidiTransportCommands c;
-        c.transport = &transport;
-        c.onTogglePlayPause = [this] { invokePlayPauseToggleFromWindowShortcut(); };
-        c.onStop = [this] { stopOrSeekFromStopButton(); };
-        c.onToggleRecord = [this] { invokeRecordToggleFromWindowShortcut(); };
-        c.onJumpToLeftLocator = [this] { invokeJumpToLeftLocatorFromWindowShortcut(); };
-        c.onToggleCycle = [this] {
-            if (recorder_.isRecording() || isCountInActive())
-            {
-                juce::Logger::writeToLog("[Cycle] MIDI editor toggle ignored (recording or count-in)");
-                return;
-            }
-            transport.requestCycleEnabled(!transport.readCycleEnabledForUi());
-            juce::Logger::writeToLog(juce::String{"[Cycle] "}
-                                     + (transport.readCycleEnabledForUi() ? "on" : "off"));
-        };
-        c.isUiInputBlockedByRecording = [this]() {
-            return recorder_.isRecording() || isCountInActive();
-        };
-        return c;
-    }
-
     void invokeJumpToLeftLocatorFromWindowShortcut()
     {
-        if (recorder_.isRecording() || isCountInActive())
+        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             juce::Logger::writeToLog("[Shortcut] numpad1 ignored (recording or count-in)");
             return;
@@ -1093,9 +1001,9 @@ public:
         if (R > L && R > 0)
         {
             transport.requestSeek(L);
-            if (experimentalMidiEditorWindow_ != nullptr)
+            if (midiEditorPresenter_ != nullptr)
             {
-                experimentalMidiEditorWindow_->notifyExternalTransportSeek(L);
+                midiEditorPresenter_->notifyMidiEditorExternalTransportSeekIfOpen(L);
             }
             return;
         }
@@ -1104,7 +1012,7 @@ public:
 
     void invokeDeleteSelectedPlacedClipFromWindowShortcut()
     {
-        if (recorder_.isRecording() || isCountInActive())
+        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             return;
         }
@@ -1191,7 +1099,7 @@ public:
 
     void invokePasteClipFromWindowShortcut()
     {
-        if (recorder_.isRecording() || isCountInActive())
+        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             return;
         }
@@ -1249,14 +1157,14 @@ public:
                 + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
                 + juce::String(sessionHistory_.redoStackSize()));
         }
-        if (recorder_.isRecording() || isCountInActive())
+        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             if constexpr (undo_diagnostic::kUndoDiag)
             {
                 writeUndoDiagnosticLogLine(
                     "[UndoDiag] invokeUndo bail: recordingOrCountIn recording="
                     + juce::String(recorder_.isRecording() ? "Y" : "n")
-                    + " countIn=" + juce::String(isCountInActive() ? "Y" : "n"));
+                    + " countIn=" + juce::String(recordingCoordinator_->isCountInActive() ? "Y" : "n"));
             }
             return;
         }
@@ -1306,9 +1214,12 @@ public:
         {
             if constexpr (undo_diagnostic::kUndoDiag)
             {
-                if (experimentalMidiEditorWindow_ != nullptr)
+                ExperimentalMidiEditorWindow* midiEditorWnd = nullptr;
+                if (midiEditorPresenter_ != nullptr)
+                    midiEditorWnd = midiEditorPresenter_->midiEditorWindow();
+                if (midiEditorWnd != nullptr)
                 {
-                    const auto preId = experimentalMidiEditorWindow_->getBoundInstrumentClipId();
+                    const auto preId = midiEditorWnd->getBoundInstrumentClipId();
                     writeUndoDiagnosticLogLine(
                         "[UndoDiag] invokeUndo pre instrument apply storedEditorClipId="
                         + (preId.has_value() ? juce::String(static_cast<juce::int64>(*preId))
@@ -1318,7 +1229,10 @@ public:
             const std::vector<ProjectFileExperimentalInstrumentTrackV1>& mus
                 = bundle->isRedo ? bundle->instrumentSides->after : bundle->instrumentSides->before;
             applyInstrumentMusicalUndoVectorToAllKeyedControllers(mus);
-            rebindExperimentalMidiEditorAfterInstrumentMusicalUndo();
+            if (midiEditorPresenter_ != nullptr)
+            {
+                midiEditorPresenter_->rebindAfterInstrumentMusicalUndo();
+            }
         }
         refreshAfterSessionSnapshotRestore();
         if constexpr (undo_diagnostic::kUndoDiag)
@@ -1340,14 +1254,14 @@ public:
                 + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
                 + juce::String(sessionHistory_.redoStackSize()));
         }
-        if (recorder_.isRecording() || isCountInActive())
+        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             if constexpr (undo_diagnostic::kUndoDiag)
             {
                 writeUndoDiagnosticLogLine(
                     "[UndoDiag] invokeRedo bail: recordingOrCountIn recording="
                     + juce::String(recorder_.isRecording() ? "Y" : "n")
-                    + " countIn=" + juce::String(isCountInActive() ? "Y" : "n"));
+                    + " countIn=" + juce::String(recordingCoordinator_->isCountInActive() ? "Y" : "n"));
             }
             return;
         }
@@ -1396,9 +1310,12 @@ public:
         {
             if constexpr (undo_diagnostic::kUndoDiag)
             {
-                if (experimentalMidiEditorWindow_ != nullptr)
+                ExperimentalMidiEditorWindow* midiEditorWnd = nullptr;
+                if (midiEditorPresenter_ != nullptr)
+                    midiEditorWnd = midiEditorPresenter_->midiEditorWindow();
+                if (midiEditorWnd != nullptr)
                 {
-                    const auto preId = experimentalMidiEditorWindow_->getBoundInstrumentClipId();
+                    const auto preId = midiEditorWnd->getBoundInstrumentClipId();
                     writeUndoDiagnosticLogLine(
                         "[UndoDiag] invokeRedo pre instrument apply storedEditorClipId="
                         + (preId.has_value() ? juce::String(static_cast<juce::int64>(*preId))
@@ -1408,7 +1325,10 @@ public:
             const std::vector<ProjectFileExperimentalInstrumentTrackV1>& mus
                 = bundle->isRedo ? bundle->instrumentSides->after : bundle->instrumentSides->before;
             applyInstrumentMusicalUndoVectorToAllKeyedControllers(mus);
-            rebindExperimentalMidiEditorAfterInstrumentMusicalUndo();
+            if (midiEditorPresenter_ != nullptr)
+            {
+                midiEditorPresenter_->rebindAfterInstrumentMusicalUndo();
+            }
         }
         refreshAfterSessionSnapshotRestore();
         if constexpr (undo_diagnostic::kUndoDiag)
@@ -1447,17 +1367,7 @@ public:
     // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
     void resized() override
     {
-        if (instrumentStagingController_ != nullptr)
-        {
-            instrumentStagingController_->syncShellWithHostState();
-        }
-        for (auto& kv : instrumentControllersByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->syncShellWithHostState();
-            }
-        }
+        instrumentRuntimeCoordinator_->syncAllKeyedAndStagingShellWithHostState();
         auto area = getLocalBounds().reduced(8);
         auto row = area.removeFromTop(32);
         if (kShowKeyDiagnostic)
@@ -1572,480 +1482,7 @@ public:
         }
     }
 
-    void wireMidiEditorForOpenClip(const TrackId timelineInstrumentTrackId, InstrumentMidiClip* clip)
-    {
-        jassert(clip != nullptr);
-        InstrumentTrackController* ctl = getInstrumentControllerForTrack(timelineInstrumentTrackId);
-        if (ctl == nullptr)
-        {
-            return;
-        }
-        experimentalMidiEditorWindow_->bindExternalPattern(&clip->pattern,
-                                                           clip,
-                                                           ctl,
-                                                           &session,
-                                                           &transport,
-                                                           &deviceManager,
-                                                           &timelineViewport_,
-                                                           clip->name);
-        experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
-        experimentalMidiEditorWindow_->setInstrumentMusicalUndoUi(
-            [this](const juce::String& lab, std::function<bool()> m) {
-                executeUndoableInstrumentEdit(lab, std::move(m));
-            },
-            [this](const juce::String& lab, std::vector<ProjectFileExperimentalInstrumentTrackV1> before) {
-                commitInstrumentMusicalUndoPair(lab, std::move(before));
-            },
-            [this] {
-                return buildSortedInstrumentMusicalUndoSnapshot();
-            },
-            [this] { invokeUndoFromWindowShortcut(); },
-            [this] { invokeRedoFromWindowShortcut(); });
-        experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
-    }
-
-    /// Clip-bound editor is invalid (e.g. clip removed by undo); same scratch wiring as toolbar scratch.
-    void detachMidiEditorToScratchAfterMissingInstrumentClip(const juce::String& reasonForUser)
-    {
-        if (experimentalMidiEditorWindow_ == nullptr)
-        {
-            return;
-        }
-        experimentalMidiEditorWindow_->unbindExternalPattern();
-        experimentalMidiEditorWindow_->bindTransportCommands(makeMidiEditorTransportCommands());
-        experimentalMidiEditorWindow_->setInstrumentMusicalUndoUi(
-            std::function<void(const juce::String&, std::function<bool()>)>{},
-            std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>{},
-            std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()>{},
-            [this] { invokeUndoFromWindowShortcut(); },
-            [this] { invokeRedoFromWindowShortcut(); });
-        experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
-        midiEditorOpenedForInstrumentTrackId_.reset();
-        if (reasonForUser.isNotEmpty())
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon, "MIDI editor", reasonForUser);
-        }
-    }
-
-    void rebindExperimentalMidiEditorAfterInstrumentMusicalUndo()
-    {
-        if (experimentalMidiEditorWindow_ == nullptr)
-        {
-            return;
-        }
-        const std::optional<std::uint64_t> idOpt = experimentalMidiEditorWindow_->getBoundInstrumentClipId();
-        if (!idOpt.has_value() || *idOpt == 0)
-        {
-            if constexpr (undo_diagnostic::kUndoDiag)
-            {
-                writeUndoDiagnosticLogLine(
-                    "[UndoDiag] rebindMidiAfterInstrumentUndo skip: no stored clip id");
-            }
-            return;
-        }
-        const InstrumentMidiClipId clipId = static_cast<InstrumentMidiClipId>(*idOpt);
-        if constexpr (undo_diagnostic::kUndoDiag)
-        {
-            writeUndoDiagnosticLogLine("[UndoDiag] rebindMidiAfterInstrumentUndo clipId="
-                                       + juce::String(static_cast<juce::int64>(clipId)));
-        }
-        if (!midiEditorOpenedForInstrumentTrackId_.has_value())
-        {
-            detachMidiEditorToScratchAfterMissingInstrumentClip(
-                "The MIDI clip being edited is no longer available after undo.\n\n"
-                "The editor was switched to scratch mode.");
-            return;
-        }
-        InstrumentTrackController* ctl
-            = getInstrumentControllerForTrack(midiEditorOpenedForInstrumentTrackId_.value());
-        if (ctl == nullptr)
-        {
-            detachMidiEditorToScratchAfterMissingInstrumentClip(
-                "The MIDI clip being edited is no longer available after undo.\n\n"
-                "The editor was switched to scratch mode.");
-            return;
-        }
-        InstrumentMidiClip* const clip = ctl->getClipById(clipId);
-        if (clip == nullptr)
-        {
-            if constexpr (undo_diagnostic::kUndoDiag)
-            {
-                writeUndoDiagnosticLogLine(
-                    "[UndoDiag] rebindMidiAfterInstrumentUndo clip missing -> detach scratch");
-            }
-            detachMidiEditorToScratchAfterMissingInstrumentClip(
-                "The MIDI clip being edited is no longer available after undo.\n\n"
-                "The editor was switched to scratch mode.");
-            return;
-        }
-        ctl->setSelectedClipId(clipId);
-        wireMidiEditorForOpenClip(midiEditorOpenedForInstrumentTrackId_.value(), clip);
-        if constexpr (undo_diagnostic::kUndoDiag)
-        {
-            writeUndoDiagnosticLogLine(
-                "[UndoDiag] rebindMidiAfterInstrumentUndo ok patternPtr="
-                + juce::String::formatted("%p", (void*)&clip->pattern) + " timelineNotes="
-                + juce::String((int)clip->pattern.timelineNotes.size()));
-        }
-    }
-
-    void openMidiEditorForInstrumentClip(const TrackId timelineInstrumentTrackId,
-                                         const InstrumentMidiClipId clipId)
-    {
-        InstrumentTrackController* ctl = getInstrumentControllerForTrack(timelineInstrumentTrackId);
-        if (ctl == nullptr)
-        {
-            return;
-        }
-
-        InstrumentMidiClip* clip = ctl->getClipById(clipId);
-        if (clip == nullptr)
-        {
-            return;
-        }
-
-        ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(timelineInstrumentTrackId);
-        if (mh == nullptr)
-        {
-            return;
-        }
-
-        ctl->setSelectedClipId(clipId);
-        midiEditorOpenedForInstrumentTrackId_ = timelineInstrumentTrackId;
-        experimentalMidiEditorWindow_.reset();
-        experimentalMidiEditorWindow_ = std::make_unique<ExperimentalMidiEditorWindow>(*mh);
-        wireMidiEditorForOpenClip(timelineInstrumentTrackId, clip);
-        experimentalMidiEditorWindow_->setVisible(true);
-        experimentalMidiEditorWindow_->toFront(true);
-    }
-
-    [[nodiscard]] TimelineViewportModel& getTimelineViewport() noexcept { return timelineViewport_; }
-
-    void syncInstrumentClipTimelineFromDevice() noexcept
-    {
-        double sr = 48000.0;
-        if (juce::AudioIODevice* d = deviceManager.getCurrentAudioDevice())
-        {
-            const double r = d->getCurrentSampleRate();
-            if (r > 0.0 && std::isfinite(r))
-            {
-                sr = r;
-            }
-        }
-        if (instrumentStagingController_)
-        {
-            instrumentStagingController_->setTimelineSampleRate(sr);
-        }
-        for (auto& kv : instrumentControllersByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->setTimelineSampleRate(sr);
-            }
-        }
-    }
-
-    private:
-    void refreshExperimentalMidiEditorInstrumentUiIfOpen()
-    {
-        if (experimentalMidiEditorWindow_ != nullptr)
-        {
-            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
-        }
-    }
-
-    /// Repaint experimental instrument `TrackHeaderView` + MIDI lane (children of `trackLanesView`).
-    void repaintInstrumentTrackRow()
-    {
-        for (auto& kv : instrumentTrackHeadersByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->repaint();
-            }
-        }
-        for (auto& kv : instrumentMidiEventLanesByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->repaint();
-            }
-        }
-    }
-
-    /// MIDI clip lane only (same role as `ClipWaveformView`). Header is embedded in `trackLanesView`.
-    struct InstrumentMidiEventLane final : public juce::Component,
-                                           private juce::ChangeListener,
-                                           private juce::Timer
-    {
-        static constexpr bool kLogInstrumentLane = false;
-
-        explicit InstrumentMidiEventLane(TransportControlsContent& ownerIn,
-                                        InstrumentTrackController* ctl,
-                                        TrackId timelineInstrumentTrackId) noexcept
-            : owner_(ownerIn)
-            , boundCtl_(ctl)
-            , laneTimelineTrackId_(timelineInstrumentTrackId)
-        {
-            startTimerHz(20);
-            if (boundCtl_ != nullptr)
-            {
-                boundCtl_->addChangeListener(this);
-            }
-        }
-
-        ~InstrumentMidiEventLane() override
-        {
-            stopTimer();
-            if (boundCtl_ != nullptr)
-            {
-                boundCtl_->removeChangeListener(this);
-                boundCtl_ = nullptr;
-            }
-        }
-
-        [[nodiscard]] TrackId laneTimelineTrackId() const noexcept { return laneTimelineTrackId_; }
-
-        void attachControllerIfStillValid(InstrumentTrackController* ctl) noexcept
-        {
-            if (ctl == boundCtl_)
-            {
-                return;
-            }
-            if (boundCtl_ != nullptr)
-            {
-                boundCtl_->removeChangeListener(this);
-            }
-            boundCtl_ = ctl;
-            if (boundCtl_ != nullptr)
-            {
-                boundCtl_->addChangeListener(this);
-            }
-        }
-
-        [[nodiscard]] InstrumentTrackController* fixedControllerNullable() const noexcept { return boundCtl_; }
-
-    private:
-        void changeListenerCallback(juce::ChangeBroadcaster*) override
-        {
-            owner_.repaintInstrumentTrackRow();
-            owner_.refreshExperimentalMidiEditorInstrumentUiIfOpen();
-        }
-
-        void timerCallback() override
-        {
-            if (owner_.transport.readPlaybackIntentForUi() == PlaybackIntent::Playing)
-            {
-                repaint();
-            }
-        }
-
-        void paint(juce::Graphics& g) override
-        {
-            const auto lane = getLocalBounds();
-
-            const juce::Colour laneBg = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId)
-                                          .darker(0.2f);
-            g.setColour(laneBg);
-            g.fillRect(lane);
-            g.setColour(laneBg.darker(0.12f));
-            g.drawVerticalLine(lane.getX(), (float)lane.getY(), (float)lane.getBottom());
-
-            const auto laneContent = getLaneContentBounds();
-            if (laneContent.isEmpty())
-            {
-                return;
-            }
-
-            InstrumentTrackController* const ac = activeControllerNullable();
-            if (ac == nullptr)
-            {
-                return;
-            }
-
-            for (const auto& up : ac->getClips())
-            {
-                const auto* c = up.get();
-                if (c == nullptr)
-                {
-                    continue;
-                }
-                const auto eb = getEventBoundsForClip(*c, laneContent);
-                if (eb.isEmpty())
-                {
-                    continue;
-                }
-                const bool sel = (c->id == ac->getSelectedClipId());
-                if (kLogInstrumentLane)
-                {
-                    juce::Logger::writeToLog("instrument-lane: paint clip id=" + juce::String((juce::int64)c->id)
-                                             + " selected=" + juce::String(sel ? "true" : "false") + " eventBounds="
-                                             + eb.toString());
-                }
-
-                paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel);
-            }
-        }
-
-        void mouseDown(const juce::MouseEvent& e) override
-        {
-            const auto pos = e.getPosition();
-            if (kLogInstrumentLane)
-            {
-                juce::Logger::writeToLog("instrument-lane: mouseDown x=" + juce::String(pos.x) + " y="
-                                         + juce::String(pos.y));
-            }
-
-            if (!getLocalBounds().contains(pos))
-            {
-                return;
-            }
-
-            InstrumentTrackController* const ac = activeControllerNullable();
-            if (ac == nullptr)
-            {
-                return;
-            }
-
-            if (auto* clip = hitTestClipAtEvent(e.position))
-            {
-                ac->setSelectedClipId(clip->id);
-                if (kLogInstrumentLane)
-                {
-                    juce::Logger::writeToLog("instrument-lane: hit clip id=" + juce::String((juce::int64)clip->id)
-                                             + " selected=true");
-                }
-            }
-            else
-            {
-                ac->clearClipSelection();
-                if (kLogInstrumentLane)
-                {
-                    juce::Logger::writeToLog("instrument-lane: no hit");
-                }
-            }
-
-            repaint();
-        }
-
-        void mouseDoubleClick(const juce::MouseEvent& e) override
-        {
-            InstrumentTrackController* const ac = activeControllerNullable();
-            if (ac == nullptr)
-            {
-                return;
-            }
-
-            if (auto* clip = hitTestClipAtEvent(e.position))
-            {
-                ac->setSelectedClipId(clip->id);
-                owner_.openMidiEditorForInstrumentClip(laneTimelineTrackId_, clip->id);
-                repaint();
-            }
-        }
-
-    private:
-        [[nodiscard]] InstrumentTrackController* activeControllerNullable() const noexcept { return boundCtl_; }
-        [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const
-        {
-            // Horizontal: must match `ClipWaveformView` (full lane width for sample↔pixel map).
-            // A previous symmetric horizontal `reduced(8)` offset MIDI clips vs ruler/audio/playhead.
-            return getLocalBounds().reduced(0, 6);
-        }
-
-        [[nodiscard]] juce::Rectangle<int> getEventBoundsForClip(const InstrumentMidiClip& c,
-                                                                 juce::Rectangle<int> laneContent) const
-        {
-            using namespace mini_daw::timeline_clip_chrome;
-            const auto band = laneContent.toFloat().reduced(0.0f, kEventVerticalMargin);
-            TimelineViewportModel& vp = owner_.getTimelineViewport();
-            const double spp = vp.getSamplesPerPixel();
-            if (spp > 0.0 && std::isfinite(spp) && c.lengthSamples > 0)
-            {
-                const std::int64_t visStart = vp.getVisibleStartSamples();
-                const float originX = band.getX();
-                const std::int64_t len = juce::jmax(std::int64_t{1}, c.lengthSamples);
-                const float x0 = TimelineRulerView::sessionSampleToLocalX(
-                    c.startSamples, originX, visStart, spp);
-                const float x1 = TimelineRulerView::sessionSampleToLocalX(
-                    c.startSamples + len, originX, visStart, spp);
-                float left = juce::jmin(x0, x1);
-                float right = juce::jmax(x0, x1);
-                constexpr float minW = 40.0f;
-                if (right - left < minW)
-                {
-                    const float mid = 0.5f * (left + right);
-                    left = mid - minW * 0.5f;
-                    right = mid + minW * 0.5f;
-                }
-                left = juce::jlimit(band.getX(), band.getRight(), left);
-                right = juce::jlimit(band.getX(), band.getRight(), right);
-                if (right <= band.getX() + 0.5f || left >= band.getRight() - 0.5f)
-                {
-                    return {};
-                }
-                const int y = juce::roundToInt(band.getY());
-                const int h = juce::jmax(1, juce::roundToInt(band.getHeight()));
-                return { juce::roundToInt(left), y, juce::jmax(1, juce::roundToInt(right - left)), h };
-            }
-
-            const int laneCW = juce::jmax(1, juce::roundToInt(band.getWidth()));
-            const float s = (float)c.laneStartFractionPermille / 1000.f;
-            const float e = (float)c.laneEndFractionPermille / 1000.f;
-            const float span = juce::jlimit(0.02f, 1.f, e - s);
-            int w = juce::roundToInt((float)laneCW * span);
-            w = juce::jmax(40, juce::jmin(w, laneCW));
-            const int minX0 = juce::roundToInt(band.getX());
-            const int maxX0 = juce::roundToInt(band.getRight()) - w;
-            if (maxX0 < minX0)
-            {
-                return {};
-            }
-            const int avail = juce::jmax(0, maxX0 - minX0);
-            const int x0 = minX0 + (avail > 0 ? juce::roundToInt(s * (float)avail) : 0);
-            const int clampedX0 = juce::jlimit(minX0, maxX0, x0);
-            const int y = juce::roundToInt(band.getY());
-            const int h = juce::jmax(1, juce::roundToInt(band.getHeight()));
-            return { clampedX0, y, w, h };
-        }
-
-        [[nodiscard]] InstrumentMidiClip* hitTestClipAtEvent(juce::Point<float> pos) const
-        {
-            const auto laneContent = getLaneContentBounds();
-            if (!laneContent.contains(pos.toInt()))
-            {
-                return nullptr;
-            }
-
-            InstrumentTrackController* const ac = activeControllerNullable();
-            if (ac == nullptr)
-            {
-                return nullptr;
-            }
-
-            for (const auto& up : ac->getClips())
-            {
-                auto* c = up.get();
-                if (c == nullptr)
-                {
-                    continue;
-                }
-
-                if (getEventBoundsForClip(*c, laneContent).contains(pos.toInt()))
-                {
-                    return c;
-                }
-            }
-
-            return nullptr;
-        }
-
-        TransportControlsContent& owner_;
-        InstrumentTrackController* boundCtl_ = nullptr;
-        TrackId laneTimelineTrackId_ = kInvalidTrackId;
-    };
-
+private:
     struct InternalClipPasteboard
     {
         std::shared_ptr<const AudioClip> material;
@@ -2057,42 +1494,6 @@ public:
 
     std::optional<InternalClipPasteboard> clipPasteboard_;
 
-    struct CountInTimer final : juce::Timer
-    {
-        explicit CountInTimer(TransportControlsContent& o)
-            : owner(o)
-        {
-        }
-        void timerCallback() override { owner.onCountInTimerTick(); }
-        TransportControlsContent& owner;
-    };
-    friend struct CountInTimer;
-
-    struct CycleRecordingWrapTimer final : juce::Timer
-    {
-        explicit CycleRecordingWrapTimer(TransportControlsContent& o)
-            : owner(o)
-        {
-        }
-        void timerCallback() override { owner.onCycleRecordingWrapTimerTick(); }
-        TransportControlsContent& owner;
-    };
-    friend struct CycleRecordingWrapTimer;
-
-    void onCycleRecordingWrapTimerTick()
-    {
-        if (!cycleRecordingActive_ || !recorder_.isRecording())
-        {
-            return;
-        }
-        const std::uint32_t now = transport.readCycleWrapCountForUi();
-        if (now != lastSeenWrapCount_)
-        {
-            numCompletedPasses_ += static_cast<int>(now - lastSeenWrapCount_);
-            lastSeenWrapCount_ = now;
-        }
-    }
-
     void changeListenerCallback(juce::ChangeBroadcaster* source) override
     {
         juce::ignoreUnused(source);
@@ -2101,7 +1502,10 @@ public:
         latencyStore_.refreshFromCurrentDevice();
         latencyStore_.save();
         playbackEngine_.setPlaybackOffsetSamples(latencyStore_.getCurrentPlaybackOffsetSamples());
-        syncInstrumentClipTimelineFromDevice();
+        if (midiEditorPresenter_ != nullptr)
+        {
+            midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
+        }
         if (auto* lv = audioLatencySettingsWeak_.getComponent())
         {
             lv->syncFromStore();
@@ -2110,7 +1514,7 @@ public:
 
     void showAudioSettingsDialog()
     {
-        if (recorder_.isRecording() || isCountInActive())
+        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon,
@@ -2195,18 +1599,10 @@ public:
 
     void timerCallback() override
     {
-        const bool structuralBlockedUi = trackLanesView.isStructuralTimelineEditBlocked();
-        if (structuralBlockedUi != lastStructuralTimelineBlockedForHeaderStripUi_)
+        if (instrumentTimelineRowCoordinator_ != nullptr)
         {
-            lastStructuralTimelineBlockedForHeaderStripUi_ = structuralBlockedUi;
-            for (auto& kv : instrumentTrackHeadersByTrackId_)
-            {
-                if (kv.second != nullptr)
-                {
-                    kv.second->repaint();
-                }
-            }
-            trackLanesView.repaint();
+            instrumentTimelineRowCoordinator_->tickStructuralEditBlockedHeaderStripRepaint(
+                trackLanesView.isStructuralTimelineEditBlocked());
         }
         updatePlayPauseButtonFromTransport();
         inspectorView_.refreshFromSession();
@@ -2229,14 +1625,14 @@ public:
 
     void togglePlayPauseFromUi()
     {
-        if (isCountInActive())
+        if (recordingCoordinator_->isCountInActive())
         {
-            cancelCountIn();
+            recordingCoordinator_->cancelCountIn();
             return;
         }
         if (recorder_.isRecording())
         {
-            stopRecordingAndCommitFromUi("play_pause");
+            recordingCoordinator_->stopRecordingAndCommitFromUi("play_pause");
             return;
         }
         togglePlayPauseTransportOnly();
@@ -2245,14 +1641,14 @@ public:
     // [Message thread] Stop button: normal stop+seek, or end recording and commit (then seek 0).
     void stopOrSeekFromStopButton()
     {
-        if (isCountInActive())
+        if (recordingCoordinator_->isCountInActive())
         {
-            cancelCountIn();
+            recordingCoordinator_->cancelCountIn();
             return;
         }
         if (recorder_.isRecording())
         {
-            stopRecordingAndCommitFromUi("stop");
+            recordingCoordinator_->stopRecordingAndCommitFromUi("stop");
         }
         else
         {
@@ -2284,25 +1680,12 @@ public:
                 "[UndoDiag] refreshAfterSessionSnapshotRestore: cancel UI for snapshot restore");
         }
         trackLanesView.cancelAllClipGesturesAndTransientUiState();
-        if (cycleSessionTrackId_ != kInvalidTrackId)
-        {
-            const std::shared_ptr<const SessionSnapshot> snap
-                = session.loadSessionSnapshotForAudioThread();
-            if (snap == nullptr || snap->findTrackIndexById(cycleSessionTrackId_) < 0)
-            {
-                if constexpr (undo_diagnostic::kUndoDiag)
-                {
-                    writeUndoDiagnosticLogLine(
-                        "[UndoDiag] cycleSessionTrackId cleared (track missing from snapshot)");
-                }
-                cycleSessionTrackId_ = kInvalidTrackId;
-            }
-        }
+        recordingCoordinator_->reconcileCycleBookingAfterUndoSnapshotRestore();
         syncViewportFromSession();
         trackLanesView.syncTracksFromSession();
         rulerView.repaint();
         trackLanesView.repaint();
-        refreshExperimentalInstrumentUi();
+        refreshInstrumentUi();
         inspectorView_.refreshFromSession();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
@@ -2594,119 +1977,19 @@ public:
         });
     }
 
-    void showVst3PluginPickerForTrack(const TrackId trackId,
-                                      InsertPickerMode mode,
-                                      juce::Component* anchor)
+    void refreshInstrumentUi()
     {
-        if (trackId == kInvalidTrackId)
-        {
-            return;
-        }
-        juce::FileSearchPath combined = mini_daw::getStandardVst3SearchPaths();
-        const juce::FileSearchPath userPaths = mini_daw::loadUserVst3SearchPaths();
-        for (int i = 0; i < userPaths.getNumPaths(); ++i)
-        {
-            combined.add(userPaths[i], -1);
-        }
-        auto scan = mini_daw::scanForVst3Plugins(combined);
-
-        juce::PopupMenu menu;
-        juce::PopupMenu discovered;
-        if (scan.entries.empty())
-        {
-            discovered.addItem(
-                juce::PopupMenu::Item("(no VST3 plugins found)").setEnabled(false));
-        }
-        else
-        {
-            constexpr int kFoundBase = 1000;
-            for (size_t i = 0; i < scan.entries.size(); ++i)
-            {
-                const auto& en = scan.entries[i];
-                juce::PopupMenu::Item item(
-                    en.support == mini_daw::PluginPickerSupport::SupportedCandidate
-                        ? en.displayName
-                        : en.displayName + "  (" + en.unsupportedReason + ")");
-                item.itemID = static_cast<int>(kFoundBase + static_cast<int>(i));
-                item.setEnabled(en.support == mini_daw::PluginPickerSupport::SupportedCandidate);
-                discovered.addItem(item);
-            }
-        }
-        menu.addSubMenu("Discovered VST3 plugins", discovered);
-        menu.addSeparator();
-        menu.addItem(1, "Add VST3 Folder...");
-        menu.addItem(2, "Load Specific VST3...");
-
-        juce::Component* const target = (anchor != nullptr) ? anchor : this;
-        juce::Component::SafePointer<TransportControlsContent> safeThis(this);
-        std::vector<mini_daw::PluginDiscoveryEntry> entries = std::move(scan.entries);
-        menu.showMenuAsync(
-            juce::PopupMenu::Options().withTargetComponent(target),
-            [safeThis, trackId, mode, entries = std::move(entries), anchor](const int result) {
-                if (safeThis == nullptr || result == 0)
-                {
-                    return;
-                }
-                if (result == 1)
-                {
-                    safeThis->beginAddVst3FolderForTrack(trackId, anchor, mode);
-                    return;
-                }
-                if (result == 2)
-                {
-                    safeThis->beginLoadVst3ForTrack(trackId, mode);
-                    return;
-                }
-                constexpr int kFoundBase = 1000;
-                const size_t idx = static_cast<size_t>(result - kFoundBase);
-                if (idx >= entries.size())
-                {
-                    return;
-                }
-                if (mini_daw::classifyVst3Candidate(entries[idx].file.getFileNameWithoutExtension())
-                    == mini_daw::PluginPickerSupport::UnsupportedInstrument)
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon, "VST3", instrumentVst3InsertBlockedMessage());
-                    safeThis->inspectorView_.refreshFromSession();
-                    return;
-                }
-                const InsertStage stage
-                    = (mode == InsertPickerMode::AddPre) ? InsertStage::Pre : InsertStage::Post;
-                const juce::Result r
-                    = safeThis->pluginHost_.addInsertFromVst3File(trackId, stage, entries[idx].file);
-                if (!r.wasOk())
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon, "VST3", r.getErrorMessage());
-                }
-                safeThis->inspectorView_.refreshFromSession();
-            });
-    }
-
-    void refreshExperimentalInstrumentUi()
-    {
-        syncInstrumentTimelineRowAttachmentToSession();
-        updateExperimentalPlaybackBridgeAfterRegistryChange();
-        for (auto& kv : instrumentControllersByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->syncShellWithHostState();
-            }
-        }
-        if (instrumentStagingController_ != nullptr)
-        {
-            instrumentStagingController_->syncShellWithHostState();
-        }
+        instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
+        instrumentRuntimeCoordinator_->updateExperimentalPlaybackBridgeAfterRegistryChange();
+        instrumentRuntimeCoordinator_->syncAllKeyedAndStagingShellWithHostState();
         trackLanesView.refreshInstrumentHeaderReorderAttachments();
         trackLanesView.rebuildVisibleTrackEntries();
-        syncInstrumentTimelineRowAttachmentToSession();
+        instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
         resized();
 
-        if (experimentalMidiEditorWindow_ != nullptr)
+        if (midiEditorPresenter_ != nullptr)
         {
-            experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            midiEditorPresenter_->refreshInstrumentUiIfOpen();
         }
     }
 
@@ -2732,20 +2015,22 @@ public:
         }
 
         const TrackId tid = *newIdOpt;
-        const bool registryWasEmpty = instrumentHostsByTrackId_.empty();
+        const bool registryWasEmpty = instrumentRuntimeCoordinator_->isKeyedRuntimeRegistryEmpty();
         ExperimentalInstrumentHost* mh = nullptr;
         InstrumentTrackController* ctl = nullptr;
 
-        if (registryWasEmpty && instrumentStagingHost_ != nullptr && instrumentStagingController_ != nullptr
-            && instrumentStagingHost_->hasInstrument()
-            && instrumentStagingHost_->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+        if (registryWasEmpty && instrumentRuntimeCoordinator_->stagingInstrumentHostUnchecked() != nullptr
+            && instrumentRuntimeCoordinator_->stagingInstrumentControllerUnchecked() != nullptr
+            && instrumentRuntimeCoordinator_->stagingInstrumentHostUnchecked()->hasInstrument()
+            && instrumentRuntimeCoordinator_->stagingInstrumentHostUnchecked()->getInstrumentNameForUi().containsIgnoreCase(
+                   "Groove Agent"))
         {
-            mh = instrumentStagingHost_.get();
-            ctl = instrumentStagingController_.get();
+            mh = instrumentRuntimeCoordinator_->stagingInstrumentHostUnchecked();
+            ctl = instrumentRuntimeCoordinator_->stagingInstrumentControllerUnchecked();
         }
         else
         {
-            const auto pr = getOrCreateInstrumentRuntimeForTrack(tid);
+            const auto pr = instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(tid);
             mh = pr.first;
             ctl = pr.second;
         }
@@ -2758,9 +2043,9 @@ public:
             session.removeTrack(tid);
             if (!registryWasEmpty)
             {
-                removeInstrumentRuntimeForTrack(tid);
+                instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
             }
-            refreshExperimentalInstrumentUi();
+            refreshInstrumentUi();
             return;
         }
 
@@ -2774,9 +2059,9 @@ public:
                 session.removeTrack(tid);
                 if (!registryWasEmpty)
                 {
-                    removeInstrumentRuntimeForTrack(tid);
+                    instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
                 }
-                refreshExperimentalInstrumentUi();
+                refreshInstrumentUi();
                 return;
             }
         }
@@ -2789,764 +2074,26 @@ public:
             session.removeTrack(tid);
             if (!registryWasEmpty)
             {
-                removeInstrumentRuntimeForTrack(tid);
+                instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
             }
-            refreshExperimentalInstrumentUi();
+            refreshInstrumentUi();
             return;
         }
 
-        if (registryWasEmpty && mh == instrumentStagingHost_.get() && ctl == instrumentStagingController_.get())
+        if (registryWasEmpty && mh == instrumentRuntimeCoordinator_->stagingInstrumentHostUnchecked()
+            && ctl == instrumentRuntimeCoordinator_->stagingInstrumentControllerUnchecked())
         {
-            promoteInstrumentStagingIntoRegistryBoundTo(tid);
+            instrumentRuntimeCoordinator_->promoteInstrumentStagingIntoRegistryBoundTo(tid);
         }
 
         ctl->syncShellWithHostState();
-        updateExperimentalPlaybackBridgeAfterRegistryChange();
-        syncInstrumentClipTimelineFromDevice();
-        refreshExperimentalInstrumentUi();
+        instrumentRuntimeCoordinator_->updateExperimentalPlaybackBridgeAfterRegistryChange();
+        if (midiEditorPresenter_ != nullptr)
+        {
+            midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
+        }
+        refreshInstrumentUi();
         resized();
-    }
-
-    static juce::String experimentalInstrumentRescanFailureDetail(const mini_daw::Vst3OopScanOutcome outcome,
-                                                                  bool successButNoDescriptions)
-    {
-        if (successButNoDescriptions)
-        {
-            return "The scan finished but no plugin descriptions were returned.";
-        }
-        switch (outcome)
-        {
-        case mini_daw::Vst3OopScanOutcome::Success:
-            return {};
-        case mini_daw::Vst3OopScanOutcome::ChildCrashedOrFailed:
-            return "The scan process exited with an error.";
-        case mini_daw::Vst3OopScanOutcome::Timeout:
-            return "The scan timed out.";
-        case mini_daw::Vst3OopScanOutcome::LaunchFailed:
-            return "The scan process could not be started.";
-        case mini_daw::Vst3OopScanOutcome::ParseFailed:
-            return "The scan result could not be read.";
-        default:
-            return "Unknown error.";
-        }
-    }
-
-    static juce::String experimentalInstrumentRescanOutcomeLogTag(const mini_daw::Vst3OopScanOutcome outcome,
-                                                                  bool successButNoDescriptions)
-    {
-        if (successButNoDescriptions)
-        {
-            return "success_no_descriptions";
-        }
-        switch (outcome)
-        {
-        case mini_daw::Vst3OopScanOutcome::Success:
-            return "success";
-        case mini_daw::Vst3OopScanOutcome::ChildCrashedOrFailed:
-            return "child_failed";
-        case mini_daw::Vst3OopScanOutcome::Timeout:
-            return "timeout";
-        case mini_daw::Vst3OopScanOutcome::LaunchFailed:
-            return "launch_failed";
-        case mini_daw::Vst3OopScanOutcome::ParseFailed:
-            return "parse_failed";
-        default:
-            return "unknown";
-        }
-    }
-
-    void runExperimentalInstrumentPluginDescriptionRescan()
-    {
-        TrackId tid = canonicalInstrumentLaneTrackIdFromSession();
-        if (tid != kInvalidTrackId)
-        {
-            runExperimentalInstrumentPluginDescriptionRescanForTrack(tid);
-        }
-    }
-
-    void beginAddVst3FolderForTrack(const TrackId trackId,
-                                    juce::Component* anchor,
-                                    InsertPickerMode mode)
-    {
-        if (trackId == kInvalidTrackId)
-        {
-            return;
-        }
-        if (vst3FolderChooserInFlight_)
-        {
-            return;
-        }
-        vst3FolderChooserInFlight_ = true;
-        const auto chooserFlags = juce::FileBrowserComponent::openMode
-                                  | juce::FileBrowserComponent::canSelectDirectories;
-        auto chooser = std::make_shared<juce::FileChooser>("Add VST3 search folder", juce::File{}, "*");
-        chooser->launchAsync(
-            chooserFlags,
-            [this, chooser, trackId, anchor, mode](const juce::FileChooser& fc) {
-                juce::ignoreUnused(chooser);
-                struct ClearFolderChooser
-                {
-                    bool& flag;
-                    explicit ClearFolderChooser(bool& f) noexcept
-                        : flag(f)
-                    {
-                    }
-                    ~ClearFolderChooser() { flag = false; }
-                } clearFlag{ vst3FolderChooserInFlight_ };
-                const juce::File folder = fc.getResult();
-                if (!folder.isDirectory())
-                {
-                    return;
-                }
-                juce::FileSearchPath paths = mini_daw::loadUserVst3SearchPaths();
-                paths.add(folder, -1);
-                mini_daw::saveUserVst3SearchPaths(paths);
-                showVst3PluginPickerForTrack(trackId, mode, anchor);
-            });
-    }
-
-    void beginLoadVst3ForTrack(const TrackId trackId, InsertPickerMode mode)
-    {
-        if (trackId == kInvalidTrackId)
-        {
-            return;
-        }
-        if (vst3ChooserInFlight_)
-        {
-            return;
-        }
-        vst3ChooserInFlight_ = true;
-        const auto fileChooserFlags = juce::FileBrowserComponent::openMode
-                                      | juce::FileBrowserComponent::canSelectFiles;
-        auto chooser = std::make_shared<juce::FileChooser>("Load VST3", juce::File{}, "*.vst3");
-        chooser->launchAsync(
-            fileChooserFlags,
-            [this, chooser, trackId, mode](const juce::FileChooser& fc) {
-                juce::ignoreUnused(chooser);
-                struct ClearVst3Chooser
-                {
-                    bool& flag;
-                    explicit ClearVst3Chooser(bool& f) noexcept
-                        : flag(f)
-                    {
-                    }
-                    ~ClearVst3Chooser() { flag = false; }
-                } clearFlag{ vst3ChooserInFlight_ };
-                const juce::File file = fc.getResult();
-                if (!file.exists())
-                {
-                    inspectorView_.refreshFromSession();
-                    return;
-                }
-                if (mini_daw::classifyVst3Candidate(file.getFileNameWithoutExtension())
-                    == mini_daw::PluginPickerSupport::UnsupportedInstrument)
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon, "VST3", instrumentVst3InsertBlockedMessage());
-                    inspectorView_.refreshFromSession();
-                    return;
-                }
-                const InsertStage stage
-                    = (mode == InsertPickerMode::AddPre) ? InsertStage::Pre : InsertStage::Post;
-                const juce::Result r = pluginHost_.addInsertFromVst3File(trackId, stage, file);
-                if (!r.wasOk())
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon, "VST3", r.getErrorMessage());
-                }
-                inspectorView_.refreshFromSession();
-            });
-    }
-
-    // [Message thread] One path to end a take: stop transport first, then finalize, then commit.
-    // Call only when `recorder_.isRecording()`; no-op if not.
-    void stopRecordingAndCommitFromUi(const char* sourceContext)
-    {
-        if (!recorder_.isRecording())
-        {
-            return;
-        }
-        if (sourceContext != nullptr)
-        {
-            juce::Logger::writeToLog(
-                juce::String{"[Rec] stop/commit source="} + sourceContext);
-        }
-
-        const bool commitCycleTakes = cycleRecordingActive_;
-        const TrackId cycleTrackId = cycleSessionTrackId_;
-        const std::int64_t cycleLocL = cycleSessionLocL_;
-        const std::int64_t cycleLocR = cycleSessionLocR_;
-        const std::int64_t cycleStart = cycleSessionRecordingStartSample_;
-        const double cycleSr = cycleSessionSampleRate_;
-
-        transport.requestPlaybackIntent(PlaybackIntent::Stopped);
-        updatePlayPauseButtonFromTransport();
-        if (cycleRecordingWrapTimer_ != nullptr)
-        {
-            cycleRecordingWrapTimer_->stopTimer();
-        }
-
-        trackLanesView.clearCycleRecordingPreviewContext();
-        cycleRecordingActive_ = false;
-
-        const RecordedTakeResult r = recorder_.stopRecordingAndFinalize();
-
-        if (!r.success)
-        {
-            numCompletedPasses_ = 0;
-            lastSeenWrapCount_ = 0;
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Recording",
-                r.errorMessage.isNotEmpty() ? r.errorMessage : "Could not finalize recording.");
-            juce::Logger::writeToLog(
-                juce::String{"[Rec] stop/finalize failed: "} + r.errorMessage);
-            return;
-        }
-
-        std::uint32_t wrapFinal = transport.readCycleWrapCountForUi();
-        if (commitCycleTakes)
-        {
-            if (wrapFinal != lastSeenWrapCount_)
-            {
-                numCompletedPasses_ += static_cast<int>(wrapFinal - lastSeenWrapCount_);
-                lastSeenWrapCount_ = wrapFinal;
-            }
-        }
-
-        if (r.droppedSampleCount > 0)
-        {
-            const juce::String w = "Recording overrun: " + juce::String(r.droppedSampleCount)
-                                    + (r.droppedSampleCount == 1 ? " sample was" : " samples were")
-                                    + " replaced with silence.";
-            juce::Logger::writeToLog(juce::String{"[Rec] "} + w);
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon, "Recording", w);
-        }
-
-        if (commitCycleTakes)
-        {
-            std::unique_ptr<AudioClip> loadedClip;
-            const auto loadClipResult
-                = AudioFileLoader::loadFromFile(r.takeFile, cycleSr, loadedClip);
-            if (!loadClipResult.wasOk() || loadedClip == nullptr)
-            {
-                numCompletedPasses_ = 0;
-                lastSeenWrapCount_ = 0;
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Session",
-                    loadClipResult.getErrorMessage().isNotEmpty() ? loadClipResult.getErrorMessage()
-                                                                 : "Could not decode recorded WAV.");
-                juce::Logger::writeToLog(
-                    juce::String{"[Rec] cycle decode failed: "} + loadClipResult.getErrorMessage());
-                rulerView.repaint();
-                trackLanesView.repaint();
-                return;
-            }
-
-            const std::int64_t passLen = cycleLocR - cycleLocL;
-            if (passLen <= 0 || cycleSr <= 0.0 || loadedClip->getNumChannels() < 1)
-            {
-                numCompletedPasses_ = 0;
-                lastSeenWrapCount_ = 0;
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Session",
-                    "Cycle recording commit failed: invalid loop range or decoded material.");
-                rulerView.repaint();
-                trackLanesView.repaint();
-                return;
-            }
-
-            juce::File audioDir = session.getCurrentProjectFolder().getChildFile("Audio");
-            if (audioDir.getFullPathName().isEmpty())
-            {
-                numCompletedPasses_ = 0;
-                lastSeenWrapCount_ = 0;
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Session", "Could not resolve project Audio folder.");
-                rulerView.repaint();
-                trackLanesView.repaint();
-                return;
-            }
-            if (!audioDir.isDirectory() && !audioDir.createDirectory())
-            {
-                numCompletedPasses_ = 0;
-                lastSeenWrapCount_ = 0;
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Session",
-                    "Could not create project Audio folder: " + audioDir.getFullPathName());
-                rulerView.repaint();
-                trackLanesView.repaint();
-                return;
-            }
-
-            const float* const pcmLive = loadedClip->getAudio().getReadPointer(0);
-            const auto decoded = static_cast<std::int64_t>(loadedClip->getNumSamples());
-            const std::int64_t totalAvail
-                = juce::jmax<std::int64_t>(std::int64_t{ 0 }, juce::jmin(decoded, r.intendedSampleCount));
-
-            if (totalAvail < 1)
-            {
-                numCompletedPasses_ = 0;
-                lastSeenWrapCount_ = 0;
-                loadedClip.reset();
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Session",
-                    "Cycle recording had no usable samples to commit.");
-                rulerView.repaint();
-                trackLanesView.repaint();
-                return;
-            }
-
-            std::vector<float> pcmStable(
-                static_cast<size_t>(
-                    juce::jmax<std::int64_t>(std::int64_t{ 0 }, totalAvail)));
-            for (std::int64_t i = 0; i < totalAvail; ++i)
-            {
-                pcmStable[(size_t)i] = pcmLive[i];
-            }
-            loadedClip.reset();
-
-            const float* const pcm = pcmStable.data();
-
-            const juce::String batchStamp
-                = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
-            bool allOk = true;
-            const juce::File continuousMaster = r.takeFile;
-            int sliceFileIndex = 0;
-
-            const std::int64_t recordingPlacementOffsetSamples
-                = latencyStore_.getCurrentRecordingOffsetSamples();
-
-            // `timelinePos` is where the slice is placed on the session timeline. Segment 0
-            // sits at the actual recording start (which may be < L, in [L,R), or >= R), while
-            // every subsequent wrapped pass sits at L by definition of cycle wrap-around.
-            auto writeSliceCommit = [&](const std::int64_t offsetSamples,
-                                        std::int64_t sliceLen,
-                                        const std::int64_t timelinePosRaw) {
-                std::int64_t timelinePos = timelinePosRaw + recordingPlacementOffsetSamples;
-                std::int64_t wavOff = offsetSamples;
-                std::int64_t sliceUse = sliceLen;
-
-                if (timelinePos < 0)
-                {
-                    const std::int64_t underflow = -timelinePos;
-                    timelinePos = 0;
-                    wavOff += underflow;
-                    sliceUse -= underflow;
-                }
-
-                if (sliceUse <= 0 || wavOff < 0)
-                {
-                    return;
-                }
-                if (wavOff + sliceUse > totalAvail)
-                {
-                    sliceUse = totalAvail - wavOff;
-                    if (sliceUse <= 0)
-                    {
-                        allOk = false;
-                        return;
-                    }
-                }
-                const auto sampleCount = static_cast<int>(sliceUse);
-                const juce::File sliceWav = makeUniqueCyclePassWavInProjectAudioDir(
-                    audioDir, batchStamp, sliceFileIndex);
-
-                ++sliceFileIndex;
-
-                const juce::Result wrResult = MonoWavFileWriter::writeMono24BitWavSegment(
-                    sliceWav, pcm + wavOff, sampleCount, cycleSr);
-
-                if (!wrResult.wasOk())
-                {
-                    allOk = false;
-                    juce::Logger::writeToLog(
-                        "[Rec] cycle split write failed (" + sliceWav.getFileName()
-                        + "): " + wrResult.getErrorMessage());
-                    return;
-                }
-
-                const juce::Result ar = session.addRecordedTakeAtSample(
-                    sliceWav,
-                    cycleSr,
-                    timelinePos,
-                    cycleTrackId,
-                    sliceUse);
-                if (!ar.wasOk())
-                {
-                    allOk = false;
-                    juce::Logger::writeToLog(
-                        "[Rec] cycle addRecordedTake "
-                        + sliceWav.getFileName() + ": " + ar.getErrorMessage());
-                }
-            };
-
-            // Variable first-segment placement: sample 0 of the recording corresponds to the
-            // playhead at recording-start (cycleStart). Wrap math (R - cycleStart) yields
-            // segment 0's natural length only if the recording actually crossed R from the
-            // left (i.e. at least one wrap signalled by the audio thread).
-            const std::int64_t actualStart = juce::jmax<std::int64_t>(std::int64_t{ 0 }, cycleStart);
-            const int wraps = juce::jmax(0, numCompletedPasses_);
-
-            if (actualStart >= cycleLocR || wraps <= 0)
-            {
-                // Linear: a single segment placed at actualStart, full take length.
-                // Covers: start >= R (no wrap possible), or start < R but recording stopped
-                // before reaching R (no wrap occurred).
-                writeSliceCommit(std::int64_t{ 0 }, totalAvail, actualStart);
-            }
-            else
-            {
-                // Segment 0 spans recording samples [0, R - actualStart) -> timeline [actualStart, R).
-                const std::int64_t firstSegLen
-                    = juce::jmin(cycleLocR - actualStart, totalAvail);
-                writeSliceCommit(std::int64_t{ 0 }, firstSegLen, actualStart);
-
-                // Subsequent full passes (each of length passLen) are placed at L.
-                const std::int64_t remainingAfterFirst = totalAvail - firstSegLen;
-                const std::int64_t maxAdditionalFullsBySamples
-                    = passLen > 0 ? remainingAfterFirst / passLen : std::int64_t{ 0 };
-                const int subsequentFull = static_cast<int>(
-                    juce::jmin(static_cast<std::int64_t>(juce::jmax(0, wraps - 1)),
-                               maxAdditionalFullsBySamples));
-                for (int i = 0; i < subsequentFull; ++i)
-                {
-                    const std::int64_t off
-                        = firstSegLen + static_cast<std::int64_t>(i) * passLen;
-                    writeSliceCommit(off, passLen, cycleLocL);
-                }
-
-                // Final partial (at L), if any samples remain after the last full pass.
-                const std::int64_t partialOffset
-                    = firstSegLen + static_cast<std::int64_t>(subsequentFull) * passLen;
-                std::int64_t partialLen = totalAvail - partialOffset;
-                partialLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, partialLen);
-                if (partialLen > 0)
-                {
-                    writeSliceCommit(partialOffset, partialLen, cycleLocL);
-                }
-            }
-
-            numCompletedPasses_ = 0;
-            lastSeenWrapCount_ = 0;
-
-            if (!allOk)
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Session",
-                    "Some cycle takes could not be split or committed (see log).");
-            }
-            else
-            {
-                syncViewportFromSession();
-                scheduleCycleContinuousMasterCleanup(continuousMaster);
-            }
-        }
-        else
-        {
-            const std::int64_t recordingPlacementOffsetSamples
-                = latencyStore_.getCurrentRecordingOffsetSamples();
-            // TODO: If committed start is negative, non-cycle could trim the head of the WAV
-            // symmetrically to cycle; v1 only clamps timeline placement to 0.
-            const std::int64_t committedStartSamples = juce::jmax<std::int64_t>(
-                std::int64_t{ 0 }, r.recordingStartSample + recordingPlacementOffsetSamples);
-
-            const juce::Result ar = session.addRecordedTakeAtSample(
-                r.takeFile,
-                r.sampleRate,
-                committedStartSamples,
-                r.targetTrackId,
-                r.intendedSampleCount);
-            if (!ar.wasOk())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Session", ar.getErrorMessage());
-                juce::Logger::writeToLog(
-                    juce::String{"[Rec] addRecordedTakeAtSample failed: "} + ar.getErrorMessage());
-            }
-            else
-            {
-                syncViewportFromSession();
-            }
-        }
-
-        rulerView.repaint();
-        trackLanesView.repaint();
-    }
-
-    void numpadRecordToggled()
-    {
-        if (recorder_.isRecording())
-        {
-            stopRecordingAndCommitFromUi("numpad_*");
-            return;
-        }
-        if (isCountInActive())
-        {
-            cancelCountIn();
-            juce::Logger::writeToLog("[Rec] count-in cancelled (numpad_*)");
-            return;
-        }
-
-        const TrackId armed = recorder_.getArmedTrackId();
-        if (armed == kInvalidTrackId)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon,
-                "Recording",
-                "Arm a track for recording (use the R control on a track header) first.");
-            juce::Logger::writeToLog("[Rec] start blocked: no armed track");
-            return;
-        }
-        if (!session.hasKnownProjectFile())
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon,
-                "Recording",
-                "Save the project before recording.");
-            juce::Logger::writeToLog("[Rec] start blocked: project not saved to disk");
-            return;
-        }
-        juce::File projectFile = session.getCurrentProjectFile();
-        if (projectFile.getFullPathName().isEmpty())
-        {
-            juce::Logger::writeToLog("[Rec] start blocked: empty project file path");
-            return;
-        }
-        juce::File audioDir = session.getCurrentProjectFolder().getChildFile("Audio");
-        if (audioDir.getFullPathName().isEmpty())
-        {
-            juce::Logger::writeToLog("[Rec] start blocked: could not build Audio/ path");
-            return;
-        }
-        if (!audioDir.isDirectory() && !audioDir.createDirectory())
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Recording",
-                "Could not create the project Audio folder: " + audioDir.getFullPathName());
-            juce::Logger::writeToLog("[Rec] start blocked: createDirectory Audio/ failed");
-            return;
-        }
-        const juce::File takeWav = makeUniqueTakeWavInProjectAudioDir(audioDir);
-        juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
-        if (dev == nullptr)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon, "Audio", "No active audio device.");
-            return;
-        }
-        if (dev->getActiveInputChannels().countNumberOfSetBits() < 1)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Audio",
-                "No input channel is active. Enable an input in your audio device, then try again.");
-            juce::Logger::writeToLog("[Rec] start blocked: no active input channels");
-            return;
-        }
-        const double sr = dev->getCurrentSampleRate();
-        if (sr <= 0.0)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon, "Audio", "Invalid device sample rate.");
-            return;
-        }
-
-        cycleRecordingActive_ = false;
-        const bool cycleOn = transport.readCycleEnabledForUi();
-        const std::int64_t locL = session.getLeftLocatorSamples();
-        const std::int64_t locR = session.getRightLocatorSamples();
-        if (cycleOn && locR > locL && locR > 0)
-        {
-            cycleRecordingActive_ = true;
-            cycleSessionLocL_ = locL;
-            cycleSessionLocR_ = locR;
-            numCompletedPasses_ = 0;
-            // No presnap to L: cycle recording starts at the current playhead. Cycle wraps still
-            // happen on the audio thread when playback crosses R from the left.
-        }
-
-        BeginRecordingRequest req;
-        req.takeFile = takeWav;
-        req.targetTrackId = armed;
-        // Filled in `completeCountInAndStartRecording` from the playhead at the moment
-        // `beginRecording` runs (after 8 count-in clicks + 375 ms silent tail).
-        req.recordingStartSample = 0;
-        req.sampleRate = sr;
-        // Count-in: no `beginRecording` until clicks + post-click delay; Session not touched before.
-        startCountInAfterValidation(std::move(req));
-    }
-
-    [[nodiscard]] bool isCountInActive() const noexcept { return pendingCountIn_.has_value(); }
-
-    void cancelCountIn()
-    {
-        if (countInTimer_ != nullptr)
-        {
-            countInTimer_->stopTimer();
-        }
-        countInAwaitingPostClickDelay_ = false;
-        pendingCountIn_.reset();
-        countInClicks_.cancel();
-        countInStatusLabel_.setText({}, juce::dontSendNotification);
-        if (cycleRecordingActive_)
-        {
-            cycleRecordingActive_ = false;
-            trackLanesView.clearCycleRecordingPreviewContext();
-            if (cycleRecordingWrapTimer_ != nullptr)
-            {
-                cycleRecordingWrapTimer_->stopTimer();
-            }
-            numCompletedPasses_ = 0;
-            lastSeenWrapCount_ = 0;
-        }
-        juce::Logger::writeToLog("[Rec] count-in cancelled");
-    }
-
-    void onCountInTimerTick()
-    {
-        if (!pendingCountIn_.has_value())
-        {
-            if (countInTimer_ != nullptr)
-            {
-                countInTimer_->stopTimer();
-            }
-            return;
-        }
-        // After the 8th click, one more interval of silence, then `beginRecording` (no 9th click).
-        if (countInAwaitingPostClickDelay_)
-        {
-            countInAwaitingPostClickDelay_ = false;
-            if (countInTimer_ != nullptr)
-            {
-                countInTimer_->stopTimer();
-            }
-            completeCountInAndStartRecording();
-            return;
-        }
-        // Cubase-like: tick tock tock tock | tick tock tock tock; 375 ms per step; first click
-        // one interval after * so the keydown is not on-mic. Extra 375 ms after last click
-        // before arming the recorder (reduces headphone bleed from the final click).
-        static constexpr int kClicks = 8;
-        ++countInBeat_;
-        if (countInBeat_ < 1 || countInBeat_ > kClicks)
-        {
-            if (countInTimer_ != nullptr)
-            {
-                countInTimer_->stopTimer();
-            }
-            return;
-        }
-        const bool useTick = (countInBeat_ == 1 || countInBeat_ == 5);
-        if (useTick)
-        {
-            countInClicks_.triggerTick();
-        }
-        else
-        {
-            countInClicks_.triggerTock();
-        }
-        countInStatusLabel_.setText("Count-in: " + juce::String(countInBeat_) + "/"
-                                    + juce::String(kClicks),
-                                    juce::dontSendNotification);
-        if (countInBeat_ == kClicks)
-        {
-            countInAwaitingPostClickDelay_ = true;
-            countInStatusLabel_.setText("Get ready…", juce::dontSendNotification);
-        }
-    }
-
-    void startCountInAfterValidation(BeginRecordingRequest&& req)
-    {
-        countInClicks_.prepare(req.sampleRate);
-        pendingCountIn_ = std::move(req);
-        countInBeat_ = 0;
-        countInAwaitingPostClickDelay_ = false;
-        if (countInTimer_ == nullptr)
-        {
-            countInTimer_ = std::make_unique<CountInTimer>(*this);
-        }
-        // First audible click is after kCountInIntervalMs, not on keydown.
-        countInStatusLabel_.setText("Count-in…", juce::dontSendNotification);
-        static constexpr int kCountInIntervalMs = 375;
-        countInTimer_->startTimer(kCountInIntervalMs);
-        juce::Logger::writeToLog(
-            "[Rec] count-in started (8 clicks, 375 ms, +375 ms pre-roll before record)");
-    }
-
-    void completeCountInAndStartRecording()
-    {
-        if (!pendingCountIn_.has_value())
-        {
-            return;
-        }
-        BeginRecordingRequest req = *pendingCountIn_;
-        pendingCountIn_.reset();
-        countInStatusLabel_.setText({}, juce::dontSendNotification);
-
-        const bool armedCycleSession = cycleRecordingActive_;
-        // For both linear and cycle recording, the timeline start is wherever the playhead is
-        // at the moment count-in completes. Cycle splitting (commit) reconstructs per-pass
-        // placement from this real start, the locators, and the wrap count.
-        req.recordingStartSample = transport.readPlayheadSamplesForUi();
-        if (armedCycleSession)
-        {
-            cycleSessionTrackId_ = req.targetTrackId;
-            cycleSessionSampleRate_ = req.sampleRate;
-            cycleSessionTakeFile_ = req.takeFile;
-            cycleSessionRecordingStartSample_ = req.recordingStartSample;
-        }
-
-        if (!recorder_.beginRecording(req))
-        {
-            if (armedCycleSession)
-            {
-                cycleRecordingActive_ = false;
-                trackLanesView.clearCycleRecordingPreviewContext();
-                if (cycleRecordingWrapTimer_ != nullptr)
-                {
-                    cycleRecordingWrapTimer_->stopTimer();
-                }
-                numCompletedPasses_ = 0;
-                lastSeenWrapCount_ = 0;
-            }
-            juce::String err = recorder_.getLastError();
-            if (err.isEmpty())
-            {
-                err = "beginRecording failed";
-            }
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon, "Recording", err);
-            juce::Logger::writeToLog(juce::String{"[Rec] beginRecording failed: "} + err);
-            return;
-        }
-
-        if (armedCycleSession)
-        {
-            lastSeenWrapCount_ = transport.readCycleWrapCountForUi();
-            numCompletedPasses_ = 0;
-            trackLanesView.setCycleRecordingPreviewContext(
-                true,
-                cycleSessionLocL_,
-                cycleSessionLocR_,
-                cycleSessionRecordingStartSample_,
-                lastSeenWrapCount_);
-            if (cycleRecordingWrapTimer_ == nullptr)
-            {
-                cycleRecordingWrapTimer_ = std::make_unique<CycleRecordingWrapTimer>(*this);
-            }
-            cycleRecordingWrapTimer_->startTimerHz(50);
-        }
-
-        transport.requestPlaybackIntent(PlaybackIntent::Playing);
-        updatePlayPauseButtonFromTransport();
     }
 
     Transport& transport;
@@ -3558,41 +2105,22 @@ public:
     LatencySettingsStore& latencyStore_;
     PlaybackEngine& playbackEngine_;
 
-    std::unordered_map<TrackId, std::unique_ptr<ExperimentalInstrumentHost>> instrumentHostsByTrackId_;
-    std::unordered_map<TrackId, std::unique_ptr<InstrumentTrackController>> instrumentControllersByTrackId_;
-    std::unique_ptr<ExperimentalInstrumentHost> instrumentStagingHost_;
-    std::unique_ptr<InstrumentTrackController> instrumentStagingController_;
+    std::unique_ptr<InstrumentRuntimeCoordinator> instrumentRuntimeCoordinator_;
+
     SessionHistory sessionHistory_;
 
     /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
-    std::optional<BeginRecordingRequest> pendingCountIn_;
-    int countInBeat_ = 0;
-    /// True after the 8th click: next timer fire ends count-in and starts `beginRecording`.
-    bool countInAwaitingPostClickDelay_ = false;
-    std::unique_ptr<CountInTimer> countInTimer_;
     /// Count-in / recording line (no always-visible audio device debug; use Audio...).
     juce::Label countInStatusLabel_;
-
-    std::unique_ptr<CycleRecordingWrapTimer> cycleRecordingWrapTimer_;
-    bool cycleRecordingActive_ = false;
-    TrackId cycleSessionTrackId_ = kInvalidTrackId;
-    std::int64_t cycleSessionLocL_ = 0;
-    std::int64_t cycleSessionLocR_ = 0;
-    /// Actual playhead sample at the moment cycle recording begins (after count-in). Used by
-    /// the offline split to place segment 0 at its real start position rather than at L.
-    std::int64_t cycleSessionRecordingStartSample_ = 0;
-    double cycleSessionSampleRate_ = 0.0;
-    juce::File cycleSessionTakeFile_;
-    std::uint32_t lastSeenWrapCount_ = 0;
-    int numCompletedPasses_ = 0;
+    std::unique_ptr<RecordingCoordinator> recordingCoordinator_;
+    std::unique_ptr<Vst3PluginPickerCoordinator> vst3PluginPickerCoordinator_;
 
     /// Set while a file chooser for Add clip is in flight; blocks overlapping Add clip clicks.
     bool importInFlight_ = false;
-    bool vst3ChooserInFlight_ = false;
-    bool vst3FolderChooserInFlight_ = false;
-    std::atomic<bool> experimentalOopScanBusy_{ false };
-    std::unique_ptr<ExperimentalMidiEditorWindow> experimentalMidiEditorWindow_;
+    std::unique_ptr<ExperimentalMidiEditorWindow> midiEditorWindow_;
+    std::unique_ptr<MidiEditorPresenter> midiEditorPresenter_;
+    std::unique_ptr<InstrumentTimelineRowCoordinator> instrumentTimelineRowCoordinator_;
     std::unique_ptr<ProjectIoCoordinator> projectIoCoordinator_;
 
     EditTool currentEditTool_ = EditTool::Pointer;
@@ -3608,15 +2136,7 @@ public:
     juce::TextButton pointerToolButton_{ "Pointer" };
     juce::TextButton splitToolButton_{ "Split" };
 
-    std::unordered_map<TrackId, std::unique_ptr<TrackHeaderView>> instrumentTrackHeadersByTrackId_;
-    std::unordered_map<TrackId, std::unique_ptr<InstrumentMidiEventLane>> instrumentMidiEventLanesByTrackId_;
-    /// Last `TrackLanesView::isStructuralTimelineEditBlocked()` — repaints headers on edge so power strip matches.
-    bool lastStructuralTimelineBlockedForHeaderStripUi_ = false;
-    std::optional<TrackId> midiEditorOpenedForInstrumentTrackId_;
-    juce::String lastExperimentalPlaybackRoutingPublishFingerprint_;
     juce::Label keyDiagLabel_;
-
-    /// Temporary: last key seen by `MainWindow::routeShortcut` for numpad diagnostics (gated by flag).
     std::unique_ptr<juce::Label> shortcutDiagLabel_;
 
     /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).
@@ -3632,661 +2152,79 @@ public:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)
 };
-void TransportControlsContent::wireExperimentalInstrumentHost(ExperimentalInstrumentHost& host,
-                                                                                      InstrumentTrackController& ctrl)
-    noexcept
-{
-    host.setDrumNamePhaseCAudioProbeShouldSkip([this]() noexcept {
-        return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording()
-               || isCountInActive();
-    });
-    host.setOnPluginDrumNamesDiscovered([&host, &ctrl](const std::map<int, juce::String>& discovered) {
-        juce::PluginDescription d{};
-        const juce::String pluginId
-            = host.getLastLoadedPluginDescription(d) ? d.createIdentifierString() : juce::String{};
-        ctrl.mergeAutoPluginDrumLabels(discovered, pluginId);
-        ExperimentalInstrumentHost::appendInstrumentHostLogLine(
-            "drum-track: mergeAutoPluginDrumLabels source=afterEditorOpen keys="
-            + juce::String(static_cast<int>(discovered.size())));
-    });
-}
 
 TrackId TransportControlsContent::canonicalInstrumentLaneTrackIdFromSession() const noexcept
 {
-    const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
-    if (snap == nullptr)
-    {
-        return kInvalidTrackId;
-    }
-    for (int ti = 0; ti < snap->getNumTracks(); ++ti)
-    {
-        const Track& tr = snap->getTrack(ti);
-        if (tr.getKind() == TrackKind::Instrument)
-        {
-            return tr.getId();
-        }
-    }
-    return kInvalidTrackId;
+    return instrumentRuntimeCoordinator_->canonicalInstrumentLaneTrackIdFromSession();
 }
 
 bool TransportControlsContent::anyHeldExperimentalHostShowsGrooveAgentLoaded() const noexcept
 {
-    for (const auto& kv : instrumentHostsByTrackId_)
-    {
-        if (kv.second != nullptr && kv.second->hasInstrument()
-            && kv.second->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
-        {
-            return true;
-        }
-    }
-    if (instrumentStagingHost_ != nullptr && instrumentStagingHost_->hasInstrument()
-        && instrumentStagingHost_->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
-    {
-        return true;
-    }
-    return false;
+    return instrumentRuntimeCoordinator_->anyHeldHostShowsGrooveAgentLoaded();
 }
 
-ExperimentalInstrumentHost* TransportControlsContent::getInstrumentHostForTrack(
-    const TrackId tid) const noexcept
+ExperimentalInstrumentHost* TransportControlsContent::getInstrumentHostForTrack(const TrackId tid) const noexcept
 {
-    auto it = instrumentHostsByTrackId_.find(tid);
-    return (it == instrumentHostsByTrackId_.end()) ? nullptr : it->second.get();
+    return instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid);
 }
 
-InstrumentTrackController* TransportControlsContent::getInstrumentControllerForTrack(
-    const TrackId tid) const noexcept
+InstrumentTrackController* TransportControlsContent::getInstrumentControllerForTrack(const TrackId tid) const noexcept
 {
-    auto it = instrumentControllersByTrackId_.find(tid);
-    return (it == instrumentControllersByTrackId_.end()) ? nullptr : it->second.get();
+    return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
 }
 
 std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
 TransportControlsContent::getOrCreateInstrumentRuntimeForTrack(const TrackId tid)
 {
-    if (tid == kInvalidTrackId)
-    {
-        return { nullptr, nullptr };
-    }
-    ExperimentalInstrumentHost* hostExisting = getInstrumentHostForTrack(tid);
-    InstrumentTrackController* ctlExisting = getInstrumentControllerForTrack(tid);
-    if (hostExisting != nullptr && ctlExisting != nullptr)
-    {
-        return { hostExisting, ctlExisting };
-    }
-    if (instrumentHostsByTrackId_.empty() && instrumentStagingController_ != nullptr
-        && instrumentStagingHost_ != nullptr && instrumentStagingController_->hasInstrumentTrack()
-        && instrumentStagingController_->getExperimentalInstrumentDomainTrackId() == tid)
-    {
-        promoteInstrumentStagingIntoRegistryBoundTo(tid);
-        return { getInstrumentHostForTrack(tid), getInstrumentControllerForTrack(tid) };
-    }
-
-    auto host = std::make_unique<ExperimentalInstrumentHost>();
-    auto ctl = std::make_unique<InstrumentTrackController>(*host);
-    ctl->setSession(&session);
-    wireExperimentalInstrumentHost(*host, *ctl);
-    ExperimentalInstrumentHost* const hostPtr = host.get();
-    InstrumentTrackController* const ctlPtr = ctl.get();
-    instrumentHostsByTrackId_.emplace(tid, std::move(host));
-    instrumentControllersByTrackId_.emplace(tid, std::move(ctl));
-    updateExperimentalPlaybackBridgeAfterRegistryChange();
-    syncInstrumentTimelineRowAttachmentToSession();
-    return { hostPtr, ctlPtr };
+    return instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(tid);
 }
 
 std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
 TransportControlsContent::getExperimentRuntimePairForGrooveAdds()
 {
-    if (instrumentStagingHost_ == nullptr || instrumentStagingController_ == nullptr)
-    {
-        instrumentStagingHost_ = std::make_unique<ExperimentalInstrumentHost>();
-        instrumentStagingController_ = std::make_unique<InstrumentTrackController>(*instrumentStagingHost_);
-        instrumentStagingController_->setSession(&session);
-        wireExperimentalInstrumentHost(*instrumentStagingHost_, *instrumentStagingController_);
-        updateExperimentalPlaybackBridgeAfterRegistryChange();
-        syncInstrumentTimelineRowAttachmentToSession();
-    }
-    return { instrumentStagingHost_.get(), instrumentStagingController_.get() };
+    return instrumentRuntimeCoordinator_->getExperimentRuntimePairForGrooveAdds();
 }
 
 void TransportControlsContent::promoteInstrumentStagingIntoRegistryBoundTo(const TrackId tid)
 {
-    if (tid == kInvalidTrackId || instrumentStagingHost_ == nullptr || instrumentStagingController_ == nullptr)
-    {
-        return;
-    }
-    if (!instrumentStagingController_->hasInstrumentTrack())
-    {
-        return;
-    }
-    if (!instrumentHostsByTrackId_.empty())
-    {
-        juce::Logger::writeToLog(
-            "[TransportControlsContent] promoteInstrumentStaging: registry unexpectedly non-empty (TrackId="
-            + juce::String((juce::int64)tid) + ").");
-        return;
-    }
-    instrumentHostsByTrackId_[tid] = std::move(instrumentStagingHost_);
-    instrumentControllersByTrackId_[tid] = std::move(instrumentStagingController_);
-    updateExperimentalPlaybackBridgeAfterRegistryChange();
-    syncInstrumentTimelineRowAttachmentToSession();
+    instrumentRuntimeCoordinator_->promoteInstrumentStagingIntoRegistryBoundTo(tid);
 }
 
 void TransportControlsContent::removeInstrumentRuntimeForTrack(const TrackId tid) noexcept
 {
-    instrumentControllersByTrackId_.erase(tid);
-    instrumentHostsByTrackId_.erase(tid);
-    updateExperimentalPlaybackBridgeAfterRegistryChange();
-    syncInstrumentTimelineRowAttachmentToSession();
+    instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
 }
 
 void TransportControlsContent::clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept
 {
-    experimentalMidiEditorWindow_.reset();
-    midiEditorOpenedForInstrumentTrackId_.reset();
+    if (midiEditorPresenter_ != nullptr)
+    {
+        midiEditorPresenter_->resetWindowAndBooking();
+    }
     trackLanesView.syncInstrumentTimelineAttachments({});
-    instrumentMidiEventLanesByTrackId_.clear();
-    instrumentTrackHeadersByTrackId_.clear();
-    playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
-    instrumentStagingController_.reset();
-    instrumentStagingHost_.reset();
-    instrumentControllersByTrackId_.clear();
-    instrumentHostsByTrackId_.clear();
+    instrumentTimelineRowCoordinator_->clearInstrumentTimelineLanesAndHeaders();
+    instrumentRuntimeCoordinator_->clearRuntimesPreserveBridgeOnly();
 }
 
-void TransportControlsContent::experimentalBeginAudioBlockAllHosts(
-    const std::int64_t numSamples) noexcept
+void TransportControlsContent::experimentalBeginAudioBlockAllHosts(const std::int64_t numSamples) noexcept
 {
-    for (auto& kv : instrumentHostsByTrackId_)
-    {
-        if (kv.second != nullptr)
-        {
-            kv.second->audioThread_beginAudioBlock((int)numSamples);
-        }
-    }
-    if (instrumentStagingHost_ != nullptr)
-    {
-        instrumentStagingHost_->audioThread_beginAudioBlock((int)numSamples);
-    }
+    instrumentRuntimeCoordinator_->experimentalBeginAudioBlockAllHosts(numSamples);
 }
 
 void TransportControlsContent::prepareExperimentalInstrumentHostsForDevice(const double sampleRate,
-                                                                                                   const int blockSamples)
-    noexcept
+                                                                          const int blockSamples) noexcept
 {
-    for (auto& kv : instrumentHostsByTrackId_)
-    {
-        if (kv.second != nullptr)
-        {
-            kv.second->prepareForDevice(sampleRate, blockSamples);
-        }
-    }
-    if (instrumentStagingHost_)
-    {
-        instrumentStagingHost_->prepareForDevice(sampleRate, blockSamples);
-    }
+    instrumentRuntimeCoordinator_->prepareExperimentalInstrumentHostsForDevice(sampleRate, blockSamples);
 }
 
 void TransportControlsContent::releaseExperimentalInstrumentHostsDeviceResources() noexcept
 {
-    for (auto& kv : instrumentHostsByTrackId_)
-    {
-        if (kv.second != nullptr)
-        {
-            kv.second->releaseResources();
-        }
-    }
-    if (instrumentStagingHost_)
-    {
-        instrumentStagingHost_->releaseResources();
-    }
-}
-
-void TransportControlsContent::reconcileInstrumentRegistryAgainstSessionRows()
-    noexcept
-{
-    if (instrumentHostsByTrackId_.size() != instrumentControllersByTrackId_.size())
-    {
-        return;
-    }
-
-    for (;;)
-    {
-        TrackId staleKey = kInvalidTrackId;
-        TrackId domTarget = kInvalidTrackId;
-        InstrumentTrackController* ctlProbe = nullptr;
-        ExperimentalInstrumentHost* hostProbe = nullptr;
-
-        for (const auto& kv : instrumentControllersByTrackId_)
-        {
-            InstrumentTrackController* const ctl = kv.second.get();
-            if (ctl == nullptr || !ctl->hasInstrumentTrack())
-            {
-                continue;
-            }
-            const TrackId dom = ctl->getExperimentalInstrumentDomainTrackId();
-            if (dom == kInvalidTrackId || kv.first == dom)
-            {
-                continue;
-            }
-            staleKey = kv.first;
-            domTarget = dom;
-            ctlProbe = ctl;
-            auto hi = instrumentHostsByTrackId_.find(staleKey);
-            hostProbe = (hi != instrumentHostsByTrackId_.end()) ? hi->second.get() : nullptr;
-            break;
-        }
-
-        juce::ignoreUnused(ctlProbe);
-        if (staleKey == kInvalidTrackId || domTarget == kInvalidTrackId || hostProbe == nullptr)
-        {
-            break;
-        }
-        auto hostIt = instrumentHostsByTrackId_.find(staleKey);
-        auto ctlIt = instrumentControllersByTrackId_.find(staleKey);
-        if (hostIt == instrumentHostsByTrackId_.end() || ctlIt == instrumentControllersByTrackId_.end())
-        {
-            break;
-        }
-        if (instrumentHostsByTrackId_.count(domTarget) != 0 || instrumentControllersByTrackId_.count(domTarget) != 0)
-        {
-            juce::Logger::writeToLog(
-                "[TransportControlsContent] Instrument re-key aborted: collision at domain TrackId="
-                + juce::String((juce::int64)domTarget) + " staleKey="
-                + juce::String((juce::int64)staleKey));
-            break;
-        }
-
-        std::unique_ptr<ExperimentalInstrumentHost> uh = std::move(hostIt->second);
-        std::unique_ptr<InstrumentTrackController> uc = std::move(ctlIt->second);
-        instrumentHostsByTrackId_.erase(staleKey);
-        instrumentControllersByTrackId_.erase(staleKey);
-        instrumentHostsByTrackId_[domTarget] = std::move(uh);
-        instrumentControllersByTrackId_[domTarget] = std::move(uc);
-
-        juce::Logger::writeToLog("[TransportControlsContent] Instrument runtime maps re-keyed: map key "
-                                 + juce::String((juce::int64)(std::int64_t)staleKey)
-                                 + " -> controller domain track id "
-                                 + juce::String((juce::int64)(std::int64_t)domTarget));
-    }
+    instrumentRuntimeCoordinator_->releaseExperimentalInstrumentHostsDeviceResources();
 }
 
 void TransportControlsContent::updateExperimentalPlaybackBridgeAfterRegistryChange()
 {
-    reconcileInstrumentRegistryAgainstSessionRows();
-
-    std::vector<ExperimentalInstrumentPlaybackEntry> entries;
-    entries.reserve(instrumentControllersByTrackId_.size() + size_t { 2 });
-
-    const auto appendPlaybackRuntimePair = [&](ExperimentalInstrumentHost* host,
-                                               InstrumentTrackController* ctl) noexcept
-    {
-        if (ctl == nullptr || host == nullptr || !ctl->hasInstrumentTrack())
-        {
-            return;
-        }
-        const TrackId playbackKey = ctl->getExperimentalInstrumentDomainTrackId();
-        if (playbackKey == kInvalidTrackId)
-        {
-            return;
-        }
-        for (const auto& e : entries)
-        {
-            if (e.trackId == playbackKey)
-            {
-                return;
-            }
-        }
-        entries.push_back(ExperimentalInstrumentPlaybackEntry{ playbackKey, host, ctl });
-    };
-
-    for (const auto& kv : instrumentControllersByTrackId_)
-    {
-        InstrumentTrackController* const ctl = kv.second.get();
-        if (ctl == nullptr)
-        {
-            continue;
-        }
-        auto itHost = instrumentHostsByTrackId_.find(kv.first);
-        if (itHost == instrumentHostsByTrackId_.end() || itHost->second == nullptr)
-        {
-            continue;
-        }
-        appendPlaybackRuntimePair(itHost->second.get(), ctl);
-    }
-
-    if (instrumentStagingController_ != nullptr && instrumentStagingController_->hasInstrumentTrack()
-        && instrumentStagingHost_ != nullptr)
-    {
-        appendPlaybackRuntimePair(instrumentStagingHost_.get(), instrumentStagingController_.get());
-    }
-
-    {
-        std::vector<ExperimentalInstrumentPlaybackEntry> reordered;
-        reordered.reserve(entries.size());
-        std::unordered_map<TrackId, ExperimentalInstrumentPlaybackEntry> leftover;
-        for (auto& e : entries)
-        {
-            leftover.emplace(e.trackId, std::move(e));
-        }
-        const std::shared_ptr<const SessionSnapshot> ordSnap = session.loadSessionSnapshotForAudioThread();
-        if (ordSnap != nullptr)
-        {
-            for (int ti = 0; ti < ordSnap->getNumTracks(); ++ti)
-            {
-                const Track& tr = ordSnap->getTrack(ti);
-                if (tr.getKind() != TrackKind::Instrument)
-                {
-                    continue;
-                }
-                auto li = leftover.find(tr.getId());
-                if (li != leftover.end())
-                {
-                    reordered.push_back(std::move(li->second));
-                    leftover.erase(li);
-                }
-            }
-        }
-        for (auto& lr : leftover)
-        {
-            reordered.push_back(std::move(lr.second));
-        }
-        entries = std::move(reordered);
-    }
-
-    const TrackId canonLaneIdForLog = canonicalInstrumentLaneTrackIdFromSession();
-
-    juce::String routingPlaybackPublishFp = "playback-publish: firstInstTid=";
-    routingPlaybackPublishFp
-        += juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(canonLaneIdForLog)));
-    routingPlaybackPublishFp += juce::String(" entries=");
-    routingPlaybackPublishFp += juce::String(static_cast<int>(entries.size()));
-
-    if (!entries.empty())
-    {
-        routingPlaybackPublishFp += " [";
-        for (size_t i = 0; i < entries.size(); ++i)
-        {
-            const auto& e = entries[i];
-            if (i != 0)
-            {
-                routingPlaybackPublishFp += ", ";
-            }
-            const InstrumentTrackController* ctlInfo = e.midiController;
-            routingPlaybackPublishFp += "{tid=";
-            routingPlaybackPublishFp
-                += juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(e.trackId)));
-            routingPlaybackPublishFp += " host=";
-            routingPlaybackPublishFp +=
-                ((e.host != nullptr)
-                     ? ("0x"
-                        + juce::String::toHexString(static_cast<juce::int64>(
-                              reinterpret_cast<std::intptr_t>(static_cast<void*>(e.host)))))
-                     : juce::String("null"));
-            routingPlaybackPublishFp += " ctl=";
-            routingPlaybackPublishFp +=
-                ((e.midiController != nullptr)
-                     ? ("0x"
-                        + juce::String::toHexString(static_cast<juce::int64>(reinterpret_cast<std::intptr_t>(
-                              static_cast<void*>(e.midiController)))))
-                     : juce::String("null"));
-            const TrackId dom = (ctlInfo != nullptr) ? ctlInfo->getExperimentalInstrumentDomainTrackId()
-                                                     : kInvalidTrackId;
-            routingPlaybackPublishFp += " ctlDomain="
-                                         + juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(dom)));
-            routingPlaybackPublishFp += " ctlHasTrack=";
-            routingPlaybackPublishFp += ((ctlInfo != nullptr && ctlInfo->hasInstrumentTrack()) ? "yes" : "no");
-            routingPlaybackPublishFp += " ctlPower=";
-            routingPlaybackPublishFp += ((ctlInfo != nullptr && ctlInfo->isPowerOn()) ? "on" : "off");
-            routingPlaybackPublishFp += " ctlMuted=";
-            routingPlaybackPublishFp += ((ctlInfo != nullptr && ctlInfo->isMuted()) ? "yes" : "no");
-            routingPlaybackPublishFp += " ctlActive=";
-            routingPlaybackPublishFp += ((ctlInfo != nullptr && ctlInfo->isActive()) ? "yes" : "no");
-            routingPlaybackPublishFp += " ctlLoaded=";
-            routingPlaybackPublishFp += ((ctlInfo != nullptr && ctlInfo->isInstrumentLoaded()) ? "yes" : "no");
-            routingPlaybackPublishFp += " hostHasInstrument=";
-            routingPlaybackPublishFp += ((e.host != nullptr && e.host->hasInstrument()) ? "yes" : "no");
-            routingPlaybackPublishFp += " uiName=\"";
-            routingPlaybackPublishFp
-                += ((e.host != nullptr) ? e.host->getInstrumentNameForUi().replaceCharacter('\"', '\'')
-                                       : juce::String("--"));
-            routingPlaybackPublishFp += "\"}";
-        }
-        routingPlaybackPublishFp += "]";
-    }
-
-    if (routingPlaybackPublishFp != lastExperimentalPlaybackRoutingPublishFingerprint_)
-    {
-        lastExperimentalPlaybackRoutingPublishFingerprint_ = routingPlaybackPublishFp;
-#if MINIDAW_DIAG_PLAYBACK_ROUTING
-        appendExperimentalPlaybackRoutingLogLine(routingPlaybackPublishFp);
-#endif
-#if !defined(NDEBUG)
-        juce::Logger::writeToLog("[TransportControlsContent] Experimental playback snapshot entries changed "
-                                 + routingPlaybackPublishFp);
-#endif
-    }
-
-    if (entries.empty())
-    {
-        playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
-        return;
-    }
-
-    playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(
-        std::make_shared<const ExperimentalInstrumentPlaybackSnapshot>(
-            ExperimentalInstrumentPlaybackSnapshot{ std::move(entries) }));
-}
-
-void TransportControlsContent::tearDownExperimentalInstrumentTimelineUiForTrack(
-    const TrackId tid) noexcept
-{
-    if (tid == kInvalidTrackId)
-    {
-        return;
-    }
-    instrumentMidiEventLanesByTrackId_.erase(tid);
-    instrumentTrackHeadersByTrackId_.erase(tid);
-}
-
-void TransportControlsContent::syncInstrumentTimelineRowAttachmentToSession() noexcept
-{
-    std::vector<InstrumentTimelineAttachment> rows;
-    const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
-    if (snap != nullptr)
-    {
-        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
-        {
-            const Track& tr = snap->getTrack(ti);
-            if (tr.getKind() != TrackKind::Instrument)
-            {
-                continue;
-            }
-            const TrackId laneTid = tr.getId();
-            InstrumentTrackController* ctl = getInstrumentControllerForTrack(laneTid);
-            if (ctl == nullptr || !ctl->hasInstrumentTrack()
-                || ctl->getExperimentalInstrumentDomainTrackId() != laneTid)
-            {
-                continue;
-            }
-            ensureInstrumentTimelineHeaderAndLaneForTrack(laneTid);
-            auto itLane = instrumentMidiEventLanesByTrackId_.find(laneTid);
-            auto itHdr = instrumentTrackHeadersByTrackId_.find(laneTid);
-            if (itLane == instrumentMidiEventLanesByTrackId_.end() || itLane->second == nullptr
-                || itHdr == instrumentTrackHeadersByTrackId_.end() || itHdr->second == nullptr)
-            {
-                continue;
-            }
-            itLane->second->attachControllerIfStillValid(ctl);
-            rows.push_back(InstrumentTimelineAttachment{
-                laneTid, ctl, itHdr->second.get(), itLane->second.get() });
-        }
-    }
-    trackLanesView.syncInstrumentTimelineAttachments(rows);
-}
-
-void TransportControlsContent::ensureInstrumentTimelineHeaderAndLaneForTrack(const TrackId tid)
-{
-    if (tid == kInvalidTrackId)
-    {
-        return;
-    }
-    InstrumentTrackController* ctl = getInstrumentControllerForTrack(tid);
-    if (ctl == nullptr || !ctl->hasInstrumentTrack())
-    {
-        return;
-    }
-
-    auto itLaneExisting = instrumentMidiEventLanesByTrackId_.find(tid);
-    if (itLaneExisting == instrumentMidiEventLanesByTrackId_.end())
-    {
-        auto lane = std::make_unique<InstrumentMidiEventLane>(*this, ctl, tid);
-        instrumentMidiEventLanesByTrackId_.emplace(tid, std::move(lane));
-    }
-    else if (itLaneExisting->second != nullptr)
-    {
-        itLaneExisting->second->attachControllerIfStillValid(ctl);
-    }
-
-    auto itHdr = instrumentTrackHeadersByTrackId_.find(tid);
-    if (itHdr != instrumentTrackHeadersByTrackId_.end() && itHdr->second != nullptr)
-    {
-        return;
-    }
-
-    const TrackId laneTid = tid;
-
-    TrackHeaderModelProvider modelProvider = [this, ctl, laneTid]() -> TrackHeaderModel {
-        TrackHeaderModel m;
-        ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(laneTid);
-        m.subtitle = ctl->getLaneHeaderSubtitle();
-        m.active = ctl->isActive();
-        m.armed = false;
-        m.muted = ctl->isMuted();
-        m.off = !ctl->isPowerOn();
-        m.powerInteractable = !trackLanesView.isStructuralTimelineEditBlocked();
-        m.muteInteractable = true;
-        m.armInteractable = false;
-        if (const auto sn = session.loadSessionSnapshotForAudioThread())
-        {
-            const int idx = sn->findTrackIndexById(laneTid);
-            if (idx >= 0)
-            {
-                m.name = sn->getTrack(idx).getName();
-            }
-            else
-            {
-                m.name = ctl->getLaneHeaderTitle();
-            }
-        }
-        else
-        {
-            m.name = ctl->getLaneHeaderTitle();
-        }
-        m.instrumentEditorAvailable = mh != nullptr && mh->hasInstrument();
-        return m;
-    };
-
-    auto repaintExtras = [this] {
-        repaintInstrumentTrackRow();
-        trackLanesView.repaint();
-        inspectorView_.refreshFromSession();
-    };
-
-    TrackHeaderCallbacks callbacks;
-    callbacks.onActivateName = [this, ctl, laneTid, repaintExtras] {
-        for (auto& kv : instrumentControllersByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->setActive(false);
-            }
-        }
-        if (instrumentStagingController_ != nullptr)
-        {
-            instrumentStagingController_->setActive(false);
-        }
-        session.setActiveTrack(laneTid);
-        ctl->setActive(true);
-        repaintExtras();
-    };
-    callbacks.onToggleMute = [ctl, laneTid, this, repaintExtras] {
-        ctl->setMuted(!ctl->isMuted());
-        session.setActiveTrack(laneTid);
-        repaintExtras();
-    };
-    callbacks.onTogglePower = [ctl, laneTid, this, repaintExtras]() -> bool {
-        if (trackLanesView.isStructuralTimelineEditBlocked())
-        {
-            return false;
-        }
-        ctl->setPowerOn(!ctl->isPowerOn());
-        session.setActiveTrack(laneTid);
-        repaintExtras();
-        return true;
-    };
-    callbacks.onToggleArm = [] {};
-    callbacks.onOpenInstrumentEditor = [this, laneTid] {
-        if (ExperimentalInstrumentHost* h = getInstrumentHostForTrack(laneTid))
-        {
-            h->openNativeEditor();
-        }
-    };
-    callbacks.onShowContextMenu = [this, laneTid, repaintExtras](TrackHeaderView& self, const juce::MouseEvent&) {
-        session.setActiveTrack(laneTid);
-        for (auto& kv : instrumentControllersByTrackId_)
-        {
-            if (kv.second != nullptr)
-            {
-                kv.second->setActive(kv.first == laneTid);
-            }
-        }
-        if (instrumentStagingController_ != nullptr)
-        {
-            instrumentStagingController_->setActive(false);
-        }
-        repaintExtras();
-
-        juce::PopupMenu menu;
-        constexpr int kDeleteTrackMenuId = 1;
-        constexpr int kRescanDescriptionsMenuId = 2;
-        const bool editLocked = trackLanesView.isStructuralTimelineEditBlocked();
-        juce::PopupMenu::Item deleteItem;
-        deleteItem.itemID = kDeleteTrackMenuId;
-        deleteItem.text = "Delete Track";
-        deleteItem.isEnabled = !editLocked;
-        menu.addItem(deleteItem);
-        menu.addSeparator();
-        juce::PopupMenu::Item rescanItem;
-        rescanItem.itemID = kRescanDescriptionsMenuId;
-        rescanItem.text = "Rescan plugin description (out-of-process)…";
-        rescanItem.isEnabled = !editLocked;
-        menu.addItem(rescanItem);
-
-        juce::Component::SafePointer<TransportControlsContent> safeThis(this);
-        menu.showMenuAsync(
-            juce::PopupMenu::Options().withTargetComponent(&self),
-            [safeThis, laneTid, kDeleteTrackMenuId, kRescanDescriptionsMenuId](const int result) {
-                if (safeThis == nullptr || result == 0)
-                {
-                    return;
-                }
-                if (result == kDeleteTrackMenuId)
-                {
-                    safeThis->trackLanesView.requestDeleteTrackForHeaderMenu(laneTid);
-                    return;
-                }
-                if (result == kRescanDescriptionsMenuId)
-                {
-                    safeThis->runExperimentalInstrumentPluginDescriptionRescanForTrack(laneTid);
-                }
-            });
-    };
-
-    auto hdr = std::make_unique<TrackHeaderView>(
-        std::move(modelProvider), std::move(callbacks), kInvalidTrackId, std::nullopt);
-    instrumentTrackHeadersByTrackId_[tid] = std::move(hdr);
+    instrumentRuntimeCoordinator_->updateExperimentalPlaybackBridgeAfterRegistryChange();
 }
 
 juce::String TransportControlsContent::proposeNextGrooveAgentInstrumentTrackDisplayName()
@@ -4314,21 +2252,7 @@ juce::String TransportControlsContent::proposeNextGrooveAgentInstrumentTrackDisp
 bool TransportControlsContent::tryCloneGrooveAgentFromAnyExistingInto(
     ExperimentalInstrumentHost& dest) noexcept
 {
-    ExperimentalInstrumentHost* src = nullptr;
-    for (const auto& kv : instrumentHostsByTrackId_)
-    {
-        if (kv.second != nullptr && kv.second->hasInstrument()
-            && kv.second->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
-        {
-            src = kv.second.get();
-            break;
-        }
-    }
-    if (src == nullptr && instrumentStagingHost_ != nullptr && instrumentStagingHost_->hasInstrument()
-        && instrumentStagingHost_->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
-    {
-        src = instrumentStagingHost_.get();
-    }
+    ExperimentalInstrumentHost* src = instrumentRuntimeCoordinator_->findGrooveAgentTemplateHostPreferKeyed(&dest);
     if (src == nullptr || src == &dest)
     {
         return false;
@@ -4410,96 +2334,9 @@ void TransportControlsContent::stableSortInstrumentMusicalUndoVector(
 void TransportControlsContent::applyInstrumentMusicalUndoVectorToAllKeyedControllers(
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
 {
-    for (auto& kv : instrumentControllersByTrackId_)
-    {
-        if (kv.second != nullptr)
-        {
-            kv.second->applyExperimentalInstrumentMusicalUndoBlock(tracks);
-        }
-    }
-    if (instrumentStagingController_ != nullptr)
-    {
-        instrumentStagingController_->applyExperimentalInstrumentMusicalUndoBlock(tracks);
-    }
+    instrumentRuntimeCoordinator_->applyInstrumentMusicalUndoVectorToAllKeyedAndStaging(tracks);
 }
 
-void TransportControlsContent::runExperimentalInstrumentPluginDescriptionRescanForTrack(
-    const TrackId tid)
-{
-    if (tid == kInvalidTrackId)
-    {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::InfoIcon, "Experimental instrument", "No instrument track is attached.");
-        return;
-    }
-    ExperimentalInstrumentHost* const mh = getInstrumentHostForTrack(tid);
-    if (mh == nullptr || !mh->hasInstrument())
-    {
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
-                                               "Experimental instrument",
-                                               "No instrument plugin is loaded for this track.");
-        return;
-    }
-    const juce::File bundle(mh->getLastLoadedVst3OriginalPath());
-    if (!bundle.exists())
-    {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::WarningIcon,
-            "Experimental instrument",
-            "No VST3 bundle path is known for the loaded instrument.");
-        return;
-    }
-
-    bool expectedBusy = false;
-    if (!experimentalOopScanBusy_.compare_exchange_strong(expectedBusy, true))
-    {
-        mini_daw::writeVst3OopScanDiagnosticLogLine(
-            "parent: instrument description rescan ignored (OOP operation already in progress)");
-        return;
-    }
-
-    mini_daw::writeVst3OopScanDiagnosticLogLine("rescan requested trackId="
-                                                + juce::String((juce::int64)tid) + " path=\""
-                                                + bundle.getFullPathName() + "\"");
-
-    juce::Component::SafePointer<TransportControlsContent> safeThis(this);
-    const juce::File bundleCopy = bundle;
-    std::thread([safeThis, bundleCopy] {
-        const mini_daw::Vst3OopScanResult scanResult
-            = mini_daw::runVst3OopScanBlocking(bundleCopy, mini_daw::kVst3OopScanReplyTimeoutMs);
-        juce::MessageManager::callAsync([safeThis, scanResult, bundleCopy] {
-            if (safeThis == nullptr)
-            {
-                return;
-            }
-            safeThis->experimentalOopScanBusy_.store(false);
-            safeThis->refreshExperimentalInstrumentUi();
-
-            const bool successNoDesc = scanResult.outcome == mini_daw::Vst3OopScanOutcome::Success
-                                       && scanResult.descriptions.empty();
-            const bool ok = scanResult.outcome == mini_daw::Vst3OopScanOutcome::Success
-                            && !scanResult.descriptions.empty();
-
-            if (!ok)
-            {
-                const juce::String tag = experimentalInstrumentRescanOutcomeLogTag(
-                    scanResult.outcome,
-                    successNoDesc);
-                mini_daw::writeVst3OopScanDiagnosticLogLine("rescan failed outcome=" + tag);
-                juce::String msg = "Plugin description scan failed. Existing cache and loaded instrument "
-                                  "were left unchanged.\n\n";
-                msg << experimentalInstrumentRescanFailureDetail(scanResult.outcome, successNoDesc);
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Experimental instrument", msg);
-                return;
-            }
-
-            mini_daw::writeVst3OopScanDiagnosticLogLine(
-                "rescan success descriptionCount=" + juce::String((int)scanResult.descriptions.size())
-                + " v2Updated=yes");
-        });
-    }).detach();
-}
 } // namespace
 
 MainWindow::MainWindow(const juce::String& name,

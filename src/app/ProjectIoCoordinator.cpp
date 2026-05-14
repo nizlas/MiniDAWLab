@@ -216,7 +216,7 @@ void ProjectIoCoordinator::loadProject()
                 juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
             return;
         }
-        juce::String experimentalInstrumentAutoloadNoteAcc;
+        juce::String instrumentAutoloadNoteAcc;
         if (!parsedLoad.experimentalInstrumentTracks.empty())
         {
             for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
@@ -253,22 +253,22 @@ void ProjectIoCoordinator::loadProject()
                 ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
                 if (noteOne.isNotEmpty())
                 {
-                    if (experimentalInstrumentAutoloadNoteAcc.isNotEmpty())
+                    if (instrumentAutoloadNoteAcc.isNotEmpty())
                     {
-                        experimentalInstrumentAutoloadNoteAcc << "\n\n";
+                        instrumentAutoloadNoteAcc << "\n\n";
                     }
-                    experimentalInstrumentAutoloadNoteAcc << noteOne;
+                    instrumentAutoloadNoteAcc << noteOne;
                 }
             }
         }
         callbacks_.syncMidiEditorInstrumentStateFromHost();
-        const juce::String experimentalInstrumentAutoloadNote(experimentalInstrumentAutoloadNoteAcc);
+        const juce::String instrumentAutoloadNote(instrumentAutoloadNoteAcc);
         {
             if (infoNote.isNotEmpty())
             {
                 infoNote << "\n\n";
             }
-            infoNote << experimentalInstrumentAutoloadNote;
+            infoNote << instrumentAutoloadNote;
         }
         callbacks_.clearSessionHistory();
         callbacks_.refreshAllUiAfterLoadedProject();
