@@ -45,6 +45,8 @@
 #include "diagnostics/UndoDiagnosticFileLog.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 
+#include "app/ProjectIoCoordinator.h"
+
 #include <algorithm>
 #include <atomic>
 #include <memory>
@@ -328,43 +330,6 @@ namespace
         }
         DeferredCycleMasterDeleter::schedule(continuousWav);
     }
-
-    // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
-    // `projectFile` = `<projectFolder>/<projectName>.dalproj`.
-    [[nodiscard]] juce::String firstTimeSaveConflictMessage(
-        const juce::File& projectFolder,
-        const juce::File& projectFile)
-    {
-        if (projectFile.existsAsFile())
-        {
-            return "A project file already exists at:\n" + projectFile.getFullPathName()
-                   + "\n\nChoose a different name or delete the existing file first.";
-        }
-        if (projectFolder.exists() && !projectFolder.isDirectory())
-        {
-            return "Cannot create the project folder; a file already exists at:\n"
-                   + projectFolder.getFullPathName();
-        }
-        if (projectFolder.isDirectory())
-        {
-            juce::Array<juce::File> files;
-            projectFolder.findChildFiles(files, juce::File::findFiles, false);
-            for (const auto& c : files)
-            {
-                const juce::String n = c.getFileName();
-                if (n.endsWithIgnoreCase(".dalproj") || n.endsWithIgnoreCase(".mdlproj"))
-                {
-                    if (!(c == projectFile))
-                    {
-                        return "The project folder already contains a different project file:\n"
-                               + c.getFullPathName()
-                               + "\n\nChoose a different folder or name.";
-                    }
-                }
-            }
-        }
-        return {};
-    }
 } // namespace
 
 namespace
@@ -576,7 +541,21 @@ public:
                     }
                 });
         };
-        saveProjectButton.onClick = [this] { saveProjectClicked(); };
+        projectIoCoordinator_ = std::make_unique<ProjectIoCoordinator>(
+            transport,
+            session,
+            deviceManager,
+            pluginHost_,
+            ProjectIoCoordinator::Callbacks{
+                [this](TrackId tid) { return getInstrumentControllerForTrack(tid); },
+                [this] {
+                    if (experimentalMidiEditorWindow_ != nullptr)
+                    {
+                        experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
+                    }
+                },
+            });
+        saveProjectButton.onClick = [this] { projectIoCoordinator_->saveProject(); };
         loadProjectButton.onClick = [this] { loadProjectClicked(); };
         playPauseButton.onClick = [this] { togglePlayPauseFromUi(); };
         // Stop: "playback off + playhead to start" when idle; if recording, finalize/commit first
@@ -2960,118 +2939,6 @@ public:
             });
     }
 
-    void saveProjectClicked()
-    {
-        juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
-        if (device == nullptr)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Save project",
-                "No active audio device; cannot include device sample rate in the project file.");
-            return;
-        }
-        const double sampleRate = device->getCurrentSampleRate();
-
-        // Normal save: no chooser. Explicit "Save As" / "New project" is deferred.
-        if (session.hasKnownProjectFile())
-        {
-            if (experimentalMidiEditorWindow_ != nullptr)
-            {
-                experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
-            }
-            const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
-                return getInstrumentControllerForTrack(laneId);
-            });
-            const juce::Result r = session.saveProjectToFile(
-                transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_, ctlLookup);
-            if (!r.wasOk())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
-            }
-            return;
-        }
-
-        // First-time save: DAW-style `<Parent>/<ProjectName>/<ProjectName>.dalproj`
-        const auto fileChooserFlags = juce::FileBrowserComponent::saveMode
-                                      | juce::FileBrowserComponent::canSelectFiles;
-        auto chooser = std::make_shared<juce::FileChooser>(
-            "Save project as…",
-            juce::File{},
-            "*.dalproj");
-        chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
-            juce::ignoreUnused(chooser);
-            juce::File userPick = fc.getResult();
-            if (userPick.getFullPathName().isEmpty())
-            {
-                return;
-            }
-            if (!userPick.hasFileExtension("dalproj"))
-            {
-                userPick = userPick.getSiblingFile(
-                    userPick.getFileNameWithoutExtension() + ".dalproj");
-            }
-            const juce::String projectName = userPick.getFileNameWithoutExtension();
-            if (projectName.isEmpty())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Save project",
-                    "Invalid project name.");
-                return;
-            }
-            const juce::File parentDir = userPick.getParentDirectory();
-            const juce::File projectFolder = parentDir.getChildFile(projectName);
-            const juce::File projectFile
-                = projectFolder.getChildFile(projectName + ".dalproj");
-            {
-                const juce::String conflict = firstTimeSaveConflictMessage(projectFolder, projectFile);
-                if (conflict.isNotEmpty())
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon, "Save project", conflict);
-                    return;
-                }
-            }
-            if (!projectFolder.isDirectory() && !projectFolder.createDirectory())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Save project",
-                    "Could not create the project folder:\n" + projectFolder.getFullPathName());
-                return;
-            }
-            {
-                const juce::String conflict2
-                    = firstTimeSaveConflictMessage(projectFolder, projectFile);
-                if (conflict2.isNotEmpty())
-                {
-                    juce::AlertWindow::showMessageBoxAsync(
-                        juce::AlertWindow::WarningIcon, "Save project", conflict2);
-                    return;
-                }
-            }
-            if (experimentalMidiEditorWindow_ != nullptr)
-            {
-                experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
-            }
-            const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
-                return getInstrumentControllerForTrack(laneId);
-            });
-            const juce::Result r = session.saveProjectToFile(transport,
-                                                               projectFile,
-                                                               sampleRate,
-                                                               &pluginHost_,
-                                                               ctlLookup);
-            if (!r.wasOk())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
-            }
-        });
-    }
-
     void loadProjectClicked()
     {
         juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
@@ -3851,6 +3718,7 @@ public:
     bool vst3FolderChooserInFlight_ = false;
     std::atomic<bool> experimentalOopScanBusy_{ false };
     std::unique_ptr<ExperimentalMidiEditorWindow> experimentalMidiEditorWindow_;
+    std::unique_ptr<ProjectIoCoordinator> projectIoCoordinator_;
 
     EditTool currentEditTool_ = EditTool::Pointer;
 
