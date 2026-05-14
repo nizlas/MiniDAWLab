@@ -451,13 +451,6 @@ std::optional<TrackId> Session::appendExperimentalInstrumentShellTrack(juce::Str
     {
         return std::nullopt;
     }
-    for (int i = 0; i < current->getNumTracks(); ++i)
-    {
-        if (current->getTrack(i).getKind() == TrackKind::Instrument)
-        {
-            return std::nullopt;
-        }
-    }
 
     const TrackId newId = nextTrackId_;
     jassert(newId != kInvalidTrackId);
@@ -943,7 +936,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                                        const juce::File& file,
                                        const double deviceSampleRate,
                                        PluginInsertHost* pluginHost,
-                                       InstrumentTrackController* instrumentController)
+                                       ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -1061,9 +1054,22 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         out.tracks.push_back(std::move(tr));
     }
 
-    if (instrumentController != nullptr && instrumentController->hasInstrumentTrack())
+    if (instrumentCtlByTrackId)
     {
-        out.experimentalInstrumentTracks.push_back(instrumentController->buildExperimentalInstrumentProjectBlock());
+        for (int ti = 0; ti < s->getNumTracks(); ++ti)
+        {
+            const Track& tr = s->getTrack(ti);
+            if (tr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            InstrumentTrackController* const ctl = instrumentCtlByTrackId(tr.getId());
+            if (ctl != nullptr && ctl->hasInstrumentTrack()
+                && ctl->getExperimentalInstrumentDomainTrackId() == tr.getId())
+            {
+                out.experimentalInstrumentTracks.push_back(ctl->buildExperimentalInstrumentProjectBlock());
+            }
+        }
     }
 
     if (out.tracks.empty())
@@ -1083,8 +1089,7 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
                                           const double deviceSampleRate,
                                           juce::StringArray& outSkippedClipDetails,
                                           juce::String& outInfoNote,
-                                          PluginInsertHost* pluginHost,
-                                          InstrumentTrackController* instrumentController)
+                                          PluginInsertHost* pluginHost)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -1102,8 +1107,7 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
         deviceSampleRate,
         outSkippedClipDetails,
         outInfoNote,
-        pluginHost,
-        instrumentController);
+        pluginHost);
 }
 
 juce::Result Session::applyLoadedProjectModel(Transport& transport,
@@ -1112,8 +1116,7 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                               const double deviceSampleRate,
                                               juce::StringArray& outSkippedClipDetails,
                                               juce::String& outInfoNote,
-                                              PluginInsertHost* pluginHost,
-                                              InstrumentTrackController* instrumentController)
+                                              PluginInsertHost* pluginHost)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -1142,22 +1145,12 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     std::vector<Track> built;
     built.reserve(parsed.tracks.size());
 
-    int persistedInstrumentLanesSeenLoad = 0;
     for (const auto& trDto : parsed.tracks)
     {
         TrackKind tk = TrackKind::Audio;
         if (trDto.kind.equalsIgnoreCase("instrument"))
         {
             tk = TrackKind::Instrument;
-            ++persistedInstrumentLanesSeenLoad;
-            if (persistedInstrumentLanesSeenLoad > 1)
-            {
-                tk = TrackKind::Audio;
-                juce::Logger::writeToLog(
-                    "[Session] Loaded project has multiple instrument lanes — coercing extras to Audio "
-                    "in this slice (track id="
-                    + juce::String((juce::int64)trDto.id) + ").");
-            }
         }
 
         std::vector<PlacedClip> placed;
@@ -1327,12 +1320,6 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                 pluginHost->importChain(trDto.id, chain);
             }
         }
-    }
-
-    if (instrumentController != nullptr)
-    {
-        instrumentController->restoreExperimentalInstrumentFromProject(parsed.experimentalInstrumentTracks,
-                                                                         &parsed.tracks);
     }
 
     return juce::Result::ok();

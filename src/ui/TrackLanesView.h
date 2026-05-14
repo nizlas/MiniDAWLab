@@ -23,7 +23,7 @@
 //
 // See: `Session::getNumTracks` / `getTrackIdAtIndex`, `ClipWaveformView`, `TrackHeaderView`.
 //   Same parent shell also owns the lane-column `PlayheadOverlay`. Optional **instrument timeline
-//   row** (when `attachInstrumentRow` is wired) shares the same visible stack and header-drag model.
+//   rows** (`syncInstrumentTimelineAttachments`) share the stack and header-drag model.
 // =============================================================================
 
 #include "domain/Track.h"
@@ -38,6 +38,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -63,6 +64,15 @@ struct VisibleTrackEntry
 {
     VisibleTrackKind kind;
     TrackId sessionTrackId = kInvalidTrackId;
+};
+
+/// Non-owning trio for one `TrackKind::Instrument` shell row (components owned by `Main`).
+struct InstrumentTimelineAttachment
+{
+    TrackId sessionTrackId = kInvalidTrackId;
+    InstrumentTrackController* controller = nullptr;
+    TrackHeaderView* header = nullptr;
+    juce::Component* midiLane = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -138,6 +148,9 @@ public:
     // clicked track id (Playing/recording + validity handled by host).
     void setOnDeleteTrackRequested(std::function<void(TrackId)> onDeleteTrackRequested) noexcept;
 
+    /// Same handler as wired by `setOnDeleteTrackRequested` (`Main` invokes from instrument-shell headers).
+    void requestDeleteTrackForHeaderMenu(TrackId tid) noexcept;
+
     // [Message thread] Wired once by `Main`: header context menu VST3 / editor / remove (optional).
     void setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept;
 
@@ -166,23 +179,11 @@ public:
     /// `Session::setActiveTrack` succeeds. `Main` uses this to clear the instrument-row active flag.
     void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
 
-    /// Live row wired to `ExperimentalInstrumentHost` + `InstrumentTrackController` (single bridge).
-    /// `instrumentSessionTrackId` is the `SessionSnapshot` `TrackId` for the (`TrackKind::Instrument`) row
-    /// this UI stack represents (still one row in this build).
-    void attachInstrumentRow(InstrumentTrackController* controller,
-                             TrackHeaderView* header,
-                             juce::Component* midiLane,
-                             TrackId instrumentSessionTrackId) noexcept;
-
-    /// [Message thread] Non-`kInvalidTrackId` after `attachInstrumentRow` when an instrument lane is bound.
-    [[nodiscard]] TrackId getAttachedInstrumentSessionTrackId() const noexcept
-    {
-        return instrumentRowSessionTrackId_;
-    }
+    /// [Message thread] Replace all instrument-shell UI bridges (Groove-Agent rows). Omit a `TrackId` to detach it.
+    void syncInstrumentTimelineAttachments(const std::vector<InstrumentTimelineAttachment>& rows) noexcept;
 
     /// [Message thread] After shell id changes (`tryAddGrooveAgent…` / project restore), reinstall header-drag host.
-    void refreshInstrumentHeaderReorderAttachment() noexcept;
-
+    void refreshInstrumentHeaderReorderAttachments() noexcept;
     /// Undo-bundled reorder: publishes `session.moveTrack(movedId, destSessionIndex)` (see `Main`).
     void setCommittedHeaderDragTrackReorder(std::function<void(TrackId movedId, int destSessionIndex)> fn) noexcept;
     /// [Message thread] Rebuild visible track rows from canonical `SessionSnapshot::tracks_` order.
@@ -237,14 +238,10 @@ private:
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
 
-    /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged UI row keyed by `instrumentRowSessionTrackId_`).
+    /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged attachments).
     std::vector<VisibleTrackEntry> visibleTrackEntries_;
 
-    InstrumentTrackController* instrumentController_ = nullptr;
-    TrackHeaderView* instrumentHeader_ = nullptr;
-    juce::Component* instrumentMidiLane_ = nullptr;
-    TrackId instrumentRowSessionTrackId_ = kInvalidTrackId;
-
+    std::unordered_map<TrackId, InstrumentTimelineAttachment> instrumentTimelineAttachments_;
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
     // while recording as `drainNextPreviewBlock` returns data. Not session state.
     std::vector<RecordingPreviewPeakBlock> recordingPreviewPeaksAccum_;

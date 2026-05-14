@@ -23,6 +23,7 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -197,8 +198,12 @@ TrackLanesView::~TrackLanesView()
             p->removeChildComponent(c);
         }
     };
-    detachFromParentIfAny(instrumentHeader_);
-    detachFromParentIfAny(instrumentMidiLane_);
+    for (auto& kv : instrumentTimelineAttachments_)
+    {
+        detachFromParentIfAny(kv.second.header);
+        detachFromParentIfAny(kv.second.midiLane);
+    }
+    instrumentTimelineAttachments_.clear();
 }
 
 void TrackLanesView::setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept
@@ -413,6 +418,14 @@ void TrackLanesView::setOnDeleteTrackRequested(
     onDeleteTrackRequested_ = std::move(onDeleteTrackRequested);
 }
 
+void TrackLanesView::requestDeleteTrackForHeaderMenu(const TrackId tid) noexcept
+{
+    if (onDeleteTrackRequested_ != nullptr)
+    {
+        onDeleteTrackRequested_(tid);
+    }
+}
+
 void TrackLanesView::setOnUndoableClipMoveRequested(
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> fn) noexcept
 {
@@ -464,68 +477,106 @@ void TrackLanesView::setCommittedHeaderDragTrackReorder(
     committedHeaderDragTrackReorder_ = std::move(fn);
 }
 
-void TrackLanesView::refreshInstrumentHeaderReorderAttachment() noexcept
+void TrackLanesView::syncInstrumentTimelineAttachments(
+    const std::vector<InstrumentTimelineAttachment>& rows) noexcept
 {
-    if (instrumentHeader_ == nullptr)
+    std::unordered_set<TrackId> keep;
+    keep.reserve(rows.size());
+    for (const InstrumentTimelineAttachment& r : rows)
     {
-        return;
+        if (r.sessionTrackId != kInvalidTrackId)
+        {
+            keep.insert(r.sessionTrackId);
+        }
     }
 
-    const bool trioReady = instrumentController_ != nullptr
-        && instrumentController_->hasInstrumentTrack() && instrumentMidiLane_ != nullptr
-        && instrumentRowSessionTrackId_ != kInvalidTrackId;
-
-    if (trioReady && instrumentController_->getExperimentalInstrumentDomainTrackId() != instrumentRowSessionTrackId_)
+    for (auto it = instrumentTimelineAttachments_.begin(); it != instrumentTimelineAttachments_.end();)
     {
-        juce::Logger::writeToLog(
-            "[TrackLanesView] Instrument header drag id "
-            + juce::String((juce::int64)instrumentRowSessionTrackId_)
-            + " does not match controller domain id "
-            + juce::String((juce::int64)instrumentController_->getExperimentalInstrumentDomainTrackId())
-            + " — header reorder disabled until they match.");
-        instrumentHeader_->setHeaderReorderDrag(std::nullopt, kInvalidTrackId);
-        return;
+        if (keep.count(it->first) == 0)
+        {
+            InstrumentTimelineAttachment& slot = it->second;
+            if (slot.header != nullptr && slot.header->getParentComponent() == this)
+            {
+                removeChildComponent(slot.header);
+            }
+            if (slot.midiLane != nullptr && slot.midiLane->getParentComponent() == this)
+            {
+                removeChildComponent(slot.midiLane);
+            }
+            it = instrumentTimelineAttachments_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
     }
 
-    const TrackId dragId = trioReady ? instrumentRowSessionTrackId_ : kInvalidTrackId;
+    for (const InstrumentTimelineAttachment& row : rows)
+    {
+        if (row.sessionTrackId == kInvalidTrackId || row.controller == nullptr || row.header == nullptr
+            || row.midiLane == nullptr)
+        {
+            continue;
+        }
+        InstrumentTimelineAttachment& dst = instrumentTimelineAttachments_[row.sessionTrackId];
+        dst = row;
+        if (dst.header->getParentComponent() != this)
+        {
+            addAndMakeVisible(*dst.header);
+        }
+        if (dst.midiLane->getParentComponent() != this)
+        {
+            addAndMakeVisible(*dst.midiLane);
+        }
+    }
 
-    if (trioReady && dragId != kInvalidTrackId)
-    {
-        TrackHeaderDragHost dh;
-        dh.onHeaderDragBegan
-            = [this](const TrackId id, TrackHeaderView* src) { beginHeaderTrackDrag(id, *src); };
-        dh.onHeaderDragMoved
-            = [this](const TrackId id, const juce::Point<int> p) { updateHeaderTrackDrag(id, p); };
-        dh.onHeaderDragEnded = [this](const TrackId id) { endHeaderTrackDrag(id); };
-        instrumentHeader_->setHeaderReorderDrag(std::move(dh), dragId);
-    }
-    else
-    {
-        instrumentHeader_->setHeaderReorderDrag(std::nullopt, kInvalidTrackId);
-    }
-}
-
-void TrackLanesView::attachInstrumentRow(InstrumentTrackController* controller,
-                                         TrackHeaderView* header,
-                                         juce::Component* midiLane,
-                                         const TrackId instrumentSessionTrackId) noexcept
-{
-    instrumentController_ = controller;
-    instrumentHeader_ = header;
-    instrumentMidiLane_ = midiLane;
-    instrumentRowSessionTrackId_ = instrumentSessionTrackId;
-
-    if (instrumentHeader_ != nullptr)
-    {
-        addAndMakeVisible(*instrumentHeader_);
-    }
-    if (instrumentMidiLane_ != nullptr)
-    {
-        addAndMakeVisible(*instrumentMidiLane_);
-    }
-    refreshInstrumentHeaderReorderAttachment();
+    refreshInstrumentHeaderReorderAttachments();
     rebuildVisibleTrackEntries();
     resized();
+}
+
+void TrackLanesView::refreshInstrumentHeaderReorderAttachments() noexcept
+{
+    for (auto& kv : instrumentTimelineAttachments_)
+    {
+        InstrumentTimelineAttachment& a = kv.second;
+        TrackHeaderView* const h = a.header;
+        if (h == nullptr)
+        {
+            continue;
+        }
+
+        const bool trioReady = a.controller != nullptr && a.controller->hasInstrumentTrack() && a.midiLane != nullptr
+                               && kv.first != kInvalidTrackId && a.sessionTrackId == kv.first;
+
+        if (trioReady && a.controller->getExperimentalInstrumentDomainTrackId() != kv.first)
+        {
+            juce::Logger::writeToLog(
+                "[TrackLanesView] Instrument header drag id "
+                + juce::String((juce::int64)kv.first) + " does not match controller domain id "
+                + juce::String((juce::int64)a.controller->getExperimentalInstrumentDomainTrackId())
+                + " — header reorder disabled until they match.");
+            h->setHeaderReorderDrag(std::nullopt, kInvalidTrackId);
+            continue;
+        }
+
+        const TrackId dragId = trioReady ? kv.first : kInvalidTrackId;
+
+        if (trioReady && dragId != kInvalidTrackId)
+        {
+            TrackHeaderDragHost dh;
+            dh.onHeaderDragBegan
+                = [this](const TrackId id, TrackHeaderView* src) { beginHeaderTrackDrag(id, *src); };
+            dh.onHeaderDragMoved
+                = [this](const TrackId id, const juce::Point<int> p) { updateHeaderTrackDrag(id, p); };
+            dh.onHeaderDragEnded = [this](const TrackId id) { endHeaderTrackDrag(id); };
+            h->setHeaderReorderDrag(std::move(dh), dragId);
+        }
+        else
+        {
+            h->setHeaderReorderDrag(std::nullopt, kInvalidTrackId);
+        }
+    }
 }
 
 void TrackLanesView::rebuildVisibleTrackEntries() noexcept
@@ -550,20 +601,31 @@ void TrackLanesView::rebuildVisibleTrackEntries() noexcept
             continue;
         }
 
-        const bool trio = instrumentController_ != nullptr
-            && instrumentController_->hasInstrumentTrack() && instrumentHeader_ != nullptr
-            && instrumentMidiLane_ != nullptr && instrumentRowSessionTrackId_ != kInvalidTrackId;
-        const bool idsMatch = trio && (instrumentRowSessionTrackId_ == tid);
-        const bool domainMatch
-            = idsMatch
-              && (instrumentController_->getExperimentalInstrumentDomainTrackId() == instrumentRowSessionTrackId_);
-
-        if (!idsMatch || !domainMatch)
+        auto itAttach = instrumentTimelineAttachments_.find(tid);
+        if (itAttach == instrumentTimelineAttachments_.end())
         {
             juce::Logger::writeToLog(
                 juce::String("[TrackLanesView] Snapshot Instrument row id=") + juce::String((juce::int64)tid)
-                + " has no bridged controller/header for attached id="
-                + juce::String((juce::int64)instrumentRowSessionTrackId_) + " — row hidden.");
+                + " has no instrument UI attachment.");
+            continue;
+        }
+
+        InstrumentTrackController* const ctl = itAttach->second.controller;
+        if (ctl == nullptr || !ctl->hasInstrumentTrack() || itAttach->second.header == nullptr
+            || itAttach->second.midiLane == nullptr)
+        {
+            juce::Logger::writeToLog(juce::String("[TrackLanesView] Instrument attachment incomplete for tid=")
+                                     + juce::String((juce::int64)tid) + ".");
+            continue;
+        }
+
+        if (ctl->getExperimentalInstrumentDomainTrackId() != tid)
+        {
+            juce::Logger::writeToLog("[TrackLanesView] Snapshot Instrument row id="
+                                     + juce::String((juce::int64)tid)
+                                     + " mismatches controller domain id="
+                                     + juce::String((juce::int64)ctl->getExperimentalInstrumentDomainTrackId())
+                                     + ".");
             continue;
         }
 
@@ -574,8 +636,6 @@ void TrackLanesView::rebuildVisibleTrackEntries() noexcept
 
 bool TrackLanesView::isInstrumentTimelineRowVisible() const noexcept
 {
-    if (instrumentController_ == nullptr || !instrumentController_->hasInstrumentTrack())
-        return false;
     for (const VisibleTrackEntry& entry : visibleTrackEntries_)
         if (entry.kind == VisibleTrackKind::Instrument)
             return true;
@@ -683,7 +743,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     if (!need)
     {
         rebuildVisibleTrackEntries();
-        refreshInstrumentHeaderReorderAttachment();
+        refreshInstrumentHeaderReorderAttachments();
         return;
     }
     headers_.clear();
@@ -998,7 +1058,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         lanes_.push_back(std::move(ptr));
     }
     rebuildVisibleTrackEntries();
-    refreshInstrumentHeaderReorderAttachment();
+    refreshInstrumentHeaderReorderAttachments();
 }
 
 ClipWaveformView* TrackLanesView::findLaneAtScreenPosition(const juce::Point<int> screenPos)
@@ -1051,27 +1111,24 @@ void TrackLanesView::resized()
 
     auto area = getLocalBounds();
     const int vr = static_cast<int>(visibleTrackEntries_.size());
-    bool instrumentBridgedInLayout = false;
-    for (const VisibleTrackEntry& entry : visibleTrackEntries_)
+
+    std::unordered_set<TrackId> instrumentVisibleTids;
+    for (const VisibleTrackEntry& ve : visibleTrackEntries_)
+        if (ve.kind == VisibleTrackKind::Instrument)
+            instrumentVisibleTids.insert(ve.sessionTrackId);
+
+    for (auto& kv : instrumentTimelineAttachments_)
     {
-        if (entry.kind == VisibleTrackKind::Instrument)
+        const bool visible = instrumentVisibleTids.count(kv.first) > 0;
+        InstrumentTimelineAttachment& a = kv.second;
+        if (a.header != nullptr)
         {
-            instrumentBridgedInLayout = true;
-            break;
+            a.header->setVisible(visible && a.controller != nullptr && a.controller->hasInstrumentTrack());
         }
-    }
-
-    const bool hasInst = instrumentController_ != nullptr
-        && instrumentController_->hasInstrumentTrack() && instrumentBridgedInLayout
-        && instrumentHeader_ != nullptr && instrumentMidiLane_ != nullptr;
-
-    if (instrumentHeader_ != nullptr)
-    {
-        instrumentHeader_->setVisible(hasInst);
-    }
-    if (instrumentMidiLane_ != nullptr)
-    {
-        instrumentMidiLane_->setVisible(hasInst);
+        if (a.midiLane != nullptr)
+        {
+            a.midiLane->setVisible(visible && a.controller != nullptr && a.controller->hasInstrumentTrack());
+        }
     }
 
     if (area.getHeight() <= 0 || vr <= 0)
@@ -1093,12 +1150,14 @@ void TrackLanesView::resized()
         const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)vi];
         if (e.kind == VisibleTrackKind::Instrument)
         {
-            if (instrumentHeader_ != nullptr && instrumentMidiLane_ != nullptr)
+            auto itA = instrumentTimelineAttachments_.find(e.sessionTrackId);
+            if (itA != instrumentTimelineAttachments_.end() && itA->second.header != nullptr
+                && itA->second.midiLane != nullptr)
             {
-                instrumentHeader_->setBounds(row.removeFromLeft(leftW));
-                instrumentMidiLane_->setBounds(row);
-                instrumentHeader_->toFront(false);
-                instrumentMidiLane_->toFront(false);
+                itA->second.header->setBounds(row.removeFromLeft(leftW));
+                itA->second.midiLane->setBounds(row);
+                itA->second.header->toFront(false);
+                itA->second.midiLane->toFront(false);
             }
         }
         else
@@ -1153,11 +1212,16 @@ int TrackLanesView::visibleRowPixelHeight(const int visibleIndex) const noexcept
     const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)visibleIndex];
     if (e.kind == VisibleTrackKind::Instrument)
     {
-        if (instrumentHeader_ != nullptr)
+        auto itA = instrumentTimelineAttachments_.find(e.sessionTrackId);
+        if (itA == instrumentTimelineAttachments_.end())
         {
-            return instrumentHeader_->getHeight();
+            return 0;
         }
-        return instrumentMidiLane_ != nullptr ? instrumentMidiLane_->getHeight() : 0;
+        if (itA->second.header != nullptr)
+        {
+            return itA->second.header->getHeight();
+        }
+        return itA->second.midiLane != nullptr ? itA->second.midiLane->getHeight() : 0;
     }
     const int si = audioLaneIndexFromTrackId(e.sessionTrackId);
     if (si < 0 || si >= (int)lanes_.size() || lanes_[(size_t)si] == nullptr)

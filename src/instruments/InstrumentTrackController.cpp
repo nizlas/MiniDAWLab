@@ -13,9 +13,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 
-namespace
-{
-[[nodiscard]] const ProjectFileExperimentalInstrumentTrackV1* selectedEnabledGrooveAgentPayload(
+[[nodiscard]] static const ProjectFileExperimentalInstrumentTrackV1* selectedEnabledGrooveAgentPayload(
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
 {
     for (const auto& t : tracks)
@@ -29,7 +27,7 @@ namespace
     return nullptr;
 }
 
-[[nodiscard]] TrackId resolveExperimentalInstrumentBindLaneId(
+[[nodiscard]] static TrackId resolveExperimentalInstrumentBindLaneId(
     Session* sessionMaybe,
     const TrackId dtoTrackField,
     const std::vector<ProjectFileTrackV1>* persistedSerializedTracksMaybe) noexcept
@@ -101,7 +99,14 @@ namespace
 
     return bindId;
 }
-} // namespace
+
+TrackId InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
+    Session* sessionNullable,
+    const TrackId dtoTrackField,
+    const std::vector<ProjectFileTrackV1>* persistedSerializedTracksMaybe) noexcept
+{
+    return resolveExperimentalInstrumentBindLaneId(sessionNullable, dtoTrackField, persistedSerializedTracksMaybe);
+}
 
 InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept
     : host_(host)
@@ -150,6 +155,63 @@ juce::String InstrumentTrackController::getLaneHeaderText() const
     return t + "\n" + getLaneHeaderSubtitle();
 }
 
+bool InstrumentTrackController::bootstrapGrooveAgentShellForSessionTrack(const TrackId sessionInstrumentTrackId) noexcept
+{
+    if (sessionInstrumentTrackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    if (trackActive_ && experimentalDomainTrackId_ != sessionInstrumentTrackId)
+    {
+        return false;
+    }
+    if (session_ == nullptr)
+    {
+        return false;
+    }
+    if (const auto snap = session_->loadSessionSnapshotForAudioThread())
+    {
+        const int ix = snap->findTrackIndexById(sessionInstrumentTrackId);
+        if (ix < 0 || snap->getTrack(ix).getKind() != TrackKind::Instrument)
+        {
+            return false;
+        }
+    }
+
+    experimentalDomainTrackId_ = sessionInstrumentTrackId;
+
+    trackActive_ = true;
+    powerOn_ = true;
+    muted_ = false;
+    isActive_ = false;
+    requiredKitName_ = "FiftySixDegreesModified";
+    pendingProjectGrooveAutoload_ = false;
+    pendingAdvisoryPluginBundlePath_.clear();
+    pendingInstrumentKind_.clear();
+    instrumentLoaded_ = computeInstrumentLoadedFromHost();
+
+    if (clips_.empty())
+    {
+        auto clip = std::make_unique<InstrumentMidiClip>();
+        clip->id = nextClipId_++;
+        clip->name = "MIDI 1";
+        clip->pattern.numSteps = 16;
+        clip->pattern.stepDenom = 16;
+        clip->pattern.bpm = 110.0;
+        clip->pattern.loop = true;
+        clip->laneStartFractionPermille = 0;
+        clip->laneEndFractionPermille = 250;
+        clip->startSamples = 0;
+        clip->lengthSamples = 0;
+        selectedClipId_ = 0;
+        clips_.push_back(std::move(clip));
+        recomputeLockedClipLengthFromPatternGrid(*clips_.back());
+    }
+
+    sendChangeMessage();
+    return true;
+}
+
 bool InstrumentTrackController::tryAddGrooveAgentInstrumentTrackShell()
 {
     if (session_ == nullptr)
@@ -163,39 +225,7 @@ bool InstrumentTrackController::tryAddGrooveAgentInstrumentTrackShell()
 
     const std::optional<TrackId> newId
         = session_->appendExperimentalInstrumentShellTrack(juce::String("Groove Agent SE"));
-    if (!newId.has_value())
-    {
-        return false;
-    }
-    experimentalDomainTrackId_ = *newId;
-
-    trackActive_ = true;
-    powerOn_ = true;
-    muted_ = false;
-    isActive_ = false;
-    requiredKitName_ = "FiftySixDegreesModified";
-    pendingProjectGrooveAutoload_ = false;
-    pendingAdvisoryPluginBundlePath_.clear();
-    pendingInstrumentKind_.clear();
-    instrumentLoaded_ = computeInstrumentLoadedFromHost();
-
-    auto clip = std::make_unique<InstrumentMidiClip>();
-    clip->id = nextClipId_++;
-    clip->name = "MIDI 1";
-    clip->pattern.numSteps = 16;
-    clip->pattern.stepDenom = 16;
-    clip->pattern.bpm = 110.0;
-    clip->pattern.loop = true;
-    clip->laneStartFractionPermille = 0;
-    clip->laneEndFractionPermille = 250;
-    clip->startSamples = 0;
-    clip->lengthSamples = 0;
-    selectedClipId_ = 0;
-    clips_.push_back(std::move(clip));
-    recomputeLockedClipLengthFromPatternGrid(*clips_.back());
-
-    sendChangeMessage();
-    return true;
+    return newId.has_value() && bootstrapGrooveAgentShellForSessionTrack(*newId);
 }
 
 void InstrumentTrackController::syncShellWithHostState()
@@ -588,6 +618,11 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         {
             continue;
         }
+        const bool unspecifiedTrackBinding = (t.trackId == static_cast<TrackId>(0));
+        if (!unspecifiedTrackBinding && t.trackId != experimentalDomainTrackId_)
+        {
+            continue;
+        }
         chosen = &t;
         break;
     }
@@ -711,26 +746,24 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks,
     const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRows)
 {
-    clearExperimentalInstrumentStateForProjectLoad();
-
-    const ProjectFileExperimentalInstrumentTrackV1* chosen = nullptr;
-    for (const auto& t : tracks)
-    {
-        if (!t.enabled || t.instrumentKind != "GrooveAgentSE")
-        {
-            continue;
-        }
-        chosen = &t;
-        break;
-    }
+    const ProjectFileExperimentalInstrumentTrackV1* chosen = selectedEnabledGrooveAgentPayload(tracks);
     if (chosen == nullptr)
     {
+        clearExperimentalInstrumentStateForProjectLoad();
         sendChangeMessage();
         return;
     }
+    restoreExperimentalInstrumentSingleProjectRow(*chosen, persistedSerializedTrackRows);
+}
 
-    experimentalDomainTrackId_ = resolveExperimentalInstrumentBindLaneId(
-        session_, chosen->trackId, persistedSerializedTrackRows);
+void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
+    const ProjectFileExperimentalInstrumentTrackV1& chosen,
+    const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRows)
+{
+    clearExperimentalInstrumentStateForProjectLoad();
+
+    experimentalDomainTrackId_
+        = resolveExperimentalInstrumentBindLaneId(session_, chosen.trackId, persistedSerializedTrackRows);
 
     std::shared_ptr<const SessionSnapshot> snap;
     if (session_ != nullptr)
@@ -739,8 +772,8 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     }
 
     trackActive_ = true;
-    bool power = chosen->powerOn;
-    bool mute = chosen->muted;
+    bool power = chosen.powerOn;
+    bool mute = chosen.muted;
     if (snap != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
     {
         const int ix = snap->findTrackIndexById(experimentalDomainTrackId_);
@@ -754,21 +787,22 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     powerOn_ = power;
     muted_ = mute;
     isActive_ = false;
-    requiredKitName_ = chosen->requiredKitName.isNotEmpty() ? chosen->requiredKitName : juce::String("FiftySixDegreesModified");
-    pendingProjectGrooveAutoload_ = chosen->pluginWasLoadedOnSave && chosen->instrumentKind == "GrooveAgentSE";
-    pendingAdvisoryPluginBundlePath_ = chosen->pluginBundlePath;
-    pendingInstrumentKind_ = chosen->instrumentKind;
-    pendingPluginStateBase64_ = chosen->pluginStateBase64;
+    requiredKitName_
+        = chosen.requiredKitName.isNotEmpty() ? chosen.requiredKitName : juce::String("FiftySixDegreesModified");
+    pendingProjectGrooveAutoload_ = chosen.pluginWasLoadedOnSave && chosen.instrumentKind == "GrooveAgentSE";
+    pendingAdvisoryPluginBundlePath_ = chosen.pluginBundlePath;
+    pendingInstrumentKind_ = chosen.instrumentKind;
+    pendingPluginStateBase64_ = chosen.pluginStateBase64;
 
     drumLabels_.clear();
-    for (const auto& kv : chosen->drumNoteNameOverrides)
+    for (const auto& kv : chosen.drumNoteNameOverrides)
     {
         if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
         {
             drumLabels_[kv.first].manual = kv.second;
         }
     }
-    for (const auto& kv : chosen->drumNoteNameAutoPlugin)
+    for (const auto& kv : chosen.drumNoteNameAutoPlugin)
     {
         if (kv.first >= 0 && kv.first <= 127 && kv.second.isNotEmpty())
         {
@@ -777,7 +811,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     }
 
     InstrumentMidiClipId maxId = 0;
-    for (const auto& cdto : chosen->clips)
+    for (const auto& cdto : chosen.clips)
     {
         auto clip = std::make_unique<InstrumentMidiClip>();
         clip->id = static_cast<InstrumentMidiClipId>(cdto.id);

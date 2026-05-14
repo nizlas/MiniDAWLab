@@ -134,6 +134,8 @@ public:
     [[nodiscard]] bool getLastLoadedPluginDescription(juce::PluginDescription& out) const noexcept;
 
     void openNativeEditor();
+    /// [Message thread] Closes the native editor window if open (e.g. before track teardown). No-op if closed.
+    void closeNativeEditor();
     void editorWindowClosing();
 
     /// [Message thread] I2: enqueue MIDI for the next audio block. No-op if not on message thread
@@ -186,8 +188,6 @@ private:
     [[nodiscard]] bool tryPrepareInstrumentLayout(juce::AudioPluginInstance& inst,
                                                   double sampleRate,
                                                   int blockSize);
-
-    void closeNativeEditor();
 
     struct MidiIoState;
     std::unique_ptr<MidiIoState> midiIo_;

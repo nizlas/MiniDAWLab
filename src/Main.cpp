@@ -94,6 +94,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -600,8 +601,6 @@ private:
 
         void sideStripLayoutChanged() override { resized(); }
 
-        [[nodiscard]] InstrumentTrackController* instrumentControllerForTimelineUiLane() const noexcept;
-
         [[nodiscard]] InstrumentTrackController* primaryInstrumentRuntimeForSessionApi() noexcept;
 
         [[nodiscard]] ExperimentalInstrumentHost* primaryExperimentalInstrumentHostPointer() noexcept;
@@ -641,7 +640,17 @@ private:
 
         void syncInstrumentTimelineRowAttachmentToSession() noexcept;
 
-        [[nodiscard]] InstrumentTrackController* instrumentControllerForAttachedTimelineRow() const noexcept;
+        [[nodiscard]] juce::String proposeNextGrooveAgentInstrumentTrackDisplayName() const;
+        [[nodiscard]] bool tryCloneGrooveAgentFromAnyExistingInto(ExperimentalInstrumentHost& dest) noexcept;
+
+        [[nodiscard]] std::vector<ProjectFileExperimentalInstrumentTrackV1>
+        buildSortedInstrumentMusicalUndoSnapshot() const;
+        static void stableSortInstrumentMusicalUndoVector(std::vector<ProjectFileExperimentalInstrumentTrackV1>& v);
+        void applyInstrumentMusicalUndoVectorToAllKeyedControllers(
+            const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept;
+
+        void ensureInstrumentTimelineHeaderAndLaneForTrack(TrackId tid);
+        void tearDownExperimentalInstrumentTimelineUiForTrack(TrackId tid) noexcept;
 
         void runExperimentalInstrumentPluginDescriptionRescanForTrack(TrackId tid);
 
@@ -684,7 +693,6 @@ private:
             , inspectorView_(sessionIn)
             , inspectorResizeSplitter_(*this)
             , inspectorCollapsedKnob_(*this)
-            , instrumentMidiEventLane_(*this)
         {
             playbackEngine_.setExperimentalInstrumentDeviceLifecycleHooks(
                 [this](const double sr, const int bs) { prepareExperimentalInstrumentHostsForDevice(sr, bs); },
@@ -699,165 +707,6 @@ private:
             });
             setWantsKeyboardFocus(true);
             audioWaveformCache_.setOnPyramidReady([this](const AudioClip*) { trackLanesView.repaint(); });
-            {
-                TrackHeaderCallbacks hdrCb;
-                // Selecting the instrument row makes it the UI-active track and clears any audio
-                // header active highlight (mutex; no `Session` change — see `setHeaderActiveSuppressProvider`).
-                hdrCb.onActivateName = [this] {
-                    InstrumentTrackController* ctl = nullptr;
-                    if (const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-                        tid != kInvalidTrackId)
-                    {
-                        ctl = getInstrumentControllerForTrack(tid);
-                    }
-                    if (ctl == nullptr)
-                    {
-                        ctl = instrumentControllerForAttachedTimelineRow();
-                    }
-                    if (ctl != nullptr)
-                    {
-                        ctl->setActive(true);
-                    }
-                    trackLanesView.repaint();
-                };
-                hdrCb.onTogglePower = [this]() -> bool {
-                    if (trackLanesView.isStructuralTimelineEditBlocked())
-                    {
-                        return false;
-                    }
-                    InstrumentTrackController* ctl = nullptr;
-                    if (const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-                        tid != kInvalidTrackId)
-                    {
-                        ctl = getInstrumentControllerForTrack(tid);
-                    }
-                    if (ctl == nullptr)
-                    {
-                        ctl = instrumentControllerForAttachedTimelineRow();
-                    }
-                    if (ctl != nullptr)
-                    {
-                        ctl->setPowerOn(!ctl->isPowerOn());
-                        ctl->setActive(true);
-                    }
-                    trackLanesView.repaint();
-                    return true;
-                };
-                hdrCb.onToggleMute = [this] {
-                    InstrumentTrackController* ctl = nullptr;
-                    if (const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-                        tid != kInvalidTrackId)
-                    {
-                        ctl = getInstrumentControllerForTrack(tid);
-                    }
-                    if (ctl == nullptr)
-                    {
-                        ctl = instrumentControllerForAttachedTimelineRow();
-                    }
-                    if (ctl != nullptr)
-                    {
-                        ctl->setMuted(!ctl->isMuted());
-                        ctl->setActive(true);
-                    }
-                    trackLanesView.repaint();
-                };
-                hdrCb.onToggleArm = nullptr;
-                hdrCb.onShowContextMenu =
-                    [this](TrackHeaderView& header, const juce::MouseEvent&) {
-                    const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-                    if (InstrumentTrackController* ctl
-                        = tid != kInvalidTrackId ? getInstrumentControllerForTrack(tid)
-                                                 : instrumentControllerForAttachedTimelineRow())
-                    {
-                        ctl->setActive(true);
-                    }
-                    trackLanesView.repaint();
-
-                    ExperimentalInstrumentHost* mh
-                        = tid != kInvalidTrackId ? getInstrumentHostForTrack(tid) : nullptr;
-                    constexpr int kRescanInstrumentPluginDescription = 101;
-                    const bool has = (mh != nullptr && mh->hasInstrument());
-                    const juce::File instBundle(has ? mh->getLastLoadedVst3OriginalPath() : juce::File{});
-                    const bool canRescanDesc =
-                        tid != kInvalidTrackId && has && instBundle.exists() && !experimentalOopScanBusy_.load();
-
-                    juce::PopupMenu menu;
-                    juce::PopupMenu::Item rescanItem;
-                    rescanItem.itemID = kRescanInstrumentPluginDescription;
-                    rescanItem.text = "Rescan instrument plugin description";
-                    rescanItem.isEnabled = canRescanDesc;
-                    menu.addItem(rescanItem);
-
-                    juce::Component::SafePointer<TransportControlsContent> safeThis(this);
-                    menu.showMenuAsync(
-                        juce::PopupMenu::Options().withTargetComponent(&header),
-                        [safeThis, tid, kRescanInstrumentPluginDescription](const int result) {
-                            if (safeThis == nullptr || result == 0)
-                            {
-                                return;
-                            }
-                            if (result == kRescanInstrumentPluginDescription)
-                            {
-                                safeThis->runExperimentalInstrumentPluginDescriptionRescanForTrack(tid);
-                            }
-                        });
-                };
-                hdrCb.onOpenInstrumentEditor = [this] {
-                    const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-                    if (ExperimentalInstrumentHost* mh = tid != kInvalidTrackId ? getInstrumentHostForTrack(tid) : nullptr)
-                    {
-                        mh->openNativeEditor();
-                        return;
-                    }
-                    if (InstrumentTrackController* ctl = instrumentControllerForAttachedTimelineRow())
-                    {
-                        const TrackId dom = ctl->getExperimentalInstrumentDomainTrackId();
-                        if (dom != kInvalidTrackId)
-                        {
-                            if (ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(dom))
-                            {
-                                mh->openNativeEditor();
-                            }
-                        }
-                    }
-                };
-
-                instrumentTrackHeader_ = std::make_unique<TrackHeaderView>(
-                    [this]() -> TrackHeaderModel {
-                        TrackHeaderModel m;
-                        m.name = juce::String("Groove Agent SE");
-                        m.subtitle = {};
-                        const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-                        InstrumentTrackController* ctl = nullptr;
-                        if (tid != kInvalidTrackId)
-                        {
-                            ctl = getInstrumentControllerForTrack(tid);
-                        }
-                        if (ctl == nullptr)
-                        {
-                            ctl = instrumentControllerForAttachedTimelineRow();
-                        }
-                        ExperimentalInstrumentHost* mh
-                            = tid != kInvalidTrackId ? getInstrumentHostForTrack(tid) : nullptr;
-                        if (mh == nullptr && ctl != nullptr)
-                        {
-                            mh = getInstrumentHostForTrack(ctl->getExperimentalInstrumentDomainTrackId());
-                        }
-                        const bool ctlOk = ctl != nullptr;
-                        m.active = ctlOk && ctl->isActive();
-                        m.armed = false;
-                        m.muted = ctlOk ? ctl->isMuted() : false;
-                        m.off = ctlOk ? !ctl->isPowerOn() : false;
-                        m.powerInteractable = !trackLanesView.isStructuralTimelineEditBlocked();
-                        m.muteInteractable = true;
-                        m.armInteractable = false;
-                        m.instrumentEditorAvailable = (mh != nullptr && mh->hasInstrument());
-                        return m;
-                    },
-                    std::move(hdrCb),
-                    kInvalidTrackId,
-                    std::nullopt);
-            }
             timelineViewport_.setOnVisibleRangeChanged([this] {
                 rulerView.repaint();
                 trackLanesView.repaint();
@@ -1033,10 +882,27 @@ private:
                         const int ix = snap->findTrackIndexById(tid);
                         if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Instrument)
                         {
-                            return false;
+                            if (ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(tid))
+                            {
+                                mh->closeNativeEditor();
+                            }
+                            if (midiEditorOpenedForInstrumentTrackId_.has_value()
+                                && midiEditorOpenedForInstrumentTrackId_.value() == tid)
+                            {
+                                experimentalMidiEditorWindow_.reset();
+                                midiEditorOpenedForInstrumentTrackId_.reset();
+                            }
+                            tearDownExperimentalInstrumentTimelineUiForTrack(tid);
+                            pluginHost_.evictPluginForTrackNoUndo(tid);
+                            session.removeTrack(tid);
+                            removeInstrumentRuntimeForTrack(tid);
+                            refreshExperimentalInstrumentUi();
                         }
-                        pluginHost_.evictPluginForTrackNoUndo(tid);
-                        session.removeTrack(tid);
+                        else
+                        {
+                            pluginHost_.evictPluginForTrackNoUndo(tid);
+                            session.removeTrack(tid);
+                        }
                         syncViewportFromSession();
                         trackLanesView.syncTracksFromSession();
                         rulerView.repaint();
@@ -1304,14 +1170,23 @@ private:
             // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.
             trackLanesView.setHeaderActiveSuppressProvider(
                 [this] {
-                    InstrumentTrackController* ctl = instrumentControllerForAttachedTimelineRow();
-                    return ctl != nullptr && ctl->isActive();
+                    for (const auto& kv : instrumentControllersByTrackId_)
+                    {
+                        if (kv.second != nullptr && kv.second->isActive())
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
                 });
             trackLanesView.setOnAudioHeaderActivated(
                 [this] {
-                    if (InstrumentTrackController* ctl = instrumentControllerForAttachedTimelineRow())
+                    for (const auto& kv : instrumentControllersByTrackId_)
                     {
-                        ctl->setActive(false);
+                        if (kv.second != nullptr)
+                        {
+                            kv.second->setActive(false);
+                        }
                     }
                 });
             deviceManager.addChangeListener(this);
@@ -1319,7 +1194,7 @@ private:
             startTimerHz(10);
             syncViewportFromSession();
             syncInstrumentClipTimelineFromDevice();
-            instrumentMidiEventLane_.retargetFromOwner();
+            syncInstrumentTimelineRowAttachmentToSession();
         }
 
         ~TransportControlsContent() override
@@ -1611,10 +1486,7 @@ private:
                 }
                 const std::vector<ProjectFileExperimentalInstrumentTrackV1>& mus
                     = bundle->isRedo ? bundle->instrumentSides->after : bundle->instrumentSides->before;
-                if (InstrumentTrackController* const ctl = primaryInstrumentRuntimeForSessionApi())
-                {
-                    ctl->applyExperimentalInstrumentMusicalUndoBlock(mus);
-                }
+                applyInstrumentMusicalUndoVectorToAllKeyedControllers(mus);
                 rebindExperimentalMidiEditorAfterInstrumentMusicalUndo();
             }
             refreshAfterSessionSnapshotRestore();
@@ -1704,10 +1576,7 @@ private:
                 }
                 const std::vector<ProjectFileExperimentalInstrumentTrackV1>& mus
                     = bundle->isRedo ? bundle->instrumentSides->after : bundle->instrumentSides->before;
-                if (InstrumentTrackController* const ctl = primaryInstrumentRuntimeForSessionApi())
-                {
-                    ctl->applyExperimentalInstrumentMusicalUndoBlock(mus);
-                }
+                applyInstrumentMusicalUndoVectorToAllKeyedControllers(mus);
                 rebindExperimentalMidiEditorAfterInstrumentMusicalUndo();
             }
             refreshAfterSessionSnapshotRestore();
@@ -1747,9 +1616,16 @@ private:
         // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
         void resized() override
         {
-            if (InstrumentTrackController* const ctl = primaryInstrumentRuntimeForSessionApi())
+            if (instrumentStagingController_ != nullptr)
             {
-                ctl->syncShellWithHostState();
+                instrumentStagingController_->syncShellWithHostState();
+            }
+            for (auto& kv : instrumentControllersByTrackId_)
+            {
+                if (kv.second != nullptr)
+                {
+                    kv.second->syncShellWithHostState();
+                }
             }
             auto area = getLocalBounds().reduced(8);
             auto row = area.removeFromTop(32);
@@ -1865,14 +1741,10 @@ private:
             }
         }
 
-        void wireMidiEditorForOpenClip(InstrumentMidiClip* clip)
+        void wireMidiEditorForOpenClip(const TrackId timelineInstrumentTrackId, InstrumentMidiClip* clip)
         {
             jassert(clip != nullptr);
-            InstrumentTrackController* ctl = instrumentControllerForAttachedTimelineRow();
-            if (ctl == nullptr)
-            {
-                ctl = primaryInstrumentRuntimeForSessionApi();
-            }
+            InstrumentTrackController* ctl = getInstrumentControllerForTrack(timelineInstrumentTrackId);
             if (ctl == nullptr)
             {
                 return;
@@ -1894,9 +1766,7 @@ private:
                     commitInstrumentMusicalUndoPair(lab, std::move(before));
                 },
                 [this] {
-                    InstrumentTrackController* c = primaryInstrumentRuntimeForSessionApi();
-                    return c != nullptr ? c->buildExperimentalInstrumentMusicalUndoBlock()
-                                        : std::vector<ProjectFileExperimentalInstrumentTrackV1>{};
+                    return buildSortedInstrumentMusicalUndoSnapshot();
                 },
                 [this] { invokeUndoFromWindowShortcut(); },
                 [this] { invokeRedoFromWindowShortcut(); });
@@ -1919,6 +1789,7 @@ private:
                 [this] { invokeUndoFromWindowShortcut(); },
                 [this] { invokeRedoFromWindowShortcut(); });
             experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+            midiEditorOpenedForInstrumentTrackId_.reset();
             if (reasonForUser.isNotEmpty())
             {
                 juce::AlertWindow::showMessageBoxAsync(
@@ -1948,11 +1819,15 @@ private:
                 writeUndoDiagnosticLogLine("[UndoDiag] rebindMidiAfterInstrumentUndo clipId="
                                            + juce::String(static_cast<juce::int64>(clipId)));
             }
-            InstrumentTrackController* ctl = instrumentControllerForAttachedTimelineRow();
-            if (ctl == nullptr)
+            if (!midiEditorOpenedForInstrumentTrackId_.has_value())
             {
-                ctl = primaryInstrumentRuntimeForSessionApi();
+                detachMidiEditorToScratchAfterMissingInstrumentClip(
+                    "The MIDI clip being edited is no longer available after undo.\n\n"
+                    "The editor was switched to scratch mode.");
+                return;
             }
+            InstrumentTrackController* ctl
+                = getInstrumentControllerForTrack(midiEditorOpenedForInstrumentTrackId_.value());
             if (ctl == nullptr)
             {
                 detachMidiEditorToScratchAfterMissingInstrumentClip(
@@ -1974,7 +1849,7 @@ private:
                 return;
             }
             ctl->setSelectedClipId(clipId);
-            wireMidiEditorForOpenClip(clip);
+            wireMidiEditorForOpenClip(midiEditorOpenedForInstrumentTrackId_.value(), clip);
             if constexpr (undo_diagnostic::kUndoDiag)
             {
                 writeUndoDiagnosticLogLine(
@@ -1984,13 +1859,10 @@ private:
             }
         }
 
-        void openMidiEditorForInstrumentClip(const InstrumentMidiClipId clipId)
+        void openMidiEditorForInstrumentClip(const TrackId timelineInstrumentTrackId,
+                                             const InstrumentMidiClipId clipId)
         {
-            InstrumentTrackController* ctl = instrumentControllerForAttachedTimelineRow();
-            if (ctl == nullptr)
-            {
-                ctl = primaryInstrumentRuntimeForSessionApi();
-            }
+            InstrumentTrackController* ctl = getInstrumentControllerForTrack(timelineInstrumentTrackId);
             if (ctl == nullptr)
             {
                 return;
@@ -2002,26 +1874,17 @@ private:
                 return;
             }
 
-            const TrackId attachedTid = trackLanesView.getAttachedInstrumentSessionTrackId();
-            TrackId hostTid = attachedTid != kInvalidTrackId
-                                  ? attachedTid
-                                  : (ctl != nullptr ? ctl->getExperimentalInstrumentDomainTrackId()
-                                                    : kInvalidTrackId);
-            ExperimentalInstrumentHost* mh
-                = hostTid != kInvalidTrackId ? getInstrumentHostForTrack(hostTid) : nullptr;
-            if (mh == nullptr)
-            {
-                mh = primaryExperimentalInstrumentHostPointer();
-            }
+            ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(timelineInstrumentTrackId);
             if (mh == nullptr)
             {
                 return;
             }
 
             ctl->setSelectedClipId(clipId);
+            midiEditorOpenedForInstrumentTrackId_ = timelineInstrumentTrackId;
             experimentalMidiEditorWindow_.reset();
             experimentalMidiEditorWindow_ = std::make_unique<ExperimentalMidiEditorWindow>(*mh);
-            wireMidiEditorForOpenClip(clip);
+            wireMidiEditorForOpenClip(timelineInstrumentTrackId, clip);
             experimentalMidiEditorWindow_->setVisible(true);
             experimentalMidiEditorWindow_->toFront(true);
         }
@@ -2039,9 +1902,16 @@ private:
                     sr = r;
                 }
             }
-            if (InstrumentTrackController* ctl = primaryInstrumentRuntimeForSessionApi())
+            if (instrumentStagingController_)
             {
-                ctl->setTimelineSampleRate(sr);
+                instrumentStagingController_->setTimelineSampleRate(sr);
+            }
+            for (auto& kv : instrumentControllersByTrackId_)
+            {
+                if (kv.second != nullptr)
+                {
+                    kv.second->setTimelineSampleRate(sr);
+                }
             }
         }
 
@@ -2057,11 +1927,20 @@ private:
         /// Repaint experimental instrument `TrackHeaderView` + MIDI lane (children of `trackLanesView`).
         void repaintInstrumentTrackRow()
         {
-            if (instrumentTrackHeader_ != nullptr)
+            for (auto& kv : instrumentTrackHeadersByTrackId_)
             {
-                instrumentTrackHeader_->repaint();
+                if (kv.second != nullptr)
+                {
+                    kv.second->repaint();
+                }
             }
-            instrumentMidiEventLane_.repaint();
+            for (auto& kv : instrumentMidiEventLanesByTrackId_)
+            {
+                if (kv.second != nullptr)
+                {
+                    kv.second->repaint();
+                }
+            }
         }
 
         /// MIDI clip lane only (same role as `ClipWaveformView`). Header is embedded in `trackLanesView`.
@@ -2071,10 +1950,18 @@ private:
         {
             static constexpr bool kLogInstrumentLane = false;
 
-            explicit InstrumentMidiEventLane(TransportControlsContent& ownerIn) noexcept
+            explicit InstrumentMidiEventLane(TransportControlsContent& ownerIn,
+                                            InstrumentTrackController* ctl,
+                                            TrackId timelineInstrumentTrackId) noexcept
                 : owner_(ownerIn)
+                , boundCtl_(ctl)
+                , laneTimelineTrackId_(timelineInstrumentTrackId)
             {
                 startTimerHz(20);
+                if (boundCtl_ != nullptr)
+                {
+                    boundCtl_->addChangeListener(this);
+                }
             }
 
             ~InstrumentMidiEventLane() override
@@ -2087,33 +1974,28 @@ private:
                 }
             }
 
-            void retargetFromOwner() noexcept
+            [[nodiscard]] TrackId laneTimelineTrackId() const noexcept { return laneTimelineTrackId_; }
+
+            void attachControllerIfStillValid(InstrumentTrackController* ctl) noexcept
             {
-                InstrumentTrackController* const p = owner_.instrumentControllerForAttachedTimelineRow();
-                if (p == boundCtl_)
+                if (ctl == boundCtl_)
                 {
                     return;
                 }
                 if (boundCtl_ != nullptr)
                 {
                     boundCtl_->removeChangeListener(this);
-                    boundCtl_ = nullptr;
                 }
-                boundCtl_ = p;
+                boundCtl_ = ctl;
                 if (boundCtl_ != nullptr)
                 {
                     boundCtl_->addChangeListener(this);
                 }
             }
 
+            [[nodiscard]] InstrumentTrackController* fixedControllerNullable() const noexcept { return boundCtl_; }
+
         private:
-            [[nodiscard]] InstrumentTrackController* activeControllerNullable() const noexcept
-            {
-                InstrumentTrackController* const c = boundCtl_ != nullptr
-                                                       ? boundCtl_
-                                                       : owner_.instrumentControllerForAttachedTimelineRow();
-                return c;
-            }
             void changeListenerCallback(juce::ChangeBroadcaster*) override
             {
                 owner_.repaintInstrumentTrackRow();
@@ -2227,12 +2109,13 @@ private:
                 if (auto* clip = hitTestClipAtEvent(e.position))
                 {
                     ac->setSelectedClipId(clip->id);
-                    owner_.openMidiEditorForInstrumentClip(clip->id);
+                    owner_.openMidiEditorForInstrumentClip(laneTimelineTrackId_, clip->id);
                     repaint();
                 }
             }
 
         private:
+            [[nodiscard]] InstrumentTrackController* activeControllerNullable() const noexcept { return boundCtl_; }
             [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const
             {
                 // Horizontal: must match `ClipWaveformView` (full lane width for sample↔pixel map).
@@ -2329,6 +2212,7 @@ private:
 
             TransportControlsContent& owner_;
             InstrumentTrackController* boundCtl_ = nullptr;
+            TrackId laneTimelineTrackId_ = kInvalidTrackId;
         };
 
         struct InternalClipPasteboard
@@ -2484,9 +2368,12 @@ private:
             if (structuralBlockedUi != lastStructuralTimelineBlockedForHeaderStripUi_)
             {
                 lastStructuralTimelineBlockedForHeaderStripUi_ = structuralBlockedUi;
-                if (instrumentTrackHeader_ != nullptr)
+                for (auto& kv : instrumentTrackHeadersByTrackId_)
                 {
-                    instrumentTrackHeader_->repaint();
+                    if (kv.second != nullptr)
+                    {
+                        kv.second->repaint();
+                    }
                 }
                 trackLanesView.repaint();
             }
@@ -2661,24 +2548,14 @@ private:
                 }
                 return;
             }
-            InstrumentTrackController* const ctlMus = primaryInstrumentRuntimeForSessionApi();
-            if (ctlMus == nullptr)
-            {
-                if constexpr (undo_diagnostic::kUndoDiag)
-                {
-                    writeUndoDiagnosticLogLine(
-                        "[UndoDiag] executeUndoableInstrumentEdit skip: no controller label=\"" + label + "\"");
-                }
-                return;
-            }
-            std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical
-                = ctlMus->buildExperimentalInstrumentMusicalUndoBlock();
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical = buildSortedInstrumentMusicalUndoSnapshot();
+            stableSortInstrumentMusicalUndoVector(beforeMusical);
             if (beforeMusical.empty())
             {
                 if constexpr (undo_diagnostic::kUndoDiag)
                 {
-                    writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit skip: empty before label=\""
-                                               + label + "\"");
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] executeUndoableInstrumentEdit skip: empty before label=\"" + label + "\"");
                 }
                 return;
             }
@@ -2696,8 +2573,8 @@ private:
                 }
                 return;
             }
-            std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical
-                = ctlMus->buildExperimentalInstrumentMusicalUndoBlock();
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical = buildSortedInstrumentMusicalUndoSnapshot();
+            stableSortInstrumentMusicalUndoVector(afterMusical);
             if (afterMusical.empty())
             {
                 if constexpr (undo_diagnostic::kUndoDiag)
@@ -2733,6 +2610,7 @@ private:
             const juce::String& label,
             std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical)
         {
+            stableSortInstrumentMusicalUndoVector(beforeMusical);
             if (beforeMusical.empty())
             {
                 return;
@@ -2742,13 +2620,8 @@ private:
             {
                 return;
             }
-            InstrumentTrackController* const ctlMus = primaryInstrumentRuntimeForSessionApi();
-            if (ctlMus == nullptr)
-            {
-                return;
-            }
-            std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical
-                = ctlMus->buildExperimentalInstrumentMusicalUndoBlock();
+            std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical = buildSortedInstrumentMusicalUndoSnapshot();
+            stableSortInstrumentMusicalUndoVector(afterMusical);
             if (afterMusical.empty() || experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical))
             {
                 return;
@@ -2984,13 +2857,20 @@ private:
         {
             syncInstrumentTimelineRowAttachmentToSession();
             updateExperimentalPlaybackBridgeAfterRegistryChange();
-            if (InstrumentTrackController* const ctl = primaryInstrumentRuntimeForSessionApi())
+            for (auto& kv : instrumentControllersByTrackId_)
             {
-                ctl->syncShellWithHostState();
+                if (kv.second != nullptr)
+                {
+                    kv.second->syncShellWithHostState();
+                }
             }
-            trackLanesView.refreshInstrumentHeaderReorderAttachment();
+            if (instrumentStagingController_ != nullptr)
+            {
+                instrumentStagingController_->syncShellWithHostState();
+            }
+            trackLanesView.refreshInstrumentHeaderReorderAttachments();
             trackLanesView.rebuildVisibleTrackEntries();
-            instrumentMidiEventLane_.retargetFromOwner();
+            syncInstrumentTimelineRowAttachmentToSession();
             resized();
 
             if (experimentalMidiEditorWindow_ != nullptr)
@@ -3001,41 +2881,95 @@ private:
 
         void onAddGrooveAgentInstrumentTrackFromMenu()
         {
-            const auto pair = getExperimentRuntimePairForGrooveAdds();
-            ExperimentalInstrumentHost* const mh = pair.first;
-            InstrumentTrackController* const ctl = pair.second;
+            if (!anyHeldExperimentalHostShowsGrooveAgentLoaded())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Instrument track",
+                    "Load Groove Agent SE from cached OOP description first.");
+                return;
+            }
+            const juce::String displayName = proposeNextGrooveAgentInstrumentTrackDisplayName();
+            const std::optional<TrackId> newIdOpt = session.appendExperimentalInstrumentShellTrack(displayName);
+            if (!newIdOpt.has_value())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon,
+                    "Instrument track",
+                    "Could not add instrument track shell.");
+                return;
+            }
+
+            const TrackId tid = *newIdOpt;
+            const bool registryWasEmpty = instrumentHostsByTrackId_.empty();
+            ExperimentalInstrumentHost* mh = nullptr;
+            InstrumentTrackController* ctl = nullptr;
+
+            if (registryWasEmpty && instrumentStagingHost_ != nullptr && instrumentStagingController_ != nullptr
+                && instrumentStagingHost_->hasInstrument()
+                && instrumentStagingHost_->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+            {
+                mh = instrumentStagingHost_.get();
+                ctl = instrumentStagingController_.get();
+            }
+            else
+            {
+                const auto pr = getOrCreateInstrumentRuntimeForTrack(tid);
+                mh = pr.first;
+                ctl = pr.second;
+            }
+
             if (mh == nullptr || ctl == nullptr)
             {
                 juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
                                                         "Instrument track",
                                                         "Could not allocate Groove Agent instrument runtime.");
+                session.removeTrack(tid);
+                if (!registryWasEmpty)
+                {
+                    removeInstrumentRuntimeForTrack(tid);
+                }
+                refreshExperimentalInstrumentUi();
                 return;
             }
-            if (!mh->hasInstrument())
+
+            if (!mh->hasInstrument() || !mh->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
             {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::InfoIcon,
-                    "Instrument track",
-                    "Load Groove Agent SE from cached OOP description first.");
-                return;
+                if (!tryCloneGrooveAgentFromAnyExistingInto(*mh))
+                {
+                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                            "Instrument track",
+                                                            "Could not clone Groove Agent into this instrument track.");
+                    session.removeTrack(tid);
+                    if (!registryWasEmpty)
+                    {
+                        removeInstrumentRuntimeForTrack(tid);
+                    }
+                    refreshExperimentalInstrumentUi();
+                    return;
+                }
             }
-            if (!mh->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+
+            if (!ctl->bootstrapGrooveAgentShellForSessionTrack(tid))
             {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::InfoIcon,
-                    "Instrument track",
-                    "Load Groove Agent SE from cached OOP description first.");
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                                        "Instrument track",
+                                                        "Could not bind Groove Agent to the new timeline row.");
+                session.removeTrack(tid);
+                if (!registryWasEmpty)
+                {
+                    removeInstrumentRuntimeForTrack(tid);
+                }
+                refreshExperimentalInstrumentUi();
                 return;
             }
-            if (!ctl->tryAddGrooveAgentInstrumentTrackShell())
+
+            if (registryWasEmpty && mh == instrumentStagingHost_.get() && ctl == instrumentStagingController_.get())
             {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::InfoIcon,
-                    "Instrument track",
-                    "An instrument track row is already shown.");
-                return;
+                promoteInstrumentStagingIntoRegistryBoundTo(tid);
             }
-            promoteInstrumentStagingIntoRegistryBoundTo(ctl->getExperimentalInstrumentDomainTrackId());
+
+            ctl->syncShellWithHostState();
             updateExperimentalPlaybackBridgeAfterRegistryChange();
             syncInstrumentClipTimelineFromDevice();
             refreshExperimentalInstrumentUi();
@@ -3092,12 +3026,11 @@ private:
 
         void runExperimentalInstrumentPluginDescriptionRescan()
         {
-            TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-            if (tid == kInvalidTrackId)
+            TrackId tid = canonicalInstrumentLaneTrackIdFromSession();
+            if (tid != kInvalidTrackId)
             {
-                tid = canonicalInstrumentLaneTrackIdFromSession();
+                runExperimentalInstrumentPluginDescriptionRescanForTrack(tid);
             }
-            runExperimentalInstrumentPluginDescriptionRescanForTrack(tid);
         }
 
         void beginAddVst3FolderForTrack(const TrackId trackId,
@@ -3214,9 +3147,11 @@ private:
                 {
                     experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
                 }
-                InstrumentTrackController* const ctlSave = primaryInstrumentRuntimeForSessionApi();
+                const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
+                    return getInstrumentControllerForTrack(laneId);
+                });
                 const juce::Result r = session.saveProjectToFile(
-                    transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_, ctlSave);
+                    transport, session.getCurrentProjectFile(), sampleRate, &pluginHost_, ctlLookup);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -3288,12 +3223,14 @@ private:
                 {
                     experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
                 }
-                InstrumentTrackController* const ctlSave = primaryInstrumentRuntimeForSessionApi();
+                const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
+                    return getInstrumentControllerForTrack(laneId);
+                });
                 const juce::Result r = session.saveProjectToFile(transport,
                                                                    projectFile,
                                                                    sampleRate,
                                                                    &pluginHost_,
-                                                                   ctlSave);
+                                                                   ctlLookup);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -3338,56 +3275,72 @@ private:
                 }
                 clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
 
-                InstrumentTrackController* ctlForLoad = nullptr;
-                if (!parsedLoad.experimentalInstrumentTracks.empty()
-                    && InstrumentTrackController::serializedProjectUsesEnabledGrooveAgentRow(
-                        parsedLoad.experimentalInstrumentTracks))
-                {
-                    const TrackId bindTid = InstrumentTrackController::peekExperimentalInstrumentBindLaneId(
-                        nullptr, parsedLoad.experimentalInstrumentTracks, parsedLoad.tracks);
-                    ctlForLoad = getOrCreateInstrumentRuntimeForTrack(bindTid).second;
-                }
-                if (ctlForLoad != nullptr)
-                {
-                    ctlForLoad->setTimelineSampleRate(sampleRate);
-                }
-
                 juce::StringArray skipped;
                 juce::String infoNote;
-                const juce::Result r = session.applyLoadedProjectModel(transport,
-                                                                       f,
-                                                                       parsedLoad,
-                                                                       sampleRate,
-                                                                       skipped,
-                                                                       infoNote,
-                                                                       &pluginHost_,
-                                                                       ctlForLoad);
+                const juce::Result r = session.applyLoadedProjectModel(
+                    transport,
+                    f,
+                    parsedLoad,
+                    sampleRate,
+                    skipped,
+                    infoNote,
+                    &pluginHost_);
                 if (!r.wasOk())
                 {
                     juce::AlertWindow::showMessageBoxAsync(
                         juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
                     return;
                 }
-                juce::String experimentalInstrumentAutoloadNote;
-                if (ctlForLoad != nullptr)
+                juce::String experimentalInstrumentAutoloadNoteAcc;
+                if (!parsedLoad.experimentalInstrumentTracks.empty())
                 {
-                    const TrackId dom = ctlForLoad->getExperimentalInstrumentDomainTrackId();
-                    ExperimentalInstrumentHost* mh
-                        = (dom != kInvalidTrackId ? getInstrumentHostForTrack(dom) : nullptr);
-                    if (mh == nullptr)
+                    for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
                     {
-                        mh = primaryExperimentalInstrumentHostPointer();
-                    }
-                    if (mh != nullptr)
-                    {
-                        ctlForLoad->runPendingGrooveAgentProjectAutoload(*mh, experimentalInstrumentAutoloadNote);
+                        if (!etRow.enabled || etRow.instrumentKind != "GrooveAgentSE")
+                        {
+                            continue;
+                        }
+                        const TrackId bindTid = InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
+                            &session,
+                            etRow.trackId,
+                            &parsedLoad.tracks);
+                        const std::shared_ptr<const SessionSnapshot> postSnap
+                            = session.loadSessionSnapshotForAudioThread();
+                        if (bindTid == kInvalidTrackId || postSnap == nullptr)
+                        {
+                            continue;
+                        }
+                        const int tix = postSnap->findTrackIndexById(bindTid);
+                        if (tix < 0 || postSnap->getTrack(tix).getKind() != TrackKind::Instrument)
+                        {
+                            continue;
+                        }
+                        const auto runtime = getOrCreateInstrumentRuntimeForTrack(bindTid);
+                        InstrumentTrackController* ctl = runtime.second;
+                        ExperimentalInstrumentHost* mh = runtime.first;
+                        if (ctl == nullptr || mh == nullptr)
+                        {
+                            continue;
+                        }
+                        ctl->setTimelineSampleRate(sampleRate);
+                        ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
+                        juce::String noteOne;
+                        ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
+                        if (noteOne.isNotEmpty())
+                        {
+                            if (experimentalInstrumentAutoloadNoteAcc.isNotEmpty())
+                            {
+                                experimentalInstrumentAutoloadNoteAcc << "\n\n";
+                            }
+                            experimentalInstrumentAutoloadNoteAcc << noteOne;
+                        }
                     }
                 }
                 if (experimentalMidiEditorWindow_ != nullptr)
                 {
                     experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
                 }
-                if (experimentalInstrumentAutoloadNote.isNotEmpty())
+                const juce::String experimentalInstrumentAutoloadNote(experimentalInstrumentAutoloadNoteAcc);
                 {
                     if (infoNote.isNotEmpty())
                     {
@@ -4079,10 +4032,11 @@ private:
         juce::TextButton pointerToolButton_{ "Pointer" };
         juce::TextButton splitToolButton_{ "Split" };
 
-        std::unique_ptr<TrackHeaderView> instrumentTrackHeader_;
+        std::unordered_map<TrackId, std::unique_ptr<TrackHeaderView>> instrumentTrackHeadersByTrackId_;
+        std::unordered_map<TrackId, std::unique_ptr<InstrumentMidiEventLane>> instrumentMidiEventLanesByTrackId_;
         /// Last `TrackLanesView::isStructuralTimelineEditBlocked()` — repaints headers on edge so power strip matches.
         bool lastStructuralTimelineBlockedForHeaderStripUi_ = false;
-        InstrumentMidiEventLane instrumentMidiEventLane_;
+        std::optional<TrackId> midiEditorOpenedForInstrumentTrackId_;
         juce::String lastExperimentalPlaybackRoutingPublishFingerprint_;
         juce::Label keyDiagLabel_;
 
@@ -4362,27 +4316,6 @@ private:
 
 // MSVC: defining `MiniDAWLabApplication::TransportControlsContent::…` qualified members inside the
 // application class body (between sibling nested classes) is parsed incorrectly; define at TU scope instead.
-InstrumentTrackController* MiniDAWLabApplication::TransportControlsContent::instrumentControllerForTimelineUiLane()
-    const noexcept
-{
-    const TrackId canon = canonicalInstrumentLaneTrackIdFromSession();
-    if (canon == kInvalidTrackId)
-    {
-        return nullptr;
-    }
-    auto it = instrumentControllersByTrackId_.find(canon);
-    if (it == instrumentControllersByTrackId_.end() || it->second == nullptr)
-    {
-        return nullptr;
-    }
-    InstrumentTrackController& c = *it->second;
-    if (!c.hasInstrumentTrack() || canon != c.getExperimentalInstrumentDomainTrackId())
-    {
-        return nullptr;
-    }
-    return &c;
-}
-
 InstrumentTrackController* MiniDAWLabApplication::TransportControlsContent::primaryInstrumentRuntimeForSessionApi() noexcept
 {
     InstrumentTrackController* keyed = [&]() noexcept -> InstrumentTrackController* {
@@ -4505,39 +4438,12 @@ MiniDAWLabApplication::TransportControlsContent::getOrCreateInstrumentRuntimeFor
     {
         return { hostExisting, ctlExisting };
     }
-    if (!instrumentHostsByTrackId_.empty())
+    if (instrumentHostsByTrackId_.empty() && instrumentStagingController_ != nullptr
+        && instrumentStagingHost_ != nullptr && instrumentStagingController_->hasInstrumentTrack()
+        && instrumentStagingController_->getExperimentalInstrumentDomainTrackId() == tid)
     {
-        const TrackId other = instrumentHostsByTrackId_.begin()->first;
-        juce::Logger::writeToLog(
-            "[TransportControlsContent] Instrument runtime already exists for TrackId="
-            + juce::String((juce::int64)other) + " — rejecting duplicate lane id="
-            + juce::String((juce::int64)tid) + " (single-instrument slice).");
-        return { getInstrumentHostForTrack(other), getInstrumentControllerForTrack(other) };
-    }
-    if (instrumentStagingHost_ != nullptr || instrumentStagingController_ != nullptr)
-    {
-        InstrumentTrackController* const stc = instrumentStagingController_.get();
-        if (stc == nullptr)
-        {
-            instrumentStagingHost_.reset();
-        }
-        else if (!stc->hasInstrumentTrack())
-        {
-            instrumentStagingController_.reset();
-            instrumentStagingHost_.reset();
-        }
-        else if (instrumentHostsByTrackId_.empty() && stc->getExperimentalInstrumentDomainTrackId() == tid)
-        {
-            promoteInstrumentStagingIntoRegistryBoundTo(tid);
-            return { getInstrumentHostForTrack(tid), getInstrumentControllerForTrack(tid) };
-        }
-        else
-        {
-            juce::Logger::writeToLog("[TransportControlsContent] Staging Groove Agent runtime occupies single slot — "
-                                     "ignoring keyed create TrackId="
-                                     + juce::String((juce::int64)tid) + ".");
-            return { instrumentStagingHost_.get(), instrumentStagingController_.get() };
-        }
+        promoteInstrumentStagingIntoRegistryBoundTo(tid);
+        return { getInstrumentHostForTrack(tid), getInstrumentControllerForTrack(tid) };
     }
 
     auto host = std::make_unique<ExperimentalInstrumentHost>();
@@ -4549,26 +4455,21 @@ MiniDAWLabApplication::TransportControlsContent::getOrCreateInstrumentRuntimeFor
     instrumentHostsByTrackId_.emplace(tid, std::move(host));
     instrumentControllersByTrackId_.emplace(tid, std::move(ctl));
     updateExperimentalPlaybackBridgeAfterRegistryChange();
-    instrumentMidiEventLane_.retargetFromOwner();
+    syncInstrumentTimelineRowAttachmentToSession();
     return { hostPtr, ctlPtr };
 }
 
 std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
 MiniDAWLabApplication::TransportControlsContent::getExperimentRuntimePairForGrooveAdds()
 {
-    if (canonicalInstrumentLaneTrackIdFromSession() != kInvalidTrackId)
-    {
-        const TrackId canon = canonicalInstrumentLaneTrackIdFromSession();
-        return getOrCreateInstrumentRuntimeForTrack(canon);
-    }
-    if (!instrumentStagingHost_)
+    if (instrumentStagingHost_ == nullptr || instrumentStagingController_ == nullptr)
     {
         instrumentStagingHost_ = std::make_unique<ExperimentalInstrumentHost>();
         instrumentStagingController_ = std::make_unique<InstrumentTrackController>(*instrumentStagingHost_);
         instrumentStagingController_->setSession(&session);
         wireExperimentalInstrumentHost(*instrumentStagingHost_, *instrumentStagingController_);
         updateExperimentalPlaybackBridgeAfterRegistryChange();
-        instrumentMidiEventLane_.retargetFromOwner();
+        syncInstrumentTimelineRowAttachmentToSession();
     }
     return { instrumentStagingHost_.get(), instrumentStagingController_.get() };
 }
@@ -4593,7 +4494,7 @@ void MiniDAWLabApplication::TransportControlsContent::promoteInstrumentStagingIn
     instrumentHostsByTrackId_[tid] = std::move(instrumentStagingHost_);
     instrumentControllersByTrackId_[tid] = std::move(instrumentStagingController_);
     updateExperimentalPlaybackBridgeAfterRegistryChange();
-    instrumentMidiEventLane_.retargetFromOwner();
+    syncInstrumentTimelineRowAttachmentToSession();
 }
 
 void MiniDAWLabApplication::TransportControlsContent::removeInstrumentRuntimeForTrack(const TrackId tid) noexcept
@@ -4601,12 +4502,16 @@ void MiniDAWLabApplication::TransportControlsContent::removeInstrumentRuntimeFor
     instrumentControllersByTrackId_.erase(tid);
     instrumentHostsByTrackId_.erase(tid);
     updateExperimentalPlaybackBridgeAfterRegistryChange();
-    instrumentMidiEventLane_.retargetFromOwner();
+    syncInstrumentTimelineRowAttachmentToSession();
 }
 
 void MiniDAWLabApplication::TransportControlsContent::clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept
 {
     experimentalMidiEditorWindow_.reset();
+    midiEditorOpenedForInstrumentTrackId_.reset();
+    trackLanesView.syncInstrumentTimelineAttachments({});
+    instrumentMidiEventLanesByTrackId_.clear();
+    instrumentTrackHeadersByTrackId_.clear();
     playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
     instrumentStagingController_.reset();
     instrumentStagingHost_.reset();
@@ -4662,54 +4567,78 @@ void MiniDAWLabApplication::TransportControlsContent::releaseExperimentalInstrum
     }
 }
 
-void MiniDAWLabApplication::TransportControlsContent::reconcileKeyedInstrumentMapsToExperimentalDomainSingleSlotIfNeeded() noexcept
+void MiniDAWLabApplication::TransportControlsContent::reconcileKeyedInstrumentMapsToExperimentalDomainSingleSlotIfNeeded()
+    noexcept
 {
     if (instrumentHostsByTrackId_.size() != instrumentControllersByTrackId_.size())
     {
         return;
     }
-    if (instrumentControllersByTrackId_.size() != 1)
-    {
-        return;
-    }
 
-    auto ctlIt = instrumentControllersByTrackId_.begin();
-    const TrackId staleKey = ctlIt->first;
-    InstrumentTrackController* const ctl = ctlIt->second.get();
-    if (ctl == nullptr || !ctl->hasInstrumentTrack())
+    for (;;)
     {
-        return;
-    }
-    const TrackId dom = ctl->getExperimentalInstrumentDomainTrackId();
-    if (dom == kInvalidTrackId || staleKey == dom)
-    {
-        return;
-    }
-    auto hostIt = instrumentHostsByTrackId_.find(staleKey);
-    if (hostIt == instrumentHostsByTrackId_.end() || hostIt->second == nullptr)
-    {
-        return;
-    }
+        TrackId staleKey = kInvalidTrackId;
+        TrackId domTarget = kInvalidTrackId;
+        InstrumentTrackController* ctlProbe = nullptr;
+        ExperimentalInstrumentHost* hostProbe = nullptr;
 
-    std::unique_ptr<ExperimentalInstrumentHost> uh = std::move(hostIt->second);
-    std::unique_ptr<InstrumentTrackController> uc = std::move(ctlIt->second);
-    instrumentHostsByTrackId_.erase(staleKey);
-    instrumentControllersByTrackId_.erase(staleKey);
-    instrumentHostsByTrackId_[dom] = std::move(uh);
-    instrumentControllersByTrackId_[dom] = std::move(uc);
+        for (const auto& kv : instrumentControllersByTrackId_)
+        {
+            InstrumentTrackController* const ctl = kv.second.get();
+            if (ctl == nullptr || !ctl->hasInstrumentTrack())
+            {
+                continue;
+            }
+            const TrackId dom = ctl->getExperimentalInstrumentDomainTrackId();
+            if (dom == kInvalidTrackId || kv.first == dom)
+            {
+                continue;
+            }
+            staleKey = kv.first;
+            domTarget = dom;
+            ctlProbe = ctl;
+            auto hi = instrumentHostsByTrackId_.find(staleKey);
+            hostProbe = (hi != instrumentHostsByTrackId_.end()) ? hi->second.get() : nullptr;
+            break;
+        }
 
-    juce::Logger::writeToLog(
-        "[TransportControlsContent] Instrument runtime maps re-keyed: map key "
-        + juce::String((juce::int64)(std::int64_t) staleKey) + " → controller domain "
-        + juce::String((juce::int64)(std::int64_t) dom)
-        + " so SessionSnapshot Instrument row and playback registry stay aligned.");
+        juce::ignoreUnused(ctlProbe);
+        if (staleKey == kInvalidTrackId || domTarget == kInvalidTrackId || hostProbe == nullptr)
+        {
+            break;
+        }
+        auto hostIt = instrumentHostsByTrackId_.find(staleKey);
+        auto ctlIt = instrumentControllersByTrackId_.find(staleKey);
+        if (hostIt == instrumentHostsByTrackId_.end() || ctlIt == instrumentControllersByTrackId_.end())
+        {
+            break;
+        }
+        if (instrumentHostsByTrackId_.count(domTarget) != 0 || instrumentControllersByTrackId_.count(domTarget) != 0)
+        {
+            juce::Logger::writeToLog(
+                "[TransportControlsContent] Instrument re-key aborted: collision at domain TrackId="
+                + juce::String((juce::int64)domTarget) + " staleKey="
+                + juce::String((juce::int64)staleKey));
+            break;
+        }
+
+        std::unique_ptr<ExperimentalInstrumentHost> uh = std::move(hostIt->second);
+        std::unique_ptr<InstrumentTrackController> uc = std::move(ctlIt->second);
+        instrumentHostsByTrackId_.erase(staleKey);
+        instrumentControllersByTrackId_.erase(staleKey);
+        instrumentHostsByTrackId_[domTarget] = std::move(uh);
+        instrumentControllersByTrackId_[domTarget] = std::move(uc);
+
+        juce::Logger::writeToLog("[TransportControlsContent] Instrument runtime maps re-keyed: map key "
+                                 + juce::String((juce::int64)(std::int64_t)staleKey)
+                                 + " → controller domain track id "
+                                 + juce::String((juce::int64)(std::int64_t)domTarget));
+    }
 }
 
 void MiniDAWLabApplication::TransportControlsContent::updateExperimentalPlaybackBridgeAfterRegistryChange()
 {
     reconcileKeyedInstrumentMapsToExperimentalDomainSingleSlotIfNeeded();
-
-    const TrackId canonLaneId = canonicalInstrumentLaneTrackIdFromSession();
 
     std::vector<ExperimentalInstrumentPlaybackEntry> entries;
     entries.reserve(instrumentControllersByTrackId_.size() + size_t { 2 });
@@ -4751,52 +4680,59 @@ void MiniDAWLabApplication::TransportControlsContent::updateExperimentalPlayback
         appendPlaybackRuntimePair(itHost->second.get(), ctl);
     }
 
-    ExperimentalInstrumentHost* mh = nullptr;
-    InstrumentTrackController* ctl = nullptr;
-
-    if (canonLaneId != kInvalidTrackId)
+    if (instrumentStagingController_ != nullptr && instrumentStagingController_->hasInstrumentTrack()
+        && instrumentStagingHost_ != nullptr)
     {
-        ctl = getInstrumentControllerForTrack(canonLaneId);
-        mh = getInstrumentHostForTrack(canonLaneId);
-        if (ctl == nullptr || !ctl->hasInstrumentTrack())
+        appendPlaybackRuntimePair(instrumentStagingHost_.get(), instrumentStagingController_.get());
+    }
+
+    {
+        std::vector<ExperimentalInstrumentPlaybackEntry> reordered;
+        reordered.reserve(entries.size());
+        std::unordered_map<TrackId, ExperimentalInstrumentPlaybackEntry> leftover;
+        for (auto& e : entries)
         {
-            ctl = nullptr;
-            mh = nullptr;
+            leftover.emplace(e.trackId, std::move(e));
         }
+        const std::shared_ptr<const SessionSnapshot> ordSnap = session.loadSessionSnapshotForAudioThread();
+        if (ordSnap != nullptr)
+        {
+            for (int ti = 0; ti < ordSnap->getNumTracks(); ++ti)
+            {
+                const Track& tr = ordSnap->getTrack(ti);
+                if (tr.getKind() != TrackKind::Instrument)
+                {
+                    continue;
+                }
+                auto li = leftover.find(tr.getId());
+                if (li != leftover.end())
+                {
+                    reordered.push_back(std::move(li->second));
+                    leftover.erase(li);
+                }
+            }
+        }
+        for (auto& lr : leftover)
+        {
+            reordered.push_back(std::move(lr.second));
+        }
+        entries = std::move(reordered);
     }
 
-    if (ctl == nullptr && instrumentStagingController_ != nullptr
-        && instrumentStagingController_->hasInstrumentTrack())
-    {
-        ctl = instrumentStagingController_.get();
-        mh = instrumentStagingHost_.get();
-    }
+    const TrackId canonLaneIdForLog = canonicalInstrumentLaneTrackIdFromSession();
 
-    if (ctl != nullptr && mh != nullptr && ctl->hasInstrumentTrack())
-    {
-        appendPlaybackRuntimePair(mh, ctl);
-    }
-
-    juce::String routingPlaybackPublishFp = "playback-publish: canonTid=";
+    juce::String routingPlaybackPublishFp = "playback-publish: firstInstTid=";
     routingPlaybackPublishFp
-        += juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(canonLaneId)));
+        += juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(canonLaneIdForLog)));
     routingPlaybackPublishFp += juce::String(" entries=");
     routingPlaybackPublishFp += juce::String(static_cast<int>(entries.size()));
 
     if (!entries.empty())
     {
-        std::vector<ExperimentalInstrumentPlaybackEntry> sorted(entries);
-        std::sort(sorted.begin(),
-                  sorted.end(),
-                  [](const ExperimentalInstrumentPlaybackEntry& a,
-                     const ExperimentalInstrumentPlaybackEntry& b) noexcept -> bool {
-                      return a.trackId < b.trackId;
-                  });
-
         routingPlaybackPublishFp += " [";
-        for (size_t i = 0; i < sorted.size(); ++i)
+        for (size_t i = 0; i < entries.size(); ++i)
         {
-            const auto& e = sorted[i];
+            const auto& e = entries[i];
             if (i != 0)
             {
                 routingPlaybackPublishFp += ", ";
@@ -4865,35 +4801,348 @@ void MiniDAWLabApplication::TransportControlsContent::updateExperimentalPlayback
             ExperimentalInstrumentPlaybackSnapshot{ std::move(entries) }));
 }
 
-void MiniDAWLabApplication::TransportControlsContent::syncInstrumentTimelineRowAttachmentToSession() noexcept
+void MiniDAWLabApplication::TransportControlsContent::tearDownExperimentalInstrumentTimelineUiForTrack(
+    const TrackId tid) noexcept
 {
-    TrackId tid = canonicalInstrumentLaneTrackIdFromSession();
-    InstrumentTrackController* ctl = (tid != kInvalidTrackId) ? getInstrumentControllerForTrack(tid) : nullptr;
-    if (ctl == nullptr)
+    if (tid == kInvalidTrackId)
     {
-        ctl = primaryInstrumentRuntimeForSessionApi();
+        return;
     }
-    if (tid == kInvalidTrackId && ctl != nullptr)
-    {
-        tid = ctl->getExperimentalInstrumentDomainTrackId();
-    }
-    trackLanesView.attachInstrumentRow(ctl, instrumentTrackHeader_.get(), &instrumentMidiEventLane_, tid);
+    instrumentMidiEventLanesByTrackId_.erase(tid);
+    instrumentTrackHeadersByTrackId_.erase(tid);
 }
 
-InstrumentTrackController* MiniDAWLabApplication::TransportControlsContent::instrumentControllerForAttachedTimelineRow()
-    const noexcept
+void MiniDAWLabApplication::TransportControlsContent::syncInstrumentTimelineRowAttachmentToSession() noexcept
 {
-    const TrackId tid = trackLanesView.getAttachedInstrumentSessionTrackId();
-    if (tid != kInvalidTrackId)
+    std::vector<InstrumentTimelineAttachment> rows;
+    const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+    if (snap != nullptr)
     {
-        InstrumentTrackController* const keyed = getInstrumentControllerForTrack(tid);
-        if (keyed != nullptr && keyed->hasInstrumentTrack())
+        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
         {
-            return keyed;
+            const Track& tr = snap->getTrack(ti);
+            if (tr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            const TrackId laneTid = tr.getId();
+            InstrumentTrackController* ctl = getInstrumentControllerForTrack(laneTid);
+            if (ctl == nullptr || !ctl->hasInstrumentTrack()
+                || ctl->getExperimentalInstrumentDomainTrackId() != laneTid)
+            {
+                continue;
+            }
+            ensureInstrumentTimelineHeaderAndLaneForTrack(laneTid);
+            auto itLane = instrumentMidiEventLanesByTrackId_.find(laneTid);
+            auto itHdr = instrumentTrackHeadersByTrackId_.find(laneTid);
+            if (itLane == instrumentMidiEventLanesByTrackId_.end() || itLane->second == nullptr
+                || itHdr == instrumentTrackHeadersByTrackId_.end() || itHdr->second == nullptr)
+            {
+                continue;
+            }
+            itLane->second->attachControllerIfStillValid(ctl);
+            rows.push_back(InstrumentTimelineAttachment{
+                laneTid, ctl, itHdr->second.get(), itLane->second.get() });
         }
-        return nullptr;
     }
-    return instrumentControllerForTimelineUiLane();
+    trackLanesView.syncInstrumentTimelineAttachments(rows);
+}
+
+void MiniDAWLabApplication::TransportControlsContent::ensureInstrumentTimelineHeaderAndLaneForTrack(const TrackId tid)
+{
+    if (tid == kInvalidTrackId)
+    {
+        return;
+    }
+    InstrumentTrackController* ctl = getInstrumentControllerForTrack(tid);
+    if (ctl == nullptr || !ctl->hasInstrumentTrack())
+    {
+        return;
+    }
+
+    auto itLaneExisting = instrumentMidiEventLanesByTrackId_.find(tid);
+    if (itLaneExisting == instrumentMidiEventLanesByTrackId_.end())
+    {
+        auto lane = std::make_unique<InstrumentMidiEventLane>(*this, ctl, tid);
+        instrumentMidiEventLanesByTrackId_.emplace(tid, std::move(lane));
+    }
+    else if (itLaneExisting->second != nullptr)
+    {
+        itLaneExisting->second->attachControllerIfStillValid(ctl);
+    }
+
+    auto itHdr = instrumentTrackHeadersByTrackId_.find(tid);
+    if (itHdr != instrumentTrackHeadersByTrackId_.end() && itHdr->second != nullptr)
+    {
+        return;
+    }
+
+    const TrackId laneTid = tid;
+
+    TrackHeaderModelProvider modelProvider = [this, ctl, laneTid]() -> TrackHeaderModel {
+        TrackHeaderModel m;
+        ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(laneTid);
+        m.subtitle = ctl->getLaneHeaderSubtitle();
+        m.active = ctl->isActive();
+        m.armed = false;
+        m.muted = ctl->isMuted();
+        m.off = !ctl->isPowerOn();
+        m.powerInteractable = !trackLanesView.isStructuralTimelineEditBlocked();
+        m.muteInteractable = true;
+        m.armInteractable = false;
+        if (const auto sn = session.loadSessionSnapshotForAudioThread())
+        {
+            const int idx = sn->findTrackIndexById(laneTid);
+            if (idx >= 0)
+            {
+                m.name = sn->getTrack(idx).getName();
+            }
+            else
+            {
+                m.name = ctl->getLaneHeaderTitle();
+            }
+        }
+        else
+        {
+            m.name = ctl->getLaneHeaderTitle();
+        }
+        m.instrumentEditorAvailable = mh != nullptr && mh->hasInstrument();
+        return m;
+    };
+
+    auto repaintExtras = [this] {
+        repaintInstrumentTrackRow();
+        trackLanesView.repaint();
+        inspectorView_.refreshFromSession();
+    };
+
+    TrackHeaderCallbacks callbacks;
+    callbacks.onActivateName = [this, ctl, laneTid, repaintExtras] {
+        for (auto& kv : instrumentControllersByTrackId_)
+        {
+            if (kv.second != nullptr)
+            {
+                kv.second->setActive(false);
+            }
+        }
+        if (instrumentStagingController_ != nullptr)
+        {
+            instrumentStagingController_->setActive(false);
+        }
+        session.setActiveTrack(laneTid);
+        ctl->setActive(true);
+        repaintExtras();
+    };
+    callbacks.onToggleMute = [ctl, laneTid, this, repaintExtras] {
+        ctl->setMuted(!ctl->isMuted());
+        session.setActiveTrack(laneTid);
+        repaintExtras();
+    };
+    callbacks.onTogglePower = [ctl, laneTid, this, repaintExtras]() -> bool {
+        if (trackLanesView.isStructuralTimelineEditBlocked())
+        {
+            return false;
+        }
+        ctl->setPowerOn(!ctl->isPowerOn());
+        session.setActiveTrack(laneTid);
+        repaintExtras();
+        return true;
+    };
+    callbacks.onToggleArm = [] {};
+    callbacks.onOpenInstrumentEditor = [this, laneTid] {
+        if (ExperimentalInstrumentHost* h = getInstrumentHostForTrack(laneTid))
+        {
+            h->openNativeEditor();
+        }
+    };
+    callbacks.onShowContextMenu = [this, laneTid, repaintExtras](TrackHeaderView& self, const juce::MouseEvent&) {
+        session.setActiveTrack(laneTid);
+        for (auto& kv : instrumentControllersByTrackId_)
+        {
+            if (kv.second != nullptr)
+            {
+                kv.second->setActive(kv.first == laneTid);
+            }
+        }
+        if (instrumentStagingController_ != nullptr)
+        {
+            instrumentStagingController_->setActive(false);
+        }
+        repaintExtras();
+
+        juce::PopupMenu menu;
+        constexpr int kDeleteTrackMenuId = 1;
+        constexpr int kRescanDescriptionsMenuId = 2;
+        const bool editLocked = trackLanesView.isStructuralTimelineEditBlocked();
+        juce::PopupMenu::Item deleteItem;
+        deleteItem.itemID = kDeleteTrackMenuId;
+        deleteItem.text = "Delete Track";
+        deleteItem.isEnabled = !editLocked;
+        menu.addItem(deleteItem);
+        menu.addSeparator();
+        juce::PopupMenu::Item rescanItem;
+        rescanItem.itemID = kRescanDescriptionsMenuId;
+        rescanItem.text = "Rescan plugin description (out-of-process)…";
+        rescanItem.isEnabled = !editLocked;
+        menu.addItem(rescanItem);
+
+        juce::Component::SafePointer<TransportControlsContent> safeThis(this);
+        menu.showMenuAsync(
+            juce::PopupMenu::Options().withTargetComponent(&self),
+            [safeThis, laneTid, kDeleteTrackMenuId, kRescanDescriptionsMenuId](const int result) {
+                if (safeThis == nullptr || result == 0)
+                {
+                    return;
+                }
+                if (result == kDeleteTrackMenuId)
+                {
+                    safeThis->trackLanesView.requestDeleteTrackForHeaderMenu(laneTid);
+                    return;
+                }
+                if (result == kRescanDescriptionsMenuId)
+                {
+                    safeThis->runExperimentalInstrumentPluginDescriptionRescanForTrack(laneTid);
+                }
+            });
+    };
+
+    auto hdr = std::make_unique<TrackHeaderView>(
+        std::move(modelProvider), std::move(callbacks), kInvalidTrackId, std::nullopt);
+    instrumentTrackHeadersByTrackId_[tid] = std::move(hdr);
+}
+
+juce::String MiniDAWLabApplication::TransportControlsContent::proposeNextGrooveAgentInstrumentTrackDisplayName()
+    const
+{
+    int shells = 0;
+    const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+    if (snap != nullptr)
+    {
+        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+        {
+            if (snap->getTrack(ti).getKind() == TrackKind::Instrument)
+            {
+                ++shells;
+            }
+        }
+    }
+    if (shells == 0)
+    {
+        return juce::String("Groove Agent");
+    }
+    return juce::String("Groove Agent ") + juce::String(shells + 1);
+}
+
+bool MiniDAWLabApplication::TransportControlsContent::tryCloneGrooveAgentFromAnyExistingInto(
+    ExperimentalInstrumentHost& dest) noexcept
+{
+    ExperimentalInstrumentHost* src = nullptr;
+    for (const auto& kv : instrumentHostsByTrackId_)
+    {
+        if (kv.second != nullptr && kv.second->hasInstrument()
+            && kv.second->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+        {
+            src = kv.second.get();
+            break;
+        }
+    }
+    if (src == nullptr && instrumentStagingHost_ != nullptr && instrumentStagingHost_->hasInstrument()
+        && instrumentStagingHost_->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+    {
+        src = instrumentStagingHost_.get();
+    }
+    if (src == nullptr || src == &dest)
+    {
+        return false;
+    }
+    juce::PluginDescription d{};
+    if (!src->getLastLoadedPluginDescription(d))
+    {
+        return false;
+    }
+    const juce::File original(src->getLastLoadedVst3OriginalPath());
+    if (!original.exists())
+    {
+        return false;
+    }
+    juce::MemoryBlock restored;
+    {
+        const juce::String b64 = src->getCurrentInstrumentStateBase64();
+        if (b64.isNotEmpty())
+        {
+            juce::MemoryOutputStream mos;
+            if (juce::Base64::convertFromBase64(mos, b64))
+            {
+                restored.append(mos.getData(), mos.getDataSize());
+            }
+        }
+    }
+    juce::String warnIgnored;
+    const juce::MemoryBlock* mb = restored.getSize() > 0 ? &restored : nullptr;
+    return dest
+        .loadInstrumentFromDescription(
+            d,
+            original,
+            "groove-agent-sibling-clone",
+            mb,
+            &warnIgnored)
+        .wasOk();
+}
+
+std::vector<ProjectFileExperimentalInstrumentTrackV1>
+MiniDAWLabApplication::TransportControlsContent::buildSortedInstrumentMusicalUndoSnapshot() const
+{
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> out;
+    const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return out;
+    }
+    for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+    {
+        const Track& tr = snap->getTrack(ti);
+        if (tr.getKind() != TrackKind::Instrument)
+        {
+            continue;
+        }
+        InstrumentTrackController* const ctl = const_cast<TransportControlsContent*>(this)->getInstrumentControllerForTrack(
+            tr.getId());
+        if (ctl == nullptr || !ctl->hasInstrumentTrack()
+            || ctl->getExperimentalInstrumentDomainTrackId() != tr.getId())
+        {
+            continue;
+        }
+        std::vector<ProjectFileExperimentalInstrumentTrackV1> one = ctl->buildExperimentalInstrumentMusicalUndoBlock();
+        out.insert(out.end(), std::make_move_iterator(one.begin()), std::make_move_iterator(one.end()));
+    }
+    stableSortInstrumentMusicalUndoVector(out);
+    return out;
+}
+
+void MiniDAWLabApplication::TransportControlsContent::stableSortInstrumentMusicalUndoVector(
+    std::vector<ProjectFileExperimentalInstrumentTrackV1>& v)
+{
+    std::stable_sort(
+        v.begin(),
+        v.end(),
+        [](const ProjectFileExperimentalInstrumentTrackV1& a,
+           const ProjectFileExperimentalInstrumentTrackV1& b) noexcept -> bool { return a.trackId < b.trackId; });
+}
+
+void MiniDAWLabApplication::TransportControlsContent::applyInstrumentMusicalUndoVectorToAllKeyedControllers(
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
+{
+    for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->applyExperimentalInstrumentMusicalUndoBlock(tracks);
+        }
+    }
+    if (instrumentStagingController_ != nullptr)
+    {
+        instrumentStagingController_->applyExperimentalInstrumentMusicalUndoBlock(tracks);
+    }
 }
 
 void MiniDAWLabApplication::TransportControlsContent::runExperimentalInstrumentPluginDescriptionRescanForTrack(

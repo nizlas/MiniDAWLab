@@ -43,6 +43,7 @@
 #include <juce_core/juce_core.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -51,6 +52,9 @@ class AudioClip;
 class Transport;
 class PluginInsertHost;
 class InstrumentTrackController;
+
+/// When default-uninitialized / empty callable, skips `experimentalInstrumentTracks`.
+using ExperimentalInstrumentCtlLookupFn = std::function<InstrumentTrackController*(TrackId)>;
 
 // ---------------------------------------------------------------------------
 // Session — sole publisher of `std::shared_ptr<const SessionSnapshot>` to readers (engine + UI)
@@ -237,7 +241,7 @@ public:
         const juce::File& file,
         double deviceSampleRate,
         PluginInsertHost* pluginHost = nullptr,
-        InstrumentTrackController* instrumentController = nullptr);
+        ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId = {});
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).
@@ -247,11 +251,10 @@ public:
         double deviceSampleRate,
         juce::StringArray& outSkippedClipDetails,
         juce::String& outInfoNote,
-        PluginInsertHost* pluginHost = nullptr,
-        InstrumentTrackController* instrumentController = nullptr);
+        PluginInsertHost* pluginHost = nullptr);
 
     /// [Message thread] Same effects as loading `file`, but uses an already-parsed model (caller read
-    /// `file` beforehand). Enables instrument runtime keyed by serialized `tracks[]` before restore.
+    /// `file` beforehand). Caller restores `experimentalInstrumentTracks` rows after timeline + inserts.
     [[nodiscard]] juce::Result applyLoadedProjectModel(
         Transport& transport,
         const juce::File& loadedFromDisk,
@@ -259,8 +262,7 @@ public:
         double deviceSampleRate,
         juce::StringArray& outSkippedClipDetails,
         juce::String& outInfoNote,
-        PluginInsertHost* pluginHost = nullptr,
-        InstrumentTrackController* instrumentController = nullptr);
+        PluginInsertHost* pluginHost = nullptr);
 
 private:
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear

@@ -116,7 +116,12 @@ public:
     /// Global slot currently has Groove Agent (by name heuristic).
     [[nodiscard]] bool isInstrumentLoaded() const noexcept { return instrumentLoaded_; }
 
-    /// Adds track + default clip if not already present. Returns false if track already exists.
+    /// Binds runtime clips + mute/power shell state to an existing `TrackKind::Instrument` row (`sessionInstrumentTrackId`).
+    /// Caller must publish the session instrument shell first (`Session::appendExperimentalInstrumentShellTrack`).
+    [[nodiscard]] bool bootstrapGrooveAgentShellForSessionTrack(TrackId sessionInstrumentTrackId) noexcept;
+
+    /// Legacy path: asks `Session` to append one instrument shell, then binds this controller row.
+    /// Prefer `bootstrapGrooveAgentShellForSessionTrack` when naming / ordering is orchestrated externally.
     [[nodiscard]] bool tryAddGrooveAgentInstrumentTrackShell();
 
     /// Refresh instrumentLoaded_ from host. Never deletes the track or clips.
@@ -194,10 +199,15 @@ public:
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks);
 
     /// Replace in-memory track + clips from project (message thread). Clears track when `tracks` empty
-    /// or no enabled GrooveAgentSE row.
+    /// or no enabled GrooveAgentSE row (**first** GA row wins — retained for callers that pass a sliced vector).
     void restoreExperimentalInstrumentFromProject(
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks,
         const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRowsForBind = nullptr);
+
+    /// Restore a **single** `experimentalInstrumentTracks[]` row onto **this** controller instance.
+    void restoreExperimentalInstrumentSingleProjectRow(
+        const ProjectFileExperimentalInstrumentTrackV1& row,
+        const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRowsForBind);
     /// [Message thread] True when serialized experimental payload carries an enabled Groove Agent lane.
     [[nodiscard]] static bool serializedProjectUsesEnabledGrooveAgentRow(
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept;
@@ -209,6 +219,12 @@ public:
         Session* sessionNullable,
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& payloads,
         const std::vector<ProjectFileTrackV1>& persistedTracks) noexcept;
+
+    /// Resolve `dto.trackId` against the persisted track list and (when non-null) the live snapshot.
+    [[nodiscard]] static TrackId resolveExperimentalInstrumentLaneIdFromProjectFields(
+        Session* sessionNullable,
+        TrackId dtoTrackField,
+        const std::vector<ProjectFileTrackV1>* persistedSerializedTracksMaybe) noexcept;
 
     /// After `loadProjectFromFile`, attempts cache load + optional Windows path repair + host load.
     void runPendingGrooveAgentProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
