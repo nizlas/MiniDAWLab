@@ -195,7 +195,20 @@ public:
 
     /// Replace in-memory track + clips from project (message thread). Clears track when `tracks` empty
     /// or no enabled GrooveAgentSE row.
-    void restoreExperimentalInstrumentFromProject(const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks);
+    void restoreExperimentalInstrumentFromProject(
+        const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks,
+        const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRowsForBind = nullptr);
+    /// [Message thread] True when serialized experimental payload carries an enabled Groove Agent lane.
+    [[nodiscard]] static bool serializedProjectUsesEnabledGrooveAgentRow(
+        const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept;
+
+    /// Resolve which `tracks[]` row should hold the singleton experimental instrument lane **before**
+    /// `Session` apply (no live snapshot yet). Uses serialized `persistedTracks` + optional `session`
+    /// validation when already loaded (pass nullptr pre-load).
+    [[nodiscard]] static TrackId peekExperimentalInstrumentBindLaneId(
+        Session* sessionNullable,
+        const std::vector<ProjectFileExperimentalInstrumentTrackV1>& payloads,
+        const std::vector<ProjectFileTrackV1>& persistedTracks) noexcept;
 
     /// After `loadProjectFromFile`, attempts cache load + optional Windows path repair + host load.
     void runPendingGrooveAgentProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
@@ -219,12 +232,14 @@ public:
     }
 
     /// [Audio thread] Sample-accurate Groove Agent MIDI for one render segment (half-open times).
+    /// When `outMidiEventsEmitted` is non-null, increments once per successful `audioThread_addMidiEventForCurrentBlock`.
     void audioThread_scheduleTransportMidiForSegment(ExperimentalInstrumentHost& host,
                                                      std::int64_t timelineSegStart,
                                                      int segNumSamples,
                                                      int bufferOffsetInDevice,
                                                      bool forceDiscontinuity,
-                                                     int deviceBlockNumSamples) noexcept;
+                                                     int deviceBlockNumSamples,
+                                                     int* outMidiEventsEmitted = nullptr) noexcept;
 
     /// [Audio thread] Stop/flush: pending transport offs + allNotesOff(1).
     void audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
@@ -268,6 +283,8 @@ private:
 
     std::atomic<std::shared_ptr<const InstrumentTrackRenderSnapshot>> renderSnapshot_;
     std::uint32_t nextSnapshotRevision_ = 1;
+    /// [Message thread] Dedupes `%APPDATA%\\MiniDAWLab\\experimental-playback-routing.log` instrument-render rows.
+    juce::String lastExperimentalPlaybackRoutingRenderFingerprint_;
 
     void publishRenderSnapshot();
     void clearExperimentalInstrumentStateForProjectLoad();

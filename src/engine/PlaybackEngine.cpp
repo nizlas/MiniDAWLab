@@ -20,8 +20,9 @@
 //   scratch into the device buffer at unity (same mono L+R blend rule as the dry path).
 //   Mono device: (L+R)*0.5 into output 0. Stereo+: L→0, R→1; higher channels unchanged by inserts.
 //
-// I1 (experimental global instrument): after clip/insert summing (and even when transport is not
-//   Playing), `ExperimentalInstrumentHost` may add one stereo instrument bus to the same outputs.
+// I1 (experimental instrument): after clip/insert summing (and even when transport is not
+//   Playing), each `ExperimentalInstrumentHost` keyed in `ExperimentalInstrumentPlaybackSnapshot`
+//   may add its stereo instrument bus to the same outputs in **session track order**.
 //
 // WHERE THIS SITS
 //   `Session` publish → acquire-load of `const SessionSnapshot` (refcount) here; `Transport` seek
@@ -41,6 +42,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
@@ -48,13 +50,43 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
+#include <juce_events/juce_events.h>
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
 
 namespace
 {
+    [[nodiscard]] float peakAbsMono(const float* p, const int n) noexcept
+    {
+        if (p == nullptr || n <= 0)
+        {
+            return 0.0f;
+        }
+        float m = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            m = juce::jmax(m, std::fabs(p[i]));
+        }
+        return m;
+    }
+
+    [[nodiscard]] float peakAbsStereoDevice(float* const* oc, const int numCh, const int n) noexcept
+    {
+        if (oc == nullptr || numCh <= 0 || n <= 0)
+        {
+            return 0.0f;
+        }
+        float pk = peakAbsMono(oc[0], n);
+        if (numCh >= 2 && oc[1] != nullptr)
+        {
+            pk = juce::jmax(pk, peakAbsMono(oc[1], n));
+        }
+        return pk;
+    }
+
     [[nodiscard]] int findCoveringRowIndexInLane(
         const std::vector<PlacedClip>& lane, const std::int64_t t) noexcept
     {
@@ -230,35 +262,301 @@ namespace
         }
     }
 
-    /// [Audio thread] Global experimental instrument slot (I1); summed after tracks / inserts.
+    /// [Audio thread] One experimental instrument (I1); additive after tracks / inserts / prior instruments.
     void mixExperimentalInstrumentAfterTracks(ExperimentalInstrumentHost* host,
-                                             float* const* outputChannelData,
-                                             int numOutputChannels,
-                                             int numSamples) noexcept
+                                                float* const* outputChannelData,
+                                                int numOutputChannels,
+                                                int numSamples,
+                                                float instrumentGain) noexcept
     {
         if (host == nullptr || numSamples <= 0)
         {
             return;
         }
-        host->audioThread_processBlockAndAddToOutputs(outputChannelData, numOutputChannels, numSamples);
+        host->audioThread_processBlockAndAddToOutputs(
+            outputChannelData, numOutputChannels, numSamples, instrumentGain);
     }
+
+    [[nodiscard]] const ExperimentalInstrumentPlaybackEntry* findExperimentalInstrumentPlaybackEntry(
+        const ExperimentalInstrumentPlaybackSnapshot& snap,
+        TrackId trackId) noexcept
+    {
+        for (const auto& e : snap.entries)
+        {
+            if (e.trackId != trackId)
+                continue;
+            if (e.host == nullptr || e.midiController == nullptr)
+                continue;
+            return &e;
+        }
+        return nullptr;
+    }
+
+    struct InstPlayEdgeDiagSlot
+    {
+        TrackId sessionTrackId = kInvalidTrackId;
+        bool sessionOff = false;
+        bool sessionMuted = false;
+        bool registryYes = false;
+        TrackId entryTrackId = kInvalidTrackId;
+        std::uintptr_t hostAddr = 0;
+        std::uintptr_t ctlAddr = 0;
+        ExperimentalInstrumentHost* hostLive = nullptr;
+        TrackId ctlDomain = kInvalidTrackId;
+        bool renderSnap = false;
+        bool renderPb = false;
+        int plans = -1;
+        bool scheduleCalled = false;
+        int emittedFirstSeg = 0;
+        bool firstSegDiagCaptured = false;
+        bool mixInvoked = false;
+        bool mixSkipped = false;
+        const char* mixSkipReason = "";
+        float mixDevicePeakBefore = 0.f;
+        float mixDevicePeakAfter = 0.f;
+        float mixAddedPeakApprox = 0.f;
+        float sessionFaderGain = 1.f;
+    };
+
+    [[nodiscard]] int indexOfInstrumentPlayEdgeDiagSlot(const InstPlayEdgeDiagSlot* slots,
+                                                        int slotCount,
+                                                        TrackId tid) noexcept
+    {
+        for (int i = 0; i < slotCount; ++i)
+        {
+            if (slots[i].sessionTrackId == tid)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    struct RoutingInstrumentPeekDiagRow final
+    {
+        TrackId tid = kInvalidTrackId;
+        ExperimentalInstrumentHost* host = nullptr;
+    };
+
+    struct ExperimentalPlaybackRoutingPlayEdgePoster
+    {
+        const bool armed;
+        InstPlayEdgeDiagSlot* const slots;
+        const int slotCount;
+        const std::int64_t playEdgeT0;
+        const bool transportPlaying;
+
+        ExperimentalPlaybackRoutingPlayEdgePoster(bool arm,
+                                                  InstPlayEdgeDiagSlot* sl,
+                                                  int n,
+                                                  std::int64_t tPlayback,
+                                                  bool transportPlayingIn) noexcept
+            : armed(arm)
+            , slots(sl)
+            , slotCount(n)
+            , playEdgeT0(tPlayback)
+            , transportPlaying(transportPlayingIn)
+        {
+        }
+
+        ~ExperimentalPlaybackRoutingPlayEdgePoster()
+        {
+            if (!armed || slots == nullptr || slotCount <= 0
+                || juce::MessageManager::getInstanceWithoutCreating() == nullptr)
+            {
+                return;
+            }
+
+            juce::String line = "playback-edge: playT0=";
+            line << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(playEdgeT0)));
+
+            line << " instRows="
+                 << juce::String(slotCount)
+                 << " transportPlaying="
+                 << juce::String(transportPlaying ? "yes" : "no");
+
+            std::vector<juce::String> routingLines;
+            std::vector<RoutingInstrumentPeekDiagRow> peekRows;
+            peekRows.reserve((size_t)slotCount);
+
+            for (int i = 0; i < slotCount; ++i)
+            {
+                const InstPlayEdgeDiagSlot& s = slots[i];
+                std::uint64_t midiDiscarded = 0;
+                std::int64_t blockCap = -1;
+                if (s.hostLive != nullptr)
+                {
+                    midiDiscarded = s.hostLive->getTransportMidiAddEventDiscardedCountRelaxed();
+                    blockCap = static_cast<std::int64_t>(s.hostLive->audioThread_peekTransportMidiBlockCap());
+                }
+
+                line << " [tid="
+                     << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(s.sessionTrackId)));
+                line << " off=" << juce::String(s.sessionOff ? "yes" : "no") << " muted="
+                     << juce::String(s.sessionMuted ? "yes" : "no") << " reg="
+                     << juce::String(s.registryYes ? "yes" : "no");
+
+                line << " entryTid="
+                     << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(s.entryTrackId)));
+
+                line << " h="
+                     << ((s.hostAddr != 0)
+                             ? (juce::String("0x")
+                                + juce::String::toHexString(
+                                      static_cast<juce::int64>(static_cast<std::int64_t>(s.hostAddr))))
+                             : juce::String("null"));
+
+                line << " ctl="
+                     << ((s.ctlAddr != 0)
+                             ? (juce::String("0x")
+                                + juce::String::toHexString(
+                                      static_cast<juce::int64>(static_cast<std::int64_t>(s.ctlAddr))))
+                             : juce::String("null"));
+
+                line << " dom="
+                     << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(s.ctlDomain)));
+
+                line << " renderSnap=" << juce::String(s.renderSnap ? "yes" : "no");
+                line << " renderPb=" << juce::String(s.renderPb ? "yes" : "no");
+                line << " plans=" << juce::String(s.plans);
+                line << " sched=" << juce::String(s.scheduleCalled ? "yes" : "no");
+                line << " emitted=" << juce::String(s.emittedFirstSeg);
+                line << " mix=" << juce::String(s.mixInvoked ? "yes" : "no");
+                line << " mixSkip=" << juce::String(s.mixSkipped ? "yes" : "no");
+                if (const char* wy = s.mixSkipReason; s.mixSkipped && wy != nullptr && wy[0] != '\0')
+                {
+                    line << " mixSkipWhy=" << juce::String(wy);
+                }
+                else if (s.mixSkipped)
+                {
+                    line << " mixSkipWhy=(unknown)";
+                }
+                line << " blockCap=" << juce::String(static_cast<int>(blockCap));
+                line << " midiDiscarded="
+                     << juce::String(static_cast<juce::uint64>(midiDiscarded));
+                line << ']';
+
+                const bool masterHadApprox = (s.mixDevicePeakBefore > 1.0e-6f);
+
+                juce::String mixLine = "instrument-mix: tid=";
+                mixLine << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(s.sessionTrackId)));
+                mixLine << " playT0="
+                        << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(playEdgeT0)));
+                mixLine << " transportPlaying="
+                        << juce::String(transportPlaying ? "yes" : "no");
+                mixLine << " h="
+                        << ((s.hostAddr != 0)
+                                ? (juce::String("0x")
+                                   + juce::String::toHexString(static_cast<juce::int64>(
+                                       static_cast<std::int64_t>(s.hostAddr))))
+                                : juce::String("null"));
+                mixLine << " ctl="
+                        << ((s.ctlAddr != 0)
+                                ? (juce::String("0x")
+                                   + juce::String::toHexString(static_cast<juce::int64>(
+                                       static_cast<std::int64_t>(s.ctlAddr))))
+                                : juce::String("null"));
+
+                mixLine << " mixInvoked=" << juce::String(s.mixInvoked ? "yes" : "no");
+                mixLine << " mixSkip=" << juce::String(s.mixSkipped ? "yes" : "no");
+                if (const char* wy = s.mixSkipReason; s.mixSkipped && wy != nullptr && wy[0] != '\0')
+                {
+                    mixLine << " mixSkipReason=" << juce::String(wy);
+                }
+                else if (s.mixSkipped)
+                {
+                    mixLine << " mixSkipReason=(unknown)";
+                }
+                else
+                {
+                    mixLine << " mixSkipReason=none";
+                }
+
+                mixLine << " peakDevStereoBefore=" << juce::String(s.mixDevicePeakBefore, 9);
+                mixLine << " peakDevStereoAfter=" << juce::String(s.mixDevicePeakAfter, 9);
+                mixLine << " approxAddedStereoPeak=" << juce::String(s.mixAddedPeakApprox, 9);
+                mixLine << " faderApplied=" << juce::String(s.sessionFaderGain, 9);
+                mixLine << " ctlRenderPb=" << juce::String(s.renderPb ? "yes" : "no");
+                mixLine << " masterHadNonSilentAudioApprox="
+                        << juce::String(masterHadApprox ? "yes" : "no");
+
+                routingLines.emplace_back(std::move(mixLine));
+
+                RoutingInstrumentPeekDiagRow prow;
+                prow.tid = s.sessionTrackId;
+                prow.host = s.hostLive;
+                peekRows.emplace_back(std::move(prow));
+            }
+
+            struct PendingRoutingBurst
+            {
+                juce::String edge;
+                std::vector<juce::String> mix;
+                std::vector<RoutingInstrumentPeekDiagRow> peeks;
+            };
+
+            juce::MessageManager::callAsync([burst = PendingRoutingBurst{
+                                                 std::move(line),
+                                                 std::move(routingLines),
+                                                 std::move(peekRows),
+                                             }]() mutable {
+                appendExperimentalPlaybackRoutingLogLine(std::move(burst.edge));
+                for (juce::String& l : burst.mix)
+                {
+                    appendExperimentalPlaybackRoutingLogLine(std::move(l));
+                }
+
+                constexpr char kInstrumentAudioPrefix[] = "instrument-audio:";
+                constexpr int kInstrumentAudioPrefixLen =
+                    (int)((sizeof(kInstrumentAudioPrefix) / sizeof(kInstrumentAudioPrefix[0])) - 1);
+
+                for (RoutingInstrumentPeekDiagRow& p : burst.peeks)
+                {
+                    if (p.host == nullptr)
+                        continue;
+
+                    juce::String trimmed = p.host->peekInstrumentAudioRoutingDiagLineForMessageThread().trim();
+                    if (trimmed.startsWithIgnoreCase(kInstrumentAudioPrefix))
+                        trimmed = trimmed.substring(kInstrumentAudioPrefixLen).trimStart();
+
+                    appendExperimentalPlaybackRoutingLogLine(
+                        juce::String("instrument-audio: tid="
+                                     + juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(p.tid)))
+                                     + " ")
+                        + trimmed);
+                }
+            });
+        }
+    };
 } // namespace
 
 PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder,
-                               CountInClickOutput* countIn, PluginInsertHost* pluginHost,
-                               ExperimentalInstrumentHost* experimentalInstrument,
-                               InstrumentTrackController* instrumentTrack)
+                               CountInClickOutput* countIn, PluginInsertHost* pluginHost)
     : transport_(transport)
     , session_(session)
     , recorder_(recorder)
     , countIn_(countIn)
     , pluginHost_(pluginHost)
-    , experimentalInstrument_(experimentalInstrument)
-    , instrumentTrack_(instrumentTrack)
 {
 }
 
 PlaybackEngine::~PlaybackEngine() = default;
+
+void PlaybackEngine::publishExperimentalInstrumentPlaybackSnapshot(
+    std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot> snapshot) noexcept
+{
+    experimentalInstrumentPlaybackSnapshot_.store(std::move(snapshot), std::memory_order_release);
+}
+
+void PlaybackEngine::setExperimentalInstrumentDeviceLifecycleHooks(
+    std::function<void(double sampleRate, int blockSizeSamples)> prepareAllHosts,
+    std::function<void()> releaseAllHosts,
+    std::function<void(int numSamples)> beginBlockAllHosts) noexcept
+{
+    experimentalPrepareAllHosts_ = std::move(prepareAllHosts);
+    experimentalReleaseAllHosts_ = std::move(releaseAllHosts);
+    experimentalBeginBlockAllHosts_ = std::move(beginBlockAllHosts);
+}
 
 void PlaybackEngine::setPlaybackOffsetSamples(const std::int64_t samples) noexcept
 {
@@ -276,9 +574,9 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         {
             pluginHost_->prepareForDevice(sr, bs, nOut);
         }
-        if (experimentalInstrument_ != nullptr)
+        if (experimentalPrepareAllHosts_)
         {
-            experimentalInstrument_->prepareForDevice(sr, bs);
+            experimentalPrepareAllHosts_(sr, bs);
         }
     }
 }
@@ -289,9 +587,9 @@ void PlaybackEngine::audioDeviceStopped()
     {
         pluginHost_->releaseResources();
     }
-    if (experimentalInstrument_ != nullptr)
+    if (experimentalReleaseAllHosts_)
     {
-        experimentalInstrument_->releaseResources();
+        experimentalReleaseAllHosts_();
     }
 }
 
@@ -319,12 +617,31 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const int deviceBlockSizeInFrames = numSamples;
     transport_.audioThread_beginBlock();
-    if (experimentalInstrument_ != nullptr)
-    {
-        experimentalInstrument_->audioThread_beginAudioBlock(deviceBlockSizeInFrames);
-    }
 
     const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
+    /// [Audio thread] Same publish discipline as Session: acquire-load retains a const view for this block only.
+    const std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot> instrumentSnap
+        = experimentalInstrumentPlaybackSnapshot_.load(std::memory_order_acquire);
+
+    // Per-block RT MIDI delivery uses `audioCallbackBlockSamples_` (see `ExperimentalInstrumentHost`). The
+    // snapshot is the engine's source of truth for which host(s) are driven this block — call `beginAudioBlock`
+    // here before the optional map/staging lambda so message-thread map drift cannot skip the active host.
+    if (instrumentSnap != nullptr)
+    {
+        for (const auto& e : instrumentSnap->entries)
+        {
+            if (e.host != nullptr)
+            {
+                e.host->audioThread_beginAudioBlock(deviceBlockSizeInFrames);
+            }
+        }
+    }
+
+    if (experimentalBeginBlockAllHosts_)
+    {
+        experimentalBeginBlockAllHosts_(deviceBlockSizeInFrames);
+    }
+
     const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
     const std::int64_t t0 = transport_.audioThread_loadPlayhead();
 
@@ -338,13 +655,235 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const bool becameStopped = (playbackIntent != PlaybackIntent::Playing
                                && lastTransportIntentInCallback_ == PlaybackIntent::Playing);
-    if (becameStopped && instrumentTrack_ != nullptr && experimentalInstrument_ != nullptr)
+    if (becameStopped)
     {
-        instrumentTrack_->audioThread_flushTransportMidi(*experimentalInstrument_, 0, deviceBlockSizeInFrames);
+        if (instrumentSnap != nullptr)
+        {
+            for (const auto& e : instrumentSnap->entries)
+            {
+                if (e.midiController != nullptr && e.host != nullptr)
+                {
+                    e.midiController->audioThread_flushTransportMidi(*e.host, 0, deviceBlockSizeInFrames);
+                }
+            }
+        }
     }
 
     const bool becamePlayingTransport = (playbackIntent == PlaybackIntent::Playing
                                         && lastTransportIntentInCallback_ != PlaybackIntent::Playing);
+
+    constexpr int kRoutingInstSlotsCap = 24;
+    InstPlayEdgeDiagSlot routingInstSlots[kRoutingInstSlotsCap];
+    int routingInstSlotCount = 0;
+    const bool routePlayEdgeDiag =
+        becamePlayingTransport && sessionSnap != nullptr && deviceBlockSizeInFrames > 0;
+    if (routePlayEdgeDiag)
+    {
+        for (int rti = 0; rti < sessionSnap->getNumTracks(); ++rti)
+        {
+            const Track& itr = sessionSnap->getTrack(rti);
+            if (itr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            if (routingInstSlotCount >= kRoutingInstSlotsCap)
+            {
+                break;
+            }
+            InstPlayEdgeDiagSlot& s = routingInstSlots[routingInstSlotCount++];
+            s.sessionTrackId = itr.getId();
+            s.sessionOff = itr.isTrackOff();
+            s.sessionMuted = itr.isMuted();
+            const ExperimentalInstrumentPlaybackEntry* pe = instrumentSnap != nullptr
+                                                                   ? findExperimentalInstrumentPlaybackEntry(
+                                                                       *instrumentSnap, itr.getId())
+                                                                   : nullptr;
+            if (pe != nullptr && pe->host != nullptr && pe->midiController != nullptr)
+            {
+                s.registryYes = true;
+                s.entryTrackId = pe->trackId;
+                s.hostAddr = reinterpret_cast<std::uintptr_t>(static_cast<void*>(pe->host));
+                s.ctlAddr = reinterpret_cast<std::uintptr_t>(static_cast<void*>(pe->midiController));
+                s.hostLive = pe->host;
+                s.ctlDomain = pe->midiController->getExperimentalInstrumentDomainTrackId();
+                if (const auto rs = pe->midiController->loadRenderSnapshotForAudioThread())
+                {
+                    s.renderSnap = true;
+                    s.renderPb = rs->playbackEnabled;
+                    s.plans = static_cast<int>(rs->clips.size());
+                }
+            }
+        }
+    }
+
+    ExperimentalPlaybackRoutingPlayEdgePoster routingPlaybackPlayEdgePoster {
+        routePlayEdgeDiag, routingInstSlots, routingInstSlotCount, t0,
+        playbackIntent == PlaybackIntent::Playing,
+    };
+
+#if !defined(NDEBUG)
+    /// One-shot per transport PLAY edge: verifies `TrackKind::Instrument` rows resolve against I1 playback entries.
+    if (becamePlayingTransport && sessionSnap != nullptr)
+    {
+        for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
+        {
+            const Track& tr = sessionSnap->getTrack(ti);
+            if (tr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            const ExperimentalInstrumentPlaybackEntry* e = nullptr;
+            if (instrumentSnap != nullptr)
+            {
+                e = findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
+            }
+
+            TrackId ctlDom = kInvalidTrackId;
+            int clipPlanCount = -1;
+            bool playbackGate = false;
+            const void* hostPtr = nullptr;
+            if (e != nullptr && e->host != nullptr && e->midiController != nullptr)
+            {
+                ctlDom = e->midiController->getExperimentalInstrumentDomainTrackId();
+                hostPtr = static_cast<const void*>(e->host);
+                if (const auto rs = e->midiController->loadRenderSnapshotForAudioThread())
+                {
+                    clipPlanCount = static_cast<int>(rs->clips.size());
+                    playbackGate = rs->playbackEnabled;
+                }
+            }
+
+            juce::Logger::writeToLog(juce::String("PlaybackEngine[I1-debug] transport PLAY instrument row ")
+                                     + juce::String(ti) + " sessionTrackId="
+                                     + juce::String((juce::int64)(std::int64_t) tr.getId())
+                                     + " registryEntry="
+                                     + juce::String(e != nullptr ? "yes" : "no")
+                                     + " host="
+                                     + (hostPtr != nullptr
+                                            ? ("0x"
+                                               + juce::String::toHexString(
+                                                   (juce::int64) reinterpret_cast<std::uintptr_t>(hostPtr)))
+                                            : juce::String("nullptr"))
+                                     + " ctlDomain="
+                                     + juce::String((juce::int64)(std::int64_t) ctlDom)
+                                     + " ctlNonNull="
+                                     + juce::String(e != nullptr && e->midiController != nullptr ? "yes" : "no")
+                                     + " midiClipPlans="
+                                     + juce::String(clipPlanCount)
+                                     + " renderPlaybackEnabled="
+                                     + juce::String(playbackGate ? "yes" : "no"));
+        }
+    }
+#endif
+
+    /// [Audio thread] Sum each keyed instrument whose `trackId` matches a `TrackKind::Instrument`
+    /// row in `sessionSnap`, in timeline row order (see MIX ORDER below). When `sessionSnap` is missing
+    /// (tear / edge), mix every snapshot entry once so staged-only playback still audible.
+    const auto mixKeyedInstrumentLanesIntoOutputsIfAny = [&]()
+    {
+        if (instrumentSnap == nullptr || instrumentSnap->entries.empty())
+        {
+            return;
+        }
+        if (sessionSnap != nullptr)
+        {
+#if !defined(NDEBUG)
+            static TrackId loggedMissingPlaybackBindingOnce = kInvalidTrackId;
+#endif
+            // MIX ORDER: iterate session rows so instrument buses follow mixed track order once multiple
+            // instrument lanes exist — today `entries` holds at most one row (UI unchanged).
+            for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
+            {
+                const Track& tr = sessionSnap->getTrack(ti);
+                if (tr.getKind() != TrackKind::Instrument)
+                {
+                    continue;
+                }
+                const ExperimentalInstrumentPlaybackEntry* entry
+                    = findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
+                if (entry == nullptr || entry->host == nullptr)
+                {
+#if !defined(NDEBUG)
+                    if (loggedMissingPlaybackBindingOnce != tr.getId())
+                    {
+                        loggedMissingPlaybackBindingOnce = tr.getId();
+                        juce::Logger::writeToLog(juce::String("PlaybackEngine: Instrument lane TrackId=")
+                                                 + juce::String(static_cast<juce::int64>(std::int64_t(tr.getId())))
+                                                 + " has no playback registry entry — instrument silent this block.");
+                    }
+#endif
+                    continue;
+                }
+
+                const int sx = routePlayEdgeDiag ? indexOfInstrumentPlayEdgeDiagSlot(
+                                       routingInstSlots, routingInstSlotCount, tr.getId())
+                                                   : -1;
+
+                auto fillPlayEdgePeekOnly = [&](const char* skipWhy) noexcept
+                {
+                    if (sx < 0)
+                        return;
+                    const float pkSnap = peakAbsStereoDevice(outputChannelData, numOutputChannels, numSamples);
+                    routingInstSlots[sx].mixSkipped = true;
+                    routingInstSlots[sx].mixSkipReason = skipWhy;
+                    routingInstSlots[sx].mixInvoked = false;
+                    routingInstSlots[sx].mixDevicePeakBefore = pkSnap;
+                    routingInstSlots[sx].mixDevicePeakAfter = pkSnap;
+                    routingInstSlots[sx].mixAddedPeakApprox = 0.0f;
+                    routingInstSlots[sx].sessionFaderGain = tr.getChannelFaderGain();
+                };
+
+                if (tr.isTrackOff())
+                {
+                    fillPlayEdgePeekOnly("sessionOff");
+                    continue;
+                }
+                if (tr.isMuted())
+                {
+                    fillPlayEdgePeekOnly("sessionMuted");
+                    continue;
+                }
+
+                const float fader = tr.getChannelFaderGain();
+                if (fader <= 0.0f)
+                {
+                    fillPlayEdgePeekOnly("faderZero");
+                    continue;
+                }
+
+                const float pkBeforeThisMix = (routePlayEdgeDiag && sx >= 0)
+                                                  ? peakAbsStereoDevice(outputChannelData, numOutputChannels, numSamples)
+                                                  : 0.0f;
+                if (sx >= 0)
+                {
+                    routingInstSlots[sx].mixDevicePeakBefore = pkBeforeThisMix;
+                    routingInstSlots[sx].mixSkipped = false;
+                    routingInstSlots[sx].mixSkipReason = "";
+                    routingInstSlots[sx].sessionFaderGain = fader;
+                }
+
+                mixExperimentalInstrumentAfterTracks(
+                    entry->host, outputChannelData, numOutputChannels, numSamples, fader);
+
+                if (sx >= 0)
+                {
+                    routingInstSlots[sx].mixInvoked = true;
+                    const float pkAfter = peakAbsStereoDevice(outputChannelData, numOutputChannels, numSamples);
+                    routingInstSlots[sx].mixDevicePeakAfter = pkAfter;
+                    routingInstSlots[sx].mixAddedPeakApprox = juce::jmax(0.0f, pkAfter - pkBeforeThisMix);
+                }
+            }
+            return;
+        }
+        for (const auto& e : instrumentSnap->entries)
+        {
+            if (e.host != nullptr)
+            {
+                mixExperimentalInstrumentAfterTracks(
+                    e.host, outputChannelData, numOutputChannels, numSamples, 1.0f);
+            }
+        }
+    };
 
     for (int ch = 0; ch < numOutputChannels; ++ch)
     {
@@ -358,16 +897,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         countIn_->audioThread_mixInto(outputChannelData, numOutputChannels, numSamples);
     }
 
-    const auto mixInstrumentIfAny = [&]() noexcept {
-        mixExperimentalInstrumentAfterTracks(
-            experimentalInstrument_, outputChannelData, numOutputChannels, numSamples);
-    };
-
     if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0
         || playbackIntent != PlaybackIntent::Playing)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixInstrumentIfAny();
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
         return;
     }
 
@@ -375,7 +909,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (timelineEnd <= 0 || t0 >= timelineEnd)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixInstrumentIfAny();
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
         return;
     }
 
@@ -417,7 +951,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (availTimeline <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixInstrumentIfAny();
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
         return;
     }
 
@@ -529,16 +1063,50 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             jassert(t - timelineStartAudible == static_cast<std::int64_t>(audibleRun));
         }
 
-        if (instrumentTrack_ != nullptr && experimentalInstrument_ != nullptr
-            && playbackIntent == PlaybackIntent::Playing)
+        // Timeline order: dispatch transport MIDI toward each Instrument row that has a playback entry.
+        if (playbackIntent == PlaybackIntent::Playing && instrumentSnap != nullptr)
         {
             const bool segDisc = forceSegDiscontinuity || becamePlayingTransport;
-            instrumentTrack_->audioThread_scheduleTransportMidiForSegment(*experimentalInstrument_,
-                                                                          timelineStartAudible,
-                                                                          audibleRun,
-                                                                          outFrame0 + silencePrefix,
-                                                                          segDisc,
-                                                                          deviceBlockSizeInFrames);
+            for (int instTi = 0; instTi < sessionSnap->getNumTracks(); ++instTi)
+            {
+                const Track& itr = sessionSnap->getTrack(instTi);
+                if (itr.getKind() != TrackKind::Instrument)
+                    continue;
+
+                const ExperimentalInstrumentPlaybackEntry* const entry =
+                    findExperimentalInstrumentPlaybackEntry(*instrumentSnap, itr.getId());
+                if (entry == nullptr)
+                    continue;
+
+                const int sx = routePlayEdgeDiag
+                                   ? indexOfInstrumentPlayEdgeDiagSlot(
+                                         routingInstSlots, routingInstSlotCount, itr.getId())
+                                   : -1;
+
+                if (routePlayEdgeDiag && sx >= 0)
+                {
+                    routingInstSlots[sx].scheduleCalled = true;
+                }
+
+                int* emitPtr = nullptr;
+                if (routePlayEdgeDiag && sx >= 0 && !routingInstSlots[sx].firstSegDiagCaptured)
+                {
+                    emitPtr = &routingInstSlots[sx].emittedFirstSeg;
+                }
+
+                entry->midiController->audioThread_scheduleTransportMidiForSegment(*entry->host,
+                                                                                     timelineStartAudible,
+                                                                                     audibleRun,
+                                                                                     outFrame0 + silencePrefix,
+                                                                                     segDisc,
+                                                                                     deviceBlockSizeInFrames,
+                                                                                     emitPtr);
+
+                if (routePlayEdgeDiag && sx >= 0 && emitPtr != nullptr)
+                {
+                    routingInstSlots[sx].firstSegDiagCaptured = true;
+                }
+            }
         }
     };
 
@@ -549,12 +1117,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         if (firstRun64 <= 0)
         {
             transport_.audioThread_advancePlayheadIfPlaying(0);
-            mixInstrumentIfAny();
+            mixKeyedInstrumentLanesIntoOutputsIfAny();
             return;
         }
         renderRun(tWork, static_cast<int>(firstRun64), 0, becamePlayingTransport);
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
-        mixInstrumentIfAny();
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
         return;
     }
 
@@ -566,7 +1134,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (firstRun64 <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixInstrumentIfAny();
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
         return;
     }
 
@@ -577,7 +1145,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (!reachedRightLocator)
     {
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
-        mixInstrumentIfAny();
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
         return;
     }
 
@@ -643,5 +1211,5 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             + juce::String(transport_.audioThread_relaxedLoadWrapPassCount()));
 #endif
     }
-    mixInstrumentIfAny();
+    mixKeyedInstrumentLanesIntoOutputsIfAny();
 }

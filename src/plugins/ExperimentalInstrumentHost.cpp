@@ -14,12 +14,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <set>
 #include <vector>
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
+#include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "diagnostics/DrumNameDiagnosticFileLog.h"
 #include "plugins/Vst3ChildProcessScan.h"
 #include "ui/experimental/DrumNoteNames.h"
@@ -1547,11 +1550,38 @@ namespace
             setContentOwned(editor.release(), true);
             if (auto* c = getContentComponent())
             {
+                c->addMouseListener(this, true);
                 const int tw = juce::jmax(200, c->getWidth());
                 const int th = juce::jmax(120, c->getHeight());
                 centreWithSize(tw + 20, th + 20);
             }
             setVisible(true);
+        }
+
+        ~ExperimentalPluginEditorWindow() override
+        {
+            if (auto* c = getContentComponent())
+            {
+                c->removeMouseListener(this);
+            }
+        }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            juce::ignoreUnused(e);
+            host_.messageThreadOnNativeEditorUserActivity();
+        }
+
+        void mouseDrag(const juce::MouseEvent& e) override
+        {
+            juce::ignoreUnused(e);
+            host_.messageThreadOnNativeEditorUserActivity();
+        }
+
+        void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
+        {
+            juce::ignoreUnused(e, wheel);
+            host_.messageThreadOnNativeEditorUserActivity();
         }
 
         void closeButtonPressed() override
@@ -1637,14 +1667,131 @@ void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int numSamples) noe
 }
 
 void ExperimentalInstrumentHost::audioThread_addMidiEventForCurrentBlock(int sampleOffsetInBlock,
-                                                                          const juce::MidiMessage& message) noexcept
+                                                                      const juce::MidiMessage& message) noexcept
 {
     const int cap = audioCallbackBlockSamples_;
     if (cap <= 0 || sampleOffsetInBlock < 0 || sampleOffsetInBlock >= cap)
     {
+        rtTransportMidiAddEventDiscarded_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     rtBlockMidi_.addEvent(message, sampleOffsetInBlock);
+}
+
+std::uint64_t ExperimentalInstrumentHost::getTransportMidiAddEventDiscardedCountRelaxed() const noexcept
+{
+    return rtTransportMidiAddEventDiscarded_.load(std::memory_order_relaxed);
+}
+
+namespace
+{
+    [[nodiscard]] float decodeScratchPeakBits(std::uint32_t bits) noexcept
+    {
+        float v{};
+        std::memcpy(&v, &bits, sizeof(float));
+        return v;
+    }
+
+    [[nodiscard]] std::uint32_t encodeScratchPeak(float v) noexcept
+    {
+        std::uint32_t bits{};
+        std::memcpy(&bits, &v, sizeof(float));
+        return bits;
+    }
+
+    [[nodiscard]] juce::String joinSkipReasonTokens(const std::initializer_list<juce::String>& parts)
+    {
+        bool any = false;
+        juce::String s("none");
+        for (const juce::String& p : parts)
+        {
+            if (p.isEmpty())
+                continue;
+            if (!any)
+            {
+                s.clear();
+                any = true;
+                s << p;
+            }
+            else
+            {
+                s << "+" << p;
+            }
+        }
+        return any ? s : juce::String("none");
+    }
+} // namespace
+
+juce::String ExperimentalInstrumentHost::peekInstrumentAudioRoutingDiagLineForMessageThread() const noexcept
+{
+    try
+    {
+        auto ownerPeek = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+        const bool hi = ownerPeek != nullptr && ownerPeek->inst != nullptr && ownerPeek->layoutOk;
+
+        const auto badIo = rtDiag_skipBadIoArgs_.load(std::memory_order_relaxed);
+        const auto noOwn = rtDiag_skipNoOwnerBadLayout_.load(std::memory_order_relaxed);
+        const auto lay = rtDiag_skipScratchLayout_.load(std::memory_order_relaxed);
+        const auto smallCb = rtDiag_skipScratchTooSmallForCallback_.load(std::memory_order_relaxed);
+        const auto noMidiIo = rtDiag_skipNoMidiIo_.load(std::memory_order_relaxed);
+        const auto okBlk = rtDiag_processOkBlocks_.load(std::memory_order_relaxed);
+
+        const int lastTot = rtDiag_lastTotalOut_.load(std::memory_order_relaxed);
+        const int lastMain = rtDiag_lastMainOut_.load(std::memory_order_relaxed);
+        const int lastScratchAllocCh = rtDiag_lastScratchChAllocated_.load(std::memory_order_relaxed);
+        const int lastProcRun = rtDiag_lastProcessRun_.load(std::memory_order_relaxed);
+
+        const float pk = decodeScratchPeakBits(rtDiag_lastScratchPeakBits_.load(std::memory_order_relaxed));
+        const bool allZeroLast = rtDiag_lastScratchAllZero_.load(std::memory_order_relaxed) != 0;
+
+        juce::String line = "instrument-audio: host=0x";
+        line << juce::String::toHexString(
+                    static_cast<juce::int64>(static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(
+                        static_cast<const void*>(this)))))
+             << " processCalled=" << juce::String(okBlk > 0 ? "yes" : "no") << " blocks=" << juce::String(okBlk)
+             << " hasInstrument=" << juce::String(hi ? "yes" : "no") << " totalOut=" << juce::String(lastTot)
+             << " mainOut=" << juce::String(lastMain) << " scratchChAlloc=" << juce::String(lastScratchAllocCh)
+             << " lastN=" << juce::String(lastProcRun)
+             << " pluginPeakLast=" << juce::String(pk, 9) << " allZeroLast=" << juce::String(allZeroLast ? "yes" : "no");
+
+        line << " skips(badIo/noOwnerLayout/scratchLay/scratchSmall/noMidiIo)=" << juce::String(badIo) << '/'
+             << juce::String(noOwn) << '/' << juce::String(lay) << '/' << juce::String(smallCb) << '/'
+             << juce::String(noMidiIo);
+
+        line << " skippedReason="
+             << joinSkipReasonTokens({
+                    badIo ? juce::String("badIoArgs") : juce::String(),
+                    noOwn ? juce::String("noOwnerOrBadLayout") : juce::String(),
+                    lay ? juce::String("scratchBusLayout") : juce::String(),
+                    smallCb ? juce::String("scratchTooSmallForCallback") : juce::String(),
+                    noMidiIo ? juce::String("noMidiIo") : juce::String(),
+                });
+
+        line << " sr=" << juce::String(sampleRate_, 3) << " blockSizeCfg=" << juce::String(blockSize_);
+
+        return line;
+    }
+    catch (...)
+    {
+        return "instrument-audio: peek failed (exception)";
+    }
+}
+
+void ExperimentalInstrumentHost::messageThreadOnNativeEditorUserActivity()
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+
+    const juce::int64 nowMs = juce::Time::currentTimeMillis();
+    if (diagLastRoutingLogBumpMs_ != 0 && (nowMs - diagLastRoutingLogBumpMs_) < 750)
+        return;
+    diagLastRoutingLogBumpMs_ = nowMs;
+
+    appendExperimentalPlaybackRoutingLogLine(juce::String("instrument-editor-activity: event=uiMouseOrWheel ")
+                                               + peekInstrumentAudioRoutingDiagLineForMessageThread());
 }
 
 bool ExperimentalInstrumentHost::tryPrepareInstrumentLayout(juce::AudioPluginInstance& inst,
@@ -1821,7 +1968,8 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
     const int scratchCh = juce::jmax(kStereoChannels, totalCh);
-    scratch_.setSize(scratchCh, blockSize_, false, true, true);
+    const int bsRowsForScratch = effectiveBs(blockSize_);
+    scratch_.setSize(scratchCh, bsRowsForScratch, false, true, true);
     scratchPtrs_.clear();
     scratchPtrs_.reserve((size_t)scratchCh);
     for (int c = 0; c < scratchCh; ++c)
@@ -1831,7 +1979,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
 
     writeExperimentalInstrumentScanBoundaryLine(
         "load: AFTER  active slot publish + scratch alloc scratchCh=" + juce::String(scratchCh)
-        + " blockSize=" + juce::String(blockSize_));
+        + " scratchRows=" + juce::String(bsRowsForScratch) + " blockSizeCfg=" + juce::String(blockSize_));
 
     juce::Logger::writeToLog(
         juce::String{ "[experimental-instrument] loaded " } + owner->inst->getName()
@@ -2075,7 +2223,8 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
     const int scratchCh = juce::jmax(kStereoChannels, totalCh);
-    scratch_.setSize(scratchCh, blockSize_, false, true, true);
+    const int bsRowsForScratch = effectiveBs(blockSize_);
+    scratch_.setSize(scratchCh, bsRowsForScratch, false, true, true);
     scratchPtrs_.clear();
     scratchPtrs_.reserve((size_t)scratchCh);
     for (int c = 0; c < scratchCh; ++c)
@@ -2085,7 +2234,7 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
 
     writeExperimentalInstrumentScanBoundaryLine(
         "load: AFTER  active slot publish + scratch alloc scratchCh=" + juce::String(scratchCh)
-        + " blockSize=" + juce::String(blockSize_));
+        + " scratchRows=" + juce::String(bsRowsForScratch) + " blockSizeCfg=" + juce::String(blockSize_));
 
     juce::Logger::writeToLog(
         juce::String{ "[experimental-instrument] loaded " } + owner->inst->getName()
@@ -2182,6 +2331,21 @@ void ExperimentalInstrumentHost::unloadInstrument()
     lastLoadedPluginDescription_ = {};
     drumNamePhaseCPendingAfterEditorOpen_ = false;
     primaryPadDisplayActiveNotes_.clear();
+
+    diagLastRoutingLogBumpMs_ = 0;
+
+    rtDiag_skipBadIoArgs_.store(0, std::memory_order_relaxed);
+    rtDiag_skipNoOwnerBadLayout_.store(0, std::memory_order_relaxed);
+    rtDiag_skipScratchLayout_.store(0, std::memory_order_relaxed);
+    rtDiag_skipScratchTooSmallForCallback_.store(0, std::memory_order_relaxed);
+    rtDiag_skipNoMidiIo_.store(0, std::memory_order_relaxed);
+    rtDiag_processOkBlocks_.store(0, std::memory_order_relaxed);
+    rtDiag_lastTotalOut_.store(0, std::memory_order_relaxed);
+    rtDiag_lastMainOut_.store(0, std::memory_order_relaxed);
+    rtDiag_lastScratchChAllocated_.store(0, std::memory_order_relaxed);
+    rtDiag_lastProcessRun_.store(0, std::memory_order_relaxed);
+    rtDiag_lastScratchPeakBits_.store(0, std::memory_order_relaxed);
+    rtDiag_lastScratchAllZero_.store(1, std::memory_order_relaxed);
 
     closeNativeEditor();
 
@@ -3197,29 +3361,40 @@ void ExperimentalInstrumentHost::releaseResources()
 
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* const* outputChannelData,
                                                                          const int numOutputChannels,
-                                                                         const int numSamples) noexcept
+                                                                         const int numSamples,
+                                                                         float outputGain) noexcept
 {
     if (numSamples <= 0 || outputChannelData == nullptr || numOutputChannels <= 0)
     {
+        rtDiag_skipBadIoArgs_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     auto owner = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
     if (owner == nullptr || owner->inst == nullptr || !owner->layoutOk)
     {
+        rtDiag_skipNoOwnerBadLayout_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     juce::AudioPluginInstance& inst = *owner->inst;
     const int totalCh = inst.getTotalNumOutputChannels();
-    if (totalCh < kStereoChannels || scratch_.getNumChannels() < kStereoChannels
-        || scratch_.getNumSamples() < numSamples)
+
+    const int scratchAllocatedSamples = scratch_.getNumSamples();
+    const int scratchAllocatedChans = scratch_.getNumChannels();
+    const bool scratchUndersized = scratchAllocatedSamples < numSamples || scratchAllocatedChans < kStereoChannels;
+    if (totalCh < kStereoChannels || scratchUndersized)
     {
+        if (scratchUndersized)
+            rtDiag_skipScratchTooSmallForCallback_.fetch_add(1, std::memory_order_relaxed);
+        else
+            rtDiag_skipScratchLayout_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     if (midiIo_ == nullptr)
     {
+        rtDiag_skipNoMidiIo_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -3232,8 +3407,10 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     blockMidi.addEvents(rtBlockMidi_, 0, numSamples, 0);
     rtBlockMidi_.clear();
 
-    const int scratchCh = juce::jmin(scratch_.getNumChannels(), juce::jmax(kStereoChannels, totalCh));
-    const int n = juce::jmin(numSamples, scratch_.getNumSamples());
+    const int scratchCh = juce::jmin(scratchAllocatedChans, juce::jmax(kStereoChannels, totalCh));
+    const int n = numSamples;
+    jassert(n <= scratchAllocatedSamples);
+
     for (int c = 0; c < scratchCh; ++c)
     {
         if (float* p = scratch_.getWritePointer(c))
@@ -3252,5 +3429,26 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
 
     const float* L = scratch_.getReadPointer(0);
     const float* R = scratch_.getReadPointer(1);
-    addFirstStereoBusToDeviceOutputs(L, R, n, numOutputChannels, outputChannelData, 1.0f);
+
+    float peak = 0.0f;
+    if (L != nullptr && R != nullptr)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            peak = juce::jmax(peak, std::fabs(L[i]), std::fabs(R[i]));
+        }
+    }
+
+    rtDiag_lastTotalOut_.store(totalCh, std::memory_order_relaxed);
+    rtDiag_lastMainOut_.store(inst.getMainBusNumOutputChannels(), std::memory_order_relaxed);
+    rtDiag_lastScratchChAllocated_.store(scratchAllocatedChans, std::memory_order_relaxed);
+    rtDiag_lastProcessRun_.store(n, std::memory_order_relaxed);
+    rtDiag_lastScratchPeakBits_.store(encodeScratchPeak(peak), std::memory_order_relaxed);
+    constexpr float kEpsilon = 1.0e-12f;
+    rtDiag_lastScratchAllZero_.store(peak <= kEpsilon ? 1 : 0, std::memory_order_relaxed);
+
+    rtDiag_processOkBlocks_.fetch_add(1, std::memory_order_relaxed);
+
+    const float gain = juce::jmax(0.0f, outputGain);
+    addFirstStereoBusToDeviceOutputs(L, R, n, numOutputChannels, outputChannelData, gain);
 }

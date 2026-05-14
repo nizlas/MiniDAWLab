@@ -38,6 +38,7 @@
 #include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "io/ProjectFile.h"
 
 #include <juce_core/juce_core.h>
 
@@ -243,6 +244,18 @@ public:
     [[nodiscard]] juce::Result loadProjectFromFile(
         Transport& transport,
         const juce::File& file,
+        double deviceSampleRate,
+        juce::StringArray& outSkippedClipDetails,
+        juce::String& outInfoNote,
+        PluginInsertHost* pluginHost = nullptr,
+        InstrumentTrackController* instrumentController = nullptr);
+
+    /// [Message thread] Same effects as loading `file`, but uses an already-parsed model (caller read
+    /// `file` beforehand). Enables instrument runtime keyed by serialized `tracks[]` before restore.
+    [[nodiscard]] juce::Result applyLoadedProjectModel(
+        Transport& transport,
+        const juce::File& loadedFromDisk,
+        const ProjectFileV1& parsed,
         double deviceSampleRate,
         juce::StringArray& outSkippedClipDetails,
         juce::String& outInfoNote,

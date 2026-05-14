@@ -33,6 +33,7 @@ juce_generate_juce_header(MiniDAWLab)
 target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_sources(MiniDAWLab PRIVATE
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
     src/instruments/InstrumentTrackController.cpp
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp

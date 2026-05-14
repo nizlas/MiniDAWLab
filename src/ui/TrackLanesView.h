@@ -158,8 +158,8 @@ public:
     /// experimental instrument header — no `Session` change).
     void setHeaderActiveSuppressProvider(std::function<bool()> fn) noexcept;
 
-    /// [Message thread] Optional: block track-header structural actions (power, delete track, VST3
-    /// menu) during recording or count-in. When unset, only `RecorderService::isRecording()` is used.
+    /// [Message thread] Optional: block track-header structural actions (power/off, delete track, VST3
+    /// menu) during recording, count-in, or **transport Playing** (`Main` installs this predicate).
     void setStructuralTimelineEditBlockedPredicate(std::function<bool()> fn) noexcept;
 
     /// [Message thread] Wired once by `Main`: fires from any audio header's name-strip click after
@@ -167,10 +167,18 @@ public:
     void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
 
     /// Live row wired to `ExperimentalInstrumentHost` + `InstrumentTrackController` (single bridge).
-    /// Instrument header drag id is refreshed when `InstrumentTrackController` receives its domain shell id.
+    /// `instrumentSessionTrackId` is the `SessionSnapshot` `TrackId` for the (`TrackKind::Instrument`) row
+    /// this UI stack represents (still one row in this build).
     void attachInstrumentRow(InstrumentTrackController* controller,
                              TrackHeaderView* header,
-                             juce::Component* midiLane) noexcept;
+                             juce::Component* midiLane,
+                             TrackId instrumentSessionTrackId) noexcept;
+
+    /// [Message thread] Non-`kInvalidTrackId` after `attachInstrumentRow` when an instrument lane is bound.
+    [[nodiscard]] TrackId getAttachedInstrumentSessionTrackId() const noexcept
+    {
+        return instrumentRowSessionTrackId_;
+    }
 
     /// [Message thread] After shell id changes (`tryAddGrooveAgent…` / project restore), reinstall header-drag host.
     void refreshInstrumentHeaderReorderAttachment() noexcept;
@@ -185,6 +193,10 @@ public:
 
     /** True while a clip move or trim gesture is in flight on any lane (undo/redo should no-op). */
     [[nodiscard]] bool isClipEditGestureInProgress() const noexcept;
+
+    /// [Message thread] True when destructive header/timeline edits must not run (recording, count‑in,
+    /// transport Playing, etc. — see `Main`’s installed `structuralTimelineEditBlockedPredicate`).
+    [[nodiscard]] bool isStructuralTimelineEditBlocked() const noexcept;
 
 private:
     void timerCallback() override;
@@ -225,12 +237,13 @@ private:
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
 
-    /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged singleton UI).
+    /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged UI row keyed by `instrumentRowSessionTrackId_`).
     std::vector<VisibleTrackEntry> visibleTrackEntries_;
 
     InstrumentTrackController* instrumentController_ = nullptr;
     TrackHeaderView* instrumentHeader_ = nullptr;
     juce::Component* instrumentMidiLane_ = nullptr;
+    TrackId instrumentRowSessionTrackId_ = kInvalidTrackId;
 
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
     // while recording as `drainNextPreviewBlock` returns data. Not session state.
@@ -271,8 +284,6 @@ private:
     std::function<bool()> headerActiveSuppressProvider_;
     std::function<void()> onAudioHeaderActivated_;
     std::function<bool()> structuralTimelineEditBlockedPredicate_;
-
-    [[nodiscard]] bool isStructuralTimelineEditBlocked() const noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

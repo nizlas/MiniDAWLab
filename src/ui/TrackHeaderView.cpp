@@ -287,23 +287,14 @@ void TrackHeaderView::drawStripControlButton(juce::Graphics& g,
         break;
 
     case TrackHeaderButtonKind::Power:
-        if (spec.enabled)
-        {
-            drawStandardStripButtonFace(g,
-                                        rf,
-                                        spec.powerStandby ? juce::Colour(0xff5a5858) : juce::Colour(0xff2d9d53),
-                                        ctlEdgeNeutral,
-                                        showHoverBrighten);
-            drawPowerGlyphInSquare(g, nonLetterGlyphAreaFromSquareBodyPx(bodyPx), juce::Colour(0xfff2f6f9));
-        }
-        else
-        {
-            const juce::Colour edgeMuted(0xc0121212);
-            drawStandardStripButtonFace(g, rf, juce::Colour(0xff444441), edgeMuted, false);
-            drawPowerGlyphInSquare(g,
-                                   nonLetterGlyphAreaFromSquareBodyPx(bodyPx),
-                                   juce::Colour(0xff959595));
-        }
+        // On/Off appearance follows `spec.powerStandby` only (`TrackHeaderModel::off`). Interactivity is
+        // `spec.enabled`; it affects hover brighten via `showHoverBrighten`, not base body/glyph colors.
+        drawStandardStripButtonFace(g,
+                                    rf,
+                                    spec.powerStandby ? juce::Colour(0xff5a5858) : juce::Colour(0xff2d9d53),
+                                    ctlEdgeNeutral,
+                                    showHoverBrighten);
+        drawPowerGlyphInSquare(g, nonLetterGlyphAreaFromSquareBodyPx(bodyPx), juce::Colour(0xfff2f6f9));
         break;
 
     case TrackHeaderButtonKind::Mute:

@@ -43,7 +43,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
+#include <vector>
 
+#include "domain/Track.h"
 #include "transport/Transport.h"
 
 class CountInClickOutput;
@@ -52,7 +56,35 @@ class InstrumentTrackController;
 class PluginInsertHost;
 class RecorderService;
 class Session;
-class Transport;
+
+// =============================================================================
+// ExperimentalInstrumentPlaybackSnapshot  —  message-thread publishes, RT reads
+// =============================================================================
+//
+// One immutable vector of `{TrackId, host*, controller*}` pairs. The audio callback resolves
+// `TrackKind::Instrument` rows against this snapshot **by TrackId** and runs the same I1 MIDI +
+// synth path as before. Main owns hosts/controllers; pointers are stable for the snapshot's
+// lifetime. Publication uses `publishExperimentalInstrumentPlaybackSnapshot` (release-store);
+// reads use acquire-load plus `shared_ptr` retain — no mutation and no allocator traffic on RT.
+//
+// ---------------------------------------------------------------------------
+struct ExperimentalInstrumentPlaybackEntry
+{
+    TrackId trackId = kInvalidTrackId;
+    ExperimentalInstrumentHost* host = nullptr;
+    InstrumentTrackController* midiController = nullptr;
+};
+
+struct ExperimentalInstrumentPlaybackSnapshot
+{
+    std::vector<ExperimentalInstrumentPlaybackEntry> entries;
+
+    ExperimentalInstrumentPlaybackSnapshot() = default;
+    explicit ExperimentalInstrumentPlaybackSnapshot(std::vector<ExperimentalInstrumentPlaybackEntry>&& e)
+        : entries(std::move(e))
+    {
+    }
+};
 
 class PlaybackEngine : public juce::AudioIODeviceCallback
 {
@@ -63,19 +95,19 @@ public:
     // `countIn` is optional: short count-in metronome clicks to device outputs only (no session/recorder).
     // `pluginHost` optional Phase 8: per-track VST3 insert; must outlive this engine until after
     // `removeAudioCallback` (same tear order as `recorder`).
-    // `experimentalInstrument` optional I1: single global instrument slot mixed after tracks; same
-    // lifetime rule as `pluginHost`.
-    // `instrumentTrack` optional I3e: Groove Agent MIDI clip scheduling; must outlive this engine until
-    // `removeAudioCallback`. May be null before main window attaches the controller.
     PlaybackEngine(Transport& transport, Session& session, RecorderService* recorder = nullptr,
-                  CountInClickOutput* countIn = nullptr, PluginInsertHost* pluginHost = nullptr,
-                  ExperimentalInstrumentHost* experimentalInstrument = nullptr,
-                  InstrumentTrackController* instrumentTrack = nullptr);
+                   CountInClickOutput* countIn = nullptr, PluginInsertHost* pluginHost = nullptr);
 
-    void setInstrumentTrackController(InstrumentTrackController* instrumentTrack) noexcept
-    {
-        instrumentTrack_ = instrumentTrack;
-    }
+    /// Message thread only: installs the next immutable instrument playback view for the RT.
+    /// Passing nullptr clears the snapshot; passing an empty snapshot is equivalent (no lookups hit).
+    void publishExperimentalInstrumentPlaybackSnapshot(
+        std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot> snapshot) noexcept;
+
+    void setExperimentalInstrumentDeviceLifecycleHooks(
+        std::function<void(double sampleRate, int blockSizeSamples)> prepareAllHosts,
+        std::function<void()> releaseAllHosts,
+        std::function<void(int numSamples)> beginBlockAllHosts) noexcept;
+
     ~PlaybackEngine() override;
 
     PlaybackEngine(const PlaybackEngine&) = delete;
@@ -88,7 +120,8 @@ public:
     // **Across** tracks, samples are **added** into the same output (minimal sum, not a mixer).
     // Optional: forward mono **input[0]** to `RecorderService::pushInputBlock` when a recorder is
     // composed in (independent of `Session`; no-op if not recording or no input channels).
-    // No decode, I/O, locks, or UI; no new heap use on the hot path beyond the snapshot pointer copy.
+    // No decode, I/O, locks, or UI; no new heap use on the hot path beyond the two snapshot pointer
+    // retains (`Session` + instrument playback, same pattern as `Session::loadSessionSnapshotForAudioThread`).
     // See .cpp for coverage runs, mono→stereo, and transport advance.
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                           int numInputChannels,
@@ -112,9 +145,13 @@ private:
     RecorderService* const recorder_;
     CountInClickOutput* const countIn_;
     PluginInsertHost* const pluginHost_;
-    ExperimentalInstrumentHost* const experimentalInstrument_;
-    InstrumentTrackController* instrumentTrack_;
+    /// [Audio thread] acquire-load retains const snapshot — same handoff discipline as Session.
+    std::atomic<std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>>
+        experimentalInstrumentPlaybackSnapshot_;
 
+    std::function<void(double, int)> experimentalPrepareAllHosts_;
+    std::function<void()> experimentalReleaseAllHosts_;
+    std::function<void(int)> experimentalBeginBlockAllHosts_;
     std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;

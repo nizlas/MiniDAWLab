@@ -1095,6 +1095,28 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
     {
         return pr;
     }
+    return applyLoadedProjectModel(
+        transport,
+        file,
+        parsed,
+        deviceSampleRate,
+        outSkippedClipDetails,
+        outInfoNote,
+        pluginHost,
+        instrumentController);
+}
+
+juce::Result Session::applyLoadedProjectModel(Transport& transport,
+                                              const juce::File& file,
+                                              const ProjectFileV1& parsed,
+                                              const double deviceSampleRate,
+                                              juce::StringArray& outSkippedClipDetails,
+                                              juce::String& outInfoNote,
+                                              PluginInsertHost* pluginHost,
+                                              InstrumentTrackController* instrumentController)
+{
+    outSkippedClipDetails.clear();
+    outInfoNote.clear();
 
     if (!juce::approximatelyEqual(deviceSampleRate, parsed.deviceSampleRateAtSave))
     {
@@ -1309,7 +1331,8 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
 
     if (instrumentController != nullptr)
     {
-        instrumentController->restoreExperimentalInstrumentFromProject(parsed.experimentalInstrumentTracks);
+        instrumentController->restoreExperimentalInstrumentFromProject(parsed.experimentalInstrumentTracks,
+                                                                         &parsed.tracks);
     }
 
     return juce::Result::ok();

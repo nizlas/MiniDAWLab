@@ -24,6 +24,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -149,14 +150,31 @@ public:
     void audioThread_addMidiEventForCurrentBlock(int sampleOffsetInBlock,
                                                  const juce::MidiMessage& message) noexcept;
 
+    /// [Audio thread] Samples cap set by `audioThread_beginAudioBlock` for transport MIDI clamps (same thread).
+    [[nodiscard]] int audioThread_peekTransportMidiBlockCap() const noexcept
+    {
+        return audioCallbackBlockSamples_;
+    }
+
+    /// Cumulative discard count when `audioThread_addMidiEventForCurrentBlock` rejects (bad block/offets).
+    /// Relaxed atomic; diagnostics only — read anytime from UI or routed message-thread logs.
+    [[nodiscard]] std::uint64_t getTransportMidiAddEventDiscardedCountRelaxed() const noexcept;
+
+    /// [Message thread] One-line routing/mix diagnostics for `experimental-playback-routing.log` (atomics/peek).
+    [[nodiscard]] juce::String peekInstrumentAudioRoutingDiagLineForMessageThread() const noexcept;
+
+    /// [Message thread] Called when native editor subtree receives interaction; throttled routing-log peek.
+    void messageThreadOnNativeEditorUserActivity();
+
     void prepareForDevice(double sampleRate, int blockSize);
     void releaseResources();
 
     /// [Audio thread] Clears stereo scratch, drains MIDI collector, runs processBlock if loaded
     /// and layout ok, adds first stereo output bus to device buffers (frame 0..numSamples-1).
     void audioThread_processBlockAndAddToOutputs(float* const* outputChannelData,
-                                                   int numOutputChannels,
-                                                   int numSamples) noexcept;
+                                                 int numOutputChannels,
+                                                 int numSamples,
+                                                 float outputGain = 1.0f) noexcept;
 
 private:
     struct InstrumentOwner
@@ -181,11 +199,28 @@ private:
 
     /// Transport-driven MIDI for the current audio callback (no lock; audio thread only).
     juce::MidiBuffer rtBlockMidi_;
+    std::atomic<std::uint64_t> rtTransportMidiAddEventDiscarded_{ 0 };
     int audioCallbackBlockSamples_ = 0;
 
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
 
     std::unique_ptr<juce::DocumentWindow> editorWindow_;
+
+    // --- [Audio thread] Instrument routing diagnostics (peek from message thread; no file I/O on audio thread).
+    std::atomic<std::uint64_t> rtDiag_skipBadIoArgs_{ 0 };
+    std::atomic<std::uint64_t> rtDiag_skipNoOwnerBadLayout_{ 0 };
+    std::atomic<std::uint64_t> rtDiag_skipScratchLayout_{ 0 };
+    std::atomic<std::uint64_t> rtDiag_skipScratchTooSmallForCallback_{ 0 };
+    std::atomic<std::uint64_t> rtDiag_skipNoMidiIo_{ 0 };
+    std::atomic<std::uint64_t> rtDiag_processOkBlocks_{ 0 };
+    std::atomic<std::int32_t> rtDiag_lastTotalOut_{ 0 };
+    std::atomic<std::int32_t> rtDiag_lastMainOut_{ 0 };
+    std::atomic<std::int32_t> rtDiag_lastScratchChAllocated_{ 0 };
+    std::atomic<std::int32_t> rtDiag_lastProcessRun_{ 0 };
+    std::atomic<std::uint32_t> rtDiag_lastScratchPeakBits_{ 0 }; // bitwise float
+    std::atomic<std::uint8_t> rtDiag_lastScratchAllZero_{ 1 };
+
+    mutable std::int64_t diagLastRoutingLogBumpMs_{ 0 };
 
     /// [Message thread] Forwards into MidiMessageCollector (implementation in .cpp).
     void queueMidiFromMessageThread(const ::juce::MidiMessage& message);

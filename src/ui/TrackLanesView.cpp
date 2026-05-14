@@ -472,9 +472,22 @@ void TrackLanesView::refreshInstrumentHeaderReorderAttachment() noexcept
     }
 
     const bool trioReady = instrumentController_ != nullptr
-        && instrumentController_->hasInstrumentTrack() && instrumentMidiLane_ != nullptr;
-    const TrackId dragId
-        = trioReady ? instrumentController_->getExperimentalInstrumentDomainTrackId() : kInvalidTrackId;
+        && instrumentController_->hasInstrumentTrack() && instrumentMidiLane_ != nullptr
+        && instrumentRowSessionTrackId_ != kInvalidTrackId;
+
+    if (trioReady && instrumentController_->getExperimentalInstrumentDomainTrackId() != instrumentRowSessionTrackId_)
+    {
+        juce::Logger::writeToLog(
+            "[TrackLanesView] Instrument header drag id "
+            + juce::String((juce::int64)instrumentRowSessionTrackId_)
+            + " does not match controller domain id "
+            + juce::String((juce::int64)instrumentController_->getExperimentalInstrumentDomainTrackId())
+            + " — header reorder disabled until they match.");
+        instrumentHeader_->setHeaderReorderDrag(std::nullopt, kInvalidTrackId);
+        return;
+    }
+
+    const TrackId dragId = trioReady ? instrumentRowSessionTrackId_ : kInvalidTrackId;
 
     if (trioReady && dragId != kInvalidTrackId)
     {
@@ -492,14 +505,15 @@ void TrackLanesView::refreshInstrumentHeaderReorderAttachment() noexcept
     }
 }
 
-void TrackLanesView::attachInstrumentRow(
-    InstrumentTrackController* controller,
-    TrackHeaderView* header,
-    juce::Component* midiLane) noexcept
+void TrackLanesView::attachInstrumentRow(InstrumentTrackController* controller,
+                                         TrackHeaderView* header,
+                                         juce::Component* midiLane,
+                                         const TrackId instrumentSessionTrackId) noexcept
 {
     instrumentController_ = controller;
     instrumentHeader_ = header;
     instrumentMidiLane_ = midiLane;
+    instrumentRowSessionTrackId_ = instrumentSessionTrackId;
 
     if (instrumentHeader_ != nullptr)
     {
@@ -538,15 +552,18 @@ void TrackLanesView::rebuildVisibleTrackEntries() noexcept
 
         const bool trio = instrumentController_ != nullptr
             && instrumentController_->hasInstrumentTrack() && instrumentHeader_ != nullptr
-            && instrumentMidiLane_ != nullptr;
-        const TrackId bridged = trio ? instrumentController_->getExperimentalInstrumentDomainTrackId()
-                                     : kInvalidTrackId;
+            && instrumentMidiLane_ != nullptr && instrumentRowSessionTrackId_ != kInvalidTrackId;
+        const bool idsMatch = trio && (instrumentRowSessionTrackId_ == tid);
+        const bool domainMatch
+            = idsMatch
+              && (instrumentController_->getExperimentalInstrumentDomainTrackId() == instrumentRowSessionTrackId_);
 
-        if (!trio || bridged != tid)
+        if (!idsMatch || !domainMatch)
         {
             juce::Logger::writeToLog(
                 juce::String("[TrackLanesView] Snapshot Instrument row id=") + juce::String((juce::int64)tid)
-                + " has no bridged singleton controller/header — row hidden.");
+                + " has no bridged controller/header for attached id="
+                + juce::String((juce::int64)instrumentRowSessionTrackId_) + " — row hidden.");
             continue;
         }
 
@@ -720,7 +737,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     m.muted = tr.isMuted();
                 }
             }
-            m.powerInteractable = true;
+            m.powerInteractable = !isStructuralTimelineEditBlocked();
             m.muteInteractable = true;
             m.armInteractable = true;
             return m;

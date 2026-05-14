@@ -1,14 +1,107 @@
 #include "instruments/InstrumentTrackController.h"
 
+#include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "domain/Session.h"
+#include "domain/SessionSnapshot.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
+
+namespace
+{
+[[nodiscard]] const ProjectFileExperimentalInstrumentTrackV1* selectedEnabledGrooveAgentPayload(
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
+{
+    for (const auto& t : tracks)
+    {
+        if (!t.enabled || t.instrumentKind != "GrooveAgentSE")
+        {
+            continue;
+        }
+        return &t;
+    }
+    return nullptr;
+}
+
+[[nodiscard]] TrackId resolveExperimentalInstrumentBindLaneId(
+    Session* sessionMaybe,
+    const TrackId dtoTrackField,
+    const std::vector<ProjectFileTrackV1>* persistedSerializedTracksMaybe) noexcept
+{
+    std::shared_ptr<const SessionSnapshot> snap;
+    if (sessionMaybe != nullptr)
+    {
+        snap = sessionMaybe->loadSessionSnapshotForAudioThread();
+    }
+
+    TrackId bindId = dtoTrackField;
+    if (bindId == static_cast<TrackId>(0))
+    {
+        bindId = kInvalidTrackId;
+    }
+
+    if (snap != nullptr && bindId != kInvalidTrackId)
+    {
+        const int ixSnap = snap->findTrackIndexById(bindId);
+        if (ixSnap < 0 || snap->getTrack(ixSnap).getKind() != TrackKind::Instrument)
+        {
+            bindId = kInvalidTrackId;
+        }
+    }
+
+    if (bindId == kInvalidTrackId && snap != nullptr)
+    {
+        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+        {
+            const Track& tr = snap->getTrack(ti);
+            if (tr.getKind() == TrackKind::Instrument)
+            {
+                bindId = tr.getId();
+                juce::Logger::writeToLog(
+                    "[InstrumentTrackController] Bound experimental payload to Instrument lane id="
+                    + juce::String((juce::int64)bindId));
+                break;
+            }
+        }
+    }
+
+    if (bindId == kInvalidTrackId && persistedSerializedTracksMaybe != nullptr)
+    {
+        const TrackId rawDto
+            = (dtoTrackField == static_cast<TrackId>(0)) ? kInvalidTrackId : dtoTrackField;
+        if (rawDto != kInvalidTrackId)
+        {
+            for (const auto& trDto : *persistedSerializedTracksMaybe)
+            {
+                if (trDto.kind.equalsIgnoreCase("instrument") && trDto.id == rawDto)
+                {
+                    bindId = trDto.id;
+                    break;
+                }
+            }
+        }
+        if (bindId == kInvalidTrackId)
+        {
+            for (const auto& trDto : *persistedSerializedTracksMaybe)
+            {
+                if (trDto.kind.equalsIgnoreCase("instrument"))
+                {
+                    bindId = trDto.id;
+                    break;
+                }
+            }
+        }
+    }
+
+    return bindId;
+}
+} // namespace
 
 InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept
     : host_(host)
@@ -18,7 +111,14 @@ InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost&
 
 bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
 {
-    return host_.hasInstrument() && host_.getInstrumentNameForUi().containsIgnoreCase("Groove Agent");
+    // Host-report name formatting varies (“Groove Agent …”, “GrooveAgent SE”, …). Treat any GrooveAgent
+    // substring as loaded so UI subtitles and snapshots stay coherent with `hasInstrument()`.
+    if (!host_.hasInstrument())
+    {
+        return false;
+    }
+    const juce::String n = host_.getInstrumentNameForUi();
+    return n.containsIgnoreCase("Groove Agent") || n.containsIgnoreCase("GrooveAgent");
 }
 
 juce::String InstrumentTrackController::getLaneHeaderTitle() const
@@ -608,7 +708,8 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
 }
 
 void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
-    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks)
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks,
+    const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRows)
 {
     clearExperimentalInstrumentStateForProjectLoad();
 
@@ -628,43 +729,14 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
         return;
     }
 
+    experimentalDomainTrackId_ = resolveExperimentalInstrumentBindLaneId(
+        session_, chosen->trackId, persistedSerializedTrackRows);
+
     std::shared_ptr<const SessionSnapshot> snap;
     if (session_ != nullptr)
     {
         snap = session_->loadSessionSnapshotForAudioThread();
     }
-
-    TrackId bindId = chosen->trackId;
-    if (bindId == 0)
-    {
-        bindId = kInvalidTrackId;
-    }
-    if (snap != nullptr && bindId != kInvalidTrackId)
-    {
-        const int ixSnap = snap->findTrackIndexById(bindId);
-        if (ixSnap < 0 || snap->getTrack(ixSnap).getKind() != TrackKind::Instrument)
-        {
-            bindId = kInvalidTrackId;
-        }
-    }
-
-    if (bindId == kInvalidTrackId && snap != nullptr)
-    {
-        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
-        {
-            const Track& tr = snap->getTrack(ti);
-            if (tr.getKind() == TrackKind::Instrument)
-            {
-                bindId = tr.getId();
-                juce::Logger::writeToLog(
-                    "[InstrumentTrack] Bound experimental payload to Instrument lane id="
-                    + juce::String((juce::int64)bindId));
-                break;
-            }
-        }
-    }
-
-    experimentalDomainTrackId_ = bindId;
 
     trackActive_ = true;
     bool power = chosen->powerOn;
@@ -1087,7 +1159,10 @@ void InstrumentTrackController::publishRenderSnapshot()
         sr = 48000.0;
     }
     snap->gateSamples = juce::jmax(1, (int)std::llround(0.001 * 100.0 * sr));
-    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_ && instrumentLoaded_ && host_.hasInstrument();
+    // Transport MIDI must follow **host readiness** (`layoutOk` instrument). `instrumentLoaded_` mirrored
+    // that via a Groove-shaped name heuristic and could stay false while the plug-in actually processed
+    // audio — starving `audioThread_scheduleTransportMidiForSegment` even though clips paint from `clips_`.
+    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_ && host_.hasInstrument();
 
     for (const auto& cptr : clips_)
     {
@@ -1152,6 +1227,61 @@ void InstrumentTrackController::publishRenderSnapshot()
                                                          const InstrumentClipRenderPlan& b) {
         return a.startSamples < b.startSamples;
     });
+
+    std::int64_t arrangeMinSample = 0;
+    std::int64_t arrangeMaxExclusive = -1;
+    int routedNoteRows = 0;
+    if (!snap->clips.empty())
+    {
+        arrangeMinSample = std::numeric_limits<std::int64_t>::max();
+        arrangeMaxExclusive = std::numeric_limits<std::int64_t>::min();
+        for (const auto& pl : snap->clips)
+        {
+            arrangeMinSample = juce::jmin(arrangeMinSample, pl.startSamples);
+            arrangeMaxExclusive = juce::jmax(arrangeMaxExclusive, pl.endSamplesExclusive);
+            routedNoteRows += static_cast<int>(pl.notes.size());
+        }
+    }
+
+    juce::String routingRenderFp;
+    routingRenderFp << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(experimentalDomainTrackId_)))
+                    << '|' << juce::String(trackActive_ ? 1 : 0) << '|' << juce::String(powerOn_ ? 1 : 0)
+                    << '|' << juce::String(muted_ ? 1 : 0) << '|' << juce::String(instrumentLoaded_ ? 1 : 0) << '|'
+                    << juce::String(host_.hasInstrument() ? 1 : 0) << '|'
+                    << juce::String(snap->playbackEnabled ? 1 : 0) << '|'
+                    << juce::String(static_cast<int>(snap->clips.size()));
+
+    routingRenderFp << '|' << juce::String(static_cast<juce::int64>(
+                              static_cast<std::int64_t>(arrangeMinSample)))
+                    << '|' << juce::String(static_cast<juce::int64>(
+                               static_cast<std::int64_t>(arrangeMaxExclusive)))
+                    << '|' << juce::String(routedNoteRows);
+
+    if (routingRenderFp != lastExperimentalPlaybackRoutingRenderFingerprint_)
+    {
+        lastExperimentalPlaybackRoutingRenderFingerprint_ = routingRenderFp;
+        const juce::String arrangeSpan
+            = snap->clips.empty()
+                  ? juce::String("plansEmpty=1")
+                  : juce::String("timelineRange=[")
+                        + juce::String(static_cast<juce::int64>(std::int64_t(arrangeMinSample)))
+                        + juce::String(",")
+                        + juce::String(static_cast<juce::int64>(std::int64_t(arrangeMaxExclusive)))
+                        + juce::String(")");
+
+        appendExperimentalPlaybackRoutingLogLine(
+            juce::String("instrument-render-snapshot: tid=")
+            + juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(experimentalDomainTrackId_)))
+            + juce::String(" active=") + juce::String(trackActive_ ? "yes" : "no")
+            + juce::String(" powerOn=") + juce::String(powerOn_ ? "yes" : "no")
+            + juce::String(" muted=") + juce::String(muted_ ? "yes" : "no")
+            + juce::String(" instrumentLoaded=") + juce::String(instrumentLoaded_ ? "yes" : "no")
+            + juce::String(" hostHasInstrument=") + juce::String(host_.hasInstrument() ? "yes" : "no")
+            + juce::String(" playbackEnabled=") + juce::String(snap->playbackEnabled ? "yes" : "no")
+            + juce::String(" clipPlans=") + juce::String(static_cast<int>(snap->clips.size()))
+            + juce::String(" noteEventsTotal=") + juce::String(routedNoteRows) + juce::String(" ") + arrangeSpan);
+    }
+
     std::atomic_store_explicit(&renderSnapshot_, std::shared_ptr<const InstrumentTrackRenderSnapshot>(std::move(snap)),
                                std::memory_order_release);
 }
@@ -1188,12 +1318,21 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     const int segNumSamples,
     const int bufferOffsetInDevice,
     const bool forceDiscontinuity,
-    const int deviceBlockNumSamples) noexcept
+    const int deviceBlockNumSamples,
+    int* outMidiEventsEmitted) noexcept
 {
     if (segNumSamples <= 0 || deviceBlockNumSamples <= 0)
     {
         return;
     }
+
+    const auto emitCounted = [&](const int offset, const juce::MidiMessage& message) noexcept {
+        host.audioThread_addMidiEventForCurrentBlock(offset, message);
+        if (outMidiEventsEmitted != nullptr)
+        {
+            ++(*outMidiEventsEmitted);
+        }
+    };
 
     const auto snap = std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
     if (snap == nullptr)
@@ -1219,8 +1358,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
         {
             const auto& p = rtPendingOffs_[(size_t)i];
             const int c = juce::jlimit(1, 16, p.midiChannel);
-            host.audioThread_addMidiEventForCurrentBlock(
-                off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+            emitCounted(off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
         }
         rtPendingOffCount_ = 0;
     }
@@ -1240,12 +1378,10 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
             {
                 const int rel = static_cast<int>(p.dueAbsSample - timelineSegStart);
                 const int o = juce::jlimit(0, deviceBlockNumSamples - 1, rel + bufferOffsetInDevice);
-                host.audioThread_addMidiEventForCurrentBlock(
-                    o, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+                emitCounted(o, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
                 continue;
             }
-            host.audioThread_addMidiEventForCurrentBlock(
-                off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+            emitCounted(off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
         }
         rtPendingOffCount_ = w;
     }
@@ -1283,8 +1419,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
             const int onOffset = juce::jlimit(0, deviceBlockNumSamples - 1, onRel + bufferOffsetInDevice);
             const float vel = static_cast<float>(ev.velocity) / 127.0f;
             const int noteCh = juce::jlimit(1, 16, (int)ev.midiChannel);
-            host.audioThread_addMidiEventForCurrentBlock(
-                onOffset, juce::MidiMessage::noteOn(noteCh, (int)ev.midiNote, vel));
+            emitCounted(onOffset, juce::MidiMessage::noteOn(noteCh, (int)ev.midiNote, vel));
 
             const std::int64_t dueAbs = (ev.noteOffAbsSample > ev.absSample)
                                             ? ev.noteOffAbsSample
@@ -1293,8 +1428,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
             {
                 const int offRel = static_cast<int>(dueAbs - timelineSegStart);
                 const int o = juce::jlimit(0, deviceBlockNumSamples - 1, offRel + bufferOffsetInDevice);
-                host.audioThread_addMidiEventForCurrentBlock(
-                    o, juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, 0.0f));
+                emitCounted(o, juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, 0.0f));
             }
             else if (dueAbs >= segEnd)
             {
@@ -1304,11 +1438,29 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
                 }
                 else
                 {
-                    host.audioThread_addMidiEventForCurrentBlock(
-                        juce::jmax(0, deviceBlockNumSamples - 1),
-                        juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, 0.0f));
+                    emitCounted(juce::jmax(0, deviceBlockNumSamples - 1),
+                                juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, 0.0f));
                 }
             }
         }
     }
+}
+
+bool InstrumentTrackController::serializedProjectUsesEnabledGrooveAgentRow(
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
+{
+    return selectedEnabledGrooveAgentPayload(tracks) != nullptr;
+}
+
+TrackId InstrumentTrackController::peekExperimentalInstrumentBindLaneId(
+    Session* sessionNullable,
+    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& payloads,
+    const std::vector<ProjectFileTrackV1>& persistedTracks) noexcept
+{
+    const ProjectFileExperimentalInstrumentTrackV1* chosen = selectedEnabledGrooveAgentPayload(payloads);
+    if (chosen == nullptr)
+    {
+        return kInvalidTrackId;
+    }
+    return resolveExperimentalInstrumentBindLaneId(sessionNullable, chosen->trackId, &persistedTracks);
 }
