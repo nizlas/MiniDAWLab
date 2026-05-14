@@ -102,8 +102,8 @@ Do **not** design new features around a single “the” instrument or “primar
 
 ## Diagnostics and logging
 
-- **Always-on file logs** (e.g. under `%APPDATA%\MiniDAWLab\`) are **not** architecture — they are implementation detail. New diagnostic noise should be **compile-time or config gated** where it affects normal users.
-- Optional flags already exist for some paths (e.g. undo/drum name configs under [`src/diagnostics/`](../src/diagnostics/)).
+- **`experimental-playback-routing.log`** and **`experimental-instrument.log`** (`%APPDATA%\MiniDAWLab\`) are **compile-gated**: `MINIDAW_DIAG_PLAYBACK_ROUTING` and `MINIDAW_DIAG_INSTRUMENT_LIFECYCLE` in [`src/diagnostics/DiagnosticBuildFlags.h`](../src/diagnostics/DiagnosticBuildFlags.h), both compiling to **`0`** by default — **never** architectural guarantees.
+- Other `%APPDATA%\MiniDAWLab\` diagnostics (undo / drum name configs, scans, etc.) are also **implementation detail**, not contracts; prefer **compile-time or config gates** for anything that affects normal users.
 
 ---
 

@@ -629,7 +629,7 @@ private:
 
         void releaseExperimentalInstrumentHostsDeviceResources() noexcept;
 
-        void reconcileKeyedInstrumentMapsToExperimentalDomainSingleSlotIfNeeded() noexcept;
+        void reconcileInstrumentRegistryAgainstSessionRows() noexcept;
 
         void updateExperimentalPlaybackBridgeAfterRegistryChange();
 
@@ -4522,7 +4522,7 @@ void MiniDAWLabApplication::TransportControlsContent::releaseExperimentalInstrum
     }
 }
 
-void MiniDAWLabApplication::TransportControlsContent::reconcileKeyedInstrumentMapsToExperimentalDomainSingleSlotIfNeeded()
+void MiniDAWLabApplication::TransportControlsContent::reconcileInstrumentRegistryAgainstSessionRows()
     noexcept
 {
     if (instrumentHostsByTrackId_.size() != instrumentControllersByTrackId_.size())
@@ -4593,7 +4593,7 @@ void MiniDAWLabApplication::TransportControlsContent::reconcileKeyedInstrumentMa
 
 void MiniDAWLabApplication::TransportControlsContent::updateExperimentalPlaybackBridgeAfterRegistryChange()
 {
-    reconcileKeyedInstrumentMapsToExperimentalDomainSingleSlotIfNeeded();
+    reconcileInstrumentRegistryAgainstSessionRows();
 
     std::vector<ExperimentalInstrumentPlaybackEntry> entries;
     entries.reserve(instrumentControllersByTrackId_.size() + size_t { 2 });

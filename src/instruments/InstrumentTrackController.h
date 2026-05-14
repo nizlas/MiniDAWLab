@@ -301,7 +301,9 @@ private:
 
     std::atomic<std::shared_ptr<const InstrumentTrackRenderSnapshot>> renderSnapshot_;
     std::uint32_t nextSnapshotRevision_ = 1;
-    /// [Message thread] Dedupes `%APPDATA%\\MiniDAWLab\\experimental-playback-routing.log` instrument-render rows.
+    /// [Message thread] Dedup fingerprint for instrument-render snapshots; **`appendExperimentalPlaybackRoutingLogLine`
+    /// runs only when** `MINIDAW_DIAG_PLAYBACK_ROUTING` is non-zero (default **`0`** — `DiagnosticBuildFlags.h`).
+    /// When disabled, fingerprints still advance but nothing is written to `experimental-playback-routing.log`.
     juce::String lastExperimentalPlaybackRoutingRenderFingerprint_;
 
     void publishRenderSnapshot();

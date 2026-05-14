@@ -5,6 +5,9 @@
 
 #include <cmath>
 
+// `experimental-instrument.log` (midi-editor lines): `writeMidiEditorLogLine` touches the file only when
+// MINIDAW_DIAG_INSTRUMENT_LIFECYCLE != 0 at compile time (default **`0`** in DiagnosticBuildFlags.h).
+
 namespace
 {
 #if MINIDAW_DIAG_INSTRUMENT_LIFECYCLE

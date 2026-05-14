@@ -1,5 +1,9 @@
 // =============================================================================
 // ExperimentalPlaybackRoutingLog — file-based routing triage (message thread)
+//
+// Writes `experimental-playback-routing.log` only when MINIDAW_DIAG_PLAYBACK_ROUTING != 0
+// (default 0 — see DiagnosticBuildFlags.h). Compile-flag gated only; not a runtime or architecture
+// guarantee.
 // =============================================================================
 
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"

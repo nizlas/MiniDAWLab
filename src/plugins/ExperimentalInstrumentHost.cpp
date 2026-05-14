@@ -1243,6 +1243,9 @@ namespace
         return r;
     }
 
+    // `experimental-instrument.log`: only created/appended when MINIDAW_DIAG_INSTRUMENT_LIFECYCLE != 0 at
+    // compile time (`DiagnosticBuildFlags.h`, default **`0`**). Instrument-lifecycle diagnostics only — not contract.
+
 #if MINIDAW_DIAG_INSTRUMENT_LIFECYCLE
     [[nodiscard]] juce::File getExperimentalInstrumentLogFile()
     {
@@ -1307,7 +1310,7 @@ namespace
 #endif
     }
 
-    /// Scan / load boundary lines: append and close the stream each time so the log is not left buffered.
+    /// Scan / load boundary lines for `experimental-instrument.log` (compile-gated lifecycle flag above).
     void writeExperimentalInstrumentScanBoundaryLine(const juce::String& message)
     {
 #if !MINIDAW_DIAG_INSTRUMENT_LIFECYCLE

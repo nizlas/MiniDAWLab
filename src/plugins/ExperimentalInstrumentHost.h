@@ -66,7 +66,9 @@ public:
 
     /// [Message thread] Loads from a description obtained out-of-process (e.g. raw OOP scan or XML cache).
     /// Skips in-process findAllTypesForFile. If `desc.fileOrIdentifier` is empty, uses `originalPath`.
-    /// `sourceTag` is copied into experimental-instrument.log (e.g. "oop-description", "cached-oop-description").
+    /// When `MINIDAW_DIAG_INSTRUMENT_LIFECYCLE` is enabled (non-zero at compile time; default **`0`** in
+    /// `DiagnosticBuildFlags.h`), `sourceTag` is copied into `experimental-instrument.log`
+    /// (e.g. "oop-description", "cached-oop-description").
     /// If `pluginStateToRestore` is non-null and non-empty, `setStateInformation` runs on the message thread
     /// after layout `prepare` and before publishing `activeOwner_` (audio thread never sees pre-restored instance).
     /// On restore failure the instance is reset via `releaseResources` + `tryPrepareInstrumentLayout` (default patch).
@@ -78,7 +80,8 @@ public:
         const juce::MemoryBlock* pluginStateToRestore = nullptr,
         juce::String* outPluginStateRestoreWarning = nullptr);
 
-    /// [Message thread] Appends one line to `experimental-instrument.log` (shared with load/unload diagnostics).
+    /// [Message thread] When `MINIDAW_DIAG_INSTRUMENT_LIFECYCLE` is enabled (default compile-time **`0`**),
+    /// appends one line to `experimental-instrument.log` (shared with load/unload diagnostics); otherwise no-op.
     static void appendInstrumentHostLogLine(const juce::String& message);
 
     /// [Message thread] Base64 `getStateInformation` for the loaded instrument, or empty.
@@ -167,10 +170,13 @@ public:
     /// Relaxed atomic; diagnostics only — read anytime from UI or routed message-thread logs.
     [[nodiscard]] std::uint64_t getTransportMidiAddEventDiscardedCountRelaxed() const noexcept;
 
-    /// [Message thread] One-line routing/mix diagnostics for `experimental-playback-routing.log` (atomics/peek).
+    /// [Message thread] One-line routing/mix diagnostics from atomics/peek (`instrument-audio:` style). Performs
+    /// **no file I/O**; callers combine it into `experimental-playback-routing.log` only when
+    /// `MINIDAW_DIAG_PLAYBACK_ROUTING` is non-zero at compile time (default **`0`** — `DiagnosticBuildFlags.h`).
     [[nodiscard]] juce::String peekInstrumentAudioRoutingDiagLineForMessageThread() const noexcept;
 
-    /// [Message thread] Called when native editor subtree receives interaction; throttled routing-log peek.
+    /// [Message thread] Throttled native-editor activity hook; **`appendExperimentalPlaybackRoutingLogLine` only when**
+    /// `MINIDAW_DIAG_PLAYBACK_ROUTING` is non-zero at compile time (default **`0`**).
     void messageThreadOnNativeEditorUserActivity();
 
     void prepareForDevice(double sampleRate, int blockSize);
