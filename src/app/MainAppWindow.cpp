@@ -554,9 +554,28 @@ public:
                         experimentalMidiEditorWindow_->snapshotOpenClipViewportFromRoll();
                     }
                 },
+                [this] { clearExperimentalInstrumentRuntimesPreserveBridgeOnly(); },
+                [this](TrackId tid) { return getOrCreateInstrumentRuntimeForTrack(tid); },
+                [this] {
+                    if (experimentalMidiEditorWindow_ != nullptr)
+                    {
+                        experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
+                    }
+                },
+                [this] { sessionHistory_.clear(); },
+                [this] {
+                    syncViewportFromSession();
+                    syncInstrumentClipTimelineFromDevice();
+                    trackLanesView.syncTracksFromSession();
+                    inspectorView_.refreshFromSession();
+                    rulerView.repaint();
+                    trackLanesView.repaint();
+                    refreshExperimentalInstrumentUi();
+                    resized();
+                },
             });
         saveProjectButton.onClick = [this] { projectIoCoordinator_->saveProject(); };
-        loadProjectButton.onClick = [this] { loadProjectClicked(); };
+        loadProjectButton.onClick = [this] { projectIoCoordinator_->loadProject(); };
         playPauseButton.onClick = [this] { togglePlayPauseFromUi(); };
         // Stop: "playback off + playhead to start" when idle; if recording, finalize/commit first
         // so RecorderService is never left recording while transport is Stopped.
@@ -2937,150 +2956,6 @@ public:
                 }
                 inspectorView_.refreshFromSession();
             });
-    }
-
-    void loadProjectClicked()
-    {
-        juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
-        if (device == nullptr)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Load project",
-                "No active audio device; cannot match sample rate to decode project clips.");
-            return;
-        }
-        const double sampleRate = device->getCurrentSampleRate();
-
-        const auto fileChooserFlags = juce::FileBrowserComponent::openMode
-                                      | juce::FileBrowserComponent::canSelectFiles;
-        auto chooser = std::make_shared<juce::FileChooser>(
-            "Load project",
-            juce::File{},
-            "*.dalproj;*.mdlproj");
-        chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
-            juce::ignoreUnused(chooser);
-            const juce::File f = fc.getResult();
-            if (!f.existsAsFile())
-            {
-                return;
-            }
-            ProjectFileV1 parsedLoad;
-            const juce::Result parsedRes = readProjectFile(f, parsedLoad);
-            if (!parsedRes.wasOk())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Load project", parsedRes.getErrorMessage());
-                return;
-            }
-            clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
-
-            juce::StringArray skipped;
-            juce::String infoNote;
-            const juce::Result r = session.applyLoadedProjectModel(
-                transport,
-                f,
-                parsedLoad,
-                sampleRate,
-                skipped,
-                infoNote,
-                &pluginHost_);
-            if (!r.wasOk())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
-                return;
-            }
-            juce::String experimentalInstrumentAutoloadNoteAcc;
-            if (!parsedLoad.experimentalInstrumentTracks.empty())
-            {
-                for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
-                {
-                    if (!etRow.enabled || etRow.instrumentKind != "GrooveAgentSE")
-                    {
-                        continue;
-                    }
-                    const TrackId bindTid = InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
-                        &session,
-                        etRow.trackId,
-                        &parsedLoad.tracks);
-                    const std::shared_ptr<const SessionSnapshot> postSnap
-                        = session.loadSessionSnapshotForAudioThread();
-                    if (bindTid == kInvalidTrackId || postSnap == nullptr)
-                    {
-                        continue;
-                    }
-                    const int tix = postSnap->findTrackIndexById(bindTid);
-                    if (tix < 0 || postSnap->getTrack(tix).getKind() != TrackKind::Instrument)
-                    {
-                        continue;
-                    }
-                    const auto runtime = getOrCreateInstrumentRuntimeForTrack(bindTid);
-                    InstrumentTrackController* ctl = runtime.second;
-                    ExperimentalInstrumentHost* mh = runtime.first;
-                    if (ctl == nullptr || mh == nullptr)
-                    {
-                        continue;
-                    }
-                    ctl->setTimelineSampleRate(sampleRate);
-                    ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
-                    juce::String noteOne;
-                    ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
-                    if (noteOne.isNotEmpty())
-                    {
-                        if (experimentalInstrumentAutoloadNoteAcc.isNotEmpty())
-                        {
-                            experimentalInstrumentAutoloadNoteAcc << "\n\n";
-                        }
-                        experimentalInstrumentAutoloadNoteAcc << noteOne;
-                    }
-                }
-            }
-            if (experimentalMidiEditorWindow_ != nullptr)
-            {
-                experimentalMidiEditorWindow_->syncInstrumentStateFromHost();
-            }
-            const juce::String experimentalInstrumentAutoloadNote(experimentalInstrumentAutoloadNoteAcc);
-            {
-                if (infoNote.isNotEmpty())
-                {
-                    infoNote << "\n\n";
-                }
-                infoNote << experimentalInstrumentAutoloadNote;
-            }
-            sessionHistory_.clear();
-            syncViewportFromSession();
-            syncInstrumentClipTimelineFromDevice();
-            trackLanesView.syncTracksFromSession();
-            inspectorView_.refreshFromSession();
-            rulerView.repaint();
-            trackLanesView.repaint();
-            refreshExperimentalInstrumentUi();
-            resized();
-            if (infoNote.isNotEmpty() || skipped.size() > 0)
-            {
-                juce::String body;
-                if (infoNote.isNotEmpty())
-                {
-                    body = infoNote;
-                }
-                if (skipped.size() > 0)
-                {
-                    if (body.isNotEmpty())
-                    {
-                        body << "\n\n";
-                    }
-                    body << "Could not load " + juce::String(skipped.size())
-                         + (skipped.size() == 1 ? " file:" : " files:") + "\n\n";
-                    for (int i = 0; i < skipped.size(); ++i)
-                    {
-                        body << skipped[i] << (i < skipped.size() - 1 ? "\n" : "");
-                    }
-                }
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
-            }
-        });
     }
 
     // [Message thread] One path to end a take: stop transport first, then finalize, then commit.

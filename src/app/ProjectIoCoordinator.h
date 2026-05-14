@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <utility>
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
@@ -10,6 +11,7 @@ class Transport;
 class Session;
 class PluginInsertHost;
 class InstrumentTrackController;
+class ExperimentalInstrumentHost;
 
 class ProjectIoCoordinator
 {
@@ -18,6 +20,12 @@ public:
     {
         std::function<InstrumentTrackController*(TrackId)> instrumentCtlByTrackId;
         std::function<void()> snapshotOpenClipViewportFromMidiEditor;
+
+        std::function<void()> clearExperimentalInstrumentRuntimesPreserveBridgeOnly;
+        std::function<std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>(TrackId)> getOrCreateInstrumentRuntimeForTrack;
+        std::function<void()> syncMidiEditorInstrumentStateFromHost;
+        std::function<void()> clearSessionHistory;
+        std::function<void()> refreshAllUiAfterLoadedProject;
     };
 
     ProjectIoCoordinator(Transport& transport,
@@ -27,6 +35,7 @@ public:
                            Callbacks callbacks);
 
     void saveProject();
+    void loadProject();
 
 private:
     Transport& transport_;
