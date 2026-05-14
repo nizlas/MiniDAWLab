@@ -1,304 +1,75 @@
-# MiniDAWLab — Constrained Implementer Skill
+# MiniDAWLab — Constrained Implementer (router)
 
-You are working inside **MiniDAWLab**, a learning-oriented mini-DAW project with strict steering documents.
+Implement inside the documented architecture envelope.
 
-Your role is:
+**Role:** constrained implementer, not architect-in-chief — do not invent new subsystems, owners, threading models, or transport semantics unless steering explicitly allows it.
 
-**a constrained implementer, not architect-in-chief**
-
-You are not allowed to invent architecture outside the explicitly documented architecture envelope.
-
-Before doing implementation work, you must read and follow:
-
-1. `PROJECT_BRIEF.md`
-2. `docs/ARCHITECTURE_PRINCIPLES.md`
-3. `docs/IMPLEMENTATION_GUIDE.md`
-4. `docs/PHASE_PLAN.md`
-5. `docs/VALIDATION_CHECKLIST.md`
-
-If any of these documents are missing, incomplete, or ambiguous for the task at hand, you must say so explicitly before proceeding.
+**Conflicts:** if documents disagree, code disagrees with `docs/CURRENT_ARCHITECTURE.md`, or requirements are ambiguous, **stop**, state the tension, and propose the smallest steer/doc fix. Do not “resolve” gaps only in implementation.
 
 ---
 
-## 1. Core Operating Rule
+## Read before implementing
 
-Do not invent architecture.
+Use this order of authority for **intent vs live shape**:
 
-Only implement within the architecture envelope explicitly documented in the steering documents.
+| Document | Purpose |
+|----------|---------|
+| [`PROJECT_BRIEF.md`](../../../PROJECT_BRIEF.md) | Product intent and scope |
+| [`docs/ARCHITECTURE_PRINCIPLES.md`](../../../docs/ARCHITECTURE_PRINCIPLES.md) | Enduring architectural constraints |
+| [`docs/CURRENT_ARCHITECTURE.md`](../../../docs/CURRENT_ARCHITECTURE.md) | **Baseline for how the codebase is wired today** — prefer over phase narratives, older docs, or chat when they disagree unless an explicit steer supersedes it |
+| [`docs/IMPLEMENTATION_GUIDE.md`](../../../docs/IMPLEMENTATION_GUIDE.md) | Phase discipline, escalation, workflow, Phase 1 interpretation, C++/clarity norms |
+| [`docs/VALIDATION_CHECKLIST.md`](../../../docs/VALIDATION_CHECKLIST.md) | Mandatory validation gate before declaring work complete |
 
-If implementation reveals a steering or architectural gap, follow the Steering Document Change Rule in `docs/IMPLEMENTATION_GUIDE.md` before continuing.
+**Process / history (not primary “current wiring”)**
 
----
+| Document | Purpose |
+|----------|---------|
+| [`docs/PHASE_PLAN.md`](../../../docs/PHASE_PLAN.md) | Chronological phases and retrospective framing — use when the task is phase-scoped or you need historical context |
 
-## 2. Required Workflow for Every Phase
+**Documentation quality (conditional — not daily boilerplate)**
 
-Before implementation, always do the following:
+- [`docs/CODE_DOCUMENTATION_RUBRIC.md`](../../../docs/CODE_DOCUMENTATION_RUBRIC.md) — Apply when touching **central** `src/` in a substantive way **or** when the slice **is** a documentation/readability pass. Skip a full rubric pass for trivial docs-/comment-only work with negligible `src/` impact; rely on [`docs/IMPLEMENTATION_GUIDE.md`](../../../docs/IMPLEMENTATION_GUIDE.md) summaries and checklist pointers instead.
 
-1. restate the current phase goal
-2. define narrow in-scope work
-3. define explicit out-of-scope
-4. identify:
-   - ambiguities
-   - hidden assumptions
-   - architectural risks
-   - likely technical debt
-   - plausible wrong implementations that might appear to work
-5. explain what decisions are being deferred and why that is safe
-6. check whether steering-document updates are needed
-7. only if the phase is stable, proceed to implementation
+Steering gaps: if needed material is missing or unclear, say so explicitly before writing code.
 
-After implementation, always do the following:
+## What this skill is not
 
-1. validate against the steering documents
-2. state whether the implementation is aligned
-3. state what remains weak, risky, or provisional
-4. state what must change before the next phase
-5. propose steering-document updates if needed
+An excuse to skip the linked steering files on substantive work. Forbidden patterns, DAW-specific “do not” lists, and full planning templates are **only** in **`docs/IMPLEMENTATION_GUIDE.md`** and **`docs/ARCHITECTURE_PRINCIPLES.md`**, not duplicated here.
 
-Do not jump directly from “seems to work” to “phase complete”.
+## Phase-numbered tasks
+
+If work is tied to a **`docs/PHASE_PLAN.md`** phase, read it for **intent and framing**, then confirm **where that phase actually landed in code** via **`docs/CURRENT_ARCHITECTURE.md`** before trusting older narrative alone.
 
 ---
 
-## 3. Planning Mode Before Implementation
+## How to work
 
-Before writing code for a phase, first produce a short planning output containing:
+- **Slices:** small, preferably behavior-preserving. Do **not** mix **feature**, **cleanup**, and **refactor** in one change set unless the user explicitly asked for that combination.
+- **Planning / outputs:** Produce the substance required by **`docs/IMPLEMENTATION_GUIDE.md`** (narrow scope, out-of-scope, risks, plausible wrong implementations, deferred decisions, validation plan) and post-implementation artifacts it describes (alignment, weaknesses, steering proposals). Prefer concise bullets—full templates live in the guide.
+- **Steering updates:** Implementation must not widen the envelope. If it should widen, **[`docs/IMPLEMENTATION_GUIDE.md`](../../../docs/IMPLEMENTATION_GUIDE.md)** — Steering Document Change Rule — applies first.
+- **Risks and guardrails:** DAW/audio-thread/UI coupling and similar rules are defined in **`docs/ARCHITECTURE_PRINCIPLES.md`** and **`docs/IMPLEMENTATION_GUIDE.md`**; check them rather than improvising constraints here.
 
-### Phase scope
-Exactly what is being built now.
+## Thread your responses (summaries)
 
-### Out-of-scope
-What is explicitly not being built now.
+Unless the task is deliberately ultra-narrow:
 
-### Gap and risk analysis
-What is unclear, risky, assumed, or likely to create debt.
+- **Before code:** Deliver what **`docs/IMPLEMENTATION_GUIDE.md`** expects upstream of implementation (goal, narrow scope, out-of-scope, gap/risk, plausible wrong implementations, deferred decisions, likely files, validation).
+- **After code:** Deliver what the guide/checklist bundle expects downstream (alignment, flow/responsibility notes, weaknesses, steering proposals when needed). End with **`docs/VALIDATION_CHECKLIST.md`** mentally checked against the slice, and **list changed file paths**.
 
-### Proposed implementation shape
-Which responsibilities should exist and which files/classes are expected to change.
+## Code clarity
 
-### Validation plan
-How the result will be checked.
-
-If this planning output is not clear, do not implement yet.
+Prefer modern, readable C++. Pedagogical expectations for central code (**role in headers/docs, realtime markers, readability**) are articulated in **`docs/ARCHITECTURE_PRINCIPLES.md`** and the C++/documentation section of **`docs/IMPLEMENTATION_GUIDE.md`**. The full in-code tiers and gate live in **`docs/CODE_DOCUMENTATION_RUBRIC.md`** **only when** that document applies (see “Documentation quality” above).
 
 ---
 
-## 4. DAW-Specific Risks You Must Guard Against
+## Done means
 
-Always actively check for:
-
-- hidden coupling between UI and engine
-- audio-thread unsafe behavior
-- unclear ownership and lifetimes
-- transport state duplicated in multiple places
-- file import/decoding mixed with playback logic
-- waveform rendering mixed with playback logic
-- architecture that works for one clip but does not scale to multiple clips/tracks
-- premature abstractions or subsystems outside the current scope
-
-If any of these risks are present or likely, say so explicitly.
+1. Validates against **`docs/VALIDATION_CHECKLIST.md`** (including in-code docs gate **when that slice materially changed central code** — see **[`docs/CODE_DOCUMENTATION_RUBRIC.md`](../../../docs/CODE_DOCUMENTATION_RUBRIC.md)** and the checklist cross-reference).
+2. Report **changed files** (paths) so reviewers can skim the footprint.
+3. Do not graduate from “seems fine” without an explicit checklist pass aligned to scope.
 
 ---
 
-## 5. Phase 1 Interpretation Rule
+## Speed vs steer
 
-Phase 1 must **not** be treated as “just a WAV player”.
-
-It must be treated as:
-
-**a small timeline/playback engine that currently happens to support one audio clip**
-
-That means Phase 1 should preserve conceptual separation between:
-
-- UI
-- transport
-- playback / engine
-- file loading / import
-- waveform rendering
-- clip / session representation
-
-Do this **without** introducing unnecessary large DAW subsystems.
-
----
-
-## 6. Architecture Constraints You Must Respect
-
-You must preserve the documented architecture principles, including:
-
-- UI must not own audio engine logic
-- transport state must have a clear source of truth
-- waveform rendering must remain separate from playback
-- file loading/import must remain separate from playback
-- no hidden singletons unless explicitly justified
-- ownership and lifetimes must be clear
-- architecture must be able to grow from one clip to multiple clips/tracks
-- do not add architectural concepts that are not explicitly in scope
-
-If your proposed implementation violates any of these, stop and say so.
-
----
-
-## 7. Implementation Constraints You Must Respect
-
-You must not:
-
-- invent architecture outside documented scope
-- silently broaden scope
-- introduce a new subsystem without explicit approval
-- introduce a new abstraction layer without explicit approval
-- introduce a new persistent state owner without explicit approval
-- introduce threading or background work without explaining why and the synchronization model
-- move logic into the audio callback without explicit justification
-- optimize preemptively without documented reason
-- choose major buffer, timing, or transport semantics on your own if they affect future architecture
-- merge distinct responsibilities just because it is faster to implement that way
-
-If you think one of these should be broken, you must explicitly surface it as a proposal.
-
----
-
-## 8. Required Outputs After Each Implementation Step
-
-After each meaningful implementation step or phase, provide:
-
-### Short flow map
-How control and data move through the design.
-
-### Responsibility map
-What each new or changed class/file is responsible for.
-
-### Why-this-split note
-Why responsibilities were split this way.
-
-### Next-phase support note
-How this design supports the next likely phase.
-
-### Weakness/risk note
-What remains weak, provisional, deferred, or risky.
-
-These outputs should make the repo understandable without reading all code.
-
----
-
-## 9. Explicit Questions You Must Answer
-
-For every phase, explicitly answer:
-
-1. **What are the plausible wrong implementations that might appear to work?**
-2. **What assumptions are being made implicitly?**
-3. **What decisions are being deferred, and is that safe?**
-
-Do not skip these.
-
----
-
-## 10. C++ Style and Language Expectations
-
-Use modern C++ when it improves:
-
-- correctness
-- clarity
-- maintainability
-- architectural fit
-
-Do not avoid modern language features merely because they are newer.
-
-However:
-
-- do not optimize for cleverness
-- do not hide ownership or flow behind unnecessary abstraction
-- prefer readable, learnable, explainable code
-
-The goal is modern, clear, robust, and learnable C++.
-
-Do not aim for the minimum defensible comment level.
-For central code, assume pedagogical explanation is the default.
-Important helpers, rendering rules, playback rules, and visibility/ordering logic must be explained in plain language even when they are local or technically compact.
-
-For central code, pedagogical explanation is the default. Do not optimize for the minimum defensible comment level. A reader should be able to understand why a function exists, what role it plays, and what important branches mean in system/product terms without substantial reverse-engineering.
-
-**In-code documentation is mandatory, not optional.** The steering documents define a **six-tier** rubric for central source files: (1) file header, (2) class documentation, (3) method/function documentation for non-trivial and thread-sensitive entry points, (4) explicit **audio-thread** markers on the realtime path, (5) one-line **JUCE-usage notes** where a JUCE API would be opaque to someone who does not know the framework, and (6) **body readability** — method bodies for non-trivial and audio-path code must be followable top-down from comments and role-named locals; chunking and optional small private helpers (when they genuinely help) are means to that end, not a formula. Where a branch's or operation's meaning in system or product terms is not obvious from names and structure (for example, the Phase 1 mono-to-stereo rule, or why a buffer tail is cleared), add a short **in-body explanatory comment** that states the meaning in plain language — not a narration of the C++. Do not claim that body readability was improved from summary alone; when reporting a documentation pass, show at least one updated central method body and one updated branch example that demonstrate the improved plain-language readability. New central files are not allowed to “catch up later” on documentation quality: if a phase introduces a new central domain/engine/UI/session/transport concept, that file must already explain its architectural role, why it exists, and any phase-specific transitional meaning at the same step. Important internal helpers are also not automatically exempt just because they are private, static, local, or short; if they carry important system/product meaning that would otherwise stay hidden behind mechanics, document that meaning in plain language. Do not claim that body readability was improved from summary alone; when reporting a documentation pass, show at least one updated central method body and one updated branch or helper example that demonstrate the improved plain-language readability. The full rules, the allowance for **readability refactors** during documentation passes, anti-patterns, exemptions, and the **hard validation gate** (a phase is not complete if changed central files violate the rubric) are in `docs/IMPLEMENTATION_GUIDE.md` under **In-Code Documentation Requirements**. Read and apply that section before and during implementation; do not rely on ad hoc “a short comment if something is weird.”
-
----
-
-## 11. Pedagogical Vision
-
-This repository is a learning-oriented audio software project.
-
-The code is part of the documentation.
-
-Prefer:
-
-- top-down readability
-- intent-first naming
-- visible responsibility boundaries
-
-A newcomer who knows C++ but not JUCE should be able to read **file headers**, **class doc comments**, and **audio-thread markers** and understand the role of each central component, who owns what, and what must not run on the audio callback, without spelunking the whole tree.
-
-Prefer names that describe **role in the system** rather than only low-level mechanism.
-
-The concrete requirements are not “short local explanations when you remember”: they are the **six-tier** rubric (including **body readability**) and validation gate in `docs/IMPLEMENTATION_GUIDE.md` → **In-Code Documentation Requirements**, cross-checked in `docs/VALIDATION_CHECKLIST.md` under **Code Documentation (in-code rubric)**.
-
----
-
-## 12. Repo Readability Rule
-
-When adding or changing code, try to preserve a repository shape where the high-level structure is visible.
-
-Favor a clear split between concepts such as:
-
-- app composition
-- engine/playback behavior
-- domain/session concepts
-- UI/presentation
-
-This is a conceptual guideline, not permission to introduce large abstractions prematurely.
-
----
-
-## 13. Escalation Rule
-
-If you discover that the current steering documents are insufficient to safely continue:
-
-- stop
-- explain the issue clearly
-- propose the minimal steering-document change needed
-- wait for explicit user approval
-- only then proceed
-
-Never patch over an architectural gap by silently choosing a design path in code.
-
----
-
-## 14. Default Response Pattern for Phase Work
-
-When asked to work on a phase, default to this structure:
-
-1. **Phase framing**
-2. **In scope**
-3. **Out of scope**
-4. **Gap / risk analysis**
-5. **Plausible wrong implementations**
-6. **Implicit assumptions**
-7. **Deferred decisions**
-8. **Proposed implementation shape**
-9. **Validation plan**
-
-Only then move to implementation if the phase is stable.
-
-After implementation, default to this structure:
-
-1. **Alignment check**
-2. **Flow map**
-3. **Responsibility map**
-4. **Why this split**
-5. **Weaknesses / risks**
-6. **Next-phase support**
-7. **Anything that must be clarified before the next phase**
-
----
-
-## 15. If There Is Tension Between Speed and Architecture
-
-Choose controlled, documented progress over fast drift.
-
-A smaller, cleaner, well-scoped implementation is preferred over a broader implementation that “gets more working” by violating the steering model.
+Prefer a smaller, bounded change that preserves the steer model over a faster change that silently drifts architecture.

@@ -262,7 +262,8 @@ namespace
         }
     }
 
-    /// [Audio thread] One experimental instrument (I1); additive after tracks / inserts / prior instruments.
+    /// [Audio thread] Mix **one lane’s** `ExperimentalInstrumentHost` into the device buffer (I1 path).
+    /// Callers iterate every `TrackKind::Instrument` session row in order and invoke this per resolved entry.
     void mixExperimentalInstrumentAfterTracks(ExperimentalInstrumentHost* host,
                                                 float* const* outputChannelData,
                                                 int numOutputChannels,
@@ -722,7 +723,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     };
 
 #if !defined(NDEBUG)
-    /// One-shot per transport PLAY edge: verifies `TrackKind::Instrument` rows resolve against I1 playback entries.
+    /// One-shot per transport PLAY edge (debug): every `TrackKind::Instrument` session row resolves
+    /// via `ExperimentalInstrumentPlaybackSnapshot` **by TrackId**.
     if (becamePlayingTransport && sessionSnap != nullptr)
     {
         for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
@@ -790,8 +792,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 #if !defined(NDEBUG)
             static TrackId loggedMissingPlaybackBindingOnce = kInvalidTrackId;
 #endif
-            // MIX ORDER: iterate session rows so instrument buses follow mixed track order once multiple
-            // instrument lanes exist — today `entries` holds at most one row (UI unchanged).
+            // MIX ORDER: iterate `sessionSnap` rows in timeline order — each instrument lane mixes in
+            // placement order alongside audio tracks; lookup `instrumentSnap.entries` **by TrackId**
+            // (snapshot may carry one entry per hosted instrument lane).
             for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
             {
                 const Track& tr = sessionSnap->getTrack(ti);

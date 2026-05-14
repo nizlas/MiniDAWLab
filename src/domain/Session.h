@@ -128,8 +128,10 @@ public:
 
     [[nodiscard]] TrackKind getTrackKindAtIndex(int index) const noexcept;
 
-    /// Append an empty `TrackKind::Instrument` lane at the end — **experimental single shell** slice
-    /// (refuses while any `Instrument` track already exists). Returns the new stable id when published.
+    /// Append an empty `TrackKind::Instrument` lane at the end of **`SessionSnapshot::tracks_`**
+    /// (timeline order preserved on save/load and undo/redo).
+    /// **Multiple instrument tracks** may exist — this does **not** refuse when another `Instrument`
+    /// row is already present. Returns the new stable `TrackId` when published, else `nullopt`.
     [[nodiscard]] std::optional<TrackId> appendExperimentalInstrumentShellTrack(juce::String trackDisplayName) noexcept;
 
     // [Message thread] Move one placed clip in **timeline sample** space. Ordering (promote to 0

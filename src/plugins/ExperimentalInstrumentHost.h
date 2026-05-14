@@ -1,15 +1,19 @@
 #pragma once
 
 // =============================================================================
-// ExperimentalInstrumentHost — single global VST3 instrument slot (I1 feasibility)
+// ExperimentalInstrumentHost — one VST3 instrument **instance per timeline instrument track**
 // =============================================================================
 //
 // ROLE
-//   Message-thread owner of one optional juce::AudioPluginInstance intended for instruments
-//   (e.g. Groove Agent SE): MIDI in from the message thread via a small locked MidiBuffer
-//   queue (I1), stereo audio out mixed by PlaybackEngine after the normal clip/insert sum.
+//   **Per timeline instrument track:** message-thread owner of **at most one loaded**
+//   `juce::AudioPluginInstance` **in this host object** (e.g. Groove Agent SE). There is **no** single
+//   app-wide “global instrument slot”: the app keeps **`ExperimentalInstrumentHost` per `TrackId`**
+//   (see `docs/CURRENT_ARCHITECTURE.md`). MIDI from the message thread via a short locked `MidiBuffer`
+//   queue; stereo out is summed by `PlaybackEngine` for each `TrackKind::Instrument` row that resolves
+//   to this host via `ExperimentalInstrumentPlaybackSnapshot`.
 //
-// NOT in Session / ProjectFile; no undo; experimental UX only.
+// Instrument UI state and blobs follow `InstrumentTrackController` / project `experimentalInstrumentTracks[]`;
+// this file is runtime hosting only (`activeOwner_` is the one plugin slot **inside this host instance**).
 //
 // THREADING
 //   load / unload / editor / prepareForDevice: [Message thread].
@@ -17,7 +21,8 @@
 //   drains UI MIDI into a block buffer under a short CriticalSection, then processBlock.
 //   (We avoid juce::MidiMessageCollector here: VST3 host headers can break `juce::` lookup on MSVC.)
 //
-// See docs/PHASE_PLAN.md — this is a narrow vertical slice before MIDI tracks / instruments.
+// See `docs/CURRENT_ARCHITECTURE.md` for the TrackId-keyed multi-instrument model (`docs/PHASE_PLAN.md`
+// is planning/history only—not live wiring).
 // =============================================================================
 
 #include <juce_audio_basics/juce_audio_basics.h>

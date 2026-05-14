@@ -1,279 +1,132 @@
-# Architecture Principles
+# Architecture principles
 
-This document defines the architecture envelope for MiniDAWLab.
+This document defines the **timeless** architecture envelope for MiniDAWLab: separations, ownership, threading, and safety rules that should stay true across phases.
 
-The agent is not allowed to invent architecture outside this envelope.  
-It may only implement within the structure, constraints, and scope explicitly documented here and in the other steering documents.
+**Present-day wiring** (types, maps, file paths, current commands, schema version) belongs in **[`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)** — read it alongside this file before implementing substantive work. Treat [`docs/PHASE_PLAN.md`](PHASE_PLAN.md) as **historical process and intent**, not the live map of the codebase.
 
-## Core Principle
+The agent implements **within** this envelope plus the other steering documents. It must **not invent** new persistent owners, realtime contracts, transport semantics, or subsystems unless steering is updated **first**.
 
-The agent is a constrained implementer, not architect-in-chief.
+The product is **timeline- and engine-shaped** from the start—a small playback engine with staged features—not a disposable file player whose architecture would need a rewrite for multiple clips/tracks.
 
-Architecture must be made explicit in documents before it is implemented in code.
+---
 
-If architectural gaps, ambiguities, or risks are discovered, the correct action is to update the steering documents first, then reassess implementation.
+## Core rule
 
-## Phase 1 Architectural Framing
+Architecture is negotiated in **documents** before it is asserted in **code**.
 
-Phase 1 must **not** be treated as “just a WAV player”.
+If gaps, ambiguities, or violations appear, pause and reconcile steering (including [`docs/IMPLEMENTATION_GUIDE.md`](IMPLEMENTATION_GUIDE.md) escalation rules) rather than patching forward in isolation.
 
-It must be treated as:
+Growth must be **incremental**: the codebase should scale from simple cases to richer timelines without poisoning later refactors—but **without** speculative subsystems that are out of steering scope ([`docs/PHASE_PLAN.md`](PHASE_PLAN.md) lists what phases committed to).
 
-**a small timeline/playback engine that currently happens to support one audio clip**
+**Hazard patterns** (stay wrong even when prototypes are minimal): UI owning transport truth; playback logic trapped in presentation components; collapsing clip identity into transport identity; import creating playback machinery with no separable domain model.
 
-This means the design must support a logical growth path toward:
+---
 
-- multiple clips
-- multiple tracks
-- clearer transport ownership
-- separation of playback, file loading, waveform generation, and UI
-- future routing and mixer-related expansion
+## Layering and coupling
 
-However, that future growth path must be supported **without introducing premature subsystems** outside the current phase scope.
+These boundaries are **non-negotiable**:
 
-## Core Separation Requirements
+- **UI** does not own engine/playback truth. It displays state and issues **high-level** actions; it does not become the hidden owner of transport, decoding flow, or mix policy.
+- **File import / decode** is separate from **playback execution** and from **transport policy**. Opening a path must not blur those roles.
+- **Waveform / visualisation** is separate from **audio callback** work. Rendering may read clip/material metadata; it must not drive or entangle realtime processing.
+- **No hidden singletons** unless explicitly justified in steering and visible in design.
+- **Ownership and lifetimes** must be legible: who owns what, what is long-lived vs view-local, what is non-owning, and where destruction order matters.
 
-### UI and engine separation
+For how these map to today’s classes and threads, see **[`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)**.
 
-UI must not own audio engine logic.
+---
 
-UI may display state and invoke high-level actions, but it must not become the hidden owner of playback behavior, transport truth, decoding flow, or engine decisions.
+## Transport: source of truth and writers
 
-### Clear transport source of truth
+Transport state has **one** conceptual owner for **live** playback control: intent (play/pause/stop), **authoritative playhead** position, and **pending seek**. These must not be duplicated across unrelated objects without an explicit, documented model.
 
-Transport state must have a clear source of truth.
+**Timeless write rules** (exact types and call sites: [`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)):
 
-Playback position, play/pause/stop intent, and seek state must not be duplicated across multiple unrelated objects without explicit justification.
+- **Playback intent** is written from **non-realtime** code in response to user/session actions.
+- The **authoritative playhead** is advanced only from the **audio callback** path that owns playback integration (today: the engine side that applies time).
+- **Seek** is requested from **non-realtime** code as a **pending** request; the audio path **consumes** it at a safe point and applies it to the playhead. The message thread must **not** silently overwrite the live playhead as if it were the callback.
+- **Project load:** restoring a saved playhead is expressed only via the **approved seek pathway** once a coherent session snapshot exists for playback—**not** by inventing parallel playhead storages tied to snapshots. Live transport remains the sole owner of **live** playhead/seek-pending semantics.
 
-The transport source of truth for Phase 1 is a single object named `Transport`,
-owned at the application composition level. The exact top-level class
-arrangement that instantiates and owns it is an implementation choice.
+Timeline meaning of the playhead (clip-relative vs timeline-absolute samples, rulers, lanes) follows the **published session model**. Do not re-derive overlapping concepts in UI-owned state.
 
-`Transport` holds:
+---
 
-- the playback intent (playing / paused / stopped),
-- the authoritative playhead position in samples,
-- any pending seek request.
+## Session snapshots and placement semantics
 
-Writers are constrained:
+**Immutability and publication:**
 
-- playback intent is written only by non-realtime code in response to user
-  actions,
-- the authoritative playhead position is written only by `PlaybackEngine`
-  from inside the audio callback,
-- a seek is expressed as a pending seek request written by non-realtime code;
-  `PlaybackEngine` consumes it at the start of its next callback and applies
-  it to the playhead.
+- **`SessionSnapshot` is immutable.** Edits produce a **new** snapshot value; mutations do not patch a shared instance in place.
+- The audio thread observes session placement via a **released published view** (e.g. atomic `shared_ptr` to `const`): **non-blocking, lock-free** hot-path reads consistent with steering; allocation and heavyweight work stay off the realtime path unless explicitly justified elsewhere.
 
-No other component may mutate these fields. UI components read transport
-state but do not own or mutate it.
+**What the domain owns:**
 
-**Project load:** Restoring a saved playhead position is expressed only as
-`Transport::requestSeek` after a new session snapshot is published. The
-project file may record `playheadSamples` and `deviceSampleRateAtSave`, but
-`Transport` is not populated from a snapshot; it remains the sole owner of
-the live playhead and seek pending state.
+- Clip **order**, **placement** on the shared timeline/lanes, overlap resolution, track row order, lane kind distinctions, **non-destructive trim windows** versus raw PCM—all are **session/snapshot-owned** truths. UI is a **consumer** of that truth for display and gestures; it must not secretly become the canonical store for overlap order or timeline geometry.
+- **Order changes** (add, move, reorder tracks, trim windows, cross-lane moves) happen only through **explicit, named** session/snapshot/document operations—not as side effects of selection, hover, or in-flight drag state.
+- **Non-destructive editing:** PCM buffers are **not** shortened unless product/steering explicitly calls for destructive edit; audible span and timeline extent follow **effective placement** semantics. (Concrete rules today: [`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).)
 
-### Phase 2 playhead and session (one timeline, multiple clips)
+Instrument rows, playback bridges keyed by **`TrackId`**, and experimental/project bindings are **current fact**, not exceptions—design new work against **`docs/CURRENT_ARCHITECTURE.md`**, not against legacy “single instrument” metaphors.
 
-Phase 2 reuses the same `Transport` fields. The **meaning** of `playheadSamples` changes
-from “sample index in the one loaded clip” to a **timeline-absolute** index on the
-**session timeline**: sample `0` is the start of the timeline, and the playhead runs in the
-same address space that placement and the waveform use (until a later phase introduces
-more complex timebases).
+---
 
-**`Session` owns** the set of **placed** clips, each with a **start sample** on that timeline
-and a deterministic **front-to-back** order for overlap. The UI and waveform are **read-only
-consumers**; they do not own clip order. For Phase 2, **newest added is front-most** (index 0)
-unless steering documents are updated.
+## Audio-thread and realtime integrity
 
-**Where the user seeks:** With a **minimal timeline ruler** above the event lane, **seek** is requested from that strip only (same session sample axis as the playhead). The **event lane** handles clip selection and move; it does not seek on empty background. `Transport` remains the only seek/playhead owner.
+Treat the device callback as a **hard realtime environment**:
 
-**Coverage playback (Phase 2, per track):** on a **single** track, only the **front-most** placed clip that
-**covers** that timeline position is audible in that lane (stacked “events” mental model;
-**not** summing overlapping clips **on the same track**).
+- Prefer **no** file I/O, decode setup, UI, waveform builds, heavyweight allocation, mutex/condition-variable waits, or unclear cross-thread mutation on that path unless explicitly documented and justified.
+- If additional threads or queues appear, document **producer/consumer**, **blocking**, **loss**, **ordering**, and **what the callback may touch** **before** coding.
 
-**Phase 3 minimal multi-track:** `SessionSnapshot` holds an ordered list of **tracks**; each track has its own front-to-back clip list and the same overlap rule as Phase 2 **within that lane**. For the same timeline instant, output is the **sum** of what each track would produce on its own (not a mixer UI, no per-track gain).
+Legacy cross-thread summaries (Phase 1 message thread vs audio thread) distill to: **callbacks read published views and advance time; session and heavy I/O stay off that path** except for the approved handoffs.
 
-**Phase 3 late extension — cross-track clip move:** A clip may be moved to another track with **`Session::moveClipToTrack`** and **`SessionSnapshot::withClipMovedToTrack`**, which reassign the existing `PlacedClipId` to the target track at a new timeline start, inserting the row as **front-most (index 0)** on that track. This is a distinct, named command from **within-track** **`Session::moveClip`** (committed end-state rule only in the clip’s current lane). **No** per-track “compatibility / type” predicate in the current project — “valid target lane” is purely geometric. **`Session::moveClipToTrack` does not change** which track is **active** for **Add clip** — only **`Session::addTrack`** and **`Session::clearClip`** (reset) do.
+---
 
-**Phase 3 late extension — track headers (UI):** each **`Track`** carries a **display name** in the **domain** (`Track::getName()`), set when the snapshot is built (e.g. default `"Track 1"`, `"Track 2"`, … from **`Session`**, not from UI list indices). The **add-clip target** is **`Session::activeTrackId_`**, a **message-thread** field; it is **not** in **`SessionSnapshot`** and **does not** require a snapshot republish when the user **clicks a header** to call **`Session::setActiveTrack`**. The timeline ruler and lane area share the **same** horizontal x ↔ session-sample range: the main layout insets the ruler by the **same** fixed width as the left header column so alignment matches pre-header behaviour in the lane strip.
+## Instrument / plugin inserts (threading and persistence)
 
-**Phase 3 late extension — track reorder (header drag):** **Row order** of **`Track`s** in **`SessionSnapshot`** is changed only by a **named** command **`Session::moveTrack` / `SessionSnapshot::withTrackReordered`**, not by in-flight UI. Each **`Track`’s** internal **`PlacedClip`** list is **unchanged**; engine **sum** across tracks is the same. **`activeTrackId_`** is **not** reassigned on reorder; the same **id** appears on a different row. The gesture is **header-only**; in-flight feedback (insert line) is **UI-local**; invalid cursor uses the same **forbidden** glyph as an **invalid** cross-lane **clip** drop, via one shared **UI** helper, not a second cursor implementation.
+**Runtime vs snapshot:**
 
-**Phase 3 late extension — non-destructive right-edge trim:** **`AudioClip`** PCM is never shortened. **`PlacedClip`** holds the **placement window** (effective length) on that material. **`SessionSnapshot::withClipRightEdgeTrimmed`** replaces one row by id without changing lane order (not split, not “cut”). Playback offset in the material remains from sample **0**; the audible region is bounded by the effective length. **Timeline** extent, **overlap** resolution, the **engine** coverage test, and **waveform** paint span use **effective** length, not `getAudioClip().getNumSamples()` alone for placement.
+- **Live plugin instances are not part of `SessionSnapshot`.** They are mutable, may own GUI, and are created/destroyed on the **message thread** only.
+- A **host/registry** on the message thread owns instances; it publishes a **separate atomic `shared_ptr` to an immutable “active processor view”** for the callback—**same handoff discipline** as the session snapshot, **different** payload and pointer.
+- **`prepareToPlay` / `releaseResources` / load / editor UI** run on the message thread. The callback **reads** the active view and calls **`processBlock`** into **pre-sized** scratch buffers: **no locks, no heap on that path**, no direct `Session` mutation from audio.
 
-**Phase 4 — minimal mono input recording (steering reference):** The **application root** (e.g. `MainComponent`) **coordinates** numpad `*`, `Transport` intents, playhead for record placement, and begin/stop of capture; a **`RecorderService` (or equivalent) must not** call **`Transport`** or own transport policy. The audio callback is limited to **realtime-safe** handoff to an SPSC-style buffer; take files, `AudioFormatWriter`, and new **`PlacedClip` / `SessionSnapshot`** work happen **off** the callback, in the order documented in `docs/PHASE_PLAN.md` (Phase 4) and `status/DECISION_LOG.md`. While recording, the **engine** may **skip mixing** the recording track (transient only; not a session mute). See Phase 4 for device scope, FIFO overrun rules, unsaved-project refusal, and deferred latency compensation.
+**Persistence:** plugin identity and state blobs are persisted per steering (paths, identifiers, opaque state). They are **not** clip PCM; they follow plugin persistence policy, distinct from **`Audio/`** project-relative audio asset rules unless steering explicitly aligns them.
 
-**Snapshot handoff** generalizes Phase 1: the audio thread loads an **immutable** snapshot of
-session placement (e.g. `std::shared_ptr` to a const snapshot value) with **lock-free, non-allocating**
-reads on the hot path; the exact snapshot type is an implementation choice consistent with
-`docs/PHASE_PLAN.md` and `status/DECISION_LOG.md`.
+**Realtime caveat:** third-party `processBlock` is **not** certified allocation-free—that is accepted only where steering says so; do not confuse “our hot path avoids locks” with “all hosted code is realtime-safe.”
 
-**Session-owned overlap order — how it may change:**  
-Front-to-back order of placed clips is **session state**, not UI state. Any change to that order must be expressed as an **explicit, named** `Session` (or `SessionSnapshot`) operation — for example, adding a clip, **`Session::moveClip`** (within a track, end-state rule in `docs/PHASE_PLAN.md`), or **`Session::moveClipToTrack`** (to another track, **front-most insertion** on the destination; **no** ad-hoc per-track “type” gate in the current codebase). **Selection, hover, and in-flight drags** must not silently reorder clips. The principle is: **no order mutation as a side effect of general UI state.**
+---
 
-### File loading is separate from playback
+## Recording coordination (narrow contract)
 
-File import, file opening, and audio decoding concerns must be separated from playback control and playback execution.
+Minimal input recording stays **transport-wired at composition**: the app root coordinates transport intents, placement, and begin/stop; a capture service **must not** quietly own **`Transport`** or transport policy.
 
-Opening a file must not implicitly blur boundaries between:
-- file loading
-- clip/session state
-- transport behavior
-- audio output behavior
+**Audio path:** realtime-safe enqueue only (e.g. SPSC-style handoff); file writers, **`PlacedClip` / snapshot** commits, and non-realtime bookkeeping run **off** the callback **in documented order**.
 
-### Waveform rendering is separate from playback
+Details and device/FIFO rules remain in [`docs/PHASE_PLAN.md`](PHASE_PLAN.md) / project decision logs where referenced—this file only pins **ownership** and **thread boundaries**.
 
-Waveform generation/rendering must be separated from playback logic.
+---
 
-A waveform view may depend on audio file or clip information, but waveform-related code must not become entangled with transport execution or audio callback behavior.
+## Scope and subsystems
 
-### Avoid hidden singletons
+Do **not** introduce major frameworks or cross-cutting subsystems (full mixing graphs, general job systems, broad plugin platforms beyond committed slices, etc.) unless they are **explicitly added to steering first**.
 
-No hidden singletons unless explicitly justified in documents.
+[`docs/PHASE_PLAN.md`](PHASE_PLAN.md) names which slices exist; **`docs/CURRENT_ARCHITECTURE.md`** says what landed in code—use both to sanity-check creep.
 
-Global or effectively global state should be avoided unless there is a documented architectural reason.
+---
 
-### Clear ownership and lifetimes
+## Code expression (not policy duplication)
 
-Ownership and lifetimes must be explicit.
+Prefer **modern, readable C++** when it improves correctness and clarity—not cleverness for its own sake.
 
-It should always be reasonably clear:
-- what owns what
-- which objects are long-lived
-- which objects are phase-local or view-local
-- which references are non-owning
-- where destruction order matters
+Responsibility, ownership, threading, and realtime boundaries must remain **visible in central code**. The **six-tier** in-code rubric, readability-refactor allowances, exemptions, and validation gate live only in **[`docs/CODE_DOCUMENTATION_RUBRIC.md`](CODE_DOCUMENTATION_RUBRIC.md)**—apply that document **when rubric-bearing work applies** ([`docs/IMPLEMENTATION_GUIDE.md`](IMPLEMENTATION_GUIDE.md) summarizes day-to-day vs full pass).
 
-## Audio-Thread Safety Principles
+---
 
-The audio callback is a constrained environment.
+## Questions to answer before a slice
 
-Do not move logic into the audio callback unless explicitly justified.
+Explicitly decide (and document in planning output if non-trivial):
 
-In particular, avoid placing the following into the realtime path unless documented and justified:
+1. Who owns **transport** intent, playhead, and seek pend for this slice?
+2. Who owns **clip/material** lifecycle and timeline placement truths?
+3. What runs on **audio thread** versus **message thread**, and where is snapshot/publication boundary?
+4. What is assumed about **minimal** timelines or single-lane prototypes that must **not** leak into coupling?
+5. What is deliberately **deferred**, and why is that safe?
 
-- file loading
-- decoding setup
-- UI work
-- waveform generation
-- allocation-heavy behavior
-- hidden synchronization that may block
-- state mutation whose thread-safety model is unclear
-
-If threading or background work is introduced, the synchronization model must be explicitly explained first.
-
-### Phase 1 cross-thread model
-
-Phase 1 uses the message thread for UI and synchronous file loading, and uses the audio-callback thread for playback (`PlaybackEngine`).
-Transport state is read and written across these two threads.
-
-The cross-thread model is constrained as follows:
-
-- communication of transport state between the message thread and the audio
-  callback must be lock-free and non-blocking,
-- the audio callback is the only writer of the authoritative playhead
-  position,
-- the message thread may request a seek, but the audio callback applies it;
-  the message thread never writes the authoritative playhead directly,
-- the audio-callback path must not take mutexes, wait on condition variables,
-  allocate, or use any other blocking synchronization.
-
-The exact lock-free primitives used to realize this model (for example
-atomic variables, single-producer flags, or equivalent mechanisms) are an
-implementation choice, not a steering-level constraint, as long as the
-properties above hold.
-
-If later phases introduce richer transport state (for example loop regions
-or tempo), this section must be revisited before that state is added.
-
-## Phase 1 Intended Conceptual Split
-
-Phase 1 should aim toward a clear conceptual split such as:
-
-- **App / composition layer**  
-  Top-level assembly and wiring.
-
-- **Transport / playback control layer**  
-  High-level playback intent and position control.
-
-- **Engine layer**  
-  Audio-device-facing and playback-facing behavior.
-
-- **Domain/session layer**  
-  Concepts such as loaded clip, timeline placement, and session state.
-
-- **File loading / import concept**  
-  Responsibility for turning a file path into a loaded clip, with no
-  knowledge of transport, engine, or UI. This is a concept, not a
-  subsystem: in Phase 1 it may be a single small class. It must not own
-  clips, playback state, or transport.
-
-- **UI layer**  
-  Waveform display, transport controls, playhead display, and user interaction.
-
-This is a conceptual split, not a forced early over-abstraction.  
-The implementation may remain small, but responsibilities must remain visible.
-
-## Scaling Constraint
-
-The architecture must work for one clip now **without poisoning the path** toward multiple clips and tracks later.
-
-That means Phase 1 must avoid designs that only work because there is exactly one clip, if those designs would create painful refactoring later.
-
-Examples of risky patterns:
-
-- UI object secretly owning transport truth
-- playback state embedded only in a waveform component
-- clip identity and transport identity being treated as the same thing
-- file import directly constructing playback behavior with no separable model
-- one-off logic that assumes only one future track or one future clip forever
-
-## Anti-Scope-Creep Rule
-
-Do not add architectural concepts that are not explicitly needed for the current phase.
-
-In particular, do not introduce major subsystems for:
-- plugin hosting **beyond** the minimal per-track single VST3 insert slice documented as **Phase 8** in `docs/PHASE_PLAN.md`
-- mixer/routing frameworks
-- background asset pipelines
-- generalized track graphs
-- advanced persistence systems
-- undo frameworks
-- multi-threaded job systems
-
-unless those are explicitly added to the steering documents first.
-
-## Plugin host — ownership and threading (Phase 8)
-
-- **Live plugin instances are not part of `SessionSnapshot`.** They are mutable, may own GUI editors, and must be constructed and torn down on the **message thread** only.
-- A **`PluginInsertHost`** (name in code is an implementation detail) **owns** `TrackId → std::unique_ptr<juce::AudioPluginInstance>` on the message thread. It publishes a separate **atomic `shared_ptr` to an immutable “active processor view”** for the audio callback (same handoff *idea* as `Session::sessionSnapshot_`, but a different pointer and payload).
-- **`prepareToPlay` / `releaseResources` / loading state / opening editors** run on the message thread. The audio callback must only **read** the active view and call **`processBlock`** on already-prepared processors into **pre-sized scratch buffers** — no locks, no heap allocation on that path, no `Session` access.
-- **Persistence:** project file v8 stores plugin **file path** (absolute `.vst3` on disk), a stable **identifier string** for mismatch detection, and an opaque **`getStateInformation`** blob (e.g. Base64). This is **not** clip PCM and does not use the `Audio/` project-relative audio policy.
-- **Realtime caveat:** third-party `processBlock` code is **not** guaranteed to be allocation-free or lock-free; this is accepted for Phase 8 and must not be mistaken for a certification of realtime safety.
-
-## Modern C++ Principle
-
-Modern C++ should be used when it improves correctness, clarity, maintainability, or architectural fit.
-
-Do not avoid newer language features merely because they are newer.
-
-However:
-- do not use advanced features for their own sake
-- do not hide simple ownership or flow behind unnecessary cleverness
-- prefer readable and learnable code
-
-**Pedagogical visibility:** Responsibility, ownership, lifetime, and thread or realtime constraints must be **visible in the code** for central types and files—not only in external prose. A reader who knows C++ but not this codebase or JUCE should be able to orient themselves from class and file-level documentation, from the thread/realtime markers on the audio path, and from **readable method bodies** (top-down intent in non-trivial methods and callback reachability), without reverse-engineering intent from implementation details. The **exact** rules (six tiers: file header, class doc, method doc, audio-thread markers, JUCE-usage notes, **body readability**; plus bounded **readability refactors** during documentation passes where listed in `docs/IMPLEMENTATION_GUIDE.md`), anti-patterns, and the hard validation gate are defined in `docs/IMPLEMENTATION_GUIDE.md` under **In-Code Documentation Requirements**. That section is part of the architecture envelope for how implementation is expressed; it is not optional commentary.
-
-## Required Architectural Questions Before Implementation
-
-Before implementation of a phase, the following questions must be answered:
-
-1. What is the source of truth for transport state?
-2. What owns the loaded audio file or clip model?
-3. What code is responsible for playback versus file import versus waveform display?
-4. What assumptions are being made because Phase 1 only supports one clip?
-5. Which decisions are intentionally deferred, and why is that safe?
-
-If these questions cannot be answered clearly, the architecture docs must be updated before implementation proceeds.
+If these cannot be answered without guessing, update steering before coding.

@@ -46,7 +46,7 @@ struct ProjectFileTrackV1
 {
     TrackId id = kInvalidTrackId;
     juce::String name;
-    /// v13: `"audio"` (default when absent) or `"instrument"` experimental shell lane.
+    /// v13: `"audio"` (default when absent) or `"instrument"` (hosted instrument timeline lane; multiple allowed).
     juce::String kind;
     std::vector<ProjectFileClipV1> clips;
     // v5: linear gain at channel-fader point (mixer). Omitted in JSON when ~ unity (see writer).

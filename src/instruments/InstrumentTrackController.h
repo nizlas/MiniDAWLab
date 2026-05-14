@@ -4,9 +4,10 @@
 // InstrumentTrackController — experimental instrument track + runtime MIDI clips (I3b)
 // =============================================================================
 //
-// Message-thread only. Owns zero or one Groove-Agent instrument track and its MIDI
-// clips in memory (experimental ProjectFile v11 + optional project-load autoload).
-// instrumentLoaded_ reflects whether the global Groove Agent slot is filled.
+// Message-thread only. Holds MIDI clip state + render snapshots for **one** timeline `TrackId`
+// (paired with that lane’s `ExperimentalInstrumentHost`). Many instrument lanes ⇒ many controllers.
+// Project persistence: experimental `experimentalInstrumentTracks[]` payloads, v11+ conventions.
+// `instrumentLoaded_`: whether **this** lane’s paired host currently has an instrument loaded—not a global singleton flag.
 //
 // =============================================================================
 
@@ -101,7 +102,8 @@ public:
 
     void setSession(Session* session) noexcept { session_ = session; }
 
-    /// Domain `TrackId` of the singleton experimental instrument shell (session order); invalid when inactive.
+    /// Timeline `TrackId` of **`this` controller's** `TrackKind::Instrument` lane (session snapshot order).
+    /// `kInvalidTrackId` when this controller row is inactive / unbound.
     [[nodiscard]] TrackId getExperimentalInstrumentDomainTrackId() const noexcept
     {
         return experimentalDomainTrackId_;
@@ -113,7 +115,7 @@ public:
     /// Alias for older call sites.
     [[nodiscard]] bool hasInstrumentTrackShell() const noexcept { return trackActive_; }
 
-    /// Global slot currently has Groove Agent (by name heuristic).
+    /// True when **`this` controller's** paired host reports a Groove Agent–class instrument (by name heuristic).
     [[nodiscard]] bool isInstrumentLoaded() const noexcept { return instrumentLoaded_; }
 
     /// Binds runtime clips + mute/power shell state to an existing `TrackKind::Instrument` row (`sessionInstrumentTrackId`).
@@ -212,9 +214,9 @@ public:
     [[nodiscard]] static bool serializedProjectUsesEnabledGrooveAgentRow(
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept;
 
-    /// Resolve which `tracks[]` row should hold the singleton experimental instrument lane **before**
-    /// `Session` apply (no live snapshot yet). Uses serialized `persistedTracks` + optional `session`
-    /// validation when already loaded (pass nullptr pre-load).
+    /// Resolve which persisted `tracks[]` row should bind **one** `experimentalInstrumentTracks[]` payload
+    /// — **before** `Session::applyLoadedProjectModel` (no live snapshot yet). Uses serialized rows +
+    /// optional live `session` validation when reloading (pass `nullptr` pre-load).
     [[nodiscard]] static TrackId peekExperimentalInstrumentBindLaneId(
         Session* sessionNullable,
         const std::vector<ProjectFileExperimentalInstrumentTrackV1>& payloads,

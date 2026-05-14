@@ -1,5 +1,5 @@
 // =============================================================================
-// ExperimentalInstrumentHost.cpp — global instrument slot for I1 feasibility
+// ExperimentalInstrumentHost.cpp — per-`TrackId` hosted instrument (VST3); app holds one host instance per instrument lane
 // =============================================================================
 //
 // Include juce_audio_basics before our header so MidiBuffer/Message resolve before

@@ -102,7 +102,8 @@ public:
         juce::String newTrackName) noexcept;
 
     /// Append an empty track at the end with explicit `kind` (`Audio`: timeline WAV lanes;
-    /// `Instrument`: experimental shell lane — clips must remain empty in this slice).
+    /// `Instrument`: hosted instrument / MIDI lane). **Multiple** `Instrument` rows are normal;
+    /// clip placement rules follow current product/steering (these lanes often stay waveform-empty).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackAdded(
         const SessionSnapshot& previous,
         TrackId newTrackId,

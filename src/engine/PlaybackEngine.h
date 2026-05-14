@@ -61,11 +61,13 @@ class Session;
 // ExperimentalInstrumentPlaybackSnapshot  —  message-thread publishes, RT reads
 // =============================================================================
 //
-// One immutable vector of `{TrackId, host*, controller*}` pairs. The audio callback resolves
-// `TrackKind::Instrument` rows against this snapshot **by TrackId** and runs the same I1 MIDI +
-// synth path as before. Main owns hosts/controllers; pointers are stable for the snapshot's
-// lifetime. Publication uses `publishExperimentalInstrumentPlaybackSnapshot` (release-store);
-// reads use acquire-load plus `shared_ptr` retain — no mutation and no allocator traffic on RT.
+// One immutable vector of `{TrackId, host*, controller*}` pairs (**one entry per hosted instrument
+// lane** currently wired in Main). The audio callback walks `SessionSnapshot` `TrackKind::Instrument`
+// rows in timeline order and resolves each row **by TrackId** against this vector—**not** “first
+// instrument only”. Each match runs that lane’s MIDI + hosted-synth path (`ExperimentalInstrumentHost`).
+// Main owns hosts/controllers; pointers are stable for the snapshot's lifetime. Publication uses
+// `publishExperimentalInstrumentPlaybackSnapshot` (release-store); reads use acquire-load plus
+// `shared_ptr` retain — no mutation and no allocator traffic on RT.
 //
 // ---------------------------------------------------------------------------
 struct ExperimentalInstrumentPlaybackEntry
