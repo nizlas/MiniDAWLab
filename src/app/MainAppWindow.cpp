@@ -13,6 +13,7 @@
 #include "app/MidiEditorPresenter.h"
 #include "app/ProjectIoCoordinator.h"
 #include "app/RecordingCoordinator.h"
+#include "app/TrackLanesEditCoordinator.h"
 #include "app/UndoRedoCoordinator.h"
 #include "app/ShortcutDiagnostics.h"
 #include "app/TransportControlsFactory.h"
@@ -588,315 +589,45 @@ public:
             [this](const TrackId tid, const InsertSlotId sid, const int gapIndex) {
                 pluginHost_.reorderInsertWithinStage(tid, sid, gapIndex);
             } });
-        trackLanesView.setOnDeleteTrackRequested([this](const TrackId tid) {
-            if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
-            {
-                return;
-            }
-            if (tid == kInvalidTrackId)
-            {
-                return;
-            }
-            executeUndoableSessionEdit(
-                "Delete track",
-                [this, tid]() -> bool {
-                    const std::shared_ptr<const SessionSnapshot> snap
-                        = session.loadSessionSnapshotForAudioThread();
-                    if (snap == nullptr || snap->findTrackIndexById(tid) < 0)
-                    {
-                        return false;
-                    }
-                    const int ix = snap->findTrackIndexById(tid);
-                    if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Instrument)
-                    {
-                        if (ExperimentalInstrumentHost* mh = getInstrumentHostForTrack(tid))
-                        {
-                            mh->closeNativeEditor();
-                        }
-                        if (midiEditorPresenter_ != nullptr)
-                        {
-                            midiEditorPresenter_->resetWindowAndBookingIfOpenOnTrack(tid);
-                        }
-                        instrumentTimelineRowCoordinator_->tearDownExperimentalInstrumentTimelineUiForTrack(tid);
-                        pluginHost_.evictPluginForTrackNoUndo(tid);
-                        session.removeTrack(tid);
-                        instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
-                        refreshInstrumentUi();
-                    }
-                    else
-                    {
-                        pluginHost_.evictPluginForTrackNoUndo(tid);
-                        session.removeTrack(tid);
-                    }
-                    syncViewportFromSession();
-                    trackLanesView.syncTracksFromSession();
-                    rulerView.repaint();
-                    trackLanesView.repaint();
-                    inspectorView_.refreshFromSession();
-                    return true;
-                });
-        });
-        trackLanesView.setCommittedHeaderDragTrackReorder([this](const TrackId movedId,
-                                                                 const int destSessionIndex) {
-            if (movedId == kInvalidTrackId || destSessionIndex < 0)
-            {
-                return;
-            }
-            executeUndoableSessionEdit(
-                "Reorder track",
-                [this, movedId, destSessionIndex]() -> bool {
-                    const std::shared_ptr<const SessionSnapshot> before
-                        = session.loadSessionSnapshotForAudioThread();
-                    if (before == nullptr)
-                    {
-                        return false;
-                    }
-                    session.moveTrack(movedId, destSessionIndex);
-                    const std::shared_ptr<const SessionSnapshot> after
-                        = session.loadSessionSnapshotForAudioThread();
-                    if (after == nullptr || after == before)
-                    {
-                        return false;
-                    }
-                    syncViewportFromSession();
-                    trackLanesView.syncTracksFromSession();
-                    rulerView.repaint();
-                    trackLanesView.repaint();
-                    inspectorView_.refreshFromSession();
-                    return true;
-                });
-        });
-        trackLanesView.setOnUndoableClipMoveRequested(
-            [this](const PlacedClipId clipId,
-                   const std::int64_t newStart,
-                   const std::optional<TrackId> destTrack) -> bool {
-                if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
-                {
-                    return false;
-                }
-                if (clipId == kInvalidPlacedClipId)
-                {
-                    return false;
-                }
-                bool committed = false;
-                executeUndoableSessionEdit(
-                    "Move clip",
-                    [this, clipId, newStart, destTrack, &committed]() -> bool {
-                        const std::shared_ptr<const SessionSnapshot> snapBefore
-                            = session.loadSessionSnapshotForAudioThread();
-                        if (snapBefore == nullptr)
-                        {
-                            return false;
-                        }
-                        bool found = false;
-                        for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
-                        {
-                            const Track& tr = snapBefore->getTrack(ti);
-                            for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
-                            {
-                                if (tr.getPlacedClip(ci).getId() == clipId)
-                                {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found)
-                            {
-                                break;
-                            }
-                        }
-                        if (!found)
-                        {
-                            return false;
-                        }
-                        if (destTrack.has_value())
-                        {
-                            if (*destTrack == kInvalidTrackId
-                                || snapBefore->findTrackIndexById(*destTrack) < 0)
-                            {
-                                return false;
-                            }
-                            session.moveClipToTrack(clipId, newStart, *destTrack);
-                        }
-                        else
-                        {
-                            session.moveClip(clipId, newStart);
-                        }
-                        const std::shared_ptr<const SessionSnapshot> snapAfter
-                            = session.loadSessionSnapshotForAudioThread();
-                        if (snapAfter == snapBefore)
-                        {
-                            return false;
-                        }
-                        syncViewportFromSession();
-                        trackLanesView.syncTracksFromSession();
-                        rulerView.repaint();
-                        trackLanesView.repaint();
-                        inspectorView_.refreshFromSession();
-                        committed = true;
-                        return true;
-                    });
-                return committed;
-            });
-        trackLanesView.setOnUndoableClipTrimRequested(
-            [this](const PlacedClipId clipId, const ClipTrimEdge edge, const std::int64_t newVal) -> bool {
-                if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
-                {
-                    return false;
-                }
-                if (clipId == kInvalidPlacedClipId)
-                {
-                    return false;
-                }
-                bool committed = false;
-                executeUndoableSessionEdit(
-                    "Trim clip",
-                    [this, clipId, edge, newVal, &committed]() -> bool {
-                        const std::shared_ptr<const SessionSnapshot> snapBefore
-                            = session.loadSessionSnapshotForAudioThread();
-                        if (snapBefore == nullptr)
-                        {
-                            return false;
-                        }
-                        bool found = false;
-                        for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
-                        {
-                            const Track& tr = snapBefore->getTrack(ti);
-                            for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
-                            {
-                                if (tr.getPlacedClip(ci).getId() == clipId)
-                                {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found)
-                            {
-                                break;
-                            }
-                        }
-                        if (!found)
-                        {
-                            return false;
-                        }
-                        if (edge == ClipTrimEdge::Left)
-                        {
-                            session.setClipLeftEdgeTrim(clipId, newVal);
-                        }
-                        else
-                        {
-                            session.setClipRightEdgeVisibleLength(clipId, newVal);
-                        }
-                        const std::shared_ptr<const SessionSnapshot> snapAfter
-                            = session.loadSessionSnapshotForAudioThread();
-                        if (snapAfter == snapBefore)
-                        {
-                            return false;
-                        }
-                        syncViewportFromSession();
-                        trackLanesView.syncTracksFromSession();
-                        rulerView.repaint();
-                        trackLanesView.repaint();
-                        inspectorView_.refreshFromSession();
-                        committed = true;
-                        return true;
-                    });
-                return committed;
-            });
         trackLanesView.setActiveEditToolProvider([this]() { return currentEditTool_; });
-        trackLanesView.setOnUndoableClipSplitRequested(
-            [this](const PlacedClipId clipId,
-                   const std::int64_t splitSample,
-                   const bool clipWasSelected) {
-                if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
-                {
-                    return;
-                }
-                if (clipId == kInvalidPlacedClipId)
-                {
-                    return;
-                }
-                std::optional<std::pair<PlacedClipId, PlacedClipId>> splitIds;
-                executeUndoableSessionEdit(
-                    "Split clip",
-                    [this, clipId, splitSample, &splitIds]() -> bool {
-                        const std::shared_ptr<const SessionSnapshot> snapBefore
-                            = session.loadSessionSnapshotForAudioThread();
-                        if (snapBefore == nullptr)
-                        {
-                            return false;
-                        }
-                        bool found = false;
-                        for (int ti = 0; ti < snapBefore->getNumTracks(); ++ti)
-                        {
-                            const Track& tr = snapBefore->getTrack(ti);
-                            for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
-                            {
-                                if (tr.getPlacedClip(ci).getId() == clipId)
-                                {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found)
-                            {
-                                break;
-                            }
-                        }
-                        if (!found)
-                        {
-                            return false;
-                        }
-                        const auto maybe = session.splitClip(clipId, splitSample);
-                        if (!maybe.has_value())
-                        {
-                            return false;
-                        }
-                        const std::shared_ptr<const SessionSnapshot> snapAfter
-                            = session.loadSessionSnapshotForAudioThread();
-                        if (snapAfter == snapBefore)
-                        {
-                            return false;
-                        }
-                        splitIds = *maybe;
-                        syncViewportFromSession();
-                        trackLanesView.syncTracksFromSession();
-                        rulerView.repaint();
-                        trackLanesView.repaint();
-                        inspectorView_.refreshFromSession();
-                        return true;
-                    });
-                if (!clipWasSelected || !splitIds.has_value())
-                {
-                    return;
-                }
-                const PlacedClipId rightId = splitIds->second;
-                const std::shared_ptr<const SessionSnapshot> snap
-                    = session.loadSessionSnapshotForAudioThread();
-                if (snap == nullptr)
-                {
-                    return;
-                }
-                for (int ti = 0; ti < snap->getNumTracks(); ++ti)
-                {
-                    const Track& tr = snap->getTrack(ti);
-                    for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+
+        trackLanesEditCoordinator_ = std::make_unique<TrackLanesEditCoordinator>(
+            session,
+            pluginHost_,
+            trackLanesView,
+            rulerView,
+            inspectorView_,
+            TrackLanesEditCoordinator::Callbacks{
+                [this] { return recorder_.isRecording(); },
+                [this] {
+                    return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
+                },
+                [this](const juce::String& label, std::function<bool()> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
                     {
-                        if (tr.getPlacedClip(ci).getId() == rightId)
-                        {
-                            trackLanesView.selectPlacedClipOnTrack(tr.getId(), rightId);
-                            return;
-                        }
+                        undoRedoCoordinator_->executeUndoableSessionEdit(label, std::move(mutator));
                     }
-                }
+                },
+                [this] { syncViewportFromSession(); },
+                [this](TrackId tid) { return getInstrumentHostForTrack(tid); },
+                [this](TrackId tid) {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->resetWindowAndBookingIfOpenOnTrack(tid);
+                    }
+                },
+                [this](TrackId tid) {
+                    instrumentTimelineRowCoordinator_->tearDownExperimentalInstrumentTimelineUiForTrack(tid);
+                },
+                [this](TrackId tid) {
+                    instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
+                },
+                [this] { refreshInstrumentUi(); },
+                [this] { return instrumentRuntimeCoordinator_->hasAnyKeyedInstrumentControllerActive(); },
+                [this] { instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly(); },
             });
-        // UI-only mutex with the instrument timeline header row. Audio headers paint inactive
-        // when the instrument row is the UI-active row; clicking any audio header clears it.
-        // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.
-        trackLanesView.setHeaderActiveSuppressProvider(
-            [this] { return instrumentRuntimeCoordinator_->hasAnyKeyedInstrumentControllerActive(); });
-        trackLanesView.setOnAudioHeaderActivated(
-            [this] { instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly(); });
+        trackLanesEditCoordinator_->install();
+
         deviceManager.addChangeListener(this);
         updatePlayPauseButtonFromTransport();
         startTimerHz(10);
@@ -1478,6 +1209,11 @@ private:
     collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
     collapsible_side_strip::CollapsedKnob inspectorCollapsedKnob_;
     int inspectorCurrentWidth_ = kInspectorDefaultW;
+
+    /// Declared LAST among data members (after `trackLanesView`, `rulerView`, `inspectorView_`)
+    /// so it is destroyed FIRST in reverse-declaration order, while every UI object it borrows
+    /// is still alive. See `TrackLanesEditCoordinator` ctor — it stores `&` to those views.
+    std::unique_ptr<TrackLanesEditCoordinator> trackLanesEditCoordinator_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)
 };

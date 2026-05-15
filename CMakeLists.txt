@@ -44,6 +44,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/InstrumentTimelineRowCoordinator.cpp
     src/app/ProjectIoCoordinator.cpp
     src/app/RecordingCoordinator.cpp
+    src/app/TrackLanesEditCoordinator.cpp
     src/app/Vst3PluginPickerCoordinator.cpp
     src/MiniDAWLabApplication.cpp
     src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
