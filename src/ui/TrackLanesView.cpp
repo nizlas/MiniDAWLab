@@ -466,9 +466,19 @@ void TrackLanesView::setOnAudioHeaderActivated(std::function<void()> fn) noexcep
     onAudioHeaderActivated_ = std::move(fn);
 }
 
+void TrackLanesView::setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept
+{
+    onAudioClipMouseDownClearForeignSelections_ = std::move(fn);
+}
+
 void TrackLanesView::setStructuralTimelineEditBlockedPredicate(std::function<bool()> fn) noexcept
 {
     structuralTimelineEditBlockedPredicate_ = std::move(fn);
+}
+
+void TrackLanesView::setInstrumentMidiClipMoveBlockedPredicate(std::function<bool()> fn) noexcept
+{
+    instrumentMidiClipMoveBlockedPredicate_ = std::move(fn);
 }
 
 void TrackLanesView::setCommittedHeaderDragTrackReorder(
@@ -647,6 +657,15 @@ bool TrackLanesView::isStructuralTimelineEditBlocked() const noexcept
     if (structuralTimelineEditBlockedPredicate_)
     {
         return structuralTimelineEditBlockedPredicate_();
+    }
+    return recorder_.isRecording();
+}
+
+bool TrackLanesView::isInstrumentMidiClipMoveBlocked() const noexcept
+{
+    if (instrumentMidiClipMoveBlockedPredicate_)
+    {
+        return instrumentMidiClipMoveBlockedPredicate_();
     }
     return recorder_.isRecording();
 }
@@ -992,6 +1011,10 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 {
                     u->clearSelectionOnly();
                 }
+            }
+            if (onAudioClipMouseDownClearForeignSelections_ != nullptr)
+            {
+                onAudioClipMouseDownClearForeignSelections_();
             }
         };
         host.findLaneAtScreen = [this](const juce::Point<int> screenPos) -> ClipWaveformView* {

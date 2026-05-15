@@ -1314,6 +1314,66 @@ InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAt
     return outId;
 }
 
+std::int64_t InstrumentTrackController::clampInstrumentMidiClipMoveDeltaForCurrentSelection(
+    const std::int64_t deltaSamples) const noexcept
+{
+    if (deltaSamples == 0 || selectedClipIds_.empty())
+    {
+        return 0;
+    }
+
+    std::int64_t minStart = std::numeric_limits<std::int64_t>::max();
+    for (const InstrumentMidiClipId id : selectedClipIds_)
+    {
+        const InstrumentMidiClip* const c = getClipById(id);
+        if (c != nullptr)
+        {
+            minStart = juce::jmin(minStart, c->startSamples);
+        }
+    }
+
+    if (minStart == std::numeric_limits<std::int64_t>::max())
+    {
+        return 0;
+    }
+
+    return juce::jmax(deltaSamples, -minStart);
+}
+
+bool InstrumentTrackController::moveSelectedInstrumentMidiClipsByDeltaSamples(const std::int64_t deltaSamples) noexcept
+{
+    const std::int64_t d = clampInstrumentMidiClipMoveDeltaForCurrentSelection(deltaSamples);
+    if (d == 0)
+    {
+        return false;
+    }
+
+    bool any = false;
+    for (const InstrumentMidiClipId id : selectedClipIds_)
+    {
+        InstrumentMidiClip* const c = getClipById(id);
+        if (c == nullptr)
+        {
+            continue;
+        }
+        const std::int64_t ns = c->startSamples + d;
+        if (ns != c->startSamples)
+        {
+            c->startSamples = ns;
+            any = true;
+        }
+    }
+
+    if (!any)
+    {
+        return false;
+    }
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
 void InstrumentTrackController::publishRenderSnapshot()
 {
     auto snap = std::make_shared<InstrumentTrackRenderSnapshot>();

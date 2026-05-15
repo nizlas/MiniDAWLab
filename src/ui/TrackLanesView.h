@@ -175,9 +175,18 @@ public:
     /// menu) during recording, count-in, or **transport Playing** (`Main` installs this predicate).
     void setStructuralTimelineEditBlockedPredicate(std::function<bool()> fn) noexcept;
 
+    /// [Message thread] Optional: block **instrument MIDI clip drag moves** on the timeline (`MidiEventLane`).
+    /// Narrower than `isStructuralTimelineEditBlocked`: allows moves during playback; `Main` typically
+    /// installs recording + count-in only.
+    void setInstrumentMidiClipMoveBlockedPredicate(std::function<bool()> fn) noexcept;
+
     /// [Message thread] Wired once by `Main`: fires from any audio header's name-strip click after
     /// `Session::setActiveTrack` succeeds. `Main` uses this to clear the instrument-row active flag.
     void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
+
+    /// Optional: after an audio clip lane clears peer waveform selections on mouse-down, invoke this
+    /// so MIDI clip selections can be cleared without threading instrument details into `ClipWaveformView`.
+    void setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept;
 
     /// [Message thread] Replace all instrument-shell UI bridges (Groove-Agent rows). Omit a `TrackId` to detach it.
     void syncInstrumentTimelineAttachments(const std::vector<InstrumentTimelineAttachment>& rows) noexcept;
@@ -198,6 +207,10 @@ public:
     /// [Message thread] True when destructive header/timeline edits must not run (recording, count‑in,
     /// transport Playing, etc. — see `Main`’s installed `structuralTimelineEditBlockedPredicate`).
     [[nodiscard]] bool isStructuralTimelineEditBlocked() const noexcept;
+
+    /// [Message thread] True when instrument MIDI clip drag-reposition should not run (see
+    /// `setInstrumentMidiClipMoveBlockedPredicate`). Defaults to `RecorderService::isRecording()` when unset.
+    [[nodiscard]] bool isInstrumentMidiClipMoveBlocked() const noexcept;
 
 private:
     void timerCallback() override;
@@ -280,7 +293,9 @@ private:
     std::function<void(PlacedClipId, std::int64_t, bool)> onUndoableClipSplitRequested_;
     std::function<bool()> headerActiveSuppressProvider_;
     std::function<void()> onAudioHeaderActivated_;
+    std::function<void()> onAudioClipMouseDownClearForeignSelections_;
     std::function<bool()> structuralTimelineEditBlockedPredicate_;
+    std::function<bool()> instrumentMidiClipMoveBlockedPredicate_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

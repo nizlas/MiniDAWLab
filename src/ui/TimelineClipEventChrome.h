@@ -55,6 +55,13 @@ inline void paintEventChromeSelectionOverlay(juce::Graphics& g, juce::Rectangle<
     g.drawRoundedRectangle(eventRect, kEventCorner, kSelectionOverlayStroke);
 }
 
+/// Stronger outline for the keyboard-focused / active clip among a multi-selection.
+inline void paintEventChromeActiveSelectionOutline(juce::Graphics& g, juce::Rectangle<float> eventRect)
+{
+    g.setColour(juce::Colour(0xff3d7dd9));
+    g.drawRoundedRectangle(eventRect, kEventCorner, kSelectionOverlayStroke + 2.0f);
+}
+
 /// Inset for label-only content; vertical term matches ClipWaveformView `1.0f + kWaveInset * 0.5f`.
 [[nodiscard]] inline juce::Rectangle<float> clipEventLabelBounds(juce::Rectangle<float> eventRect)
 {

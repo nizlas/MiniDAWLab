@@ -35,6 +35,7 @@ target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_sources(MiniDAWLab PRIVATE
     src/app/MainAppWindow.cpp
     src/app/AddInstrumentTrackCoordinator.cpp
+    src/app/ArrangementEventSelectionCoordinator.cpp
     src/app/MainAppDialogs.cpp
     src/app/MainWindow.cpp
     src/app/ClipPasteboardController.cpp

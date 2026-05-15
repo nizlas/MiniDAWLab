@@ -28,6 +28,9 @@ public:
         std::function<void()> refreshMidiEditorInstrumentUiIfOpen;
         std::function<void(TrackId, InstrumentMidiClipId)> openMidiEditorForInstrumentClip;
         std::function<void(TrackId)> runInstrumentMidiFileImportForTrack;
+        std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableInstrumentEdit;
+        std::function<void(TrackId)> clearAudioAndOtherInstrumentSelectionsForMidiTrack;
+        std::function<void()> clearAllArrangementEventSelections;
     };
 
     InstrumentTimelineRowCoordinator(Session& session,

@@ -24,6 +24,7 @@
 #include "app/TransportControlsShortcutTarget.h"
 #include "app/Vst3PluginPickerCoordinator.h"
 #include "app/InstrumentMusicalUndoSnapshot.h"
+#include "app/ArrangementEventSelectionCoordinator.h"
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "app/InstrumentTimelineRowCoordinator.h"
 
@@ -291,6 +292,15 @@ public:
                 },
             });
 
+        arrangementEventSelectionCoordinator_
+            = std::make_unique<ArrangementEventSelectionCoordinator>(trackLanesView, *instrumentRuntimeCoordinator_);
+        trackLanesView.setOnAudioClipMouseDownClearForeignSelections([this]() noexcept {
+            if (arrangementEventSelectionCoordinator_ != nullptr)
+            {
+                arrangementEventSelectionCoordinator_->clearAllInstrumentControllerSelectionsOnly();
+            }
+        });
+
         vst3PluginPickerCoordinator_ = std::make_unique<Vst3PluginPickerCoordinator>(
             *this,
             session,
@@ -364,6 +374,25 @@ public:
                     if (instrumentMidiImportCoordinator_ != nullptr)
                     {
                         instrumentMidiImportCoordinator_->importMidiFileForInstrumentTrack(laneTid);
+                    }
+                },
+                [this](const juce::String& lab, std::function<bool()> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->executeUndoableInstrumentEdit(lab, std::move(mutator));
+                    }
+                },
+                [this](TrackId keepInstrumentTrackId) noexcept {
+                    if (arrangementEventSelectionCoordinator_ != nullptr)
+                    {
+                        arrangementEventSelectionCoordinator_->clearAudioAndOtherInstrumentControllerSelections(
+                            keepInstrumentTrackId);
+                    }
+                },
+                [this]() noexcept {
+                    if (arrangementEventSelectionCoordinator_ != nullptr)
+                    {
+                        arrangementEventSelectionCoordinator_->clearAllArrangementEventSelections();
                     }
                 },
             });
@@ -454,6 +483,11 @@ public:
                    || (recordingCoordinator_ != nullptr
                        && recordingCoordinator_->isCountInActive())
                    || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+        });
+        trackLanesView.setInstrumentMidiClipMoveBlockedPredicate([this]() {
+            return recorder_.isRecording()
+                   || (recordingCoordinator_ != nullptr
+                       && recordingCoordinator_->isCountInActive());
         });
         setWantsKeyboardFocus(true);
         audioWaveformCache_.setOnPyramidReady([this](const AudioClip*) { trackLanesView.repaint(); });
@@ -940,6 +974,9 @@ private:
     collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
     collapsible_side_strip::CollapsedKnob inspectorCollapsedKnob_;
     int inspectorCurrentWidth_ = kInspectorDefaultW;
+
+    /// Destroyed before `trackLanesView` / `instrumentRuntimeCoordinator_` reverse dtors run (non-owning refs).
+    std::unique_ptr<ArrangementEventSelectionCoordinator> arrangementEventSelectionCoordinator_;
 
     /// Declared LAST among data members (after `trackLanesView`, `rulerView`, `inspectorView_`)
     /// so it is destroyed FIRST in reverse-declaration order, while every UI object it borrows

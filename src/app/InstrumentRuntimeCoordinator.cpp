@@ -110,6 +110,22 @@ InstrumentTrackController* InstrumentRuntimeCoordinator::getInstrumentController
     return (it == instrumentControllersByTrackId_.end()) ? nullptr : it->second.get();
 }
 
+void InstrumentRuntimeCoordinator::forEachInstrumentController(
+    const std::function<void(TrackId, InstrumentTrackController&)>& fn)
+{
+    if (fn == nullptr)
+    {
+        return;
+    }
+    for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            fn(kv.first, *kv.second);
+        }
+    }
+}
+
 bool InstrumentRuntimeCoordinator::isKeyedRuntimeRegistryEmpty() const noexcept
 {
     return instrumentHostsByTrackId_.empty();

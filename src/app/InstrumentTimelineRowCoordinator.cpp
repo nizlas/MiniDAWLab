@@ -21,6 +21,7 @@ namespace
 void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
                                     juce::Rectangle<float> eb,
                                     bool selected,
+                                    bool activeClip,
                                     const juce::String& clipName)
 {
     using namespace mini_daw::timeline_clip_chrome;
@@ -28,6 +29,10 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
     if (selected)
     {
         paintEventChromeSelectionOverlay(g, eb);
+    }
+    if (activeClip)
+    {
+        paintEventChromeActiveSelectionOutline(g, eb);
     }
     g.setColour(juce::Colour(0xff242a33));
     g.setFont(11.5f);
@@ -45,6 +50,7 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
                                                                  private juce::Timer
 {
     static constexpr bool kLogInstrumentLane = false;
+    static constexpr float kClipDragThresholdPx = 3.0f;
 
     explicit MidiEventLane(InstrumentTimelineRowCoordinator& ownerIn,
                             InstrumentTrackController* ctl,
@@ -128,6 +134,8 @@ private:
             return;
         }
 
+        const InstrumentMidiClipId activeClipId = ac->getSelectedClipId();
+
         for (const auto& up : ac->getClips())
         {
             const auto* c = up.get();
@@ -135,12 +143,14 @@ private:
             {
                 continue;
             }
-            const auto eb = getEventBoundsForClip(*c, laneContent);
+            const bool sel = ac->isClipSelected(c->id);
+            const std::int64_t previewDelta
+                = (dragDragging_ && sel) ? dragEffectivePreviewDeltaSamples_ : std::int64_t{ 0 };
+            const auto eb = getEventBoundsForClip(*c, laneContent, previewDelta);
             if (eb.isEmpty())
             {
                 continue;
             }
-            const bool sel = ac->isClipSelected(c->id);
             if (kLogInstrumentLane)
             {
                 juce::Logger::writeToLog(
@@ -148,7 +158,8 @@ private:
                     + " selected=" + juce::String(sel ? "true" : "false") + " eventBounds=" + eb.toString());
             }
 
-            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name);
+            const bool activeClip = (c->id != 0 && c->id == activeClipId);
+            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, activeClip && sel, c->name);
         }
     }
 
@@ -172,38 +183,156 @@ private:
             return;
         }
 
+        dragCouldMove_ = false;
+        dragDragging_ = false;
+        dragEffectivePreviewDeltaSamples_ = 0;
+
+        const bool midiMoveBlocked = owner_.trackLanes_.isInstrumentMidiClipMoveBlocked();
+
         if (auto* clip = hitTestClipAtEvent(e.position))
         {
-            const bool toggleMulti = e.mods.isCommandDown();
+            const bool toggleMulti = e.mods.isShiftDown();
             if (toggleMulti)
             {
-                ac->toggleClipSelection(clip->id);
-            }
-            else if (ac->isClipSelected(clip->id))
-            {
-                // Plain click on an already-selected clip: activate only (preserves multi-selection,
-                // including for double-click's first click).
-                ac->setActiveSelectedClipId(clip->id);
+                const bool thisTrackHasSelection = !ac->getSelectedClipIds().empty();
+                if (!thisTrackHasSelection)
+                {
+                    if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
+                    {
+                        owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(
+                            laneTimelineTrackId_);
+                    }
+                    ac->setSelectedClipIdsExclusive(clip->id);
+                }
+                else
+                {
+                    ac->toggleClipSelection(clip->id);
+                }
             }
             else
             {
-                ac->setSelectedClipIdsExclusive(clip->id);
+                if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
+                {
+                    owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(laneTimelineTrackId_);
+                }
+                if (ac->isClipSelected(clip->id))
+                {
+                    // Plain click on an already-selected clip: activate only (preserves multi-selection,
+                    // including for double-click's first click).
+                    ac->setActiveSelectedClipId(clip->id);
+                }
+                else
+                {
+                    ac->setSelectedClipIdsExclusive(clip->id);
+                }
             }
             if (kLogInstrumentLane)
             {
                 juce::Logger::writeToLog(
                     "instrument-lane: hit clip id=" + juce::String((juce::int64)clip->id) + " selected=true");
             }
+
+            dragMouseDownLocal_ = e.position.toInt();
+            dragCouldMove_ = !midiMoveBlocked && ac->isClipSelected(clip->id)
+                             && timelineMappingAvailableForClipDrag_();
         }
         else
         {
-            ac->clearClipSelection();
+            if (owner_.callbacks_.clearAllArrangementEventSelections != nullptr)
+            {
+                owner_.callbacks_.clearAllArrangementEventSelections();
+            }
+            else
+            {
+                ac->clearClipSelection();
+            }
             if (kLogInstrumentLane)
             {
                 juce::Logger::writeToLog("instrument-lane: no hit");
             }
         }
 
+        repaint();
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (!dragCouldMove_)
+        {
+            return;
+        }
+
+        InstrumentTrackController* const ac = activeControllerNullable();
+        if (ac == nullptr || owner_.trackLanes_.isInstrumentMidiClipMoveBlocked())
+        {
+            return;
+        }
+
+        const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
+        const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
+        const std::int64_t rawDelta = s1 - s0;
+        const std::int64_t effDelta = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(rawDelta);
+
+        if (!dragDragging_)
+        {
+            const float dx = std::abs(e.position.x - (float)dragMouseDownLocal_.x);
+            if (dx < kClipDragThresholdPx)
+            {
+                return;
+            }
+            dragDragging_ = true;
+        }
+
+        dragEffectivePreviewDeltaSamples_ = effDelta;
+        repaint();
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        InstrumentTrackController* const ac = activeControllerNullable();
+
+        if (dragDragging_ && ac != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked())
+        {
+            const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
+            const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
+            const std::int64_t dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(s1 - s0);
+
+            if (dCommit != 0)
+            {
+                auto execute = owner_.callbacks_.executeUndoableInstrumentEdit;
+                if (execute != nullptr)
+                {
+                    TrackId laneTid = laneTimelineTrackId_;
+                    execute(juce::String("Move MIDI clip"), [this, laneTid, dCommit]() mutable -> bool {
+                        InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
+                        InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+                        if (ctl == nullptr || !ctl->hasInstrumentTrack())
+                        {
+                            return false;
+                        }
+                        const bool ok = ctl->moveSelectedInstrumentMidiClipsByDeltaSamples(dCommit);
+                        if (ok)
+                        {
+                            owner_.trackLanes_.repaint();
+                            owner_.inspector_.refreshFromSession();
+                        }
+                        return ok;
+                    });
+                }
+                else
+                {
+                    if (ac->moveSelectedInstrumentMidiClipsByDeltaSamples(dCommit))
+                    {
+                        owner_.trackLanes_.repaint();
+                        owner_.inspector_.refreshFromSession();
+                    }
+                }
+            }
+        }
+
+        dragCouldMove_ = false;
+        dragDragging_ = false;
+        dragEffectivePreviewDeltaSamples_ = 0;
         repaint();
     }
 
@@ -231,13 +360,35 @@ private:
     }
 
     [[nodiscard]] InstrumentTrackController* activeControllerNullable() const noexcept { return boundCtl_; }
+
+    [[nodiscard]] bool timelineMappingAvailableForClipDrag_() const noexcept
+    {
+        const double spp = owner_.timelineViewport_.getSamplesPerPixel();
+        return spp > 0.0 && std::isfinite(spp);
+    }
+
+    [[nodiscard]] std::int64_t laneTimelineSampleAtLocalX(juce::Point<int> localPt) const noexcept
+    {
+        const auto lc = getLaneContentBounds();
+        const float relX = (float)(localPt.x - lc.getX());
+        TimelineViewportModel& vp = owner_.timelineViewport_;
+        const double spp = vp.getSamplesPerPixel();
+        const std::int64_t visStart = vp.getVisibleStartSamples();
+        if (!timelineMappingAvailableForClipDrag_())
+        {
+            return visStart;
+        }
+        return TimelineRulerView::xToSessionSampleClamped(relX, (float)lc.getWidth(), visStart, spp);
+    }
+
     [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const
     {
         return getLocalBounds().reduced(0, 6);
     }
 
     [[nodiscard]] juce::Rectangle<int> getEventBoundsForClip(const InstrumentMidiClip& c,
-                                                             juce::Rectangle<int> laneContent) const
+                                                             juce::Rectangle<int> laneContent,
+                                                             std::int64_t previewStartDelta) const
     {
         using namespace mini_daw::timeline_clip_chrome;
         const auto band = laneContent.toFloat().reduced(0.0f, kEventVerticalMargin);
@@ -248,9 +399,11 @@ private:
             const std::int64_t visStart = vp.getVisibleStartSamples();
             const float originX = band.getX();
             const std::int64_t len = juce::jmax(std::int64_t{ 1 }, c.lengthSamples);
-            const float x0 = TimelineRulerView::sessionSampleToLocalX(c.startSamples, originX, visStart, spp);
+            const std::int64_t anchor
+                = juce::jmax(std::int64_t{ 0 }, c.startSamples + previewStartDelta);
+            const float x0 = TimelineRulerView::sessionSampleToLocalX(anchor, originX, visStart, spp);
             const float x1 = TimelineRulerView::sessionSampleToLocalX(
-                c.startSamples + len, originX, visStart, spp);
+                anchor + len, originX, visStart, spp);
             float left = juce::jmin(x0, x1);
             float right = juce::jmax(x0, x1);
             constexpr float minW = 40.0f;
@@ -313,7 +466,7 @@ private:
                 continue;
             }
 
-            if (getEventBoundsForClip(*c, laneContent).contains(pos.toInt()))
+            if (getEventBoundsForClip(*c, laneContent, 0).contains(pos.toInt()))
             {
                 return c;
             }
@@ -325,6 +478,11 @@ private:
     InstrumentTimelineRowCoordinator& owner_;
     InstrumentTrackController* boundCtl_ = nullptr;
     TrackId laneTimelineTrackId_ = kInvalidTrackId;
+
+    bool dragCouldMove_ = false;
+    bool dragDragging_ = false;
+    juce::Point<int> dragMouseDownLocal_;
+    std::int64_t dragEffectivePreviewDeltaSamples_ = 0;
 };
 
 InstrumentTimelineRowCoordinator::InstrumentTimelineRowCoordinator(

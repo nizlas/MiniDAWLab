@@ -45,6 +45,9 @@ public:
     [[nodiscard]] ExperimentalInstrumentHost* getInstrumentHostForTrack(TrackId tid) const noexcept;
     [[nodiscard]] InstrumentTrackController* getInstrumentControllerForTrack(TrackId tid) const noexcept;
 
+    /// Message thread: keyed instrument controllers only (staging excluded). Null `fn` is ignored.
+    void forEachInstrumentController(const std::function<void(TrackId, InstrumentTrackController&)>& fn);
+
     [[nodiscard]] std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
         getOrCreateInstrumentRuntimeForTrack(TrackId tid);
 

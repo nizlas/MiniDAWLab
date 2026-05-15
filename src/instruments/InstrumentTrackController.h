@@ -270,6 +270,14 @@ public:
         std::int64_t startSamples,
         juce::String suggestedName);
 
+    /// Arrangement move: shift all currently selected MIDI clips by `deltaSamples`. Clamps as a group so no
+    /// clip starts before sample 0. Returns false if nothing changed.
+    [[nodiscard]] bool moveSelectedInstrumentMidiClipsByDeltaSamples(std::int64_t deltaSamples) noexcept;
+
+    /// Effective delta after clamping the current selection so every clip stays at or past sample 0.
+    [[nodiscard]] std::int64_t clampInstrumentMidiClipMoveDeltaForCurrentSelection(
+        std::int64_t deltaSamples) const noexcept;
+
     [[nodiscard]] std::shared_ptr<const InstrumentTrackRenderSnapshot> loadRenderSnapshotForAudioThread() const noexcept
     {
         return std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
