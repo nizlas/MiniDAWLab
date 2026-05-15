@@ -158,9 +158,27 @@ public:
     /// t in [0,1] along the event lane (excluding header).
     [[nodiscard]] InstrumentMidiClip* findClipAtLaneFraction(float t) noexcept;
 
-    [[nodiscard]] InstrumentMidiClipId getSelectedClipId() const noexcept { return selectedClipId_; }
+    /// Active / keyboard-focused MIDI clip on this lane (`selectedClipIds_.back()`, or 0 when none).
+    [[nodiscard]] InstrumentMidiClipId getSelectedClipId() const noexcept;
+
+    /// Compatibility shim — replaces selection with a single clip, or clears when `id == 0`.
     void setSelectedClipId(InstrumentMidiClipId id) noexcept;
-    void clearClipSelection() noexcept { setSelectedClipId(0); }
+
+    [[nodiscard]] const std::vector<InstrumentMidiClipId>& getSelectedClipIds() const noexcept
+    {
+        return selectedClipIds_;
+    }
+
+    [[nodiscard]] bool isClipSelected(InstrumentMidiClipId id) const noexcept;
+
+    void setSelectedClipIdsExclusive(InstrumentMidiClipId activeClipId) noexcept;
+    void addClipToSelection(InstrumentMidiClipId id) noexcept;
+    void toggleClipSelection(InstrumentMidiClipId id) noexcept;
+
+    /// Reorders selection only if `id` is already selected (otherwise no-op).
+    void setActiveSelectedClipId(InstrumentMidiClipId id) noexcept;
+
+    void clearClipSelection() noexcept;
 
     [[nodiscard]] const juce::String& getRequiredKitName() const noexcept { return requiredKitName_; }
     void setRequiredKitName(juce::String name) noexcept;
@@ -244,6 +262,14 @@ public:
     /// BPM / timeline note timing changed (ticks→samples); does **not** rewrite `lengthSamples` from grid.
     void notifyClipExperimentalMusicalTimingChanged() noexcept;
 
+    /// Arrangement import: append one timeline-MIDI clip anchored at `startSamples`. Message thread only.
+    /// Returns **0** when no instrument shell is active (`!trackActive_`).
+    [[nodiscard]] InstrumentMidiClipId appendImportedTimelineMidiClipAtSamples(
+        std::vector<TimelineMidiNote> timelineNotes,
+        double firstTempoBpmFromFile,
+        std::int64_t startSamples,
+        juce::String suggestedName);
+
     [[nodiscard]] std::shared_ptr<const InstrumentTrackRenderSnapshot> loadRenderSnapshotForAudioThread() const noexcept
     {
         return std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);
@@ -265,6 +291,8 @@ public:
                                         int deviceBlockNumSamples) noexcept;
 
 private:
+    void pruneInstrumentMidiClipSelectionToExistingClips() noexcept;
+
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
     ExperimentalInstrumentHost& host_;
@@ -273,7 +301,8 @@ private:
     bool trackActive_ = false;
     bool instrumentLoaded_ = false;
     InstrumentMidiClipId nextClipId_ = 1;
-    InstrumentMidiClipId selectedClipId_ = 0;
+    /// UI-only multi-selection; active clip is `back()`. Not serialized or part of musical undo snapshots.
+    std::vector<InstrumentMidiClipId> selectedClipIds_;
     std::vector<std::unique_ptr<InstrumentMidiClip>> clips_;
     bool powerOn_ = true;
     bool muted_ = false;

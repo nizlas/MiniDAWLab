@@ -190,24 +190,7 @@ bool InstrumentTrackController::bootstrapGrooveAgentShellForSessionTrack(const T
     pendingInstrumentKind_.clear();
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
 
-    if (clips_.empty())
-    {
-        auto clip = std::make_unique<InstrumentMidiClip>();
-        clip->id = nextClipId_++;
-        clip->name = "MIDI 1";
-        clip->pattern.numSteps = 16;
-        clip->pattern.stepDenom = 16;
-        clip->pattern.bpm = 110.0;
-        clip->pattern.loop = true;
-        clip->laneStartFractionPermille = 0;
-        clip->laneEndFractionPermille = 250;
-        clip->startSamples = 0;
-        clip->lengthSamples = 0;
-        selectedClipId_ = 0;
-        clips_.push_back(std::move(clip));
-        recomputeLockedClipLengthFromPatternGrid(*clips_.back());
-    }
-
+    publishRenderSnapshot();
     sendChangeMessage();
     return true;
 }
@@ -270,6 +253,119 @@ const InstrumentMidiClip* InstrumentTrackController::getClipById(const Instrumen
     return nullptr;
 }
 
+InstrumentMidiClipId InstrumentTrackController::getSelectedClipId() const noexcept
+{
+    return selectedClipIds_.empty() ? InstrumentMidiClipId{ 0 } : selectedClipIds_.back();
+}
+
+bool InstrumentTrackController::isClipSelected(const InstrumentMidiClipId id) const noexcept
+{
+    if (id == 0)
+    {
+        return false;
+    }
+    return std::find(selectedClipIds_.begin(), selectedClipIds_.end(), id) != selectedClipIds_.end();
+}
+
+void InstrumentTrackController::clearClipSelection() noexcept
+{
+    if (selectedClipIds_.empty())
+    {
+        return;
+    }
+    selectedClipIds_.clear();
+    sendChangeMessage();
+}
+
+void InstrumentTrackController::setSelectedClipIdsExclusive(const InstrumentMidiClipId activeClipId) noexcept
+{
+    if (activeClipId == 0)
+    {
+        clearClipSelection();
+        return;
+    }
+    if (selectedClipIds_.size() == 1 && selectedClipIds_.front() == activeClipId)
+    {
+        return;
+    }
+    selectedClipIds_.clear();
+    selectedClipIds_.push_back(activeClipId);
+    sendChangeMessage();
+}
+
+void InstrumentTrackController::addClipToSelection(const InstrumentMidiClipId id) noexcept
+{
+    if (id == 0)
+    {
+        return;
+    }
+    const auto it = std::find(selectedClipIds_.begin(), selectedClipIds_.end(), id);
+    if (it == selectedClipIds_.end())
+    {
+        selectedClipIds_.push_back(id);
+        sendChangeMessage();
+        return;
+    }
+    if (it != selectedClipIds_.end() - 1)
+    {
+        selectedClipIds_.erase(it);
+        selectedClipIds_.push_back(id);
+        sendChangeMessage();
+    }
+}
+
+void InstrumentTrackController::toggleClipSelection(const InstrumentMidiClipId id) noexcept
+{
+    if (id == 0)
+    {
+        return;
+    }
+    const auto it = std::find(selectedClipIds_.begin(), selectedClipIds_.end(), id);
+    if (it != selectedClipIds_.end())
+    {
+        selectedClipIds_.erase(it);
+        sendChangeMessage();
+        return;
+    }
+    selectedClipIds_.push_back(id);
+    sendChangeMessage();
+}
+
+void InstrumentTrackController::setActiveSelectedClipId(const InstrumentMidiClipId id) noexcept
+{
+    if (id == 0)
+    {
+        return;
+    }
+    const auto it = std::find(selectedClipIds_.begin(), selectedClipIds_.end(), id);
+    jassert(it != selectedClipIds_.end());
+    if (it == selectedClipIds_.end())
+    {
+        return;
+    }
+    if (it != selectedClipIds_.end() - 1)
+    {
+        selectedClipIds_.erase(it);
+        selectedClipIds_.push_back(id);
+        sendChangeMessage();
+    }
+}
+
+void InstrumentTrackController::setSelectedClipId(const InstrumentMidiClipId id) noexcept
+{
+    setSelectedClipIdsExclusive(id);
+}
+
+void InstrumentTrackController::pruneInstrumentMidiClipSelectionToExistingClips() noexcept
+{
+    selectedClipIds_.erase(
+        std::remove_if(
+            selectedClipIds_.begin(),
+            selectedClipIds_.end(),
+            [this](const InstrumentMidiClipId cid) { return getClipById(cid) == nullptr; }),
+        selectedClipIds_.end());
+}
+
 InstrumentMidiClip* InstrumentTrackController::findClipAtLaneFraction(const float t) noexcept
 {
     const float clamped = juce::jlimit(0.f, 1.f, t);
@@ -283,16 +379,6 @@ InstrumentMidiClip* InstrumentTrackController::findClipAtLaneFraction(const floa
         }
     }
     return nullptr;
-}
-
-void InstrumentTrackController::setSelectedClipId(const InstrumentMidiClipId id) noexcept
-{
-    if (selectedClipId_ == id)
-    {
-        return;
-    }
-    selectedClipId_ = id;
-    sendChangeMessage();
 }
 
 void InstrumentTrackController::setPowerOn(const bool on) noexcept
@@ -343,9 +429,13 @@ void InstrumentTrackController::setRequiredKitName(juce::String name) noexcept
 int InstrumentTrackController::pluginNoteNameQueryChannel(const InstrumentMidiClip* contextClip) const noexcept
 {
     const InstrumentMidiClip* clip = contextClip;
-    if (clip == nullptr && selectedClipId_ != 0)
+    if (clip == nullptr)
     {
-        clip = getClipById(selectedClipId_);
+        const InstrumentMidiClipId active = getSelectedClipId();
+        if (active != 0)
+        {
+            clip = getClipById(active);
+        }
     }
     if (clip != nullptr && clip->pattern.usesTimelineNotes() && !clip->pattern.timelineNotes.empty())
     {
@@ -502,7 +592,7 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     trackActive_ = false;
     clips_.clear();
     nextClipId_ = 1;
-    selectedClipId_ = 0;
+    selectedClipIds_.clear();
     powerOn_ = true;
     muted_ = false;
     isActive_ = false;
@@ -686,21 +776,6 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         }
         clips_.push_back(std::move(clip));
     }
-    if (clips_.empty())
-    {
-        auto clip = std::make_unique<InstrumentMidiClip>();
-        clip->id = 1;
-        clip->name = "MIDI 1";
-        clip->pattern.numSteps = 16;
-        clip->pattern.stepDenom = 16;
-        clip->pattern.bpm = 110.0;
-        clip->pattern.loop = true;
-        clip->startSamples = 0;
-        clip->lengthSamples = 0;
-        clips_.push_back(std::move(clip));
-        recomputeLockedClipLengthFromPatternGrid(*clips_.back());
-        maxId = 1;
-    }
     for (auto& cp : clips_)
     {
         if (cp == nullptr)
@@ -733,10 +808,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         }
     }
     nextClipId_ = maxId + 1;
-    if (selectedClipId_ != 0 && getClipById(selectedClipId_) == nullptr)
-    {
-        selectedClipId_ = 0;
-    }
+    pruneInstrumentMidiClipSelectionToExistingClips();
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
     publishRenderSnapshot();
     sendChangeMessage();
@@ -854,21 +926,6 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
         }
         clips_.push_back(std::move(clip));
     }
-    if (clips_.empty())
-    {
-        auto clip = std::make_unique<InstrumentMidiClip>();
-        clip->id = 1;
-        clip->name = "MIDI 1";
-        clip->pattern.numSteps = 16;
-        clip->pattern.stepDenom = 16;
-        clip->pattern.bpm = 110.0;
-        clip->pattern.loop = true;
-        clip->startSamples = 0;
-        clip->lengthSamples = 0;
-        clips_.push_back(std::move(clip));
-        recomputeLockedClipLengthFromPatternGrid(*clips_.back());
-        maxId = 1;
-    }
     for (auto& cp : clips_)
     {
         if (cp == nullptr)
@@ -901,7 +958,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
         }
     }
     nextClipId_ = maxId + 1;
-    selectedClipId_ = 0;
+    selectedClipIds_.clear();
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
     publishRenderSnapshot();
     sendChangeMessage();
@@ -1180,6 +1237,81 @@ void InstrumentTrackController::notifyClipExperimentalMusicalTimingChanged() noe
     }
     publishRenderSnapshot();
     sendChangeMessage();
+}
+
+InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAtSamples(
+    std::vector<TimelineMidiNote> timelineNotes,
+    const double firstTempoBpmFromFile,
+    const std::int64_t startSamples,
+    juce::String suggestedName)
+{
+    if (!trackActive_)
+    {
+        return 0;
+    }
+
+    auto clip = std::make_unique<InstrumentMidiClip>();
+    clip->id = nextClipId_++;
+    const juce::String trimmedSuggested = suggestedName.trim();
+    if (trimmedSuggested.isNotEmpty())
+    {
+        clip->name = trimmedSuggested;
+    }
+    else
+    {
+        clip->name = juce::String("MIDI ") + juce::String(clip->id);
+    }
+
+    clip->startSamples = juce::jmax(std::int64_t{0}, startSamples);
+
+    clip->pattern.notes.clear();
+    clip->pattern.timelineNotes = std::move(timelineNotes);
+    clip->pattern.ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+    clip->pattern.numSteps = 16;
+    clip->pattern.stepDenom = 16;
+    clip->pattern.loop = true;
+    if (firstTempoBpmFromFile > 0.0 && std::isfinite(firstTempoBpmFromFile))
+    {
+        clip->pattern.bpm = firstTempoBpmFromFile;
+    }
+    else
+    {
+        clip->pattern.bpm = 110.0;
+    }
+
+    clip->laneStartFractionPermille = 0;
+    clip->laneEndFractionPermille = 250;
+
+    double sr = timelineSampleRate_;
+    if (sr <= 0.0 || !std::isfinite(sr))
+    {
+        sr = 48000.0;
+    }
+
+    if (clip->pattern.usesTimelineNotes())
+    {
+        const std::int64_t tlen = timelinePatternLengthSamples(clip->pattern, sr);
+        if (tlen > 0)
+        {
+            clip->lengthSamples = tlen;
+        }
+    }
+
+    if (clip->lengthSamples <= 0)
+    {
+        recomputeLockedClipLengthFromPatternGrid(*clip);
+    }
+
+    clip->midiRollVisibleStartSamples = 0;
+    clip->midiRollSamplesPerPixel = 0.0;
+    clip->midiRollFollowEnabled = false;
+
+    const InstrumentMidiClipId outId = clip->id;
+    clips_.push_back(std::move(clip));
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return outId;
 }
 
 void InstrumentTrackController::publishRenderSnapshot()

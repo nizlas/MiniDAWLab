@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <optional>
+#include <thread>
 
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "domain/Session.h"
@@ -14,6 +15,10 @@
 
 namespace
 {
+    constexpr const char* kGrooveAgentAddFailureMsg
+        = "Could not find or load Groove Agent SE. Make sure it is installed, then rescan VST3 plugins or "
+          "choose it manually from the VST3 picker.";
+
     [[nodiscard]] juce::String proposeNextGrooveAgentInstrumentTrackDisplayName(Session& session)
     {
         int shells = 0;
@@ -35,6 +40,8 @@ namespace
         return juce::String("Groove Agent ") + juce::String(shells + 1);
     }
 
+    /// Loads another Groove Agent instance using an existing host's description and bundle path only.
+    /// Intentionally does **not** restore plugin state so normal Add Track gets a fresh/default kit.
     [[nodiscard]] bool tryCloneGrooveAgentFromAnyExistingInto(InstrumentRuntimeCoordinator& instrumentRuntimeCoordinator,
                                                                ExperimentalInstrumentHost& dest) noexcept
     {
@@ -53,26 +60,32 @@ namespace
         {
             return false;
         }
-        juce::MemoryBlock restored;
-        {
-            const juce::String b64 = src->getCurrentInstrumentStateBase64();
-            if (b64.isNotEmpty())
-            {
-                juce::MemoryOutputStream mos;
-                if (juce::Base64::convertFromBase64(mos, b64))
-                {
-                    restored.append(mos.getData(), mos.getDataSize());
-                }
-            }
-        }
         juce::String warnIgnored;
-        const juce::MemoryBlock* mb = restored.getSize() > 0 ? &restored : nullptr;
         return dest
             .loadInstrumentFromDescription(
                 d,
                 original,
-                "groove-agent-sibling-clone",
-                mb,
+                "groove-agent-sibling-fresh",
+                nullptr,
+                &warnIgnored)
+            .wasOk();
+    }
+
+    [[nodiscard]] bool tryLoadGrooveAgentFromCacheCandidate(ExperimentalInstrumentHost& host,
+                                                            const mini_daw::Vst3GrooveCacheLoadCandidate& cand,
+                                                            const char* loadTag) noexcept
+    {
+        if (!cand.valid || cand.descriptions.empty())
+        {
+            return false;
+        }
+        juce::String warnIgnored;
+        return host
+            .loadInstrumentFromDescription(
+                cand.descriptions.front(),
+                cand.resolvedBundle,
+                loadTag,
+                nullptr,
                 &warnIgnored)
             .wasOk();
     }
@@ -89,14 +102,139 @@ void AddInstrumentTrackCoordinator::addGrooveAgentInstrumentTrackFromMenu()
     Session& session = refs_.session;
     InstrumentRuntimeCoordinator& instrumentRuntimeCoordinator = refs_.instrumentRuntimeCoordinator;
 
-    if (!callbacks_.anyHeldGrooveAgentLoaded())
+    if (instrumentRuntimeCoordinator.anyHeldHostShowsGrooveAgentLoaded())
     {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::InfoIcon,
-            "Instrument track",
-            "Load Groove Agent SE from cached OOP description first.");
+        finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
         return;
     }
+
+    const auto prStaging = instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
+    ExperimentalInstrumentHost* const mh = prStaging.first;
+    InstrumentTrackController* const ctlStaging = prStaging.second;
+    if (mh == nullptr || ctlStaging == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "Instrument track", kGrooveAgentAddFailureMsg);
+        return;
+    }
+
+    if (mh->hasInstrument() && mh->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+    {
+        finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+        return;
+    }
+
+    mini_daw::Vst3GrooveCacheLoadCandidate v2Cand;
+    mini_daw::Vst3GrooveCacheLoadCandidate v1Cand;
+    juce::String cacheInfo;
+    (void)mini_daw::tryLoadGrooveAgentCacheCandidates({}, v2Cand, v1Cand, cacheInfo);
+    juce::ignoreUnused(cacheInfo);
+
+    bool loadOk = false;
+    if (v2Cand.valid)
+    {
+        loadOk = tryLoadGrooveAgentFromCacheCandidate(*mh, v2Cand, "add-track-cached-v2");
+    }
+
+    if (loadOk)
+    {
+        finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+        return;
+    }
+
+    if (!v2Cand.valid)
+    {
+        beginAsyncGrooveAgentOopScanForAddTrack(std::move(v1Cand));
+        return;
+    }
+
+    if (v1Cand.valid && tryLoadGrooveAgentFromCacheCandidate(*mh, v1Cand, "add-track-cached-v1"))
+    {
+        finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+        return;
+    }
+
+    beginAsyncGrooveAgentOopScanForAddTrack(std::move(v1Cand));
+}
+
+void AddInstrumentTrackCoordinator::beginAsyncGrooveAgentOopScanForAddTrack(
+    mini_daw::Vst3GrooveCacheLoadCandidate v1Cand)
+{
+    const juce::File scanTarget = mini_daw::getGrooveAgentSeVst3BundlePathForOopScanFallback();
+
+    AddInstrumentTrackCoordinator* const self = this;
+
+    if (!scanTarget.exists())
+    {
+        juce::MessageManager::callAsync([self, v1Cand]() mutable {
+            if (self == nullptr)
+            {
+                return;
+            }
+            auto pr = self->refs_.instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
+            ExperimentalInstrumentHost* const mh = pr.first;
+            if (mh != nullptr && v1Cand.valid
+                && tryLoadGrooveAgentFromCacheCandidate(*mh, v1Cand, "add-track-cached-v1"))
+            {
+                self->finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+                return;
+            }
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon, "Instrument track", kGrooveAgentAddFailureMsg);
+        });
+        return;
+    }
+
+    std::thread([self, scanTarget, v1Cand]() mutable {
+        const mini_daw::Vst3OopScanResult scanResult
+            = mini_daw::runVst3OopScanBlocking(scanTarget, mini_daw::kVst3OopScanReplyTimeoutMs);
+        juce::MessageManager::callAsync([self, scanResult, scanTarget, v1Cand]() mutable {
+            if (self == nullptr)
+            {
+                return;
+            }
+            auto pr = self->refs_.instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
+            ExperimentalInstrumentHost* const mh = pr.first;
+            if (mh == nullptr)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon, "Instrument track", kGrooveAgentAddFailureMsg);
+                return;
+            }
+
+            const bool scanOk = scanResult.outcome == mini_daw::Vst3OopScanOutcome::Success
+                                && !scanResult.descriptions.empty();
+            juce::String warnIgnored;
+            if (scanOk
+                && mh->loadInstrumentFromDescription(
+                       scanResult.descriptions.front(),
+                       scanTarget,
+                       "add-track-oop-fresh-v2",
+                       nullptr,
+                       &warnIgnored)
+                       .wasOk())
+            {
+                self->finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+                return;
+            }
+
+            if (v1Cand.valid && tryLoadGrooveAgentFromCacheCandidate(*mh, v1Cand, "add-track-cached-v1"))
+            {
+                self->finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+                return;
+            }
+
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon, "Instrument track", kGrooveAgentAddFailureMsg);
+        });
+    }).detach();
+}
+
+void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved()
+{
+    Session& session = refs_.session;
+    InstrumentRuntimeCoordinator& instrumentRuntimeCoordinator = refs_.instrumentRuntimeCoordinator;
+
     const juce::String displayName = proposeNextGrooveAgentInstrumentTrackDisplayName(session);
     const std::optional<TrackId> newIdOpt = session.appendExperimentalInstrumentShellTrack(displayName);
     if (!newIdOpt.has_value())
@@ -149,7 +287,7 @@ void AddInstrumentTrackCoordinator::addGrooveAgentInstrumentTrackFromMenu()
         {
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
                                                     "Instrument track",
-                                                    "Could not clone Groove Agent into this instrument track.");
+                                                    "Could not load Groove Agent into this instrument track.");
             session.removeTrack(tid);
             if (!registryWasEmpty)
             {

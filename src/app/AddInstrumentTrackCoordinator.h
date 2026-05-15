@@ -2,6 +2,8 @@
 
 #include <functional>
 
+#include "plugins/Vst3ChildProcessScan.h"
+
 class InstrumentRuntimeCoordinator;
 class Session;
 
@@ -17,7 +19,6 @@ public:
 
     struct Callbacks
     {
-        std::function<bool()> anyHeldGrooveAgentLoaded;
         std::function<void()> refreshInstrumentUi;
         std::function<void()> requestLayoutResized;
         std::function<void()> syncMidiEditorInstrumentClipTimelineFromDeviceIfOpen;
@@ -28,6 +29,9 @@ public:
     void addGrooveAgentInstrumentTrackFromMenu();
 
 private:
+    void finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
+    void beginAsyncGrooveAgentOopScanForAddTrack(mini_daw::Vst3GrooveCacheLoadCandidate v1Cand);
+
     Refs refs_;
     Callbacks callbacks_;
 };

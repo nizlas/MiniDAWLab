@@ -40,6 +40,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/ClipPasteboardController.cpp
     src/app/UndoRedoCoordinator.cpp
     src/app/AudioClipImportCoordinator.cpp
+    src/app/InstrumentMidiImportCoordinator.cpp
     src/app/MidiEditorPresenter.cpp
     src/app/PluginHostUiBindings.cpp
     src/app/InstrumentMusicalUndoSnapshot.cpp

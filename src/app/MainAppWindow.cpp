@@ -8,6 +8,7 @@
 
 #include "app/AddInstrumentTrackCoordinator.h"
 #include "app/AudioClipImportCoordinator.h"
+#include "app/InstrumentMidiImportCoordinator.h"
 #include "app/ClipPasteboardController.h"
 #include "app/MainAppDialogs.h"
 #include "app/MidiEditorPresenter.h"
@@ -318,6 +319,24 @@ public:
             });
         addChildComponent(*vst3PluginPickerCoordinator_);
 
+        instrumentMidiImportCoordinator_ = std::make_unique<InstrumentMidiImportCoordinator>(
+            session,
+            transport,
+            *instrumentRuntimeCoordinator_,
+            trackLanesView,
+            rulerView,
+            inspectorView_,
+            InstrumentMidiImportCoordinator::Callbacks{
+                [this](const juce::String& lab, std::function<bool()> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->executeUndoableInstrumentEdit(lab, std::move(mutator));
+                    }
+                },
+                [this]() { syncViewportFromSession(); },
+                [this]() { refreshInstrumentUi(); },
+            });
+
         instrumentTimelineRowCoordinator_ = std::make_unique<InstrumentTimelineRowCoordinator>(
             session,
             transport,
@@ -339,6 +358,12 @@ public:
                     if (midiEditorPresenter_ != nullptr)
                     {
                         midiEditorPresenter_->openMidiEditorForInstrumentClip(timelineTid, clipId);
+                    }
+                },
+                [this](TrackId laneTid) {
+                    if (instrumentMidiImportCoordinator_ != nullptr)
+                    {
+                        instrumentMidiImportCoordinator_->importMidiFileForInstrumentTrack(laneTid);
                     }
                 },
             });
@@ -405,7 +430,6 @@ public:
         addInstrumentTrackCoordinator_ = std::make_unique<AddInstrumentTrackCoordinator>(
             AddInstrumentTrackCoordinator::Refs{ session, *instrumentRuntimeCoordinator_ },
             AddInstrumentTrackCoordinator::Callbacks{
-                [this]() { return instrumentRuntimeCoordinator_->anyHeldHostShowsGrooveAgentLoaded(); },
                 [this]() { refreshInstrumentUi(); },
                 [this]() { resized(); },
                 [this]() {
@@ -883,6 +907,7 @@ private:
     std::unique_ptr<UndoRedoCoordinator> undoRedoCoordinator_;
     std::unique_ptr<ClipPasteboardController> clipPasteboardController_;
     std::unique_ptr<AudioClipImportCoordinator> audioClipImportCoordinator_;
+    std::unique_ptr<InstrumentMidiImportCoordinator> instrumentMidiImportCoordinator_;
     std::unique_ptr<Vst3PluginPickerCoordinator> vst3PluginPickerCoordinator_;
     std::unique_ptr<ExperimentalMidiEditorWindow> midiEditorWindow_;
     std::unique_ptr<MidiEditorPresenter> midiEditorPresenter_;

@@ -98,6 +98,9 @@ private:
     std::unique_ptr<InstrumentTrackController> instrumentStagingController_;
     juce::String lastExperimentalPlaybackRoutingPublishFingerprint_;
 
+    double lastPreparedDeviceSampleRate_ = 0.0;
+    int lastPreparedDeviceBlockSize_ = 0;
+
     void runSyncInstrumentTimelineRowAttachmentCallback();
     [[nodiscard]] bool invokeDrumNamePhaseAudioProbeShouldSkipPredicate() noexcept;
 

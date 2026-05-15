@@ -18,7 +18,10 @@
 namespace
 {
 /// MIDI runtime clip: same outer chrome sequence as placed audio clips (`ClipWaveformView`); label only inside.
-void paintRuntimeMidiClipEventBlock(juce::Graphics& g, juce::Rectangle<float> eb, bool selected)
+void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
+                                    juce::Rectangle<float> eb,
+                                    bool selected,
+                                    const juce::String& clipName)
 {
     using namespace mini_daw::timeline_clip_chrome;
     paintEventChromeBody(g, eb, midiLaneEventBodyFill());
@@ -28,8 +31,9 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g, juce::Rectangle<float> eb
     }
     g.setColour(juce::Colour(0xff242a33));
     g.setFont(11.5f);
+    const juce::String label = clipName.trim().isNotEmpty() ? clipName.trim() : juce::String("MIDI");
     g.drawFittedText(
-        juce::String("MIDI 1"),
+        label,
         clipEventLabelBounds(eb).toNearestInt(),
         juce::Justification::centredLeft,
         1);
@@ -136,7 +140,7 @@ private:
             {
                 continue;
             }
-            const bool sel = (c->id == ac->getSelectedClipId());
+            const bool sel = ac->isClipSelected(c->id);
             if (kLogInstrumentLane)
             {
                 juce::Logger::writeToLog(
@@ -144,7 +148,7 @@ private:
                     + " selected=" + juce::String(sel ? "true" : "false") + " eventBounds=" + eb.toString());
             }
 
-            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel);
+            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name);
         }
     }
 
@@ -170,7 +174,21 @@ private:
 
         if (auto* clip = hitTestClipAtEvent(e.position))
         {
-            ac->setSelectedClipId(clip->id);
+            const bool toggleMulti = e.mods.isCommandDown();
+            if (toggleMulti)
+            {
+                ac->toggleClipSelection(clip->id);
+            }
+            else if (ac->isClipSelected(clip->id))
+            {
+                // Plain click on an already-selected clip: activate only (preserves multi-selection,
+                // including for double-click's first click).
+                ac->setActiveSelectedClipId(clip->id);
+            }
+            else
+            {
+                ac->setSelectedClipIdsExclusive(clip->id);
+            }
             if (kLogInstrumentLane)
             {
                 juce::Logger::writeToLog(
@@ -199,7 +217,14 @@ private:
 
         if (auto* clip = hitTestClipAtEvent(e.position))
         {
-            ac->setSelectedClipId(clip->id);
+            if (!ac->isClipSelected(clip->id))
+            {
+                ac->setSelectedClipIdsExclusive(clip->id);
+            }
+            else
+            {
+                ac->setActiveSelectedClipId(clip->id);
+            }
             owner_.openMidiEditorForInstrumentClip(laneTimelineTrackId_, clip->id);
             repaint();
         }
@@ -530,6 +555,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
 
         juce::PopupMenu menu;
         constexpr int kDeleteTrackMenuId = 1;
+        constexpr int kImportMidiFileMenuId = 3;
         constexpr int kRescanDescriptionsMenuId = 2;
         const bool editLocked = trackLanes_.isStructuralTimelineEditBlocked();
         juce::PopupMenu::Item deleteItem;
@@ -537,6 +563,11 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         deleteItem.text = "Delete Track";
         deleteItem.isEnabled = !editLocked;
         menu.addItem(deleteItem);
+        juce::PopupMenu::Item importMidiItem;
+        importMidiItem.itemID = kImportMidiFileMenuId;
+        importMidiItem.text = "Import MIDI file...";
+        importMidiItem.isEnabled = !editLocked;
+        menu.addItem(importMidiItem);
         menu.addSeparator();
         juce::PopupMenu::Item rescanItem;
         rescanItem.itemID = kRescanDescriptionsMenuId;
@@ -546,9 +577,16 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
 
         juce::Component::SafePointer<TrackLanesView> safeLanes(&trackLanes_);
         auto rescan = callbacks_.runExperimentalInstrumentPluginDescriptionRescanForTrack;
+        auto runMidiImport = callbacks_.runInstrumentMidiFileImportForTrack;
         menu.showMenuAsync(
             juce::PopupMenu::Options().withTargetComponent(&self),
-            [safeLanes, laneTid, kDeleteTrackMenuId, kRescanDescriptionsMenuId, rescan](const int result) {
+            [safeLanes,
+             laneTid,
+             kDeleteTrackMenuId,
+             kImportMidiFileMenuId,
+             kRescanDescriptionsMenuId,
+             rescan,
+             runMidiImport](const int result) {
                 if (safeLanes == nullptr || result == 0)
                 {
                     return;
@@ -556,6 +594,14 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
                 if (result == kDeleteTrackMenuId)
                 {
                     safeLanes->requestDeleteTrackForHeaderMenu(laneTid);
+                    return;
+                }
+                if (result == kImportMidiFileMenuId)
+                {
+                    if (runMidiImport != nullptr)
+                    {
+                        runMidiImport(laneTid);
+                    }
                     return;
                 }
                 if (result == kRescanDescriptionsMenuId)

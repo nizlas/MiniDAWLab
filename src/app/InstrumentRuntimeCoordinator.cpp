@@ -152,6 +152,10 @@ std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
     wireExperimentalInstrumentHost(*host, *ctl);
     ExperimentalInstrumentHost* const hostPtr = host.get();
     InstrumentTrackController* const ctlPtr = ctl.get();
+    if (lastPreparedDeviceSampleRate_ > 0.0 && lastPreparedDeviceBlockSize_ > 0)
+    {
+        hostPtr->prepareForDevice(lastPreparedDeviceSampleRate_, lastPreparedDeviceBlockSize_);
+    }
     instrumentHostsByTrackId_.emplace(tid, std::move(host));
     instrumentControllersByTrackId_.emplace(tid, std::move(ctl));
     updateExperimentalPlaybackBridgeAfterRegistryChange();
@@ -168,6 +172,10 @@ std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
         instrumentStagingController_ = std::make_unique<InstrumentTrackController>(*instrumentStagingHost_);
         instrumentStagingController_->setSession(&session_);
         wireExperimentalInstrumentHost(*instrumentStagingHost_, *instrumentStagingController_);
+        if (lastPreparedDeviceSampleRate_ > 0.0 && lastPreparedDeviceBlockSize_ > 0)
+        {
+            instrumentStagingHost_->prepareForDevice(lastPreparedDeviceSampleRate_, lastPreparedDeviceBlockSize_);
+        }
         updateExperimentalPlaybackBridgeAfterRegistryChange();
         runSyncInstrumentTimelineRowAttachmentCallback();
     }
@@ -232,6 +240,12 @@ void InstrumentRuntimeCoordinator::experimentalBeginAudioBlockAllHosts(const std
 void InstrumentRuntimeCoordinator::prepareExperimentalInstrumentHostsForDevice(const double sampleRate,
                                                                                const int blockSamples) noexcept
 {
+    if (sampleRate > 0.0 && blockSamples > 0)
+    {
+        lastPreparedDeviceSampleRate_ = sampleRate;
+        lastPreparedDeviceBlockSize_ = blockSamples;
+    }
+
     for (auto& kv : instrumentHostsByTrackId_)
     {
         if (kv.second != nullptr)

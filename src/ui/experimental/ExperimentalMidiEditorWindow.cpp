@@ -1,5 +1,4 @@
 #include "ExperimentalMidiEditorWindow.h"
-#include "ExperimentalMidiImport.h"
 #include "io/InstrumentMidiClipExport.h"
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
@@ -129,10 +128,6 @@ public:
         bpmSlider_.setValue(110.0);
         bpmSlider_.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 56, 22);
         bpmSlider_.addListener(this);
-
-        addAndMakeVisible(importButton_);
-        importButton_.setButtonText("Import MIDI...");
-        importButton_.onClick = [this] { beginImportMidi(); };
 
         addAndMakeVisible(exportButton_);
         exportButton_.setButtonText("Export MIDI...");
@@ -469,7 +464,6 @@ public:
         debugPreviewButton_.setEnabled(canPlayPattern);
         const bool clipTimelineBound =
             externalPattern_ != nullptr && boundTimelineClip_ != nullptr;
-        importButton_.setEnabled(clipTimelineBound);
         exportButton_.setEnabled(clipTimelineBound);
 
         juce::String instPart;
@@ -523,7 +517,7 @@ public:
             canPlayPattern ? juce::Colour(0xffc8c8d8) : juce::Colour(0xffffaa88);
 
         modeLabel_.setText(
-            juce::String("I3f: timeline MIDI — Import MIDI for tick-accurate clips (960 PPQ internal). ")
+            juce::String("I3f: timeline MIDI — import MIDI from the instrument track header (arrangement). ")
                 + "When the clip has timeline notes they drive transport; step grid is for empty/legacy clips only. "
                   "Snap applies to click‑to‑add timing. Preview uses step timing; main Play uses the timeline.\n"
                 + instPart + "\n"
@@ -567,7 +561,6 @@ public:
         transportStopButton_.setBounds(toolbar.removeFromLeft(52).reduced(0, 2));
         cycleToggleButton_.setBounds(toolbar.removeFromLeft(56).reduced(0, 2));
         recordButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        importButton_.setBounds(toolbar.removeFromLeft(92).reduced(0, 2));
         exportButton_.setBounds(toolbar.removeFromLeft(96).reduced(0, 2));
         snapLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
         snapBox_.setBounds(toolbar.removeFromLeft(76).reduced(0, 2));
@@ -675,10 +668,6 @@ private:
     void pushRowsModeToRoll();
     [[nodiscard]] juce::String resolveDrumRowDisplayName(int midiNote, int pluginQueryChannel) const noexcept;
     [[nodiscard]] juce::String resolveDrumRowHoverTooltip(int midiNote, int pluginQueryChannel) const noexcept;
-    void beginImportMidi();
-    void launchMidiFileChooserAfterConfirm();
-    void applyMidiImportResultToPattern(const ExperimentalMidiImportResult& result);
-    void finishMidiImportWithOptionalUndo(const ExperimentalMidiImportResult& result);
     void beginExportMidi();
     void launchMidiExportFileChooser();
 
@@ -752,7 +741,6 @@ private:
     juce::TextButton recordButton_;
     juce::TextButton debugPreviewButton_;
     juce::TextButton debugStopButton_;
-    juce::TextButton importButton_;
     juce::TextButton exportButton_;
     juce::Label snapLabel_;
     juce::ComboBox snapBox_;
@@ -770,7 +758,6 @@ private:
     collapsible_side_strip::CollapsedKnob midiRollCollapsedKnob_;
     juce::Viewport viewport_;
 
-    std::unique_ptr<juce::FileChooser> midiImportChooser_;
     std::unique_ptr<juce::FileChooser> midiExportChooser_;
 
     std::function<void(const juce::String&, std::function<bool()>)> instrumentUndoableMutate_;
@@ -1245,80 +1232,6 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
     layoutMidiSideStripChrome();
 }
 
-void ExperimentalMidiEditorWindow::Body::beginImportMidi()
-{
-    if (externalPattern_ == nullptr || boundTimelineClip_ == nullptr)
-    {
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                               "Import MIDI",
-                                               "Open this editor from a clip on the instrument track to import MIDI.");
-        return;
-    }
-
-    const bool haveContent =
-        activePattern().usesTimelineNotes() || !activePattern().notes.empty();
-    if (haveContent)
-    {
-        const int ok = juce::AlertWindow::showOkCancelBox(
-            juce::AlertWindow::WarningIcon,
-            "Import MIDI",
-            "Replace this clip's pattern with the imported MIDI?\n\n"
-            "Existing step and timeline notes will be cleared.",
-            "Replace",
-            "Cancel",
-            nullptr,
-            nullptr);
-        if (ok == 0)
-        {
-            return;
-        }
-    }
-
-    launchMidiFileChooserAfterConfirm();
-}
-
-void ExperimentalMidiEditorWindow::Body::launchMidiFileChooserAfterConfirm()
-{
-    midiImportChooser_ = std::make_unique<juce::FileChooser>(
-        "Import MIDI", juce::File{}, "*.mid;*.midi", true, false, this);
-
-    const auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
-
-    const juce::Component::SafePointer<Body> safeThis(this);
-    midiImportChooser_->launchAsync(flags, [safeThis](const juce::FileChooser& fc) {
-        if (safeThis == nullptr)
-        {
-            return;
-        }
-        const juce::File file = fc.getResult();
-        safeThis->midiImportChooser_.reset();
-
-        if (!file.existsAsFile())
-        {
-            return;
-        }
-
-        ExperimentalMidiImportResult r =
-            experimentalImportMidiFile(file, kDefaultExperimentalTicksPerQuarter);
-        if (!r.ok)
-        {
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                   "MIDI import failed",
-                                                   r.combinedUserMessageLine());
-            return;
-        }
-
-        safeThis->finishMidiImportWithOptionalUndo(r);
-
-        if (r.warningMessage.isNotEmpty())
-        {
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
-                                                   "MIDI import",
-                                                   r.warningMessage);
-        }
-    });
-}
-
 void ExperimentalMidiEditorWindow::Body::beginExportMidi()
 {
     if (externalPattern_ == nullptr || boundTimelineClip_ == nullptr)
@@ -1402,53 +1315,6 @@ void ExperimentalMidiEditorWindow::Body::launchMidiExportFileChooser()
             "midi-editor: export wrote path=\"" + file.getFullPathName() + "\" notes="
             + juce::String(exportResult.notesExported));
     });
-}
-
-void ExperimentalMidiEditorWindow::Body::finishMidiImportWithOptionalUndo(const ExperimentalMidiImportResult& result)
-{
-    if (canUseInstrumentUndo() && instrumentUndoableMutate_)
-    {
-        instrumentUndoableMutate_("Import MIDI", [this, result]() -> bool {
-            applyMidiImportResultToPattern(result);
-            return true;
-        });
-    }
-    else
-    {
-        applyMidiImportResultToPattern(result);
-    }
-}
-
-void ExperimentalMidiEditorWindow::Body::applyMidiImportResultToPattern(const ExperimentalMidiImportResult& result)
-{
-    ExperimentalMidiPattern& p = activePattern();
-    p.notes.clear();
-    p.timelineNotes = result.notes;
-    p.ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
-    if (result.firstTempoBpm > 0.0 && std::isfinite(result.firstTempoBpm))
-    {
-        p.bpm = result.firstTempoBpm;
-    }
-
-    bpmSlider_.setValue(p.bpm, juce::dontSendNotification);
-    syncStepsAndSnapUiForPattern();
-
-    if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr)
-    {
-        instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
-        instrumentTrackForClipBind_->sendChangeMessage();
-    }
-
-    rebuildPlayerAndRoll();
-    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
-    {
-        rv->seedOrResetViewport();
-        rv->repaint();
-    }
-
-    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-        "midi-editor: import applied timelineNotes=" + juce::String((int)p.timelineNotes.size()) + " bpm="
-        + juce::String(p.bpm, 2));
 }
 
 ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumentHost& host)

@@ -27,6 +27,7 @@ public:
         std::function<void(TrackId)> runExperimentalInstrumentPluginDescriptionRescanForTrack;
         std::function<void()> refreshMidiEditorInstrumentUiIfOpen;
         std::function<void(TrackId, InstrumentMidiClipId)> openMidiEditorForInstrumentClip;
+        std::function<void(TrackId)> runInstrumentMidiFileImportForTrack;
     };
 
     InstrumentTimelineRowCoordinator(Session& session,

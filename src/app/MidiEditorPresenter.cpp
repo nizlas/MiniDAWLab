@@ -12,6 +12,26 @@
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 
+namespace
+{
+void alignInstrumentClipSelectionForMidiEditor(InstrumentTrackController& ctl,
+                                               InstrumentMidiClipId clipId) noexcept
+{
+    if (clipId == 0)
+    {
+        return;
+    }
+    if (ctl.isClipSelected(clipId))
+    {
+        ctl.setActiveSelectedClipId(clipId);
+    }
+    else
+    {
+        ctl.setSelectedClipIdsExclusive(clipId);
+    }
+}
+} // namespace
+
 MidiEditorPresenter::MidiEditorPresenter(Transport& transport,
                                          Session& session,
                                          juce::AudioDeviceManager& deviceManager,
@@ -174,7 +194,7 @@ void MidiEditorPresenter::rebindAfterInstrumentMusicalUndo()
             "The editor was switched to scratch mode.");
         return;
     }
-    ctl->setSelectedClipId(clipId);
+    alignInstrumentClipSelectionForMidiEditor(*ctl, clipId);
     wireMidiEditorForOpenClip(*midiEditorOpenedForInstrumentTrackId_, clip);
     if constexpr (undo_diagnostic::kUndoDiag)
     {
@@ -211,7 +231,7 @@ void MidiEditorPresenter::openMidiEditorForInstrumentClip(const TrackId timeline
         return;
     }
 
-    ctl->setSelectedClipId(clipId);
+    alignInstrumentClipSelectionForMidiEditor(*ctl, clipId);
     midiEditorOpenedForInstrumentTrackId_ = timelineInstrumentTrackId;
     midiEditorWindow_.reset();
     midiEditorWindow_ = std::make_unique<ExperimentalMidiEditorWindow>(*mh);
