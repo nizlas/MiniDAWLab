@@ -1,8 +1,8 @@
 #pragma once
 
-#include <juce_gui_basics/juce_gui_basics.h>
+#include <JuceHeader.h>
 
-#include <juce_audio_devices/juce_audio_devices.h>
+#include <memory>
 
 class Transport;
 class Session;
@@ -12,7 +12,9 @@ class CountInClickOutput;
 class LatencySettingsStore;
 class PlaybackEngine;
 
-class MainWindow : public juce::DocumentWindow, public juce::KeyListener
+class TransportControlsShortcutTarget;
+
+class MainWindow final : public juce::DocumentWindow, public juce::KeyListener
 {
 public:
     MainWindow(const juce::String& name,
@@ -34,5 +36,18 @@ public:
 private:
     [[nodiscard]] bool routeShortcut(const juce::KeyPress& key);
 
+    TransportControlsShortcutTarget* shortcutTargetFromContent_ = nullptr;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
 };
+
+[[nodiscard]] std::unique_ptr<MainWindow> createMainWindow(
+    const juce::String& name,
+    Transport& transport,
+    Session& session,
+    PluginInsertHost& pluginInsertHost,
+    juce::AudioDeviceManager& deviceManager,
+    RecorderService& recorderService,
+    CountInClickOutput& countInClicks,
+    LatencySettingsStore& latencyStore,
+    PlaybackEngine& playbackEngine);

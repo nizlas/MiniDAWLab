@@ -1,9 +1,9 @@
 #pragma once
 
+#include <JuceHeader.h>
+
 #include <functional>
 #include <utility>
-
-#include <juce_audio_devices/juce_audio_devices.h>
 
 #include "domain/Track.h"
 

@@ -80,6 +80,15 @@ Do **not** design new features around a single “the” instrument or “primar
 
 ---
 
+## Undo / redo (message thread)
+
+- **[`UndoRedoCoordinator`](../src/app/UndoRedoCoordinator.h)** owns **`SessionHistory`** (undo-1 stack), orchestrates **Ctrl+Z / Shift+Ctrl+Z** and **executeUndoable**\* / **commitInstrumentMusicalUndoPair** recording, and runs **restore → plugin chain → instrument musical state → UI refresh** in a fixed order.
+- It also owns **`PluginInsertHost` wiring**: **`setUndoRecorder`** (plugin-parameter steps) and **`setEditorShortcutCallbacks`** (undo/redo while a plugin editor is focused). The coordinator **constructor** registers these; the **destructor** clears them (`nullptr` / empty callbacks).
+- **`TransportControlsContent`** ([`MainAppWindow.cpp`](../src/app/MainAppWindow.cpp)) **delegates** undo/redo to the coordinator (thin forwards / lambdas); it does not keep a parallel `SessionHistory`.
+- **Project load / new session**: [`ProjectIoCoordinator`](../src/app/ProjectIoCoordinator.h) calls a **clear history** callback that forwards to **`UndoRedoCoordinator::clearHistory()`** so the stack matches the loaded file (same as clearing before the extraction).
+
+---
+
 ## Power (Off) vs Mute
 
 - **Power / Off** is **structural** (`Track::trackOff_` in the snapshot): engine skips the lane. It **must not** toggle while **playing, recording, or count-in** (UI no-op; no session write).
@@ -137,4 +146,4 @@ Some **API/class header comments** may lag multi-instrument reality (e.g. wordin
 | Instrument controller | [InstrumentTrackController.h/.cpp](../src/instruments/InstrumentTrackController.h) |
 | Playback + instrument snapshot | [PlaybackEngine.h/.cpp](../src/engine/PlaybackEngine.h) |
 | Project v13 + migration | [ProjectFile.h](../src/io/ProjectFile.h), [ProjectFile.cpp](../src/io/ProjectFile.cpp) |
-| Composition / registry / UI wiring | [MainAppWindow.cpp](../src/app/MainAppWindow.cpp), [InstrumentRuntimeCoordinator](../src/app/InstrumentRuntimeCoordinator.h), [InstrumentTimelineRowCoordinator](../src/app/InstrumentTimelineRowCoordinator.h), [ProjectIoCoordinator](../src/app/ProjectIoCoordinator.h), [MidiEditorPresenter](../src/app/MidiEditorPresenter.h) |
+| Composition / registry / UI wiring | [MainAppWindow.cpp](../src/app/MainAppWindow.cpp), [InstrumentRuntimeCoordinator](../src/app/InstrumentRuntimeCoordinator.h), [InstrumentTimelineRowCoordinator](../src/app/InstrumentTimelineRowCoordinator.h), [ProjectIoCoordinator](../src/app/ProjectIoCoordinator.h), [MidiEditorPresenter](../src/app/MidiEditorPresenter.h), [UndoRedoCoordinator](../src/app/UndoRedoCoordinator.h) |

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <JuceHeader.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -9,8 +11,6 @@
 
 #include "domain/Track.h"
 #include "io/ProjectFile.h"
-
-#include <juce_core/juce_core.h>
 
 class ExperimentalInstrumentHost;
 class InstrumentTrackController;

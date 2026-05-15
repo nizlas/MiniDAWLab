@@ -30,7 +30,7 @@
 //   callback, which we do not call from here.
 //
 // NESTED TYPES
-//   TransportControlsContent / MainWindow live in app/MainAppWindow.cpp.
+//   TransportControlsContent lives in app/MainAppWindow.cpp; MainWindow in app/MainWindow.cpp.
 //
 // Method bodies in this file add plain-language notes next to start/stop order and the async
 // file dialog path so the composition root is navigable, not just listed.
@@ -96,17 +96,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "app/MainAppWindow.h"
-
-[[nodiscard]] std::unique_ptr<MainWindow> createMainWindow(const juce::String& name,
-                                                           Transport& transport,
-                                                           Session& session,
-                                                           PluginInsertHost& pluginInsertHost,
-                                                           juce::AudioDeviceManager& deviceManager,
-                                                           RecorderService& recorderService,
-                                                           CountInClickOutput& countInClicks,
-                                                           LatencySettingsStore& latencyStore,
-                                                           PlaybackEngine& playbackEngine);
+#include "app/MainWindow.h"
 
 void MiniDAWLabApplication::initialise(const juce::String& commandLine)
 {

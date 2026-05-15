@@ -1,11 +1,10 @@
 #pragma once
 
+#include <JuceHeader.h>
+
 #include <functional>
 #include <memory>
 #include <optional>
-
-#include <juce_audio_devices/juce_audio_devices.h>
-#include <juce_gui_basics/juce_gui_basics.h>
 
 #include "domain/Track.h"
 #include "engine/RecorderService.h"

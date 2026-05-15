@@ -1,13 +1,15 @@
 #pragma once
 
-#include "domain/Track.h"
-#include "instruments/InstrumentTrackController.h"
-
-#include "ui/TrackHeaderView.h"
+#include <JuceHeader.h>
 
 #include <functional>
 #include <memory>
 #include <unordered_map>
+
+#include "domain/Track.h"
+#include "instruments/InstrumentTrackController.h"
+
+#include "ui/TrackHeaderView.h"
 
 class Session;
 class Transport;

@@ -1,6 +1,6 @@
 #include "MiniDAWLabApplication.h"
 
-#include "app/MainAppWindow.h"
+#include "app/MainWindow.h"
 #include "audio/LatencySettingsStore.h"
 #include "domain/Session.h"
 #include "engine/CountInClickOutput.h"

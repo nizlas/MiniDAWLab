@@ -1,8 +1,9 @@
 #pragma once
 
-#include <atomic>
+#include <JuceHeader.h>
 
-#include <juce_gui_basics/juce_gui_basics.h>
+#include <atomic>
+#include <functional>
 
 #include "domain/Track.h"
 

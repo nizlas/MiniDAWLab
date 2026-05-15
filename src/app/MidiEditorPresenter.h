@@ -1,5 +1,7 @@
 #pragma once
 
+#include <JuceHeader.h>
+
 #include <functional>
 #include <memory>
 #include <optional>
@@ -10,8 +12,6 @@
 #include "instruments/InstrumentTrackController.h"
 #include "io/ProjectFile.h"
 
-#include <juce_gui_basics/juce_gui_basics.h>
-
 #include "ui/experimental/ExperimentalMidiEditorWindow.h"
 
 class Transport;
@@ -19,11 +19,6 @@ class Session;
 class RecorderService;
 class ExperimentalInstrumentHost;
 class TimelineViewportModel;
-
-namespace juce
-{
-class AudioDeviceManager;
-} // namespace juce
 
 using InstrumentMusicalUndoSnapshot = ProjectFileExperimentalInstrumentTrackV1;
 
