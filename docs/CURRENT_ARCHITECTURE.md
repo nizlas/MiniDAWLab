@@ -13,6 +13,69 @@ Use it alongside [ARCHITECTURE_PRINCIPLES.md](ARCHITECTURE_PRINCIPLES.md), [PROJ
 
 ---
 
+## App layer: `MainAppWindow.cpp` (`TransportControlsContent`) — composition root
+
+[`MainAppWindow.cpp`](../src/app/MainAppWindow.cpp) defines `mini_daw_app_transport::TransportControlsContent`, the inner transport timeline UI subtree. After modularization (**~988 lines**, down from a much larger monolith), its **intended role** is the **transport UI composition root** — not a dump for feature implementation.
+
+**What it owns / does**
+
+- **Top-level JUCE widgets and views** for the transport strip and timeline chrome (buttons, ruler, lanes, inspector, overlays, MIDI editor component handle, etc.).
+- **Construction and member ownership** of **app-layer coordinators**, with **explicit member order** so reverse destruction frees coordinators safely while borrowed UI (`TrackLanesView`, `inspectorView_`, …) remains alive — see destructor-order comments beside `trackLanesEditCoordinator_` and related members.
+- **Callback wiring** between coordinators (lambdas in the constructor that forward `transport`, `session`, recorder state, undo entry points, instrument runtime hooks, refresh signals, etc.).
+- **Thin shims**: JUCE overrides (`resized`, `changeListenerCallback`, `timerCallback`, clipboard shortcut entry points surfaced through `TransportControlsShortcutTarget`), and **`createTransportUiForMainWindow`** as the factory return type that pairs UI + shortcut target ([`TransportControlsFactory.h`](../src/app/TransportControlsFactory.h)).
+- **Legitimate cross-subsystem orchestration** kept local because it stitches multiple-owned UI pieces in one place, for example:
+  - **`refreshInstrumentUi()`** — timeline row attachment sync, playback bridge / shell sync with `InstrumentRuntimeCoordinator`, lane header rebuild/repaint, optional MIDI editor refresh, layout.
+  - **`syncViewportFromSession()`** — arrangement extent, default samples-per-pixel, viewport clamp tied to ruler width and device sample rate.
+  - **`clearExperimentalInstrumentRuntimesPreserveBridgeOnly()`** — resets MIDI editor booking, clears instrument attachments on lanes, clears `InstrumentTimelineRowCoordinator` lanes/headers, then `InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly()`. **This stays in the composition root** because it crosses MIDI editor + track lanes + instrument timeline rows + runtime cleanup.
+
+**What it must not represent architecturally**
+
+- **Not** where “the feature logic” for recording, project I/O, MIDI editor internals, VST picker flow, lane edit semantics, clipboard rules, undo stack implementation, etc. should accumulate — those belong in the **coordinators and domain modules** below (and callers should stay thin).
+
+**Constructor and size**
+
+- The **constructor is intentionally explicit** — a readable wiring block. Do **not** break it apart only to shorten the file unless a dependency truly changes.
+- **~988 lines is acceptable** at the composition layer as long as the file stays **mostly ownership, wiring, and small orchestration**.
+
+**Guidance for changes**
+
+- **Prefer** implementing new behavior inside the **appropriate coordinator** (or a new small module under `src/app/`) and only **threading callbacks** through `TransportControlsContent` when integration requires.
+- Keep code here only when it is **composition-root wiring**, **top-level shell behavior** (keyboard focus, splitter, dialogs entry), or **genuine multi-subsystem orchestration** like the helpers above.
+
+**Standalone MainAppWindow refactor**
+
+- Treat **standalone `MainAppWindow.cpp` refactoring as closed**: no further decomposition “for hygiene” unless a **concrete regression** or **feature-driven integration need** proves the split. Resume normal feature work instead.
+
+### App-layer coordinator map
+
+| Module | Responsibility |
+|--------|----------------|
+| [`ProjectIoCoordinator`](../src/app/ProjectIoCoordinator.h) | Project save/load orchestration |
+| [`RecordingCoordinator`](../src/app/RecordingCoordinator.h) | Count-in, recording start/stop/commit, cycle recording |
+| [`Vst3PluginPickerCoordinator`](../src/app/Vst3PluginPickerCoordinator.h) | VST3 picker / load / rescan flow |
+| [`MidiEditorPresenter`](../src/app/MidiEditorPresenter.h) | MIDI editor window, binding, and transport/UI command orchestration |
+| [`InstrumentRuntimeCoordinator`](../src/app/InstrumentRuntimeCoordinator.h) | Instrument host/controller registry, staging/keyed runtimes, playback bridge, device lifecycle hooks |
+| [`InstrumentTimelineRowCoordinator`](../src/app/InstrumentTimelineRowCoordinator.h) | Instrument track header and MIDI lane row UI |
+| [`ClipPasteboardController`](../src/app/ClipPasteboardController.h) | Selected clip delete / copy / paste |
+| [`MainWindow`](../src/app/MainWindow.h) (`MainWindow.cpp`) | Document window shell and shortcut routing to the shortcut target |
+| [`TransportControlsFactory.h`](../src/app/TransportControlsFactory.h) (`createTransportUiForMainWindow` lives in [`MainAppWindow.cpp`](../src/app/MainAppWindow.cpp)) | Builds transport UI content and exposes the shortcut target |
+| [`MainAppDialogs`](../src/app/MainAppDialogs.h) | Audio settings, Help, undo-behavior dialogs |
+| [`AudioClipImportCoordinator`](../src/app/AudioClipImportCoordinator.h) | Add/import audio clip at playhead flow |
+| [`UndoRedoCoordinator`](../src/app/UndoRedoCoordinator.h) | `SessionHistory`, undo/redo, plugin undo recorder, editor shortcut callbacks |
+| [`TrackLanesEditCoordinator`](../src/app/TrackLanesEditCoordinator.h) | Track delete/reorder and clip move / trim / split callback wiring |
+| [`TransportLayoutHelper`](../src/app/TransportLayoutHelper.h) (`TransportLayoutHelper.cpp`) | Shared layout geometry for transport controls strip |
+| [`TransportPlayPauseStopController`](../src/app/TransportPlayPauseStopController.h) | Play / pause / stop behavior vs transport and recorder |
+| [`PluginHostUiBindings`](../src/app/PluginHostUiBindings.h) | Wiring `PluginInsertHost` callbacks into track headers and inspector |
+| [`InstrumentMusicalUndoSnapshot`](../src/app/InstrumentMusicalUndoSnapshot.h) (namespace helpers) | Build/sort payloads for instrument **musical** undo snapshots |
+| [`AddInstrumentTrackCoordinator`](../src/app/AddInstrumentTrackCoordinator.h) | Groove Agent “add instrument track” menu flow |
+
+**Housekeeping unrelated to layering**
+
+- Do **not** change **`kDrumNamesDiag`** (or drum-name diagnostics behavior) unless the user explicitly requests it — see code that references that symbol.
+- **`Experimental*`** identifiers and broader renames tied to **project format, undo, or playback semantics** were **not** migrated in this pass; treat renames as a **separate, deliberate slice** ([Naming debt](#naming-debt-do-not-mistake-for-design) still applies).
+
+---
+
 ## Session and snapshot
 
 - **`SessionSnapshot`** is **immutable**. Every session edit builds a new snapshot and publishes it with a single atomic store (`Session::sessionSnapshot_`, `memory_order_release`).
@@ -84,7 +147,7 @@ Do **not** design new features around a single “the” instrument or “primar
 
 - **[`UndoRedoCoordinator`](../src/app/UndoRedoCoordinator.h)** owns **`SessionHistory`** (undo-1 stack), orchestrates **Ctrl+Z / Shift+Ctrl+Z** and **executeUndoable**\* / **commitInstrumentMusicalUndoPair** recording, and runs **restore → plugin chain → instrument musical state → UI refresh** in a fixed order.
 - It also owns **`PluginInsertHost` wiring**: **`setUndoRecorder`** (plugin-parameter steps) and **`setEditorShortcutCallbacks`** (undo/redo while a plugin editor is focused). The coordinator **constructor** registers these; the **destructor** clears them (`nullptr` / empty callbacks).
-- **`TransportControlsContent`** ([`MainAppWindow.cpp`](../src/app/MainAppWindow.cpp)) **delegates** undo/redo to the coordinator (thin forwards / lambdas); it does not keep a parallel `SessionHistory`.
+- **`TransportControlsContent`** ([`MainAppWindow.cpp`](../src/app/MainAppWindow.cpp)) **wires** the coordinator in its constructor — lambdas attach **shortcut targets**, **session/instrument** undo entry points, **musical** snapshot **build/sort/apply** (via [`InstrumentMusicalUndoSnapshot.h`](../src/app/InstrumentMusicalUndoSnapshot.h) helpers + [`InstrumentRuntimeCoordinator`](../src/app/InstrumentRuntimeCoordinator.h)), and post-restore refresh hooks — but **never** duplicates `SessionHistory` or undo stack semantics.
 - **Project load / new session**: [`ProjectIoCoordinator`](../src/app/ProjectIoCoordinator.h) calls a **clear history** callback that forwards to **`UndoRedoCoordinator::clearHistory()`** so the stack matches the loaded file (same as clearing before the extraction).
 
 ---
@@ -131,7 +194,7 @@ Some **API/class header comments** may lag multi-instrument reality (e.g. wordin
 ## Explicit non-goals (this document)
 
 - Does not define **HALion** or broad third-party instrument policy (future work).
-- Does not prescribe further **transport / MainAppWindow** decomposition (planned refactors are separate).
+- Does not schedule further **standalone `MainAppWindow.cpp` / transport composition** refactoring for its own sake; that track is [**treated as closed**](#standalone-mainappwindow-refactor) unless a regression or integration need motivates a change — extend **coordinators** instead.
 - Does not replace [PHASE_PLAN.md](PHASE_PLAN.md) for historical phase narrative.
 
 ---
@@ -146,4 +209,4 @@ Some **API/class header comments** may lag multi-instrument reality (e.g. wordin
 | Instrument controller | [InstrumentTrackController.h/.cpp](../src/instruments/InstrumentTrackController.h) |
 | Playback + instrument snapshot | [PlaybackEngine.h/.cpp](../src/engine/PlaybackEngine.h) |
 | Project v13 + migration | [ProjectFile.h](../src/io/ProjectFile.h), [ProjectFile.cpp](../src/io/ProjectFile.cpp) |
-| Composition / registry / UI wiring | [MainAppWindow.cpp](../src/app/MainAppWindow.cpp), [InstrumentRuntimeCoordinator](../src/app/InstrumentRuntimeCoordinator.h), [InstrumentTimelineRowCoordinator](../src/app/InstrumentTimelineRowCoordinator.h), [ProjectIoCoordinator](../src/app/ProjectIoCoordinator.h), [MidiEditorPresenter](../src/app/MidiEditorPresenter.h), [UndoRedoCoordinator](../src/app/UndoRedoCoordinator.h) |
+| Composition root + coordinator map | [MainAppWindow.cpp](../src/app/MainAppWindow.cpp), [InstrumentRuntimeCoordinator](../src/app/InstrumentRuntimeCoordinator.h); see [App-layer coordinator map](#app-layer-coordinator-map) |
