@@ -1091,7 +1091,9 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
     callbacks.onRowHeightDrag = [this, laneTid](const int startH, const int delta) {
         trackLanes_.applyTrackRowHeightDelta(laneTid, startH, delta);
     };
-    callbacks.onRowHeightDragEnd = [] {};
+    callbacks.onRowHeightDragEnd = [this, laneTid, ctl] {
+        trackLanes_.snapTrackHeaderRowHeightAfterResize(laneTid, ctl->getLaneHeaderSubtitle().isNotEmpty());
+    };
 
     auto hdr = std::make_unique<TrackHeaderView>(
         std::move(modelProvider), std::move(callbacks), kInvalidTrackId, std::nullopt);

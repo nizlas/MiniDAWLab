@@ -3,7 +3,7 @@
 // =============================================================================
 // TrackHeaderView — shared track header chrome (audio + experimental instrument)
 // =============================================================================
-// Visual: name (and optional subtitle), active accent; optional **[Instrument][Power][M][R]** strip (audio: no Instrument).
+// Visual: top row — name (+ optional subtitle); below — left-aligned **[Instrument][Power][M][R]** strip (audio: no Instrument).
 // State comes from `TrackHeaderModelProvider`; actions from `TrackHeaderCallbacks`.
 // Optional `TrackHeaderDragHost` + non-`kInvalidTrackId` `dragTrackId` enable header-drag reorder
 // (`setHeaderReorderDrag` can attach drag after construction for experimental instrument shells).
@@ -56,7 +56,7 @@ using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;
 
 struct TrackHeaderCallbacks
 {
-    /// Left-click on name strip (not on **[Instrument][Power][Mute][R]** strip). Null = no-op.
+    /// Left-click on name row / drag surface (not on **[Instrument][Power][Mute][R]** strip). Null = no-op.
     std::function<void()> onActivateName;
     /// Return true if the click was handled (blocks promoting to header-drag); false = ignored.
     std::function<bool()> onTogglePower;
@@ -77,6 +77,29 @@ public:
     /// Horizontal strip: each M/R/power/instrument cell (`squareStripButtonBodyFromCell` insets inside).
     static constexpr int kStripControlCellWidthPx = 22;
     static constexpr int kStripSquareBodyInsetPx = 1;
+
+    /// Bottom-edge resize band inside the header (matches layout hit-testing).
+    static constexpr int kHeaderResizeBandPx = 5;
+
+    [[nodiscard]] static constexpr int resizeBandPx() noexcept { return kHeaderResizeBandPx; }
+
+    /// Minimum row height when the control strip is fully clipped (name + outer pad + resize band only).
+    /// Must stay aligned with `computeHeaderContentLayout` vertical constants.
+    [[nodiscard]] static int minimumRowHeightPxForNameOnlyLayout(bool hasSubtitle) noexcept;
+
+    /// Alias for layout clamp/snap call sites that think in “name-only chrome + resize band”.
+    [[nodiscard]] static int minimumNameOnlyHeightPx(bool hasSubtitle) noexcept
+    {
+        return minimumRowHeightPxForNameOnlyLayout(hasSubtitle);
+    }
+
+    /// After a row-height drag ends: snap to name-only or full name+buttons using the 50% visibility rule.
+    /// `hasSubtitle` selects the taller name block (instrument subtitle). Must match header paint geometry.
+    /// `globalMinRowPx` must be <= the name-only ideal (`minimumRowHeightPxForNameOnlyLayout`) so the collapsed snap can stick.
+    [[nodiscard]] static int snapTrackHeaderRowHeightAfterResize(int heightPx,
+                                                                 bool hasSubtitle,
+                                                                 int globalMinRowPx,
+                                                                 int globalMaxRowPx) noexcept;
 
     /// `dragTrackId` is forwarded to `TrackHeaderDragHost`. Use `kInvalidTrackId` when there is no
     /// reorder drag initially (e.g. until the owning view calls `setHeaderReorderDrag`).
@@ -133,6 +156,17 @@ private:
     };
 
     [[nodiscard]] int computeRightStripCellCount() const noexcept;
+
+    struct HeaderContentLayout
+    {
+        juce::Rectangle<int> nameTextBounds;
+        /// Contains Instrument→Power→Mute→Arm cells left-to-right (`22px` wide each).
+        juce::Rectangle<int> controlStripBounds;
+    };
+
+    [[nodiscard]] HeaderContentLayout computeHeaderContentLayout() const noexcept;
+
+    /// Union of control cells (left-aligned strip); strip metrics / painting only (resize hit-test does not use this).
     [[nodiscard]] juce::Rectangle<int> getRightControlsStripBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
@@ -160,6 +194,10 @@ private:
     void clearStripHover() noexcept;
 
     [[nodiscard]] bool isPositionInRowResizeBand(juce::Point<int> position) const noexcept;
+
+    [[nodiscard]] juce::Rectangle<int> visibleChromeBoundsExcludingResizeBand() const noexcept;
+    [[nodiscard]] bool stripCellHitIntersectsVisibleChrome(juce::Rectangle<int> cell,
+                                                           juce::Point<int> pos) const noexcept;
 
     TrackHeaderModelProvider modelProvider_;
     TrackHeaderCallbacks callbacks_;

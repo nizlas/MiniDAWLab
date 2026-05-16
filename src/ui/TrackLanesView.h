@@ -230,6 +230,9 @@ public:
     /// [Message thread] Runtime-only row height drag (no undo, no persistence).
     void applyTrackRowHeightDelta(TrackId tid, int startHeightPx, int deltaPx) noexcept;
 
+    /// [Message thread] After header bottom-edge resize: snap to clean name-only or full name+buttons height.
+    void snapTrackHeaderRowHeightAfterResize(TrackId tid, bool headerHasSubtitle) noexcept;
+
 private:
     void timerCallback() override;
 
@@ -263,8 +266,12 @@ private:
     [[nodiscard]] int maxVerticalScrollOffsetPx() const noexcept;
     void setVerticalScrollOffsetPx(int newOffset) noexcept;
     [[nodiscard]] int findVisibleRowIndexForDragSource(TrackId movedId) const noexcept;
+    [[nodiscard]] bool trackHeaderModelUsesSubtitle(TrackId tid) const noexcept;
+    [[nodiscard]] int minimumRowHeightPxForTrackHeader(TrackId tid) const noexcept;
+
     void prunePerTrackRowHeightsNotInSession() noexcept;
     void paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g) const noexcept;
+    void setTrackRowHeightPx(TrackId tid, int heightPx) noexcept;
 
     Session& session_;
     Transport& transport_;
@@ -280,7 +287,6 @@ private:
     std::vector<VisibleTrackEntry> visibleTrackEntries_;
 
     int defaultRowHeightPx_ = 96;
-    int minRowHeightPx_ = 36;
     int maxRowHeightPx_ = 480;
     int verticalScrollOffsetPx_ = 0;
 

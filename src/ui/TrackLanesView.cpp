@@ -1042,7 +1042,9 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         callbacks.onRowHeightDrag = [this, tid](const int startH, const int delta) {
             applyTrackRowHeightDelta(tid, startH, delta);
         };
-        callbacks.onRowHeightDragEnd = [] {};
+        callbacks.onRowHeightDragEnd = [this, tid] {
+            snapTrackHeaderRowHeightAfterResize(tid, false);
+        };
 
         auto head = std::make_unique<TrackHeaderView>(
             std::move(modelProvider),
@@ -1337,15 +1339,38 @@ void TrackLanesView::paint(juce::Graphics& g)
     }
 }
 
-int TrackLanesView::rowHeightForTrack(const TrackId tid) const noexcept
+bool TrackLanesView::trackHeaderModelUsesSubtitle(const TrackId tid) const noexcept
 {
     if (tid == kInvalidTrackId)
     {
-        return juce::jlimit(minRowHeightPx_, maxRowHeightPx_, defaultRowHeightPx_);
+        return false;
+    }
+    const auto it = instrumentTimelineAttachments_.find(tid);
+    if (it == instrumentTimelineAttachments_.end())
+    {
+        return false;
+    }
+    InstrumentTrackController* const ctl = it->second.controller;
+    return ctl != nullptr && ctl->getLaneHeaderSubtitle().isNotEmpty();
+}
+
+int TrackLanesView::minimumRowHeightPxForTrackHeader(const TrackId tid) const noexcept
+{
+    return TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(trackHeaderModelUsesSubtitle(tid));
+}
+
+int TrackLanesView::rowHeightForTrack(const TrackId tid) const noexcept
+{
+    const int lo = (tid == kInvalidTrackId)
+                       ? TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(false)
+                       : minimumRowHeightPxForTrackHeader(tid);
+    if (tid == kInvalidTrackId)
+    {
+        return juce::jlimit(lo, maxRowHeightPx_, defaultRowHeightPx_);
     }
     auto it = perTrackRowHeightPx_.find(tid);
     const int h = (it != perTrackRowHeightPx_.end()) ? it->second : defaultRowHeightPx_;
-    return juce::jlimit(minRowHeightPx_, maxRowHeightPx_, h);
+    return juce::jlimit(lo, maxRowHeightPx_, h);
 }
 
 int TrackLanesView::rowHeightForVisibleEntry(const int visibleIndex) const noexcept
@@ -1381,7 +1406,17 @@ void TrackLanesView::applyTrackRowHeightDelta(const TrackId tid,
     {
         return;
     }
-    const int nh = juce::jlimit(minRowHeightPx_, maxRowHeightPx_, startHeightPx + deltaPx);
+    setTrackRowHeightPx(tid, startHeightPx + deltaPx);
+}
+
+void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) noexcept
+{
+    if (tid == kInvalidTrackId)
+    {
+        return;
+    }
+    const int lo = minimumRowHeightPxForTrackHeader(tid);
+    const int nh = juce::jlimit(lo, maxRowHeightPx_, heightPx);
     if (nh == defaultRowHeightPx_)
     {
         perTrackRowHeightPx_.erase(tid);
@@ -1392,6 +1427,23 @@ void TrackLanesView::applyTrackRowHeightDelta(const TrackId tid,
     }
     resized();
     repaint();
+}
+
+void TrackLanesView::snapTrackHeaderRowHeightAfterResize(const TrackId tid,
+                                                          const bool headerHasSubtitle) noexcept
+{
+    if (tid == kInvalidTrackId)
+    {
+        return;
+    }
+    const int h = rowHeightForTrack(tid);
+    const int lo = minimumRowHeightPxForTrackHeader(tid);
+    const int snapped = TrackHeaderView::snapTrackHeaderRowHeightAfterResize(
+        h, headerHasSubtitle, lo, maxRowHeightPx_);
+    if (snapped != h)
+    {
+        setTrackRowHeightPx(tid, snapped);
+    }
 }
 
 void TrackLanesView::prunePerTrackRowHeightsNotInSession() noexcept
