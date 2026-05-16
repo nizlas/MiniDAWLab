@@ -56,6 +56,7 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
         , laneTimelineTrackId_(timelineInstrumentTrackId)
     {
         startTimerHz(20);
+        setOpaque(false);
         if (boundCtl_ != nullptr)
         {
             boundCtl_->addChangeListener(this);
@@ -111,14 +112,6 @@ private:
     void paint(juce::Graphics& g) override
     {
         using namespace mini_daw::timeline_clip_chrome;
-
-        const auto lane = getLocalBounds();
-
-        const juce::Colour laneBg = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f);
-        g.setColour(laneBg);
-        g.fillRect(lane);
-        g.setColour(laneBg.darker(0.12f));
-        g.drawVerticalLine(lane.getX(), (float)lane.getY(), (float)lane.getBottom());
 
         const auto laneContent = getLaneContentBounds();
         if (laneContent.isEmpty())

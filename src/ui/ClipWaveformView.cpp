@@ -635,6 +635,7 @@ ClipWaveformView::ClipWaveformView(
     jassert(trackId_ != kInvalidTrackId);
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
+    setOpaque(false);
 }
 
 void ClipWaveformView::setDragGhost(const std::int64_t startSampleOnTimeline, const std::int64_t lengthSamples)
@@ -1544,7 +1545,6 @@ bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>
     waveRaster_ = juce::Image(juce::Image::PixelFormat::ARGB, imageW, vh, true);
     {
         juce::Graphics gr(waveRaster_);
-        gr.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
         const juce::Rectangle<float> imgBounds(0.0f, 0.0f, (float)imageW, (float)vh);
         paintStableCommittedLayer(gr, imgBounds, coveredStart, visLen, spp);
     }
@@ -1929,7 +1929,6 @@ void ClipWaveformView::paint(juce::Graphics& g)
 
     if (shouldBypassWaveformRasterCache())
     {
-        g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
         paintUncachedFull(g, bounds, visStart, visLen, spp);
         if (kClipWaveformPaintDiagnostics)
         {
@@ -1968,7 +1967,6 @@ void ClipWaveformView::paint(juce::Graphics& g)
 
     if (!ok || waveRaster_.isNull())
     {
-        g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
         paintUncachedFull(g, bounds, visStart, visLen, spp);
         if (kClipWaveformPaintDiagnostics)
         {

@@ -33,6 +33,14 @@ namespace
     // Match `ClipWaveformView` playhead refresh so preview drain + repaints stay in the same ballpark.
     constexpr int kRecordingPreviewTimerHz = 20;
 
+    // Shared arrange-lane chrome behind waveform / MIDI lanes (`TrackLanesView::paint`).
+    constexpr unsigned int kArrangementLaneBackgroundArgb = 0xff252528u;
+
+    // Single separator family (vertical drawn in `paintOverChildren` so lane children do not cover it).
+    constexpr unsigned int kArrangementSeparatorArgb = 0xff4a4a52u;
+    constexpr float kArrangementSeparatorAlphaVertical = 0.62f;
+    constexpr float kArrangementSeparatorAlphaHorizontal = 0.58f;
+
     // Move up to `maxSamples` front-most source samples from `from` into `out` (may split a block).
     void peelPeakBlocksBySampleCount(std::vector<RecordingPreviewPeakBlock>& from,
                                      std::vector<RecordingPreviewPeakBlock>& out,
@@ -1156,19 +1164,25 @@ void TrackLanesView::resized()
 
     if (area.getHeight() <= 0 || vr <= 0)
     {
+        if (vr <= 0)
+        {
+            verticalScrollOffsetPx_ = 0;
+        }
         return;
     }
 
-    const int totalH = area.getHeight();
+    const int viewportH = area.getHeight();
+    const int contentH = vr * defaultRowHeightPx_;
+    verticalScrollOffsetPx_
+        = juce::jlimit(0, juce::jmax(0, contentH - viewportH), verticalScrollOffsetPx_);
+
     const int w = area.getWidth();
     const int leftW = juce::jmin(kTrackHeaderWidth, w);
 
-    int y = area.getY();
+    const int hh = juce::jmax(1, defaultRowHeightPx_);
+    int y = area.getY() - verticalScrollOffsetPx_;
     for (int vi = 0; vi < vr; ++vi)
     {
-        const int hh = (vi == vr - 1)
-            ? (area.getBottom() - y)
-            : juce::jmax(1, totalH / juce::jmax(1, vr));
         juce::Rectangle row(area.getX(), y, w, hh);
         const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)vi];
         if (e.kind == VisibleTrackKind::Instrument)
@@ -1203,6 +1217,54 @@ void TrackLanesView::resized()
     }
 }
 
+void TrackLanesView::paint(juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds();
+    if (bounds.isEmpty())
+    {
+        return;
+    }
+
+    const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
+    const auto laneBg = juce::Colour(kArrangementLaneBackgroundArgb);
+
+    if (headerW > 0)
+    {
+        const auto headerArea = bounds.withTrimmedRight(juce::jmax(0, bounds.getWidth() - headerW));
+        g.setColour(laneBg);
+        g.fillRect(headerArea);
+    }
+
+    const auto laneArea = bounds.withTrimmedLeft(headerW);
+    if (!laneArea.isEmpty())
+    {
+        g.setColour(laneBg);
+        g.fillRect(laneArea);
+    }
+
+    const int vr = static_cast<int>(visibleTrackEntries_.size());
+    if (vr <= 0)
+    {
+        return;
+    }
+
+    const int ay = bounds.getY();
+    const int hh = juce::jmax(1, defaultRowHeightPx_);
+    g.setColour(
+        juce::Colour(kArrangementSeparatorArgb).withAlpha(kArrangementSeparatorAlphaHorizontal));
+
+    for (int i = 1; i <= vr; ++i)
+    {
+        const int lineY = ay + i * hh - verticalScrollOffsetPx_;
+        if (lineY <= bounds.getY() || lineY >= bounds.getBottom())
+        {
+            continue;
+        }
+
+        g.drawHorizontalLine(lineY, (float)bounds.getX(), (float)bounds.getRight());
+    }
+}
+
 int TrackLanesView::audioLaneIndexFromTrackId(const TrackId tid) const noexcept
 {
     if (tid == kInvalidTrackId)
@@ -1226,32 +1288,35 @@ int TrackLanesView::audioLaneIndexFromTrackId(const TrackId tid) const noexcept
     return -1;
 }
 
-int TrackLanesView::visibleRowPixelHeight(const int visibleIndex) const noexcept
+int TrackLanesView::rowHeightForVisibleEntry(const int visibleIndex) const noexcept
 {
     if (visibleIndex < 0 || visibleIndex >= static_cast<int>(visibleTrackEntries_.size()))
     {
         return 0;
     }
-    const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)visibleIndex];
-    if (e.kind == VisibleTrackKind::Instrument)
-    {
-        auto itA = instrumentTimelineAttachments_.find(e.sessionTrackId);
-        if (itA == instrumentTimelineAttachments_.end())
-        {
-            return 0;
-        }
-        if (itA->second.header != nullptr)
-        {
-            return itA->second.header->getHeight();
-        }
-        return itA->second.midiLane != nullptr ? itA->second.midiLane->getHeight() : 0;
-    }
-    const int si = audioLaneIndexFromTrackId(e.sessionTrackId);
-    if (si < 0 || si >= (int)lanes_.size() || lanes_[(size_t)si] == nullptr)
-    {
-        return 0;
-    }
-    return lanes_[(size_t)si]->getHeight();
+    return defaultRowHeightPx_;
+}
+
+int TrackLanesView::visibleRowPixelHeight(const int visibleIndex) const noexcept
+{
+    return rowHeightForVisibleEntry(visibleIndex);
+}
+
+int TrackLanesView::totalContentHeightPx() const noexcept
+{
+    return static_cast<int>(visibleTrackEntries_.size()) * defaultRowHeightPx_;
+}
+
+int TrackLanesView::maxVerticalScrollOffsetPx() const noexcept
+{
+    const int vh = getLocalBounds().getHeight();
+    return juce::jmax(0, totalContentHeightPx() - vh);
+}
+
+void TrackLanesView::setVerticalScrollOffsetPx(const int newOffset) noexcept
+{
+    verticalScrollOffsetPx_ = newOffset;
+    resized();
 }
 
 int TrackLanesView::findVisibleRowIndexForDragSource(const TrackId movedId) const noexcept
@@ -1344,11 +1409,11 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
         return;
     }
 
+    const int ay = getLocalBounds().getY();
     std::vector<int> gapY((size_t)vr + 1u);
-    gapY[0] = 0;
-    for (int i = 0; i < vr; ++i)
+    for (int k = 0; k <= vr; ++k)
     {
-        gapY[(size_t)(i + 1)] = gapY[(size_t)i] + visibleRowPixelHeight(i);
+        gapY[(size_t)k] = ay + k * defaultRowHeightPx_ - verticalScrollOffsetPx_;
     }
 
     int bestK = 0;
@@ -1434,16 +1499,24 @@ int TrackLanesView::yForVisibleInsertGapK(const int k) const noexcept
     {
         return 0;
     }
-    int y = 0;
-    for (int i = 0; i < k; ++i)
-    {
-        y += visibleRowPixelHeight(i);
-    }
-    return y;
+    return getLocalBounds().getY() + k * defaultRowHeightPx_ - verticalScrollOffsetPx_;
 }
 
 void TrackLanesView::paintOverChildren(juce::Graphics& g)
 {
+    const auto bounds = getLocalBounds();
+    if (!bounds.isEmpty())
+    {
+        const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
+        if (headerW > 0 && headerW < bounds.getWidth())
+        {
+            const float vx = (float)(bounds.getX() + headerW) - 0.5f;
+            g.setColour(
+                juce::Colour(kArrangementSeparatorArgb).withAlpha(kArrangementSeparatorAlphaVertical));
+            g.drawLine(vx, (float)bounds.getY(), vx, (float)bounds.getBottom(), 1.0f);
+        }
+    }
+
     if (!headerTrackDragActive_ || headerTrackDragInvalidArea_)
     {
         return;
@@ -1487,16 +1560,6 @@ void TrackLanesView::mouseWheelMove(
             return;
         }
     }
-    const std::int64_t arr = session_.getArrangementExtentSamples();
-    if (arr <= 0)
-    {
-        return;
-    }
-    const double spp = timelineViewport_.getSamplesPerPixel();
-    if (spp <= 0.0)
-    {
-        return;
-    }
     const double d = (wheel.isReversed ? -wheel.deltaY : wheel.deltaY);
     if (d == 0.0)
     {
@@ -1504,6 +1567,16 @@ void TrackLanesView::mouseWheelMove(
     }
     if (e.mods.isCtrlDown())
     {
+        const std::int64_t arr = session_.getArrangementExtentSamples();
+        if (arr <= 0)
+        {
+            return;
+        }
+        const double spp = timelineViewport_.getSamplesPerPixel();
+        if (spp <= 0.0)
+        {
+            return;
+        }
         if (e.position.x < (float)kTrackHeaderWidth)
         {
             return;
@@ -1522,21 +1595,46 @@ void TrackLanesView::mouseWheelMove(
         repaint();
         return;
     }
-    const int twPan = juce::jmax(0, getWidth() - kTrackHeaderWidth);
-    if (twPan <= 0)
+    if (e.mods.isShiftDown())
+    {
+        const std::int64_t arr = session_.getArrangementExtentSamples();
+        if (arr <= 0)
+        {
+            return;
+        }
+        const double spp = timelineViewport_.getSamplesPerPixel();
+        if (spp <= 0.0)
+        {
+            return;
+        }
+        const int twPan = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+        if (twPan <= 0)
+        {
+            return;
+        }
+        const double wPan = (double)twPan;
+        const double panNotchPx = juce::jmax(1.0, wPan / 8.0);
+        const std::int64_t step = (d > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
+                                           : -((std::int64_t)std::llround(panNotchPx * spp));
+        if (step == 0)
+        {
+            return;
+        }
+        timelineViewport_.panBySamples(step, wPan, arr);
+        repaint();
+        return;
+    }
+
+    if (visibleTrackEntries_.empty())
     {
         return;
     }
-    const double wPan = (double)twPan;
-    const double panNotchPx = juce::jmax(1.0, wPan / 8.0);
-    const std::int64_t step = (d > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
-                                       : -((std::int64_t)std::llround(panNotchPx * spp));
-    if (step == 0)
+    const int deltaPx = (int)std::llround(d * (double)defaultRowHeightPx_ * 0.5);
+    if (deltaPx == 0)
     {
         return;
     }
-    timelineViewport_.panBySamples(step, wPan, arr);
-    repaint();
+    setVerticalScrollOffsetPx(verticalScrollOffsetPx_ + deltaPx);
 }
 
 void TrackLanesView::notifyPlacedClipRemoved(const TrackId trackId, const PlacedClipId clipId) noexcept

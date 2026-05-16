@@ -104,6 +104,7 @@ public:
         AudioWaveformCache& waveformCache);
 
     void resized() override;
+    void paint(juce::Graphics& g) override;
     void paintOverChildren(juce::Graphics& g) override;
     void mouseWheelMove(
         const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
@@ -243,7 +244,11 @@ private:
     void clearHeaderTrackDragState() noexcept;
     [[nodiscard]] int yForVisibleInsertGapK(int k) const noexcept;
     [[nodiscard]] int audioLaneIndexFromTrackId(TrackId tid) const noexcept;
+    [[nodiscard]] int rowHeightForVisibleEntry(int visibleIndex) const noexcept;
     [[nodiscard]] int visibleRowPixelHeight(int visibleIndex) const noexcept;
+    [[nodiscard]] int totalContentHeightPx() const noexcept;
+    [[nodiscard]] int maxVerticalScrollOffsetPx() const noexcept;
+    void setVerticalScrollOffsetPx(int newOffset) noexcept;
     [[nodiscard]] int findVisibleRowIndexForDragSource(TrackId movedId) const noexcept;
 
     Session& session_;
@@ -258,6 +263,11 @@ private:
 
     /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged attachments).
     std::vector<VisibleTrackEntry> visibleTrackEntries_;
+
+    int defaultRowHeightPx_ = 96;
+    int minRowHeightPx_ = 36;
+    int maxRowHeightPx_ = 480;
+    int verticalScrollOffsetPx_ = 0;
 
     std::unordered_map<TrackId, InstrumentTimelineAttachment> instrumentTimelineAttachments_;
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended

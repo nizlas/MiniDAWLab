@@ -413,6 +413,10 @@ void TimelineRulerView::mouseWheelMove(
         repaint();
         return;
     }
+    if (!e.mods.isShiftDown())
+    {
+        return;
+    }
     const double panNotchPx = juce::jmax(1.0, w / 8.0);
     const std::int64_t step = (d > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
                                        : -((std::int64_t)std::llround(panNotchPx * spp));
