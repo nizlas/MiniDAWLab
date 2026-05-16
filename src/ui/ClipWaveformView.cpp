@@ -29,6 +29,7 @@
 
 #include "ui/ClipWaveformView.h"
 
+#include "ui/TimelineClipEventChrome.h"
 #include "ui/ForbiddenCursor.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
@@ -48,6 +49,8 @@
 #include <utility>
 #include <vector>
 
+namespace tc = mini_daw::timeline_clip_chrome;
+
 // See `getForbiddenNoDropMouseCursor` in `ForbiddenCursor.cpp` (shared with `TrackHeaderView`).
 
 // Anonymous helpers: all **session-timeline** intervals are half-open [a, b) in device samples,
@@ -58,24 +61,11 @@ namespace
 {
 // Off by default: logs coarse `paint` timing + raster cache stats when enabled (developer-only).
     constexpr bool kClipWaveformPaintDiagnostics = false;
-    // Visual scale for rounded corners so events read as “blocks” on the timeline, not as raw bars.
-    constexpr float kEventCorner = 2.5f;
-    constexpr float kEventVerticalMargin = 4.0f;
     // Vertical only for peak bar clamping; horizontal uses full `eventRect` width so adjacent split
     // segments share one timeline scale with no stacked side insets (avoids a visible waveform gap).
     constexpr float kWaveInset = 2.0f;
     // Horizontal delta below which a mousedown+move is treated as a click (no `Session::moveClip`).
     constexpr float kDragThresholdPx = 3.0f;
-    // Cubase-style **trim**: small square in the bottom-right of the event (separate from move).
-    constexpr float kTrimHandleSquarePx = 5.0f;
-    constexpr float kMinEventWidthForTrimHandlePx = 12.0f;
-    // Inset of the square from the event’s bottom-right edge (keeps the stroke visible).
-    constexpr float kTrimHandleMarginPx = 1.5f;
-    // Full-height hit zone on the right edge of the event (in addition to the corner square) so
-    // grabbing the “trim line” works after a strong inward trim, not just the 5px corner.
-    constexpr float kTrimHitRightEdgeBandPx = 6.0f;
-    // Same for the left edge (left-edge non-destructive trim).
-    constexpr float kTrimHitLeftEdgeBandPx = 6.0f;
 
     [[nodiscard]] std::int64_t trimViewMappingSpan(
         const std::int64_t visStart,
@@ -158,7 +148,7 @@ namespace
                 continue;
             }
             juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(0.5f, x1 - x0), eventTrackY.getHeight() };
-            const float lBandW = juce::jmin(kTrimHitLeftEdgeBandPx, eventRect.getWidth());
+            const float lBandW = juce::jmin(tc::kTrimHitLeftEdgeBandPx, eventRect.getWidth());
             juce::Rectangle<float> leftEdgeHitBand{ eventRect.getX(), eventRect.getY(), lBandW, eventRect.getHeight() };
             if (leftEdgeHitBand.getWidth() >= 0.5f && leftEdgeHitBand.contains(p))
             {
@@ -188,7 +178,7 @@ namespace
                 continue;
             }
             juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(0.5f, x1 - x0), eventTrackY.getHeight() };
-            const float bandW = juce::jmin(kTrimHitRightEdgeBandPx, eventRect.getWidth());
+            const float bandW = juce::jmin(tc::kTrimHitRightEdgeBandPx, eventRect.getWidth());
             const float bandX = juce::jmax(eventRect.getX(), eventRect.getRight() - bandW);
             juce::Rectangle<float> edgeHitBand{ bandX, eventRect.getY(), bandW, eventRect.getHeight() };
             if (edgeHitBand.getWidth() >= 0.5f && edgeHitBand.contains(p))
@@ -219,17 +209,17 @@ namespace
                 continue;
             }
             juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(0.5f, x1 - x0), eventTrackY.getHeight() };
-            if (eventRect.getWidth() >= kMinEventWidthForTrimHandlePx
-                && eventRect.getHeight() >= kTrimHandleSquarePx + 2.0f)
+            if (eventRect.getWidth() >= tc::kMinEventWidthForTrimHandlePx
+                && eventRect.getHeight() >= tc::kTrimHandleSquarePx + 2.0f)
             {
                 const float hsz
-                    = juce::jmin(kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
+                    = juce::jmin(tc::kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
                 if (hsz >= 2.0f)
                 {
                     const float hLeft = juce::jmax(
-                        eventRect.getX() + 0.5f, eventRect.getRight() - kTrimHandleMarginPx - hsz);
+                        eventRect.getX() + 0.5f, eventRect.getRight() - tc::kTrimHandleMarginPx - hsz);
                     const float hTop = juce::jmax(
-                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
+                        eventRect.getY() + 0.5f, eventRect.getBottom() - tc::kTrimHandleMarginPx - hsz);
                     const juce::Rectangle<float> hRect{ hLeft, hTop, hsz, hsz };
                     if (hRect.contains(p))
                     {
@@ -261,17 +251,17 @@ namespace
                 continue;
             }
             juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(0.5f, x1 - x0), eventTrackY.getHeight() };
-            if (eventRect.getWidth() >= kMinEventWidthForTrimHandlePx
-                && eventRect.getHeight() >= kTrimHandleSquarePx + 2.0f)
+            if (eventRect.getWidth() >= tc::kMinEventWidthForTrimHandlePx
+                && eventRect.getHeight() >= tc::kTrimHandleSquarePx + 2.0f)
             {
                 const float hsz
-                    = juce::jmin(kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
+                    = juce::jmin(tc::kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
                 if (hsz >= 2.0f)
                 {
                     const float hLeftL = juce::jmin(
-                        eventRect.getX() + kTrimHandleMarginPx, eventRect.getRight() - hsz - 0.5f);
+                        eventRect.getX() + tc::kTrimHandleMarginPx, eventRect.getRight() - hsz - 0.5f);
                     const float hTop = juce::jmax(
-                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
+                        eventRect.getY() + 0.5f, eventRect.getBottom() - tc::kTrimHandleMarginPx - hsz);
                     const juce::Rectangle<float> hRectL{ hLeftL, hTop, hsz, hsz };
                     if (hRectL.contains(p))
                     {
@@ -359,20 +349,6 @@ namespace
             }
         }
         return r;
-    }
-
-    // All rows share the same event chrome. **Product:** a clip that is only *partly* covered in
-    // time should not read as a permanently “muted track” in its **uncovered** tails — the rule is
-    // local, not a global style by snapshot index. Covered spans are *occluded* by a newer row’s
-    // paint, not by a different palette in this function.
-    juce::Colour eventBodyFill()
-    {
-        return juce::Colour(0xff343c4d);
-    }
-
-    juce::Colour eventBodyBorder()
-    {
-        return juce::Colour(0xff7a8aa0).withAlpha(0.9f);
     }
 
     // Peak bar opacity for any row, whenever that column is not covered by a prior row in time.
@@ -896,7 +872,7 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
     }
     const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples((double)b.getWidth());
 
-    const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, kEventVerticalMargin);
+    const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, tc::kEventVerticalMargin);
     const EditTool editTool
         = (laneHost_.getActiveEditTool ? laneHost_.getActiveEditTool() : EditTool::Pointer);
     const LanePixelHit ph
@@ -1595,10 +1571,9 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
         return TimelineRulerView::sessionSampleToLocalX(s, bounds.getX(), mappingVisStart, spp);
     };
     const int numRows = (int)clipStrips_.size();
-    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
+    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, tc::kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
-    constexpr float kEventStroke = 1.0f;
     for (int row = numRows - 1; row >= 0; --row)
     {
         const TimelineStrip& strip = clipStrips_[(size_t)row];
@@ -1622,10 +1597,7 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
             continue;
         }
 
-        g.setColour(eventBodyFill());
-        g.fillRoundedRectangle(eventRect, kEventCorner);
-        g.setColour(eventBodyBorder());
-        g.drawRoundedRectangle(eventRect, kEventCorner, kEventStroke);
+        tc::paintEventChromeBody(g, eventRect, tc::unifiedClipEventBodyFill());
 
         juce::Rectangle<float> innerForPeakHeight = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
         if (eventRect.getWidth() >= 1.0f && innerForPeakHeight.getHeight() >= 1.0f && nsForDraw > 0)
@@ -2062,7 +2034,7 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
 
     const int numRows = (int)clipStrips_.size();
     // Vertical event stack: a bit of margin from the view edge; silent audio still has the same rect.
-    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
+    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, tc::kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
 
@@ -2077,9 +2049,9 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
         juce::Rectangle<float> ghostRect{ gLeft, eventTrackY.getY(), juce::jmax(1.0f, gRight - gLeft),
                                             eventTrackY.getHeight() };
         g.setColour(juce::Colour(0xff5a7a9a).withAlpha(0.28f));
-        g.fillRoundedRectangle(ghostRect, kEventCorner);
+        g.fillRoundedRectangle(ghostRect, tc::kEventCorner);
         g.setColour(juce::Colour(0xffa0b8d8).withAlpha(0.5f));
-        g.drawRoundedRectangle(ghostRect, kEventCorner, 1.0f);
+        g.drawRoundedRectangle(ghostRect, tc::kEventCorner, 1.0f);
     }
 
     // --- (2) Event bodies + inner peaks, **back to front in snapshot** (largest index → 0). The
@@ -2087,7 +2059,6 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
     //     older rows. Peak columns: skip when the **center** material sample, mapped to the
     //     session line, is already covered by a *newer* row so we do not show a *readable* under-wave.
     //     Uncovered tails of older clips still get a full-height sketch. ---
-    constexpr float kEventStroke = 1.0f;
     for (int row = numRows - 1; row >= 0; --row)
     {
         const TimelineStrip& strip = clipStrips_[(size_t)row];
@@ -2154,14 +2125,10 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
             continue;
         }
 
-        g.setColour(eventBodyFill());
-        g.fillRoundedRectangle(eventRect, kEventCorner);
-        g.setColour(eventBodyBorder());
-        g.drawRoundedRectangle(eventRect, kEventCorner, kEventStroke);
+        tc::paintEventChromeBody(g, eventRect, tc::unifiedClipEventBodyFill());
         if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
         {
-            g.setColour(juce::Colour(0xff9eb8d8).withAlpha(0.95f));
-            g.drawRoundedRectangle(eventRect, kEventCorner, 1.2f);
+            tc::paintEventChromeSelectionOverlay(g, eventRect);
         }
 
         juce::Rectangle<float> innerForPeakHeight
@@ -2241,38 +2208,13 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
             = !hideTrimCues
               && (hoverRightTrimHandleId_ == strip.clipId
                   || onEventBodyTrimCue);
-        if (eventRect.getWidth() >= kMinEventWidthForTrimHandlePx
-            && eventRect.getHeight() >= kTrimHandleSquarePx + 2.0f)
+        if (showLeftTrimHoverCue)
         {
-            const float hsz
-                = juce::jmin(kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
-            if (hsz >= 2.0f)
-            {
-                if (showLeftTrimHoverCue)
-                {
-                    const float hLeftL = juce::jmin(
-                        eventRect.getX() + kTrimHandleMarginPx, eventRect.getRight() - hsz - 0.5f);
-                    const float hTopL = juce::jmax(
-                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
-                    const juce::Rectangle<float> hRL{ hLeftL, hTopL, hsz, hsz };
-                    g.setColour(juce::Colour(0xff3d4a5a).brighter(0.25f).withAlpha(0.88f));
-                    g.fillRoundedRectangle(hRL, 1.0f);
-                    g.setColour(juce::Colour(0xff9eb0c8).withAlpha(0.95f));
-                    g.drawRoundedRectangle(hRL, 1.0f, 0.75f);
-                }
-                if (showRightTrimHoverCue)
-                {
-                    const float hLeftR = juce::jmax(
-                        eventRect.getX() + 0.5f, eventRect.getRight() - kTrimHandleMarginPx - hsz);
-                    const float hTopR = juce::jmax(
-                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
-                    const juce::Rectangle<float> hR{ hLeftR, hTopR, hsz, hsz };
-                    g.setColour(juce::Colour(0xff3d4a5a).brighter(0.25f).withAlpha(0.88f));
-                    g.fillRoundedRectangle(hR, 1.0f);
-                    g.setColour(juce::Colour(0xff9eb0c8).withAlpha(0.95f));
-                    g.drawRoundedRectangle(hR, 1.0f, 0.75f);
-                }
-            }
+            tc::paintEventChromeTrimHandle(g, eventRect, true);
+        }
+        if (showRightTrimHoverCue)
+        {
+            tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
     }
 
@@ -2429,7 +2371,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
 {
     juce::ignoreUnused(visLen);
     const int numRows = (int)clipStrips_.size();
-    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, kEventVerticalMargin);
+    const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, tc::kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
 
@@ -2444,9 +2386,9 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
         juce::Rectangle<float> ghostRect{ gLeft, eventTrackY.getY(), juce::jmax(1.0f, gRight - gLeft),
                                           eventTrackY.getHeight() };
         g.setColour(juce::Colour(0xff5a7a9a).withAlpha(0.28f));
-        g.fillRoundedRectangle(ghostRect, kEventCorner);
+        g.fillRoundedRectangle(ghostRect, tc::kEventCorner);
         g.setColour(juce::Colour(0xffa0b8d8).withAlpha(0.5f));
-        g.drawRoundedRectangle(ghostRect, kEventCorner, 1.0f);
+        g.drawRoundedRectangle(ghostRect, tc::kEventCorner, 1.0f);
     }
 
     for (int row = numRows - 1; row >= 0; --row)
@@ -2471,8 +2413,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
 
         if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
         {
-            g.setColour(juce::Colour(0xff9eb8d8).withAlpha(0.95f));
-            g.drawRoundedRectangle(eventRect, kEventCorner, 1.2f);
+            tc::paintEventChromeSelectionOverlay(g, eventRect);
         }
 
         const bool hideTrimCues
@@ -2489,38 +2430,13 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
         const bool showRightTrimHoverCue
             = !hideTrimCues
               && (hoverRightTrimHandleId_ == strip.clipId || onEventBodyTrimCue);
-        if (eventRect.getWidth() >= kMinEventWidthForTrimHandlePx
-            && eventRect.getHeight() >= kTrimHandleSquarePx + 2.0f)
+        if (showLeftTrimHoverCue)
         {
-            const float hsz = juce::jmin(
-                kTrimHandleSquarePx, eventRect.getWidth() * 0.4f, eventRect.getHeight() * 0.4f);
-            if (hsz >= 2.0f)
-            {
-                if (showLeftTrimHoverCue)
-                {
-                    const float hLeftL = juce::jmin(
-                        eventRect.getX() + kTrimHandleMarginPx, eventRect.getRight() - hsz - 0.5f);
-                    const float hTopL = juce::jmax(
-                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
-                    const juce::Rectangle<float> hRL{ hLeftL, hTopL, hsz, hsz };
-                    g.setColour(juce::Colour(0xff3d4a5a).brighter(0.25f).withAlpha(0.88f));
-                    g.fillRoundedRectangle(hRL, 1.0f);
-                    g.setColour(juce::Colour(0xff9eb0c8).withAlpha(0.95f));
-                    g.drawRoundedRectangle(hRL, 1.0f, 0.75f);
-                }
-                if (showRightTrimHoverCue)
-                {
-                    const float hLeftR = juce::jmax(
-                        eventRect.getX() + 0.5f, eventRect.getRight() - kTrimHandleMarginPx - hsz);
-                    const float hTopR = juce::jmax(
-                        eventRect.getY() + 0.5f, eventRect.getBottom() - kTrimHandleMarginPx - hsz);
-                    const juce::Rectangle<float> hR{ hLeftR, hTopR, hsz, hsz };
-                    g.setColour(juce::Colour(0xff3d4a5a).brighter(0.25f).withAlpha(0.88f));
-                    g.fillRoundedRectangle(hR, 1.0f);
-                    g.setColour(juce::Colour(0xff9eb0c8).withAlpha(0.95f));
-                    g.drawRoundedRectangle(hR, 1.0f, 0.75f);
-                }
-            }
+            tc::paintEventChromeTrimHandle(g, eventRect, true);
+        }
+        if (showRightTrimHoverCue)
+        {
+            tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
     }
 
@@ -2646,7 +2562,7 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
         {
             return;
         }
-        const juce::Rectangle<float> eventTrackYS = bS.reduced(0.0f, kEventVerticalMargin);
+        const juce::Rectangle<float> eventTrackYS = bS.reduced(0.0f, tc::kEventVerticalMargin);
         const std::int64_t visStartS = timelineViewport_.getVisibleStartSamples();
         const double sppS = timelineViewport_.getSamplesPerPixel();
         if (sppS <= 0.0)
@@ -2715,7 +2631,7 @@ void ClipWaveformView::updateTrimHoverAndCursor(const juce::Point<float> pos) no
     {
         return;
     }
-    const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, kEventVerticalMargin);
+    const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, tc::kEventVerticalMargin);
     const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
     const double spp = timelineViewport_.getSamplesPerPixel();
     if (spp <= 0.0)

@@ -21,7 +21,6 @@ namespace
 void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
                                     juce::Rectangle<float> eb,
                                     bool selected,
-                                    bool activeClip,
                                     const juce::String& clipName)
 {
     using namespace mini_daw::timeline_clip_chrome;
@@ -30,11 +29,7 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
     {
         paintEventChromeSelectionOverlay(g, eb);
     }
-    if (activeClip)
-    {
-        paintEventChromeActiveSelectionOutline(g, eb);
-    }
-    g.setColour(juce::Colour(0xff242a33));
+    g.setColour(juce::Colours::white.withAlpha(0.85f));
     g.setFont(11.5f);
     const juce::String label = clipName.trim().isNotEmpty() ? clipName.trim() : juce::String("MIDI");
     g.drawFittedText(
@@ -115,6 +110,8 @@ private:
 
     void paint(juce::Graphics& g) override
     {
+        using namespace mini_daw::timeline_clip_chrome;
+
         const auto lane = getLocalBounds();
 
         const juce::Colour laneBg = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f);
@@ -134,8 +131,6 @@ private:
         {
             return;
         }
-
-        const InstrumentMidiClipId activeClipId = ac->getSelectedClipId();
 
         for (const auto& up : ac->getClips())
         {
@@ -166,13 +161,37 @@ private:
                     + " selected=" + juce::String(sel ? "true" : "false") + " eventBounds=" + eb.toString());
             }
 
-            const bool activeClip = (c->id != 0 && c->id == activeClipId);
-            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, activeClip && sel, c->name);
+            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name);
+
+            if (!c->pattern.usesTimelineNotes())
+            {
+                continue;
+            }
+            const bool hideTrimCues = trimLaneGestureActive_ && trimLaneClipId_ == c->id;
+            const bool onEventBodyTrimCue = hoverEventTrimCueId_ == c->id
+                                            && !hoverLeftTrimHandleId_.has_value()
+                                            && !hoverRightTrimHandleId_.has_value();
+            const bool showLeftTrimHoverCue
+                = !hideTrimCues && (hoverLeftTrimHandleId_ == c->id || onEventBodyTrimCue);
+            const bool showRightTrimHoverCue
+                = !hideTrimCues && (hoverRightTrimHandleId_ == c->id || onEventBodyTrimCue);
+            if (showLeftTrimHoverCue)
+            {
+                paintEventChromeTrimHandle(g, eb.toFloat(), true);
+            }
+            if (showRightTrimHoverCue)
+            {
+                paintEventChromeTrimHandle(g, eb.toFloat(), false);
+            }
         }
     }
 
     void mouseDown(const juce::MouseEvent& e) override
     {
+        hoverEventTrimCueId_.reset();
+        hoverLeftTrimHandleId_.reset();
+        hoverRightTrimHandleId_.reset();
+
         const auto pos = e.getPosition();
         if (kLogInstrumentLane)
         {
@@ -400,7 +419,6 @@ private:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
-        juce::ignoreUnused(e);
         InstrumentTrackController* const ac = activeControllerNullable();
 
         if (trimLaneGestureActive_)
@@ -484,6 +502,7 @@ private:
         dragCouldMove_ = false;
         dragDragging_ = false;
         dragEffectivePreviewDeltaSamples_ = 0;
+        refreshMidiLaneTrimHoverAffordances(e.getPosition());
         repaint();
     }
 
@@ -492,6 +511,18 @@ private:
         if (trimLaneDragging_ || dragDragging_)
         {
             return;
+        }
+
+        if (trimLaneGestureActive_)
+        {
+            setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+            return;
+        }
+
+        const bool hoverDirty = refreshMidiLaneTrimHoverAffordances(e.getPosition());
+        if (hoverDirty)
+        {
+            repaint();
         }
 
         InstrumentTrackController* const ac = activeControllerNullable();
@@ -509,26 +540,10 @@ private:
             return;
         }
 
-        const auto pos = e.getPosition();
-        const auto& clips = ac->getClips();
-        for (auto it = clips.rbegin(); it != clips.rend(); ++it)
+        if (hoverLeftTrimHandleId_.has_value() || hoverRightTrimHandleId_.has_value())
         {
-            const auto* c = it->get();
-            if (c == nullptr || !c->pattern.usesTimelineNotes())
-            {
-                continue;
-            }
-            const auto eb = getEventBoundsForClip(*c, laneContent, 0);
-            if (eb.isEmpty() || !eb.contains(pos.toInt()))
-            {
-                continue;
-            }
-            const int px = pos.x;
-            if (px <= eb.getX() + kTrimLaneEdgeHitPx || px >= eb.getRight() - kTrimLaneEdgeHitPx)
-            {
-                setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
-                return;
-            }
+            setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+            return;
         }
 
         setMouseCursor(juce::MouseCursor::NormalCursor);
@@ -537,6 +552,11 @@ private:
     void mouseExit(const juce::MouseEvent& e) override
     {
         juce::ignoreUnused(e);
+        const bool hoverDirty = refreshMidiLaneTrimHoverAffordances(std::nullopt);
+        if (hoverDirty)
+        {
+            repaint();
+        }
         if (!trimLaneDragging_ && !dragDragging_)
         {
             setMouseCursor(juce::MouseCursor::NormalCursor);
@@ -692,6 +712,80 @@ private:
         return nullptr;
     }
 
+    [[nodiscard]] bool refreshMidiLaneTrimHoverAffordances(const std::optional<juce::Point<int>>& localPos)
+    {
+        const auto assignAndDiff = [&](std::optional<InstrumentMidiClipId> cue,
+                                       std::optional<InstrumentMidiClipId> left,
+                                       std::optional<InstrumentMidiClipId> right) -> bool {
+            const bool changed = (cue != hoverEventTrimCueId_) || (left != hoverLeftTrimHandleId_)
+                                 || (right != hoverRightTrimHandleId_);
+            hoverEventTrimCueId_ = cue;
+            hoverLeftTrimHandleId_ = left;
+            hoverRightTrimHandleId_ = right;
+            return changed;
+        };
+
+        if (!localPos.has_value())
+        {
+            return assignAndDiff(std::nullopt, std::nullopt, std::nullopt);
+        }
+
+        if (trimLaneDragging_ || dragDragging_)
+        {
+            return assignAndDiff(std::nullopt, std::nullopt, std::nullopt);
+        }
+
+        InstrumentTrackController* const ac = activeControllerNullable();
+        if (ac == nullptr || owner_.trackLanes_.isInstrumentMidiClipMoveBlocked()
+            || !timelineMappingAvailableForClipDrag_())
+        {
+            return assignAndDiff(std::nullopt, std::nullopt, std::nullopt);
+        }
+
+        const auto laneContent = getLaneContentBounds();
+        if (laneContent.isEmpty())
+        {
+            return assignAndDiff(std::nullopt, std::nullopt, std::nullopt);
+        }
+
+        std::optional<InstrumentMidiClipId> newCue;
+        std::optional<InstrumentMidiClipId> newL;
+        std::optional<InstrumentMidiClipId> newR;
+
+        const auto& clips = ac->getClips();
+        for (auto it = clips.rbegin(); it != clips.rend(); ++it)
+        {
+            const auto* c = it->get();
+            if (c == nullptr || !c->pattern.usesTimelineNotes())
+            {
+                continue;
+            }
+            const auto eb = getEventBoundsForClip(*c, laneContent, 0);
+            if (eb.isEmpty() || !eb.contains(localPos->toInt()))
+            {
+                continue;
+            }
+            const int px = localPos->x;
+            const bool leftZone = px <= eb.getX() + kTrimLaneEdgeHitPx;
+            const bool rightZone = px >= eb.getRight() - kTrimLaneEdgeHitPx;
+            if (leftZone)
+            {
+                newL = c->id;
+            }
+            else if (rightZone)
+            {
+                newR = c->id;
+            }
+            else
+            {
+                newCue = c->id;
+            }
+            break;
+        }
+
+        return assignAndDiff(newCue, newL, newR);
+    }
+
     InstrumentTimelineRowCoordinator& owner_;
     InstrumentTrackController* boundCtl_ = nullptr;
     TrackId laneTimelineTrackId_ = kInvalidTrackId;
@@ -710,6 +804,10 @@ private:
     std::int64_t trimLaneTimelineAnchorSamples_ = 0;
     std::int64_t trimLanePreviewStartSamples_ = 0;
     std::int64_t trimLanePreviewLengthSamples_ = 0;
+
+    std::optional<InstrumentMidiClipId> hoverEventTrimCueId_;
+    std::optional<InstrumentMidiClipId> hoverLeftTrimHandleId_;
+    std::optional<InstrumentMidiClipId> hoverRightTrimHandleId_;
 };
 
 InstrumentTimelineRowCoordinator::InstrumentTimelineRowCoordinator(
