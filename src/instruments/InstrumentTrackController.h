@@ -38,7 +38,8 @@ struct InstrumentMidiClip
     /// Session-timeline anchor (samples). I3d1: piano roll + lane use absolute samples.
     std::int64_t startSamples = 0;
     /// Sample where `timelineNotes` tick 0 sits on the session timeline (non-negative).
-    /// Matches `startSamples` until a non-destructive left trim moves the visible edge without shifting notes.
+    /// Matches `startSamples` until left trim moves the visible edge; outward left trim may place
+    /// `startSamples` earlier than this anchor (empty lead-in before tick zero).
     std::int64_t timelineAnchorSamples = 0;
     /// Locked pattern span in samples (explicit; user trim deferred). Recomputed only on clip create,
     /// load when missing/zero, or **numSteps / stepDenom** change — **not** on BPM-only edits.
@@ -291,8 +292,9 @@ public:
     /// Replace multi-selection in traversal order; active clip is the last element (keyboard/editor focus).
     void replaceInstrumentMidiClipSelectionOrdered(std::vector<InstrumentMidiClipId> orderedIds) noexcept;
 
-    /// Timeline-authoritative clips only (`timelineNotes` non-empty): set visible arrangement bounds while
-    /// keeping tick-origin anchored at `timelineAnchorSamples` so note timing does not shift on left trim.
+    /// Timeline-authoritative clips only (`timelineNotes` non-empty): set visible arrangement bounds without
+    /// moving `timelineAnchorSamples`. Supports inward trim (hide notes) and outward trim (empty regions
+    /// before the anchor or after the natural pattern end). Note timing stays fixed in session samples.
     /// Returns false when unchanged or clip not eligible.
     [[nodiscard]] bool applyInstrumentMidiClipVisibleTrim(InstrumentMidiClipId id,
                                                            std::int64_t newVisibleStartSamples,

@@ -249,7 +249,6 @@ private:
                 trimLaneClipId_ = c->id;
                 trimLaneInitialStartSamples_ = c->startSamples;
                 trimLaneInitialLengthSamples_ = c->lengthSamples;
-                trimLaneTimelineAnchorSamples_ = c->timelineAnchorSamples;
                 trimLanePreviewStartSamples_ = c->startSamples;
                 trimLanePreviewLengthSamples_ = c->lengthSamples;
 
@@ -372,7 +371,7 @@ private:
             if (trimLaneLeftEdge_)
             {
                 std::int64_t ns = juce::jmin(sPtr, initEndEx - kMinLen);
-                ns = juce::jmax(trimLaneTimelineAnchorSamples_, ns);
+                ns = juce::jmax(std::int64_t{ 0 }, ns);
                 trimLanePreviewStartSamples_ = ns;
                 trimLanePreviewLengthSamples_ = initEndEx - ns;
             }
@@ -801,7 +800,6 @@ private:
     InstrumentMidiClipId trimLaneClipId_ = 0;
     std::int64_t trimLaneInitialStartSamples_ = 0;
     std::int64_t trimLaneInitialLengthSamples_ = 0;
-    std::int64_t trimLaneTimelineAnchorSamples_ = 0;
     std::int64_t trimLanePreviewStartSamples_ = 0;
     std::int64_t trimLanePreviewLengthSamples_ = 0;
 

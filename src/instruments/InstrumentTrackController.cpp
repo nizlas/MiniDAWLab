@@ -1222,19 +1222,21 @@ void InstrumentTrackController::notifyClipExperimentalMusicalTimingChanged() noe
         {
             continue;
         }
+        cp->startSamples = juce::jmax(std::int64_t{ 0 }, cp->startSamples);
+
         const std::int64_t tlen = timelinePatternLengthSamples(cp->pattern, sr);
         if (tlen <= 0)
         {
             continue;
         }
         const std::int64_t naturalEndEx = cp->timelineAnchorSamples + tlen;
-        std::int64_t maxLen = naturalEndEx - cp->startSamples;
+        const std::int64_t maxLen = naturalEndEx - cp->startSamples;
         if (maxLen < 1)
         {
-            cp->startSamples = juce::jmax(cp->timelineAnchorSamples, naturalEndEx - 1);
-            maxLen = naturalEndEx - cp->startSamples;
+            // Visible start has moved past the pattern end; pull it back without moving `timelineAnchorSamples`.
+            cp->startSamples = juce::jmax(std::int64_t{ 0 }, naturalEndEx - 1);
         }
-        cp->lengthSamples = juce::jmax(std::int64_t{ 1 }, juce::jmin(cp->lengthSamples, maxLen));
+        cp->lengthSamples = juce::jmax(std::int64_t{ 1 }, cp->lengthSamples);
     }
     publishRenderSnapshot();
     sendChangeMessage();
@@ -1331,27 +1333,9 @@ bool InstrumentTrackController::applyInstrumentMidiClipVisibleTrim(const Instrum
     const std::int64_t anchorTrimInvariant = c->timelineAnchorSamples;
 #endif
 
-    double sr = timelineSampleRate_;
-    if (sr <= 0.0 || !std::isfinite(sr))
-    {
-        sr = 48000.0;
-    }
-
     constexpr std::int64_t kMinVisibleSpanSamples = 1;
-    const std::int64_t anchor = c->timelineAnchorSamples;
-    std::int64_t ns = juce::jmax(anchor, newVisibleStartSamples);
-    std::int64_t nl = juce::jmax(kMinVisibleSpanSamples, newVisibleLengthSamples);
-
-    const std::int64_t tlen = timelinePatternLengthSamples(c->pattern, sr);
-    if (tlen > 0)
-    {
-        const std::int64_t naturalEndEx = anchor + tlen;
-        const std::int64_t endEx = ns + nl;
-        if (endEx > naturalEndEx)
-        {
-            nl = juce::jmax(kMinVisibleSpanSamples, naturalEndEx - ns);
-        }
-    }
+    const std::int64_t ns = juce::jmax(std::int64_t{ 0 }, newVisibleStartSamples);
+    const std::int64_t nl = juce::jmax(kMinVisibleSpanSamples, newVisibleLengthSamples);
 
     if (ns == c->startSamples && nl == c->lengthSamples)
     {

@@ -169,6 +169,27 @@ struct ExperimentalMidiPattern
     return (std::int64_t)std::llround(sec * sampleRate);
 }
 
+/// Signed sample offset for bidirectional tick→time mapping (negative ticks = before tick zero).
+/// `ticksToRelativeSamples` clamps non-positive **seconds** to 0 and cannot represent pre‑tick‑zero grid lines.
+[[nodiscard]] inline std::int64_t ticksToSignedSamples(const std::int64_t ticks,
+                                                       const double bpm,
+                                                       const int ticksPerQuarter,
+                                                       const double sampleRate) noexcept
+{
+    const double beats = static_cast<double>(ticks) / (double)juce::jmax(1, ticksPerQuarter);
+    if (bpm <= 0.0 || !std::isfinite(bpm) || sampleRate <= 0.0 || !std::isfinite(sampleRate))
+    {
+        return 0;
+    }
+    const double secondsPerBeat = 60.0 / bpm;
+    const double sec = beats * secondsPerBeat;
+    if (!std::isfinite(sec))
+    {
+        return 0;
+    }
+    return (std::int64_t)std::llround(sec * sampleRate);
+}
+
 [[nodiscard]] inline std::int64_t relativeSamplesToTicks(const std::int64_t relativeSamples,
                                                        const double bpm,
                                                        const int ticksPerQuarter,

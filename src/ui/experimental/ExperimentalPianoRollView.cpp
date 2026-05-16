@@ -9,6 +9,7 @@
 #include "ui/TimelineViewportModel.h"
 
 #include <cmath>
+#include <limits>
 
 #include <algorithm>
 
@@ -933,12 +934,11 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
     const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
 
+    const std::int64_t vis0 = timelineClip_->startSamples;
+    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+
     const std::int64_t absClick = sampleAtGridX((float)e.getPosition().getX());
-    const std::int64_t relSamples = absClick - timelineClip_->timelineAnchorSamples;
-    if (relSamples < 0)
-    {
-        return;
-    }
+    const std::int64_t oldAnchor = timelineClip_->timelineAnchorSamples;
 
     for (int i = (int)pattern_.timelineNotes.size() - 1; i >= 0; --i)
     {
@@ -948,8 +948,6 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
             continue;
         }
         const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->timelineAnchorSamples, tn, pattern_, sr);
-        const std::int64_t vis0 = timelineClip_->startSamples;
-        const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
         if (a0 < vis0 || a0 >= vis1)
         {
             continue;
@@ -980,23 +978,20 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         }
     }
 
-    std::int64_t rawTick = relativeSamplesToTicks(relSamples, bpm, tpq, sr);
+    std::int64_t tickOffset = relativeSamplesToTicks(absClick - oldAnchor, bpm, tpq, sr);
     const std::int64_t snapG = musicalSnapGridTicks();
     if (snapG > 0)
     {
-        rawTick = (std::int64_t)std::llround((double)rawTick / (double)snapG) * snapG;
+        tickOffset = (std::int64_t)std::llround((double)tickOffset / (double)snapG) * snapG;
     }
-    rawTick = juce::jmax<std::int64_t>(0, rawTick);
 
-    TimelineMidiNote nn;
-    nn.midiNote = pitch;
-    nn.velocity = 100;
-    nn.channel = 10;
-    nn.startTick = rawTick;
-    nn.durationTicks = snapG > 0 ? snapG : 240;
+    const std::int64_t absSnappedNote = oldAnchor + ticksToSignedSamples(tickOffset, bpm, tpq, sr);
+    if (absSnappedNote < vis0 || absSnappedNote >= vis1)
+    {
+        return;
+    }
 
-    auto addAndNotify = [this, nn]() mutable -> bool {
-        pattern_.timelineNotes.push_back(nn);
+    auto commitSortedNotes = [this]() {
         std::sort(
             pattern_.timelineNotes.begin(), pattern_.timelineNotes.end(),
             [](const TimelineMidiNote& a, const TimelineMidiNote& b) noexcept {
@@ -1010,6 +1005,73 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
                 }
                 return a.channel < b.channel;
             });
+    };
+
+    if (tickOffset >= 0)
+    {
+        TimelineMidiNote nn;
+        nn.midiNote = pitch;
+        nn.velocity = 100;
+        nn.channel = 10;
+        nn.startTick = tickOffset;
+        nn.durationTicks = snapG > 0 ? snapG : 240;
+
+        auto addAndNotify = [this, nn, commitSortedNotes]() mutable -> bool {
+            pattern_.timelineNotes.push_back(nn);
+            commitSortedNotes();
+
+            if (instrumentTrackController_ != nullptr)
+            {
+                instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+            }
+            repaint();
+            return true;
+        };
+        if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            undoablePatternEditHandler_("Add MIDI note", std::move(addAndNotify));
+        }
+        else
+        {
+            addAndNotify();
+        }
+        return;
+    }
+
+    // Pre–tick-zero region: move anchor earlier and shift existing ticks so absolute note times stay fixed.
+    const std::int64_t newAnchor = absSnappedNote;
+    if (newAnchor >= oldAnchor || newAnchor < 0)
+    {
+        return;
+    }
+    const std::int64_t deltaShift = relativeSamplesToTicks(oldAnchor - newAnchor, bpm, tpq, sr);
+    if (deltaShift < 1 || oldAnchor - newAnchor < 1)
+    {
+        return;
+    }
+    for (const auto& tn : pattern_.timelineNotes)
+    {
+        if (tn.startTick > std::numeric_limits<std::int64_t>::max() - deltaShift)
+        {
+            return;
+        }
+    }
+
+    TimelineMidiNote nn;
+    nn.midiNote = pitch;
+    nn.velocity = 100;
+    nn.channel = 10;
+    nn.startTick = 0;
+    nn.durationTicks = snapG > 0 ? snapG : 240;
+
+    auto rebaseAnchorAndAddNote = [this, newAnchor, deltaShift, nn, commitSortedNotes]() mutable -> bool {
+        timelineClip_->timelineAnchorSamples = newAnchor;
+        for (auto& tn : pattern_.timelineNotes)
+        {
+            tn.startTick += deltaShift;
+        }
+        pattern_.timelineNotes.push_back(nn);
+        commitSortedNotes();
 
         if (instrumentTrackController_ != nullptr)
         {
@@ -1018,13 +1080,14 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         repaint();
         return true;
     };
+
     if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
     {
-        undoablePatternEditHandler_("Add MIDI note", std::move(addAndNotify));
+        undoablePatternEditHandler_("Add MIDI note", std::move(rebaseAnchorAndAddNote));
     }
     else
     {
-        addAndNotify();
+        rebaseAnchorAndAddNote();
     }
 }
 
@@ -1707,19 +1770,11 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             }
 
             const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
-            const std::int64_t lenPat = juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
-            const std::int64_t tickEndPat = relativeSamplesToTicks(lenPat, bpm, tpqI, sr) + lineStep * 4;
-
             const std::int64_t visHi = visibleEndSamples();
-            const std::int64_t tickEndView =
-                relativeSamplesToTicks(juce::jmax(std::int64_t{ 0 }, visHi - anchor), bpm, tpqI, sr)
-                + lineStep * 4;
-            const std::int64_t tickEnd = juce::jmax(tickEndPat, tickEndView);
+            const std::int64_t tickEnd = relativeSamplesToTicks(visHi - anchor, bpm, tpqI, sr) + lineStep * 4;
 
             const std::int64_t visLo = visibleStartSamples_;
-            std::int64_t tickStartRaw =
-                relativeSamplesToTicks(juce::jmax(std::int64_t{ 0 }, visLo - anchor), bpm, tpqI, sr);
-            tickStartRaw = juce::jmax<std::int64_t>(0, tickStartRaw - lineStep * 2);
+            std::int64_t tickStartRaw = relativeSamplesToTicks(visLo - anchor, bpm, tpqI, sr) - lineStep * 2;
             std::int64_t tk = floorTickToGridStep(tickStartRaw, lineStep);
 
             const juce::Colour colMinor = juce::Colour(0xff333340);
@@ -1728,8 +1783,7 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
 
             for (; tk <= tickEnd; tk += lineStep)
             {
-                const std::int64_t absS =
-                    timelineClip_->timelineAnchorSamples + ticksToRelativeSamples(tk, bpm, tpqI, sr);
+                const std::int64_t absS = anchor + ticksToSignedSamples(tk, bpm, tpqI, sr);
                 const float x = xForSessionSample(absS);
                 if (x < (float)gr.getX() - 2.0f || x > (float)gr.getRight() + 2.0f)
                 {
