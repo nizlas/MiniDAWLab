@@ -1577,6 +1577,46 @@ std::optional<std::pair<TrackId, PlacedClipId>> TrackLanesView::getAggregatedSel
     return aggregatedSelectedPlacedClip_;
 }
 
+std::optional<std::pair<TrackId, std::vector<InstrumentMidiClipId>>>
+TrackLanesView::getAggregatedSelectedInstrumentMidiClipSelection() const noexcept
+{
+    const auto pickForTrack = [this](const TrackId tid)
+        -> std::optional<std::pair<TrackId, std::vector<InstrumentMidiClipId>>> {
+        if (tid == kInvalidTrackId)
+        {
+            return std::nullopt;
+        }
+        const auto it = instrumentTimelineAttachments_.find(tid);
+        if (it == instrumentTimelineAttachments_.end() || it->second.controller == nullptr)
+        {
+            return std::nullopt;
+        }
+        const auto& sel = it->second.controller->getSelectedClipIds();
+        if (sel.empty())
+        {
+            return std::nullopt;
+        }
+        return std::pair<TrackId, std::vector<InstrumentMidiClipId>>(tid,
+                                                                     std::vector<InstrumentMidiClipId>(
+                                                                         sel.begin(),
+                                                                         sel.end()));
+    };
+
+    const TrackId active = session_.getActiveTrackId();
+    if (auto fromActive = pickForTrack(active))
+    {
+        return fromActive;
+    }
+    for (const auto& kv : instrumentTimelineAttachments_)
+    {
+        if (auto r = pickForTrack(kv.first))
+        {
+            return r;
+        }
+    }
+    return std::nullopt;
+}
+
 void TrackLanesView::selectFrontPlacedClipOnTrack(const TrackId tid) noexcept
 {
     if (tid == kInvalidTrackId)

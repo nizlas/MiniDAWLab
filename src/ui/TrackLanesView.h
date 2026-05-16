@@ -28,6 +28,7 @@
 
 #include "domain/Track.h"
 #include "domain/PlacedClip.h"
+#include "instruments/InstrumentTrackController.h"
 #include "engine/RecorderService.h"
 #include "ui/ClipWaveformView.h"
 #include "ui/TrackHeaderView.h"
@@ -52,7 +53,6 @@ class Transport;
 class TimelineViewportModel;
 class LatencySettingsStore;
 class AudioWaveformCache;
-class InstrumentTrackController;
 
 enum class VisibleTrackKind
 {
@@ -126,6 +126,11 @@ public:
     // [Message thread] Last clip the user selected on any lane (`TrackId` + placement id).
     [[nodiscard]] std::optional<std::pair<TrackId, PlacedClipId>> getAggregatedSelectedClip()
         const noexcept;
+
+    /// [Message thread] Same-track MIDI clip selection for arrangement shortcuts: prefers `Session`'s active
+    /// track when it has a non-empty MIDI selection, otherwise the first instrument row with a selection.
+    [[nodiscard]] std::optional<std::pair<TrackId, std::vector<InstrumentMidiClipId>>>
+    getAggregatedSelectedInstrumentMidiClipSelection() const noexcept;
     // [Message thread] Clear other lanes, then select clip index 0 on `tid` (paste / host actions).
     void selectFrontPlacedClipOnTrack(TrackId tid) noexcept;
 

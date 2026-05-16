@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
@@ -1426,6 +1427,83 @@ bool InstrumentTrackController::moveSelectedInstrumentMidiClipsByDeltaSamples(co
     publishRenderSnapshot();
     sendChangeMessage();
     return true;
+}
+
+bool InstrumentTrackController::removeInstrumentMidiClipsByIds(const std::vector<InstrumentMidiClipId>& ids) noexcept
+{
+    if (!trackActive_ || ids.empty())
+    {
+        return false;
+    }
+    std::unordered_set<InstrumentMidiClipId> kill(ids.begin(), ids.end());
+    const auto beforeSize = clips_.size();
+    clips_.erase(
+        std::remove_if(
+            clips_.begin(),
+            clips_.end(),
+            [&](const std::unique_ptr<InstrumentMidiClip>& p) {
+                return p != nullptr && kill.count(p->id) > 0;
+            }),
+        clips_.end());
+    if (clips_.size() == beforeSize)
+    {
+        return false;
+    }
+    pruneInstrumentMidiClipSelectionToExistingClips();
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
+std::vector<InstrumentMidiClipId> InstrumentTrackController::appendDeepCopiedInstrumentMidiClips(
+    const std::vector<InstrumentMidiClip>& snapshotsInOrder,
+    const std::vector<std::pair<std::int64_t, std::int64_t>>& startAndAnchorsInOrder) noexcept
+{
+    if (!trackActive_ || snapshotsInOrder.size() != startAndAnchorsInOrder.size()
+        || snapshotsInOrder.empty())
+    {
+        return {};
+    }
+    std::vector<InstrumentMidiClipId> out;
+    out.reserve(snapshotsInOrder.size());
+    for (std::size_t i = 0; i < snapshotsInOrder.size(); ++i)
+    {
+        const InstrumentMidiClip& src = snapshotsInOrder[i];
+        const std::int64_t newStart = startAndAnchorsInOrder[i].first;
+        const std::int64_t newAnchor = startAndAnchorsInOrder[i].second;
+        auto clip = std::make_unique<InstrumentMidiClip>(src);
+        clip->id = nextClipId_++;
+        clip->startSamples = juce::jmax(std::int64_t{ 0 }, newStart);
+        clip->timelineAnchorSamples = newAnchor;
+        clip->midiRollVisibleStartSamples = 0;
+        clip->midiRollSamplesPerPixel = 0.0;
+        clip->midiRollFollowEnabled = false;
+        const InstrumentMidiClipId nid = clip->id;
+        clips_.push_back(std::move(clip));
+        out.push_back(nid);
+    }
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return out;
+}
+
+void InstrumentTrackController::replaceInstrumentMidiClipSelectionOrdered(
+    std::vector<InstrumentMidiClipId> orderedIds) noexcept
+{
+    orderedIds.erase(
+        std::remove_if(
+            orderedIds.begin(),
+            orderedIds.end(),
+            [](const InstrumentMidiClipId id) noexcept { return id == 0; }),
+        orderedIds.end());
+    if (orderedIds.empty())
+    {
+        clearClipSelection();
+        return;
+    }
+    selectedClipIds_ = std::move(orderedIds);
+    pruneInstrumentMidiClipSelectionToExistingClips();
+    sendChangeMessage();
 }
 
 void InstrumentTrackController::publishRenderSnapshot()

@@ -202,9 +202,12 @@ private:
 
         if (!midiMoveBlocked && timelineMappingAvailableForClipDrag_() && !laneContent.isEmpty())
         {
-            for (const auto& up : ac->getClips())
+            // Iterate front-to-back paint order is oldest-first; hits must prefer the topmost clip (last in
+            // z-order), otherwise another clip's minimum-width hit rect can steal edges from a newer paste.
+            const auto& clips = ac->getClips();
+            for (auto it = clips.rbegin(); it != clips.rend(); ++it)
             {
-                InstrumentMidiClip* const c = up.get();
+                InstrumentMidiClip* const c = it->get();
                 if (c == nullptr || !c->pattern.usesTimelineNotes())
                 {
                     continue;
@@ -507,9 +510,10 @@ private:
         }
 
         const auto pos = e.getPosition();
-        for (const auto& up : ac->getClips())
+        const auto& clips = ac->getClips();
+        for (auto it = clips.rbegin(); it != clips.rend(); ++it)
         {
-            const auto* c = up.get();
+            const auto* c = it->get();
             if (c == nullptr || !c->pattern.usesTimelineNotes())
             {
                 continue;
@@ -668,9 +672,12 @@ private:
             return nullptr;
         }
 
-        for (const auto& up : ac->getClips())
+        // Match paint z-order: clips draw oldest→newest; prefer topmost hit so a pasted clip is not
+        // shadowed by another clip's minimum-width hit rectangle.
+        const auto& clips = ac->getClips();
+        for (auto it = clips.rbegin(); it != clips.rend(); ++it)
         {
-            auto* c = up.get();
+            auto* c = it->get();
             if (c == nullptr)
             {
                 continue;

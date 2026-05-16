@@ -237,28 +237,6 @@ public:
                 },
             });
 
-        ClipPasteboardController::Callbacks clipPasteCallbacks;
-        clipPasteCallbacks.isRecording = [this] { return recorder_.isRecording(); };
-        clipPasteCallbacks.isCountInActive = [this] {
-            return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
-        };
-        clipPasteCallbacks.executeUndoableSessionEdit
-            = [this](const juce::String& label, std::function<bool()> mutator) {
-                  if (undoRedoCoordinator_ != nullptr)
-                  {
-                      undoRedoCoordinator_->executeUndoableSessionEdit(label, std::move(mutator));
-                  }
-              };
-        clipPasteCallbacks.syncViewportFromSession = [this] { syncViewportFromSession(); };
-        clipPasteboardController_
-            = std::make_unique<ClipPasteboardController>(
-                session,
-                transport,
-                trackLanesView,
-                rulerView,
-                inspectorView_,
-                std::move(clipPasteCallbacks));
-
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
             session,
             transport,
@@ -455,6 +433,46 @@ public:
                     instrumentRuntimeCoordinator_->applyTimelineSampleRateToKeyedAndStaging(sr);
                 },
             });
+
+        ClipPasteboardController::Callbacks clipPasteCallbacks;
+        clipPasteCallbacks.isRecording = [this] { return recorder_.isRecording(); };
+        clipPasteCallbacks.isCountInActive = [this] {
+            return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
+        };
+        clipPasteCallbacks.executeUndoableSessionEdit
+            = [this](const juce::String& label, std::function<bool()> mutator) {
+                  if (undoRedoCoordinator_ != nullptr)
+                  {
+                      undoRedoCoordinator_->executeUndoableSessionEdit(label, std::move(mutator));
+                  }
+              };
+        clipPasteCallbacks.executeUndoableInstrumentEdit
+            = [this](const juce::String& label, std::function<bool()> mutator) {
+                  if (undoRedoCoordinator_ != nullptr)
+                  {
+                      undoRedoCoordinator_->executeUndoableInstrumentEdit(label, std::move(mutator));
+                  }
+              };
+        clipPasteCallbacks.getInstrumentControllerForTrack = [this](const TrackId tid) {
+            return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+        };
+        clipPasteCallbacks.syncViewportFromSession = [this] { syncViewportFromSession(); };
+        clipPasteCallbacks.refreshInstrumentArrangementUi = [this] { refreshInstrumentUi(); };
+        clipPasteCallbacks.openMidiEditorForInstrumentClip = [this](const TrackId timelineTid,
+                                                                     const InstrumentMidiClipId clipId) {
+            if (midiEditorPresenter_ != nullptr)
+            {
+                midiEditorPresenter_->openMidiEditorForInstrumentClip(timelineTid, clipId);
+            }
+        };
+        clipPasteboardController_
+            = std::make_unique<ClipPasteboardController>(
+                session,
+                transport,
+                trackLanesView,
+                rulerView,
+                inspectorView_,
+                std::move(clipPasteCallbacks));
 
         addInstrumentTrackCoordinator_ = std::make_unique<AddInstrumentTrackCoordinator>(
             AddInstrumentTrackCoordinator::Refs{ session, *instrumentRuntimeCoordinator_ },

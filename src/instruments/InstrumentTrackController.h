@@ -277,6 +277,20 @@ public:
     /// clip starts before sample 0. Returns false if nothing changed.
     [[nodiscard]] bool moveSelectedInstrumentMidiClipsByDeltaSamples(std::int64_t deltaSamples) noexcept;
 
+    /// Arrangement delete: remove clips by id on this lane. Prunes selection and republishes render snapshot.
+    /// Returns false when nothing was removed.
+    [[nodiscard]] bool removeInstrumentMidiClipsByIds(const std::vector<InstrumentMidiClipId>& ids) noexcept;
+
+    /// Arrangement paste: append copies of `snapshotsInOrder` with new ids and supplied timeline positions.
+    /// `startAndAnchorsInOrder[i]` is `(startSamples, timelineAnchorSamples)` aligned with `snapshotsInOrder`.
+    /// Returns new ids in the same order (empty on failure / inactive track / size mismatch).
+    [[nodiscard]] std::vector<InstrumentMidiClipId> appendDeepCopiedInstrumentMidiClips(
+        const std::vector<InstrumentMidiClip>& snapshotsInOrder,
+        const std::vector<std::pair<std::int64_t, std::int64_t>>& startAndAnchorsInOrder) noexcept;
+
+    /// Replace multi-selection in traversal order; active clip is the last element (keyboard/editor focus).
+    void replaceInstrumentMidiClipSelectionOrdered(std::vector<InstrumentMidiClipId> orderedIds) noexcept;
+
     /// Timeline-authoritative clips only (`timelineNotes` non-empty): set visible arrangement bounds while
     /// keeping tick-origin anchored at `timelineAnchorSamples` so note timing does not shift on left trim.
     /// Returns false when unchanged or clip not eligible.

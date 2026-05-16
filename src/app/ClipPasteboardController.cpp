@@ -9,6 +9,31 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TrackLanesView.h"
 
+#include <algorithm>
+#include <limits>
+
+namespace
+{
+    [[nodiscard]] bool sessionTrackIsInstrument(const Session& session, const TrackId tid) noexcept
+    {
+        if (tid == kInvalidTrackId)
+        {
+            return false;
+        }
+        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            return false;
+        }
+        const int ix = snap->findTrackIndexById(tid);
+        if (ix < 0)
+        {
+            return false;
+        }
+        return snap->getTrack(ix).getKind() == TrackKind::Instrument;
+    }
+} // namespace
+
 ClipPasteboardController::ClipPasteboardController(Session& session,
                                                    Transport& transport,
                                                    TrackLanesView& trackLanesView,
@@ -24,12 +49,67 @@ ClipPasteboardController::ClipPasteboardController(Session& session,
 {
 }
 
+TrackId ClipPasteboardController::resolveInstrumentMidiPasteTargetTrack(
+    const TrackId sourceTrackFromPasteboard) const noexcept
+{
+    const auto midiSel = trackLanesView_.getAggregatedSelectedInstrumentMidiClipSelection();
+    if (midiSel.has_value())
+    {
+        const TrackId tid = midiSel->first;
+        if (sessionTrackIsInstrument(session_, tid))
+        {
+            return tid;
+        }
+    }
+    if (sourceTrackFromPasteboard != kInvalidTrackId
+        && sessionTrackIsInstrument(session_, sourceTrackFromPasteboard))
+    {
+        return sourceTrackFromPasteboard;
+    }
+    const TrackId active = session_.getActiveTrackId();
+    if (sessionTrackIsInstrument(session_, active))
+    {
+        return active;
+    }
+    return kInvalidTrackId;
+}
+
 void ClipPasteboardController::invokeDeleteSelectedPlacedClipFromWindowShortcut()
 {
     if (callbacks_.isRecording() || callbacks_.isCountInActive())
     {
         return;
     }
+    const auto midiSel = trackLanesView_.getAggregatedSelectedInstrumentMidiClipSelection();
+    if (midiSel.has_value())
+    {
+        const TrackId tid = midiSel->first;
+        if (!sessionTrackIsInstrument(session_, tid))
+        {
+            return;
+        }
+        std::vector<InstrumentMidiClipId> ids = midiSel->second;
+        callbacks_.executeUndoableInstrumentEdit(
+            "Delete MIDI clip",
+            [this, tid, ids = std::move(ids)]() mutable -> bool {
+                InstrumentTrackController* const c = callbacks_.getInstrumentControllerForTrack(tid);
+                if (c == nullptr)
+                {
+                    return false;
+                }
+                if (!c->removeInstrumentMidiClipsByIds(ids))
+                {
+                    return false;
+                }
+                callbacks_.refreshInstrumentArrangementUi();
+                rulerView_.repaint();
+                trackLanesView_.repaint();
+                inspectorView_.refreshFromSession();
+                return true;
+            });
+        return;
+    }
+
     const std::optional<std::pair<TrackId, PlacedClipId>> sel = trackLanesView_.getAggregatedSelectedClip();
     if (!sel.has_value())
     {
@@ -73,6 +153,46 @@ void ClipPasteboardController::invokeDeleteSelectedPlacedClipFromWindowShortcut(
 
 void ClipPasteboardController::invokeCopySelectedClipFromWindowShortcut()
 {
+    const auto midiSel = trackLanesView_.getAggregatedSelectedInstrumentMidiClipSelection();
+    if (midiSel.has_value())
+    {
+        InstrumentTrackController* const c = callbacks_.getInstrumentControllerForTrack(midiSel->first);
+        if (c == nullptr)
+        {
+            return;
+        }
+        std::vector<const InstrumentMidiClip*> ptrs;
+        ptrs.reserve(midiSel->second.size());
+        for (const InstrumentMidiClipId id : midiSel->second)
+        {
+            if (const InstrumentMidiClip* cl = c->getClipById(id))
+            {
+                ptrs.push_back(cl);
+            }
+        }
+        if (ptrs.empty())
+        {
+            return;
+        }
+        std::sort(ptrs.begin(), ptrs.end(), [](const InstrumentMidiClip* a, const InstrumentMidiClip* b) noexcept {
+            return a->startSamples < b->startSamples;
+        });
+
+        InternalInstrumentMidiPasteboard pb;
+        pb.sourceTrackId = midiSel->first;
+        pb.groupEarliestStartSamples = ptrs.front()->startSamples;
+        pb.clipsSortedByOriginalStart.reserve(ptrs.size());
+        for (const InstrumentMidiClip* p : ptrs)
+        {
+            pb.clipsSortedByOriginalStart.push_back(*p);
+        }
+
+        instrumentMidiPasteboard_ = std::move(pb);
+        audioPasteboard_.reset();
+        payloadKind_ = PayloadKind::InstrumentMidi;
+        return;
+    }
+
     const std::optional<std::pair<TrackId, PlacedClipId>> sel = trackLanesView_.getAggregatedSelectedClip();
     if (!sel.has_value())
     {
@@ -102,7 +222,9 @@ void ClipPasteboardController::invokeCopySelectedClipFromWindowShortcut()
         pb.visibleLengthSamples = p.getEffectiveLengthSamples();
         pb.materialWindowStartSamples = p.getMaterialWindowStartSamples();
         pb.materialWindowEndExclusiveSamples = p.getMaterialWindowEndExclusiveSamples();
-        clipPasteboard_ = std::move(pb);
+        audioPasteboard_ = std::move(pb);
+        instrumentMidiPasteboard_.reset();
+        payloadKind_ = PayloadKind::Audio;
         return;
     }
 }
@@ -113,7 +235,79 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
     {
         return;
     }
-    if (!clipPasteboard_.has_value())
+    if (payloadKind_ == PayloadKind::InstrumentMidi && instrumentMidiPasteboard_.has_value())
+    {
+        const InternalInstrumentMidiPasteboard pb = *instrumentMidiPasteboard_;
+        if (pb.clipsSortedByOriginalStart.empty())
+        {
+            return;
+        }
+        const TrackId target = resolveInstrumentMidiPasteTargetTrack(pb.sourceTrackId);
+        if (target == kInvalidTrackId || !sessionTrackIsInstrument(session_, target))
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Paste MIDI",
+                "No instrument track is available to paste MIDI clips onto.",
+                "OK");
+            return;
+        }
+
+        const std::int64_t playhead = transport_.readPlayheadSamplesForUi();
+        const std::int64_t earliest = pb.groupEarliestStartSamples;
+        std::vector<std::pair<std::int64_t, std::int64_t>> placements;
+        placements.reserve(pb.clipsSortedByOriginalStart.size());
+        std::int64_t minStart = std::numeric_limits<std::int64_t>::max();
+        for (const InstrumentMidiClip& cl : pb.clipsSortedByOriginalStart)
+        {
+            const std::int64_t ns = playhead + (cl.startSamples - earliest);
+            const std::int64_t na = playhead + (cl.timelineAnchorSamples - earliest);
+            placements.push_back({ ns, na });
+            minStart = juce::jmin(minStart, ns);
+        }
+        const std::int64_t shift = (minStart < 0) ? -minStart : 0;
+        if (shift != 0)
+        {
+            for (auto& pr : placements)
+            {
+                pr.first += shift;
+                pr.second += shift;
+            }
+        }
+
+        callbacks_.executeUndoableInstrumentEdit(
+            "Paste MIDI clip",
+            [this,
+             target,
+             snapshots = pb.clipsSortedByOriginalStart,
+             placements = std::move(placements)]() mutable -> bool {
+                InstrumentTrackController* const c = callbacks_.getInstrumentControllerForTrack(target);
+                if (c == nullptr)
+                {
+                    return false;
+                }
+                std::vector<InstrumentMidiClipId> newIds
+                    = c->appendDeepCopiedInstrumentMidiClips(snapshots, placements);
+                if (newIds.empty())
+                {
+                    return false;
+                }
+                c->replaceInstrumentMidiClipSelectionOrdered(std::move(newIds));
+                callbacks_.refreshInstrumentArrangementUi();
+                rulerView_.repaint();
+                trackLanesView_.repaint();
+                inspectorView_.refreshFromSession();
+                const InstrumentMidiClipId active = c->getSelectedClipId();
+                if (active != 0)
+                {
+                    callbacks_.openMidiEditorForInstrumentClip(target, active);
+                }
+                return true;
+            });
+        return;
+    }
+
+    if (payloadKind_ != PayloadKind::Audio || !audioPasteboard_.has_value())
     {
         return;
     }
@@ -127,7 +321,7 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
     {
         return;
     }
-    const InternalClipPasteboard pb = *clipPasteboard_;
+    const InternalClipPasteboard pb = *audioPasteboard_;
     if (pb.material == nullptr || pb.visibleLengthSamples <= 0)
     {
         return;
