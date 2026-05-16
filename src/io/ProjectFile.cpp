@@ -539,6 +539,15 @@ namespace
                                 c.lengthSamples = len;
                             }
                         }
+                        {
+                            bool taOk = false;
+                            const std::int64_t ta
+                                = int64FromVarId(cv.getProperty("timelineAnchorSamples", {}), taOk);
+                            if (taOk)
+                            {
+                                c.timelineAnchorSamples = ta;
+                            }
+                        }
                         const juce::var& notesV = cv.getProperty("notes", {});
                         if (notesV.isArray())
                         {
@@ -784,6 +793,16 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 }
                 co->setProperty("startSamples", static_cast<juce::int64>(cl.startSamples));
                 co->setProperty("lengthSamples", static_cast<juce::int64>(cl.lengthSamples));
+                if (!cl.timelineNotes.empty())
+                {
+                    const std::int64_t anchorResolved = cl.timelineAnchorSamples.value_or(cl.startSamples);
+                    co->setProperty("timelineAnchorSamples", static_cast<juce::int64>(anchorResolved));
+                }
+                else if (cl.timelineAnchorSamples.has_value())
+                {
+                    co->setProperty(
+                        "timelineAnchorSamples", static_cast<juce::int64>(*cl.timelineAnchorSamples));
+                }
                 if (cl.laneStartFractionPermille != 0)
                 {
                     co->setProperty("laneStartFractionPermille", cl.laneStartFractionPermille);
@@ -1140,7 +1159,9 @@ namespace
     {
         if (a.id != b.id || a.name != b.name || a.numSteps != b.numSteps || a.stepDenom != b.stepDenom
             || a.bpm != b.bpm || a.loop != b.loop || a.startSamples != b.startSamples
-            || a.lengthSamples != b.lengthSamples || a.laneStartFractionPermille != b.laneStartFractionPermille
+            || a.lengthSamples != b.lengthSamples
+            || a.timelineAnchorSamples.value_or(a.startSamples) != b.timelineAnchorSamples.value_or(b.startSamples)
+            || a.laneStartFractionPermille != b.laneStartFractionPermille
             || a.laneEndFractionPermille != b.laneEndFractionPermille || a.ticksPerQuarter != b.ticksPerQuarter
             || a.midiRollVisibleStartSamples != b.midiRollVisibleStartSamples
             || a.midiRollSamplesPerPixel != b.midiRollSamplesPerPixel

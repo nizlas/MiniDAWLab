@@ -37,6 +37,9 @@ struct InstrumentMidiClip
     ExperimentalMidiPattern pattern;
     /// Session-timeline anchor (samples). I3d1: piano roll + lane use absolute samples.
     std::int64_t startSamples = 0;
+    /// Sample where `timelineNotes` tick 0 sits on the session timeline (non-negative).
+    /// Matches `startSamples` until a non-destructive left trim moves the visible edge without shifting notes.
+    std::int64_t timelineAnchorSamples = 0;
     /// Locked pattern span in samples (explicit; user trim deferred). Recomputed only on clip create,
     /// load when missing/zero, or **numSteps / stepDenom** change — **not** on BPM-only edits.
     std::int64_t lengthSamples = 0;
@@ -273,6 +276,13 @@ public:
     /// Arrangement move: shift all currently selected MIDI clips by `deltaSamples`. Clamps as a group so no
     /// clip starts before sample 0. Returns false if nothing changed.
     [[nodiscard]] bool moveSelectedInstrumentMidiClipsByDeltaSamples(std::int64_t deltaSamples) noexcept;
+
+    /// Timeline-authoritative clips only (`timelineNotes` non-empty): set visible arrangement bounds while
+    /// keeping tick-origin anchored at `timelineAnchorSamples` so note timing does not shift on left trim.
+    /// Returns false when unchanged or clip not eligible.
+    [[nodiscard]] bool applyInstrumentMidiClipVisibleTrim(InstrumentMidiClipId id,
+                                                           std::int64_t newVisibleStartSamples,
+                                                           std::int64_t newVisibleLengthSamples) noexcept;
 
     /// Effective delta after clamping the current selection so every clip stays at or past sample 0.
     [[nodiscard]] std::int64_t clampInstrumentMidiClipMoveDeltaForCurrentSelection(

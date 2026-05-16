@@ -653,6 +653,10 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         c.loop = cptr->pattern.loop;
         c.startSamples = cptr->startSamples;
         c.lengthSamples = cptr->lengthSamples;
+        if (!cptr->pattern.timelineNotes.empty())
+        {
+            c.timelineAnchorSamples.emplace(cptr->timelineAnchorSamples);
+        }
         c.laneStartFractionPermille = cptr->laneStartFractionPermille;
         c.laneEndFractionPermille = cptr->laneEndFractionPermille;
         c.midiRollVisibleStartSamples = cptr->midiRollVisibleStartSamples;
@@ -754,6 +758,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
         clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
         clip->lengthSamples = cdto.lengthSamples;
+        clip->timelineAnchorSamples = cdto.timelineAnchorSamples.value_or(cdto.startSamples);
         for (const auto& n : cdto.notes)
         {
             PrototypeMidiNote pn;
@@ -790,16 +795,9 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         if (cp->pattern.usesTimelineNotes())
         {
             const std::int64_t tlen = timelinePatternLengthSamples(cp->pattern, sr);
-            if (tlen > 0)
+            if (tlen > 0 && cp->lengthSamples <= 0)
             {
-                if (cp->lengthSamples <= 0)
-                {
-                    cp->lengthSamples = tlen;
-                }
-                else
-                {
-                    cp->lengthSamples = juce::jmax(cp->lengthSamples, tlen);
-                }
+                cp->lengthSamples = tlen;
             }
         }
         else if (cp->lengthSamples <= 0)
@@ -904,6 +902,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
         clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
         clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
         clip->lengthSamples = cdto.lengthSamples;
+        clip->timelineAnchorSamples = cdto.timelineAnchorSamples.value_or(cdto.startSamples);
         for (const auto& n : cdto.notes)
         {
             PrototypeMidiNote pn;
@@ -940,16 +939,9 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
         if (cp->pattern.usesTimelineNotes())
         {
             const std::int64_t tlen = timelinePatternLengthSamples(cp->pattern, sr);
-            if (tlen > 0)
+            if (tlen > 0 && cp->lengthSamples <= 0)
             {
-                if (cp->lengthSamples <= 0)
-                {
-                    cp->lengthSamples = tlen;
-                }
-                else
-                {
-                    cp->lengthSamples = juce::jmax(cp->lengthSamples, tlen);
-                }
+                cp->lengthSamples = tlen;
             }
         }
         else if (cp->lengthSamples <= 0)
@@ -1230,10 +1222,18 @@ void InstrumentTrackController::notifyClipExperimentalMusicalTimingChanged() noe
             continue;
         }
         const std::int64_t tlen = timelinePatternLengthSamples(cp->pattern, sr);
-        if (tlen > 0)
+        if (tlen <= 0)
         {
-            cp->lengthSamples = tlen;
+            continue;
         }
+        const std::int64_t naturalEndEx = cp->timelineAnchorSamples + tlen;
+        std::int64_t maxLen = naturalEndEx - cp->startSamples;
+        if (maxLen < 1)
+        {
+            cp->startSamples = juce::jmax(cp->timelineAnchorSamples, naturalEndEx - 1);
+            maxLen = naturalEndEx - cp->startSamples;
+        }
+        cp->lengthSamples = juce::jmax(std::int64_t{ 1 }, juce::jmin(cp->lengthSamples, maxLen));
     }
     publishRenderSnapshot();
     sendChangeMessage();
@@ -1263,6 +1263,8 @@ InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAt
     }
 
     clip->startSamples = juce::jmax(std::int64_t{0}, startSamples);
+
+    clip->timelineAnchorSamples = clip->startSamples;
 
     clip->pattern.notes.clear();
     clip->pattern.timelineNotes = std::move(timelineNotes);
@@ -1314,6 +1316,57 @@ InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAt
     return outId;
 }
 
+bool InstrumentTrackController::applyInstrumentMidiClipVisibleTrim(const InstrumentMidiClipId id,
+                                                                   const std::int64_t newVisibleStartSamples,
+                                                                   const std::int64_t newVisibleLengthSamples) noexcept
+{
+    InstrumentMidiClip* const c = getClipById(id);
+    if (c == nullptr || !c->pattern.usesTimelineNotes())
+    {
+        return false;
+    }
+
+#if !defined(NDEBUG)
+    const std::int64_t anchorTrimInvariant = c->timelineAnchorSamples;
+#endif
+
+    double sr = timelineSampleRate_;
+    if (sr <= 0.0 || !std::isfinite(sr))
+    {
+        sr = 48000.0;
+    }
+
+    constexpr std::int64_t kMinVisibleSpanSamples = 1;
+    const std::int64_t anchor = c->timelineAnchorSamples;
+    std::int64_t ns = juce::jmax(anchor, newVisibleStartSamples);
+    std::int64_t nl = juce::jmax(kMinVisibleSpanSamples, newVisibleLengthSamples);
+
+    const std::int64_t tlen = timelinePatternLengthSamples(c->pattern, sr);
+    if (tlen > 0)
+    {
+        const std::int64_t naturalEndEx = anchor + tlen;
+        const std::int64_t endEx = ns + nl;
+        if (endEx > naturalEndEx)
+        {
+            nl = juce::jmax(kMinVisibleSpanSamples, naturalEndEx - ns);
+        }
+    }
+
+    if (ns == c->startSamples && nl == c->lengthSamples)
+    {
+        return false;
+    }
+
+    c->startSamples = ns;
+    c->lengthSamples = nl;
+#if !defined(NDEBUG)
+    jassert(c->timelineAnchorSamples == anchorTrimInvariant);
+#endif
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
 std::int64_t InstrumentTrackController::clampInstrumentMidiClipMoveDeltaForCurrentSelection(
     const std::int64_t deltaSamples) const noexcept
 {
@@ -1360,6 +1413,7 @@ bool InstrumentTrackController::moveSelectedInstrumentMidiClipsByDeltaSamples(co
         if (ns != c->startSamples)
         {
             c->startSamples = ns;
+            c->timelineAnchorSamples += d;
             any = true;
         }
     }
@@ -1411,10 +1465,15 @@ void InstrumentTrackController::publishRenderSnapshot()
             for (const auto& tn : clip.pattern.timelineNotes)
             {
                 InstrumentNoteRenderEvent ev;
-                ev.absSample = absoluteSampleForTimelineNote(clip.startSamples, tn, clip.pattern, sr);
+                ev.absSample = absoluteSampleForTimelineNote(clip.timelineAnchorSamples, tn, clip.pattern, sr);
                 const std::int64_t durSam =
                     ticksToRelativeSamples(juce::jmax<std::int64_t>(1, tn.durationTicks), bpm, tpq, sr);
                 ev.noteOffAbsSample = ev.absSample + juce::jmax<std::int64_t>(1, durSam);
+                ev.noteOffAbsSample = juce::jmin(ev.noteOffAbsSample, plan.endSamplesExclusive);
+                if (ev.noteOffAbsSample <= ev.absSample)
+                {
+                    ev.noteOffAbsSample = ev.absSample + 1;
+                }
                 ev.midiNote = (std::uint8_t)juce::jlimit(0, 127, tn.midiNote);
                 ev.velocity = (std::uint8_t)juce::jlimit(1, 127, tn.velocity);
                 ev.midiChannel = (std::uint8_t)juce::jlimit(1, 16, (int)tn.channel);

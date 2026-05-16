@@ -54,6 +54,54 @@ namespace
 
     /// Resync extrapolation when `|transport - predicted|` exceeds this (seek / cycle / dropout).
     constexpr double kPlayheadHardResyncSamples = 8192.0;
+
+    /// Piano-roll vertical timeline grid: minimum screen spacing before drawing a line at this tier.
+    constexpr double kTimelineGridMinorMinPx = 8.0;
+    constexpr double kTimelineGridBeatMinPx = 11.0;
+    constexpr double kTimelineGridBarMinPx = 5.0;
+
+    [[nodiscard]] inline double spacingPxForTickDelta(const std::int64_t deltaTicks,
+                                                      const double bpm,
+                                                      const int tpq,
+                                                      const double sr,
+                                                      const double samplesPerPixel) noexcept
+    {
+        if (deltaTicks <= 0 || samplesPerPixel <= 0.0 || !std::isfinite(samplesPerPixel))
+        {
+            return 0.0;
+        }
+        const std::int64_t ds = ticksToRelativeSamples(deltaTicks, bpm, tpq, sr);
+        if (ds <= 0)
+        {
+            return 0.0;
+        }
+        return (double)ds / samplesPerPixel;
+    }
+
+    [[nodiscard]] inline std::int64_t floorTickToGridStep(const std::int64_t tk,
+                                                         const std::int64_t step) noexcept
+    {
+        if (step <= 1)
+        {
+            return tk;
+        }
+        if (tk >= 0)
+        {
+            return (tk / step) * step;
+        }
+        return ((tk + 1) / step - 1) * step;
+    }
+
+    [[nodiscard]] inline int stepGridStrideForMinPx(const float pxPerStepColumn,
+                                                    const double minPx) noexcept
+    {
+        if (!(pxPerStepColumn > 1.0e-6f) || !std::isfinite(pxPerStepColumn))
+        {
+            return 1;
+        }
+        const int stride = (int)std::ceil(minPx / (double)pxPerStepColumn);
+        return juce::jmax(1, stride);
+    }
 } // namespace
 
 ExperimentalPianoRollView::ExperimentalPianoRollView(ExperimentalMidiPattern& pattern,
@@ -886,7 +934,7 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
 
     const std::int64_t absClick = sampleAtGridX((float)e.getPosition().getX());
-    const std::int64_t relSamples = absClick - timelineClip_->startSamples;
+    const std::int64_t relSamples = absClick - timelineClip_->timelineAnchorSamples;
     if (relSamples < 0)
     {
         return;
@@ -899,7 +947,13 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         {
             continue;
         }
-        const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->startSamples, tn, pattern_, sr);
+        const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->timelineAnchorSamples, tn, pattern_, sr);
+        const std::int64_t vis0 = timelineClip_->startSamples;
+        const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+        if (a0 < vis0 || a0 >= vis1)
+        {
+            continue;
+        }
         const std::int64_t durS = ticksToRelativeSamples(
             juce::jmax<std::int64_t>(1, tn.durationTicks), bpm, tpq, sr);
         const std::int64_t a1 = a0 + juce::jmax<std::int64_t>(1, durS);
@@ -1453,6 +1507,43 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         g.fillRect(rr);
     }
 
+    // --- Trim hint: darken piano-roll grid outside the clip's visible/playable span so trimmed-away
+    // time is obvious (notes and playback are already culled; this is presentation only).
+    if (absTime && timelineClip_ != nullptr && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_)
+        && timelineClip_->lengthSamples > 0)
+    {
+        const float gx0 = (float)gr.getX();
+        const float gx1 = (float)gr.getRight();
+        const float gy = (float)gr.getY();
+        const float gh = (float)gr.getHeight();
+        const std::int64_t vis0 = timelineClip_->startSamples;
+        const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+
+        float xL = xForSessionSample(vis0);
+        float xR = xForSessionSample(vis1);
+        if (xR < xL)
+        {
+            std::swap(xL, xR);
+        }
+
+        const float bandL = juce::jlimit(gx0, gx1, xL);
+        const float bandR = juce::jlimit(gx0, gx1, xR);
+
+        constexpr float kOutsideVisibleClipShadeAlpha = 0.36f;
+        const juce::Colour shade = juce::Colours::black.withAlpha(kOutsideVisibleClipShadeAlpha);
+
+        if (bandL > gx0 + 0.5f)
+        {
+            g.setColour(shade);
+            g.fillRect(gx0, gy, bandL - gx0, gh);
+        }
+        if (gx1 > bandR + 0.5f)
+        {
+            g.setColour(shade);
+            g.fillRect(bandR, gy, gx1 - bandR, gh);
+        }
+    }
+
     // --- Ruler chrome (always when absolute timeline; independent of cycle/selection/clip overlay)
     if (absTime && !rulerCorner.isEmpty())
     {
@@ -1550,7 +1641,8 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
     // --- drawStepGrid
     if (!absTime)
     {
-        for (int s = 0; s <= nSteps; ++s)
+        const int stride = stepGridStrideForMinPx(cw, kTimelineGridMinorMinPx);
+        for (int s = 0; s <= nSteps; s += stride)
         {
             const int x = gr.getX() + (int)((float)s * cw);
             juce::Colour c = juce::Colour(0xff333340);
@@ -1565,42 +1657,118 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             g.setColour(c);
             g.drawVerticalLine(x, (float)gr.getY(), (float)gr.getBottom());
         }
+        if (stride > 1 && (nSteps % stride) != 0)
+        {
+            const int x = gr.getX() + (int)((float)nSteps * cw);
+            g.setColour(juce::Colour(0xff505060));
+            g.drawVerticalLine(x, (float)gr.getY(), (float)gr.getBottom());
+        }
     }
     else if (timelineClip_ != nullptr)
     {
-        if (pattern_.usesTimelineNotes() && samplesPerPixel_ > 0.0)
+        if (pattern_.usesTimelineNotes() && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))
         {
             const double sr = effectiveDeviceSampleRate(deviceManager_);
             const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
-            const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
-            const std::int64_t stepTicks = referenceTimelineGridTicks();
-            const std::int64_t lenPat = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-            const std::int64_t maxTick =
-                relativeSamplesToTicks(lenPat, bpm, tpq, sr) + stepTicks * 4;
-            for (std::int64_t tk = 0; tk <= maxTick; tk += stepTicks)
+            const int tpqI = experimentalEffectiveTicksPerQuarter(pattern_);
+            const std::int64_t tpq = (std::int64_t)tpqI;
+            const double spp = samplesPerPixel_;
+
+            std::int64_t minorStep = referenceTimelineGridTicks();
+            minorStep = juce::jmax<std::int64_t>(1, minorStep);
+            while (minorStep < tpq * 1024)
+            {
+                const double px = spacingPxForTickDelta(minorStep, bpm, tpqI, sr, spp);
+                if (px >= kTimelineGridMinorMinPx || minorStep >= tpq)
+                {
+                    break;
+                }
+                minorStep *= 2;
+            }
+
+            const double beatPx = spacingPxForTickDelta(tpq, bpm, tpqI, sr, spp);
+            std::int64_t lineStep = minorStep;
+            bool coarseBarsOnly = false;
+            if (beatPx < kTimelineGridBeatMinPx && tpq > 0)
+            {
+                coarseBarsOnly = true;
+                std::int64_t barStep = 4 * tpq;
+                barStep = juce::jmax<std::int64_t>(1, barStep);
+                while (barStep <= tpq * 16384)
+                {
+                    const double pxBar = spacingPxForTickDelta(barStep, bpm, tpqI, sr, spp);
+                    if (pxBar >= kTimelineGridBarMinPx)
+                    {
+                        break;
+                    }
+                    barStep *= 2;
+                }
+                lineStep = barStep;
+            }
+
+            const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
+            const std::int64_t lenPat = juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+            const std::int64_t tickEndPat = relativeSamplesToTicks(lenPat, bpm, tpqI, sr) + lineStep * 4;
+
+            const std::int64_t visHi = visibleEndSamples();
+            const std::int64_t tickEndView =
+                relativeSamplesToTicks(juce::jmax(std::int64_t{ 0 }, visHi - anchor), bpm, tpqI, sr)
+                + lineStep * 4;
+            const std::int64_t tickEnd = juce::jmax(tickEndPat, tickEndView);
+
+            const std::int64_t visLo = visibleStartSamples_;
+            std::int64_t tickStartRaw =
+                relativeSamplesToTicks(juce::jmax(std::int64_t{ 0 }, visLo - anchor), bpm, tpqI, sr);
+            tickStartRaw = juce::jmax<std::int64_t>(0, tickStartRaw - lineStep * 2);
+            std::int64_t tk = floorTickToGridStep(tickStartRaw, lineStep);
+
+            const juce::Colour colMinor = juce::Colour(0xff333340);
+            const juce::Colour colHalf = juce::Colour(0xff454552);
+            const juce::Colour colBeat = juce::Colour(0xff505060);
+
+            for (; tk <= tickEnd; tk += lineStep)
             {
                 const std::int64_t absS =
-                    timelineClip_->startSamples + ticksToRelativeSamples(tk, bpm, tpq, sr);
+                    timelineClip_->timelineAnchorSamples + ticksToRelativeSamples(tk, bpm, tpqI, sr);
                 const float x = xForSessionSample(absS);
                 if (x < (float)gr.getX() - 2.0f || x > (float)gr.getRight() + 2.0f)
                 {
                     continue;
                 }
-                const bool beat = (tpq > 0) && (tk % (std::int64_t)tpq == 0);
-                juce::Colour c = beat ? juce::Colour(0xff505060) : juce::Colour(0xff333340);
-                if (!beat && tpq >= 4 && (tk % ((std::int64_t)tpq / 2) == 0))
+
+                juce::Colour c = colMinor;
+                if (coarseBarsOnly)
                 {
-                    c = juce::Colour(0xff454552);
+                    const bool barHit = tpq > 0 && (tk % (4 * tpq) == 0);
+                    c = barHit ? colBeat : colMinor;
                 }
+                else
+                {
+                    const bool beat = tpq > 0 && (tk % tpq == 0);
+                    if (beat)
+                    {
+                        c = colBeat;
+                    }
+                    else if (tpq >= 4 && (tk % (tpq / 2) == 0))
+                    {
+                        c = colHalf;
+                    }
+                }
+
                 g.setColour(c);
                 g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
             }
         }
-        else
+        else if (samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))
         {
-            const std::int64_t lenPat = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-            for (int s = 0; s <= nSteps; ++s)
-            {
+            const std::int64_t lenPat = juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+            const float spanPx =
+                std::fabs(xForSessionSample(timelineClip_->startSamples + lenPat)
+                          - xForSessionSample(timelineClip_->startSamples));
+            const float pxPerStepCol = spanPx / (float)juce::jmax(1, nSteps);
+            const int stride = stepGridStrideForMinPx(pxPerStepCol, kTimelineGridMinorMinPx);
+
+            auto drawStepLine = [&](const int s) {
                 const std::int64_t rel =
                     (std::int64_t)std::llround((double)s * (double)lenPat / (double)nSteps);
                 const std::int64_t absS = timelineClip_->startSamples + rel;
@@ -1616,6 +1784,15 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 }
                 g.setColour(c);
                 g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
+            };
+
+            for (int s = 0; s <= nSteps; s += stride)
+            {
+                drawStepLine(s);
+            }
+            if (stride > 1 && (nSteps % stride) != 0)
+            {
+                drawStepLine(nSteps);
             }
         }
     }
@@ -1669,7 +1846,13 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 continue;
             }
             const auto rr = rowRect(tn.midiNote);
-            const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->startSamples, tn, pattern_, sr);
+            const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->timelineAnchorSamples, tn, pattern_, sr);
+            const std::int64_t vis0 = timelineClip_->startSamples;
+            const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+            if (a0 < vis0 || a0 >= vis1)
+            {
+                continue;
+            }
             const float velA = juce::jlimit(0.28f, 1.0f, (float)tn.velocity / 127.0f);
 
             if (paintBars)

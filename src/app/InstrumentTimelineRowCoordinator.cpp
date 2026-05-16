@@ -13,7 +13,7 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
 
-#include <cmath>
+#include <optional>
 
 namespace
 {
@@ -51,6 +51,7 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
 {
     static constexpr bool kLogInstrumentLane = false;
     static constexpr float kClipDragThresholdPx = 3.0f;
+    static constexpr int kTrimLaneEdgeHitPx = 7;
 
     explicit MidiEventLane(InstrumentTimelineRowCoordinator& ownerIn,
                             InstrumentTrackController* ctl,
@@ -146,7 +147,14 @@ private:
             const bool sel = ac->isClipSelected(c->id);
             const std::int64_t previewDelta
                 = (dragDragging_ && sel) ? dragEffectivePreviewDeltaSamples_ : std::int64_t{ 0 };
-            const auto eb = getEventBoundsForClip(*c, laneContent, previewDelta);
+            std::optional<std::int64_t> trimStart;
+            std::optional<std::int64_t> trimLen;
+            if (trimLaneGestureActive_ && trimLaneClipId_ == c->id)
+            {
+                trimStart = trimLanePreviewStartSamples_;
+                trimLen = trimLanePreviewLengthSamples_;
+            }
+            const auto eb = getEventBoundsForClip(*c, laneContent, previewDelta, trimStart, trimLen);
             if (eb.isEmpty())
             {
                 continue;
@@ -186,8 +194,81 @@ private:
         dragCouldMove_ = false;
         dragDragging_ = false;
         dragEffectivePreviewDeltaSamples_ = 0;
+        trimLaneGestureActive_ = false;
+        trimLaneDragging_ = false;
 
         const bool midiMoveBlocked = owner_.trackLanes_.isInstrumentMidiClipMoveBlocked();
+        const auto laneContent = getLaneContentBounds();
+
+        if (!midiMoveBlocked && timelineMappingAvailableForClipDrag_() && !laneContent.isEmpty())
+        {
+            for (const auto& up : ac->getClips())
+            {
+                InstrumentMidiClip* const c = up.get();
+                if (c == nullptr || !c->pattern.usesTimelineNotes())
+                {
+                    continue;
+                }
+                const auto eb = getEventBoundsForClip(*c, laneContent, 0);
+                if (eb.isEmpty() || !eb.contains(pos.toInt()))
+                {
+                    continue;
+                }
+                const int px = pos.x;
+                const bool leftZone = px <= eb.getX() + kTrimLaneEdgeHitPx;
+                const bool rightZone = px >= eb.getRight() - kTrimLaneEdgeHitPx;
+                if (!leftZone && !rightZone)
+                {
+                    continue;
+                }
+
+                trimLaneGestureActive_ = true;
+                trimLaneLeftEdge_ = leftZone;
+                trimLaneClipId_ = c->id;
+                trimLaneInitialStartSamples_ = c->startSamples;
+                trimLaneInitialLengthSamples_ = c->lengthSamples;
+                trimLaneTimelineAnchorSamples_ = c->timelineAnchorSamples;
+                trimLanePreviewStartSamples_ = c->startSamples;
+                trimLanePreviewLengthSamples_ = c->lengthSamples;
+
+                const bool toggleMultiTrim = e.mods.isShiftDown();
+                if (toggleMultiTrim)
+                {
+                    const bool thisTrackHasSelection = !ac->getSelectedClipIds().empty();
+                    if (!thisTrackHasSelection)
+                    {
+                        if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
+                        {
+                            owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(
+                                laneTimelineTrackId_);
+                        }
+                        ac->setSelectedClipIdsExclusive(c->id);
+                    }
+                    else
+                    {
+                        ac->toggleClipSelection(c->id);
+                    }
+                }
+                else
+                {
+                    if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
+                    {
+                        owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(laneTimelineTrackId_);
+                    }
+                    if (ac->isClipSelected(c->id))
+                    {
+                        ac->setActiveSelectedClipId(c->id);
+                    }
+                    else
+                    {
+                        ac->setSelectedClipIdsExclusive(c->id);
+                    }
+                }
+
+                repaint();
+                return;
+            }
+        }
 
         if (auto* clip = hitTestClipAtEvent(e.position))
         {
@@ -257,6 +338,33 @@ private:
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (trimLaneGestureActive_)
+        {
+            if (owner_.trackLanes_.isInstrumentMidiClipMoveBlocked())
+            {
+                return;
+            }
+            constexpr std::int64_t kMinLen = 1;
+            const std::int64_t sPtr = laneTimelineSampleAtLocalX(e.position.toInt());
+            const std::int64_t initEndEx = trimLaneInitialStartSamples_ + trimLaneInitialLengthSamples_;
+            if (trimLaneLeftEdge_)
+            {
+                std::int64_t ns = juce::jmin(sPtr, initEndEx - kMinLen);
+                ns = juce::jmax(trimLaneTimelineAnchorSamples_, ns);
+                trimLanePreviewStartSamples_ = ns;
+                trimLanePreviewLengthSamples_ = initEndEx - ns;
+            }
+            else
+            {
+                std::int64_t ne = juce::jmax(sPtr, trimLaneInitialStartSamples_ + kMinLen);
+                trimLanePreviewStartSamples_ = trimLaneInitialStartSamples_;
+                trimLanePreviewLengthSamples_ = ne - trimLaneInitialStartSamples_;
+            }
+            trimLaneDragging_ = true;
+            repaint();
+            return;
+        }
+
         if (!dragCouldMove_)
         {
             return;
@@ -289,7 +397,47 @@ private:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
+        juce::ignoreUnused(e);
         InstrumentTrackController* const ac = activeControllerNullable();
+
+        if (trimLaneGestureActive_)
+        {
+            const bool changed = trimLanePreviewStartSamples_ != trimLaneInitialStartSamples_
+                                 || trimLanePreviewLengthSamples_ != trimLaneInitialLengthSamples_;
+            if (changed && ac != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked())
+            {
+                const TrackId laneTid = laneTimelineTrackId_;
+                const InstrumentMidiClipId cid = trimLaneClipId_;
+                const std::int64_t ns = trimLanePreviewStartSamples_;
+                const std::int64_t nl = trimLanePreviewLengthSamples_;
+                auto execute = owner_.callbacks_.executeUndoableInstrumentEdit;
+                if (execute != nullptr)
+                {
+                    execute(juce::String("Trim MIDI clip"), [this, laneTid, cid, ns, nl]() mutable -> bool {
+                        InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
+                        InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+                        if (ctl == nullptr || !ctl->hasInstrumentTrack())
+                        {
+                            return false;
+                        }
+                        const bool ok = ctl->applyInstrumentMidiClipVisibleTrim(cid, ns, nl);
+                        if (ok)
+                        {
+                            owner_.trackLanes_.repaint();
+                            owner_.inspector_.refreshFromSession();
+                        }
+                        return ok;
+                    });
+                }
+                else if (ac->applyInstrumentMidiClipVisibleTrim(cid, ns, nl))
+                {
+                    owner_.trackLanes_.repaint();
+                    owner_.inspector_.refreshFromSession();
+                }
+            }
+            trimLaneGestureActive_ = false;
+            trimLaneDragging_ = false;
+        }
 
         if (dragDragging_ && ac != nullptr && !owner_.trackLanes_.isInstrumentMidiClipMoveBlocked())
         {
@@ -334,6 +482,61 @@ private:
         dragDragging_ = false;
         dragEffectivePreviewDeltaSamples_ = 0;
         repaint();
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        if (trimLaneDragging_ || dragDragging_)
+        {
+            return;
+        }
+
+        InstrumentTrackController* const ac = activeControllerNullable();
+        if (ac == nullptr || owner_.trackLanes_.isInstrumentMidiClipMoveBlocked()
+            || !timelineMappingAvailableForClipDrag_())
+        {
+            setMouseCursor(juce::MouseCursor::NormalCursor);
+            return;
+        }
+
+        const auto laneContent = getLaneContentBounds();
+        if (laneContent.isEmpty())
+        {
+            setMouseCursor(juce::MouseCursor::NormalCursor);
+            return;
+        }
+
+        const auto pos = e.getPosition();
+        for (const auto& up : ac->getClips())
+        {
+            const auto* c = up.get();
+            if (c == nullptr || !c->pattern.usesTimelineNotes())
+            {
+                continue;
+            }
+            const auto eb = getEventBoundsForClip(*c, laneContent, 0);
+            if (eb.isEmpty() || !eb.contains(pos.toInt()))
+            {
+                continue;
+            }
+            const int px = pos.x;
+            if (px <= eb.getX() + kTrimLaneEdgeHitPx || px >= eb.getRight() - kTrimLaneEdgeHitPx)
+            {
+                setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+                return;
+            }
+        }
+
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+    }
+
+    void mouseExit(const juce::MouseEvent& e) override
+    {
+        juce::ignoreUnused(e);
+        if (!trimLaneDragging_ && !dragDragging_)
+        {
+            setMouseCursor(juce::MouseCursor::NormalCursor);
+        }
     }
 
     void mouseDoubleClick(const juce::MouseEvent& e) override
@@ -388,19 +591,26 @@ private:
 
     [[nodiscard]] juce::Rectangle<int> getEventBoundsForClip(const InstrumentMidiClip& c,
                                                              juce::Rectangle<int> laneContent,
-                                                             std::int64_t previewStartDelta) const
+                                                             std::int64_t previewMoveDeltaSamples,
+                                                             const std::optional<std::int64_t>& spanStartOverride = {},
+                                                             const std::optional<std::int64_t>& spanLengthOverride = {}) const
     {
         using namespace mini_daw::timeline_clip_chrome;
         const auto band = laneContent.toFloat().reduced(0.0f, kEventVerticalMargin);
         TimelineViewportModel& vp = owner_.timelineViewport_;
         const double spp = vp.getSamplesPerPixel();
-        if (spp > 0.0 && std::isfinite(spp) && c.lengthSamples > 0)
+        const std::int64_t spanLen = spanLengthOverride.has_value()
+                                         ? juce::jmax(std::int64_t{ 1 }, *spanLengthOverride)
+                                         : c.lengthSamples;
+        if (spp > 0.0 && std::isfinite(spp) && spanLen > 0)
         {
             const std::int64_t visStart = vp.getVisibleStartSamples();
             const float originX = band.getX();
-            const std::int64_t len = juce::jmax(std::int64_t{ 1 }, c.lengthSamples);
+            const std::int64_t len = juce::jmax(std::int64_t{ 1 }, spanLen);
             const std::int64_t anchor
-                = juce::jmax(std::int64_t{ 0 }, c.startSamples + previewStartDelta);
+                = spanStartOverride.has_value()
+                      ? juce::jmax(std::int64_t{ 0 }, *spanStartOverride)
+                      : juce::jmax(std::int64_t{ 0 }, c.startSamples + previewMoveDeltaSamples);
             const float x0 = TimelineRulerView::sessionSampleToLocalX(anchor, originX, visStart, spp);
             const float x1 = TimelineRulerView::sessionSampleToLocalX(
                 anchor + len, originX, visStart, spp);
@@ -483,6 +693,16 @@ private:
     bool dragDragging_ = false;
     juce::Point<int> dragMouseDownLocal_;
     std::int64_t dragEffectivePreviewDeltaSamples_ = 0;
+
+    bool trimLaneGestureActive_ = false;
+    bool trimLaneDragging_ = false;
+    bool trimLaneLeftEdge_ = false;
+    InstrumentMidiClipId trimLaneClipId_ = 0;
+    std::int64_t trimLaneInitialStartSamples_ = 0;
+    std::int64_t trimLaneInitialLengthSamples_ = 0;
+    std::int64_t trimLaneTimelineAnchorSamples_ = 0;
+    std::int64_t trimLanePreviewStartSamples_ = 0;
+    std::int64_t trimLanePreviewLengthSamples_ = 0;
 };
 
 InstrumentTimelineRowCoordinator::InstrumentTimelineRowCoordinator(

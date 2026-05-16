@@ -15,6 +15,7 @@
 #include <juce_core/juce_core.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 struct ProjectFileClipV1
@@ -93,6 +94,9 @@ struct ProjectFileExperimentalInstrumentClipV1
     /// I3d1: optional in v11 JSON (default 0); load path may derive length when absent/zero.
     std::int64_t startSamples = 0;
     std::int64_t lengthSamples = 0;
+    /// When set: sample where `timelineNotes` tick 0 maps on the session timeline (non-destructive left trim).
+    /// Omit in JSON for legacy clips → anchor equals `startSamples` on load.
+    std::optional<std::int64_t> timelineAnchorSamples;
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
     std::vector<ProjectFileExperimentalInstrumentNoteV1> notes;

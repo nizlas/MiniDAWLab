@@ -61,7 +61,7 @@ namespace
                 if (filterToClipSamples)
                 {
                     const std::int64_t absS =
-                        absoluteSampleForTimelineNote(clip.startSamples, tn, pat, sampleRate);
+                        absoluteSampleForTimelineNote(clip.timelineAnchorSamples, tn, pat, sampleRate);
                     if (absS < clip.startSamples || absS >= clipEndEx)
                     {
                         continue;

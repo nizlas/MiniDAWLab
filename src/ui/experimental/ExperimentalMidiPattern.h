@@ -7,12 +7,13 @@
 // **Prototype path (legacy):** `notes` keyed by discrete `step`; transport maps steps onto
 // `clip.lengthSamples` evenly. Used for older projects and scratch patterns.
 //
-// **Timeline path (I3f):** `timelineNotes` store **ticks since the clip’s MIDI time zero**.
+// **Timeline path (I3f):** `timelineNotes` store **ticks since the clip’s MIDI time zero** (tick 0).
 // Timing is authoritative when `timelineNotes` is non-empty: transport, paint, and editing use
 // tick→sample conversion with `bpm`, `ticksPerQuarter`, and the device timeline sample rate.
 // Cubase‑exported files often have **silent space before the first drum hit**: tick positions are
 // **not shifted** toward the earliest note—we preserve file‑relative ticks so syncing against a full
-// mixdown remains straightforward (`clip.startSamples` still anchors where the MIDI event sits on the session).
+// mixdown remains straightforward. On the session timeline, tick 0 maps to
+// `InstrumentMidiClip::timelineAnchorSamples`; `startSamples` / `lengthSamples` are only the visible window.
 //
 // Internal resolution is **`kDefaultExperimentalTicksPerQuarter` (960)**; imported file PPQ from the MIDI
 // header is rescaled into this domain (rounded with `std::llround`).
@@ -263,12 +264,12 @@ struct ExperimentalMidiPattern
     return clipStartSamples + clipRelativeSampleAtStepCenter(step, numSteps, lengthSamples);
 }
 
-[[nodiscard]] inline std::int64_t absoluteSampleForTimelineNote(const std::int64_t clipStartSamples,
+[[nodiscard]] inline std::int64_t absoluteSampleForTimelineNote(const std::int64_t timelineAnchorSamplesForTickZero,
                                                                 const TimelineMidiNote& n,
                                                                 const ExperimentalMidiPattern& p,
                                                                 double sampleRate) noexcept
 {
     const int tpq = experimentalEffectiveTicksPerQuarter(p);
-    return clipStartSamples
+    return timelineAnchorSamplesForTickZero
            + ticksToRelativeSamples(n.startTick, p.bpm > 0.0 ? p.bpm : 120.0, tpq, sampleRate);
 }
