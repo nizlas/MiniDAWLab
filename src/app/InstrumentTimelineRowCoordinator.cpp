@@ -1088,6 +1088,11 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             });
     };
 
+    callbacks.onRowHeightDrag = [this, laneTid](const int startH, const int delta) {
+        trackLanes_.applyTrackRowHeightDelta(laneTid, startH, delta);
+    };
+    callbacks.onRowHeightDragEnd = [] {};
+
     auto hdr = std::make_unique<TrackHeaderView>(
         std::move(modelProvider), std::move(callbacks), kInvalidTrackId, std::nullopt);
     instrumentTrackHeadersByTrackId_[tid] = std::move(hdr);

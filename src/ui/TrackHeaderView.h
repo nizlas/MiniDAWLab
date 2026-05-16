@@ -66,6 +66,9 @@ struct TrackHeaderCallbacks
     std::function<void()> onOpenInstrumentEditor;
     /// Right-click; null = ignore context menu entirely.
     std::function<void(TrackHeaderView&, const juce::MouseEvent&)> onShowContextMenu;
+    /// Bottom-edge row height drag; `startHeightPx` is header height at mouse-down (session thread).
+    std::function<void(int startHeightPx, int deltaScreenYPx)> onRowHeightDrag;
+    std::function<void()> onRowHeightDragEnd;
 };
 
 class TrackHeaderView : public juce::Component
@@ -102,7 +105,8 @@ private:
         None,
         Arm,
         Mute,
-        Power
+        Power,
+        RowResize
     };
 
     enum class TrackHeaderButtonKind : std::uint8_t
@@ -151,6 +155,8 @@ private:
     void updateStripHoverFromPosition(juce::Point<int> position) noexcept;
     void clearStripHover() noexcept;
 
+    [[nodiscard]] bool isPositionInRowResizeBand(juce::Point<int> position) const noexcept;
+
     TrackHeaderModelProvider modelProvider_;
     TrackHeaderCallbacks callbacks_;
     TrackId dragTrackId_ = kInvalidTrackId;
@@ -158,6 +164,8 @@ private:
     bool headerDragInProgress_ = false;
     DragBlocker dragBlocker_ = DragBlocker::None;
     std::optional<TrackHeaderButtonKind> stripHoveredButton_;
+    int rowResizeStartHeightPx_ = 0;
+    int rowResizeStartScreenY_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackHeaderView)
 };

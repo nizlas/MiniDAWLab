@@ -14,6 +14,7 @@ namespace
     constexpr float kHeaderDragThresholdPx = 3.0f;
 
     constexpr int kTrackControlCellWidth = 22;
+    constexpr int kRowResizeBandPx = 5;
     constexpr int kSquareBodyInsetPx = 1;
     constexpr float kCubaseCtlCornerRadMax = 2.85f;
 
@@ -487,6 +488,36 @@ void TrackHeaderView::clearStripHover() noexcept
     stripHoveredButton_.reset();
 }
 
+bool TrackHeaderView::isPositionInRowResizeBand(juce::Point<int> const position) const noexcept
+{
+    if (callbacks_.onRowHeightDrag == nullptr)
+    {
+        return false;
+    }
+
+    auto const b = getLocalBounds();
+    const int h = b.getHeight();
+    if (h <= 0)
+    {
+        return false;
+    }
+
+    const int bandH = juce::jmin(kRowResizeBandPx, h);
+    const int bandTop = b.getBottom() - bandH;
+    if (position.y < bandTop)
+    {
+        return false;
+    }
+
+    auto const strip = getRightControlsStripBounds();
+    if (!strip.isEmpty() && strip.contains(position))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 TrackHeaderView::TrackHeaderView(TrackHeaderModelProvider modelProvider,
                                  TrackHeaderCallbacks callbacks,
                                  TrackId dragTrackId,
@@ -654,6 +685,15 @@ void TrackHeaderView::mouseDown(juce::MouseEvent const& e)
         return;
     }
 
+    if (isPositionInRowResizeBand(e.getPosition()))
+    {
+        dragBlocker_ = DragBlocker::RowResize;
+        headerDragInProgress_ = false;
+        rowResizeStartHeightPx_ = getHeight();
+        rowResizeStartScreenY_ = e.getScreenY();
+        return;
+    }
+
     dragBlocker_ = DragBlocker::None;
     headerDragInProgress_ = false;
     if (callbacks_.onActivateName != nullptr)
@@ -664,11 +704,21 @@ void TrackHeaderView::mouseDown(juce::MouseEvent const& e)
 
 void TrackHeaderView::mouseDrag(juce::MouseEvent const& e)
 {
-    if (!dragHost_.has_value())
+    if (!e.mods.isLeftButtonDown())
     {
         return;
     }
-    if (!e.mods.isLeftButtonDown())
+
+    if (dragBlocker_ == DragBlocker::RowResize)
+    {
+        if (callbacks_.onRowHeightDrag != nullptr)
+        {
+            callbacks_.onRowHeightDrag(rowResizeStartHeightPx_, e.getScreenY() - rowResizeStartScreenY_);
+        }
+        return;
+    }
+
+    if (!dragHost_.has_value())
     {
         return;
     }
@@ -690,17 +740,48 @@ void TrackHeaderView::mouseDrag(juce::MouseEvent const& e)
 
 void TrackHeaderView::mouseMove(juce::MouseEvent const& e)
 {
+    if (dragBlocker_ == DragBlocker::RowResize)
+    {
+        setMouseCursor(juce::MouseCursor(juce::MouseCursor::UpDownResizeCursor));
+        return;
+    }
+
+    if (isPositionInRowResizeBand(e.getPosition()))
+    {
+        setMouseCursor(juce::MouseCursor(juce::MouseCursor::UpDownResizeCursor));
+    }
+    else
+    {
+        setMouseCursor(juce::MouseCursor(juce::MouseCursor::NormalCursor));
+    }
+
     updateStripHoverFromPosition(e.getPosition());
 }
 
 void TrackHeaderView::mouseExit(juce::MouseEvent const& e)
 {
     juce::ignoreUnused(e);
+    if (dragBlocker_ != DragBlocker::RowResize)
+    {
+        setMouseCursor(juce::MouseCursor(juce::MouseCursor::NormalCursor));
+    }
     clearStripHover();
 }
 
 void TrackHeaderView::mouseUp(juce::MouseEvent const& e)
 {
+    if (dragBlocker_ == DragBlocker::RowResize)
+    {
+        dragBlocker_ = DragBlocker::None;
+        if (callbacks_.onRowHeightDragEnd != nullptr)
+        {
+            callbacks_.onRowHeightDragEnd();
+        }
+        setMouseCursor(juce::MouseCursor(juce::MouseCursor::NormalCursor));
+        juce::ignoreUnused(e);
+        return;
+    }
+
     if (headerDragInProgress_ && dragHost_.has_value())
     {
         dragHost_->onHeaderDragEnded(dragTrackId_);

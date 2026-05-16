@@ -218,6 +218,9 @@ public:
     /// `setInstrumentMidiClipMoveBlockedPredicate`). Defaults to `RecorderService::isRecording()` when unset.
     [[nodiscard]] bool isInstrumentMidiClipMoveBlocked() const noexcept;
 
+    /// [Message thread] Runtime-only row height drag (no undo, no persistence).
+    void applyTrackRowHeightDelta(TrackId tid, int startHeightPx, int deltaPx) noexcept;
+
 private:
     void timerCallback() override;
 
@@ -244,12 +247,15 @@ private:
     void clearHeaderTrackDragState() noexcept;
     [[nodiscard]] int yForVisibleInsertGapK(int k) const noexcept;
     [[nodiscard]] int audioLaneIndexFromTrackId(TrackId tid) const noexcept;
+    [[nodiscard]] int rowHeightForTrack(TrackId tid) const noexcept;
     [[nodiscard]] int rowHeightForVisibleEntry(int visibleIndex) const noexcept;
     [[nodiscard]] int visibleRowPixelHeight(int visibleIndex) const noexcept;
     [[nodiscard]] int totalContentHeightPx() const noexcept;
     [[nodiscard]] int maxVerticalScrollOffsetPx() const noexcept;
     void setVerticalScrollOffsetPx(int newOffset) noexcept;
     [[nodiscard]] int findVisibleRowIndexForDragSource(TrackId movedId) const noexcept;
+    void prunePerTrackRowHeightsNotInSession() noexcept;
+    void paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g) const noexcept;
 
     Session& session_;
     Transport& transport_;
@@ -268,6 +274,8 @@ private:
     int minRowHeightPx_ = 36;
     int maxRowHeightPx_ = 480;
     int verticalScrollOffsetPx_ = 0;
+
+    std::unordered_map<TrackId, int> perTrackRowHeightPx_;
 
     std::unordered_map<TrackId, InstrumentTimelineAttachment> instrumentTimelineAttachments_;
     // In-order preview blocks for the current take; cleared whenever `!isRecording()`; appended
