@@ -856,6 +856,24 @@ void InstrumentTimelineRowCoordinator::repaintInstrumentTrackRow()
     }
 }
 
+void InstrumentTimelineRowCoordinator::rewireInstrumentTrackRenameHandlers() noexcept
+{
+    for (auto& kv : instrumentTrackHeadersByTrackId_)
+    {
+        TrackHeaderView* const h = kv.second.get();
+        if (h == nullptr)
+        {
+            continue;
+        }
+        const TrackId laneTid = kv.first;
+        h->patchRenameCallbacks(
+            [this] { return !trackLanes_.isStructuralTimelineEditBlocked(); },
+            [this, laneTid](const juce::String raw) -> bool {
+                return trackLanes_.invokeUndoableRenameTrackRequested(laneTid, raw);
+            });
+    }
+}
+
 void InstrumentTimelineRowCoordinator::tearDownExperimentalInstrumentTimelineUiForTrack(const TrackId tid) noexcept
 {
     if (tid == kInvalidTrackId)
@@ -959,7 +977,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
     TrackHeaderModelProvider modelProvider = [this, ctl, laneTid]() -> TrackHeaderModel {
         TrackHeaderModel m;
         ExperimentalInstrumentHost* mh = instrumentRuntime_.getInstrumentHostForTrack(laneTid);
-        m.subtitle = ctl->getLaneHeaderSubtitle();
+        m.subtitle = {};
         m.active = ctl->isActive();
         m.armed = false;
         m.muted = ctl->isMuted();
@@ -976,12 +994,12 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             }
             else
             {
-                m.name = ctl->getLaneHeaderTitle();
+                m.name = juce::String("Track ") + juce::String((juce::int64)laneTid);
             }
         }
         else
         {
-            m.name = ctl->getLaneHeaderTitle();
+            m.name = juce::String("Track ") + juce::String((juce::int64)laneTid);
         }
         m.instrumentEditorAvailable = mh != nullptr && mh->hasInstrument();
         return m;
@@ -1092,7 +1110,13 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         trackLanes_.applyTrackRowHeightDelta(laneTid, startH, delta);
     };
     callbacks.onRowHeightDragEnd = [this, laneTid, ctl] {
-        trackLanes_.snapTrackHeaderRowHeightAfterResize(laneTid, ctl->getLaneHeaderSubtitle().isNotEmpty());
+        trackLanes_.snapTrackHeaderRowHeightAfterResize(laneTid, false);
+    };
+    callbacks.canBeginRenameTrack = [this] {
+        return !trackLanes_.isStructuralTimelineEditBlocked();
+    };
+    callbacks.onCommitRenameTrack = [this, laneTid](const juce::String raw) -> bool {
+        return trackLanes_.invokeUndoableRenameTrackRequested(laneTid, raw);
     };
 
     auto hdr = std::make_unique<TrackHeaderView>(

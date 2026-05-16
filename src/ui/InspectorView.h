@@ -55,6 +55,12 @@ public:
 
     void setInspectorPluginHost(InspectorPluginHost host) noexcept { pluginHost_ = std::move(host); }
 
+    /// [Message thread] Undoable rename (`TrackLanesEditCoordinator`). Empty default = inspector name field commits as no-op.
+    void setRenameTrackHandler(std::function<bool(TrackId, juce::String)> fn) noexcept
+    {
+        renameTrackHandler_ = std::move(fn);
+    }
+
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
     void dragOperationEnded(const juce::DragAndDropTarget::SourceDetails& details) override;
@@ -96,8 +102,9 @@ private:
     void textEditorFocusLost(juce::TextEditor& editor) override;
 
     void commitVolumeField();
+    void commitActiveTrackNameField();
     void setVolumeEditorTextFromLinearGain(float linearGain);
-    void updateElidedTrackTitleDisplay();
+    void syncActiveTrackNameEditorDisplay();
     void syncInsertsWhenInspectorDisabled();
     void syncInsertsNoActiveTrack();
     void syncInsertsForActiveTrack(TrackId active);
@@ -108,7 +115,7 @@ private:
     Session& session_;
     InspectorPluginHost pluginHost_;
     juce::Label sectionTitleLabel_;
-    juce::Label activeTrackTitleLabel_;
+    juce::TextEditor activeTrackNameEditor_;
     juce::Label channelVolumeCaptionLabel_;
     juce::TextEditor channelVolumeDbEditor_;
     juce::Label channelVolumeDbUnitLabel_;
@@ -137,6 +144,9 @@ private:
     /// Last insert-row model shown in the UI (avoids rebuilding strips on every timer tick).
     std::vector<InspectorInsertRow> lastShownInsertRows_;
     juce::String activeTrackPlainName_;
+
+    std::function<bool(TrackId, juce::String)> renameTrackHandler_;
+    bool inspectorNameEditorGuard_ = false;
 
     TrackId lastShownInsertRowsTrackId_ = kInvalidTrackId;
     TrackId lastShownTrackId_ = kInvalidTrackId;

@@ -56,6 +56,9 @@ public:
     void refreshMidiEditorInstrumentUiIfOpen();
     void openMidiEditorForInstrumentClip(TrackId timelineInstrumentTrackId, InstrumentMidiClipId clipId);
 
+    /// After `TrackLanesEditCoordinator::install()` wires rename; patches headers built earlier at startup.
+    void rewireInstrumentTrackRenameHandlers() noexcept;
+
 private:
     struct MidiEventLane;
     friend struct MidiEventLane;

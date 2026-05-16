@@ -469,9 +469,15 @@ InspectorView::InspectorView(Session& session)
         juce::Font(juce::FontOptions{}.withHeight(13.5f)).boldened());
     addAndMakeVisible(sectionTitleLabel_);
 
-    activeTrackTitleLabel_.setJustificationType(juce::Justification::centredLeft);
-    activeTrackTitleLabel_.setFont(juce::FontOptions(13.0f));
-    addAndMakeVisible(activeTrackTitleLabel_);
+    activeTrackNameEditor_.setMultiLine(false);
+    activeTrackNameEditor_.setReturnKeyStartsNewLine(false);
+    activeTrackNameEditor_.setScrollbarsShown(false);
+    activeTrackNameEditor_.setJustification(juce::Justification::centredLeft);
+    activeTrackNameEditor_.setFont(juce::FontOptions(13.0f));
+    activeTrackNameEditor_.setIndents(4, 4);
+    activeTrackNameEditor_.setCaretVisible(true);
+    activeTrackNameEditor_.addListener(this);
+    addAndMakeVisible(activeTrackNameEditor_);
 
     channelVolumeCaptionLabel_.setText("Channel volume", juce::dontSendNotification);
     channelVolumeCaptionLabel_.setFont(juce::FontOptions(11.0f));
@@ -939,28 +945,47 @@ void InspectorView::setVolumeEditorTextFromLinearGain(const float linearGain)
                                    juce::dontSendNotification);
 }
 
-void InspectorView::updateElidedTrackTitleDisplay()
+void InspectorView::syncActiveTrackNameEditorDisplay()
 {
-    if (activeTrackPlainName_.isEmpty())
+    if (inspectorNameEditorGuard_)
     {
-        activeTrackTitleLabel_.setTooltip({});
-        activeTrackTitleLabel_.setText({}, juce::dontSendNotification);
         return;
     }
+    activeTrackNameEditor_.setTooltip(activeTrackPlainName_.isEmpty() ? juce::String{}
+                                                                      : activeTrackPlainName_);
+    activeTrackNameEditor_.setText(activeTrackPlainName_, juce::dontSendNotification);
+}
 
-    const float w = static_cast<float>(activeTrackTitleLabel_.getWidth());
-    if (w <= 1.f)
+void InspectorView::commitActiveTrackNameField()
+{
+    if (inspectorNameEditorGuard_ || renameTrackHandler_ == nullptr)
     {
-        activeTrackTitleLabel_.setTooltip(activeTrackPlainName_);
-        activeTrackTitleLabel_.setText(activeTrackPlainName_, juce::dontSendNotification);
         return;
     }
-
-    const juce::Font font = activeTrackTitleLabel_.getFont();
-    const float maxW = w - 2.f;
-    const juce::String shown = elideTextToFitWidth(activeTrackPlainName_, font, maxW);
-    activeTrackTitleLabel_.setTooltip(activeTrackPlainName_);
-    activeTrackTitleLabel_.setText(shown, juce::dontSendNotification);
+    const TrackId active = session_.getActiveTrackId();
+    if (active == kInvalidTrackId)
+    {
+        return;
+    }
+    const juce::String trimmed = activeTrackNameEditor_.getText().trim();
+    if (trimmed.isEmpty())
+    {
+        inspectorNameEditorGuard_ = true;
+        activeTrackNameEditor_.setText(activeTrackPlainName_, juce::dontSendNotification);
+        inspectorNameEditorGuard_ = false;
+        return;
+    }
+    if (trimmed == activeTrackPlainName_)
+    {
+        return;
+    }
+    inspectorNameEditorGuard_ = true;
+    const bool ok = renameTrackHandler_(active, trimmed);
+    inspectorNameEditorGuard_ = false;
+    if (!ok)
+    {
+        activeTrackNameEditor_.setText(activeTrackPlainName_, juce::dontSendNotification);
+    }
 }
 
 void InspectorView::syncInsertsWhenInspectorDisabled()
@@ -1091,8 +1116,10 @@ void InspectorView::refreshFromSession()
     {
         setEnabled(false);
         activeTrackPlainName_.clear();
-        activeTrackTitleLabel_.setText("—", juce::dontSendNotification);
-        activeTrackTitleLabel_.setTooltip({});
+        inspectorNameEditorGuard_ = true;
+        activeTrackNameEditor_.setText("—", juce::dontSendNotification);
+        activeTrackNameEditor_.setTooltip({});
+        inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
         return;
@@ -1104,21 +1131,28 @@ void InspectorView::refreshFromSession()
     if (idx < 0)
     {
         activeTrackPlainName_.clear();
-        activeTrackTitleLabel_.setText("(no active track)", juce::dontSendNotification);
-        activeTrackTitleLabel_.setTooltip({});
+        inspectorNameEditorGuard_ = true;
+        activeTrackNameEditor_.setText("(no active track)", juce::dontSendNotification);
+        activeTrackNameEditor_.setTooltip({});
+        inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
         syncInsertsNoActiveTrack();
         return;
     }
     const Track& tr = snap->getTrack(idx);
     activeTrackPlainName_ = tr.getName();
-    updateElidedTrackTitleDisplay();
 
     const float snapGain = tr.getChannelFaderGain();
     const bool switchedTrack = (lastShownTrackId_ != active);
     lastShownTrackId_ = active;
 
     syncInsertsForActiveTrack(active);
+
+    const bool nameFocused = activeTrackNameEditor_.hasKeyboardFocus(false);
+    if (!nameFocused || switchedTrack)
+    {
+        syncActiveTrackNameEditorDisplay();
+    }
 
     if (channelVolumeDbEditor_.hasKeyboardFocus(false) && !switchedTrack)
         return;
@@ -1142,7 +1176,7 @@ void InspectorView::resized()
 {
     auto area = getLocalBounds().reduced(4);
     sectionTitleLabel_.setBounds(area.removeFromTop(20));
-    activeTrackTitleLabel_.setBounds(area.removeFromTop(22));
+    activeTrackNameEditor_.setBounds(area.removeFromTop(22));
     area.removeFromTop(4);
 
     channelVolumeCaptionLabel_.setBounds(area.removeFromTop(18));
@@ -1209,19 +1243,35 @@ void InspectorView::resized()
         postStageDrop_->setBounds(postInsertBlockBounds_);
     }
 
-    updateElidedTrackTitleDisplay();
+    syncActiveTrackNameEditorDisplay();
 }
 
 void InspectorView::textEditorReturnKeyPressed(juce::TextEditor& editor)
 {
     if (&editor == &channelVolumeDbEditor_)
+    {
         commitVolumeField();
+    }
+    else if (&editor == &activeTrackNameEditor_)
+    {
+        commitActiveTrackNameField();
+    }
 }
 
 void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
 {
-    if (&editor != &channelVolumeDbEditor_)
+    if (&editor == &activeTrackNameEditor_)
+    {
+        inspectorNameEditorGuard_ = true;
+        activeTrackNameEditor_.setText(activeTrackPlainName_, juce::dontSendNotification);
+        inspectorNameEditorGuard_ = false;
         return;
+    }
+
+    if (&editor != &channelVolumeDbEditor_)
+    {
+        return;
+    }
 
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     if (snap == nullptr || snap->getNumTracks() <= 0)
@@ -1238,5 +1288,11 @@ void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
 void InspectorView::textEditorFocusLost(juce::TextEditor& editor)
 {
     if (&editor == &channelVolumeDbEditor_)
+    {
         commitVolumeField();
+    }
+    else if (&editor == &activeTrackNameEditor_)
+    {
+        commitActiveTrackNameField();
+    }
 }

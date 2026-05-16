@@ -133,9 +133,11 @@ public:
     /// Refresh instrumentLoaded_ from host. Never deletes the track or clips.
     void syncShellWithHostState();
 
+    /// Legacy lane-header hooks: display name is **`Track::getName()`** from the session (`InstrumentTimelineRowCoordinator`).
+    /// These return empty; subtitles are unused.
     [[nodiscard]] juce::String getLaneHeaderTitle() const;
     [[nodiscard]] juce::String getLaneHeaderSubtitle() const;
-    /// Two lines: title + newline + subtitle (for logging or simple labels).
+    /// Empty when `getLaneHeaderTitle()` is empty; otherwise legacy two-line concatenation.
     [[nodiscard]] juce::String getLaneHeaderText() const;
 
     /// Experimental lane header **Power** (on = processed); default on when the track shell exists.

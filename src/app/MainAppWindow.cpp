@@ -781,6 +781,11 @@ public:
             });
         trackLanesEditCoordinator_->install();
 
+        if (instrumentTimelineRowCoordinator_ != nullptr)
+        {
+            instrumentTimelineRowCoordinator_->rewireInstrumentTrackRenameHandlers();
+        }
+
         deviceManager.addChangeListener(this);
         transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
         startTimerHz(10);

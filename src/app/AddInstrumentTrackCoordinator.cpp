@@ -8,8 +8,6 @@
 
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "domain/Session.h"
-#include "domain/SessionSnapshot.h"
-#include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
@@ -18,27 +16,6 @@ namespace
     constexpr const char* kGrooveAgentAddFailureMsg
         = "Could not find or load Groove Agent SE. Make sure it is installed, then rescan VST3 plugins or "
           "choose it manually from the VST3 picker.";
-
-    [[nodiscard]] juce::String proposeNextGrooveAgentInstrumentTrackDisplayName(Session& session)
-    {
-        int shells = 0;
-        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
-        if (snap != nullptr)
-        {
-            for (int ti = 0; ti < snap->getNumTracks(); ++ti)
-            {
-                if (snap->getTrack(ti).getKind() == TrackKind::Instrument)
-                {
-                    ++shells;
-                }
-            }
-        }
-        if (shells == 0)
-        {
-            return juce::String("Groove Agent");
-        }
-        return juce::String("Groove Agent ") + juce::String(shells + 1);
-    }
 
     /// Loads another Groove Agent instance using an existing host's description and bundle path only.
     /// Intentionally does **not** restore plugin state so normal Add Track gets a fresh/default kit.
@@ -235,8 +212,7 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
     Session& session = refs_.session;
     InstrumentRuntimeCoordinator& instrumentRuntimeCoordinator = refs_.instrumentRuntimeCoordinator;
 
-    const juce::String displayName = proposeNextGrooveAgentInstrumentTrackDisplayName(session);
-    const std::optional<TrackId> newIdOpt = session.appendExperimentalInstrumentShellTrack(displayName);
+    const std::optional<TrackId> newIdOpt = session.appendExperimentalInstrumentShellTrack({});
     if (!newIdOpt.has_value())
     {
         juce::AlertWindow::showMessageBoxAsync(

@@ -332,6 +332,66 @@ void TrackLanesEditCoordinator::install()
             }
         });
 
+    auto renameTrack = [this](const TrackId tid, const juce::String& raw) -> bool {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return false;
+        }
+        if (tid == kInvalidTrackId)
+        {
+            return false;
+        }
+        const juce::String trimmed = raw.trim();
+        if (trimmed.isEmpty())
+        {
+            return false;
+        }
+        const std::shared_ptr<const SessionSnapshot> snapBefore
+            = session_.loadSessionSnapshotForAudioThread();
+        if (snapBefore == nullptr)
+        {
+            return false;
+        }
+        const int ix = snapBefore->findTrackIndexById(tid);
+        if (ix < 0)
+        {
+            return false;
+        }
+        if (trimmed == snapBefore->getTrack(ix).getName())
+        {
+            return false;
+        }
+        bool committed = false;
+        callbacks_.executeUndoableSessionEdit(
+            "Rename track",
+            [this, tid, trimmed, &committed]() -> bool {
+                const std::shared_ptr<const SessionSnapshot> before
+                    = session_.loadSessionSnapshotForAudioThread();
+                if (before == nullptr)
+                {
+                    return false;
+                }
+                session_.setTrackName(tid, trimmed);
+                const std::shared_ptr<const SessionSnapshot> after
+                    = session_.loadSessionSnapshotForAudioThread();
+                if (after == nullptr || after == before)
+                {
+                    return false;
+                }
+                callbacks_.syncViewportFromSession();
+                trackLanesView_.syncTracksFromSession();
+                rulerView_.repaint();
+                trackLanesView_.repaint();
+                inspectorView_.refreshFromSession();
+                committed = true;
+                return true;
+            });
+        return committed;
+    };
+
+    trackLanesView_.setOnUndoableRenameTrackRequested(renameTrack);
+    inspectorView_.setRenameTrackHandler(renameTrack);
+
     // UI-only mutex with the instrument timeline header row. Audio headers paint inactive
     // when the instrument row is the UI-active row; clicking any audio header clears it.
     // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.

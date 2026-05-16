@@ -132,6 +132,7 @@ public:
     /// (timeline order preserved on save/load and undo/redo).
     /// **Multiple instrument tracks** may exist — this does **not** refuse when another `Instrument`
     /// row is already present. Returns the new stable `TrackId` when published, else `nullopt`.
+    /// When `trackDisplayName` is empty, the name defaults to **`"Track " + newId`**, matching `addTrack()`.
     [[nodiscard]] std::optional<TrackId> appendExperimentalInstrumentShellTrack(juce::String trackDisplayName) noexcept;
 
     // [Message thread] Move one placed clip in **timeline sample** space. Ordering (promote to 0
@@ -186,6 +187,9 @@ public:
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.
     void setTrackMuted(TrackId trackId, bool muted) noexcept;
+
+    // [Message thread] Rename one lane (`Track::getName()`). Trim-only no-op / empty after trim / unknown id: no publish.
+    void setTrackName(TrackId trackId, juce::String newName) noexcept;
 
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.

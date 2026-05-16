@@ -7,6 +7,7 @@
 #include "ui/ForbiddenCursor.h"
 
 #include <array>
+#include <memory>
 #include <juce_core/juce_core.h>
 
 namespace
@@ -665,6 +666,150 @@ void TrackHeaderView::setHeaderReorderDrag(
     }
 }
 
+void TrackHeaderView::patchRenameCallbacks(std::function<bool()> canBeginRenameTrack,
+                                           std::function<bool(juce::String trimmedNewName)>
+                                               onCommitRenameTrack) noexcept
+{
+    callbacks_.canBeginRenameTrack = std::move(canBeginRenameTrack);
+    callbacks_.onCommitRenameTrack = std::move(onCommitRenameTrack);
+}
+
+void TrackHeaderView::ensureTrackNameEditor()
+{
+    if (trackNameEditor_ != nullptr)
+    {
+        return;
+    }
+    trackNameEditor_ = std::make_unique<juce::TextEditor>();
+    trackNameEditor_->setMultiLine(false);
+    trackNameEditor_->setReturnKeyStartsNewLine(false);
+    trackNameEditor_->setScrollbarsShown(false);
+    trackNameEditor_->setFont(juce::Font(juce::FontOptions(14.0f)));
+    trackNameEditor_->setIndents(4, 2);
+    trackNameEditor_->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
+    trackNameEditor_->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    trackNameEditor_->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::skyblue);
+    addChildComponent(*trackNameEditor_);
+    trackNameEditor_->setAlwaysOnTop(true);
+    trackNameEditor_->setVisible(false);
+}
+
+void TrackHeaderView::layoutInlineTrackNameEditor()
+{
+    if (trackNameEditor_ == nullptr || !trackNameEditor_->isVisible())
+    {
+        return;
+    }
+    trackNameEditor_->setBounds(computeHeaderContentLayout().nameTextBounds);
+}
+
+void TrackHeaderView::beginInlineTrackRenameIfPossible(juce::Point<int> const clickLocal)
+{
+    if (callbacks_.onCommitRenameTrack == nullptr)
+    {
+        return;
+    }
+    if (callbacks_.canBeginRenameTrack != nullptr && !callbacks_.canBeginRenameTrack())
+    {
+        return;
+    }
+    if (trackNameEditor_ != nullptr && trackNameEditor_->isVisible())
+    {
+        return;
+    }
+    if (isPositionInRowResizeBand(clickLocal))
+    {
+        return;
+    }
+    auto const layout = computeHeaderContentLayout();
+    if (layout.nameTextBounds.isEmpty() || !layout.nameTextBounds.contains(clickLocal))
+    {
+        return;
+    }
+    ensureTrackNameEditor();
+    trackNameEditor_->setText(modelProvider_().name, juce::dontSendNotification);
+    trackNameEditor_->setBounds(layout.nameTextBounds);
+    trackNameEditor_->addListener(this);
+    trackNameEditor_->setVisible(true);
+    trackNameEditor_->grabKeyboardFocus();
+    dragBlocker_ = DragBlocker::InlineRename;
+    repaint();
+}
+
+void TrackHeaderView::cancelInlineTrackRename() noexcept
+{
+    ignoreTrackNameEditorFocusLoss_ = true;
+    if (trackNameEditor_ != nullptr)
+    {
+        trackNameEditor_->removeListener(this);
+        trackNameEditor_->setText(modelProvider_().name, juce::dontSendNotification);
+        trackNameEditor_->setVisible(false);
+    }
+    dragBlocker_ = DragBlocker::None;
+    repaint();
+    ignoreTrackNameEditorFocusLoss_ = false;
+}
+
+void TrackHeaderView::submitInlineTrackRenameFromEditor()
+{
+    if (trackNameRenameSubmitting_ || trackNameEditor_ == nullptr || !trackNameEditor_->isVisible())
+    {
+        return;
+    }
+    trackNameRenameSubmitting_ = true;
+    const juce::String trimmed = trackNameEditor_->getText().trim();
+    trackNameEditor_->removeListener(this);
+    trackNameEditor_->setVisible(false);
+    dragBlocker_ = DragBlocker::None;
+    repaint();
+
+    if (!trimmed.isEmpty() && callbacks_.onCommitRenameTrack != nullptr)
+    {
+        juce::ignoreUnused(callbacks_.onCommitRenameTrack(trimmed));
+    }
+
+    trackNameRenameSubmitting_ = false;
+}
+
+void TrackHeaderView::textEditorReturnKeyPressed(juce::TextEditor& e)
+{
+    juce::ignoreUnused(e);
+    submitInlineTrackRenameFromEditor();
+}
+
+void TrackHeaderView::textEditorEscapeKeyPressed(juce::TextEditor& e)
+{
+    juce::ignoreUnused(e);
+    cancelInlineTrackRename();
+}
+
+void TrackHeaderView::textEditorFocusLost(juce::TextEditor& e)
+{
+    if (trackNameEditor_.get() != &e)
+    {
+        return;
+    }
+    if (ignoreTrackNameEditorFocusLoss_ || trackNameRenameSubmitting_)
+    {
+        return;
+    }
+    submitInlineTrackRenameFromEditor();
+}
+
+void TrackHeaderView::resized()
+{
+    layoutInlineTrackNameEditor();
+}
+
+void TrackHeaderView::mouseDoubleClick(juce::MouseEvent const& e)
+{
+    if (e.mods.isPopupMenu())
+    {
+        return;
+    }
+    beginInlineTrackRenameIfPossible(e.getPosition());
+}
+
 void TrackHeaderView::paint(juce::Graphics& g)
 {
     TrackHeaderModel const m = modelProvider_();
@@ -684,7 +829,8 @@ void TrackHeaderView::paint(juce::Graphics& g)
 
     auto const layout = computeHeaderContentLayout();
     auto nameArea = layout.nameTextBounds;
-    if (!nameArea.isEmpty())
+    if (!nameArea.isEmpty()
+        && (trackNameEditor_ == nullptr || !trackNameEditor_->isVisible()))
     {
         g.setColour(juce::Colours::whitesmoke);
         g.setFont(14.0f);
@@ -834,6 +980,11 @@ void TrackHeaderView::mouseDrag(juce::MouseEvent const& e)
         return;
     }
 
+    if (dragBlocker_ == DragBlocker::InlineRename)
+    {
+        return;
+    }
+
     if (dragBlocker_ == DragBlocker::RowResize)
     {
         if (callbacks_.onRowHeightDrag != nullptr)
@@ -868,6 +1019,12 @@ void TrackHeaderView::mouseMove(juce::MouseEvent const& e)
     if (dragBlocker_ == DragBlocker::RowResize)
     {
         setMouseCursor(juce::MouseCursor(juce::MouseCursor::UpDownResizeCursor));
+        return;
+    }
+
+    if (dragBlocker_ == DragBlocker::InlineRename)
+    {
+        setMouseCursor(juce::MouseCursor(juce::MouseCursor::NormalCursor));
         return;
     }
 

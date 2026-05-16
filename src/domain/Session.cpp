@@ -456,7 +456,7 @@ std::optional<TrackId> Session::appendExperimentalInstrumentShellTrack(juce::Str
     jassert(newId != kInvalidTrackId);
     if (trackDisplayName.isEmpty())
     {
-        trackDisplayName = juce::String("Groove Agent SE");
+        trackDisplayName = juce::String("Track ") + juce::String(newId);
     }
     try
     {
@@ -797,6 +797,33 @@ void Session::setTrackMuted(const TrackId trackId, const bool muted) noexcept
     }
     const std::shared_ptr<const SessionSnapshot> next
         = SessionSnapshot::withTrackMuted(*current, trackId, muted);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+void Session::setTrackName(const TrackId trackId, juce::String newName) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return;
+    }
+    const juce::String trimmed = newName.trim();
+    if (trimmed.isEmpty() || trimmed == current->getTrack(idx).getName())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackRenamed(*current, trackId, std::move(newName));
     jassert(next != nullptr);
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }

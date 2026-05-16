@@ -178,6 +178,10 @@ public:
     void setOnUndoableClipSplitRequested(
         std::function<void(PlacedClipId, std::int64_t, bool)> fn) noexcept;
 
+    /// [Message thread] Undoable rename via `TrackLanesEditCoordinator` (`executeUndoableSessionEdit`).
+    void setOnUndoableRenameTrackRequested(std::function<bool(TrackId, juce::String)> fn) noexcept;
+    [[nodiscard]] bool invokeUndoableRenameTrackRequested(TrackId tid, juce::String proposedName) noexcept;
+
     /// [Message thread] Wired once by `Main`: when this returns true, audio header models force
     /// `m.active = false` regardless of `Session::getActiveTrackId()` (UI-only mutex with the
     /// experimental instrument header — no `Session` change).
@@ -335,6 +339,7 @@ private:
     std::function<bool()> structuralTimelineEditBlockedPredicate_;
     std::function<bool()> instrumentMidiClipMoveBlockedPredicate_;
     std::function<void(TrackId)> onAudioTrackImportClipAtPlayhead_;
+    std::function<bool(TrackId, juce::String)> onUndoableRenameTrackRequested_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

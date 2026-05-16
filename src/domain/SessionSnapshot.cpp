@@ -1093,6 +1093,54 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
                             previous.getRightLocatorSamples()));
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRenamed(const SessionSnapshot& previous,
+                                                                         const TrackId trackId,
+                                                                         juce::String newName) noexcept
+{
+    const juce::String trimmed = newName.trim();
+    if (trackId == kInvalidTrackId || trimmed.isEmpty())
+    {
+        jassert(trackId != kInvalidTrackId);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples()});
+    }
+    const Track& current = previous.getTrack(tIdx);
+    if (trimmed == current.getName())
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+        else
+        {
+            out.push_back(t.renamed(trimmed));
+        }
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples()));
+}
+
 bool SessionSnapshot::isEmpty() const noexcept
 {
     for (const Track& t : tracks_)

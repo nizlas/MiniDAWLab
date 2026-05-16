@@ -188,6 +188,13 @@ public:
         TrackId trackId,
         bool trackMuted) noexcept;
 
+    /// [Message thread] Rename one track row only (trimmed name). Unknown id or empty name after trim:
+    /// no-op copy of `previous`. Same name after trim: no-op copy.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRenamed(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        juce::String newName) noexcept;
+
     // [Message thread] **Load-only:** publish a full pre-built track list in one step (e.g. project
     // open). Does not add clips incrementally. `tracks` must be non-empty. Stored arrangement extent
     // is 0 (use `withTracks` overload for v3 load).

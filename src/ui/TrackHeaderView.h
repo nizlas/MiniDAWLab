@@ -69,9 +69,13 @@ struct TrackHeaderCallbacks
     /// Bottom-edge row height drag; `startHeightPx` is header height at mouse-down (session thread).
     std::function<void(int startHeightPx, int deltaScreenYPx)> onRowHeightDrag;
     std::function<void()> onRowHeightDragEnd;
+    /// Double-click inline rename; null `onCommitRenameTrack` disables rename affordance.
+    std::function<bool()> canBeginRenameTrack;
+    std::function<bool(juce::String trimmedNewName)> onCommitRenameTrack;
 };
 
-class TrackHeaderView : public juce::Component
+class TrackHeaderView : public juce::Component,
+                        private juce::TextEditor::Listener
 {
 public:
     /// Horizontal strip: each M/R/power/instrument cell (`squareStripButtonBodyFromCell` insets inside).
@@ -112,8 +116,10 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseDoubleClick(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
+    void resized() override;
 
     /// Empty when instrument editor strip cell is inactive (audio tracks or no instrument).
     [[nodiscard]] juce::Rectangle<int> getInstrumentEditorButtonBounds() const noexcept;
@@ -126,6 +132,10 @@ public:
     void setHeaderReorderDrag(std::optional<TrackHeaderDragHost> host,
                               TrackId dragTrackIdForwarded) noexcept;
 
+    /// [Message thread] Patch rename callbacks after construction (instrument rows created before edit coordinator `install()`).
+    void patchRenameCallbacks(std::function<bool()> canBeginRenameTrack,
+                              std::function<bool(juce::String trimmedNewName)> onCommitRenameTrack) noexcept;
+
 private:
     enum class DragBlocker : std::uint8_t
     {
@@ -133,7 +143,8 @@ private:
         Arm,
         Mute,
         Power,
-        RowResize
+        RowResize,
+        InlineRename,
     };
 
     enum class TrackHeaderButtonKind : std::uint8_t
@@ -199,6 +210,16 @@ private:
     [[nodiscard]] bool stripCellHitIntersectsVisibleChrome(juce::Rectangle<int> cell,
                                                            juce::Point<int> pos) const noexcept;
 
+    void ensureTrackNameEditor();
+    void layoutInlineTrackNameEditor();
+    void beginInlineTrackRenameIfPossible(juce::Point<int> clickLocal);
+    void cancelInlineTrackRename() noexcept;
+    void submitInlineTrackRenameFromEditor();
+
+    void textEditorReturnKeyPressed(juce::TextEditor& e) override;
+    void textEditorEscapeKeyPressed(juce::TextEditor& e) override;
+    void textEditorFocusLost(juce::TextEditor& e) override;
+
     TrackHeaderModelProvider modelProvider_;
     TrackHeaderCallbacks callbacks_;
     TrackId dragTrackId_ = kInvalidTrackId;
@@ -208,6 +229,10 @@ private:
     std::optional<TrackHeaderButtonKind> stripHoveredButton_;
     int rowResizeStartHeightPx_ = 0;
     int rowResizeStartScreenY_ = 0;
+
+    std::unique_ptr<juce::TextEditor> trackNameEditor_;
+    bool trackNameRenameSubmitting_ = false;
+    bool ignoreTrackNameEditorFocusLoss_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackHeaderView)
 };

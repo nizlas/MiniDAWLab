@@ -40,3 +40,14 @@ const PlacedClip& Track::getPlacedClip(const int index) const
     jassert(index >= 0 && index < getNumPlacedClips());
     return placedClips_.at((size_t)index);
 }
+
+Track Track::renamed(juce::String newName) const noexcept
+{
+    return Track(id_,
+                 std::move(newName),
+                 placedClips_,
+                 channelFaderGain_,
+                 trackOff_,
+                 trackMuted_,
+                 kind_);
+}

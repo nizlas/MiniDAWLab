@@ -461,6 +461,22 @@ void TrackLanesView::setOnUndoableClipSplitRequested(
     onUndoableClipSplitRequested_ = std::move(fn);
 }
 
+void TrackLanesView::setOnUndoableRenameTrackRequested(
+    std::function<bool(TrackId, juce::String)> fn) noexcept
+{
+    onUndoableRenameTrackRequested_ = std::move(fn);
+}
+
+bool TrackLanesView::invokeUndoableRenameTrackRequested(const TrackId tid,
+                                                        const juce::String proposedName) noexcept
+{
+    if (onUndoableRenameTrackRequested_ == nullptr)
+    {
+        return false;
+    }
+    return onUndoableRenameTrackRequested_(tid, proposedName);
+}
+
 void TrackLanesView::setHeaderActiveSuppressProvider(std::function<bool()> fn) noexcept
 {
     headerActiveSuppressProvider_ = std::move(fn);
@@ -1044,6 +1060,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         };
         callbacks.onRowHeightDragEnd = [this, tid] {
             snapTrackHeaderRowHeightAfterResize(tid, false);
+        };
+        callbacks.canBeginRenameTrack = [this] { return !isStructuralTimelineEditBlocked(); };
+        callbacks.onCommitRenameTrack = [this, tid](const juce::String raw) -> bool {
+            if (onUndoableRenameTrackRequested_ == nullptr)
+            {
+                return false;
+            }
+            return onUndoableRenameTrackRequested_(tid, raw);
         };
 
         auto head = std::make_unique<TrackHeaderView>(

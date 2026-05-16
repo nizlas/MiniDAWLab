@@ -87,6 +87,9 @@ public:
     /// If true, effective output gain is zero; stored fader value is unchanged.
     [[nodiscard]] bool isMuted() const noexcept { return trackMuted_; }
 
+    /// [Message thread] Same clips/gain/mute/off/kind; new display name (immutable snapshot pattern).
+    [[nodiscard]] Track renamed(juce::String newName) const noexcept;
+
 private:
     TrackId id_ = kInvalidTrackId;
     juce::String name_;

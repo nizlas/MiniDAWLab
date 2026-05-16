@@ -118,7 +118,7 @@ InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost&
 bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
 {
     // Host-report name formatting varies (“Groove Agent …”, “GrooveAgent SE”, …). Treat any GrooveAgent
-    // substring as loaded so UI subtitles and snapshots stay coherent with `hasInstrument()`.
+    // substring as loaded so snapshots stay coherent with `hasInstrument()`.
     if (!host_.hasInstrument())
     {
         return false;
@@ -129,21 +129,13 @@ bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
 
 juce::String InstrumentTrackController::getLaneHeaderTitle() const
 {
-    if (!trackActive_)
-    {
-        return {};
-    }
-    return "Groove Agent SE";
+    // Display title comes from `Track::getName()` in the session snapshot (`InstrumentTimelineRowCoordinator`).
+    return {};
 }
 
 juce::String InstrumentTrackController::getLaneHeaderSubtitle() const
 {
-    if (!trackActive_)
-    {
-        return {};
-    }
-    return instrumentLoaded_ ? juce::String("Instrument Track - experimental, not saved")
-                             : juce::String("(instrument unloaded)");
+    return {};
 }
 
 juce::String InstrumentTrackController::getLaneHeaderText() const
@@ -207,8 +199,7 @@ bool InstrumentTrackController::tryAddGrooveAgentInstrumentTrackShell()
         return false;
     }
 
-    const std::optional<TrackId> newId
-        = session_->appendExperimentalInstrumentShellTrack(juce::String("Groove Agent SE"));
+    const std::optional<TrackId> newId = session_->appendExperimentalInstrumentShellTrack({});
     return newId.has_value() && bootstrapGrooveAgentShellForSessionTrack(*newId);
 }
 
