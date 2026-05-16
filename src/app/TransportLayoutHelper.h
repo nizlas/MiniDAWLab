@@ -8,6 +8,7 @@ class TimelineRulerView;
 class TrackLanesView;
 class InspectorView;
 class PlayheadOverlay;
+class EditToolIconStrip;
 
 namespace mini_daw_app_transport
 {
@@ -22,17 +23,11 @@ struct TransportLayoutRefs
     TrackLanesView& trackLanesView;
     InspectorView& inspectorView;
 
-    juce::TextButton& addClipButton;
-    juce::TextButton& addTrackButton;
-    juce::TextButton& saveProjectButton;
-    juce::TextButton& loadProjectButton;
-    juce::TextButton& playPauseButton;
-    juce::TextButton& stopButton;
-    juce::TextButton& audioSettingsButton;
-    juce::TextButton& helpButton;
+    juce::MenuBarComponent& menuBar;
 
-    juce::TextButton& pointerToolButton;
-    juce::TextButton& splitToolButton;
+    juce::Button& addTrackCornerPlusButton;
+
+    EditToolIconStrip& editToolStrip;
 
     juce::Label& countInStatusLabel;
     juce::Label& keyDiagLabel;

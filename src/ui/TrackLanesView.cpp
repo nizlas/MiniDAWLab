@@ -483,6 +483,11 @@ void TrackLanesView::setOnAudioClipMouseDownClearForeignSelections(std::function
     onAudioClipMouseDownClearForeignSelections_ = std::move(fn);
 }
 
+void TrackLanesView::setOnAudioTrackImportClipAtPlayhead(std::function<void(TrackId)> fn) noexcept
+{
+    onAudioTrackImportClipAtPlayhead_ = std::move(fn);
+}
+
 void TrackLanesView::setStructuralTimelineEditBlockedPredicate(std::function<bool()> fn) noexcept
 {
     structuralTimelineEditBlockedPredicate_ = std::move(fn);
@@ -921,6 +926,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             constexpr int kPluginEditorMenuId = 11;
             constexpr int kPluginParamsMenuId = 12;
             constexpr int kRemovePluginMenuId = 13;
+            constexpr int kImportAudioClipMenuId = 14;
 
             const bool editLocked = isStructuralTimelineEditBlocked();
             juce::PopupMenu::Item deleteItem;
@@ -928,6 +934,15 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             deleteItem.text = "Delete Track";
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
+
+            if (onAudioTrackImportClipAtPlayhead_ != nullptr)
+            {
+                juce::PopupMenu::Item importAudioItem;
+                importAudioItem.itemID = kImportAudioClipMenuId;
+                importAudioItem.text = "Import audio clip at playhead...";
+                importAudioItem.isEnabled = !editLocked;
+                menu.addItem(importAudioItem);
+            }
 
             if (pluginHost.loadVst3 != nullptr)
             {
@@ -971,6 +986,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                  tid,
                  onDelete,
                  kDeleteTrackMenuId,
+                 kImportAudioClipMenuId,
                  kLoadVst3MenuId,
                  kPluginEditorMenuId,
                  kPluginParamsMenuId,
@@ -986,6 +1002,18 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                             return;
                         }
                         onDelete(tid);
+                        return;
+                    }
+                    if (result == kImportAudioClipMenuId)
+                    {
+                        if (isStructuralTimelineEditBlocked())
+                        {
+                            return;
+                        }
+                        if (onAudioTrackImportClipAtPlayhead_ != nullptr)
+                        {
+                            onAudioTrackImportClipAtPlayhead_(tid);
+                        }
                         return;
                     }
                     if (isStructuralTimelineEditBlocked())
@@ -1183,7 +1211,14 @@ void TrackLanesView::resized()
         return;
     }
 
-    const int viewportH = area.getHeight();
+    constexpr int gutter = kArrangementTimelineHeaderGutterPx;
+    if (area.getHeight() <= gutter)
+    {
+        return;
+    }
+
+    const auto scrollViewport = area.withTrimmedTop(gutter);
+    const int viewportH = scrollViewport.getHeight();
     int contentH = 0;
     for (int vi = 0; vi < vr; ++vi)
     {
@@ -1195,11 +1230,12 @@ void TrackLanesView::resized()
     const int w = area.getWidth();
     const int leftW = juce::jmin(kTrackHeaderWidth, w);
 
-    int y = area.getY() - verticalScrollOffsetPx_;
+    int y = scrollViewport.getY() - verticalScrollOffsetPx_;
     for (int vi = 0; vi < vr; ++vi)
     {
         const int rowH = juce::jmax(1, rowHeightForVisibleEntry(vi));
         juce::Rectangle row(area.getX(), y, w, rowH);
+        auto visibleRow = row.getIntersection(scrollViewport);
         const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)vi];
         if (e.kind == VisibleTrackKind::Instrument)
         {
@@ -1207,8 +1243,18 @@ void TrackLanesView::resized()
             if (itA != instrumentTimelineAttachments_.end() && itA->second.header != nullptr
                 && itA->second.midiLane != nullptr)
             {
-                itA->second.header->setBounds(row.removeFromLeft(leftW));
-                itA->second.midiLane->setBounds(row);
+                if (!visibleRow.isEmpty())
+                {
+                    auto split = visibleRow;
+                    const int hw = juce::jmin(leftW, split.getWidth());
+                    itA->second.header->setBounds(split.removeFromLeft(hw));
+                    itA->second.midiLane->setBounds(split);
+                }
+                else
+                {
+                    itA->second.header->setBounds(0, 0, 0, 0);
+                    itA->second.midiLane->setBounds(0, 0, 0, 0);
+                }
                 itA->second.header->toFront(false);
                 itA->second.midiLane->toFront(false);
             }
@@ -1219,8 +1265,18 @@ void TrackLanesView::resized()
             if (si >= 0 && si < (int)headers_.size() && si < (int)lanes_.size()
                 && headers_[(size_t)si] != nullptr && lanes_[(size_t)si] != nullptr)
             {
-                headers_[(size_t)si]->setBounds(row.removeFromLeft(leftW));
-                lanes_[(size_t)si]->setBounds(row);
+                if (!visibleRow.isEmpty())
+                {
+                    auto split = visibleRow;
+                    const int hw = juce::jmin(leftW, split.getWidth());
+                    headers_[(size_t)si]->setBounds(split.removeFromLeft(hw));
+                    lanes_[(size_t)si]->setBounds(split);
+                }
+                else
+                {
+                    headers_[(size_t)si]->setBounds(0, 0, 0, 0);
+                    lanes_[(size_t)si]->setBounds(0, 0, 0, 0);
+                }
             }
         }
         y += rowH;
@@ -1244,20 +1300,27 @@ void TrackLanesView::paint(juce::Graphics& g)
     const auto laneBg = juce::Colour(kArrangementLaneBackgroundArgb);
     g.fillAll(laneBg);
 
+    constexpr int gutter = kArrangementTimelineHeaderGutterPx;
+    const int ay = bounds.getY();
+    const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
+    const int hx = bounds.getX() + headerW;
+    const int gutterBottom = ay + gutter;
+    const auto laneSepColour
+        = juce::Colour(kArrangementSeparatorArgb).withAlpha(kArrangementSeparatorAlphaHorizontal);
+
+    if (headerW > 0 && gutterBottom > ay && gutterBottom < bounds.getBottom())
+    {
+        g.setColour(laneBg);
+        g.fillRect(bounds.getX(), ay, headerW, juce::jmin(gutter, bounds.getHeight()));
+    }
+
     const int vr = static_cast<int>(visibleTrackEntries_.size());
     if (vr <= 0)
     {
         return;
     }
 
-    const int ay = bounds.getY();
-    const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
-    const int hx = bounds.getX() + headerW;
-
-    const auto laneSepColour
-        = juce::Colour(kArrangementSeparatorArgb).withAlpha(kArrangementSeparatorAlphaHorizontal);
-
-    int yLine = ay - verticalScrollOffsetPx_;
+    int yLine = ay + gutter - verticalScrollOffsetPx_;
     for (int i = 0; i < vr; ++i)
     {
         yLine += rowHeightForVisibleEntry(i);
@@ -1382,7 +1445,8 @@ int TrackLanesView::audioLaneIndexFromTrackId(const TrackId tid) const noexcept
 
 int TrackLanesView::maxVerticalScrollOffsetPx() const noexcept
 {
-    const int vh = getLocalBounds().getHeight();
+    const auto area = getLocalBounds();
+    const int vh = juce::jmax(0, area.getHeight() - kArrangementTimelineHeaderGutterPx);
     return juce::jmax(0, totalContentHeightPx() - vh);
 }
 
@@ -1484,7 +1548,7 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
 
     const int ay = getLocalBounds().getY();
     std::vector<int> gapY((size_t)vr + 1u);
-    int accY = ay - verticalScrollOffsetPx_;
+    int accY = ay + kArrangementTimelineHeaderGutterPx - verticalScrollOffsetPx_;
     for (int k = 0; k <= vr; ++k)
     {
         gapY[(size_t)k] = accY;
@@ -1573,8 +1637,7 @@ void TrackLanesView::clearHeaderTrackDragState() noexcept
 void TrackLanesView::paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g) const noexcept
 {
     const auto bounds = getLocalBounds();
-    const int vr = static_cast<int>(visibleTrackEntries_.size());
-    if (bounds.isEmpty() || vr <= 0)
+    if (bounds.isEmpty())
     {
         return;
     }
@@ -1587,9 +1650,22 @@ void TrackLanesView::paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g)
     }
 
     const int ay = bounds.getY();
-    g.setColour(juce::Colour(kArrangementHeaderRowSeparatorArgb));
+    constexpr int gutter = kArrangementTimelineHeaderGutterPx;
+    const int gutterBottom = ay + gutter;
 
-    int yLine = ay - verticalScrollOffsetPx_;
+    g.setColour(juce::Colour(kArrangementHeaderRowSeparatorArgb));
+    if (gutterBottom > ay && gutterBottom < bounds.getBottom())
+    {
+        g.drawHorizontalLine(gutterBottom, (float)bounds.getX(), (float)hx);
+    }
+
+    const int vr = static_cast<int>(visibleTrackEntries_.size());
+    if (vr <= 0)
+    {
+        return;
+    }
+
+    int yLine = ay + gutter - verticalScrollOffsetPx_;
     for (int i = 0; i < vr; ++i)
     {
         yLine += rowHeightForVisibleEntry(i);
@@ -1610,7 +1686,7 @@ int TrackLanesView::yForVisibleInsertGapK(const int k) const noexcept
         return 0;
     }
     const int ay = getLocalBounds().getY();
-    int y = ay - verticalScrollOffsetPx_;
+    int y = ay + kArrangementTimelineHeaderGutterPx - verticalScrollOffsetPx_;
     for (int i = 0; i < k; ++i)
     {
         y += rowHeightForVisibleEntry(i);
@@ -1630,6 +1706,17 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
             g.setColour(
                 juce::Colour(kArrangementSeparatorArgb).withAlpha(kArrangementSeparatorAlphaVertical));
             g.drawLine(vx, (float)bounds.getY(), vx, (float)bounds.getBottom(), 1.0f);
+
+            constexpr int gutter = kArrangementTimelineHeaderGutterPx;
+            const int gutterBottom = bounds.getY() + gutter;
+            const int hx = bounds.getX() + headerW;
+            if (hx < bounds.getRight() && gutterBottom > bounds.getY()
+                && gutterBottom < bounds.getBottom())
+            {
+                g.setColour(juce::Colour(kArrangementSeparatorArgb)
+                                .withAlpha(kArrangementSeparatorAlphaHorizontal));
+                g.drawHorizontalLine(gutterBottom, (float)hx, (float)bounds.getRight());
+            }
         }
 
         paintHeaderColumnHorizontalRowSeparators(g);

@@ -11,6 +11,7 @@
 #include "app/InstrumentMidiImportCoordinator.h"
 #include "app/ClipPasteboardController.h"
 #include "app/MainAppDialogs.h"
+#include "app/MainMenuModel.h"
 #include "app/MidiEditorPresenter.h"
 #include "app/PluginHostUiBindings.h"
 #include "app/ProjectIoCoordinator.h"
@@ -44,7 +45,9 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/PlayheadOverlay.h"
 #include "ui/TimelineViewportModel.h"
+#include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
+#include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
 #include "audio/AudioDeviceInfo.h"
@@ -56,6 +59,85 @@
 #include "io/ProjectFile.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
+
+namespace
+{
+/// Compact "+" control matching `TrackHeaderView` mute/arm idle strip geometry (grey fill, subtle edge).
+class AddTrackCornerGlyphButton final : public juce::Button
+{
+public:
+    AddTrackCornerGlyphButton()
+        : juce::Button("+")
+    {
+        setTooltip("Add track");
+        setTriggeredOnMouseDown(true);
+    }
+
+    void paintButton(juce::Graphics& g, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override
+    {
+        const juce::Rectangle<int> cell = getLocalBounds();
+        if (cell.isEmpty())
+        {
+            return;
+        }
+
+        const int cw = cell.getWidth();
+        const int ch = cell.getHeight();
+        const int inset = TrackHeaderView::kStripSquareBodyInsetPx;
+        if (cw <= inset * 2 || ch <= inset * 2)
+        {
+            return;
+        }
+
+        const int availW = cw - inset * 2;
+        const int availH = ch - inset * 2;
+        const int side = juce::jmin(availW, availH);
+        if (side < 6)
+        {
+            return;
+        }
+
+        const int cx = cell.getCentreX();
+        const int cy = cell.getCentreY();
+        const int ox = cx - side / 2;
+        const int oy = cy - side / 2;
+        const juce::Rectangle<int> bodyPx = juce::Rectangle<int>(ox, oy, side, side).getIntersection(cell);
+        if (bodyPx.isEmpty())
+        {
+            return;
+        }
+
+        const juce::Rectangle<float> rf = bodyPx.toFloat();
+        const float rad = juce::jlimit(1.4f, 2.85f, juce::jmin(rf.getWidth(), rf.getHeight()) * 0.16f);
+
+        juce::Colour fill(0xff5a5858);
+        juce::Colour edge(0xd0161616);
+        if (shouldDrawButtonAsHighlighted && isEnabled())
+        {
+            fill = fill.brighter(0.12f);
+            edge = edge.brighter(0.28f);
+        }
+        if (shouldDrawButtonAsDown)
+        {
+            fill = fill.darker(0.08f);
+        }
+
+        g.setColour(fill);
+        g.fillRoundedRectangle(rf, rad);
+        g.setColour(edge);
+        g.drawRoundedRectangle(rf, rad, 1.0f);
+
+        const float fontH = juce::jlimit(8.5f,
+                                         11.5f,
+                                         juce::jmin(static_cast<float>(bodyPx.getWidth()),
+                                                    static_cast<float>(bodyPx.getHeight()))
+                                             * 0.52f);
+        g.setFont(juce::Font(juce::FontOptions().withHeight(fontH)));
+        g.setColour(juce::Colour(0xffeaeaea));
+        g.drawFittedText("+", bodyPx, juce::Justification::centred, 1);
+    }
+};
+} // namespace
 
 namespace mini_daw_app_transport
 {
@@ -152,7 +234,7 @@ public:
 
         transportPlayPauseStopController_ = std::make_unique<TransportPlayPauseStopController>(
             transport,
-            playPauseButton,
+            nullptr,
             TransportPlayPauseStopController::Callbacks{
                 [this]() { return recorder_.isRecording(); },
                 [this]() {
@@ -253,6 +335,13 @@ public:
                 },
                 [this]() { syncViewportFromSession(); },
             });
+
+        trackLanesView.setOnAudioTrackImportClipAtPlayhead([this](TrackId tid) {
+            if (audioClipImportCoordinator_ != nullptr)
+            {
+                audioClipImportCoordinator_->addClipAtPlayheadForAudioTrack(tid);
+            }
+        });
 
         instrumentRuntimeCoordinator_ = std::make_unique<InstrumentRuntimeCoordinator>(
             session,
@@ -514,8 +603,7 @@ public:
             trackLanesView.repaint();
             instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
         });
-        addClipButton.onClick = [this] { addClipAtPlayheadClicked(); };
-        addTrackButton.onClick = [this] {
+        addTrackCornerPlusButton_.onClick = [this] {
             juce::PopupMenu menu;
             menu.addItem(1, "Add Audio Track");
             juce::PopupMenu instrMenu;
@@ -525,7 +613,7 @@ public:
             menu.addSubMenu("Add Instrument Track", instrMenu);
             juce::Component::SafePointer<mini_daw_app_transport::TransportControlsContent> safeThis(this);
             menu.showMenuAsync(
-                juce::PopupMenu::Options().withTargetComponent(&addTrackButton),
+                juce::PopupMenu::Options().withTargetComponent(&addTrackCornerPlusButton_),
                 [safeThis](int result) {
                     if (safeThis == nullptr || result == 0)
                     {
@@ -591,40 +679,30 @@ public:
                     resized();
                 },
             });
-        saveProjectButton.onClick = [this] { projectIoCoordinator_->saveProject(); };
-        loadProjectButton.onClick = [this] { projectIoCoordinator_->loadProject(); };
-        playPauseButton.onClick = [this] { transportPlayPauseStopController_->togglePlayPauseFromUi(); };
-        // Stop: "playback off + playhead to start" when idle; if recording, finalize/commit first
-        // so RecorderService is never left recording while transport is Stopped.
-        stopButton.onClick = [this] { transportPlayPauseStopController_->stopOrSeekFromStopButton(); };
-        audioSettingsButton.onClick = [this] { showAudioSettingsDialog(); };
-        helpButton.onClick = [this] { showHelpMenuPopup(); };
 
-        constexpr int kEditToolRadioGroup = 90421;
-        pointerToolButton_.setClickingTogglesState(true);
-        pointerToolButton_.setToggleState(true, juce::dontSendNotification);
-        pointerToolButton_.setRadioGroupId(kEditToolRadioGroup);
-        splitToolButton_.setClickingTogglesState(true);
-        splitToolButton_.setRadioGroupId(kEditToolRadioGroup);
-        pointerToolButton_.onClick = [this] {
-            currentEditTool_ = EditTool::Pointer;
-            trackLanesView.repaint();
-        };
-        splitToolButton_.onClick = [this] {
-            currentEditTool_ = EditTool::Split;
-            trackLanesView.repaint();
-        };
+        mainMenuModel_ = std::make_unique<mini_daw_app_menu::MainMenuModel>(mini_daw_app_menu::MainMenuActions{
+            [this] {
+                if (projectIoCoordinator_ != nullptr)
+                {
+                    projectIoCoordinator_->saveProject();
+                }
+            },
+            [this] {
+                if (projectIoCoordinator_ != nullptr)
+                {
+                    projectIoCoordinator_->loadProject();
+                }
+            },
+            [this] { showAudioSettingsDialog(); },
+            [this] { showHelpMenuPopup(); },
+        });
+        menuBar_ = std::make_unique<juce::MenuBarComponent>(mainMenuModel_.get());
+        addAndMakeVisible(*menuBar_);
 
-        addAndMakeVisible(addClipButton);
-        addAndMakeVisible(addTrackButton);
-        addAndMakeVisible(saveProjectButton);
-        addAndMakeVisible(loadProjectButton);
-        addAndMakeVisible(playPauseButton);
-        addAndMakeVisible(stopButton);
-        addAndMakeVisible(audioSettingsButton);
-        addAndMakeVisible(helpButton);
-        addAndMakeVisible(pointerToolButton_);
-        addAndMakeVisible(splitToolButton_);
+        editToolIconStrip_.onToolSelected = [this](EditTool t) { applyEditToolSelection(t); };
+        addAndMakeVisible(editToolIconStrip_);
+
+        addAndMakeVisible(addTrackCornerPlusButton_);
         if (shortcut_diagnostics::kShowKeyDiagnostic)
         {
             addAndMakeVisible(keyDiagLabel_);
@@ -799,6 +877,14 @@ public:
         }
     }
 
+    // [Message thread] Keeps `currentEditTool_`, lane repaint, and strip highlights aligned.
+    void applyEditToolSelection(EditTool t) noexcept
+    {
+        currentEditTool_ = t;
+        editToolIconStrip_.setSelectedTool(t, juce::dontSendNotification);
+        trackLanesView.repaint();
+    }
+
     // [Message thread] Layout: one row of buttons, fixed-height time ruler, then event lane.
     void resized() override
     {
@@ -808,16 +894,9 @@ public:
             rulerView,
             trackLanesView,
             inspectorView_,
-            addClipButton,
-            addTrackButton,
-            saveProjectButton,
-            loadProjectButton,
-            playPauseButton,
-            stopButton,
-            audioSettingsButton,
-            helpButton,
-            pointerToolButton_,
-            splitToolButton_,
+            *menuBar_,
+            addTrackCornerPlusButton_,
+            editToolIconStrip_,
             countInStatusLabel_,
             keyDiagLabel_,
             shortcutDiagLabel_.get(),
@@ -864,7 +943,7 @@ private:
 
     void showHelpMenuPopup()
     {
-        mini_daw_app_dialogs::showHelpMenuPopup(helpButton, this, []() {
+        mini_daw_app_dialogs::showHelpMenuPopup(*menuBar_, this, []() {
             mini_daw_app_dialogs::showUndoBehaviorDialog();
         });
     }
@@ -911,16 +990,6 @@ private:
         }
     }
 
-    // Delegates to `AudioClipImportCoordinator` (file dialog + project Audio/ import + placement
-    // at the transport playhead snapshot on the message thread).
-    void addClipAtPlayheadClicked()
-    {
-        if (audioClipImportCoordinator_ != nullptr)
-        {
-            audioClipImportCoordinator_->addClipAtPlayheadClicked();
-        }
-    }
-
     void refreshInstrumentUi()
     {
         instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
@@ -952,7 +1021,7 @@ private:
 
     /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
-    /// Count-in / recording line (no always-visible audio device debug; use Audio...).
+    /// Count-in / recording line (no always-visible audio device debug; use Audio menu).
     juce::Label countInStatusLabel_;
     std::unique_ptr<RecordingCoordinator> recordingCoordinator_;
     std::unique_ptr<TransportPlayPauseStopController> transportPlayPauseStopController_;
@@ -968,16 +1037,11 @@ private:
 
     EditTool currentEditTool_ = EditTool::Pointer;
 
-    juce::TextButton addClipButton{ "Add clip..." };
-    juce::TextButton addTrackButton{ "Add track" };
-    juce::TextButton saveProjectButton{ "Save Project..." };
-    juce::TextButton loadProjectButton{ "Load Project..." };
-    juce::TextButton playPauseButton{ "Play" };
-    juce::TextButton stopButton{ "Stop" };
-    juce::TextButton audioSettingsButton{ "Audio..." };
-    juce::TextButton helpButton{ "Help..." };
-    juce::TextButton pointerToolButton_{ "Pointer" };
-    juce::TextButton splitToolButton_{ "Split" };
+    std::unique_ptr<mini_daw_app_menu::MainMenuModel> mainMenuModel_;
+    std::unique_ptr<juce::MenuBarComponent> menuBar_;
+
+    AddTrackCornerGlyphButton addTrackCornerPlusButton_;
+    EditToolIconStrip editToolIconStrip_;
 
     juce::Label keyDiagLabel_;
     std::unique_ptr<juce::Label> shortcutDiagLabel_;

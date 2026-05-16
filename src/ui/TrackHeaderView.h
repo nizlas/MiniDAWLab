@@ -74,6 +74,10 @@ struct TrackHeaderCallbacks
 class TrackHeaderView : public juce::Component
 {
 public:
+    /// Horizontal strip: each M/R/power/instrument cell (`squareStripButtonBodyFromCell` insets inside).
+    static constexpr int kStripControlCellWidthPx = 22;
+    static constexpr int kStripSquareBodyInsetPx = 1;
+
     /// `dragTrackId` is forwarded to `TrackHeaderDragHost`. Use `kInvalidTrackId` when there is no
     /// reorder drag initially (e.g. until the owning view calls `setHeaderReorderDrag`).
     TrackHeaderView(TrackHeaderModelProvider modelProvider,

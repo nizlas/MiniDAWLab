@@ -3,6 +3,9 @@
 #include <JuceHeader.h>
 
 #include <functional>
+#include <optional>
+
+#include "domain/Track.h"
 
 class Session;
 class Transport;
@@ -30,7 +33,13 @@ public:
 
     void addClipAtPlayheadClicked();
 
+    /// Same file-picker + import as `addClipAtPlayheadClicked`, but ensures the clip is placed on
+    /// `trackId` by activating it immediately before the session mutation (message thread).
+    void addClipAtPlayheadForAudioTrack(TrackId trackId);
+
 private:
+    void launchAddClipAtPlayheadPicker(std::optional<TrackId> activateTrackBeforeImport);
+
     Session& session_;
     Transport& transport_;
     juce::AudioDeviceManager& deviceManager_;

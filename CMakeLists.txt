@@ -28,6 +28,13 @@ juce_add_gui_app(MiniDAWLab
     COMPANY_NAME "MiniDAWLab"
 )
 
+juce_add_binary_data(MiniDAWLabToolStripIcons
+    HEADER_NAME MiniDAWLabToolStripBinaryData.h
+    NAMESPACE mini_daw_tool_strip_icons
+    SOURCES
+        assets/ui/tools/pointer_tool.png
+        assets/ui/tools/split_tool.png)
+
 juce_generate_juce_header(MiniDAWLab)
 
 target_include_directories(MiniDAWLab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -37,6 +44,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/AddInstrumentTrackCoordinator.cpp
     src/app/ArrangementEventSelectionCoordinator.cpp
     src/app/MainAppDialogs.cpp
+    src/app/MainMenuModel.cpp
     src/app/MainWindow.cpp
     src/app/ClipPasteboardController.cpp
     src/app/UndoRedoCoordinator.cpp
@@ -84,6 +92,8 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/PlaybackEngine.cpp
     src/engine/RecorderService.cpp
     src/ui/ClipWaveformView.cpp
+    src/ui/EditToolIconStrip.cpp
+    src/ui/ToolStripIconImages.cpp
     src/ui/PlayheadOverlay.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
@@ -111,6 +121,7 @@ target_compile_definitions(MiniDAWLab
 
 target_link_libraries(MiniDAWLab
     PRIVATE
+        MiniDAWLabToolStripIcons
         juce::juce_audio_devices
         juce::juce_audio_utils
         juce::juce_audio_processors

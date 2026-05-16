@@ -5,7 +5,9 @@
 // =============================================================================
 //
 // ROLE
-//   Sits in the main layout **below** `TimelineRulerView`. When `Session` publishes a snapshot
+//   Occupies the lanes band under the menu/tool rows; its bounds include a fixed-height strip
+//   aligned with the timeline row so the header column reads continuous with track headers.
+//   When `Session` publishes a snapshot
 //   with N tracks, this component ensures N child lanes, each created with a stable `TrackId` and
 //   the same session-wide x -> sample map as the ruler. It wires a small callback so selecting a
 //   clip in one lane clears selection in the others. **Cross-track drag:** `ClipWaveformLaneHost`
@@ -87,6 +89,10 @@ public:
     // Width of the left name/active strip. `Main` insets the timeline ruler by the same value so
     // the ruler’s x <-> session-sample map matches the lane area.
     static constexpr int kTrackHeaderWidth = 120;
+
+    /// Height of the timeline row band shared with `TimelineRulerView` / transport layout (px).
+    /// Track rows scroll only below this; the header-column gutter above the first row matches this.
+    static constexpr int kArrangementTimelineHeaderGutterPx = 28;
 
     ~TrackLanesView() override;
 
@@ -193,6 +199,9 @@ public:
     /// Optional: after an audio clip lane clears peer waveform selections on mouse-down, invoke this
     /// so MIDI clip selections can be cleared without threading instrument details into `ClipWaveformView`.
     void setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept;
+
+    /// [Message thread] Audio header context menu: import WAV/etc. at playhead onto this track.
+    void setOnAudioTrackImportClipAtPlayhead(std::function<void(TrackId)> fn) noexcept;
 
     /// [Message thread] Replace all instrument-shell UI bridges (Groove-Agent rows). Omit a `TrackId` to detach it.
     void syncInstrumentTimelineAttachments(const std::vector<InstrumentTimelineAttachment>& rows) noexcept;
@@ -319,6 +328,7 @@ private:
     std::function<void()> onAudioClipMouseDownClearForeignSelections_;
     std::function<bool()> structuralTimelineEditBlockedPredicate_;
     std::function<bool()> instrumentMidiClipMoveBlockedPredicate_;
+    std::function<void(TrackId)> onAudioTrackImportClipAtPlayhead_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrackLanesView)
 };

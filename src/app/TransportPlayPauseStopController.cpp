@@ -3,7 +3,7 @@
 #include "transport/Transport.h"
 
 TransportPlayPauseStopController::TransportPlayPauseStopController(Transport& transport,
-                                                                   juce::TextButton& playPauseButton,
+                                                                   juce::TextButton* playPauseButton,
                                                                    Callbacks callbacks)
     : transport_(transport)
     , playPauseButton_(playPauseButton)
@@ -70,10 +70,14 @@ void TransportPlayPauseStopController::stopOrSeekFromStopButton()
 
 void TransportPlayPauseStopController::updatePlayPauseButtonFromTransport()
 {
+    if (playPauseButton_ == nullptr)
+    {
+        return;
+    }
     const bool playing = transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing;
     const juce::String t = playing ? "Pause" : "Play";
-    if (t != playPauseButton_.getButtonText())
+    if (t != playPauseButton_->getButtonText())
     {
-        playPauseButton_.setButtonText(t);
+        playPauseButton_->setButtonText(t);
     }
 }

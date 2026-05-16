@@ -1,6 +1,7 @@
 #include "app/AudioClipImportCoordinator.h"
 
 #include <memory>
+#include <optional>
 
 #include "domain/Session.h"
 #include "io/ProjectAudioImport.h"
@@ -28,6 +29,17 @@ AudioClipImportCoordinator::AudioClipImportCoordinator(Session& session,
 
 void AudioClipImportCoordinator::addClipAtPlayheadClicked()
 {
+    launchAddClipAtPlayheadPicker(std::nullopt);
+}
+
+void AudioClipImportCoordinator::addClipAtPlayheadForAudioTrack(const TrackId trackId)
+{
+    launchAddClipAtPlayheadPicker(trackId);
+}
+
+void AudioClipImportCoordinator::launchAddClipAtPlayheadPicker(
+    const std::optional<TrackId> activateTrackBeforeImport)
+{
     if (!session_.hasKnownProjectFile())
     {
         juce::AlertWindow::showMessageBoxAsync(
@@ -53,72 +65,79 @@ void AudioClipImportCoordinator::addClipAtPlayheadClicked()
     // JUCE: async dialog; the lambda runs on the *message* thread when the user dismisses
     // the picker. We record playhead and decode in this callback — the agreed “at add
     // time” read for placement (not the audio thread).
-    chooser->launchAsync(fileChooserFlags, [this, chooser](const juce::FileChooser& fc) {
-        juce::ignoreUnused(chooser);
-        struct ClearImportInFlight
-        {
-            bool& b;
-            explicit ClearImportInFlight(bool& ref) noexcept
-                : b(ref)
-            {
-            }
-            ~ClearImportInFlight() { b = false; }
-        } clearImport{importInFlight_};
+    chooser->launchAsync(fileChooserFlags,
+                         [this, chooser, activateTrackBeforeImport](const juce::FileChooser& fc) {
+                             juce::ignoreUnused(chooser);
+                             struct ClearImportInFlight
+                             {
+                                 bool& b;
+                                 explicit ClearImportInFlight(bool& ref) noexcept
+                                     : b(ref)
+                                 {
+                                 }
+                                 ~ClearImportInFlight() { b = false; }
+                             } clearImport{ importInFlight_ };
 
-        const juce::File file = fc.getResult();
-        if (!file.existsAsFile())
-        {
-            // Cancel or empty selection — not an error, keep the current session.
-            return;
-        }
+                             const juce::File file = fc.getResult();
+                             if (!file.existsAsFile())
+                             {
+                                 // Cancel or empty selection — not an error, keep the current session.
+                                 return;
+                             }
 
-        juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
-        if (device == nullptr)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Audio",
-                "No active audio device. Cannot validate sample rate for load.");
-            return;
-        }
+                             juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
+                             if (device == nullptr)
+                             {
+                                 juce::AlertWindow::showMessageBoxAsync(
+                                     juce::AlertWindow::WarningIcon,
+                                     "Audio",
+                                     "No active audio device. Cannot validate sample rate for load.");
+                                 return;
+                             }
 
-        // Snapshot once: this value becomes `PlacedClip::startSampleOnTimeline` for the
-        // new row (see Session / `PHASE_PLAN` add-at-playhead).
-        const std::int64_t startSampleOnTimeline = transport_.readPlayheadSamplesForUi();
+                             if (activateTrackBeforeImport.has_value())
+                             {
+                                 session_.setActiveTrack(*activateTrackBeforeImport);
+                             }
 
-        // Loader must match the *running* device rate (Phase 1 contract).
-        const double sampleRate = device->getCurrentSampleRate();
+                             // Snapshot once: this value becomes `PlacedClip::startSampleOnTimeline` for the
+                             // new row (see Session / `PHASE_PLAN` add-at-playhead).
+                             const std::int64_t startSampleOnTimeline = transport_.readPlayheadSamplesForUi();
 
-        const juce::File audioDir = mini_daw::getProjectAudioDir(session_.getCurrentProjectFolder());
-        juce::File pathToUse;
-        const juce::Result importRes
-            = mini_daw::importAudioIntoProjectAudioDir(file, audioDir, pathToUse);
-        if (!importRes.wasOk())
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Could not import audio",
-                importRes.getErrorMessage());
-            return;
-        }
-        callbacks_.executeUndoableSessionEdit("Import clip", [&]() -> bool {
-            const juce::Result loadResult = session_.addClipFromFileAtPlayhead(
-                pathToUse, sampleRate, startSampleOnTimeline);
-            if (!loadResult.wasOk())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Could not open file",
-                    loadResult.getErrorMessage());
-                return false;
-            }
-            // New **front** clip is on the active track; playhead/transport are unchanged.
-            callbacks_.syncViewportFromSession();
-            trackLanesView_.syncTracksFromSession();
-            rulerView_.repaint();
-            trackLanesView_.repaint();
-            inspectorView_.refreshFromSession();
-            return true;
-        });
-    });
+                             // Loader must match the *running* device rate (Phase 1 contract).
+                             const double sampleRate = device->getCurrentSampleRate();
+
+                             const juce::File audioDir
+                                 = mini_daw::getProjectAudioDir(session_.getCurrentProjectFolder());
+                             juce::File pathToUse;
+                             const juce::Result importRes
+                                 = mini_daw::importAudioIntoProjectAudioDir(file, audioDir, pathToUse);
+                             if (!importRes.wasOk())
+                             {
+                                 juce::AlertWindow::showMessageBoxAsync(
+                                     juce::AlertWindow::WarningIcon,
+                                     "Could not import audio",
+                                     importRes.getErrorMessage());
+                                 return;
+                             }
+                             callbacks_.executeUndoableSessionEdit("Import clip", [&]() -> bool {
+                                 const juce::Result loadResult = session_.addClipFromFileAtPlayhead(
+                                     pathToUse, sampleRate, startSampleOnTimeline);
+                                 if (!loadResult.wasOk())
+                                 {
+                                     juce::AlertWindow::showMessageBoxAsync(
+                                         juce::AlertWindow::WarningIcon,
+                                         "Could not open file",
+                                         loadResult.getErrorMessage());
+                                     return false;
+                                 }
+                                 // New **front** clip is on the active track; playhead/transport are unchanged.
+                                 callbacks_.syncViewportFromSession();
+                                 trackLanesView_.syncTracksFromSession();
+                                 rulerView_.repaint();
+                                 trackLanesView_.repaint();
+                                 inspectorView_.refreshFromSession();
+                                 return true;
+                             });
+                         });
 }

@@ -19,8 +19,9 @@ public:
         std::function<void()> cancelCountIn;
     };
 
+    /// Optional: when non-null, `updatePlayPauseButtonFromTransport` syncs button text (Play/Pause).
     TransportPlayPauseStopController(Transport& transport,
-                                     juce::TextButton& playPauseButton,
+                                     juce::TextButton* playPauseButton,
                                      Callbacks callbacks);
 
     void invokePlayPauseToggleFromWindowShortcut();
@@ -32,6 +33,6 @@ public:
 
 private:
     Transport& transport_;
-    juce::TextButton& playPauseButton_;
+    juce::TextButton* playPauseButton_;
     Callbacks callbacks_;
 };

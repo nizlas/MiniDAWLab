@@ -1,35 +1,54 @@
 #include "app/TransportLayoutHelper.h"
 
 #include "app/ShortcutDiagnostics.h"
+#include "ui/EditToolIconStrip.h"
 #include "ui/InspectorView.h"
 #include "ui/PlayheadOverlay.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
 
 void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutRefs& r)
 {
-    auto area = r.owner.getLocalBounds().reduced(8);
-    auto row = area.removeFromTop(32);
+    // Horizontal margin matches prior chrome; slightly tighter vertical inset for a more compact top strip.
+    auto area = r.owner.getLocalBounds().reduced(8, 6);
+    const int menuBarH = juce::jmax(22, r.owner.getLookAndFeel().getDefaultMenuBarHeight());
+    r.menuBar.setBounds(area.removeFromTop(menuBarH));
+
+    // Single toolbar band below the menu: count-in (and optional diagnostics) on the right,
+    // Pointer/Split strip centred on the window (clamped so it never sits under the right labels).
+    constexpr int kToolbarRowH = 28;
+    constexpr int kCountInLabelWidth = 140;
+    const auto fullToolbarRow = area.removeFromTop(kToolbarRowH);
+    auto row = fullToolbarRow;
     if (shortcut_diagnostics::kShowKeyDiagnostic)
     {
         r.keyDiagLabel.setBounds(row.removeFromRight(300).reduced(2, 0));
     }
-    constexpr int kCountInLabelWidth = 140;
     r.countInStatusLabel.setBounds(row.removeFromRight(kCountInLabelWidth).reduced(4, 0));
-    const int buttonWidth = juce::jmax(48, row.getWidth() / 8);
 
-    r.addClipButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.addTrackButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.saveProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.loadProjectButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.playPauseButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.stopButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.audioSettingsButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    r.helpButton.setBounds(row.removeFromLeft(buttonWidth).reduced(2));
-    auto toolRow = area.removeFromTop(28);
-    constexpr int kToolButtonW = 80;
-    r.pointerToolButton.setBounds(toolRow.removeFromLeft(kToolButtonW).reduced(2, 2));
-    r.splitToolButton.setBounds(toolRow.removeFromLeft(kToolButtonW).reduced(2, 2));
+    {
+        const int pw = EditToolIconStrip::preferredWidth();
+        const int ph = EditToolIconStrip::preferredHeight();
+        const int useH = juce::jmin(ph, fullToolbarRow.getHeight());
+        const int reservedRight = (shortcut_diagnostics::kShowKeyDiagnostic ? 300 : 0) + kCountInLabelWidth;
+
+        juce::Rectangle<int> strip(fullToolbarRow.getCentreX() - pw / 2,
+                                   fullToolbarRow.getCentreY() - useH / 2,
+                                   pw,
+                                   useH);
+        const int minX = fullToolbarRow.getX();
+        const int maxX = fullToolbarRow.getRight() - reservedRight - pw;
+        if (maxX >= minX)
+        {
+            strip.setX(juce::jlimit(minX, maxX, strip.getX()));
+        }
+        else
+        {
+            strip.setX(minX);
+        }
+        r.editToolStrip.setBounds(strip);
+    }
     if constexpr (shortcut_diagnostics::kShowShortcutDiagnostics)
     {
         if (r.shortcutDiagLabel != nullptr)
@@ -37,9 +56,10 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
             r.shortcutDiagLabel->setBounds(area.removeFromTop(28));
         }
     }
-    constexpr int kTimelineRulerHeight = 20;
-    const int lanesBandTop = area.getY() + kTimelineRulerHeight;
-    const int lanesBandHeight = juce::jmax(0, area.getHeight() - kTimelineRulerHeight);
+    constexpr int kAddTrackPlusPad = 4;
+    const int gutter = TrackLanesView::kArrangementTimelineHeaderGutterPx;
+    const int lanesBandTop = area.getY() + gutter;
+    const int lanesBandHeight = juce::jmax(0, area.getHeight() - gutter);
     if (r.inspectorCurrentWidth > 0)
     {
         auto inspectorStrip = area.removeFromLeft(r.inspectorCurrentWidth);
@@ -70,10 +90,23 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         r.inspectorResizeSplitter.setBounds(0, 0, 0, 0);
         r.inspectorResizeSplitter.setVisible(false);
     }
-    auto timelineRow = area.removeFromTop(kTimelineRulerHeight);
-    timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
+    const int timelineBandTop = area.getY();
+    auto timelineRow = area.removeFromTop(gutter);
+    auto rulerLaneCorner = timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
+    {
+        const int cellSide = TrackHeaderView::kStripControlCellWidthPx;
+        const int maxSide = rulerLaneCorner.getWidth() - 2 * kAddTrackPlusPad;
+        const int side = juce::jmax(1, juce::jmin(cellSide, maxSide));
+        const int xPlus = rulerLaneCorner.getX() + kAddTrackPlusPad;
+        const int yPlus = rulerLaneCorner.getCentreY() - side / 2;
+        r.addTrackCornerPlusButton.setBounds(xPlus, yPlus, side, side);
+    }
     r.rulerView.setBounds(timelineRow);
-    r.trackLanesView.setBounds(area);
+    r.trackLanesView.setBounds(
+        area.getX(),
+        timelineBandTop,
+        area.getWidth(),
+        juce::jmax(0, area.getBottom() - timelineBandTop));
     if (r.lanePlayheadOverlay != nullptr)
     {
         const int tw = r.trackLanesView.getWidth();
@@ -93,7 +126,7 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
                 + " laneW=" + juce::String(laneW));
         }
 
-        const int topY = r.trackLanesView.getY();
+        const int topY = r.trackLanesView.getY() + TrackLanesView::kArrangementTimelineHeaderGutterPx;
         const int bottomY = r.trackLanesView.getBottom();
         if (laneW > 0 && bottomY > topY)
         {
@@ -106,6 +139,12 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
             r.lanePlayheadOverlay->setBounds(0, 0, 0, 0);
             r.lanePlayheadOverlay->setVisible(false);
         }
+    }
+    r.rulerView.toFront(false);
+    r.addTrackCornerPlusButton.toFront(false);
+    if (r.lanePlayheadOverlay != nullptr && r.lanePlayheadOverlay->isVisible())
+    {
+        r.lanePlayheadOverlay->toFront(false);
     }
     if (r.inspectorCurrentWidth == 0)
     {

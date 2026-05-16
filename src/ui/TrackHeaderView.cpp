@@ -13,9 +13,7 @@ namespace
 {
     constexpr float kHeaderDragThresholdPx = 3.0f;
 
-    constexpr int kTrackControlCellWidth = 22;
     constexpr int kRowResizeBandPx = 5;
-    constexpr int kSquareBodyInsetPx = 1;
     constexpr float kCubaseCtlCornerRadMax = 2.85f;
 
     [[nodiscard]] float cubaseCornerRadiusForSquare(float side) noexcept
@@ -165,12 +163,13 @@ TrackHeaderView::squareStripButtonBodyFromCell(juce::Rectangle<int> const cell) 
     }
     const int cw = cell.getWidth();
     const int ch = cell.getHeight();
-    if (cw <= kSquareBodyInsetPx * 2 || ch <= kSquareBodyInsetPx * 2)
+    if (cw <= TrackHeaderView::kStripSquareBodyInsetPx * 2
+        || ch <= TrackHeaderView::kStripSquareBodyInsetPx * 2)
     {
         return {};
     }
-    const int availW = cw - kSquareBodyInsetPx * 2;
-    const int availH = ch - kSquareBodyInsetPx * 2;
+    const int availW = cw - TrackHeaderView::kStripSquareBodyInsetPx * 2;
+    const int availH = ch - TrackHeaderView::kStripSquareBodyInsetPx * 2;
     const int side = juce::jmin(availW, availH);
     if (side < 6)
     {
@@ -406,21 +405,21 @@ int TrackHeaderView::computeRightStripCellCount() const noexcept
 juce::Rectangle<int> TrackHeaderView::getRightControlsStripBounds() const noexcept
 {
     return getLocalBounds()
-        .removeFromRight(kTrackControlCellWidth * computeRightStripCellCount())
+        .removeFromRight(TrackHeaderView::kStripControlCellWidthPx * computeRightStripCellCount())
         .reduced(0, 4);
 }
 
 juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
 {
     juce::Rectangle<int> s = getRightControlsStripBounds();
-    return s.removeFromRight(kTrackControlCellWidth);
+    return s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx);
 }
 
 juce::Rectangle<int> TrackHeaderView::getMuteButtonBounds() const noexcept
 {
     juce::Rectangle<int> s = getRightControlsStripBounds();
-    s.removeFromRight(kTrackControlCellWidth);
-    return s.removeFromRight(kTrackControlCellWidth);
+    s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx);
+    return s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx);
 }
 
 juce::Rectangle<int> TrackHeaderView::getPowerButtonBounds() const noexcept
@@ -428,11 +427,11 @@ juce::Rectangle<int> TrackHeaderView::getPowerButtonBounds() const noexcept
     juce::Rectangle<int> s = getRightControlsStripBounds();
     if (computeRightStripCellCount() == 4)
     {
-        s.removeFromRight(kTrackControlCellWidth);
-        s.removeFromRight(kTrackControlCellWidth);
-        return s.removeFromRight(kTrackControlCellWidth);
+        s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx);
+        s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx);
+        return s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx);
     }
-    s.removeFromRight(kTrackControlCellWidth * 2);
+    s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx * 2);
     return s;
 }
 
@@ -443,7 +442,7 @@ juce::Rectangle<int> TrackHeaderView::getInstrumentEditorButtonBounds() const no
         return {};
     }
     juce::Rectangle<int> s = getRightControlsStripBounds();
-    s.removeFromRight(kTrackControlCellWidth * 3);
+    s.removeFromRight(TrackHeaderView::kStripControlCellWidthPx * 3);
     return s;
 }
 
@@ -568,7 +567,7 @@ void TrackHeaderView::paint(juce::Graphics& g)
         g.fillRect(b.getX(), b.getY(), 4, b.getHeight());
     }
 
-    auto const stripPx = kTrackControlCellWidth * computeRightStripCellCount();
+    auto const stripPx = TrackHeaderView::kStripControlCellWidthPx * computeRightStripCellCount();
     auto nameArea = b.withTrimmedRight(stripPx).reduced(8, 0).withTrimmedLeft(active ? 6 : 4);
     g.setColour(juce::Colours::whitesmoke);
     g.setFont(14.0f);
