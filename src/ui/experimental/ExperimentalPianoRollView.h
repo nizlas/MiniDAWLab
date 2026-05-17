@@ -181,7 +181,13 @@ private:
     void toggleTimelineNoteInSelection(int noteIndex) noexcept;
     [[nodiscard]] bool isTimelineNoteIndexSelected(int noteIndex) const noexcept;
     void adjustTimelineNoteSelectionAfterErase(int erasedIndex) noexcept;
-    void applyTimelineMarqueeSelectionFromRect(const juce::Rectangle<int>& r) noexcept;
+
+    /// Timeline marquee (DAW-style rectangle select): component-local coordinates, clipped to `gridBounds()`.
+    void beginMarqueeSelection(juce::Point<int> localPos);
+    void updateMarqueeSelection(const juce::MouseEvent& e);
+    void finishMarqueeSelection();
+    [[nodiscard]] juce::Rectangle<int> getNormalizedMarqueeRect() const noexcept;
+    void selectTimelineNotesIntersecting(const juce::Rectangle<int>& r) noexcept;
 
     enum class TimelineMarqueeInteraction : std::uint8_t
     {

@@ -1279,7 +1279,7 @@ void ExperimentalPianoRollView::adjustTimelineNoteSelectionAfterErase(const int 
     selectedTimelineNoteIndices_ = std::move(out);
 }
 
-void ExperimentalPianoRollView::applyTimelineMarqueeSelectionFromRect(const juce::Rectangle<int>& r) noexcept
+void ExperimentalPianoRollView::selectTimelineNotesIntersecting(const juce::Rectangle<int>& r) noexcept
 {
     selectedTimelineNoteIndices_.clear();
     if (!pattern_.usesTimelineNotes() || timelineClip_ == nullptr || r.isEmpty())
@@ -1299,6 +1299,53 @@ void ExperimentalPianoRollView::applyTimelineMarqueeSelectionFromRect(const juce
     }
 }
 
+void ExperimentalPianoRollView::beginMarqueeSelection(const juce::Point<int> localPos)
+{
+    clearTimelineNoteSelection();
+    timelineMarqueeAnchor_ = localPos;
+    timelineMarqueeRect_ = {};
+    timelineMarqueeInteraction_ = TimelineMarqueeInteraction::Pending;
+    repaint();
+}
+
+void ExperimentalPianoRollView::updateMarqueeSelection(const juce::MouseEvent& e)
+{
+    const auto gr = gridBounds();
+    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Pending)
+    {
+        if (e.getDistanceFromDragStart() > kTimelineMarqueeDragThresholdPx)
+        {
+            timelineMarqueeInteraction_ = TimelineMarqueeInteraction::Dragging;
+        }
+    }
+    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
+    {
+        timelineMarqueeRect_
+            = juce::Rectangle<int>(timelineMarqueeAnchor_, e.getPosition()).getIntersection(gr);
+        repaint();
+    }
+}
+
+void ExperimentalPianoRollView::finishMarqueeSelection()
+{
+    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
+    {
+        selectTimelineNotesIntersecting(getNormalizedMarqueeRect());
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+        timelineMarqueeRect_ = {};
+        repaint();
+    }
+    else if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Pending)
+    {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+    }
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::getNormalizedMarqueeRect() const noexcept
+{
+    return timelineMarqueeRect_;
+}
+
 void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEvent& e)
 {
     if (timelineClip_ == nullptr)
@@ -1308,6 +1355,10 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     if (!isTimelineClipBindingFresh())
     {
         juce::Logger::writeToLog("[MIDI roll] timeline note click ignored (stale clip binding)");
+        return;
+    }
+    if (!e.mods.isLeftButtonDown())
+    {
         return;
     }
 
@@ -1327,10 +1378,7 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         return;
     }
 
-    clearTimelineNoteSelection();
-    timelineMarqueeAnchor_ = e.getPosition();
-    timelineMarqueeInteraction_ = TimelineMarqueeInteraction::Pending;
-    repaint();
+    beginMarqueeSelection(e.getPosition());
 }
 
 void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<int> pos)
@@ -1788,22 +1836,9 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
     if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
         && isTimelineClipBindingFresh())
     {
-        if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Pending)
-        {
-            if (e.getDistanceFromDragStart() > kTimelineMarqueeDragThresholdPx)
-            {
-                timelineMarqueeInteraction_ = TimelineMarqueeInteraction::Dragging;
-                const auto gr = gridBounds();
-                timelineMarqueeRect_
-                    = juce::Rectangle<int>(timelineMarqueeAnchor_, e.getPosition()).getIntersection(gr);
-            }
-        }
+        updateMarqueeSelection(e);
         if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
         {
-            const auto gr = gridBounds();
-            timelineMarqueeRect_
-                = juce::Rectangle<int>(timelineMarqueeAnchor_, e.getPosition()).getIntersection(gr);
-            repaint();
             return;
         }
     }
@@ -1823,17 +1858,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
-    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
-    {
-        applyTimelineMarqueeSelectionFromRect(timelineMarqueeRect_);
-        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
-        timelineMarqueeRect_ = {};
-        repaint();
-    }
-    else if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Pending)
-    {
-        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
-    }
+    finishMarqueeSelection();
 
     juce::ignoreUnused(e);
     rulerGestureMode_ = RulerGestureMode::None;
@@ -1995,9 +2020,9 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
     if (inKeysOrGrid && std::abs(wheel.deltaY) > 1.0e-6f)
     {
         pitchWheelScrollRemainder_ += wheel.deltaY * kPitchScrollRowsPerWheelDelta;
-        const int d = (int)std::trunc((double)pitchWheelScrollRemainder_);
-        pitchWheelScrollRemainder_ -= (float)d;
-        pitchScrollOffsetRows_ -= d;
+        const int rowSteps = (int)std::trunc((double)pitchWheelScrollRemainder_);
+        pitchWheelScrollRemainder_ -= (float)rowSteps;
+        pitchScrollOffsetRows_ -= rowSteps;
         clampPitchScrollOffset();
         resized();
         repaint();
@@ -2613,13 +2638,17 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         }
     }
 
-    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging && !timelineMarqueeRect_.isEmpty())
+    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
     {
-        const auto rf = timelineMarqueeRect_.toFloat();
-        g.setColour(juce::Colours::white.withAlpha(0.07f));
-        g.fillRect(rf);
-        g.setColour(juce::Colours::white.withAlpha(0.38f));
-        g.drawRect(rf, 1.0f);
+        const auto marq = getNormalizedMarqueeRect();
+        if (!marq.isEmpty())
+        {
+            const auto rf = marq.toFloat();
+            g.setColour(juce::Colour(0xff3d4e63).withAlpha(0.22f));
+            g.fillRect(rf);
+            g.setColour(juce::Colour(0xffe8eef5).withAlpha(0.82f));
+            g.drawRect(rf, 1.0f);
+        }
     }
 
     // --- drawGlobalPlayhead (grid)
