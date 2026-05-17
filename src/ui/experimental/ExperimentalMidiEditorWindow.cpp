@@ -31,6 +31,27 @@ namespace
     {
         return p != nullptr ? juce::String::formatted("%p", p) : juce::String("null");
     }
+
+    void applyPianoRollPitchRangeForInstrument(ExperimentalPianoRollView& roll,
+                                               const InstrumentTrackController* track) noexcept
+    {
+        if (track == nullptr)
+        {
+            roll.setEditablePitchRange(ExperimentalPianoRollView::kDrumPitchLow,
+                                       ExperimentalPianoRollView::kDrumPitchHigh);
+            return;
+        }
+        if (track->getExperimentalInstrumentKind() == "HALionSonic")
+        {
+            roll.setEditablePitchRange(ExperimentalPianoRollView::kMelodicPitchLow,
+                                       ExperimentalPianoRollView::kMelodicPitchHigh);
+        }
+        else
+        {
+            roll.setEditablePitchRange(ExperimentalPianoRollView::kDrumPitchLow,
+                                       ExperimentalPianoRollView::kDrumPitchHigh);
+        }
+    }
 } // namespace
 
 class ExperimentalMidiEditorWindow::Body final : public juce::Component,
@@ -56,6 +77,7 @@ public:
         player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
 
         addAndMakeVisible(viewport_);
+        viewport_.setScrollBarsShown(false, true);
         addAndMakeVisible(midiRollResizeSplitter_);
         midiRollResizeSplitter_.setVisible(false);
         addAndMakeVisible(midiRollCollapsedKnob_);
@@ -280,6 +302,7 @@ public:
                 deviceManagerForRoll_,
                 instrumentTrackForClipBind_,
                 mainTimelineViewportForRoll_);
+            applyPianoRollPitchRangeForInstrument(*rv, instrumentTrackForClipBind_);
             pushTransportGestureBlockToRoll();
             pushRowsModeToRoll();
         }
@@ -586,9 +609,6 @@ public:
         // scrollbar chrome; use that to size the viewed component so it fills the window.
         viewport_.setBounds(a);
 
-        const int rollMinH = ExperimentalPianoRollView::kRulerHeight
-                             + (ExperimentalPianoRollView::kPitchHigh - ExperimentalPianoRollView::kPitchLow + 1)
-                                   * ExperimentalPianoRollView::kRowHeight;
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
             const int outerW = juce::jmax(1, viewport_.getWidth());
@@ -606,7 +626,7 @@ public:
             }
 
             const int rw = juce::jmax(1, budgetW);
-            const int rh = juce::jmax(rollMinH, budgetH);
+            const int rh = juce::jmax(1, budgetH);
             rv->setSize(rw, rh);
             viewport_.setViewPosition(viewport_.getViewPositionX(), 0);
 
@@ -703,6 +723,7 @@ private:
             + " noteCount=" + juce::String((int)ap.notes.size()));
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
+        applyPianoRollPitchRangeForInstrument(*roll, instrumentTrackForClipBind_);
         roll->setSessionTimelineContext(boundTimelineClip_,
                                         sessionForRoll_,
                                         transportForRoll_,
@@ -1193,8 +1214,13 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
     }
     if (rowsBox_.getSelectedId() == 2)
     {
-        const int pitchLow = ExperimentalPianoRollView::kPitchLow;
-        const int pitchHigh = ExperimentalPianoRollView::kPitchHigh;
+        int pitchLow = ExperimentalPianoRollView::kDrumPitchLow;
+        int pitchHigh = ExperimentalPianoRollView::kDrumPitchHigh;
+        if (auto* rvPitch = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            pitchLow = rvPitch->pitchLow();
+            pitchHigh = rvPitch->pitchHigh();
+        }
         int manualLabelled = 0;
         int autoPluginLabelled = 0;
         int blank = 0;

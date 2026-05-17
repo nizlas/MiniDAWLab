@@ -156,6 +156,12 @@ public:
     [[nodiscard]] bool isActive() const noexcept { return isActive_; }
     void setActive(bool active) noexcept;
 
+    /// Persisted project DTO kind (`GrooveAgentSE` / `HALionSonic`). Message thread; UI/editor only.
+    [[nodiscard]] const juce::String& getExperimentalInstrumentKind() const noexcept
+    {
+        return experimentalInstrumentKind_;
+    }
+
     [[nodiscard]] const std::vector<std::unique_ptr<InstrumentMidiClip>>& getClips() const noexcept
     {
         return clips_;

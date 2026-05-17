@@ -23,7 +23,7 @@ class Session;
 class Transport;
 class TimelineViewportModel;
 
-/// Drum hits mode: diamonds at step centers; piano-style rows 24..72.
+/// Drum hits mode: diamonds at step centers; piano-style rows (range is **per-instance**, see `setEditablePitchRange`).
 /// I3d1: when bound to an `InstrumentMidiClip` + session/transport, X is **session-absolute samples**
 /// with an **independent** zoom/pan (not `TimelineViewportModel`).
 class ExperimentalPianoRollView final : public juce::Component,
@@ -32,8 +32,12 @@ class ExperimentalPianoRollView final : public juce::Component,
                                           private juce::TextEditor::Listener
 {
 public:
-    static constexpr int kPitchLow = 24;
-    static constexpr int kPitchHigh = 72;
+    /// Default drum-oriented editor span (Groove Agent–class lanes).
+    static constexpr int kDrumPitchLow = 24;
+    static constexpr int kDrumPitchHigh = 72;
+    /// Melodic span (~8 octaves C0–C8) for HALion Sonic–class lanes.
+    static constexpr int kMelodicPitchLow = 12;
+    static constexpr int kMelodicPitchHigh = 108;
     static constexpr int kRowHeight = 14;
 
     /// Legacy maximum piano strip width (also the resizable upper bound in Piano row mode).
@@ -52,6 +56,11 @@ public:
     static constexpr int kRulerHeight = 22;
 
     ExperimentalPianoRollView(ExperimentalMidiPattern& pattern, ExperimentalMidiPatternPlayer* player);
+
+    /// Inclusive MIDI note bounds for visible piano rows (clamped 0–127). Default: drum range.
+    void setEditablePitchRange(int lowInclusive, int highInclusive) noexcept;
+    [[nodiscard]] int pitchLow() const noexcept { return pitchLow_; }
+    [[nodiscard]] int pitchHigh() const noexcept { return pitchHigh_; }
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
@@ -169,6 +178,13 @@ private:
     void syncUiPlayheadAfterRulerSeek(std::int64_t seekTargetSamples) noexcept;
     void maybeFollowViewportToAnchorSample(double anchorSamples) noexcept;
 
+    [[nodiscard]] int countVisiblePitchRows() const noexcept;
+    [[nodiscard]] int maxPitchScrollOffsetRows() const noexcept;
+    void clampPitchScrollOffset() noexcept;
+    [[nodiscard]] int topVisiblePitch() const noexcept;
+    [[nodiscard]] std::optional<juce::Rectangle<int>> visibleRowStripRect(const juce::Rectangle<int>& strip,
+                                                                          int midiNote) const noexcept;
+
     enum class RulerGestureMode
     {
         None,
@@ -251,6 +267,14 @@ private:
     std::function<void(int, juce::String)> onCommitRowLabelEdit_;
     std::unique_ptr<juce::TextEditor> rowLabelEditor_;
     int rowLabelEditorPitch_ = -1;
+
+    int pitchLow_ = kDrumPitchLow;
+    int pitchHigh_ = kDrumPitchHigh;
+
+    /// Vertical pitch window: row index 0 at the top of the grid maps to `pitchHigh_ - pitchScrollOffsetRows_`.
+    int pitchScrollOffsetRows_ = 0;
+    /// Fractional pitch rows from high-res / sub-line wheel deltas (applied with `trunc` in `mouseWheelMove`).
+    float pitchWheelScrollRemainder_ = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExperimentalPianoRollView)
 };
