@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_set>
+#include <vector>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -71,6 +72,7 @@ public:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    bool keyPressed(const juce::KeyPress& key) override;
     void resized() override;
 
     /// Absolute timeline mode (clip editor). Pass nullptrs to use legacy clip-local step grid (internal pattern only).
@@ -138,6 +140,10 @@ public:
     /// MIDI editor window (`Body`) owns strip width; the roll only mirrors it for layout/paint.
     void setSideStripTotalWidthForUiOnly(int totalIncludingSplitter) noexcept;
 
+    /// Slice E: copy/paste selected `timelineNotes` within the bound clip (internal clipboard only).
+    [[nodiscard]] bool handleTimelineNotesCopyShortcut() noexcept;
+    [[nodiscard]] bool handleTimelineNotesPasteShortcut();
+
 private:
     void timerCallback() override;
 
@@ -203,6 +209,22 @@ private:
     void beginTimelineNoteResizeGesture(int noteIndex, TimelineNoteResizeEdge edge);
     void updateTimelineNoteResizeGesture(juce::Point<int> localPos);
     void finishTimelineNoteResizeGesture();
+
+    struct InternalTimelineClipboardItem
+    {
+        std::int64_t deltaStartTicks = 0;
+        int midiNote = 60;
+        int velocity = 100;
+        std::uint8_t channel = 1;
+        std::int64_t durationTicks = 240;
+    };
+    std::vector<InternalTimelineClipboardItem> timelineInternalClipboard_;
+    /// Earliest `startTick` among notes last copied (for paste fallback anchor).
+    std::int64_t timelineClipboardSourceMinStartTick_ = 0;
+
+    [[nodiscard]] std::int64_t computeTimelinePasteAnchorTick() const;
+    void sortTimelineNotesForEditing() noexcept;
+    void replaceTimelineSelectionWithNotesMatching(const std::vector<TimelineMidiNote>& matches) noexcept;
 
     enum class TimelineMarqueeInteraction : std::uint8_t
     {

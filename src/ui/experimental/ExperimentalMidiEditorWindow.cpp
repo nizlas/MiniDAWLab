@@ -1148,6 +1148,28 @@ bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyP
         onGlobalRedoRequested_();
         return true;
     }
+    if (const bool cKey = (key.getKeyCode() == 'c' || key.getKeyCode() == 'C');
+        cmd && cKey && !key.getModifiers().isShiftDown())
+    {
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (rv->handleTimelineNotesCopyShortcut())
+            {
+                return true;
+            }
+        }
+    }
+    if (const bool vKey = (key.getKeyCode() == 'v' || key.getKeyCode() == 'V');
+        cmd && vKey && !key.getModifiers().isShiftDown())
+    {
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (rv->handleTimelineNotesPasteShortcut())
+            {
+                return true;
+            }
+        }
+    }
     if (midi_transport_shortcuts::isRecordToggleShortcut(key))
     {
         if (transportCommands_.onToggleRecord)

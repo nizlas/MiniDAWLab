@@ -13,6 +13,7 @@
 #include <limits>
 
 #include <algorithm>
+#include <vector>
 
 namespace
 {
@@ -134,9 +135,32 @@ ExperimentalPianoRollView::ExperimentalPianoRollView(ExperimentalMidiPattern& pa
     , player_(player)
 {
     setOpaque(true);
+    setWantsKeyboardFocus(true);
     setMouseClickGrabsKeyboardFocus(false);
     uiTimerHzConfigured_ = kMidiRollTimerHzIdle;
     startTimerHz(kMidiRollTimerHzIdle);
+}
+
+bool ExperimentalPianoRollView::keyPressed(const juce::KeyPress& key)
+{
+    if (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+    {
+        return false;
+    }
+    const bool cmd = key.getModifiers().isCommandDown();
+    if (!cmd || key.getModifiers().isShiftDown())
+    {
+        return false;
+    }
+    if (key.getKeyCode() == 'c' || key.getKeyCode() == 'C')
+    {
+        return handleTimelineNotesCopyShortcut();
+    }
+    if (key.getKeyCode() == 'v' || key.getKeyCode() == 'V')
+    {
+        return handleTimelineNotesPasteShortcut();
+    }
+    return false;
 }
 
 void ExperimentalPianoRollView::setEditablePitchRange(const int lowInclusive, const int highInclusive) noexcept
@@ -375,6 +399,7 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         selectedTimelineNoteIndices_.clear();
         timelineNoteResizeActive_ = false;
         timelineResizeNoteIndex_ = -1;
+        timelineInternalClipboard_.clear();
     }
     timelineClip_ = timelineClip;
     session_ = session;
@@ -1326,6 +1351,215 @@ std::int64_t ExperimentalPianoRollView::snapTimelineTickForEdit(const std::int64
         return tick;
     }
     return (std::int64_t)std::llround((double)tick / (double)g) * g;
+}
+
+void ExperimentalPianoRollView::sortTimelineNotesForEditing() noexcept
+{
+    std::sort(
+        pattern_.timelineNotes.begin(), pattern_.timelineNotes.end(),
+        [](const TimelineMidiNote& a, const TimelineMidiNote& b) noexcept {
+            if (a.startTick != b.startTick)
+            {
+                return a.startTick < b.startTick;
+            }
+            if (a.midiNote != b.midiNote)
+            {
+                return a.midiNote < b.midiNote;
+            }
+            return a.channel < b.channel;
+        });
+}
+
+void ExperimentalPianoRollView::replaceTimelineSelectionWithNotesMatching(
+    const std::vector<TimelineMidiNote>& matches) noexcept
+{
+    selectedTimelineNoteIndices_.clear();
+    std::unordered_set<int> used;
+    for (const auto& want : matches)
+    {
+        for (int i = 0; i < (int)pattern_.timelineNotes.size(); ++i)
+        {
+            if (used.count(i) != 0u)
+            {
+                continue;
+            }
+            const auto& n = pattern_.timelineNotes[(size_t)i];
+            if (n.startTick == want.startTick && n.durationTicks == want.durationTicks && n.midiNote == want.midiNote
+                && n.channel == want.channel && n.velocity == want.velocity)
+            {
+                selectedTimelineNoteIndices_.insert(i);
+                used.insert(i);
+                break;
+            }
+        }
+    }
+}
+
+std::int64_t ExperimentalPianoRollView::computeTimelinePasteAnchorTick() const
+{
+    if (timelineClip_ == nullptr)
+    {
+        return 0;
+    }
+    const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+
+    std::int64_t rawTick = 0;
+    if (transport_ != nullptr && useAbsoluteTimeline())
+    {
+        rawTick = relativeSamplesToTicks(
+            (std::int64_t)std::llround(uiPlayheadDisplaySamples_) - anchor, bpm, tpq, sr);
+    }
+    else if (hasValidViewportState())
+    {
+        rawTick = relativeSamplesToTicks(visibleStartSamples_ - anchor, bpm, tpq, sr);
+    }
+    else
+    {
+        const std::int64_t step = juce::jmax<std::int64_t>(
+            1,
+            musicalSnapGridTicks() > 0 ? musicalSnapGridTicks() : referenceTimelineGridTicks());
+        rawTick = timelineClipboardSourceMinStartTick_ + step;
+    }
+    return snapTimelineTickForEdit(rawTick);
+}
+
+bool ExperimentalPianoRollView::handleTimelineNotesCopyShortcut() noexcept
+{
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
+        || !pattern_.usesTimelineNotes())
+    {
+        return false;
+    }
+    if (selectedTimelineNoteIndices_.empty())
+    {
+        return true;
+    }
+
+    std::vector<std::pair<int, const TimelineMidiNote*>> items;
+    items.reserve(selectedTimelineNoteIndices_.size());
+    for (const int i : selectedTimelineNoteIndices_)
+    {
+        if (i >= 0 && i < (int)pattern_.timelineNotes.size())
+        {
+            items.push_back({i, &pattern_.timelineNotes[(size_t)i]});
+        }
+    }
+    if (items.empty())
+    {
+        return true;
+    }
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) noexcept {
+        if (a.second->startTick != b.second->startTick)
+        {
+            return a.second->startTick < b.second->startTick;
+        }
+        if (a.second->midiNote != b.second->midiNote)
+        {
+            return a.second->midiNote < b.second->midiNote;
+        }
+        return a.second->channel < b.second->channel;
+    });
+
+    const std::int64_t minStart = items.front().second->startTick;
+    timelineClipboardSourceMinStartTick_ = minStart;
+    timelineInternalClipboard_.clear();
+    timelineInternalClipboard_.reserve(items.size());
+    for (const auto& it : items)
+    {
+        const auto& n = *it.second;
+        InternalTimelineClipboardItem row;
+        row.deltaStartTicks = n.startTick - minStart;
+        row.midiNote = n.midiNote;
+        row.velocity = n.velocity;
+        row.channel = n.channel;
+        row.durationTicks = n.durationTicks;
+        timelineInternalClipboard_.push_back(row);
+    }
+    return true;
+}
+
+bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
+{
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
+        || !pattern_.usesTimelineNotes())
+    {
+        return false;
+    }
+    if (timelineInternalClipboard_.empty())
+    {
+        return true;
+    }
+
+    const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
+    const std::int64_t vis0 = timelineClip_->startSamples;
+    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const std::int64_t pasteTick = computeTimelinePasteAnchorTick();
+
+    std::vector<TimelineMidiNote> toAdd;
+    toAdd.reserve(timelineInternalClipboard_.size());
+    for (const auto& it : timelineInternalClipboard_)
+    {
+        TimelineMidiNote n;
+        n.midiNote = it.midiNote;
+        n.velocity = it.velocity;
+        n.channel = it.channel;
+        n.durationTicks = it.durationTicks;
+        n.startTick = pasteTick + it.deltaStartTicks;
+
+        const std::int64_t a0 = absoluteSampleForTimelineNote(anchor, n, pattern_, sr);
+        if (a0 < vis0 || a0 >= vis1)
+        {
+            continue;
+        }
+        const std::int64_t durS = ticksToRelativeSamples(
+            juce::jmax<std::int64_t>(1, n.durationTicks), bpm, tpq, sr);
+        const std::int64_t a1 = a0 + juce::jmax<std::int64_t>(1, durS);
+        if (a1 > vis1)
+        {
+            const std::int64_t maxSam = juce::jmax(std::int64_t{1}, vis1 - a0);
+            n.durationTicks = juce::jmax<std::int64_t>(
+                1, relativeSamplesToTicks(maxSam, bpm, tpq, sr));
+        }
+        toAdd.push_back(n);
+    }
+
+    if (toAdd.empty())
+    {
+        return true;
+    }
+
+    const std::vector<TimelineMidiNote> selectionSnapshot = toAdd;
+
+    auto applyPaste = [this, toAdd = std::move(toAdd), selectionSnapshot]() mutable -> bool {
+        for (auto& n : toAdd)
+        {
+            pattern_.timelineNotes.push_back(std::move(n));
+        }
+        sortTimelineNotesForEditing();
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        replaceTimelineSelectionWithNotesMatching(selectionSnapshot);
+        repaint();
+        return true;
+    };
+
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_("Paste MIDI notes", std::move(applyPaste));
+    }
+    else
+    {
+        applyPaste();
+    }
+    return true;
 }
 
 std::int64_t ExperimentalPianoRollView::minTimelineNoteDurationTicks() const noexcept
