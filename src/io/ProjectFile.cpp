@@ -5,6 +5,7 @@
 #include "io/ProjectFile.h"
 
 #include "domain/ProjectMusicalTime.h"
+#include "domain/TrackStereoPan.h"
 #include "ui/SnapSettings.h"
 
 #include <juce_core/juce_core.h>
@@ -54,6 +55,11 @@ namespace
         if (std::fabs((double)t.channelFaderGain - 1.0) > kUnityChannelFaderOmitEpsilon)
         {
             to->setProperty("channelFaderGain", (double)t.channelFaderGain);
+        }
+        constexpr double kPanOmitEpsilon = 1.0e-6;
+        if (std::fabs((double)t.stereoPan) > kPanOmitEpsilon)
+        {
+            to->setProperty("pan", (double)t.stereoPan);
         }
         if (t.off)
         {
@@ -1128,6 +1134,14 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             {
                 trk.channelFaderGain = juce::jlimit(
                     0.0f, kTrackChannelFaderGainMax, (float)(double)gv);
+            }
+        }
+        trk.stereoPan = 0.0f;
+        {
+            const juce::var& pv = tv.getProperty("pan", {});
+            if (pv.isDouble() || pv.isInt() || pv.isInt64())
+            {
+                trk.stereoPan = sanitizeTrackStereoPan((double)pv);
             }
         }
         {

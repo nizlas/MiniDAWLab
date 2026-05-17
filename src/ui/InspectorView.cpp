@@ -498,6 +498,21 @@ InspectorView::InspectorView(Session& session)
     channelVolumeDbEditor_.addListener(this);
     addAndMakeVisible(channelVolumeDbEditor_);
 
+    panCaptionLabel_.setText("Pan", juce::dontSendNotification);
+    panCaptionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(panCaptionLabel_);
+
+    panField_.setPan(0.f, juce::dontSendNotification);
+    panField_.onPanChanged = [this](const float pan) {
+        const TrackId active = session_.getActiveTrackId();
+        if (active == kInvalidTrackId)
+        {
+            return;
+        }
+        session_.setTrackStereoPan(active, pan);
+    };
+    addAndMakeVisible(panField_);
+
     insertsSectionLabel_.setText("Inserts", juce::dontSendNotification);
     insertsSectionLabel_.setFont(juce::FontOptions(11.0f));
     addAndMakeVisible(insertsSectionLabel_);
@@ -1121,6 +1136,7 @@ void InspectorView::refreshFromSession()
         activeTrackNameEditor_.setTooltip({});
         inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
+        panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
         return;
     }
@@ -1136,6 +1152,7 @@ void InspectorView::refreshFromSession()
         activeTrackNameEditor_.setTooltip({});
         inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
+        panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsNoActiveTrack();
         return;
     }
@@ -1147,6 +1164,11 @@ void InspectorView::refreshFromSession()
     lastShownTrackId_ = active;
 
     syncInsertsForActiveTrack(active);
+
+    if (!panField_.isMouseButtonDown())
+    {
+        panField_.setPan(tr.getStereoPan(), juce::dontSendNotification);
+    }
 
     const bool nameFocused = activeTrackNameEditor_.hasKeyboardFocus(false);
     if (!nameFocused || switchedTrack)
@@ -1188,6 +1210,15 @@ void InspectorView::resized()
     channelVolumeDbEditor_.setBounds(xStart, yy, kDbValueFieldWidth, kDbValueFieldHeight);
     channelVolumeDbUnitLabel_.setBounds(xStart + kDbValueFieldWidth + kGapValueToDbSuffix, yy,
                                         kDbUnitLabelWidth, kDbValueFieldHeight);
+
+    area.removeFromTop(8);
+    panCaptionLabel_.setBounds(area.removeFromTop(18));
+    area.removeFromTop(2);
+    {
+        auto panRow = area.removeFromTop(36);
+        panField_.setBounds(panRow);
+        panField_.toFront(false);
+    }
 
     area.removeFromTop(10);
     insertsSectionLabel_.setBounds(area.removeFromTop(18));

@@ -3,6 +3,8 @@
 #include "domain/Track.h"
 #include "plugins/InsertSlotId.h"
 
+#include "ui/InspectorPanControl.h"
+
 #include <functional>
 #include <memory>
 #include <optional>
@@ -119,6 +121,8 @@ private:
     juce::Label channelVolumeCaptionLabel_;
     juce::TextEditor channelVolumeDbEditor_;
     juce::Label channelVolumeDbUnitLabel_;
+    juce::Label panCaptionLabel_;
+    InspectorPanControl panField_;
     juce::Label insertsSectionLabel_;
     juce::Label preSectionLabel_;
     juce::Label preEmptyLabel_;

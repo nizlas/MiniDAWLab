@@ -183,6 +183,9 @@ public:
     // Clamped to [0, kTrackChannelFaderGainMax]; 0 = fader at −∞ (not the same as mute flag).
     void setTrackChannelFaderGain(TrackId trackId, float linearGain) noexcept;
 
+    /// [Message thread] Stereo pan [-1,+1] (full left … full right); applied after fader in playback.
+    void setTrackStereoPan(TrackId trackId, float stereoPan) noexcept;
+
     // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.

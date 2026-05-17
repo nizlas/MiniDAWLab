@@ -180,6 +180,11 @@ public:
         TrackId trackId,
         float channelFaderGainLinear) noexcept;
 
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackStereoPan(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        float stereoPan) noexcept;
+
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackOff(
         const SessionSnapshot& previous,
         TrackId trackId,

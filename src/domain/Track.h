@@ -22,6 +22,8 @@
 //   **channel fader** → optional post-fader inserts / send taps → optional group/master routing.
 //   Playback applies this gain when summing the track after each lane's clip/overlap logic; PCM
 //   files and waveform data are unaffected. Recording path is unaffected; WAV is captured pre-fader.
+//   **Stereo pan** (`Track::stereoPan_`) is applied after this gain (and mute/off) when mixing into
+//   the device stereo bus — see `TrackStereoPan.h`.
 //   Future **post-fader** inserts/sends/explicit taps may require per-track staging buffers — not
 //   implemented here; currently gain is applied at the simplified track-output point before summing.
 //
@@ -31,6 +33,7 @@
 // =============================================================================
 
 #include "domain/PlacedClip.h"
+#include "domain/TrackStereoPan.h"
 
 #include <juce_core/juce_core.h>
 
@@ -43,6 +46,7 @@ inline constexpr TrackId kInvalidTrackId = 0;
 
 inline constexpr float kTrackChannelVolumeUnityGain = 1.0f;
 inline constexpr float kTrackChannelFaderGainMax = 8.0f;
+inline constexpr float kTrackStereoPanCenter = 0.0f;
 
 enum class TrackKind : std::uint8_t
 {
@@ -60,6 +64,7 @@ public:
     explicit Track(TrackId id, juce::String name, std::vector<PlacedClip> placedClips) noexcept;
 
     // [Message thread, snapshot build] `channelFaderGain` linear, clamped [0, kTrackChannelFaderGainMax].
+    // `stereoPan` in [-1,+1] (full left … full right), default center — see `TrackStereoPan.h`.
     // `trackOff`: lane skipped by playback engine. `trackMuted`: engine applies zero effective gain
     // without changing stored `channelFaderGain`.
     explicit Track(TrackId id,
@@ -68,7 +73,8 @@ public:
                    float channelFaderGain,
                    bool trackOff = false,
                    bool trackMuted = false,
-                   TrackKind kind = TrackKind::Audio) noexcept;
+                   TrackKind kind = TrackKind::Audio,
+                   float stereoPan = kTrackStereoPanCenter) noexcept;
 
     [[nodiscard]] TrackKind getKind() const noexcept { return kind_; }
 
@@ -87,7 +93,10 @@ public:
     /// If true, effective output gain is zero; stored fader value is unchanged.
     [[nodiscard]] bool isMuted() const noexcept { return trackMuted_; }
 
-    /// [Message thread] Same clips/gain/mute/off/kind; new display name (immutable snapshot pattern).
+    /// Stereo pan [-1,+1]: left … center … right (applied after fader in playback).
+    [[nodiscard]] float getStereoPan() const noexcept { return stereoPan_; }
+
+    /// [Message thread] Same clips/gain/mute/off/kind/pan; new display name (immutable snapshot pattern).
     [[nodiscard]] Track renamed(juce::String newName) const noexcept;
 
 private:
@@ -98,4 +107,5 @@ private:
     bool trackOff_ = false;
     bool trackMuted_ = false;
     TrackKind kind_ = TrackKind::Audio;
+    float stereoPan_ = kTrackStereoPanCenter;
 };

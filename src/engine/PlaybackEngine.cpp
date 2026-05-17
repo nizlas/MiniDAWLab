@@ -11,13 +11,14 @@
 //   *that* lane. **Across** tracks, the audible samples for each lane for the same time window are
 //   **added** into the device buffer — a minimal sum (no mixer UI). Each track contributes after
 //   multiplying by its `Track::channelFaderGain` (mixer channel volume at the fader point; not
-//   clip/pre-gain — see `Track`). With inserts (Phase 8 / Slice B), that fader multiplier is applied
+//   clip/pre-gain — see `Track`), then **per-track stereo pan** (`TrackStereoPan.h`: linear balance,
+//   center leaves L/R gains at unity vs pre-pan). With inserts (Phase 8 / Slice B), that fader multiplier is applied
 //   on the scratch between Pre and Post chains; the dry path still applies gain at merge.
 //
 // PHASE 8 / Slice B (per-track VST3 Pre/Post): when `audioThread_hasActivePluginForTrack` reports an
 //   active stereo insert, clip audio copies into `PluginInsertHost`'s stereo scratch at unity, runs the
-//   **Pre** chain, applies effective track fader/mute gain in-place, runs the **Post** chain, then sums
-//   scratch into the device buffer at unity (same mono L+R blend rule as the dry path).
+//   **Pre** chain, applies effective track fader/mute gain in-place, runs the **Post** chain, applies pan,
+//   then sums scratch into the device buffer at unity (same mono L+R blend rule as the dry path).
 //   Mono device: (L+R)*0.5 into output 0. Stereo+: L→0, R→1; higher channels unchanged by inserts.
 //
 // I1 (experimental instrument): after clip/insert summing (and even when transport is not
@@ -42,6 +43,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "domain/TrackStereoPan.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -140,10 +142,25 @@ namespace
                              int outFrame0,
                              int numOutChannels,
                              float* const* outputChannelData,
-                             float trackGain) noexcept
+                             float trackGain,
+                             float stereoPan) noexcept
     {
         const int numSourceChannels = clip.getNumChannels();
         const juce::AudioBuffer<float>& buf = clip.getAudio();
+        const float gL = trackPanLawGainLeft(stereoPan);
+        const float gR = trackPanLawGainRight(stereoPan);
+
+        if (numOutChannels == 1 && numSourceChannels == 1)
+        {
+            float* d = outputChannelData[0];
+            if (d != nullptr)
+            {
+                const float fold = 0.5f * (gL + gR) * trackGain;
+                juce::FloatVectorOperations::addWithMultiply(
+                    d + outFrame0, buf.getReadPointer(0) + offInMaterial, fold, run);
+            }
+            return;
+        }
 
         for (int outChannel = 0; outChannel < numOutChannels; ++outChannel)
         {
@@ -157,13 +174,15 @@ namespace
                                         && (outChannel == 0 || outChannel == 1));
             if (duplicateMono)
             {
+                const float g = (outChannel == 0) ? gL : gR;
                 juce::FloatVectorOperations::addWithMultiply(
-                    dest, buf.getReadPointer(0) + offInMaterial, trackGain, run);
+                    dest, buf.getReadPointer(0) + offInMaterial, trackGain * g, run);
             }
             else if (outChannel < numSourceChannels)
             {
+                const float bal = (outChannel == 0) ? gL : gR;
                 juce::FloatVectorOperations::addWithMultiply(
-                    dest, buf.getReadPointer(outChannel) + offInMaterial, trackGain, run);
+                    dest, buf.getReadPointer(outChannel) + offInMaterial, trackGain * bal, run);
             }
         }
     }
@@ -194,6 +213,22 @@ namespace
             {
                 juce::FloatVectorOperations::clear(scratchR, run);
             }
+        }
+    }
+
+    void multiplyStereoScratchLR(float* const* scratchPtrs, int run, float gainL, float gainR) noexcept
+    {
+        if (scratchPtrs == nullptr || run <= 0)
+        {
+            return;
+        }
+        if (float* L = scratchPtrs[0])
+        {
+            juce::FloatVectorOperations::multiply(L, gainL, run);
+        }
+        if (float* R = scratchPtrs[1])
+        {
+            juce::FloatVectorOperations::multiply(R, gainR, run);
         }
     }
 
@@ -268,14 +303,15 @@ namespace
                                                 float* const* outputChannelData,
                                                 int numOutputChannels,
                                                 int numSamples,
-                                                float instrumentGain) noexcept
+                                                float instrumentGain,
+                                                float stereoPan) noexcept
     {
         if (host == nullptr || numSamples <= 0)
         {
             return;
         }
         host->audioThread_processBlockAndAddToOutputs(
-            outputChannelData, numOutputChannels, numSamples, instrumentGain);
+            outputChannelData, numOutputChannels, numSamples, instrumentGain, stereoPan);
     }
 
     [[nodiscard]] const ExperimentalInstrumentPlaybackEntry* findExperimentalInstrumentPlaybackEntry(
@@ -869,7 +905,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 }
 
                 mixExperimentalInstrumentAfterTracks(
-                    entry->host, outputChannelData, numOutputChannels, numSamples, fader);
+                    entry->host, outputChannelData, numOutputChannels, numSamples, fader, tr.getStereoPan());
 
                 if (sx >= 0)
                 {
@@ -886,7 +922,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             if (e.host != nullptr)
             {
                 mixExperimentalInstrumentAfterTracks(
-                    e.host, outputChannelData, numOutputChannels, numSamples, 1.0f);
+                    e.host, outputChannelData, numOutputChannels, numSamples, 1.0f, kTrackStereoPanCenter);
             }
         }
     };
@@ -1048,6 +1084,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                             pluginHost_->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
                             scaleStereoScratch(scratch, run, effectiveGain);
                             pluginHost_->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
+                            multiplyStereoScratchLR(scratch,
+                                                    run,
+                                                    trackPanLawGainLeft(tr.getStereoPan()),
+                                                    trackPanLawGainRight(tr.getStereoPan()));
                             addStereoScratchToDeviceOutputs(scratch,
                                                             run,
                                                             destFrame,
@@ -1059,7 +1099,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     else
                     {
                         addClipRunToOutputs(
-                            c, off, run, destFrame, numOutputChannels, outputChannelData, effectiveGain);
+                            c, off, run, destFrame, numOutputChannels, outputChannelData, effectiveGain, tr.getStereoPan());
                     }
                 }
                 t += run;

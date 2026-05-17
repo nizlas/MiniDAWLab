@@ -187,7 +187,8 @@ public:
     void audioThread_processBlockAndAddToOutputs(float* const* outputChannelData,
                                                  int numOutputChannels,
                                                  int numSamples,
-                                                 float outputGain = 1.0f) noexcept;
+                                                 float outputGain = 1.0f,
+                                                 float stereoPan = 0.0f) noexcept;
 
 private:
     struct InstrumentOwner

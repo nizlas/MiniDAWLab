@@ -10,6 +10,8 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "plugins/ExperimentalInstrumentHost.h"
 
+#include "domain/TrackStereoPan.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <algorithm>
@@ -1519,33 +1521,37 @@ namespace
                                          int run,
                                          int numOutputChannels,
                                          float* const* outputChannelData,
-                                         float gain) noexcept
+                                         float gainL,
+                                         float gainR) noexcept
     {
         if (L == nullptr || R == nullptr || run <= 0 || numOutputChannels <= 0 || outputChannelData == nullptr)
         {
             return;
         }
+        const float gL = juce::jmax(0.0f, gainL);
+        const float gR = juce::jmax(0.0f, gainR);
         if (numOutputChannels == 1)
         {
             float* d = outputChannelData[0];
             if (d != nullptr)
             {
-                const float halfGain = 0.5f * gain;
-                juce::FloatVectorOperations::addWithMultiply(d, L, halfGain, run);
-                juce::FloatVectorOperations::addWithMultiply(d, R, halfGain, run);
+                const float halfGL = 0.5f * gL;
+                const float halfGR = 0.5f * gR;
+                juce::FloatVectorOperations::addWithMultiply(d, L, halfGL, run);
+                juce::FloatVectorOperations::addWithMultiply(d, R, halfGR, run);
             }
         }
         else
         {
             if (float* d0 = outputChannelData[0])
             {
-                juce::FloatVectorOperations::addWithMultiply(d0, L, gain, run);
+                juce::FloatVectorOperations::addWithMultiply(d0, L, gL, run);
             }
             if (numOutputChannels >= 2)
             {
                 if (float* d1 = outputChannelData[1])
                 {
-                    juce::FloatVectorOperations::addWithMultiply(d1, R, gain, run);
+                    juce::FloatVectorOperations::addWithMultiply(d1, R, gR, run);
                 }
             }
         }
@@ -3384,7 +3390,8 @@ void ExperimentalInstrumentHost::releaseResources()
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* const* outputChannelData,
                                                                          const int numOutputChannels,
                                                                          const int numSamples,
-                                                                         float outputGain) noexcept
+                                                                         float outputGain,
+                                                                         float stereoPan) noexcept
 {
     if (numSamples <= 0 || outputChannelData == nullptr || numOutputChannels <= 0)
     {
@@ -3471,6 +3478,8 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
 
     rtDiag_processOkBlocks_.fetch_add(1, std::memory_order_relaxed);
 
-    const float gain = juce::jmax(0.0f, outputGain);
-    addFirstStereoBusToDeviceOutputs(L, R, n, numOutputChannels, outputChannelData, gain);
+    const float g = juce::jmax(0.0f, outputGain);
+    const float pL = trackPanLawGainLeft(stereoPan);
+    const float pR = trackPanLawGainRight(stereoPan);
+    addFirstStereoBusToDeviceOutputs(L, R, n, numOutputChannels, outputChannelData, g * pL, g * pR);
 }

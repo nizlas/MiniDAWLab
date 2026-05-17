@@ -100,6 +100,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/TimelineLocatorPainter.cpp
     src/ui/LatencySettingsView.cpp
     src/ui/CollapsibleSideStrip.cpp
+    src/ui/InspectorPanControl.cpp
     src/ui/InspectorView.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp

@@ -15,6 +15,7 @@
 
 #include "domain/AudioClip.h"
 #include "domain/ProjectMusicalTime.h"
+#include "domain/TrackStereoPan.h"
 
 #include <juce_core/juce_core.h>
 
@@ -126,7 +127,8 @@ namespace
                      t.getChannelFaderGain(),
                      t.isTrackOff(),
                      t.isMuted(),
-                     t.getKind());
+                     t.getKind(),
+                     t.getStereoPan());
     }
 
     [[nodiscard]] Track duplicateTrackWithMovedClips(const Track& t, std::vector<PlacedClip>&& clips)
@@ -137,7 +139,8 @@ namespace
                      t.getChannelFaderGain(),
                      t.isTrackOff(),
                      t.isMuted(),
-                     t.getKind());
+                     t.getKind(),
+                     t.getStereoPan());
     }
 
     [[nodiscard]] Track duplicateTrackSameClipsWithGain(const Track& t, const float linearGain)
@@ -149,7 +152,8 @@ namespace
                      g,
                      t.isTrackOff(),
                      t.isMuted(),
-                     t.getKind());
+                     t.getKind(),
+                     t.getStereoPan());
     }
 } // namespace
 
@@ -1019,6 +1023,56 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGai
                             previous.getProjectMusicalTime()));
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackStereoPan(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const float stereoPan) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    const float p = sanitizeTrackStereoPan(stereoPan);
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+        else
+        {
+            out.push_back(Track(t.getId(),
+                                t.getName(),
+                                t.getPlacedClips(),
+                                t.getChannelFaderGain(),
+                                t.isTrackOff(),
+                                t.isMuted(),
+                                t.getKind(),
+                                p));
+        }
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
     const SessionSnapshot& previous,
     const TrackId trackId,
@@ -1056,7 +1110,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
                                 t.getChannelFaderGain(),
                                 trackOff,
                                 t.isMuted(),
-                                t.getKind()));
+                                t.getKind(),
+                                t.getStereoPan()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1104,7 +1159,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
                                 t.getChannelFaderGain(),
                                 t.isTrackOff(),
                                 trackMuted,
-                                t.getKind()));
+                                t.getKind(),
+                                t.getStereoPan()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(

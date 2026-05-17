@@ -15,6 +15,7 @@
 #include "domain/Session.h"
 
 #include "domain/AudioClip.h"
+#include "domain/TrackStereoPan.h"
 #include "instruments/InstrumentTrackController.h"
 #include "io/AudioFileLoader.h"
 #include "io/ProjectFile.h"
@@ -768,6 +769,33 @@ void Session::setTrackChannelFaderGain(const TrackId trackId, float linearGain) 
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::setTrackStereoPan(const TrackId trackId, const float stereoPan) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return;
+    }
+    const float p = sanitizeTrackStereoPan(stereoPan);
+    if (std::fabs((double)(p - current->getTrack(idx).getStereoPan())) < 1.0e-6)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackStereoPan(*current, trackId, p);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::setTrackOff(const TrackId trackId, const bool trackOff) noexcept
 {
     if (trackId == kInvalidTrackId)
@@ -1033,6 +1061,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.id = t.getId();
         tr.name = t.getName();
         tr.channelFaderGain = t.getChannelFaderGain();
+        tr.stereoPan = t.getStereoPan();
         tr.off = t.isTrackOff();
         tr.muted = t.isMuted();
         tr.kind = (t.getKind() == TrackKind::Instrument) ? juce::String("instrument") : juce::String("audio");
@@ -1302,7 +1331,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             juce::jlimit(0.0f, kTrackChannelFaderGainMax, trDto.channelFaderGain),
             trDto.off,
             trDto.muted,
-            tk);
+            tk,
+            sanitizeTrackStereoPan(trDto.stereoPan));
     }
 
     if (built.empty())
