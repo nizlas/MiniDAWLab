@@ -952,6 +952,38 @@ std::int64_t Session::getRightLocatorSamples() const noexcept
     return (snap != nullptr) ? snap->getRightLocatorSamples() : 0;
 }
 
+ProjectMusicalTime Session::getProjectMusicalTime() const noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> snap = loadSessionSnapshotForAudioThread();
+    return (snap != nullptr) ? snap->getProjectMusicalTime() : ProjectMusicalTime{};
+}
+
+void Session::setProjectBpm(double bpm) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> cur = loadSessionSnapshotForAudioThread();
+    if (cur == nullptr)
+    {
+        return;
+    }
+    ProjectMusicalTime mt = cur->getProjectMusicalTime();
+    mt.bpm = bpm;
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withMusicalTime(*cur, mt);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+void Session::setProjectMusicalTime(ProjectMusicalTime musicalTime) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> cur = loadSessionSnapshotForAudioThread();
+    if (cur == nullptr)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withMusicalTime(*cur, musicalTime);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 std::shared_ptr<const SessionSnapshot> Session::loadSessionSnapshotForAudioThread() const noexcept
 {
     // Acquire: pair with the release stores in replace/clear so this read happens-after the last
@@ -963,7 +995,9 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                                        const juce::File& file,
                                        const double deviceSampleRate,
                                        PluginInsertHost* pluginHost,
-                                       ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId)
+                                       ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId,
+                                       const bool arrangementSnapEnabled,
+                                       const juce::String arrangementSnapResolutionKey)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -982,6 +1016,15 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     out.leftLocatorSamples = s->getLeftLocatorSamples();
     out.rightLocatorSamples = s->getRightLocatorSamples();
     out.cycleEnabled = transport.readCycleEnabledForUi();
+    {
+        const ProjectMusicalTime mt = s->getProjectMusicalTime();
+        out.bpm = mt.bpm;
+        out.timeSignatureNumerator = mt.numerator;
+        out.timeSignatureDenominator = mt.denominator;
+        out.ticksPerQuarter = mt.ticksPerQuarter;
+    }
+    out.snapEnabled = arrangementSnapEnabled;
+    out.snapResolution = arrangementSnapResolutionKey;
 
     for (int i = 0; i < s->getNumTracks(); ++i)
     {
@@ -1270,11 +1313,18 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     nextPlacedClipId_ = juce::jmax(parsed.nextPlacedClipId, static_cast<PlacedClipId>(maxClipInFile + 1));
     nextTrackId_ = juce::jmax(parsed.nextTrackId, static_cast<TrackId>(maxTrackInFile + 1));
 
+    ProjectMusicalTime loadedMusical;
+    loadedMusical.bpm = parsed.bpm;
+    loadedMusical.numerator = parsed.timeSignatureNumerator;
+    loadedMusical.denominator = parsed.timeSignatureDenominator;
+    loadedMusical.ticksPerQuarter = parsed.ticksPerQuarter;
+
     const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTracks(
         std::move(built),
         parsed.arrangementExtentSamples,
         parsed.leftLocatorSamples,
-        parsed.rightLocatorSamples);
+        parsed.rightLocatorSamples,
+        loadedMusical);
     if (next == nullptr)
     {
         return juce::Result::fail("Could not build session from project file.");

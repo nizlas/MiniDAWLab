@@ -157,6 +157,14 @@ struct ProjectFileV1
     std::int64_t rightLocatorSamples = 0;
     // v10: cycle/loop armed (Transport). Omitted in JSON when false (default).
     bool cycleEnabled = false;
+    /// Optional root (Slice A): global musical metadata; absent in older files → struct defaults.
+    double bpm = 120.0;
+    int timeSignatureNumerator = 4;
+    int timeSignatureDenominator = 4;
+    int ticksPerQuarter = 960;
+    /// Optional root (Slice C): arrangement snap UI; absent in older files → defaults below.
+    bool snapEnabled = false;
+    juce::String snapResolution { "1_4" };
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;

@@ -253,7 +253,12 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
             return;
         }
 
-        const std::int64_t playhead = transport_.readPlayheadSamplesForUi();
+        const std::int64_t playheadRaw = transport_.readPlayheadSamplesForUi();
+        std::int64_t playhead = playheadRaw;
+        if (callbacks_.snapArrangementTimelineSample != nullptr)
+        {
+            playhead = callbacks_.snapArrangementTimelineSample(playheadRaw);
+        }
         const std::int64_t earliest = pb.groupEarliestStartSamples;
         std::vector<std::pair<std::int64_t, std::int64_t>> placements;
         placements.reserve(pb.clipsSortedByOriginalStart.size());
@@ -329,9 +334,14 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
     callbacks_.executeUndoableSessionEdit(
         "Paste clip",
         [this, target, pb]() -> bool {
+            std::int64_t pasteAt = transport_.readPlayheadSamplesForUi();
+            if (callbacks_.snapArrangementTimelineSample != nullptr)
+            {
+                pasteAt = callbacks_.snapArrangementTimelineSample(pasteAt);
+            }
             const juce::Result r = session_.addPlacedClipFromExistingMaterial(
                 pb.material,
-                transport_.readPlayheadSamplesForUi(),
+                pasteAt,
                 pb.leftTrimSamples,
                 pb.visibleLengthSamples,
                 target,

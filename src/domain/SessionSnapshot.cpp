@@ -14,6 +14,7 @@
 #include "domain/SessionSnapshot.h"
 
 #include "domain/AudioClip.h"
+#include "domain/ProjectMusicalTime.h"
 
 #include <juce_core/juce_core.h>
 
@@ -155,11 +156,13 @@ namespace
 SessionSnapshot::SessionSnapshot(std::vector<Track> tracks,
                                  const std::int64_t arrangementExtentSamples,
                                  const std::int64_t leftLocatorSamples,
-                                 const std::int64_t rightLocatorSamples) noexcept
+                                 const std::int64_t rightLocatorSamples,
+                                 ProjectMusicalTime projectMusicalTime) noexcept
     : tracks_(std::move(tracks))
     , arrangementExtentSamples_(juce::jmax(std::int64_t{0}, arrangementExtentSamples))
     , leftLocatorSamples_(juce::jmax(std::int64_t{0}, leftLocatorSamples))
     , rightLocatorSamples_(juce::jmax(std::int64_t{0}, rightLocatorSamples))
+    , projectMusicalTime_(sanitizeProjectMusicalTime(projectMusicalTime))
 {
 }
 
@@ -198,7 +201,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
     std::vector<Track> tracks,
     const std::int64_t arrangementExtentSamples,
     const std::int64_t leftLocatorSamples,
-    const std::int64_t rightLocatorSamples) noexcept
+    const std::int64_t rightLocatorSamples,
+    ProjectMusicalTime projectMusicalTime) noexcept
 {
     if (tracks.empty())
     {
@@ -214,7 +218,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
         new SessionSnapshot(std::move(tracks),
                             arrangementExtentSamples,
                             lClamp,
-                            rClamp));
+                            rClamp,
+                            projectMusicalTime));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSinglePlacedClip(
@@ -245,7 +250,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withArrangementExtent(
         previous.tracks_,
         newArrangementExtentSamples,
         previous.getLeftLocatorSamples(),
-        previous.getRightLocatorSamples()));
+        previous.getRightLocatorSamples(),
+        previous.getProjectMusicalTime()));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withLocators(
@@ -257,7 +263,20 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withLocators(
         previous.tracks_,
         previous.getStoredArrangementExtentSamples(),
         leftLocatorSamples,
-        rightLocatorSamples));
+        rightLocatorSamples,
+        previous.getProjectMusicalTime()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withMusicalTime(
+    const SessionSnapshot& previous,
+    ProjectMusicalTime musicalTime) noexcept
+{
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot(
+        previous.tracks_,
+        previous.getStoredArrangementExtentSamples(),
+        previous.getLeftLocatorSamples(),
+        previous.getRightLocatorSamples(),
+        musicalTime));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnTargetTrack(
@@ -295,14 +314,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
         // Defensive: copy as no-op
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     if (!trackAcceptsTimelineAudioClipMaterial(previous.getTrack(tIdx)))
     {
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -329,7 +348,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 namespace
@@ -403,14 +422,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     if (!trackAcceptsTimelineAudioClipMaterial(previous.getTrack(tIdx)))
     {
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -443,7 +462,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipAddedAsNewestOnT
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
@@ -470,7 +489,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks() + 1U);
@@ -488,7 +507,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
                      kind);
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
@@ -500,7 +519,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     bool found = false;
     std::vector<Track> out;
@@ -519,7 +538,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
     {
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     if (out.empty())
     {
@@ -529,7 +548,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
         std::move(out),
         previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(),
-            previous.getRightLocatorSamples()});
+            previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withPlacedClipRemoved(
@@ -541,14 +560,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withPlacedClipRemoved(
     {
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int tIdx = previous.findTrackIndexById(trackId);
     if (tIdx < 0)
     {
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const Track& touched = previous.getTrack(tIdx);
     std::vector<PlacedClip> newClips;
@@ -567,7 +586,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withPlacedClipRemoved(
     {
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -583,7 +602,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withPlacedClipRemoved(
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
@@ -596,7 +615,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -618,11 +637,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMoved(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
@@ -636,7 +655,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int targetIdx = previous.findTrackIndexById(targetTrackId);
     if (targetIdx < 0)
@@ -644,7 +663,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     int sourceIdx = -1;
     int sourceRow = -1;
@@ -670,14 +689,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     if (sourceIdx == targetIdx)
     {
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const PlacedClip& raw = previous.getTrack(sourceIdx).getPlacedClip(sourceRow);
     const std::int64_t clamped
@@ -716,7 +735,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipMovedToTrack(
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
@@ -730,14 +749,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     if (destIndex < 0 || destIndex >= n)
     {
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int s = previous.findTrackIndexById(movedTrackId);
     if (s < 0)
@@ -745,13 +764,13 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     if (s == destIndex)
     {
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> v;
     v.reserve((size_t)n);
@@ -765,7 +784,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackReordered(
     v.insert(v.begin() + destIndex, moved);
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(v), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRightEdgeTrimmed(
@@ -779,7 +798,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRightEdgeTrimmed
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
                                                                          previous.arrangementExtentSamples_,
                                                                          previous.getLeftLocatorSamples(),
-                                                                         previous.getRightLocatorSamples()});
+                                                                         previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     bool any = false;
     std::vector<Track> out;
@@ -819,11 +838,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRightEdgeTrimmed
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
                                                                          previous.arrangementExtentSamples_,
                                                                          previous.getLeftLocatorSamples(),
-                                                                         previous.getRightLocatorSamples()});
+                                                                         previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
@@ -837,7 +856,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
                                                                          previous.arrangementExtentSamples_,
                                                                          previous.getLeftLocatorSamples(),
-                                                                         previous.getRightLocatorSamples()});
+                                                                         previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     bool any = false;
     std::vector<Track> out;
@@ -877,11 +896,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipLeftEdgeTrimmed(
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{previous.tracks_,
                                                                          previous.arrangementExtentSamples_,
                                                                          previous.getLeftLocatorSamples(),
-                                                                         previous.getRightLocatorSamples()});
+                                                                         previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
@@ -897,7 +916,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     bool any = false;
     std::vector<Track> out;
@@ -950,11 +969,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGain(
@@ -967,7 +986,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGai
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int tIdx = previous.findTrackIndexById(trackId);
     if (tIdx < 0)
@@ -975,7 +994,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGai
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const float g = juce::jlimit(0.0f, kTrackChannelFaderGainMax, channelFaderGainLinear);
     std::vector<Track> out;
@@ -996,7 +1015,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackChannelFaderGai
         new SessionSnapshot(std::move(out),
                             previous.arrangementExtentSamples_,
                             previous.getLeftLocatorSamples(),
-                            previous.getRightLocatorSamples()));
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
@@ -1009,7 +1029,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int tIdx = previous.findTrackIndexById(trackId);
     if (tIdx < 0)
@@ -1017,7 +1037,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -1043,7 +1063,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
         new SessionSnapshot(std::move(out),
                             previous.arrangementExtentSamples_,
                             previous.getLeftLocatorSamples(),
-                            previous.getRightLocatorSamples()));
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
@@ -1056,7 +1077,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int tIdx = previous.findTrackIndexById(trackId);
     if (tIdx < 0)
@@ -1064,7 +1085,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_,
-            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples()});
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -1090,7 +1111,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
         new SessionSnapshot(std::move(out),
                             previous.arrangementExtentSamples_,
                             previous.getLeftLocatorSamples(),
-                            previous.getRightLocatorSamples()));
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRenamed(const SessionSnapshot& previous,
@@ -1103,7 +1125,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRenamed(const S
         jassert(trackId != kInvalidTrackId);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
-            previous.getRightLocatorSamples()});
+            previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const int tIdx = previous.findTrackIndexById(trackId);
     if (tIdx < 0)
@@ -1111,14 +1133,14 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRenamed(const S
         jassert(false);
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
-            previous.getRightLocatorSamples()});
+            previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     const Track& current = previous.getTrack(tIdx);
     if (trimmed == current.getName())
     {
         return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
             previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
-            previous.getRightLocatorSamples()});
+            previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
     std::vector<Track> out;
     out.reserve((size_t)previous.getNumTracks());
@@ -1138,7 +1160,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRenamed(const S
         new SessionSnapshot(std::move(out),
                             previous.arrangementExtentSamples_,
                             previous.getLeftLocatorSamples(),
-                            previous.getRightLocatorSamples()));
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
 }
 
 bool SessionSnapshot::isEmpty() const noexcept

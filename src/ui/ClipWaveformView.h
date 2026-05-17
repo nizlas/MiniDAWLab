@@ -88,6 +88,9 @@ struct ClipWaveformLaneHost
     /** Split tool: one undo entry per successful split. `clipWasSelected` drives post-split selection. */
     std::function<void(PlacedClipId clipId, std::int64_t splitSampleOnTimeline, bool clipWasSelected)>
         commitClipSplitAsUndoable;
+
+    /** Optional (Slice D): snaps timeline samples to arrangement musical grid when enabled. */
+    std::function<std::int64_t(std::int64_t timelineSample)> snapArrangementTimelineSample;
 };
 
 // ---------------------------------------------------------------------------
@@ -183,6 +186,8 @@ public:
     void mouseExit(const juce::MouseEvent& e) override;
 
 private:
+    [[nodiscard]] std::int64_t snapTimelineSample(std::int64_t sampleOnTimeline) const noexcept;
+
     // Cached paint inputs: one entry per `getPlacedClip(i)` row (0 = front / newest in snapshot).
     struct TimelineStrip
     {

@@ -618,6 +618,16 @@ bool ClipWaveformView::isClipTrimGestureInProgress() const noexcept
         && trimPlacedId_.has_value();
 }
 
+std::int64_t ClipWaveformView::snapTimelineSample(std::int64_t sampleOnTimeline) const noexcept
+{
+    sampleOnTimeline = juce::jmax(std::int64_t{ 0 }, sampleOnTimeline);
+    if (laneHost_.snapArrangementTimelineSample != nullptr)
+    {
+        return laneHost_.snapArrangementTimelineSample(sampleOnTimeline);
+    }
+    return sampleOnTimeline;
+}
+
 ClipWaveformView::ClipWaveformView(
     Session& session,
     Transport& transport,
@@ -959,8 +969,13 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
             const std::int64_t V = hitPlaced.getEffectiveLengthSamples();
             const float tClickL
                 = juce::jlimit(0.0f, 1.0f, e.position.x / juce::jmax(1.0f, b.getWidth()));
-            const std::int64_t splitT
+            const std::int64_t splitTRaw
                 = visStart + (std::int64_t)std::llround((double)tClickL * (double)visLen);
+            std::int64_t splitT = snapTimelineSample(splitTRaw);
+            if (!(splitT > S && splitT < S + V))
+            {
+                splitT = juce::jlimit(S + 1, S + V - 1, splitT);
+            }
             const bool clipWasSelected
                 = selectedPlacedId_.has_value() && *selectedPlacedId_ == ph.id;
             selectedPlacedId_.reset();
@@ -1030,11 +1045,17 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
         const std::int64_t sAtX
             = visStart + (std::int64_t)std::llround((double)tClickL * (double)visLen);
         const std::int64_t newS = sAtX - trimMouseOffsetToTimelineAtClick_;
-        const std::int64_t d
+        std::int64_t d
             = juce::jlimit(
                 juce::jmax(-trimOriginLeft_, -trimStartSample_),
                 trimClickDownVisibleLen_ - 1,
                 newS - trimStartSample_);
+        std::int64_t snappedStart = snapTimelineSample(trimStartSample_ + d);
+        d = snappedStart - trimStartSample_;
+        d = juce::jlimit(
+            juce::jmax(-trimOriginLeft_, -trimStartSample_),
+            trimClickDownVisibleLen_ - 1,
+            d);
         trimPreviewLeft_ = trimOriginLeft_ + d;
         trimPreviewStart_ = trimStartSample_ + d;
         trimPreviewVisibleLen_ = trimClickDownVisibleLen_ - d;
@@ -1071,6 +1092,12 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
         const std::int64_t cap = static_cast<std::int64_t>(matN);
         trimPreviewVisibleLen_
             = juce::jlimit(std::int64_t{1}, cap, newRightEdge - trimStartSample_);
+        {
+            const std::int64_t rightEdge = trimStartSample_ + trimPreviewVisibleLen_;
+            const std::int64_t snappedRight = snapTimelineSample(rightEdge);
+            trimPreviewVisibleLen_
+                = juce::jlimit(std::int64_t{1}, cap, snappedRight - trimStartSample_);
+        }
         repaint();
         return;
     }
@@ -1101,6 +1128,7 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
     const double deltaS = (double)dx * spp;
     tentativeStartOnTimeline_ = juce::jmax(
         static_cast<std::int64_t>(0), clickDownStartSample_ + static_cast<std::int64_t>(std::llround(deltaS)));
+    tentativeStartOnTimeline_ = snapTimelineSample(tentativeStartOnTimeline_);
 
     const bool canCrossLane = static_cast<bool>(laneHost_.findLaneAtScreen)
                               && static_cast<bool>(laneHost_.setGhostOnLane)

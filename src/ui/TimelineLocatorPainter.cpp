@@ -1,5 +1,8 @@
 #include "ui/TimelineLocatorPainter.h"
 
+#include "domain/ArrangementMusicalGrid.h"
+#include "domain/MusicalTimeConversions.h"
+
 #include <cmath>
 #include <cstdint>
 
@@ -427,6 +430,413 @@ void paintRulerTimeLabels(
             tw,
             kRulerLabelStripHeightPx);
         g.drawText(text, labelRect, juce::Justification::centredBottom);
+    }
+}
+
+    [[nodiscard]] static int beatsPerBarInt(ProjectMusicalTime mt) noexcept
+    {
+        mt = sanitizeProjectMusicalTime(mt);
+        const double b = beatsPerBar(mt);
+        const int bi = (int)std::llround(b);
+        return juce::jmax(1, bi);
+    }
+
+    [[nodiscard]] static std::int64_t musicalGridIterationStep(
+        const ArrangementMusicalGridPlan& plan) noexcept
+    {
+        if (plan.spBeat <= 0)
+        {
+            return 0;
+        }
+        if (plan.subDivisionsPerBeat > 0)
+        {
+            const std::int64_t st
+                = musicalSubdivisionStrideSamples(plan.spBeat, plan.subDivisionsPerBeat);
+            if (st > 0)
+            {
+                return st;
+            }
+        }
+        if (plan.drawBeatLines)
+        {
+            return plan.spBeat;
+        }
+        if (plan.drawEveryBarLine)
+        {
+            return plan.spBar;
+        }
+        const std::int64_t maj = static_cast<std::int64_t>(plan.barsPerMajor) * plan.spBar;
+        return maj > 0 ? maj : plan.spBar;
+    }
+
+    [[nodiscard]] static std::int64_t alignSampleCeil(std::int64_t pos, std::int64_t step) noexcept
+    {
+        if (step <= 0)
+        {
+            return pos;
+        }
+        if (pos <= 0)
+        {
+            return 0;
+        }
+        return ((pos + step - 1) / step) * step;
+    }
+
+    enum class MusicalTickTier
+    {
+        Sub,
+        Beat,
+        Bar,
+    };
+
+    [[nodiscard]] static MusicalTickTier musicalTickTierAtSample(
+        std::int64_t s,
+        const ArrangementMusicalGridPlan& plan,
+        std::int64_t iterationStep) noexcept
+    {
+        if (plan.spBar > 0 && (s % plan.spBar) == 0)
+        {
+            return MusicalTickTier::Bar;
+        }
+        juce::ignoreUnused(iterationStep);
+        if (plan.spBeat > 0 && (s % plan.spBeat) == 0)
+        {
+            return MusicalTickTier::Beat;
+        }
+        return MusicalTickTier::Sub;
+    }
+
+    static void strokeMusicalTickLine(juce::Graphics& g,
+                                      float x,
+                                      float bottomY,
+                                      float hShort,
+                                      MusicalTickTier tier)
+    {
+        float h = hShort;
+        float thickness = 1.0f;
+        float alpha = 0.48f;
+        switch (tier)
+        {
+        case MusicalTickTier::Bar:
+            h = hShort;
+            thickness = 1.25f;
+            alpha = 0.62f;
+            break;
+        case MusicalTickTier::Beat:
+            h = hShort * 0.74f;
+            thickness = 1.0f;
+            alpha = 0.48f;
+            break;
+        case MusicalTickTier::Sub:
+            h = hShort * 0.46f;
+            thickness = 0.85f;
+            alpha = 0.30f;
+            break;
+        }
+        g.setColour(juce::Colour(0xff7a8aa0).withAlpha(alpha));
+        g.drawLine(x, bottomY - 1.0f, x, bottomY - 1.0f - h, thickness);
+    }
+
+    static void strokeMusicalGridLine(juce::Graphics& g,
+                                      float x,
+                                      float y0,
+                                      float y1,
+                                      MusicalTickTier tier)
+    {
+        float thickness = 1.0f;
+        float alpha = 0.085f;
+        switch (tier)
+        {
+        case MusicalTickTier::Bar:
+            thickness = 1.15f;
+            alpha = 0.165f;
+            break;
+        case MusicalTickTier::Beat:
+            thickness = 1.0f;
+            alpha = 0.095f;
+            break;
+        case MusicalTickTier::Sub:
+            thickness = 0.85f;
+            alpha = 0.048f;
+            break;
+        }
+        g.setColour(juce::Colour(0xffb8c2d8).withAlpha(alpha));
+        g.drawLine(x, y0, x, y1, thickness);
+    }
+
+void paintRulerMusicalTickMarks(
+    juce::Graphics& g,
+    const juce::Rectangle<float>& bounds,
+    const std::function<float(std::int64_t)>& sampleToX,
+    const std::int64_t arrangementExtentSamples,
+    const std::int64_t visStart,
+    const std::int64_t visLen,
+    const double sampleRate,
+    const double samplesPerPixel,
+    ProjectMusicalTime musicalTime)
+{
+    juce::ignoreUnused(arrangementExtentSamples);
+    if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
+    {
+        return;
+    }
+
+    musicalTime = sanitizeProjectMusicalTime(musicalTime);
+    const ArrangementMusicalGridPlan plan
+        = computeArrangementMusicalGridPlan(musicalTime, sampleRate, samplesPerPixel);
+    const std::int64_t step = musicalGridIterationStep(plan);
+    if (step <= 0 || plan.spBeat <= 0 || plan.spBar <= 0)
+    {
+        return;
+    }
+
+    const float hShort = juce::jmax(3.0f, bounds.getHeight() * 0.35f);
+    const std::int64_t visEnd = visStart + visLen;
+    const float bottomY = bounds.getBottom();
+
+    for (std::int64_t s = alignSampleCeil(visStart, step); s < visEnd; s += step)
+    {
+        if (s < visStart)
+        {
+            continue;
+        }
+        const float x = sampleToX(s);
+        if (x < bounds.getX() - 1.0f || x > bounds.getRight() + 1.0f)
+        {
+            continue;
+        }
+        const MusicalTickTier tier = musicalTickTierAtSample(s, plan, step);
+        strokeMusicalTickLine(g, x, bottomY, hShort, tier);
+    }
+}
+
+void paintRulerMusicalLabels(
+    juce::Graphics& g,
+    const juce::Rectangle<float>& bounds,
+    const std::function<float(std::int64_t)>& sampleToX,
+    const std::int64_t arrangementExtentSamples,
+    const std::int64_t visStart,
+    const std::int64_t visLen,
+    const double sampleRate,
+    const double samplesPerPixel,
+    ProjectMusicalTime musicalTime,
+    const std::int64_t locL,
+    const std::int64_t locR)
+{
+    juce::ignoreUnused(arrangementExtentSamples);
+    if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
+    {
+        return;
+    }
+
+    musicalTime = sanitizeProjectMusicalTime(musicalTime);
+    const ArrangementMusicalGridPlan plan
+        = computeArrangementMusicalGridPlan(musicalTime, sampleRate, samplesPerPixel);
+    if (plan.spBeat <= 0 || plan.spBar <= 0)
+    {
+        return;
+    }
+
+    const std::int64_t majorStride = static_cast<std::int64_t>(plan.barsPerMajor) * plan.spBar;
+    if (majorStride <= 0)
+    {
+        return;
+    }
+
+    const int beatsInBar = beatsPerBarInt(musicalTime);
+    const float hShort = juce::jmax(3.0f, bounds.getHeight() * 0.35f);
+    const float labelBaselineY = bounds.getBottom() - 1.0f - hShort - 3.0f;
+    const float skipRadius = kLocatorTriangleHalfWidth + 2.0f;
+
+    const juce::Font labelFont(juce::FontOptions(11.0f));
+    g.setFont(labelFont);
+    g.setColour(juce::Colours::white.withAlpha(0.55f));
+
+    const std::int64_t visEnd = visStart + visLen;
+
+    const auto drawOneLabel = [&](const std::int64_t samp, const juce::String& text) {
+        if (samp < visStart || samp >= visEnd)
+        {
+            return false;
+        }
+        const float x = sampleToX(samp);
+        if (x <= bounds.getX() || x >= bounds.getRight())
+        {
+            return false;
+        }
+
+        if (locL >= visStart && locL < visEnd)
+        {
+            const float xcL = sampleToX(locL);
+            if (xcL >= bounds.getX() - 14.0f && xcL <= bounds.getRight() + 14.0f
+                && std::abs(x - xcL) < skipRadius)
+            {
+                return false;
+            }
+        }
+        if (locR > 0 && locR >= visStart && locR < visEnd)
+        {
+            const float xcR = sampleToX(locR);
+            if (xcR >= bounds.getX() - 14.0f && xcR <= bounds.getRight() + 14.0f
+                && std::abs(x - xcR) < skipRadius)
+            {
+                return false;
+            }
+        }
+
+        const float tw = glyphLayoutWidthPx(labelFont, text);
+        if (x - tw * 0.5f <= bounds.getX() || x + tw * 0.5f >= bounds.getRight())
+        {
+            return false;
+        }
+
+        juce::Rectangle<float> labelRect(
+            x - tw * 0.5f,
+            labelBaselineY - kRulerLabelStripHeightPx,
+            tw,
+            kRulerLabelStripHeightPx);
+        g.drawText(text, labelRect, juce::Justification::centredBottom);
+        return true;
+    };
+
+    const float minGapPx = glyphLayoutWidthPx(labelFont, "000.00") + 10.0f;
+    float lastLabelRightX = -1.0e15f;
+
+    const auto spacingAllows = [&](const float xCenter, const float textHalfWidth) noexcept -> bool {
+        if (lastLabelRightX <= -1.0e14f)
+        {
+            return true;
+        }
+        return xCenter - textHalfWidth >= lastLabelRightX + minGapPx;
+    };
+
+    const auto noteLabelPlaced = [&](const float xCenter, const float textHalfWidth) noexcept {
+        lastLabelRightX = xCenter + textHalfWidth;
+    };
+
+    if (!plan.labelsUseBarBeatDetail)
+    {
+        // Medium / zoomed-out: only bar boundaries (sample 0 = bar 1 beat 1).
+        for (std::int64_t s = alignSampleCeil(visStart, majorStride); s < visEnd;
+             s += majorStride)
+        {
+            if (plan.spBar <= 0)
+            {
+                break;
+            }
+            const std::int64_t barIdx = s / plan.spBar + 1;
+            const juce::String text = juce::String(barIdx);
+            const float x = sampleToX(s);
+            const float tw = glyphLayoutWidthPx(labelFont, text);
+            if (!spacingAllows(x, tw * 0.5f))
+            {
+                continue;
+            }
+            if (drawOneLabel(s, text))
+            {
+                noteLabelPlaced(x, tw * 0.5f);
+            }
+        }
+    }
+    else if (plan.spBeat > 0)
+    {
+        // Zoomed-in: bar-start labels are primary (bar.N.1); optional beat labels only if the bar
+        // start label was placed — avoids a skipped bar.1 being replaced visually by bar.2, etc.
+        bool suppressBeatsInCurrentBar = false;
+
+        for (std::int64_t s = alignSampleCeil(visStart, plan.spBeat); s < visEnd; s += plan.spBeat)
+        {
+            const bool onBarStart = (plan.spBar > 0 && (s % plan.spBar) == 0);
+            if (onBarStart)
+            {
+                suppressBeatsInCurrentBar = false;
+
+                const std::int64_t barIdx = s / plan.spBar + 1;
+                const juce::String text = juce::String(barIdx) + ".1";
+                const float x = sampleToX(s);
+                const float tw = glyphLayoutWidthPx(labelFont, text);
+
+                bool placed = false;
+                if (spacingAllows(x, tw * 0.5f))
+                {
+                    placed = drawOneLabel(s, text);
+                    if (placed)
+                    {
+                        noteLabelPlaced(x, tw * 0.5f);
+                    }
+                }
+                if (!placed)
+                {
+                    suppressBeatsInCurrentBar = true;
+                }
+            }
+            else if (!suppressBeatsInCurrentBar && plan.drawBeatLines)
+            {
+                const std::int64_t totalBeats = s / plan.spBeat;
+                const int bar = static_cast<int>(totalBeats / beatsInBar) + 1;
+                const int beatInBar = static_cast<int>(totalBeats % beatsInBar) + 1;
+                const juce::String text = juce::String(bar) + "." + juce::String(beatInBar);
+                const float x = sampleToX(s);
+                const float tw = glyphLayoutWidthPx(labelFont, text);
+                if (!spacingAllows(x, tw * 0.5f))
+                {
+                    continue;
+                }
+                if (drawOneLabel(s, text))
+                {
+                    noteLabelPlaced(x, tw * 0.5f);
+                }
+            }
+        }
+    }
+}
+
+void paintArrangementMusicalVerticalGrid(
+    juce::Graphics& g,
+    const juce::Rectangle<float>& gridBounds,
+    const std::function<float(std::int64_t)>& sampleToX,
+    const std::int64_t arrangementExtentSamples,
+    const std::int64_t visStart,
+    const std::int64_t visLen,
+    const double sampleRate,
+    const double samplesPerPixel,
+    ProjectMusicalTime musicalTime)
+{
+    juce::ignoreUnused(arrangementExtentSamples);
+    if (gridBounds.getWidth() <= 1.0f || gridBounds.getHeight() <= 1.0f)
+    {
+        return;
+    }
+
+    musicalTime = sanitizeProjectMusicalTime(musicalTime);
+    const ArrangementMusicalGridPlan plan
+        = computeArrangementMusicalGridPlan(musicalTime, sampleRate, samplesPerPixel);
+    const std::int64_t step = musicalGridIterationStep(plan);
+    if (step <= 0 || plan.spBeat <= 0 || plan.spBar <= 0)
+    {
+        return;
+    }
+
+    const std::int64_t visEnd = visStart + visLen;
+    const float y0 = gridBounds.getY();
+    const float y1 = gridBounds.getBottom();
+
+    juce::Graphics::ScopedSaveState ss(g);
+    g.reduceClipRegion(gridBounds.toNearestIntEdges());
+
+    for (std::int64_t s = alignSampleCeil(visStart, step); s < visEnd; s += step)
+    {
+        if (s < visStart)
+        {
+            continue;
+        }
+        const float x = sampleToX(s);
+        if (x < gridBounds.getX() - 1.0f || x > gridBounds.getRight() + 1.0f)
+        {
+            continue;
+        }
+        const MusicalTickTier tier = musicalTickTierAtSample(s, plan, step);
+        strokeMusicalGridLine(g, x, y0, y1, tier);
     }
 }
 

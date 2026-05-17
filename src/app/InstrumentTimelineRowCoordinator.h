@@ -31,6 +31,8 @@ public:
         std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableInstrumentEdit;
         std::function<void(TrackId)> clearAudioAndOtherInstrumentSelectionsForMidiTrack;
         std::function<void()> clearAllArrangementEventSelections;
+
+        std::function<std::int64_t(std::int64_t timelineSample)> snapArrangementTimelineSample;
     };
 
     InstrumentTimelineRowCoordinator(Session& session,

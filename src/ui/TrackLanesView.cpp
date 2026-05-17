@@ -6,6 +6,8 @@
 
 #include "audio/LatencySettingsStore.h"
 #include "ui/ClipWaveformView.h"
+#include "ui/TimelineLocatorPainter.h"
+#include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
 #include "domain/Session.h"
@@ -169,6 +171,19 @@ namespace
         outVisibleStartSample = wanted < std::int64_t{ 0 } ? std::int64_t{ 0 } : wanted;
         discardPeakSamplesFromFront(peaksWork, trimAtProjectOrigin);
         outPeaks = std::move(peaksWork);
+    }
+
+    [[nodiscard]] double effectiveDisplaySampleRate(juce::AudioDeviceManager& dm) noexcept
+    {
+        if (juce::AudioIODevice* d = dm.getCurrentAudioDevice())
+        {
+            const double r = d->getCurrentSampleRate();
+            if (r > 0.0 && std::isfinite(r))
+            {
+                return r;
+            }
+        }
+        return 48000.0;
     }
 
 } // namespace
@@ -475,6 +490,11 @@ bool TrackLanesView::invokeUndoableRenameTrackRequested(const TrackId tid,
         return false;
     }
     return onUndoableRenameTrackRequested_(tid, proposedName);
+}
+
+void TrackLanesView::setArrangementTimelineSnapFunction(std::function<std::int64_t(std::int64_t)> fn) noexcept
+{
+    arrangementTimelineSnap_ = std::move(fn);
 }
 
 void TrackLanesView::setHeaderActiveSuppressProvider(std::function<bool()> fn) noexcept
@@ -1149,6 +1169,13 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     (void)session_.splitClip(id, splitT);
                 }
             };
+        host.snapArrangementTimelineSample = [this](std::int64_t s) -> std::int64_t {
+            if (arrangementTimelineSnap_ != nullptr)
+            {
+                return arrangementTimelineSnap_(s);
+            }
+            return juce::jmax(std::int64_t{ 0 }, s);
+        };
         auto ptr = std::make_unique<ClipWaveformView>(
             session_, transport_, tid, timelineViewport_, waveformCache_, std::move(host));
         addAndMakeVisible(*ptr);
@@ -1338,6 +1365,35 @@ void TrackLanesView::paint(juce::Graphics& g)
     {
         g.setColour(laneBg);
         g.fillRect(bounds.getX(), ay, headerW, juce::jmin(gutter, bounds.getHeight()));
+    }
+
+    const int tw = juce::jmax(0, bounds.getWidth() - headerW);
+    const std::int64_t arrLen = session_.getArrangementExtentSamples();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp > 0.0 && tw > 0 && hx < bounds.getRight()
+        && gutterBottom < bounds.getBottom())
+    {
+        const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+        const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples((double)tw);
+        const float timelineOriginX = (float)hx;
+        const auto sampleToX = [&](const std::int64_t s) {
+            return TimelineRulerView::sessionSampleToLocalX(s, timelineOriginX, visStart, spp);
+        };
+        const juce::Rectangle<float> gridBounds(
+            (float)hx,
+            (float)gutterBottom,
+            (float)tw,
+            (float)(bounds.getBottom() - gutterBottom));
+        timeline_locator_paint::paintArrangementMusicalVerticalGrid(
+            g,
+            gridBounds,
+            sampleToX,
+            arrLen,
+            visStart,
+            visLen,
+            effectiveDisplaySampleRate(deviceManager_),
+            spp,
+            session_.getProjectMusicalTime());
     }
 
     const int vr = static_cast<int>(visibleTrackEntries_.size());

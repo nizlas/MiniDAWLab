@@ -30,12 +30,14 @@
 //     `PlacedClip` list and `name_` are unchanged; audio summing is order-independent. No-op
 //     if the track is not found or `destIndex` equals the current index.
 //   `withTracks` — **load-only:** replace the session with a full pre-built track list (one publish).
+//   `withMusicalTime` — replace project tempo/meter metadata only (`ProjectMusicalTime` on snapshot).
 //   `withSinglePlacedClip` — transitional: one track, one clip.
 //
 // See also: `Track`, `PlacedClip`, `Session`, `PlaybackEngine`, `docs/ARCHITECTURE_PRINCIPLES.md`.
 // =============================================================================
 
 #include "domain/PlacedClip.h"
+#include "domain/ProjectMusicalTime.h"
 #include "domain/Track.h"
 
 #include <memory>
@@ -211,7 +213,13 @@ public:
         std::vector<Track> tracks,
         std::int64_t arrangementExtentSamples,
         std::int64_t leftLocatorSamples,
-        std::int64_t rightLocatorSamples) noexcept;
+        std::int64_t rightLocatorSamples,
+        ProjectMusicalTime projectMusicalTime = {}) noexcept;
+
+    /// [Message thread] Replace sanitized `ProjectMusicalTime` only; tracks/clips/locators unchanged.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withMusicalTime(
+        const SessionSnapshot& previous,
+        ProjectMusicalTime musicalTime) noexcept;
 
     // [Message thread] Same tracks, new **stored** arrangement extent (e.g. `Session::setArrangementExtentSamples`).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withArrangementExtent(
@@ -251,14 +259,18 @@ public:
     [[nodiscard]] std::int64_t getLeftLocatorSamples() const noexcept { return leftLocatorSamples_; }
     [[nodiscard]] std::int64_t getRightLocatorSamples() const noexcept { return rightLocatorSamples_; }
 
+    [[nodiscard]] ProjectMusicalTime getProjectMusicalTime() const noexcept { return projectMusicalTime_; }
+
 private:
     explicit SessionSnapshot(std::vector<Track> tracks,
                              std::int64_t arrangementExtentSamples,
                              std::int64_t leftLocatorSamples,
-                             std::int64_t rightLocatorSamples) noexcept;
+                             std::int64_t rightLocatorSamples,
+                             ProjectMusicalTime projectMusicalTime = {}) noexcept;
 
     std::vector<Track> tracks_;
     std::int64_t arrangementExtentSamples_ = 0;
     std::int64_t leftLocatorSamples_ = 0;
     std::int64_t rightLocatorSamples_ = 0;
+    ProjectMusicalTime projectMusicalTime_;
 };

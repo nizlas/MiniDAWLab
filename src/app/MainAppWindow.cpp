@@ -1,5 +1,6 @@
 ﻿#include <JuceHeader.h>
 
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,6 +31,8 @@
 #include "app/InstrumentTimelineRowCoordinator.h"
 
 #include "domain/Session.h"
+#include "domain/ProjectMusicalTime.h"
+#include "domain/ArrangementMusicalSnap.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
 #include "domain/AudioClip.h"
@@ -50,6 +53,7 @@
 #include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
+#include "ui/SnapSettings.h"
 #include "audio/AudioDeviceInfo.h"
 #include "audio/LatencySettingsStore.h"
 #include "ui/LatencySettingsView.h"
@@ -139,6 +143,61 @@ public:
 };
 } // namespace
 
+namespace
+{
+constexpr int kArrangementTimeSigCustomComboId = 100;
+
+struct ArrangementTimeSigPreset
+{
+    int id;
+    int num;
+    int den;
+    const char* label;
+};
+
+constexpr ArrangementTimeSigPreset kArrangementTimeSigPresets[] = {
+    {1, 2, 4, "2/4"},
+    {2, 3, 4, "3/4"},
+    {3, 4, 4, "4/4"},
+    {4, 5, 4, "5/4"},
+    {5, 6, 8, "6/8"},
+    {6, 7, 8, "7/8"},
+};
+
+[[nodiscard]] juce::String formatProjectBpmForToolbar(double bpm) noexcept
+{
+    if (!std::isfinite(bpm))
+    {
+        return "120";
+    }
+    juce::String s = juce::String(bpm, 2);
+    while (s.endsWithChar('0') && s.containsChar('.'))
+    {
+        s = s.dropLastCharacters(1);
+    }
+    if (s.endsWithChar('.'))
+    {
+        s = s.dropLastCharacters(1);
+    }
+    return s.isEmpty() ? juce::String("120") : s;
+}
+
+[[nodiscard]] bool arrangementTimeSigPresetForComboId(const int comboId, int& numOut, int& denOut) noexcept
+{
+    for (const auto& p : kArrangementTimeSigPresets)
+    {
+        if (p.id == comboId)
+        {
+            numOut = p.num;
+            denOut = p.den;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 namespace mini_daw_app_transport
 {
 class TransportControlsContent : public juce::Component,
@@ -160,6 +219,20 @@ private:
     [[nodiscard]] int getSideStripDefaultWidth() const noexcept override { return kInspectorDefaultW; }
 
     void sideStripLayoutChanged() override { resized(); }
+
+    void configureArrangementMusicalControls();
+    void applyArrangementMusicalUiFromSession(ProjectMusicalTime mt, bool repaintTimeline);
+    void rebuildArrangementTimeSignatureComboItems(const ProjectMusicalTime& mt);
+    void commitArrangementBpmFromEditorIfNeeded();
+    void handleArrangementTimeSignatureComboChangedByUser();
+
+    [[nodiscard]] std::int64_t snapArrangementTimelineSample(std::int64_t sampleOnTimeline) const noexcept;
+
+    void configureArrangementSnapControls();
+    void applyArrangementSnapUiFromSettings(const SnapSettings& s, bool repaintTimeline);
+    void handleArrangementSnapUiChangedByUser();
+    [[nodiscard]] SnapProjectRootFields arrangementSnapPersistenceSnapshotForSave() const;
+    void restoreArrangementSnapFromProjectRootFields(const SnapProjectRootFields& fields);
 
     void clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept;
 
@@ -268,6 +341,9 @@ public:
                 [this] { trackLanesView.repaint(); },
                 [this] { refreshInstrumentUi(); },
                 [this] { inspectorView_.refreshFromSession(); },
+                [this] {
+                    applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), false);
+                },
                 [this]() -> std::vector<ProjectFileExperimentalInstrumentTrackV1> {
                     const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
                     if (snap == nullptr)
@@ -462,6 +538,7 @@ public:
                         arrangementEventSelectionCoordinator_->clearAllArrangementEventSelections();
                     }
                 },
+                [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); },
             });
 
         midiEditorPresenter_ = std::make_unique<MidiEditorPresenter>(
@@ -554,6 +631,8 @@ public:
                 midiEditorPresenter_->openMidiEditorForInstrumentClip(timelineTid, clipId);
             }
         };
+        clipPasteCallbacks.snapArrangementTimelineSample
+            = [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); };
         clipPasteboardController_
             = std::make_unique<ClipPasteboardController>(
                 session,
@@ -596,6 +675,8 @@ public:
                    || (recordingCoordinator_ != nullptr
                        && recordingCoordinator_->isCountInActive());
         });
+        trackLanesView.setArrangementTimelineSnapFunction(
+            [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); });
         setWantsKeyboardFocus(true);
         audioWaveformCache_.setOnPyramidReady([this](const AudioClip*) { trackLanesView.repaint(); });
         timelineViewport_.setOnVisibleRangeChanged([this] {
@@ -636,6 +717,40 @@ public:
                     }
                 });
         };
+
+        mainMenuModel_ = std::make_unique<mini_daw_app_menu::MainMenuModel>(mini_daw_app_menu::MainMenuActions{
+            [this] {
+                if (projectIoCoordinator_ != nullptr)
+                {
+                    projectIoCoordinator_->saveProject();
+                }
+            },
+            [this] {
+                if (projectIoCoordinator_ != nullptr)
+                {
+                    projectIoCoordinator_->loadProject();
+                }
+            },
+            [this] { showAudioSettingsDialog(); },
+            [this] { showHelpMenuPopup(); },
+        });
+        menuBar_ = std::make_unique<juce::MenuBarComponent>(mainMenuModel_.get());
+        addAndMakeVisible(*menuBar_);
+
+        editToolIconStrip_.onToolSelected = [this](EditTool t) { applyEditToolSelection(t); };
+        addAndMakeVisible(editToolIconStrip_);
+
+        configureArrangementMusicalControls();
+        addAndMakeVisible(arrangementBpmLabel_);
+        addAndMakeVisible(arrangementBpmEditor_);
+        addAndMakeVisible(arrangementTimeSignatureCombo_);
+
+        configureArrangementSnapControls();
+        addAndMakeVisible(arrangementSnapToggle_);
+        addAndMakeVisible(arrangementSnapResolutionCombo_);
+        applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), false);
+        applyArrangementSnapUiFromSettings(SnapSettings{}, false);
+
         projectIoCoordinator_ = std::make_unique<ProjectIoCoordinator>(
             transport,
             session,
@@ -673,34 +788,17 @@ public:
                     }
                     trackLanesView.syncTracksFromSession();
                     inspectorView_.refreshFromSession();
+                    applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), false);
                     rulerView.repaint();
                     trackLanesView.repaint();
                     refreshInstrumentUi();
                     resized();
                 },
+                [this]() -> SnapProjectRootFields { return arrangementSnapPersistenceSnapshotForSave(); },
+                [this](const SnapProjectRootFields& root) {
+                    restoreArrangementSnapFromProjectRootFields(root);
+                },
             });
-
-        mainMenuModel_ = std::make_unique<mini_daw_app_menu::MainMenuModel>(mini_daw_app_menu::MainMenuActions{
-            [this] {
-                if (projectIoCoordinator_ != nullptr)
-                {
-                    projectIoCoordinator_->saveProject();
-                }
-            },
-            [this] {
-                if (projectIoCoordinator_ != nullptr)
-                {
-                    projectIoCoordinator_->loadProject();
-                }
-            },
-            [this] { showAudioSettingsDialog(); },
-            [this] { showHelpMenuPopup(); },
-        });
-        menuBar_ = std::make_unique<juce::MenuBarComponent>(mainMenuModel_.get());
-        addAndMakeVisible(*menuBar_);
-
-        editToolIconStrip_.onToolSelected = [this](EditTool t) { applyEditToolSelection(t); };
-        addAndMakeVisible(editToolIconStrip_);
 
         addAndMakeVisible(addTrackCornerPlusButton_);
         if (shortcut_diagnostics::kShowKeyDiagnostic)
@@ -902,6 +1000,11 @@ public:
             *menuBar_,
             addTrackCornerPlusButton_,
             editToolIconStrip_,
+            arrangementBpmLabel_,
+            arrangementBpmEditor_,
+            arrangementTimeSignatureCombo_,
+            arrangementSnapToggle_,
+            arrangementSnapResolutionCombo_,
             countInStatusLabel_,
             keyDiagLabel_,
             shortcutDiagLabel_.get(),
@@ -1047,6 +1150,14 @@ private:
 
     AddTrackCornerGlyphButton addTrackCornerPlusButton_;
     EditToolIconStrip editToolIconStrip_;
+    juce::Label arrangementBpmLabel_;
+    juce::TextEditor arrangementBpmEditor_;
+    juce::ComboBox arrangementTimeSignatureCombo_;
+    bool arrangementMusicalUiApplyingFromSession_{false};
+    juce::ToggleButton arrangementSnapToggle_;
+    juce::ComboBox arrangementSnapResolutionCombo_;
+    SnapSettings arrangementSnapSettings_;
+    bool arrangementSnapUiApplyingFromProject_{false};
 
     juce::Label keyDiagLabel_;
     std::unique_ptr<juce::Label> shortcutDiagLabel_;
@@ -1074,6 +1185,250 @@ private:
 };
 
 } // namespace mini_daw_app_transport
+
+std::int64_t mini_daw_app_transport::TransportControlsContent::snapArrangementTimelineSample(
+    std::int64_t sampleOnTimeline) const noexcept
+{
+    juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice();
+    if (dev == nullptr)
+    {
+        return juce::jmax(std::int64_t{ 0 }, sampleOnTimeline);
+    }
+    const double sr = dev->getCurrentSampleRate();
+    return snapSampleToGridIfEnabled(
+        sampleOnTimeline, arrangementSnapSettings_, session.getProjectMusicalTime(), sr);
+}
+
+void mini_daw_app_transport::TransportControlsContent::configureArrangementMusicalControls()
+{
+    arrangementBpmLabel_.setText("BPM", juce::dontSendNotification);
+    arrangementBpmLabel_.setJustificationType(juce::Justification::centredRight);
+    arrangementBpmLabel_.setFont(juce::FontOptions(11.0f));
+    arrangementBpmLabel_.setInterceptsMouseClicks(false, false);
+
+    arrangementBpmEditor_.setMultiLine(false);
+    arrangementBpmEditor_.setReturnKeyStartsNewLine(false);
+    arrangementBpmEditor_.setReadOnly(false);
+    arrangementBpmEditor_.setScrollbarsShown(false);
+    arrangementBpmEditor_.setCaretVisible(true);
+    arrangementBpmEditor_.setPopupMenuEnabled(false);
+    arrangementBpmEditor_.setInputRestrictions(16, "0123456789.");
+    arrangementBpmEditor_.setTooltip("Project tempo (arrangement ruler)");
+    arrangementBpmEditor_.setFont(juce::FontOptions(11.0f));
+    arrangementBpmEditor_.onReturnKey = [this] { commitArrangementBpmFromEditorIfNeeded(); };
+    arrangementBpmEditor_.onFocusLost = [this] { commitArrangementBpmFromEditorIfNeeded(); };
+
+    arrangementTimeSignatureCombo_.setTooltip("Project time signature");
+    arrangementTimeSignatureCombo_.onChange = [this] { handleArrangementTimeSignatureComboChangedByUser(); };
+}
+
+void mini_daw_app_transport::TransportControlsContent::applyArrangementMusicalUiFromSession(
+    const ProjectMusicalTime mt,
+    const bool repaintTimeline)
+{
+    arrangementMusicalUiApplyingFromSession_ = true;
+    arrangementBpmEditor_.setText(formatProjectBpmForToolbar(mt.bpm), juce::dontSendNotification);
+    rebuildArrangementTimeSignatureComboItems(mt);
+    arrangementMusicalUiApplyingFromSession_ = false;
+    if (repaintTimeline)
+    {
+        rulerView.repaint();
+        trackLanesView.repaint();
+    }
+}
+
+void mini_daw_app_transport::TransportControlsContent::rebuildArrangementTimeSignatureComboItems(
+    const ProjectMusicalTime& mt)
+{
+    arrangementTimeSignatureCombo_.clear(juce::dontSendNotification);
+    for (const auto& p : kArrangementTimeSigPresets)
+    {
+        arrangementTimeSignatureCombo_.addItem(p.label, p.id);
+    }
+
+    bool matched = false;
+    for (const auto& p : kArrangementTimeSigPresets)
+    {
+        if (p.num == mt.numerator && p.den == mt.denominator)
+        {
+            arrangementTimeSignatureCombo_.setSelectedId(p.id, juce::dontSendNotification);
+            matched = true;
+            break;
+        }
+    }
+
+    if (!matched)
+    {
+        arrangementTimeSignatureCombo_.addItem(
+            juce::String(mt.numerator) + "/" + juce::String(mt.denominator), kArrangementTimeSigCustomComboId);
+        arrangementTimeSignatureCombo_.setSelectedId(kArrangementTimeSigCustomComboId, juce::dontSendNotification);
+    }
+}
+
+void mini_daw_app_transport::TransportControlsContent::commitArrangementBpmFromEditorIfNeeded()
+{
+    if (arrangementMusicalUiApplyingFromSession_)
+    {
+        return;
+    }
+
+    const double parsed = arrangementBpmEditor_.getText().getDoubleValue();
+    const ProjectMusicalTime cur = session.getProjectMusicalTime();
+
+    if (!std::isfinite(parsed) || parsed <= 0.0)
+    {
+        applyArrangementMusicalUiFromSession(cur, false);
+        return;
+    }
+
+    ProjectMusicalTime probe = cur;
+    probe.bpm = parsed;
+    probe = sanitizeProjectMusicalTime(probe);
+
+    if (std::abs(probe.bpm - cur.bpm) < 1e-9)
+    {
+        return;
+    }
+
+    if (undoRedoCoordinator_ != nullptr)
+    {
+        undoRedoCoordinator_->executeUndoableSessionEdit(
+            "Project BPM",
+            [this, parsed]() -> bool {
+                ProjectMusicalTime live = session.getProjectMusicalTime();
+                ProjectMusicalTime next = live;
+                next.bpm = parsed;
+                next = sanitizeProjectMusicalTime(next);
+                if (std::abs(next.bpm - live.bpm) < 1e-9)
+                {
+                    return false;
+                }
+                session.setProjectBpm(next.bpm);
+                return true;
+            });
+    }
+
+    applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), true);
+}
+
+void mini_daw_app_transport::TransportControlsContent::handleArrangementTimeSignatureComboChangedByUser()
+{
+    if (arrangementMusicalUiApplyingFromSession_)
+    {
+        return;
+    }
+
+    const int id = arrangementTimeSignatureCombo_.getSelectedId();
+    if (id == kArrangementTimeSigCustomComboId)
+    {
+        return;
+    }
+
+    int num = 4;
+    int den = 4;
+    if (!arrangementTimeSigPresetForComboId(id, num, den))
+    {
+        return;
+    }
+
+    const ProjectMusicalTime cur = session.getProjectMusicalTime();
+    if (cur.numerator == num && cur.denominator == den)
+    {
+        return;
+    }
+
+    if (undoRedoCoordinator_ != nullptr)
+    {
+        undoRedoCoordinator_->executeUndoableSessionEdit(
+            "Project time signature",
+            [this, num, den]() -> bool {
+                ProjectMusicalTime live = session.getProjectMusicalTime();
+                if (live.numerator == num && live.denominator == den)
+                {
+                    return false;
+                }
+                ProjectMusicalTime next = live;
+                next.numerator = num;
+                next.denominator = den;
+                session.setProjectMusicalTime(sanitizeProjectMusicalTime(next));
+                return true;
+            });
+    }
+
+    applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), true);
+}
+
+void mini_daw_app_transport::TransportControlsContent::configureArrangementSnapControls()
+{
+    arrangementSnapToggle_.setClickingTogglesState(true);
+    arrangementSnapToggle_.setTooltip("Snap");
+    arrangementSnapToggle_.setButtonText("Snap");
+    arrangementSnapToggle_.onClick = [this] { handleArrangementSnapUiChangedByUser(); };
+
+    arrangementSnapResolutionCombo_.clear(juce::dontSendNotification);
+    arrangementSnapResolutionCombo_.addItem(
+        snapResolutionDisplayName(SnapResolution::Bar), snapResolutionToComboItemId(SnapResolution::Bar));
+    arrangementSnapResolutionCombo_.addItem(
+        snapResolutionDisplayName(SnapResolution::Half), snapResolutionToComboItemId(SnapResolution::Half));
+    arrangementSnapResolutionCombo_.addItem(
+        snapResolutionDisplayName(SnapResolution::Quarter), snapResolutionToComboItemId(SnapResolution::Quarter));
+    arrangementSnapResolutionCombo_.addItem(
+        snapResolutionDisplayName(SnapResolution::Eighth), snapResolutionToComboItemId(SnapResolution::Eighth));
+    arrangementSnapResolutionCombo_.addItem(
+        snapResolutionDisplayName(SnapResolution::Sixteenth),
+        snapResolutionToComboItemId(SnapResolution::Sixteenth));
+    arrangementSnapResolutionCombo_.setTooltip("Snap resolution");
+    arrangementSnapResolutionCombo_.onChange = [this] { handleArrangementSnapUiChangedByUser(); };
+}
+
+void mini_daw_app_transport::TransportControlsContent::applyArrangementSnapUiFromSettings(
+    const SnapSettings& s,
+    const bool repaintTimeline)
+{
+    arrangementSnapUiApplyingFromProject_ = true;
+    arrangementSnapToggle_.setToggleState(s.enabled, juce::dontSendNotification);
+    arrangementSnapResolutionCombo_.setSelectedId(snapResolutionToComboItemId(s.resolution),
+                                                 juce::dontSendNotification);
+    arrangementSnapUiApplyingFromProject_ = false;
+    arrangementSnapSettings_ = s;
+    if (repaintTimeline)
+    {
+        rulerView.repaint();
+        trackLanesView.repaint();
+    }
+}
+
+void mini_daw_app_transport::TransportControlsContent::handleArrangementSnapUiChangedByUser()
+{
+    if (arrangementSnapUiApplyingFromProject_)
+    {
+        return;
+    }
+    arrangementSnapSettings_.enabled = arrangementSnapToggle_.getToggleState();
+    arrangementSnapSettings_.resolution
+        = snapResolutionFromComboItemId(arrangementSnapResolutionCombo_.getSelectedId());
+    rulerView.repaint();
+    trackLanesView.repaint();
+}
+
+SnapProjectRootFields mini_daw_app_transport::TransportControlsContent::arrangementSnapPersistenceSnapshotForSave()
+    const
+{
+    return {
+        arrangementSnapToggle_.getToggleState(),
+        snapResolutionToProjectString(
+            snapResolutionFromComboItemId(arrangementSnapResolutionCombo_.getSelectedId())),
+    };
+}
+
+void mini_daw_app_transport::TransportControlsContent::restoreArrangementSnapFromProjectRootFields(
+    const SnapProjectRootFields& fields)
+{
+    SnapSettings s;
+    s.enabled = fields.enabled;
+    s.resolution = snapResolutionFromProjectString(fields.resolutionKey);
+    applyArrangementSnapUiFromSettings(s, true);
+}
 
 void mini_daw_app_transport::TransportControlsContent::invokeDeleteSelectedPlacedClipFromWindowShortcut()
 {

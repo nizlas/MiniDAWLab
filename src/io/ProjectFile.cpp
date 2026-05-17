@@ -4,6 +4,9 @@
 
 #include "io/ProjectFile.h"
 
+#include "domain/ProjectMusicalTime.h"
+#include "ui/SnapSettings.h"
+
 #include <juce_core/juce_core.h>
 
 #include <cmath>
@@ -709,6 +712,12 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     {
         root->setProperty("cycleEnabled", true);
     }
+    root->setProperty("bpm", data.bpm);
+    root->setProperty("timeSignatureNumerator", data.timeSignatureNumerator);
+    root->setProperty("timeSignatureDenominator", data.timeSignatureDenominator);
+    root->setProperty("ticksPerQuarter", data.ticksPerQuarter);
+    root->setProperty("snapEnabled", data.snapEnabled);
+    root->setProperty("snapResolution", data.snapResolution);
     root->setProperty("tracks", juce::var(trackVars));
 
     if (data.version >= 11 && !data.experimentalInstrumentTracks.empty())
@@ -1004,6 +1013,71 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         {
             out.cycleEnabled = static_cast<int>(static_cast<double>(cv) + 0.5) != 0;
         }
+    }
+
+    {
+        const juce::var& bpmv = root.getProperty("bpm", {});
+        if (bpmv.isDouble() || bpmv.isInt() || bpmv.isInt64())
+        {
+            out.bpm = static_cast<double>(bpmv);
+        }
+        const juce::var& tsn = root.getProperty("timeSignatureNumerator", {});
+        if (tsn.isInt() || tsn.isInt64())
+        {
+            out.timeSignatureNumerator = static_cast<int>(static_cast<std::int64_t>((double)tsn));
+        }
+        else if (tsn.isDouble())
+        {
+            out.timeSignatureNumerator = static_cast<int>(static_cast<double>(tsn) + 0.5);
+        }
+        const juce::var& tsd = root.getProperty("timeSignatureDenominator", {});
+        if (tsd.isInt() || tsd.isInt64())
+        {
+            out.timeSignatureDenominator = static_cast<int>(static_cast<std::int64_t>((double)tsd));
+        }
+        else if (tsd.isDouble())
+        {
+            out.timeSignatureDenominator = static_cast<int>(static_cast<double>(tsd) + 0.5);
+        }
+        const juce::var& tpqRoot = root.getProperty("ticksPerQuarter", {});
+        if (tpqRoot.isInt() || tpqRoot.isInt64())
+        {
+            out.ticksPerQuarter = static_cast<int>(static_cast<std::int64_t>((double)tpqRoot));
+        }
+        else if (tpqRoot.isDouble())
+        {
+            out.ticksPerQuarter = static_cast<int>(static_cast<double>(tpqRoot) + 0.5);
+        }
+        ProjectMusicalTime tm;
+        tm.bpm = out.bpm;
+        tm.numerator = out.timeSignatureNumerator;
+        tm.denominator = out.timeSignatureDenominator;
+        tm.ticksPerQuarter = out.ticksPerQuarter;
+        tm = sanitizeProjectMusicalTime(tm);
+        out.bpm = tm.bpm;
+        out.timeSignatureNumerator = tm.numerator;
+        out.timeSignatureDenominator = tm.denominator;
+        out.ticksPerQuarter = tm.ticksPerQuarter;
+    }
+
+    {
+        const juce::var& snapEn = root.getProperty("snapEnabled", {});
+        if (snapEn.isBool())
+        {
+            out.snapEnabled = (bool)snapEn;
+        }
+        else if (snapEn.isInt() || snapEn.isInt64() || snapEn.isDouble())
+        {
+            out.snapEnabled = static_cast<int>(static_cast<double>(snapEn) + 0.5) != 0;
+        }
+        juce::String snapKey = "1_4";
+        const juce::var& snapRes = root.getProperty("snapResolution", {});
+        if (snapRes.isString())
+        {
+            snapKey = snapRes.toString();
+        }
+        const SnapResolution decoded = snapResolutionFromProjectString(snapKey);
+        out.snapResolution = snapResolutionToProjectString(decoded);
     }
 
     const juce::var& tracksVar = root["tracks"];

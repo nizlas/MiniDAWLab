@@ -234,6 +234,9 @@ public:
     /// [Message thread] Runtime-only row height drag (no undo, no persistence).
     void applyTrackRowHeightDelta(TrackId tid, int startHeightPx, int deltaPx) noexcept;
 
+    /// Optional arrangement timeline snapping (Slice D): used by clip lanes when committing/editing.
+    void setArrangementTimelineSnapFunction(std::function<std::int64_t(std::int64_t)> fn) noexcept;
+
     /// [Message thread] After header bottom-edge resize: snap to clean name-only or full name+buttons height.
     void snapTrackHeaderRowHeightAfterResize(TrackId tid, bool headerHasSubtitle) noexcept;
 
@@ -338,6 +341,7 @@ private:
     std::function<void()> onAudioClipMouseDownClearForeignSelections_;
     std::function<bool()> structuralTimelineEditBlockedPredicate_;
     std::function<bool()> instrumentMidiClipMoveBlockedPredicate_;
+    std::function<std::int64_t(std::int64_t)> arrangementTimelineSnap_;
     std::function<void(TrackId)> onAudioTrackImportClipAtPlayhead_;
     std::function<bool(TrackId, juce::String)> onUndoableRenameTrackRequested_;
 

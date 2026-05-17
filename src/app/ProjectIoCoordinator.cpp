@@ -83,8 +83,15 @@ void ProjectIoCoordinator::saveProject()
         const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
             return callbacks_.instrumentCtlByTrackId(laneId);
         });
+        const SnapProjectRootFields snapRoot = callbacks_.getSnapProjectRootFieldsForSave();
         const juce::Result r = session_.saveProjectToFile(
-            transport_, session_.getCurrentProjectFile(), sampleRate, &pluginHost_, ctlLookup);
+            transport_,
+            session_.getCurrentProjectFile(),
+            sampleRate,
+            &pluginHost_,
+            ctlLookup,
+            snapRoot.enabled,
+            snapRoot.resolutionKey);
         if (!r.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(
@@ -154,8 +161,15 @@ void ProjectIoCoordinator::saveProject()
         const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
             return callbacks_.instrumentCtlByTrackId(laneId);
         });
+        const SnapProjectRootFields snapRoot = callbacks_.getSnapProjectRootFieldsForSave();
         const juce::Result r = session_.saveProjectToFile(
-            transport_, projectFile, sampleRate, &pluginHost_, ctlLookup);
+            transport_,
+            projectFile,
+            sampleRate,
+            &pluginHost_,
+            ctlLookup,
+            snapRoot.enabled,
+            snapRoot.resolutionKey);
         if (!r.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(
@@ -216,6 +230,8 @@ void ProjectIoCoordinator::loadProject()
                 juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
             return;
         }
+        callbacks_.restoreSnapProjectRootFieldsToUi(
+            { parsedLoad.snapEnabled, parsedLoad.snapResolution });
         juce::String instrumentAutoloadNoteAcc;
         if (!parsedLoad.experimentalInstrumentTracks.empty())
         {

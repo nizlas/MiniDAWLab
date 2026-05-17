@@ -39,6 +39,7 @@ public:
         std::function<void()> syncViewportFromSession;
         std::function<void()> refreshInstrumentArrangementUi;
         std::function<void(TrackId timelineInstrumentTrackId, InstrumentMidiClipId clipId)> openMidiEditorForInstrumentClip;
+        std::function<std::int64_t(std::int64_t timelineSample)> snapArrangementTimelineSample;
     };
 
     ClipPasteboardController(Session& session,

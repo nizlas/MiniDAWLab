@@ -33,6 +33,9 @@ public:
         std::function<void()> refreshInstrumentUi;
         std::function<void()> refreshInspectorFromSession;
 
+        /// Sync main-toolbar project tempo/meter widgets after undo/redo timeline snapshot restore.
+        std::function<void()> refreshArrangementMusicalToolbarFromSession;
+
         /// Build/sort musical undo blocks for instrument tracks (delegates to host implementation).
         std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()>
             buildSortedInstrumentMusicalUndoSnapshot;

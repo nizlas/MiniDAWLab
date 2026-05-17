@@ -29,6 +29,13 @@ struct TransportLayoutRefs
 
     EditToolIconStrip& editToolStrip;
 
+    juce::Label& arrangementBpmLabel;
+    juce::TextEditor& arrangementBpmEditor;
+    juce::ComboBox& arrangementTimeSignatureCombo;
+
+    juce::ToggleButton& arrangementSnapToggle;
+    juce::ComboBox& arrangementSnapResolutionCombo;
+
     juce::Label& countInStatusLabel;
     juce::Label& keyDiagLabel;
     /// May be null when shortcut diagnostics UI is not constructed.

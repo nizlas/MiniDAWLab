@@ -19,6 +19,19 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
     // Pointer/Split strip centred on the window (clamped so it never sits under the right labels).
     constexpr int kToolbarRowH = 28;
     constexpr int kCountInLabelWidth = 140;
+    constexpr int kSnapGapAfterTools = 8;
+    constexpr int kBpmLabelWidthPx = 28;
+    constexpr int kBpmEditorWidthPx = 44;
+    constexpr int kMusicalInnerGapPx = 4;
+    constexpr int kTimeSigComboWidthPx = 54;
+    constexpr int kGapMusicalToSnapPx = 8;
+    constexpr int kMusicalClusterWidthPx = kSnapGapAfterTools + kBpmLabelWidthPx + kMusicalInnerGapPx
+                                         + kBpmEditorWidthPx + kMusicalInnerGapPx + kTimeSigComboWidthPx;
+    constexpr int kSnapToggleWidthPx = 52;
+    constexpr int kSnapComboWidthPx = 72;
+    constexpr int kSnapClusterWidthPx = kSnapToggleWidthPx + 4 + kSnapComboWidthPx;
+    constexpr int kToolbarRightReservedPx
+        = kMusicalClusterWidthPx + kGapMusicalToSnapPx + kSnapClusterWidthPx;
     const auto fullToolbarRow = area.removeFromTop(kToolbarRowH);
     auto row = fullToolbarRow;
     if (shortcut_diagnostics::kShowKeyDiagnostic)
@@ -31,7 +44,8 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         const int pw = EditToolIconStrip::preferredWidth();
         const int ph = EditToolIconStrip::preferredHeight();
         const int useH = juce::jmin(ph, fullToolbarRow.getHeight());
-        const int reservedRight = (shortcut_diagnostics::kShowKeyDiagnostic ? 300 : 0) + kCountInLabelWidth;
+        const int reservedRight = (shortcut_diagnostics::kShowKeyDiagnostic ? 300 : 0) + kCountInLabelWidth
+                                  + kToolbarRightReservedPx;
 
         juce::Rectangle<int> strip(fullToolbarRow.getCentreX() - pw / 2,
                                    fullToolbarRow.getCentreY() - useH / 2,
@@ -48,6 +62,19 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
             strip.setX(minX);
         }
         r.editToolStrip.setBounds(strip);
+
+        const int musicalTop = fullToolbarRow.getCentreY() - useH / 2;
+        int x = strip.getRight() + kSnapGapAfterTools;
+        r.arrangementBpmLabel.setBounds(x, musicalTop, kBpmLabelWidthPx, useH);
+        x += kBpmLabelWidthPx + kMusicalInnerGapPx;
+        r.arrangementBpmEditor.setBounds(x, musicalTop, kBpmEditorWidthPx, useH);
+        x += kBpmEditorWidthPx + kMusicalInnerGapPx;
+        r.arrangementTimeSignatureCombo.setBounds(x, musicalTop, kTimeSigComboWidthPx, useH);
+
+        const int snapLeft = x + kTimeSigComboWidthPx + kGapMusicalToSnapPx;
+        r.arrangementSnapToggle.setBounds(snapLeft, musicalTop, kSnapToggleWidthPx, useH);
+        r.arrangementSnapResolutionCombo.setBounds(
+            snapLeft + kSnapToggleWidthPx + 4, musicalTop, kSnapComboWidthPx, useH);
     }
     if constexpr (shortcut_diagnostics::kShowShortcutDiagnostics)
     {

@@ -13,6 +13,7 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
 
+#include <limits>
 #include <optional>
 
 namespace
@@ -365,12 +366,17 @@ private:
             {
                 std::int64_t ns = juce::jmin(sPtr, initEndEx - kMinLen);
                 ns = juce::jmax(std::int64_t{ 0 }, ns);
+                ns = snapTimelineSample(ns);
+                ns = juce::jmin(ns, initEndEx - kMinLen);
+                ns = juce::jmax(std::int64_t{ 0 }, ns);
                 trimLanePreviewStartSamples_ = ns;
                 trimLanePreviewLengthSamples_ = initEndEx - ns;
             }
             else
             {
                 std::int64_t ne = juce::jmax(sPtr, trimLaneInitialStartSamples_ + kMinLen);
+                ne = snapTimelineSample(ne);
+                ne = juce::jmax(ne, trimLaneInitialStartSamples_ + kMinLen);
                 trimLanePreviewStartSamples_ = trimLaneInitialStartSamples_;
                 trimLanePreviewLengthSamples_ = ne - trimLaneInitialStartSamples_;
             }
@@ -393,7 +399,15 @@ private:
         const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
         const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
         const std::int64_t rawDelta = s1 - s0;
-        const std::int64_t effDelta = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(rawDelta);
+        std::int64_t effDelta = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(rawDelta);
+        const std::int64_t minSelStart = earliestSelectedClipStartSamples(*ac);
+        if (minSelStart != std::numeric_limits<std::int64_t>::max())
+        {
+            const std::int64_t targetEarliest = minSelStart + effDelta;
+            const std::int64_t snappedEarliest = snapTimelineSample(targetEarliest);
+            effDelta = snappedEarliest - minSelStart;
+            effDelta = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(effDelta);
+        }
 
         if (!dragDragging_)
         {
@@ -456,7 +470,16 @@ private:
         {
             const std::int64_t s0 = laneTimelineSampleAtLocalX(dragMouseDownLocal_);
             const std::int64_t s1 = laneTimelineSampleAtLocalX(e.position.toInt());
-            const std::int64_t dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(s1 - s0);
+            std::int64_t dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(s1 - s0);
+
+            const std::int64_t minSelStart = earliestSelectedClipStartSamples(*ac);
+            if (minSelStart != std::numeric_limits<std::int64_t>::max())
+            {
+                const std::int64_t targetEarliest = minSelStart + dCommit;
+                const std::int64_t snappedEarliest = snapTimelineSample(targetEarliest);
+                dCommit = snappedEarliest - minSelStart;
+                dCommit = ac->clampInstrumentMidiClipMoveDeltaForCurrentSelection(dCommit);
+            }
 
             if (dCommit != 0)
             {
@@ -494,7 +517,7 @@ private:
         dragCouldMove_ = false;
         dragDragging_ = false;
         dragEffectivePreviewDeltaSamples_ = 0;
-        refreshMidiLaneTrimHoverAffordances(e.getPosition());
+        [[maybe_unused]] const bool hoverDirty = refreshMidiLaneTrimHoverAffordances(e.getPosition());
         repaint();
     }
 
@@ -598,6 +621,30 @@ private:
             return visStart;
         }
         return TimelineRulerView::xToSessionSampleClamped(relX, (float)lc.getWidth(), visStart, spp);
+    }
+
+    [[nodiscard]] std::int64_t snapTimelineSample(std::int64_t s) const noexcept
+    {
+        s = juce::jmax(std::int64_t{ 0 }, s);
+        if (owner_.callbacks_.snapArrangementTimelineSample != nullptr)
+        {
+            return owner_.callbacks_.snapArrangementTimelineSample(s);
+        }
+        return s;
+    }
+
+    [[nodiscard]] std::int64_t earliestSelectedClipStartSamples(
+        const InstrumentTrackController& ctl) const noexcept
+    {
+        std::int64_t minStart = std::numeric_limits<std::int64_t>::max();
+        for (const InstrumentMidiClipId id : ctl.getSelectedClipIds())
+        {
+            if (const InstrumentMidiClip* c = ctl.getClipById(id))
+            {
+                minStart = juce::jmin(minStart, c->startSamples);
+            }
+        }
+        return minStart;
     }
 
     [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const

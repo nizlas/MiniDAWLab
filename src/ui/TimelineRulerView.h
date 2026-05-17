@@ -13,11 +13,10 @@
 //   The event lane (`ClipWaveformView`) stays focused on
 //
 // PRESENTATION
-//   Tick marks + lightweight time labels (seconds / fractional seconds / `m:ss` / `m:ss.mmm`) from
-//   timeline samples × an effective **display** sample rate (device SR or 48000 Hz fallback only —
-//   never persisted). Density adapts to zoom; labels never follow playback audible-offset; no
-//   bar/beat/tempo grid. A short **playhead** stroke at the top aligns with the lane vertical line
-//   when widths match (see `Main.cpp`).
+//   Tick marks + labels use **project** tempo/meter (`Session::getProjectMusicalTime`) at an effective
+//   **display** sample rate (device SR or 48000 Hz fallback only — never persisted). Density adapts to
+//   zoom (bars / beats / subdivisions). A short **playhead** stroke at the top aligns with the lane
+//   vertical line when widths match (see `Main.cpp`).
 //
 // THREADING
 //   juce::Component + Timer: [Message thread] only. Reads `Session` / `Transport`; never runs on the
@@ -28,7 +27,7 @@
 //   Clip ordering, snap content, file I/O, or writing the authoritative playhead (only `requestSeek`).
 //   No shared “timeline model” object; mapping matches `ClipWaveformView` by contract and layout.
 //
-// See: `TimelineRulerView.cpp` (tick/label step ladder, timecode labels, x→sample mapping).
+// See: `TimelineRulerView.cpp` (musical tick plan + labels, x→sample mapping).
 // =============================================================================
 
 #include "domain/Session.h"

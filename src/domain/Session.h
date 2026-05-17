@@ -226,6 +226,13 @@ public:
     [[nodiscard]] std::int64_t getLeftLocatorSamples() const noexcept;
     [[nodiscard]] std::int64_t getRightLocatorSamples() const noexcept;
 
+    /// [Message thread] Global tempo/meter metadata on the snapshot (independent of MIDI clip `pattern.bpm`).
+    [[nodiscard]] ProjectMusicalTime getProjectMusicalTime() const noexcept;
+    /// [Message thread] Updates BPM only; publishes `SessionSnapshot::withMusicalTime`.
+    void setProjectBpm(double bpm) noexcept;
+    /// [Message thread] Replace full musical metadata (sanitized on snapshot).
+    void setProjectMusicalTime(ProjectMusicalTime musicalTime) noexcept;
+
     // [Audio thread] and [Message thread] Acquire the current `SessionSnapshot` pointer; no
     // decode, no session mutation. This is the main handoff the engine uses each block.
     [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
@@ -247,7 +254,9 @@ public:
         const juce::File& file,
         double deviceSampleRate,
         PluginInsertHost* pluginHost = nullptr,
-        ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId = {});
+        ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId = {},
+        bool arrangementSnapEnabled = false,
+        juce::String arrangementSnapResolutionKey = "1_4");
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).

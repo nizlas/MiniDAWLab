@@ -1,18 +1,17 @@
 // =============================================================================
-// TimelineRulerView.cpp  —  seek strip + second ticks (message thread)
+// TimelineRulerView.cpp  —  seek strip + musical ticks (message thread)
 // =============================================================================
 //
 // ROLE
 //   Maps horizontal pointer position to a **session-timeline-absolute** sample index (same
 //   `timelineLength` / `Transport` contract as the lane) and issues `requestSeek` so the user can
-//   place the playhead without using the event lane. Ticks + floating time labels are spatial
-//   hints derived from timeline samples via an effective sample rate (**display only** — no tempo
-//   / bar grid; labels follow raw transport/playhead timing, **not** playback audible offset).
+//   place the playhead without using the event lane. Ticks + labels follow **project** tempo/meter
+//   (`Session::getProjectMusicalTime`) at an effective display sample rate (**drawing only** —
+//   playback stays sample-authoritative). Sample 0 is bar 1, beat 1.
 
 // PEDAGOGICAL GOAL
-//   A reader should see *why* sample rate appears here: ticks + labels are spaced in **seconds** of
-//   session time, and seconds are derived from `samples / effectiveDisplayRate` for **drawing** only.
-//   Playback and placement still live in **samples** end-to-end.
+//   Readers see why sample rate appears: bar/beat spacing uses BPM × effectiveDisplayRate for
+//   **ticks/labels only**. Placement and transport remain in **samples** end-to-end.
 //
 // THREADING
 //   All methods here are [Message thread] — JUCE component + timer, no audio device callback.
@@ -328,10 +327,6 @@ void TimelineRulerView::paint(juce::Graphics& g)
     }
 
     const std::int64_t arrLen = session_.getArrangementExtentSamples();
-    if (arrLen <= 0)
-    {
-        return;
-    }
     const double spp = timelineViewport_.getSamplesPerPixel();
     if (spp <= 0.0)
     {
@@ -350,17 +345,37 @@ void TimelineRulerView::paint(juce::Graphics& g)
     const bool cycleOn = transport_.readCycleEnabledForUi();
 
     const double sampleRate = effectiveDisplaySampleRate(deviceManager_);
+    const ProjectMusicalTime musicalTime = session_.getProjectMusicalTime();
 
     using namespace timeline_locator_paint;
 
     paintLocatorCycleBandAndStripe(
         g, bounds, sessionSampleToX, visStart, visLen, locL, locR, cycleOn);
 
-    paintRulerTickMarks(g, bounds, sessionSampleToX, arrLen, visStart, visLen, sampleRate);
+    paintRulerMusicalTickMarks(
+        g,
+        bounds,
+        sessionSampleToX,
+        arrLen,
+        visStart,
+        visLen,
+        sampleRate,
+        spp,
+        musicalTime);
     paintLocatorTriangleHandles(
         g, bounds, sessionSampleToX, visStart, visLen, locL, locR, cycleOn);
-    paintRulerTimeLabels(
-        g, bounds, sessionSampleToX, arrLen, visStart, visLen, sampleRate, locL, locR);
+    paintRulerMusicalLabels(
+        g,
+        bounds,
+        sessionSampleToX,
+        arrLen,
+        visStart,
+        visLen,
+        sampleRate,
+        spp,
+        musicalTime,
+        locL,
+        locR);
 
     // --- Playhead: only when in the visible [visStart, visStart+visLen) window
     const std::int64_t ph = transport_.readPlayheadSamplesForUi();

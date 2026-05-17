@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "domain/Track.h"
+#include "ui/SnapSettings.h"
 
 class Transport;
 class Session;
@@ -26,6 +27,9 @@ public:
         std::function<void()> syncMidiEditorInstrumentStateFromHost;
         std::function<void()> clearSessionHistory;
         std::function<void()> refreshAllUiAfterLoadedProject;
+
+        std::function<SnapProjectRootFields()> getSnapProjectRootFieldsForSave;
+        std::function<void(const SnapProjectRootFields&)> restoreSnapProjectRootFieldsToUi;
     };
 
     ProjectIoCoordinator(Transport& transport,

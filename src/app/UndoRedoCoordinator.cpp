@@ -304,6 +304,10 @@ void UndoRedoCoordinator::refreshAfterSessionSnapshotRestore()
     {
         callbacks_.refreshInspectorFromSession();
     }
+    if (callbacks_.refreshArrangementMusicalToolbarFromSession)
+    {
+        callbacks_.refreshArrangementMusicalToolbarFromSession();
+    }
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine("[UndoDiag] refreshAfterSessionSnapshotRestore complete");
