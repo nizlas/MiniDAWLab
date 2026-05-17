@@ -73,7 +73,7 @@ public:
     void resized() override;
 
     /// Absolute timeline mode (clip editor). Pass nullptrs to use legacy clip-local step grid (internal pattern only).
-    /// `mainTimelineViewport` seeds horizontal zoom from the main DAW timeline when the clip has no roll viewport yet.
+    /// When the clip has no saved roll viewport, horizontal zoom is seeded to ~5 bars using `Session` tempo/meter (not main-timeline zoom).
     void setSessionTimelineContext(InstrumentMidiClip* timelineClip,
                                    Session* session,
                                    Transport* transport,
@@ -168,6 +168,11 @@ private:
     [[nodiscard]] std::int64_t referenceTimelineGridTicks() const noexcept;
     void handleTimelineNotesMouseDown(const juce::MouseEvent& e);
 
+    /// Timeline note under `pos` (topmost if overlapping), using the same geometry as paint: Bars mode =
+    /// filled rounded rect; Hits (drum) mode = diamond. Returns nullopt if none.
+    [[nodiscard]] std::optional<int> findTimelineNoteIndexAtPoint(juce::Point<int> pos) const;
+    void normalizeTimelineNoteSelectionIndex() noexcept;
+
     /// Ruler strip only (not note grid): mirrors `TimelineRulerView` mouse split + modifiers.
     void handleTimelineRulerMouseDown(const juce::MouseEvent& e, const juce::Rectangle<int>& rulerTrack);
     void handleTimelineRulerMouseDrag(const juce::MouseEvent& e, const juce::Rectangle<int>& rulerTrack);
@@ -236,6 +241,9 @@ private:
     /// 1 = Hits (default), 2 = Bars.
     int timelineNotesDisplayComboId_ = 1;
     int lastObservedTimelineNoteCountUi_ = -1;
+
+    /// Index into `pattern_.timelineNotes` when exactly one timeline note is selected (not undoable).
+    std::optional<int> selectedTimelineNoteIndex_;
 
     std::function<void(const juce::String&, std::function<bool()>)> undoablePatternEditHandler_;
 

@@ -58,7 +58,7 @@ public:
 
     /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass session/transport/
     /// deviceManager for absolute-timeline roll + shared playhead/locators; `timelineClip` may be null
-    /// only for legacy detached use. `mainTimelineViewport` seeds roll zoom when the clip has no saved viewport.
+    /// only for legacy detached use. `mainTimelineViewport` is reserved for future sync; default roll zoom uses ~5 bars from session tempo/meter when the clip has no saved viewport.
     void bindExternalPattern(ExperimentalMidiPattern* pattern,
                              InstrumentMidiClip* timelineClip,
                              InstrumentTrackController* instrumentTrackForClip,
