@@ -9,6 +9,7 @@ class LatencySettingsView;
 class PlaybackEngine;
 class RecorderService;
 class RecordingCoordinator;
+class Session;
 class Transport;
 
 namespace mini_daw_app_dialogs
@@ -23,6 +24,13 @@ void showAudioSettingsDialog(juce::Component& parent,
                              LatencySettingsStore& latencyStore,
                              PlaybackEngine& playbackEngine,
                              juce::Component::SafePointer<LatencySettingsView>& audioLatencySettingsWeakSlot);
+
+void showAudioMixdownDialog(juce::Component& parent,
+                            Transport& transport,
+                            Session& session,
+                            PlaybackEngine& playbackEngine,
+                            juce::AudioDeviceManager& deviceManager,
+                            std::function<void()> updatePlayPauseButtonFromTransport);
 
 void showHelpMenuPopup(juce::Component& helpButtonAnchor,
                        juce::Component::SafePointer<juce::Component> menuOwnerLifetime,

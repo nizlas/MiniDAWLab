@@ -74,6 +74,7 @@ target_sources(MiniDAWLab PRIVATE
     src/Main.cpp
     src/transport/Transport.cpp
     src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
     src/domain/PlacedClip.cpp
     src/domain/Track.cpp
     src/domain/Session.cpp
@@ -89,7 +90,10 @@ target_sources(MiniDAWLab PRIVATE
     src/io/InstrumentMidiClipExport.cpp
     src/engine/CountInClickOutput.cpp
     src/playback/ExperimentalInstrumentPlaybackBridge.cpp
+    src/engine/PlaybackMixHelpers.cpp
     src/engine/PlaybackEngine.cpp
+    src/app/AudioMixdownExporter.cpp
+    src/app/AudioMixdownDialog.cpp
     src/engine/RecorderService.cpp
     src/ui/ClipWaveformView.cpp
     src/ui/EditToolIconStrip.cpp

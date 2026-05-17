@@ -11,6 +11,7 @@ struct MainMenuActions
 {
     std::function<void()> saveProject;
     std::function<void()> loadProject;
+    std::function<void()> openAudioMixdown;
     std::function<void()> openAudioSettings;
     std::function<void()> openHelp;
 };
@@ -19,6 +20,7 @@ enum class MainMenuCommandId : int
 {
     FileSaveProject = 1,
     FileLoadProject = 2,
+    FileAudioMixdown = 3,
     AudioSettings = 10,
     HelpRoot = 20,
 };

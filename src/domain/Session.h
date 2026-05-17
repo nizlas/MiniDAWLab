@@ -38,6 +38,7 @@
 #include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "domain/AudioMixdownProjectSettings.h"
 #include "io/ProjectFile.h"
 
 #include <juce_core/juce_core.h>
@@ -271,6 +272,9 @@ public:
         juce::String& outInfoNote,
         PluginInsertHost* pluginHost = nullptr);
 
+    [[nodiscard]] AudioMixdownProjectSettings getAudioMixdownSettings() const noexcept;
+    void setAudioMixdownSettings(AudioMixdownProjectSettings settings) noexcept;
+
     /// [Message thread] Same effects as loading `file`, but uses an already-parsed model (caller read
     /// `file` beforehand). Caller restores `experimentalInstrumentTracks` rows after timeline + inserts.
     [[nodiscard]] juce::Result applyLoadedProjectModel(
@@ -297,4 +301,5 @@ private:
     mutable std::atomic<std::shared_ptr<const SessionSnapshot>> sessionSnapshot_;
 
     juce::File currentProjectFile_;
+    AudioMixdownProjectSettings audioMixdown_;
 };

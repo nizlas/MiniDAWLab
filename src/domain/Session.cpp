@@ -15,6 +15,7 @@
 #include "domain/Session.h"
 
 #include "domain/AudioClip.h"
+#include "domain/MixdownWavProbe.h"
 #include "domain/TrackStereoPan.h"
 #include "instruments/InstrumentTrackController.h"
 #include "io/AudioFileLoader.h"
@@ -131,6 +132,17 @@ Session::Session()
 }
 
 Session::~Session() = default;
+
+AudioMixdownProjectSettings Session::getAudioMixdownSettings() const noexcept
+{
+    return audioMixdown_;
+}
+
+void Session::setAudioMixdownSettings(AudioMixdownProjectSettings settings) noexcept
+{
+    settings.mp3BitRateKbps = clampMp3BitRateKbps(settings.mp3BitRateKbps);
+    audioMixdown_ = std::move(settings);
+}
 
 juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
                                                 const double deviceSampleRate,
@@ -1175,6 +1187,29 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     {
         return juce::Result::fail("Session has no tracks to save.");
     }
+
+    {
+        out.hasAudioMixdown = true;
+        ProjectFileAudioMixdownV1& am = out.audioMixdown;
+        am.fileNameWithoutExtension = audioMixdown_.fileNameWithoutExtension;
+        juce::String dirSpec = audioMixdown_.outputDirectorySpec.trim();
+        if (dirSpec.isEmpty())
+        {
+            dirSpec = "Mixdown";
+        }
+        am.outputDirectory = dirSpec;
+        am.fileType = (audioMixdown_.fileType == AudioMixdownProjectSettings::FileType::MpegLayer3)
+                          ? juce::String("mpeg1Layer3")
+                          : juce::String("wave");
+        int wb = audioMixdown_.wavBitDepth;
+        if (wb != 16 && wb != 24 && wb != 32)
+        {
+            wb = probeStereoFloatWavSupportedMixdown(deviceSampleRate) ? 32 : 24;
+        }
+        am.wavBitDepth = wb;
+        am.mp3BitRateKbps = clampMp3BitRateKbps(audioMixdown_.mp3BitRateKbps);
+    }
+
     const juce::Result wr = writeProjectFile(file, out);
     if (wr.wasOk())
     {
@@ -1377,6 +1412,35 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 
     currentProjectFile_ = file;
+
+    if (parsed.hasAudioMixdown)
+    {
+        const ProjectFileAudioMixdownV1& m = parsed.audioMixdown;
+        audioMixdown_.fileNameWithoutExtension = m.fileNameWithoutExtension;
+        audioMixdown_.outputDirectorySpec = m.outputDirectory.trim();
+        const juce::String ft = m.fileType.trim().toLowerCase();
+        if (ft == "mpeg1layer3" || ft == "mp3" || ft == "mpeg")
+        {
+            audioMixdown_.fileType = AudioMixdownProjectSettings::FileType::MpegLayer3;
+        }
+        else
+        {
+            audioMixdown_.fileType = AudioMixdownProjectSettings::FileType::Wave;
+        }
+        if (m.wavBitDepth == 16 || m.wavBitDepth == 24 || m.wavBitDepth == 32)
+        {
+            audioMixdown_.wavBitDepth = m.wavBitDepth;
+        }
+        else
+        {
+            audioMixdown_.wavBitDepth = 0;
+        }
+        audioMixdown_.mp3BitRateKbps = clampMp3BitRateKbps(m.mp3BitRateKbps);
+    }
+    else
+    {
+        audioMixdown_ = defaultAudioMixdownProjectSettings();
+    }
 
     const std::int64_t tlen = next->getArrangementExtentSamples();
     const std::int64_t hi = juce::jmax(std::int64_t{0}, tlen);

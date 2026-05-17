@@ -24,6 +24,8 @@ juce::PopupMenu MainMenuModel::getMenuForIndex(const int topLevelMenuIndex,
         juce::PopupMenu m;
         m.addItem(static_cast<int>(MainMenuCommandId::FileSaveProject), "Save Project...");
         m.addItem(static_cast<int>(MainMenuCommandId::FileLoadProject), "Load Project...");
+        m.addSeparator();
+        m.addItem(static_cast<int>(MainMenuCommandId::FileAudioMixdown), "Audio Mixdown...");
         return m;
     }
     case 1: {
@@ -57,6 +59,12 @@ void MainMenuModel::menuItemSelected(const int menuItemID, const int topLevelMen
         if (actions_.loadProject != nullptr)
         {
             actions_.loadProject();
+        }
+        return;
+    case static_cast<int>(MainMenuCommandId::FileAudioMixdown):
+        if (actions_.openAudioMixdown != nullptr)
+        {
+            actions_.openAudioMixdown();
         }
         return;
     case static_cast<int>(MainMenuCommandId::AudioSettings):

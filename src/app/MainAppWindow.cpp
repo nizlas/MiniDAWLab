@@ -731,6 +731,7 @@ public:
                     projectIoCoordinator_->loadProject();
                 }
             },
+            [this] { showAudioMixdownDialog(); },
             [this] { showAudioSettingsDialog(); },
             [this] { showHelpMenuPopup(); },
         });
@@ -1032,6 +1033,18 @@ private:
         {
             lv->syncFromStore();
         }
+    }
+
+    void showAudioMixdownDialog()
+    {
+        mini_daw_app_dialogs::showAudioMixdownDialog(*this,
+                                                     transport,
+                                                     session,
+                                                     playbackEngine_,
+                                                     deviceManager,
+                                                     [this]() {
+                                                         transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
+                                                     });
     }
 
     void showAudioSettingsDialog()

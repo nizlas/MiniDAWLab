@@ -56,6 +56,7 @@ class InstrumentTrackController;
 class PluginInsertHost;
 class RecorderService;
 class Session;
+class SessionSnapshot;
 
 // =============================================================================
 // ExperimentalInstrumentPlaybackSnapshot  —  message-thread publishes, RT reads
@@ -141,7 +142,27 @@ public:
     // Positive reads later material; negative reads earlier. Wrap decisions still use unshifted playhead.
     void setPlaybackOffsetSamples(std::int64_t samples) noexcept;
 
+    /// [Any thread] Offline mixdown gate: while true, `audioDeviceIOCallbackWithContext` outputs silence only.
+    void setOfflineRenderInProgress(bool on) noexcept;
+    [[nodiscard]] bool isOfflineRenderInProgress() const noexcept;
+
+    /// [Any thread] Same acquire-load discipline as instrument snapshot reads inside the device callback.
+    [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
+        loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
+
+    /// [Message thread] One stereo offline block (`stereoOutputLR[0]` = L, `[1]` = R), matching realtime summing
+    /// order for clips, inserts, instruments, mute/off/fader/pan. Does not advance transport.
+    void renderOfflineMixdownBlock(const SessionSnapshot& sessionSnap,
+                                   const ExperimentalInstrumentPlaybackSnapshot* instrumentSnap,
+                                   std::int64_t timelineSegStartSample,
+                                   int numSamples,
+                                   float* const* stereoOutputLR,
+                                   bool instrumentForceDiscontinuity);
+
 private:
+    void invokeExperimentalInstrumentBeginBlocks(const ExperimentalInstrumentPlaybackSnapshot* instrumentSnap,
+                                                 int numSamples) noexcept;
+
     Transport& transport_;
     Session& session_;
     RecorderService* const recorder_;
@@ -155,6 +176,7 @@ private:
     std::function<void()> experimentalReleaseAllHosts_;
     std::function<void(int)> experimentalBeginBlockAllHosts_;
     std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
+    std::atomic<bool> offlineRenderInProgress_{ false };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
 };

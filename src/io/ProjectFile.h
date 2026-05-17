@@ -138,6 +138,19 @@ struct ProjectFileExperimentalInstrumentTrackV1
     std::vector<ProjectFileExperimentalInstrumentClipV1> clips;
 };
 
+/// Optional Audio Mixdown UI settings (root `audioMixdown`); omitted in older projects.
+struct ProjectFileAudioMixdownV1
+{
+    juce::String fileNameWithoutExtension;
+    /// Relative path under project folder (forward slashes), e.g. `"Mixdown"`, or an absolute OS path.
+    juce::String outputDirectory;
+    /// `"wave"` (default) or `"mpeg1Layer3"`.
+    juce::String fileType;
+    /// 16 / 24 / 32, or **0** when absent or invalid in JSON.
+    int wavBitDepth = 0;
+    int mp3BitRateKbps = 320;
+};
+
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
@@ -170,6 +183,9 @@ struct ProjectFileV1
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;
+    /// Present when JSON root contains optional `audioMixdown` object (any version).
+    bool hasAudioMixdown = false;
+    ProjectFileAudioMixdownV1 audioMixdown;
 };
 
 [[nodiscard]] juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data);

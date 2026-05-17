@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace
@@ -871,6 +872,17 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         root->setProperty("experimentalInstrumentTracks", juce::var(exTracks));
     }
 
+    if (data.hasAudioMixdown)
+    {
+        juce::DynamicObject::Ptr amo = new juce::DynamicObject();
+        amo->setProperty("fileNameWithoutExtension", data.audioMixdown.fileNameWithoutExtension);
+        amo->setProperty("outputDirectory", data.audioMixdown.outputDirectory);
+        amo->setProperty("fileType", data.audioMixdown.fileType);
+        amo->setProperty("wavBitDepth", data.audioMixdown.wavBitDepth);
+        amo->setProperty("mp3BitRateKbps", data.audioMixdown.mp3BitRateKbps);
+        root->setProperty("audioMixdown", juce::var(amo.get()));
+    }
+
     const juce::String text = juce::JSON::toString(juce::var(root.get()), true);
     if (text.isEmpty())
     {
@@ -1084,6 +1096,65 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
         const SnapResolution decoded = snapResolutionFromProjectString(snapKey);
         out.snapResolution = snapResolutionToProjectString(decoded);
+    }
+
+    {
+        const juce::var& am = root.getProperty("audioMixdown", {});
+        if (am.isObject())
+        {
+            out.hasAudioMixdown = true;
+            ProjectFileAudioMixdownV1& m = out.audioMixdown;
+            m.fileNameWithoutExtension = am.getProperty("fileNameWithoutExtension", {}).toString();
+            m.outputDirectory = am.getProperty("outputDirectory", {}).toString();
+            m.fileType = am.getProperty("fileType", {}).toString().trim().toLowerCase();
+            if (m.fileType.isEmpty())
+            {
+                m.fileType = "wave";
+            }
+
+            const juce::var& wbVar = am.getProperty("wavBitDepth", {});
+            int wb = 0;
+            if (wbVar.isInt() || wbVar.isInt64())
+            {
+                wb = static_cast<int>(static_cast<std::int64_t>((double)wbVar));
+            }
+            else if (wbVar.isDouble())
+            {
+                wb = static_cast<int>(static_cast<double>(wbVar) + 0.5);
+            }
+            if (wb == 16 || wb == 24 || wb == 32)
+            {
+                m.wavBitDepth = wb;
+            }
+            else
+            {
+                m.wavBitDepth = 0;
+            }
+
+            const juce::var& brVar = am.getProperty("mp3BitRateKbps", {});
+            int br = 320;
+            if (brVar.isInt() || brVar.isInt64())
+            {
+                br = static_cast<int>(static_cast<std::int64_t>((double)brVar));
+            }
+            else if (brVar.isDouble())
+            {
+                br = static_cast<int>(static_cast<double>(brVar) + 0.5);
+            }
+            constexpr int rates[] {128, 160, 192, 224, 256, 320};
+            int best = rates[0];
+            int bestD = std::abs(br - best);
+            for (const int r : rates)
+            {
+                const int d = std::abs(br - r);
+                if (d < bestD)
+                {
+                    bestD = d;
+                    best = r;
+                }
+            }
+            m.mp3BitRateKbps = best;
+        }
     }
 
     const juce::var& tracksVar = root["tracks"];
