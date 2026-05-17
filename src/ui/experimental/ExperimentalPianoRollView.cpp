@@ -20,6 +20,8 @@ namespace
     /// Plain wheel over keys/grid: target ~12 pitch rows per **physical** notch. Many hosts/OSes report
     /// `wheel.deltaY` ≈ 0.25 per notch, so scale by 48 so one notch ≈ one octave; sub-line deltas accumulate.
     constexpr float kPitchScrollRowsPerWheelDelta = 48.0f;
+    /// Timeline marquee: ignore sub-pixel jitter so a plain click does not start a drag rect.
+    constexpr float kTimelineMarqueeDragThresholdPx = 5.0f;
 
     [[nodiscard]] double effectiveDeviceSampleRate(juce::AudioDeviceManager* dm) noexcept
     {
@@ -370,7 +372,7 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     if (changed)
     {
         dismissRowLabelEditor(false);
-        selectedTimelineNoteIndex_.reset();
+        selectedTimelineNoteIndices_.clear();
     }
     timelineClip_ = timelineClip;
     session_ = session;
@@ -1131,16 +1133,169 @@ std::optional<int> ExperimentalPianoRollView::findTimelineNoteIndexAtPoint(juce:
     return std::nullopt;
 }
 
-void ExperimentalPianoRollView::normalizeTimelineNoteSelectionIndex() noexcept
+std::optional<juce::Rectangle<float>> ExperimentalPianoRollView::getTimelineNoteVisualBounds(const int noteIndex) const
 {
-    if (!selectedTimelineNoteIndex_.has_value())
+    if (timelineClip_ == nullptr || !pattern_.usesTimelineNotes() || !useAbsoluteTimeline())
+    {
+        return std::nullopt;
+    }
+    if (samplesPerPixel_ <= 0.0 || !std::isfinite(samplesPerPixel_))
+    {
+        return std::nullopt;
+    }
+    if (!isTimelineClipBindingFresh())
+    {
+        return std::nullopt;
+    }
+    if (noteIndex < 0 || noteIndex >= (int)pattern_.timelineNotes.size())
+    {
+        return std::nullopt;
+    }
+
+    const auto gr = gridBounds();
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const bool paintBars = (timelineNotesDisplayComboId_ == 2);
+    const bool pianoRowMode = (rowLabelMode_ == 1);
+    const float hitHalfW = pianoRowMode ? juce::jmax(4.0f, juce::jmin(6.8f, (float)kRowHeight * 0.48f))
+                                        : juce::jmax(3.5f, juce::jmin(6.0f, (float)kRowHeight * 0.42f));
+    const float hitHalfH = pianoRowMode ? juce::jmax(4.0f, (float)kRowHeight * 0.45f)
+                                        : juce::jmax(3.5f, (float)kRowHeight * 0.4f);
+
+    const auto& tn = pattern_.timelineNotes[(size_t)noteIndex];
+    if (tn.midiNote < pitchLow_ || tn.midiNote > pitchHigh_)
+    {
+        return std::nullopt;
+    }
+    const auto rrOpt = visibleRowStripRect(gr, tn.midiNote);
+    if (!rrOpt)
+    {
+        return std::nullopt;
+    }
+    const auto& rr = *rrOpt;
+    const std::int64_t a0 = absoluteSampleForTimelineNote(timelineClip_->timelineAnchorSamples, tn, pattern_, sr);
+    const std::int64_t vis0 = timelineClip_->startSamples;
+    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+    if (a0 < vis0 || a0 >= vis1)
+    {
+        return std::nullopt;
+    }
+
+    if (paintBars)
+    {
+        const std::int64_t durS = ticksToRelativeSamples(
+            juce::jmax<std::int64_t>(1, tn.durationTicks), bpm, tpq, sr);
+        const std::int64_t a1 = a0 + juce::jmax<std::int64_t>(1, durS);
+        float xL = xForSessionSample(a0);
+        float xR = xForSessionSample(a1);
+        if (xR < xL)
+        {
+            std::swap(xL, xR);
+        }
+        xL = juce::jmax(xL, (float)gr.getX());
+        xR = juce::jmin(xR, (float)gr.getRight());
+        if (xR <= (float)gr.getX() || xL >= (float)gr.getRight())
+        {
+            return std::nullopt;
+        }
+        const float notePadY = pianoRowMode ? 1.0f : 2.0f;
+        const float noteInsetV = pianoRowMode ? 2.0f : 4.0f;
+        auto noteRect = juce::Rectangle<float>(
+            xL, (float)rr.getY() + notePadY, xR - xL, (float)rr.getHeight() - noteInsetV);
+        if (noteRect.getWidth() < 3.0f)
+        {
+            noteRect = noteRect.withSizeKeepingCentre(4.0f, noteRect.getHeight());
+        }
+        return noteRect;
+    }
+
+    const float cx = xForSessionSample(a0);
+    if (cx < (float)gr.getX() - hitHalfW - 2.0f || cx > (float)gr.getRight() + hitHalfW + 2.0f)
+    {
+        return std::nullopt;
+    }
+    const float cy = (float)rr.getCentreY();
+    return juce::Rectangle<float>(cx - hitHalfW, cy - hitHalfH, 2.f * hitHalfW, 2.f * hitHalfH);
+}
+
+void ExperimentalPianoRollView::normalizeTimelineNoteSelection() noexcept
+{
+    for (auto it = selectedTimelineNoteIndices_.begin(); it != selectedTimelineNoteIndices_.end();)
+    {
+        if (*it < 0 || *it >= (int)pattern_.timelineNotes.size())
+        {
+            it = selectedTimelineNoteIndices_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void ExperimentalPianoRollView::clearTimelineNoteSelection() noexcept
+{
+    selectedTimelineNoteIndices_.clear();
+}
+
+void ExperimentalPianoRollView::replaceTimelineNoteSelectionWithSingle(const int noteIndex) noexcept
+{
+    selectedTimelineNoteIndices_.clear();
+    selectedTimelineNoteIndices_.insert(noteIndex);
+}
+
+void ExperimentalPianoRollView::toggleTimelineNoteInSelection(const int noteIndex) noexcept
+{
+    if (selectedTimelineNoteIndices_.count(noteIndex) != 0u)
+    {
+        selectedTimelineNoteIndices_.erase(noteIndex);
+    }
+    else
+    {
+        selectedTimelineNoteIndices_.insert(noteIndex);
+    }
+}
+
+bool ExperimentalPianoRollView::isTimelineNoteIndexSelected(const int noteIndex) const noexcept
+{
+    return selectedTimelineNoteIndices_.count(noteIndex) != 0u;
+}
+
+void ExperimentalPianoRollView::adjustTimelineNoteSelectionAfterErase(const int erasedIndex) noexcept
+{
+    std::unordered_set<int> out;
+    for (const int j : selectedTimelineNoteIndices_)
+    {
+        if (j < erasedIndex)
+        {
+            out.insert(j);
+        }
+        else if (j > erasedIndex)
+        {
+            out.insert(j - 1);
+        }
+    }
+    selectedTimelineNoteIndices_ = std::move(out);
+}
+
+void ExperimentalPianoRollView::applyTimelineMarqueeSelectionFromRect(const juce::Rectangle<int>& r) noexcept
+{
+    selectedTimelineNoteIndices_.clear();
+    if (!pattern_.usesTimelineNotes() || timelineClip_ == nullptr || r.isEmpty())
     {
         return;
     }
-    const int idx = *selectedTimelineNoteIndex_;
-    if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+    const auto rf = r.toFloat();
+    for (int i = 0; i < (int)pattern_.timelineNotes.size(); ++i)
     {
-        selectedTimelineNoteIndex_.reset();
+        if (const auto b = getTimelineNoteVisualBounds(i))
+        {
+            if (b->intersects(rf))
+            {
+                selectedTimelineNoteIndices_.insert(i);
+            }
+        }
     }
 }
 
@@ -1156,28 +1311,53 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         return;
     }
 
+    timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+
+    if (const auto hit = findTimelineNoteIndexAtPoint(e.getPosition()))
+    {
+        if (e.mods.isCtrlDown() || e.mods.isShiftDown())
+        {
+            toggleTimelineNoteInSelection(*hit);
+        }
+        else
+        {
+            replaceTimelineNoteSelectionWithSingle(*hit);
+        }
+        repaint();
+        return;
+    }
+
+    clearTimelineNoteSelection();
+    timelineMarqueeAnchor_ = e.getPosition();
+    timelineMarqueeInteraction_ = TimelineMarqueeInteraction::Pending;
+    repaint();
+}
+
+void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<int> pos)
+{
+    if (timelineClip_ == nullptr)
+    {
+        return;
+    }
+    if (!isTimelineClipBindingFresh())
+    {
+        return;
+    }
+
     const double sr = effectiveDeviceSampleRate(deviceManager_);
     const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
     const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
 
     const std::int64_t vis0 = timelineClip_->startSamples;
-    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
 
-    if (const auto hit = findTimelineNoteIndexAtPoint(e.getPosition()))
-    {
-        selectedTimelineNoteIndex_ = *hit;
-        repaint();
-        return;
-    }
-    selectedTimelineNoteIndex_.reset();
-
-    const int pitch = pitchAtY(e.getPosition().getY());
+    const int pitch = pitchAtY(pos.getY());
     if (pitch < pitchLow_ || pitch > pitchHigh_)
     {
         return;
     }
 
-    const std::int64_t absClick = sampleAtGridX((float)e.getPosition().getX());
+    const std::int64_t absClick = sampleAtGridX((float)pos.getX());
     const std::int64_t oldAnchor = timelineClip_->timelineAnchorSamples;
     std::int64_t tickOffset = relativeSamplesToTicks(absClick - oldAnchor, bpm, tpq, sr);
     const std::int64_t snapG = musicalSnapGridTicks();
@@ -1239,7 +1419,6 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
         return;
     }
 
-    // Pre–tick-zero region: move anchor earlier and shift existing ticks so absolute note times stay fixed.
     const std::int64_t newAnchor = absSnappedNote;
     if (newAnchor >= oldAnchor || newAnchor < 0)
     {
@@ -1555,6 +1734,7 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
     const auto rt = rulerTrackBounds();
     if (useAbsoluteTimeline() && !rt.isEmpty() && rt.contains(pos))
     {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
         handleTimelineRulerMouseDown(e, rt);
         return;
     }
@@ -1568,6 +1748,7 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
             handleTimelineNotesMouseDown(e);
             return;
         }
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
         const int step = useAbsoluteTimeline() ? stepAtTimelineX(pos.getX()) : stepAtPatternX(pos.getX());
         const int pitch = pitchAtY(pos.getY());
         if (kMidiEditorVerbosePianoRollMouseLog)
@@ -1604,6 +1785,29 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+        && isTimelineClipBindingFresh())
+    {
+        if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Pending)
+        {
+            if (e.getDistanceFromDragStart() > kTimelineMarqueeDragThresholdPx)
+            {
+                timelineMarqueeInteraction_ = TimelineMarqueeInteraction::Dragging;
+                const auto gr = gridBounds();
+                timelineMarqueeRect_
+                    = juce::Rectangle<int>(timelineMarqueeAnchor_, e.getPosition()).getIntersection(gr);
+            }
+        }
+        if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
+        {
+            const auto gr = gridBounds();
+            timelineMarqueeRect_
+                = juce::Rectangle<int>(timelineMarqueeAnchor_, e.getPosition()).getIntersection(gr);
+            repaint();
+            return;
+        }
+    }
+
     const auto rt = rulerTrackBounds();
     if (!useAbsoluteTimeline() || rt.isEmpty() || rulerGestureMode_ == RulerGestureMode::None)
     {
@@ -1619,6 +1823,18 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
+    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
+    {
+        applyTimelineMarqueeSelectionFromRect(timelineMarqueeRect_);
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+        timelineMarqueeRect_ = {};
+        repaint();
+    }
+    else if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Pending)
+    {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+    }
+
     juce::ignoreUnused(e);
     rulerGestureMode_ = RulerGestureMode::None;
 }
@@ -1660,7 +1876,7 @@ void ExperimentalPianoRollView::mouseDoubleClick(const juce::MouseEvent& e)
                 {
                     instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
                 }
-                selectedTimelineNoteIndex_.reset();
+                adjustTimelineNoteSelectionAfterErase(i);
                 repaint();
                 return true;
             };
@@ -1674,6 +1890,9 @@ void ExperimentalPianoRollView::mouseDoubleClick(const juce::MouseEvent& e)
             }
             return;
         }
+
+        tryAddTimelineNoteAtGridClick(pos);
+        return;
     }
 }
 
@@ -1832,7 +2051,7 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         return;
     }
 
-    normalizeTimelineNoteSelectionIndex();
+    normalizeTimelineNoteSelection();
 
     if (absTime)
     {
@@ -2261,8 +2480,7 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 continue;
             }
             const float velA = juce::jlimit(0.28f, 1.0f, (float)tn.velocity / 127.0f);
-            const bool noteSelected
-                = selectedTimelineNoteIndex_.has_value() && *selectedTimelineNoteIndex_ == ti;
+            const bool noteSelected = isTimelineNoteIndexSelected(ti);
 
             if (paintBars)
             {
@@ -2393,6 +2611,15 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 }
             }
         }
+    }
+
+    if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging && !timelineMarqueeRect_.isEmpty())
+    {
+        const auto rf = timelineMarqueeRect_.toFloat();
+        g.setColour(juce::Colours::white.withAlpha(0.07f));
+        g.fillRect(rf);
+        g.setColour(juce::Colours::white.withAlpha(0.38f));
+        g.drawRect(rf, 1.0f);
     }
 
     // --- drawGlobalPlayhead (grid)

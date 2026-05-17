@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -167,11 +168,27 @@ private:
     [[nodiscard]] std::int64_t musicalSnapGridTicks() const noexcept;
     [[nodiscard]] std::int64_t referenceTimelineGridTicks() const noexcept;
     void handleTimelineNotesMouseDown(const juce::MouseEvent& e);
+    void tryAddTimelineNoteAtGridClick(juce::Point<int> pos);
 
     /// Timeline note under `pos` (topmost if overlapping), using the same geometry as paint: Bars mode =
     /// filled rounded rect; Hits (drum) mode = diamond. Returns nullopt if none.
     [[nodiscard]] std::optional<int> findTimelineNoteIndexAtPoint(juce::Point<int> pos) const;
-    void normalizeTimelineNoteSelectionIndex() noexcept;
+    /// Visual bounds in component space for marquee intersection (AABB of bar rect or diamond).
+    [[nodiscard]] std::optional<juce::Rectangle<float>> getTimelineNoteVisualBounds(int noteIndex) const;
+    void normalizeTimelineNoteSelection() noexcept;
+    void clearTimelineNoteSelection() noexcept;
+    void replaceTimelineNoteSelectionWithSingle(int noteIndex) noexcept;
+    void toggleTimelineNoteInSelection(int noteIndex) noexcept;
+    [[nodiscard]] bool isTimelineNoteIndexSelected(int noteIndex) const noexcept;
+    void adjustTimelineNoteSelectionAfterErase(int erasedIndex) noexcept;
+    void applyTimelineMarqueeSelectionFromRect(const juce::Rectangle<int>& r) noexcept;
+
+    enum class TimelineMarqueeInteraction : std::uint8_t
+    {
+        None,
+        Pending,
+        Dragging
+    };
 
     /// Ruler strip only (not note grid): mirrors `TimelineRulerView` mouse split + modifiers.
     void handleTimelineRulerMouseDown(const juce::MouseEvent& e, const juce::Rectangle<int>& rulerTrack);
@@ -242,8 +259,11 @@ private:
     int timelineNotesDisplayComboId_ = 1;
     int lastObservedTimelineNoteCountUi_ = -1;
 
-    /// Index into `pattern_.timelineNotes` when exactly one timeline note is selected (not undoable).
-    std::optional<int> selectedTimelineNoteIndex_;
+    /// Indices into `pattern_.timelineNotes` (not undoable).
+    std::unordered_set<int> selectedTimelineNoteIndices_;
+    TimelineMarqueeInteraction timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+    juce::Point<int> timelineMarqueeAnchor_;
+    juce::Rectangle<int> timelineMarqueeRect_;
 
     std::function<void(const juce::String&, std::function<bool()>)> undoablePatternEditHandler_;
 
