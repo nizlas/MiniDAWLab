@@ -689,8 +689,7 @@ public:
             menu.addItem(1, "Add Audio Track");
             juce::PopupMenu instrMenu;
             instrMenu.addItem(100, "Groove Agent SE");
-            instrMenu.addItem(
-                juce::PopupMenu::Item("HALion Sonic (not validated yet)").setEnabled(false));
+            instrMenu.addItem(101, "HALion Sonic");
             menu.addSubMenu("Add Instrument Track", instrMenu);
             juce::Component::SafePointer<mini_daw_app_transport::TransportControlsContent> safeThis(this);
             menu.showMenuAsync(
@@ -713,6 +712,14 @@ public:
                         if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
                         {
                             safeThis->addInstrumentTrackCoordinator_->addGrooveAgentInstrumentTrackFromMenu();
+                        }
+                        return;
+                    }
+                    if (result == 101)
+                    {
+                        if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
+                        {
+                            safeThis->addInstrumentTrackCoordinator_->addHalionSonicInstrumentTrackFromMenu();
                         }
                     }
                 });

@@ -7,9 +7,44 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <vector>
 
 namespace mini_daw
 {
+
+bool instrumentDisplayNameLooksLikeHalionSonic(const juce::String& name) noexcept
+{
+    const juce::String t = name.trim();
+    if (t.isEmpty())
+    {
+        return false;
+    }
+    return t.containsIgnoreCase("halion") && t.containsIgnoreCase("sonic");
+}
+
+juce::File normalizePathToVst3BundleRootDirectory(const juce::File& path) noexcept
+{
+    if (!path.exists())
+    {
+        return {};
+    }
+    juce::File p = path;
+    for (int depth = 0; depth < 64 && p.exists(); ++depth)
+    {
+        const juce::String leaf = p.getFileName();
+        if (leaf.endsWithIgnoreCase(".vst3") && p.isDirectory())
+        {
+            return p;
+        }
+        juce::File parent = p.getParentDirectory();
+        if (!parent.exists() || parent == p)
+        {
+            break;
+        }
+        p = parent;
+    }
+    return {};
+}
 
 juce::File getExperimentalVst3DescriptionsV1CacheFile()
 {
@@ -630,6 +665,196 @@ juce::File getGrooveAgentSeVst3BundlePathForOopScanFallback() noexcept
 #endif
 }
 
+#if JUCE_WINDOWS
+/// -1 = not a HALion Sonic–family bundle folder; otherwise higher is better (prefer exact name, Steinberg path).
+[[nodiscard]] static int halionSonicBundleFolderMatchScore(const juce::File& bundleDir) noexcept
+{
+    if (!bundleDir.isDirectory())
+    {
+        return -1;
+    }
+    const juce::String fn = bundleDir.getFileName();
+    if (!fn.endsWithIgnoreCase(".vst3"))
+    {
+        return -1;
+    }
+    if (!fn.containsIgnoreCase("halion") || !fn.containsIgnoreCase("sonic"))
+    {
+        return -1;
+    }
+    int score = 0;
+    if (fn.equalsIgnoreCase("HALion Sonic.vst3"))
+    {
+        score += 100;
+    }
+    if (bundleDir.getFullPathName().containsIgnoreCase("Steinberg"))
+    {
+        score += 25;
+    }
+    return score;
+}
+
+[[nodiscard]] static juce::File halionSonicPreferredInnerModuleFile(const juce::File& bundleDir)
+{
+    const juce::File archDir = bundleDir.getChildFile("Contents").getChildFile("x86_64-win");
+    if (!archDir.isDirectory())
+    {
+        writeVst3OopScanDiagnosticLogLine(
+            "halion inner probe: no Contents\\x86_64-win under \"" + bundleDir.getFullPathName()
+            + "\" class=bundleRoot fallback=useBundleDir");
+        return bundleDir;
+    }
+
+    const juce::File exact = archDir.getChildFile("HALion Sonic.vst3");
+    if (exact.exists())
+    {
+        writeVst3OopScanDiagnosticLogLine("halion inner probe: HIT exact inner=\"" + exact.getFullPathName()
+                                          + "\" class=innerBinary isDir=" + juce::String(exact.isDirectory() ? "yes" : "no"));
+        return exact;
+    }
+
+    juce::Array<juce::File> matches;
+    for (const auto& entry : juce::RangedDirectoryIterator(archDir, false, "*", juce::File::findFiles))
+    {
+        const juce::File f = entry.getFile();
+        if (!f.getFileName().endsWithIgnoreCase(".vst3"))
+        {
+            continue;
+        }
+        if (!instrumentDisplayNameLooksLikeHalionSonic(f.getFileNameWithoutExtension()))
+        {
+            continue;
+        }
+        matches.add(f);
+        writeVst3OopScanDiagnosticLogLine("halion inner probe: candidate inner=\"" + f.getFullPathName()
+                                          + "\" class=innerBinary");
+    }
+
+    if (matches.isEmpty())
+    {
+        writeVst3OopScanDiagnosticLogLine("halion inner probe: no .vst3 inner module class=bundleRoot fallback=\""
+                                          + bundleDir.getFullPathName() + "\"");
+        return bundleDir;
+    }
+
+    for (const auto& f : matches)
+    {
+        if (f.getFileName().equalsIgnoreCase("HALion Sonic.vst3"))
+        {
+            return f;
+        }
+    }
+    writeVst3OopScanDiagnosticLogLine("halion inner probe: CHOSE first inner=\"" + matches.getFirst().getFullPathName()
+                                      + "\"");
+    return matches.getFirst();
+}
+
+[[nodiscard]] static juce::File findHalionSonicVst3BundleOnDiskWindows()
+{
+    const auto logHalionDisk = [](const juce::String& line) {
+        writeVst3OopScanDiagnosticLogLine("halion disk search: " + line);
+    };
+
+    logHalionDisk("search roots: steinbergPreferred=\"C:\\\\Program Files\\\\Common Files\\\\VST3\\\\Steinberg\\\\HALion "
+                  "Sonic.vst3\" rootPreferred=\"C:\\\\Program Files\\\\Common Files\\\\VST3\\\\HALion Sonic.vst3\" "
+                  "enumerateRoot=\"C:\\\\Program Files\\\\Common Files\\\\VST3\"");
+
+    const juce::File preferredSteinberg(
+        "C:\\Program Files\\Common Files\\VST3\\Steinberg\\HALion Sonic.vst3");
+    if (preferredSteinberg.isDirectory())
+    {
+        logHalionDisk("preferred Steinberg HALion Sonic.vst3 HIT path=\"" + preferredSteinberg.getFullPathName() + "\"");
+        return preferredSteinberg;
+    }
+    logHalionDisk("preferred Steinberg HALion Sonic.vst3 MISS path=\"" + preferredSteinberg.getFullPathName() + "\"");
+
+    const juce::File preferredRoot("C:\\Program Files\\Common Files\\VST3\\HALion Sonic.vst3");
+    if (preferredRoot.isDirectory())
+    {
+        logHalionDisk("preferred VST3-root HALion Sonic.vst3 HIT path=\"" + preferredRoot.getFullPathName() + "\"");
+        return preferredRoot;
+    }
+    logHalionDisk("preferred VST3-root HALion Sonic.vst3 MISS path=\"" + preferredRoot.getFullPathName() + "\"");
+
+    const juce::File vst3Root("C:\\Program Files\\Common Files\\VST3");
+    if (!vst3Root.isDirectory())
+    {
+        logHalionDisk("Common Files VST3 root missing — cannot enumerate bundles");
+        return {};
+    }
+
+    std::vector<std::pair<juce::File, int>> viable;
+    for (const auto& entry : juce::RangedDirectoryIterator(
+             vst3Root, true, "*", juce::File::findFilesAndDirectories))
+    {
+        const juce::File f = entry.getFile();
+        const juce::String fn = f.getFileName();
+        const juce::String full = f.getFullPathName();
+        if (full.containsIgnoreCase("halion") || full.containsIgnoreCase("sonic"))
+        {
+            juce::String cls = "other";
+            if (f.isDirectory() && fn.endsWithIgnoreCase(".vst3"))
+            {
+                cls = f.getChildFile("Contents").isDirectory() ? "bundleRootDir" : "vst3DirNoContents";
+            }
+            else if (f.existsAsFile() && fn.endsWithIgnoreCase(".vst3"))
+            {
+                cls = "innerOrLooseVst3File";
+            }
+            logHalionDisk("path literal~HALion/Sonic path=\"" + full + "\" isDir=" + juce::String(f.isDirectory() ? "yes" : "no")
+                          + " class=" + cls);
+        }
+
+        if (!f.isDirectory() || !fn.endsWithIgnoreCase(".vst3"))
+        {
+            continue;
+        }
+
+        if (full.containsIgnoreCase("Steinberg"))
+        {
+            logHalionDisk("steinberg-tree bundle=\"" + full + "\" fileName=\"" + fn + "\"");
+        }
+
+        const int sc = halionSonicBundleFolderMatchScore(f);
+        if (sc < 0)
+        {
+            if (fn.containsIgnoreCase("halion") || fn.containsIgnoreCase("sonic")
+                || full.containsIgnoreCase("steinberg"))
+            {
+                logHalionDisk("reject bundle=\"" + full + "\" reason=fileNameMissingBothHalionAndSonicSubstrings");
+            }
+            continue;
+        }
+
+        logHalionDisk("accept-candidate bundle=\"" + full + "\" score=" + juce::String(sc));
+        viable.emplace_back(f, sc);
+    }
+
+    if (viable.empty())
+    {
+        logHalionDisk("no viable HALion+Sonic family .vst3 bundle directories under \"" + vst3Root.getFullPathName()
+                      + "\"");
+        return {};
+    }
+
+    std::sort(viable.begin(), viable.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    logHalionDisk("CHOSE best bundle=\"" + viable.front().first.getFullPathName()
+                  + "\" score=" + juce::String(viable.front().second));
+    return viable.front().first;
+}
+#endif
+
+juce::File getHalionSonicVst3BundlePathForOopScanFallback() noexcept
+{
+#if JUCE_WINDOWS
+    const juce::File onDisk = findHalionSonicVst3BundleOnDiskWindows();
+    const juce::File normalized = normalizePathToVst3BundleRootDirectory(onDisk);
+    return normalized.exists() ? normalized : onDisk;
+#else
+    return {};
+#endif
+}
+
 [[nodiscard]] static juce::File grooveAgentPreferredInnerModuleFile(const juce::File& bundleDir)
 {
     const juce::File inner = bundleDir.getChildFile("Contents")
@@ -668,6 +893,69 @@ static void applyGrooveAgentDescriptionPathRepair(juce::PluginDescription& d,
         d.fileOrIdentifier = preferred.getFullPathName();
     else
         d.fileOrIdentifier = fid.isNotEmpty() ? fid : newRoot;
+}
+
+static void applyHalionSonicDescriptionPathRepair(juce::PluginDescription& d,
+                                                  const juce::String& oldBundleKeyPath,
+                                                  const juce::File& newBundleDir)
+{
+    juce::File bundleRoot = normalizePathToVst3BundleRootDirectory(newBundleDir);
+    if (!bundleRoot.exists())
+    {
+        bundleRoot = newBundleDir;
+    }
+    const juce::String oldRoot = juce::File(oldBundleKeyPath).getFullPathName();
+    const juce::String newRoot = bundleRoot.getFullPathName();
+    juce::String fid = d.fileOrIdentifier;
+    if (fid.isNotEmpty() && oldRoot.isNotEmpty())
+    {
+#if JUCE_WINDOWS
+        if (fid.startsWithIgnoreCase(oldRoot))
+        {
+            fid = newRoot + fid.substring(oldRoot.length());
+        }
+#else
+        if (fid.startsWith(oldRoot))
+        {
+            fid = newRoot + fid.substring(oldRoot.length());
+        }
+#endif
+    }
+    const juce::File preferred = halionSonicPreferredInnerModuleFile(bundleRoot);
+    if (preferred.exists() && preferred != bundleRoot)
+    {
+        d.fileOrIdentifier = preferred.getFullPathName();
+        writeVst3OopScanDiagnosticLogLine(
+            "halion path repair: fileOrIdentifier=\"" + d.fileOrIdentifier
+            + "\" style=innerModule (same pattern as Groove Agent SE) bundleRoot=\"" + newRoot + "\"");
+    }
+    else if (preferred.exists())
+    {
+        d.fileOrIdentifier = preferred.getFullPathName();
+        writeVst3OopScanDiagnosticLogLine("halion path repair: fileOrIdentifier=\"" + d.fileOrIdentifier
+                                          + "\" style=bundleRootOnly (no separate inner module file)");
+    }
+    else
+    {
+        d.fileOrIdentifier = fid.isNotEmpty() ? fid : newRoot;
+        writeVst3OopScanDiagnosticLogLine("halion path repair: fileOrIdentifier=\"" + d.fileOrIdentifier
+                                          + "\" style=fallbackFromDescription");
+    }
+}
+
+void repairHalionPluginDescriptionForLoad(juce::PluginDescription& d, const juce::File& originalPath)
+{
+    juce::File bundle = normalizePathToVst3BundleRootDirectory(originalPath);
+    if (!bundle.exists() || !bundle.isDirectory())
+    {
+        bundle = originalPath;
+    }
+    juce::String oldKey = d.fileOrIdentifier;
+    if (oldKey.isEmpty())
+    {
+        oldKey = bundle.getFullPathName();
+    }
+    applyHalionSonicDescriptionPathRepair(d, oldKey, bundle);
 }
 
 [[nodiscard]] static bool grooveAgentCachedPathsStillValid(const std::vector<juce::PluginDescription>& descs,
@@ -987,6 +1275,206 @@ bool tryLoadExperimentalVst3PluginCapabilitiesFromV2Cache(const juce::File& bund
     return true;
 }
 
+[[nodiscard]] static bool pluginDescriptionLooksLikeHalionSonicForCache(const juce::PluginDescription& d) noexcept
+{
+    const juce::String blob = d.name + " " + d.descriptiveName + " " + d.manufacturerName + " " + d.pluginFormatName
+                              + " " + d.category;
+    return blob.containsIgnoreCase("halion") && blob.containsIgnoreCase("sonic");
+}
+
+[[nodiscard]] static bool tryScanEntireCacheFileForHalionSonic(const juce::File& cacheFile,
+                                                              const juce::String& tierLabel,
+                                                              std::vector<juce::PluginDescription>& descriptionsOut,
+                                                              juce::String& bundleKeyAttributeOut)
+{
+    descriptionsOut.clear();
+    bundleKeyAttributeOut.clear();
+    if (!cacheFile.existsAsFile())
+    {
+        return false;
+    }
+    const std::unique_ptr<juce::XmlElement> xmlRoot = juce::parseXML(cacheFile);
+    if (xmlRoot == nullptr || !xmlRoot->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
+    {
+        writeVst3OopScanDiagnosticLogLine("halion full-cache scan " + tierLabel + ": parse failed path=\""
+                                          + cacheFile.getFullPathName() + "\"");
+        return false;
+    }
+
+    int bundleCount = 0;
+    for (juce::XmlElement* b = xmlRoot->getFirstChildElement(); b != nullptr; b = b->getNextElement())
+    {
+        if (b->hasTagName("bundle"))
+        {
+            ++bundleCount;
+        }
+    }
+    writeVst3OopScanDiagnosticLogLine(
+        "halion full-cache scan " + tierLabel + ": root=\"" + xmlRoot->getTagName() + "\" version=\""
+        + xmlRoot->getStringAttribute("version", "(none)") + "\" bundleCount=" + juce::String(bundleCount));
+
+    for (juce::XmlElement* bundle = xmlRoot->getFirstChildElement(); bundle != nullptr;
+         bundle = bundle->getNextElement())
+    {
+        if (!bundle->hasTagName("bundle"))
+        {
+            continue;
+        }
+        const juce::String stored = bundle->getStringAttribute("vst3Path");
+        std::vector<juce::PluginDescription> oneBundle;
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(bundle, oneBundle);
+        writeVst3OopScanDiagnosticLogLine("halion full-cache scan " + tierLabel + ": bundle vst3Path=\""
+                                          + stored + "\" descriptionsLoaded=" + juce::String((int)oneBundle.size()));
+        for (const auto& d : oneBundle)
+        {
+            const bool match = pluginDescriptionLooksLikeHalionSonicForCache(d);
+            writeVst3OopScanDiagnosticLogLine(
+                "halion full-cache scan " + tierLabel + ":   plugin name=\"" + d.name + "\" descriptive=\""
+                + d.descriptiveName + "\" manufacturer=\"" + d.manufacturerName + "\" category=\"" + d.category
+                + "\" match=" + juce::String(match ? "ACCEPT" : "reject"));
+            if (match)
+            {
+                descriptionsOut = std::move(oneBundle);
+                bundleKeyAttributeOut = stored;
+                juce::String firstLoaded;
+                if (!descriptionsOut.empty())
+                {
+                    const auto& d0 = descriptionsOut.front();
+                    firstLoaded = " firstLoaded name=\"" + d0.name + "\" file=\"" + d0.fileOrIdentifier + "\"";
+                }
+                writeVst3OopScanDiagnosticLogLine("halion full-cache scan " + tierLabel + ": HIT bundleKey=\""
+                                                  + bundleKeyAttributeOut + "\" descriptionsLoaded="
+                                                  + juce::String((int)descriptionsOut.size()) + firstLoaded);
+                return !descriptionsOut.empty();
+            }
+        }
+    }
+
+    writeVst3OopScanDiagnosticLogLine("halion full-cache scan " + tierLabel
+                                      + ": no bundle contained a halion+sonic plugin description");
+    return false;
+}
+
+[[nodiscard]] static bool buildHalionSonicCandidateFromCacheFile(const juce::File& savedOrAdvisoryBundle,
+                                                                 const juce::File& cacheFile,
+                                                                 Vst3ExperimentalCacheTier tier,
+                                                                 Vst3GrooveCacheLoadCandidate& cand)
+{
+    cand = {};
+    cand.tier = tier;
+
+    const juce::String tierLabel = (tier == Vst3ExperimentalCacheTier::V2) ? "v2" : "v1";
+
+    std::vector<juce::PluginDescription> descs;
+    juce::String cacheKeyForPrefix;
+    bool hit = false;
+
+    if (savedOrAdvisoryBundle.getFullPathName().isNotEmpty())
+    {
+        hit = loadDescriptionsForBundleKeyFromCacheFile(cacheFile, savedOrAdvisoryBundle, tierLabel, descs);
+        if (hit && !descs.empty())
+        {
+            cacheKeyForPrefix = savedOrAdvisoryBundle.getFullPathName();
+        }
+        else
+        {
+            writeVst3OopScanDiagnosticLogLine("halion cache build " + tierLabel
+                                              + ": direct bundle-key miss or empty descriptions advisory=\""
+                                              + savedOrAdvisoryBundle.getFullPathName() + "\"");
+        }
+    }
+
+    if (!hit || descs.empty())
+    {
+        juce::String scanKey;
+        if (tryScanEntireCacheFileForHalionSonic(cacheFile, tierLabel, descs, scanKey))
+        {
+            hit = true;
+            cacheKeyForPrefix = scanKey;
+            writeVst3OopScanDiagnosticLogLine("project-autoload-halion: cache " + tierLabel
+                                              + " fallback scan hit bundleKey=\"" + scanKey + "\" count="
+                                              + juce::String((int)descs.size()));
+        }
+    }
+
+    if (!hit || descs.empty())
+    {
+        return false;
+    }
+
+    const juce::File rawKeyFile(cacheKeyForPrefix);
+    juce::File bundleForCandidate = normalizePathToVst3BundleRootDirectory(rawKeyFile);
+    if (!bundleForCandidate.exists())
+    {
+        bundleForCandidate = rawKeyFile;
+    }
+
+    const bool insideBundle = bundleForCandidate.exists() && rawKeyFile.exists() && rawKeyFile.isAChildOf(bundleForCandidate);
+    const bool narrowedToRoot
+        = bundleForCandidate.exists() && rawKeyFile.exists()
+          && rawKeyFile.getFullPathName().compareIgnoreCase(bundleForCandidate.getFullPathName()) != 0;
+    writeVst3OopScanDiagnosticLogLine(
+        "halion vst3 bundle path: context=halion-cache-build-" + tierLabel + " raw=\"" + rawKeyFile.getFullPathName()
+        + "\" insideBundleDir=" + juce::String(insideBundle ? "yes" : "no") + " narrowedInnerOrKeyToRoot="
+        + juce::String(narrowedToRoot ? "yes" : "no") + " normalized=\"" + bundleForCandidate.getFullPathName()
+        + "\" normalizedExists=" + juce::String(bundleForCandidate.exists() ? "yes" : "no") + " normalizedIsDirectory="
+        + juce::String(bundleForCandidate.isDirectory() ? "yes" : "no"));
+
+    for (auto& d : descs)
+    {
+        applyHalionSonicDescriptionPathRepair(d, cacheKeyForPrefix, bundleForCandidate);
+    }
+
+    if (grooveAgentCachedPathsStillValid(descs, bundleForCandidate))
+    {
+        cand.valid = true;
+        cand.descriptions = std::move(descs);
+        cand.resolvedBundle = bundleForCandidate;
+        cand.pathRepairUsed = false;
+        return true;
+    }
+
+    writeVst3OopScanDiagnosticLogLine("project-autoload-halion: " + tierLabel
+                                      + " cached path missing, attempting path repair");
+
+#if JUCE_WINDOWS
+    const juce::File foundOnDisk = findHalionSonicVst3BundleOnDiskWindows();
+    juce::File found = normalizePathToVst3BundleRootDirectory(foundOnDisk);
+    if (!found.exists())
+    {
+        found = foundOnDisk;
+    }
+#else
+    const juce::File found;
+#endif
+
+    if (!found.exists())
+    {
+        return false;
+    }
+
+    writeVst3OopScanDiagnosticLogLine("project-autoload-halion: found HALion Sonic bundle path=\""
+                                      + found.getFullPathName() + "\"");
+
+    for (auto& d : descs)
+    {
+        applyHalionSonicDescriptionPathRepair(d, cacheKeyForPrefix, found);
+    }
+
+    if (!descs.empty())
+    {
+        writeVst3OopScanDiagnosticLogLine("project-autoload-halion: " + tierLabel
+                                          + " repaired desc fileOrIdentifier=\"" + descs.front().fileOrIdentifier
+                                          + "\"");
+    }
+
+    cand.valid = true;
+    cand.descriptions = std::move(descs);
+    cand.resolvedBundle = found;
+    cand.pathRepairUsed = true;
+    return true;
+}
+
 bool tryLoadExperimentalVst3DescriptionsFromV2Cache(const juce::File& vst3Bundle,
                                                     std::vector<juce::PluginDescription>& descriptionsOut)
 {
@@ -1046,6 +1534,50 @@ bool tryLoadGrooveAgentCacheCandidates(const juce::File& savedOrAdvisoryBundle,
 
     writeVst3OopScanDiagnosticLogLine(
         "project-autoload: candidates v2=" + juce::String(v2Out.valid ? "yes" : "no") + " v1="
+        + juce::String(v1Out.valid ? "yes" : "no"));
+    return true;
+}
+
+bool tryLoadHalionSonicCacheCandidates(const juce::File& savedOrAdvisoryBundle,
+                                       Vst3GrooveCacheLoadCandidate& v2Out,
+                                       Vst3GrooveCacheLoadCandidate& v1Out,
+                                       juce::String& infoOrWarningOut)
+{
+    v2Out = {};
+    v1Out = {};
+    infoOrWarningOut.clear();
+
+    writeVst3OopScanDiagnosticLogLine("halion cache: tryLoadHalionSonicCacheCandidates start advisoryPath=\""
+                                      + savedOrAdvisoryBundle.getFullPathName() + "\"");
+#if JUCE_WINDOWS
+    {
+        const juce::File grooveBundle = findGrooveAgentSeVst3BundleOnDiskWindows();
+        const juce::File grooveInner = grooveAgentPreferredInnerModuleFile(grooveBundle);
+        writeVst3OopScanDiagnosticLogLine(
+            "reference groove-agent path-style: bundleRoot=\"" + grooveBundle.getFullPathName() + "\" bundleExists="
+            + juce::String(grooveBundle.exists() ? "yes" : "no") + " fileOrIdentifierStyleTarget=\""
+            + grooveInner.getFullPathName() + "\" innerOrBundleExists=" + juce::String(grooveInner.exists() ? "yes" : "no"));
+    }
+#endif
+
+    (void)buildHalionSonicCandidateFromCacheFile(
+        savedOrAdvisoryBundle, getExperimentalVst3DescriptionsV2CacheFile(), Vst3ExperimentalCacheTier::V2, v2Out);
+    (void)buildHalionSonicCandidateFromCacheFile(
+        savedOrAdvisoryBundle, getExperimentalVst3DescriptionsV1CacheFile(), Vst3ExperimentalCacheTier::V1, v1Out);
+
+    if (!v2Out.valid && !v1Out.valid)
+    {
+        infoOrWarningOut = "No HALion Sonic-family instrument found in the VST3 description cache (need both "
+                           "\"halion\" and \"sonic\" in the plugin description fields). Use Add Instrument Track > "
+                           "HALion Sonic after install, or rescan the bundle from an instrument header; see "
+                           "experimental-vst3-oop-scan.log under MiniDAWLab app data.";
+        writeVst3OopScanDiagnosticLogLine(
+            "project-autoload-halion: failed (no cache entry in v2 or v1), project remains editable");
+        return false;
+    }
+
+    writeVst3OopScanDiagnosticLogLine(
+        "project-autoload-halion: candidates v2=" + juce::String(v2Out.valid ? "yes" : "no") + " v1="
         + juce::String(v1Out.valid ? "yes" : "no"));
     return true;
 }
@@ -1458,15 +1990,19 @@ bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
         *pathRepairWasUsedOut = false;
     }
 
-    if (instrumentKind != "GrooveAgentSE")
+    if (instrumentKind != "GrooveAgentSE" && instrumentKind != "HALionSonic")
     {
-        infoOrWarningOut = "Path repair is only implemented for instrumentKind=GrooveAgentSE.";
+        infoOrWarningOut = "Path repair is only implemented for instrumentKind=GrooveAgentSE or HALionSonic.";
         return false;
     }
 
     Vst3GrooveCacheLoadCandidate v2Cand;
     Vst3GrooveCacheLoadCandidate v1Cand;
-    if (!tryLoadGrooveAgentCacheCandidates(savedOrAdvisoryBundle, v2Cand, v1Cand, infoOrWarningOut))
+    const bool cacheOk = (instrumentKind == "GrooveAgentSE")
+                             ? tryLoadGrooveAgentCacheCandidates(savedOrAdvisoryBundle, v2Cand, v1Cand, infoOrWarningOut)
+                             : tryLoadHalionSonicCacheCandidates(savedOrAdvisoryBundle, v2Cand, v1Cand,
+                                                                 infoOrWarningOut);
+    if (!cacheOk)
     {
         return false;
     }
@@ -1480,7 +2016,8 @@ bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
             *pathRepairWasUsedOut = v2Cand.pathRepairUsed;
         }
         writeVst3OopScanDiagnosticLogLine(
-            "project-autoload: cache WithPathRepair selected tier=v2 (legacy single-output API)");
+            juce::String("project-autoload: cache WithPathRepair selected tier=v2 kind=") + instrumentKind
+            + " (legacy single-output API)");
         return true;
     }
 
@@ -1491,7 +2028,8 @@ bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
         *pathRepairWasUsedOut = v1Cand.pathRepairUsed;
     }
     writeVst3OopScanDiagnosticLogLine(
-        "project-autoload: cache WithPathRepair selected tier=v1 (legacy single-output API)");
+        juce::String("project-autoload: cache WithPathRepair selected tier=v1 kind=") + instrumentKind
+        + " (legacy single-output API)");
     return true;
 }
 

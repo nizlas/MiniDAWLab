@@ -2100,6 +2100,20 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
 
     const juce::String sourceStr
         = (sourceTag != nullptr && sourceTag[0] != '\0') ? juce::String(sourceTag) : juce::String("oop-description");
+    const bool halionTaggedLoad = sourceStr.containsIgnoreCase("halion");
+
+    if (halionTaggedLoad)
+    {
+        mini_daw::repairHalionPluginDescriptionForLoad(desc, originalPath);
+        const juce::File bundleGuess = mini_daw::normalizePathToVst3BundleRootDirectory(originalPath);
+        const bool inside = bundleGuess.exists() && originalPath.exists() && originalPath.isAChildOf(bundleGuess);
+        mini_daw::writeVst3OopScanDiagnosticLogLine(
+            "halion load: context=pre-instance afterRepair originalPath=\"" + originalPath.getFullPathName()
+            + "\" bundleRootFromOriginal=\"" + bundleGuess.getFullPathName() + "\" insideBundleDir="
+            + juce::String(inside ? "yes" : "no") + " fileOrIdentifier=\"" + desc.fileOrIdentifier
+            + "\" loadAttempt=pending");
+    }
+
     writeExperimentalInstrumentLogLine(
         "load: source=" + sourceStr + " name=\"" + desc.name + "\" manufacturer=\"" + desc.manufacturerName
         + "\" format=\"" + desc.pluginFormatName + "\" fileOrIdentifier=\"" + desc.fileOrIdentifier
@@ -2145,11 +2159,23 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     {
         const juce::String msg = juce::String{ "Exception during createPluginInstance: " } + e.what();
         writeExperimentalInstrumentLogLine("createPluginInstance: FAILED exception=\"" + juce::String(e.what()) + "\"");
+        if (halionTaggedLoad)
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine("halion load: loadAttempt=failed stage=createPluginInstance "
+                                                        "exception=\"" + juce::String(e.what()) + "\" fileOrId=\""
+                                                        + desc.fileOrIdentifier + "\"");
+        }
         return juce::Result::fail(msg);
     }
     catch (...)
     {
         writeExperimentalInstrumentLogLine("createPluginInstance: FAILED exception=(unknown)");
+        if (halionTaggedLoad)
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "halion load: loadAttempt=failed stage=createPluginInstance exception=(unknown) fileOrId=\""
+                + desc.fileOrIdentifier + "\"");
+        }
         return juce::Result::fail("Unknown exception during createPluginInstance.");
     }
 
@@ -2157,6 +2183,11 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     {
         const juce::String juceErr = err.isNotEmpty() ? err : juce::String{ "createPluginInstance failed (no message)." };
         writeExperimentalInstrumentLogLine("createPluginInstance: FAILED juceError=\"" + juceErr + "\"");
+        if (halionTaggedLoad)
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine("halion load: loadAttempt=failed stage=createPluginInstance err=\""
+                                                        + juceErr + "\" fileOrIdentifier=\"" + desc.fileOrIdentifier + "\"");
+        }
         return juce::Result::fail(err.isNotEmpty() ? err : "createPluginInstance failed.");
     }
 
@@ -2167,6 +2198,11 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     if (!finalLayoutOk)
     {
         writeExperimentalInstrumentLogLine("load: FAILED bus layout after prepare (see bus negotiation lines above).");
+        if (halionTaggedLoad)
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "halion load: loadAttempt=failed stage=busLayout fileOrIdentifier=\"" + desc.fileOrIdentifier + "\"");
+        }
         inst->releaseResources();
         return juce::Result::fail(
             "Could not use instrument bus layout (need at least stereo main output). "
@@ -2196,20 +2232,23 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         {
             writeExperimentalInstrumentLogLine(
                 "plugin-state: restore failed message=\"" + juce::String(e.what()) + "\"");
+            const juce::String uiInstrumentName = getInstrumentNameForUi();
             if (outPluginStateRestoreWarning != nullptr)
             {
-                *outPluginStateRestoreWarning
-                    = "Groove Agent could not apply saved plug-in state (" + juce::String(e.what())
-                      + "). You may need to load the kit manually if audio is silent.";
+                *outPluginStateRestoreWarning = uiInstrumentName
+                    + " could not apply saved plug-in state (" + juce::String(e.what())
+                    + "). You may need to load the kit manually if audio is silent.";
             }
         }
         catch (...)
         {
             writeExperimentalInstrumentLogLine("plugin-state: restore failed message=\"unknown exception\"");
+            const juce::String uiInstrumentName = getInstrumentNameForUi();
             if (outPluginStateRestoreWarning != nullptr)
             {
-                *outPluginStateRestoreWarning = "Groove Agent could not apply saved plug-in state (unknown error). "
-                                                "You may need to load the kit manually if audio is silent.";
+                *outPluginStateRestoreWarning = uiInstrumentName
+                    + " could not apply saved plug-in state (unknown error). "
+                      "You may need to load the kit manually if audio is silent.";
             }
         }
 
@@ -2217,8 +2256,9 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
         {
             writeExperimentalInstrumentLogLine(
                 "plugin-state: restore failed message=\"invalid output bus layout after setState\"");
+            const juce::String uiInstrumentName = getInstrumentNameForUi();
             *outPluginStateRestoreWarning
-                = "Groove Agent saved state could not be applied (invalid bus layout after restore). "
+                = uiInstrumentName + " saved state could not be applied (invalid bus layout after restore). "
                   "You may need to load the kit manually if audio is silent.";
         }
 
@@ -2270,6 +2310,13 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
 
     writeExperimentalInstrumentLogLine(
         "load: COMPLETED OK plugin=\"" + owner->inst->getName() + "\" totalOutCh=" + juce::String(totalCh));
+
+    if (halionTaggedLoad)
+    {
+        mini_daw::writeVst3OopScanDiagnosticLogLine(
+            "halion load: loadAttempt=ok instance=\"" + owner->inst->getName() + "\" originalPathBundle=\""
+            + originalPath.getFullPathName() + "\" fileOrIdentifier=\"" + desc.fileOrIdentifier + "\"");
+    }
 
     lastLoadedVst3OriginalPath_ = originalPath.getFullPathName();
     lastLoadedPluginDescription_ = desc;

@@ -126,6 +126,9 @@ public:
     /// Caller must publish the session instrument shell first (`Session::appendExperimentalInstrumentShellTrack`).
     [[nodiscard]] bool bootstrapGrooveAgentShellForSessionTrack(TrackId sessionInstrumentTrackId) noexcept;
 
+    /// HALion Sonic instrument lane: same session shell as Groove; no kit name; `instrumentKind` HALionSonic.
+    [[nodiscard]] bool bootstrapHalionSonicShellForSessionTrack(TrackId sessionInstrumentTrackId) noexcept;
+
     /// Legacy path: asks `Session` to append one instrument shell, then binds this controller row.
     /// Prefer `bootstrapGrooveAgentShellForSessionTrack` when naming / ordering is orchestrated externally.
     [[nodiscard]] bool tryAddGrooveAgentInstrumentTrackShell();
@@ -255,6 +258,9 @@ public:
     /// After `loadProjectFromFile`, attempts cache load + optional Windows path repair + host load.
     void runPendingGrooveAgentProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
 
+    /// HALion Sonic project restore path (peer to Groove).
+    void runPendingHalionSonicProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
+
     /// Device sample rate for **musical** length derivation (message thread). Does not rescale clips.
     void setTimelineSampleRate(double sampleRate) noexcept;
 
@@ -347,8 +353,11 @@ private:
     juce::String requiredKitName_;
     juce::String pendingPluginStateBase64_;
     bool pendingProjectGrooveAutoload_ = false;
+    bool pendingProjectHalionSonicAutoload_ = false;
     juce::String pendingAdvisoryPluginBundlePath_;
     juce::String pendingInstrumentKind_;
+    /// Persisted/display DTO kind for this lane (`GrooveAgentSE` / `HALionSonic`). Not consulted on audio thread.
+    juce::String experimentalInstrumentKind_;
 
     double timelineSampleRate_ = 48000.0;
 

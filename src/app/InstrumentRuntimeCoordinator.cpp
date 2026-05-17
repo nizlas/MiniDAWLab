@@ -8,6 +8,7 @@
 #include "engine/PlaybackEngine.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
+#include "plugins/Vst3ChildProcessScan.h"
 
 #include "diagnostics/DiagnosticBuildFlags.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
@@ -78,6 +79,11 @@ bool InstrumentRuntimeCoordinator::anyHeldHostShowsGrooveAgentLoaded() const noe
     return findGrooveAgentTemplateHostPreferKeyed(nullptr) != nullptr;
 }
 
+bool InstrumentRuntimeCoordinator::anyHeldHostShowsHalionSonicLoaded() const noexcept
+{
+    return findHalionSonicTemplateHostPreferKeyed(nullptr) != nullptr;
+}
+
 ExperimentalInstrumentHost*
     InstrumentRuntimeCoordinator::findGrooveAgentTemplateHostPreferKeyed(
         ExperimentalInstrumentHost* avoidSameAs) const noexcept
@@ -92,6 +98,26 @@ ExperimentalInstrumentHost*
     }
     if (instrumentStagingHost_ != nullptr && instrumentStagingHost_.get() != avoidSameAs && instrumentStagingHost_->hasInstrument()
         && instrumentStagingHost_->getInstrumentNameForUi().containsIgnoreCase("Groove Agent"))
+    {
+        return instrumentStagingHost_.get();
+    }
+    return nullptr;
+}
+
+ExperimentalInstrumentHost*
+    InstrumentRuntimeCoordinator::findHalionSonicTemplateHostPreferKeyed(
+        ExperimentalInstrumentHost* avoidSameAs) const noexcept
+{
+    for (const auto& kv : instrumentHostsByTrackId_)
+    {
+        if (kv.second != nullptr && kv.second.get() != avoidSameAs && kv.second->hasInstrument()
+            && mini_daw::instrumentDisplayNameLooksLikeHalionSonic(kv.second->getInstrumentNameForUi()))
+        {
+            return kv.second.get();
+        }
+    }
+    if (instrumentStagingHost_ != nullptr && instrumentStagingHost_.get() != avoidSameAs && instrumentStagingHost_->hasInstrument()
+        && mini_daw::instrumentDisplayNameLooksLikeHalionSonic(instrumentStagingHost_->getInstrumentNameForUi()))
     {
         return instrumentStagingHost_.get();
     }
@@ -227,6 +253,86 @@ void InstrumentRuntimeCoordinator::removeInstrumentRuntimeForTrack(const TrackId
     instrumentHostsByTrackId_.erase(tid);
     updateExperimentalPlaybackBridgeAfterRegistryChange();
     runSyncInstrumentTimelineRowAttachmentCallback();
+}
+
+bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
+    const TrackId sourceTrackId,
+    const TrackId destTrackId,
+    std::vector<InstrumentMidiClipId> clipIdsInOrder,
+    const std::int64_t deltaSamples) noexcept
+{
+    if (sourceTrackId == kInvalidTrackId || destTrackId == kInvalidTrackId || sourceTrackId == destTrackId
+        || clipIdsInOrder.empty())
+    {
+        return false;
+    }
+
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return false;
+    }
+    const int si = snap->findTrackIndexById(sourceTrackId);
+    const int di = snap->findTrackIndexById(destTrackId);
+    if (si < 0 || di < 0)
+    {
+        return false;
+    }
+    if (snap->getTrack(si).getKind() != TrackKind::Instrument
+        || snap->getTrack(di).getKind() != TrackKind::Instrument)
+    {
+        return false;
+    }
+
+    InstrumentTrackController* const sourceCtl = getInstrumentControllerForTrack(sourceTrackId);
+    InstrumentTrackController* const destCtl = getInstrumentControllerForTrack(destTrackId);
+    if (sourceCtl == nullptr || destCtl == nullptr || !sourceCtl->hasInstrumentTrack()
+        || !destCtl->hasInstrumentTrack())
+    {
+        return false;
+    }
+
+    std::vector<InstrumentMidiClip> snapshots;
+    std::vector<std::pair<std::int64_t, std::int64_t>> newStartsAnchors;
+    snapshots.reserve(clipIdsInOrder.size());
+    newStartsAnchors.reserve(clipIdsInOrder.size());
+
+    for (const InstrumentMidiClipId id : clipIdsInOrder)
+    {
+        const InstrumentMidiClip* const c = sourceCtl->getClipById(id);
+        if (c == nullptr)
+        {
+            return false;
+        }
+        snapshots.push_back(*c);
+        const std::int64_t ns = c->startSamples + deltaSamples;
+        const std::int64_t na = c->timelineAnchorSamples + deltaSamples;
+        newStartsAnchors.emplace_back(juce::jmax(std::int64_t{ 0 }, ns), na);
+    }
+
+    if (!sourceCtl->removeInstrumentMidiClipsByIds(clipIdsInOrder))
+    {
+        return false;
+    }
+
+    std::vector<InstrumentMidiClipId> newIds
+        = destCtl->appendDeepCopiedInstrumentMidiClips(snapshots, newStartsAnchors);
+    if (newIds.size() != snapshots.size())
+    {
+        std::vector<std::pair<std::int64_t, std::int64_t>> restoreStartsAnchors;
+        restoreStartsAnchors.reserve(snapshots.size());
+        for (const auto& s : snapshots)
+        {
+            restoreStartsAnchors.emplace_back(s.startSamples, s.timelineAnchorSamples);
+        }
+        [[maybe_unused]] const auto restored
+            = sourceCtl->appendDeepCopiedInstrumentMidiClips(snapshots, restoreStartsAnchors);
+        juce::ignoreUnused(restored);
+        return false;
+    }
+
+    destCtl->replaceInstrumentMidiClipSelectionOrdered(std::move(newIds));
+    return true;
 }
 
 void InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly() noexcept

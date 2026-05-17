@@ -10,10 +10,10 @@
 #include <vector>
 
 #include "domain/Track.h"
+#include "instruments/InstrumentTrackController.h"
 #include "io/ProjectFile.h"
 
 class ExperimentalInstrumentHost;
-class InstrumentTrackController;
 class Session;
 class PlaybackEngine;
 
@@ -38,8 +38,14 @@ public:
 
     [[nodiscard]] bool anyHeldHostShowsGrooveAgentLoaded() const noexcept;
 
+    [[nodiscard]] bool anyHeldHostShowsHalionSonicLoaded() const noexcept;
+
     /// First keyed GA host matching legacy scan order; else staging host when it holds GA; otherwise nullptr.
     [[nodiscard]] ExperimentalInstrumentHost* findGrooveAgentTemplateHostPreferKeyed(
+        ExperimentalInstrumentHost* avoidSameAs = nullptr) const noexcept;
+
+    /// First keyed HALion Sonic host; else staging when it holds HALion Sonic.
+    [[nodiscard]] ExperimentalInstrumentHost* findHalionSonicTemplateHostPreferKeyed(
         ExperimentalInstrumentHost* avoidSameAs = nullptr) const noexcept;
 
     [[nodiscard]] ExperimentalInstrumentHost* getInstrumentHostForTrack(TrackId tid) const noexcept;
@@ -73,6 +79,11 @@ public:
     [[nodiscard]] bool isKeyedRuntimeRegistryEmpty() const noexcept;
     [[nodiscard]] ExperimentalInstrumentHost* stagingInstrumentHostUnchecked() const noexcept;
     [[nodiscard]] InstrumentTrackController* stagingInstrumentControllerUnchecked() const noexcept;
+
+    [[nodiscard]] bool moveInstrumentMidiClipsBetweenTracks(TrackId sourceTrackId,
+                                                           TrackId destTrackId,
+                                                           std::vector<InstrumentMidiClipId> clipIdsInOrder,
+                                                           std::int64_t deltaSamples) noexcept;
 
     void applyTimelineSampleRateToKeyedAndStaging(double sr) noexcept;
     void syncAllKeyedAndStagingShellWithHostState() noexcept;

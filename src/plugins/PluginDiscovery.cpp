@@ -1,5 +1,7 @@
 #include "plugins/PluginDiscovery.h"
 
+#include "plugins/Vst3ChildProcessScan.h"
+
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <algorithm>
@@ -77,16 +79,13 @@ namespace
 
 mini_daw::PluginPickerSupport mini_daw::classifyVst3Candidate(const juce::String& displayName) noexcept
 {
-    static const char* const needles[] = {
-        "Groove Agent",
-        "HALion Sonic",
-    };
-    for (const char* const needle : needles)
+    if (displayName.containsIgnoreCase("Groove Agent"))
     {
-        if (displayName.containsIgnoreCase(needle))
-        {
-            return PluginPickerSupport::UnsupportedInstrument;
-        }
+        return PluginPickerSupport::UnsupportedInstrument;
+    }
+    if (instrumentDisplayNameLooksLikeHalionSonic(displayName))
+    {
+        return PluginPickerSupport::UnsupportedInstrument;
     }
     return PluginPickerSupport::SupportedCandidate;
 }

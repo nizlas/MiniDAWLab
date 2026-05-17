@@ -14,16 +14,20 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 
-[[nodiscard]] static const ProjectFileExperimentalInstrumentTrackV1* selectedEnabledGrooveAgentPayload(
-    const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
+[[nodiscard]] static const ProjectFileExperimentalInstrumentTrackV1*
+    selectedFirstEnabledSupportedExperimentalInstrumentPayload(
+        const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
 {
     for (const auto& t : tracks)
     {
-        if (!t.enabled || t.instrumentKind != "GrooveAgentSE")
+        if (!t.enabled)
         {
             continue;
         }
-        return &t;
+        if (t.instrumentKind == "GrooveAgentSE" || t.instrumentKind == "HALionSonic")
+        {
+            return &t;
+        }
     }
     return nullptr;
 }
@@ -124,7 +128,8 @@ bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
         return false;
     }
     const juce::String n = host_.getInstrumentNameForUi();
-    return n.containsIgnoreCase("Groove Agent") || n.containsIgnoreCase("GrooveAgent");
+    return n.containsIgnoreCase("Groove Agent") || n.containsIgnoreCase("GrooveAgent")
+           || mini_daw::instrumentDisplayNameLooksLikeHalionSonic(n);
 }
 
 juce::String InstrumentTrackController::getLaneHeaderTitle() const
@@ -178,7 +183,52 @@ bool InstrumentTrackController::bootstrapGrooveAgentShellForSessionTrack(const T
     muted_ = false;
     isActive_ = false;
     requiredKitName_ = "FiftySixDegreesModified";
+    experimentalInstrumentKind_ = "GrooveAgentSE";
     pendingProjectGrooveAutoload_ = false;
+    pendingProjectHalionSonicAutoload_ = false;
+    pendingAdvisoryPluginBundlePath_.clear();
+    pendingInstrumentKind_.clear();
+    instrumentLoaded_ = computeInstrumentLoadedFromHost();
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
+bool InstrumentTrackController::bootstrapHalionSonicShellForSessionTrack(
+    const TrackId sessionInstrumentTrackId) noexcept
+{
+    if (sessionInstrumentTrackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    if (trackActive_ && experimentalDomainTrackId_ != sessionInstrumentTrackId)
+    {
+        return false;
+    }
+    if (session_ == nullptr)
+    {
+        return false;
+    }
+    if (const auto snap = session_->loadSessionSnapshotForAudioThread())
+    {
+        const int ix = snap->findTrackIndexById(sessionInstrumentTrackId);
+        if (ix < 0 || snap->getTrack(ix).getKind() != TrackKind::Instrument)
+        {
+            return false;
+        }
+    }
+
+    experimentalDomainTrackId_ = sessionInstrumentTrackId;
+
+    trackActive_ = true;
+    powerOn_ = true;
+    muted_ = false;
+    isActive_ = false;
+    requiredKitName_.clear();
+    experimentalInstrumentKind_ = "HALionSonic";
+    pendingProjectGrooveAutoload_ = false;
+    pendingProjectHalionSonicAutoload_ = false;
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
@@ -591,8 +641,10 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     instrumentLoaded_ = false;
     requiredKitName_.clear();
     pendingProjectGrooveAutoload_ = false;
+    pendingProjectHalionSonicAutoload_ = false;
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
+    experimentalInstrumentKind_.clear();
     pendingPluginStateBase64_.clear();
     drumLabels_.clear();
     experimentalDomainTrackId_ = kInvalidTrackId;
@@ -608,9 +660,23 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     }
     dto.enabled = true;
     dto.trackId = experimentalDomainTrackId_;
-    dto.name = "Groove Agent SE";
-    dto.instrumentKind = "GrooveAgentSE";
-    dto.requiredKitName = requiredKitName_.isNotEmpty() ? requiredKitName_ : juce::String("FiftySixDegreesModified");
+    juce::String kind = experimentalInstrumentKind_;
+    if (kind.isEmpty())
+    {
+        kind = "GrooveAgentSE";
+    }
+    dto.instrumentKind = kind;
+    if (kind == "HALionSonic")
+    {
+        dto.name.clear();
+        dto.requiredKitName = requiredKitName_;
+    }
+    else
+    {
+        dto.name = "Groove Agent SE";
+        dto.requiredKitName
+            = requiredKitName_.isNotEmpty() ? requiredKitName_ : juce::String("FiftySixDegreesModified");
+    }
     dto.pluginBundlePath = host_.getLastLoadedVst3OriginalPath();
     dto.pluginWasLoadedOnSave = host_.hasInstrument();
     if (dto.pluginWasLoadedOnSave)
@@ -700,7 +766,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
     const ProjectFileExperimentalInstrumentTrackV1* chosen = nullptr;
     for (const auto& t : tracks)
     {
-        if (!t.enabled || t.instrumentKind != "GrooveAgentSE")
+        if (!t.enabled || t.instrumentKind != experimentalInstrumentKind_)
         {
             continue;
         }
@@ -808,7 +874,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentFromProject(
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks,
     const std::vector<ProjectFileTrackV1>* persistedSerializedTrackRows)
 {
-    const ProjectFileExperimentalInstrumentTrackV1* chosen = selectedEnabledGrooveAgentPayload(tracks);
+    const ProjectFileExperimentalInstrumentTrackV1* chosen = selectedFirstEnabledSupportedExperimentalInstrumentPayload(tracks);
     if (chosen == nullptr)
     {
         clearExperimentalInstrumentStateForProjectLoad();
@@ -849,11 +915,16 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
     powerOn_ = power;
     muted_ = mute;
     isActive_ = false;
-    requiredKitName_
-        = chosen.requiredKitName.isNotEmpty() ? chosen.requiredKitName : juce::String("FiftySixDegreesModified");
+    requiredKitName_ = chosen.requiredKitName;
+    if (chosen.instrumentKind == "GrooveAgentSE" && requiredKitName_.isEmpty())
+    {
+        requiredKitName_ = "FiftySixDegreesModified";
+    }
     pendingProjectGrooveAutoload_ = chosen.pluginWasLoadedOnSave && chosen.instrumentKind == "GrooveAgentSE";
+    pendingProjectHalionSonicAutoload_ = chosen.pluginWasLoadedOnSave && chosen.instrumentKind == "HALionSonic";
     pendingAdvisoryPluginBundlePath_ = chosen.pluginBundlePath;
     pendingInstrumentKind_ = chosen.instrumentKind;
+    experimentalInstrumentKind_ = chosen.instrumentKind;
     pendingPluginStateBase64_ = chosen.pluginStateBase64;
 
     drumLabels_.clear();
@@ -1128,6 +1199,202 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
         outWarning << loadResult.getErrorMessage();
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: failed, project remains editable");
         juce::Logger::writeToLog("[project-autoload] Groove Agent load failed: " + loadResult.getErrorMessage());
+    }
+
+    if (stateRestoreHostWarning.isNotEmpty())
+    {
+        if (outWarning.isNotEmpty())
+        {
+            outWarning << "\n\n";
+        }
+        outWarning << stateRestoreHostWarning;
+        if (requiredKitName_.isNotEmpty())
+        {
+            outWarning << " Kit hint: " << requiredKitName_ << ".";
+        }
+    }
+
+    syncShellWithHostState();
+}
+
+void InstrumentTrackController::runPendingHalionSonicProjectAutoload(ExperimentalInstrumentHost& host,
+                                                                     juce::String& outWarning)
+{
+    outWarning.clear();
+    if (!trackActive_ || !pendingProjectHalionSonicAutoload_ || pendingInstrumentKind_ != "HALionSonic")
+    {
+        pendingProjectHalionSonicAutoload_ = false;
+        pendingPluginStateBase64_.clear();
+        syncShellWithHostState();
+        return;
+    }
+
+    pendingProjectHalionSonicAutoload_ = false;
+    const juce::String pendingB64 = pendingPluginStateBase64_;
+    pendingPluginStateBase64_.clear();
+
+    mini_daw::Vst3GrooveCacheLoadCandidate v2Cand;
+    mini_daw::Vst3GrooveCacheLoadCandidate v1Cand;
+    juce::String info;
+    const juce::File advisory(pendingAdvisoryPluginBundlePath_);
+
+    if (!mini_daw::tryLoadHalionSonicCacheCandidates(advisory, v2Cand, v1Cand, info))
+    {
+        if (info.isNotEmpty())
+        {
+            outWarning = info;
+        }
+        mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload-halion: failed, project remains editable");
+        juce::Logger::writeToLog("[project-autoload-halion] HALion Sonic autoload skipped: " + info);
+        syncShellWithHostState();
+        return;
+    }
+
+    juce::MemoryBlock decodedState;
+    const juce::MemoryBlock* statePtr = nullptr;
+    juce::String stateRestoreHostWarning;
+
+    if (pendingB64.isNotEmpty())
+    {
+        juce::MemoryOutputStream mos;
+        if (!juce::Base64::convertFromBase64(mos, pendingB64))
+        {
+            ExperimentalInstrumentHost::appendInstrumentHostLogLine(
+                "plugin-state: restore failed message=\"invalid base64 in project file\"");
+            outWarning = "HALion Sonic plug-in state in this project could not be decoded. "
+                         "Open the instrument editor and load a patch manually if audio is silent.";
+        }
+        else
+        {
+            decodedState.replaceAll(mos.getData(), mos.getDataSize());
+            if (decodedState.getSize() > 0)
+            {
+                statePtr = &decodedState;
+            }
+        }
+    }
+    else
+    {
+        ExperimentalInstrumentHost::appendInstrumentHostLogLine("plugin-state: restore skipped reason=no-state");
+    }
+
+    const auto buildTag = [](const mini_daw::Vst3GrooveCacheLoadCandidate& c) -> const char* {
+        if (c.tier == mini_daw::Vst3ExperimentalCacheTier::V2)
+        {
+            return c.pathRepairUsed ? "project-autoload-halion-repaired-cache-v2" : "project-autoload-halion-cached-v2";
+        }
+        return c.pathRepairUsed ? "project-autoload-halion-repaired-cache-v1" : "project-autoload-halion-cached-v1";
+    };
+
+    const auto tryLoadFromCandidate = [&](const mini_daw::Vst3GrooveCacheLoadCandidate& cand) -> juce::Result {
+        if (!cand.valid || cand.descriptions.empty())
+        {
+            return juce::Result::fail("no candidate");
+        }
+        return host.loadInstrumentFromDescription(
+            cand.descriptions.front(),
+            cand.resolvedBundle,
+            buildTag(cand),
+            statePtr,
+            (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
+    };
+
+    juce::Result loadResult = juce::Result::fail("");
+
+    if (v2Cand.valid)
+    {
+        loadResult = tryLoadFromCandidate(v2Cand);
+        if (loadResult.wasOk())
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload-halion: cache source=v2 load=ok");
+        }
+        else
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload-halion: cache source=v2 load=failed falling_back=v1 message=\""
+                + loadResult.getErrorMessage() + "\"");
+        }
+    }
+
+    if (!loadResult.wasOk() && !v2Cand.valid)
+    {
+        const juce::File scanTarget = [&]() -> juce::File {
+            if (advisory.exists())
+            {
+                return advisory;
+            }
+            if (v1Cand.valid && v1Cand.resolvedBundle.exists())
+            {
+                return v1Cand.resolvedBundle;
+            }
+            return mini_daw::getHalionSonicVst3BundlePathForOopScanFallback();
+        }();
+
+        if (scanTarget.exists())
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload-halion: v2 cache miss, OOP scan start target=\""
+                + scanTarget.getFullPathName() + "\"");
+            const mini_daw::Vst3OopScanResult scanOut = mini_daw::runVst3OopScanBlocking(scanTarget);
+            const bool scanOk = (scanOut.outcome == mini_daw::Vst3OopScanOutcome::Success)
+                                 && !scanOut.descriptions.empty();
+            if (scanOk)
+            {
+                loadResult = host.loadInstrumentFromDescription(
+                    scanOut.descriptions.front(),
+                    scanTarget,
+                    "project-autoload-halion-oop-fresh-v2",
+                    statePtr,
+                    (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
+                if (loadResult.wasOk())
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "project-autoload-halion: cache source=v2-fresh-scan load=ok");
+                }
+                else
+                {
+                    mini_daw::writeVst3OopScanDiagnosticLogLine(
+                        "project-autoload-halion: v2 fresh scan load=failed message=\""
+                        + loadResult.getErrorMessage() + "\" falling_back=v1");
+                }
+            }
+            else
+            {
+                mini_daw::writeVst3OopScanDiagnosticLogLine(
+                    "project-autoload-halion: OOP scan did not yield usable descriptions; falling_back=v1");
+            }
+        }
+        else
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload-halion: v2 cache miss, no OOP scan target on disk; falling_back=v1");
+        }
+    }
+
+    if (!loadResult.wasOk() && v1Cand.valid)
+    {
+        loadResult = tryLoadFromCandidate(v1Cand);
+        if (loadResult.wasOk())
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload-halion: cache source=v1 load=ok");
+        }
+        else
+        {
+            mini_daw::writeVst3OopScanDiagnosticLogLine(
+                "project-autoload-halion: cache source=v1 load=failed message=\"" + loadResult.getErrorMessage()
+                + "\"");
+        }
+    }
+
+    if (!loadResult.wasOk())
+    {
+        if (outWarning.isNotEmpty())
+        {
+            outWarning << "\n\n";
+        }
+        outWarning << loadResult.getErrorMessage();
+        mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload-halion: failed, project remains editable");
+        juce::Logger::writeToLog("[project-autoload-halion] HALion Sonic load failed: " + loadResult.getErrorMessage());
     }
 
     if (stateRestoreHostWarning.isNotEmpty())
@@ -1789,7 +2056,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
 bool InstrumentTrackController::serializedProjectUsesEnabledGrooveAgentRow(
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
 {
-    return selectedEnabledGrooveAgentPayload(tracks) != nullptr;
+    return selectedFirstEnabledSupportedExperimentalInstrumentPayload(tracks) != nullptr;
 }
 
 TrackId InstrumentTrackController::peekExperimentalInstrumentBindLaneId(
@@ -1797,7 +2064,7 @@ TrackId InstrumentTrackController::peekExperimentalInstrumentBindLaneId(
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& payloads,
     const std::vector<ProjectFileTrackV1>& persistedTracks) noexcept
 {
-    const ProjectFileExperimentalInstrumentTrackV1* chosen = selectedEnabledGrooveAgentPayload(payloads);
+    const ProjectFileExperimentalInstrumentTrackV1* chosen = selectedFirstEnabledSupportedExperimentalInstrumentPayload(payloads);
     if (chosen == nullptr)
     {
         return kInvalidTrackId;

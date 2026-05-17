@@ -377,18 +377,18 @@ namespace
             {
                 et.enabled = static_cast<int>(static_cast<double>(ev) + 0.5) != 0;
             }
-            et.name = tv.getProperty("name", {}).toString();
-            if (et.name.isEmpty())
-            {
-                et.name = "Groove Agent SE";
-            }
             et.instrumentKind = tv.getProperty("instrumentKind", {}).toString();
             if (et.instrumentKind.isEmpty())
             {
                 et.instrumentKind = "GrooveAgentSE";
             }
+            et.name = tv.getProperty("name", {}).toString();
+            if (et.name.isEmpty() && et.instrumentKind == "GrooveAgentSE")
+            {
+                et.name = "Groove Agent SE";
+            }
             et.requiredKitName = tv.getProperty("requiredKitName", {}).toString();
-            if (et.requiredKitName.isEmpty())
+            if (et.requiredKitName.isEmpty() && et.instrumentKind == "GrooveAgentSE")
             {
                 et.requiredKitName = "FiftySixDegreesModified";
             }

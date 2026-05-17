@@ -124,6 +124,23 @@ void writeVst3OopScanDiagnosticLogLine(const juce::String& message);
 /// Empty file on other platforms or when not found.
 [[nodiscard]] juce::File getGrooveAgentSeVst3BundlePathForOopScanFallback() noexcept;
 
+/// Windows: locate a **HALion Sonic-family** `.vst3` bundle under common VST3 folders (filename contains
+/// "halion" and "sonic", case-insensitive), preferring `Steinberg\HALion Sonic.vst3` when present.
+/// Empty file on other platforms or when not found.
+[[nodiscard]] juce::File getHalionSonicVst3BundlePathForOopScanFallback() noexcept;
+
+/// From any path inside a VST3 bundle layout, walk up to the directory whose name ends in `.vst3`
+/// (the bundle root Steinberg/JUCE expect for hosting). Empty when none is found.
+[[nodiscard]] juce::File normalizePathToVst3BundleRootDirectory(const juce::File& path) noexcept;
+
+/// Normalize HALion `PluginDescription` paths for hosting: `originalPath` is the bundle root from the host;
+/// sets `fileOrIdentifier` to the inner module when present (same pattern as Groove Agent SE repair).
+void repairHalionPluginDescriptionForLoad(juce::PluginDescription& d, const juce::File& originalPath);
+
+/// True when a host/plugin display name looks like the HALion Sonic product line (e.g. "HALion Sonic",
+/// "HALion Sonic 7", "HALion Sonic SE"). Case-insensitive; requires both "halion" and "sonic" substrings.
+[[nodiscard]] bool instrumentDisplayNameLooksLikeHalionSonic(const juce::String& name) noexcept;
+
 /// Cheap bundle metadata for cache validity (size, mtime, short hash). Hash may be empty on failure.
 [[nodiscard]] Vst3BundleFileFingerprint computeVst3BundleFileFingerprint(const juce::File& vst3Bundle) noexcept;
 
@@ -181,6 +198,12 @@ struct Vst3GrooveCacheLoadCandidate
                                                      Vst3GrooveCacheLoadCandidate& v1Out,
                                                      juce::String& infoOrWarningOut);
 
+/// HALion Sonic: same cache/OOP strategy as Groove Agent SE, independent name scan + bundle fallback.
+[[nodiscard]] bool tryLoadHalionSonicCacheCandidates(const juce::File& savedOrAdvisoryBundle,
+                                                     Vst3GrooveCacheLoadCandidate& v2Out,
+                                                     Vst3GrooveCacheLoadCandidate& v1Out,
+                                                     juce::String& infoOrWarningOut);
+
 /// Merge / replace one `bundle` in **v2 only** (`experimental-vst3-descriptions-v2.xml`), via temp file + replace.
 /// Call only after a **successful** OOP scan. Never writes or modifies the v1 legacy file.
 void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
@@ -199,9 +222,9 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
 /// Dev / CI: in-memory + temp-file checks for v1/v2 cache XML (does not touch the user cache file).
 [[nodiscard]] bool verifyExperimentalVst3DescriptionsCachePhase2() noexcept;
 
-/// Project-load helper for **GrooveAgentSE** only: load from cache (optional full-cache scan), and if the
+/// Project-load helper for **GrooveAgentSE** / **HALionSonic**: load from cache (optional full-cache scan), and if the
 /// cached bundle / `fileOrIdentifier` no longer exists, search standard Windows VST3 folders for
-/// `Groove Agent SE.vst3`, patch `PluginDescription` paths in memory, and return the resolved bundle.
+/// the known bundle name, patch `PluginDescription` paths in memory, and return the resolved bundle.
 /// Does not run in-process `findAllTypesForFile` or raw OOP scan. Logs to `experimental-vst3-oop-scan.log`.
 [[nodiscard]] bool tryLoadExperimentalVst3DescriptionsFromCacheWithPathRepair(
     const juce::File& savedOrAdvisoryBundle,

@@ -237,7 +237,7 @@ void ProjectIoCoordinator::loadProject()
         {
             for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
             {
-                if (!etRow.enabled || etRow.instrumentKind != "GrooveAgentSE")
+                if (!etRow.enabled || (etRow.instrumentKind != "GrooveAgentSE" && etRow.instrumentKind != "HALionSonic"))
                 {
                     continue;
                 }
@@ -266,7 +266,14 @@ void ProjectIoCoordinator::loadProject()
                 ctl->setTimelineSampleRate(sampleRate);
                 ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
                 juce::String noteOne;
-                ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
+                if (etRow.instrumentKind == "GrooveAgentSE")
+                {
+                    ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
+                }
+                else
+                {
+                    ctl->runPendingHalionSonicProjectAutoload(*mh, noteOne);
+                }
                 if (noteOne.isNotEmpty())
                 {
                     if (instrumentAutoloadNoteAcc.isNotEmpty())

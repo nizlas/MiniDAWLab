@@ -4,7 +4,10 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
@@ -57,6 +60,16 @@ public:
 
     void refreshMidiEditorInstrumentUiIfOpen();
     void openMidiEditorForInstrumentClip(TrackId timelineInstrumentTrackId, InstrumentMidiClipId clipId);
+
+    /// Screen point in global pixels: instrument MIDI event lane row under the point, if any.
+    [[nodiscard]] std::optional<TrackId> instrumentMidiLaneHitAtScreen(juce::Point<float> screenPt) const noexcept;
+
+    /// Cross-lane MIDI move: transient drop ghost (session start + length per clip), matching `ClipWaveformView` drag ghost.
+    void clearInstrumentMidiCrossTrackDropGhosts() noexcept;
+    void syncInstrumentMidiCrossTrackDropGhostPreview(
+        TrackId dragSourceTrackId,
+        std::optional<TrackId> hoverDestTrackId,
+        std::vector<std::pair<std::int64_t, std::int64_t>> sessionStartLenSamples) noexcept;
 
     /// After `TrackLanesEditCoordinator::install()` wires rename; patches headers built earlier at startup.
     void rewireInstrumentTrackRenameHandlers() noexcept;

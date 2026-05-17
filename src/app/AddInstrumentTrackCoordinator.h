@@ -7,7 +7,7 @@
 class InstrumentRuntimeCoordinator;
 class Session;
 
-/// Groove Agent "Add instrument track from menu" orchestration (owns no session/runtime state).
+/// Groove Agent / HALion Sonic "Add instrument track from menu" orchestration (owns no session/runtime state).
 class AddInstrumentTrackCoordinator final
 {
 public:
@@ -27,10 +27,14 @@ public:
     AddInstrumentTrackCoordinator(Refs refs, Callbacks callbacks);
 
     void addGrooveAgentInstrumentTrackFromMenu();
+    void addHalionSonicInstrumentTrackFromMenu();
 
 private:
     void finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
     void beginAsyncGrooveAgentOopScanForAddTrack(mini_daw::Vst3GrooveCacheLoadCandidate v1Cand);
+
+    void finishAddHalionSonicInstrumentTrackAfterInstrumentResolved();
+    void beginAsyncHalionSonicOopScanForAddTrack(mini_daw::Vst3GrooveCacheLoadCandidate v1Cand);
 
     Refs refs_;
     Callbacks callbacks_;
