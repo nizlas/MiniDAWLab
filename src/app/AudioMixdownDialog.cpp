@@ -52,6 +52,12 @@ namespace
         .getChildFile("MiniDAWLab Mixdown");
 }
 
+/// Same green family as `TrackHeaderView` power-on (active strip).
+[[nodiscard]] juce::Colour mp3EncoderReadyLabelColour() noexcept
+{
+    return juce::Colour(0xff2d9d53);
+}
+
 [[nodiscard]] juce::String formatLoopDurationHint(const std::int64_t lengthSamples, const double sampleRate)
 {
     if (lengthSamples <= 0 || !std::isfinite(sampleRate) || sampleRate <= 0.0)
@@ -274,7 +280,6 @@ public:
 
         addAndMakeVisible(mp3StatusLabel_);
         mp3StatusLabel_.setJustificationType(juce::Justification::topLeft);
-        mp3StatusLabel_.setColour(juce::Label::textColourId, juce::Colours::orange);
 
         addAndMakeVisible(exportButton_);
         exportButton_.setButtonText("Export Audio");
@@ -438,8 +443,23 @@ private:
 
         if (mp3)
         {
-            exportButton_.setEnabled(false);
-            mp3StatusLabel_.setText("MP3 export is not implemented in this build.", juce::dontSendNotification);
+            const bool lameOk = mini_daw_audio_mixdown::isBundledLameEncoderAvailable();
+            if (!lameOk)
+            {
+                mp3StatusLabel_.setText(
+                    "MP3 encoder not found. Expected Tools/lame/lame.exe beside the application.",
+                    juce::dontSendNotification);
+                mp3StatusLabel_.setColour(juce::Label::textColourId, juce::Colours::orange);
+                exportButton_.setEnabled(false);
+            }
+            else
+            {
+                mp3StatusLabel_.setText("MP3 encoder ready.", juce::dontSendNotification);
+                mp3StatusLabel_.setColour(juce::Label::textColourId, mp3EncoderReadyLabelColour());
+                exportButton_.setEnabled(loopOk && deviceManager_.getCurrentAudioDevice() != nullptr
+                                         && pathEditor_.getText().trim().isNotEmpty()
+                                         && nameEditor_.getText().trim().isNotEmpty());
+            }
         }
         else
         {
@@ -465,6 +485,71 @@ private:
 
         if (fileTypeCombo_.getSelectedId() == 2)
         {
+            if (!mini_daw_audio_mixdown::isBundledLameEncoderAvailable())
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Audio Mixdown",
+                    "MP3 encoder not found. Expected Tools/lame/lame.exe beside the application.");
+                return;
+            }
+
+            std::shared_ptr<const SessionSnapshot> snapMp3 = session_.loadSessionSnapshotForAudioThread();
+            if (snapMp3 == nullptr)
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "Audio Mixdown",
+                                                       "Session snapshot is not available.");
+                return;
+            }
+
+            mini_daw_audio_mixdown::ActiveLoopMixdownSpan loopProbeMp3 {};
+            const juce::Result spanProbeMp3 = mini_daw_audio_mixdown::resolveActiveLoopMixdownSpan(
+                transport_.readCycleEnabledForUi(),
+                snapMp3->getLeftLocatorSamples(),
+                snapMp3->getRightLocatorSamples(),
+                loopProbeMp3);
+            if (spanProbeMp3.failed())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "Audio Mixdown",
+                                                       spanProbeMp3.getErrorMessage());
+                return;
+            }
+
+            const juce::File folderMp3(pathEditor_.getText().trim());
+            const juce::String baseMp3 = sanitizeFileBaseName(nameEditor_.getText());
+            const juce::File outMp3 = folderMp3.getChildFile(baseMp3 + ".mp3");
+            const int kbps = kbpsFromMp3BitrateComboId(mp3BitrateCombo_.getSelectedId());
+
+            const juce::Result resultMp3 = mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(
+                transport_,
+                session_,
+                playbackEngine_,
+                deviceManager_,
+                syncTransportUiFromDomain_,
+                outMp3,
+                kbps);
+
+            if (resultMp3.failed())
+            {
+                const juce::String msg = resultMp3.getErrorMessage();
+                if (msg == "Export cancelled." || msg.startsWith("Export cancelled"))
+                {
+                    return;
+                }
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                       "Audio Mixdown",
+                                                       msg);
+                return;
+            }
+
+            pushMixdownUiToSession();
+
+            if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
+            {
+                dw->exitModalState(1);
+            }
             return;
         }
 

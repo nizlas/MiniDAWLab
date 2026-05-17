@@ -8,7 +8,8 @@
 .DESCRIPTION
   - Parses the project version from the top-level CMakeLists.txt (project(MiniDAWLab VERSION …)).
   - Optionally invokes scripts\build-windows.ps1 -Config Release (default: on).
-  - Copies MiniDAWLab.exe and optional docs into dist\DanielssonsAudioLab-<version>\.
+  - Copies MiniDAWLab.exe, optional MP3 encoder (external_tools/lame/lame.exe -> Tools/lame), LAME
+    license placeholders (licenses/LAME/*.txt), and optional docs into dist\DanielssonsAudioLab-<version>\.
   - Ensures dist\vendor\vc_redist.x64.exe from https://aka.ms/vc14/vc_redist.x64.exe (one-time).
   - Writes dist\DanielssonsAudioLab-<version>.zip
   - If ISCC is found, runs: ISCC /DAppVersion=<version> installer\MiniDAWLab.iss
@@ -92,6 +93,37 @@ if (Test-Path -LiteralPath $stageDir) {
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $stageDir 'MiniDAWLab.exe') -Force
+
+# Optional MP3 encoder + LAME license placeholders (omit if missing — runtime shows encoder not found)
+$lameLocal = Join-Path $repoRoot 'external_tools\lame\lame.exe'
+if (Test-Path -LiteralPath $lameLocal) {
+    $lameStageDir = Join-Path $stageDir 'Tools\lame'
+    New-Item -ItemType Directory -Path $lameStageDir -Force | Out-Null
+    Copy-Item -LiteralPath $lameLocal -Destination (Join-Path $lameStageDir 'lame.exe') -Force
+    Write-Host 'Staged optional LAME encoder: Tools\lame\lame.exe' -ForegroundColor DarkGray
+}
+else {
+    Write-Host 'Optional LAME encoder not at external_tools\lame\lame.exe — bundle will omit Tools\lame (MP3 disabled until encoder added).' -ForegroundColor DarkGray
+}
+
+$lameLicDir = Join-Path $repoRoot 'licenses\LAME'
+if (Test-Path -LiteralPath $lameLicDir) {
+    $anyLic = $false
+    foreach ($lic in @('LGPL-2.1.txt', 'LAME-NOTICE.txt', 'SOURCE.txt')) {
+        $srcLic = Join-Path $lameLicDir $lic
+        if (Test-Path -LiteralPath $srcLic) {
+            if (-not $anyLic) {
+                New-Item -ItemType Directory -Path (Join-Path $stageDir 'licenses\LAME') -Force | Out-Null
+                $anyLic = $true
+            }
+            Copy-Item -LiteralPath $srcLic -Destination (Join-Path $stageDir "licenses\LAME\$lic") -Force
+        }
+    }
+    if ($anyLic) {
+        Write-Host 'Staged licenses/LAME/*.txt' -ForegroundColor DarkGray
+    }
+}
+
 $readmes = @('README.md', 'PROJECT_BRIEF.md')
 foreach ($f in $readmes) {
     $p = Join-Path $repoRoot $f

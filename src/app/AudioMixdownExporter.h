@@ -56,4 +56,21 @@ struct ActiveLoopMixdownSpan
     const std::function<void()>& syncTransportUiFromDomain,
     const MixdownExportRequest& request);
 
+/// Bundled encoder: `<executable_dir>/Tools/lame/lame.exe` (Windows). Non-Windows also tries `Tools/lame/lame`.
+[[nodiscard]] juce::File findBundledLameExecutable() noexcept;
+
+[[nodiscard]] bool isBundledLameEncoderAvailable() noexcept;
+
+/// MP3 mixdown v1: render active loop to a **temporary** 32-bit float or 24-bit PCM WAV, then run bundled LAME.
+/// Bitrate must be one of 128, 160, 192, 224, 256, 320.
+/// On LAME failure or timeout, the temporary WAV is **kept** and its path is included in the error message for debugging.
+[[nodiscard]] juce::Result exportStereoMixdownMp3Blocking(
+    Transport& transport,
+    Session& session,
+    PlaybackEngine& playbackEngine,
+    juce::AudioDeviceManager& deviceManager,
+    const std::function<void()>& syncTransportUiFromDomain,
+    const juce::File& mp3OutputFile,
+    int bitrateKbps);
+
 } // namespace mini_daw_audio_mixdown

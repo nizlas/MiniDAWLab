@@ -1,6 +1,7 @@
 ; MiniDAWLab — Inno Setup 6. Compile from repository root, or via scripts\package-windows.ps1
 ;   "ISCC.exe" /DAppVersion=0.2.0 "installer\MiniDAWLab.iss"
 ; Staged payload: dist\DanielssonsAudioLab-{#AppVersion}\ (created by package-windows.ps1)
+;   Includes optional Tools\lame\lame.exe and licenses\LAME\ when package-windows.ps1 staged them.
 ; Embeds: dist\vendor\vc_redist.x64.exe (official Microsoft x64 redistributable)
 
 #define AppName "Danielssons Audio Lab"

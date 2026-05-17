@@ -2,6 +2,9 @@
 build/
 dist/
 
+# Optional local LAME binary for MP3 post-build copy (see CMakeLists.txt + external_tools/lame/README.txt)
+external_tools/lame/lame.exe
+
 # Prerequisites
 *.d
 

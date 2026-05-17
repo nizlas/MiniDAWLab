@@ -13,6 +13,12 @@
   - Debug:   `.\build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe`
   - Release: `.\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe`
 
+  **Optional LAME (MP3):** CMake still runs a POST_BUILD copy when the MiniDAWLab target links.
+  This script also syncs `<repo>\external_tools\lame\lame.exe` →
+  `<exe folder>\Tools\lame\lame.exe` after every successful build (covers incremental Ninja builds where
+  POST_BUILD does not run). Repo root is always derived from this script’s location (`$PSScriptRoot\..`),
+  never from the current working directory.
+
 .PARAMETER Preset
   Optional. Use `windows-ninja-debug` (default) or `windows-ninja-release` to match the CMake
   presets in `CMakePresets.json`. If set, this overrides `-Config`.
@@ -41,7 +47,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+# Repo root = parent of scripts/ — never use $PWD (script may be run from anywhere).
+$repoRootPath = [string][System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath '..'))
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path $vswhere)) {
     Write-Error "vswhere.exe not found. Install Visual Studio 2022 or later with the Desktop development with C++ workload."
@@ -90,11 +97,12 @@ if ($PSBoundParameters.ContainsKey('Preset') -and $Preset) {
 $buildLeaf = if ($cmakePreset -eq 'windows-ninja-release') { 'ninja-release' } else { 'ninja-debug' }
 $artefactConfig = if ($cmakePreset -eq 'windows-ninja-release') { 'Release' } else { 'Debug' }
 Write-Host "Preset: $cmakePreset" -ForegroundColor DarkGray
+Write-Host "Resolved repo root (from script location): $repoRootPath" -ForegroundColor DarkGray
 Write-Host "After a successful build, from this repo in PowerShell run:" -ForegroundColor Cyan
 Write-Host "  .\build\$buildLeaf\MiniDAWLab_artefacts\$artefactConfig\MiniDAWLab.exe" -ForegroundColor Cyan
 Write-Host "  (PowerShell needs .\ in front; bare 'build\...' is not a path to an executable.)" -ForegroundColor DarkGray
 
-$repoQuoted = "`"$repoRoot`""
+$repoQuoted = "`"$repoRootPath`""
 # After `cd /d` the repo, %CD% is the repo — print the JUCE .exe path (cmd /c echo line).
 $exeHintCmd = "echo === MiniDAWLab.exe (JUCE output) === && echo   %CD%\build\${buildLeaf}\MiniDAWLab_artefacts\${artefactConfig}\MiniDAWLab.exe"
 # JUCE: `MiniDAWLab_artefacts\<Debug|Release>\MiniDAWLab.exe`. `--target MiniDAWLab` forces the app.
@@ -113,7 +121,16 @@ if ($BuildOnly) {
 #    after VsDev runs (no CMake, instant return, no output).
 # 2) A single /C argument to cmd is reliable; long lines passed from PowerShell can be misparsed.
 $batch = "call `"$devCmd`" -arch=x64 -host_arch=x64 -no_logo && $inner"
-$expectedExe = Join-Path $repoRoot "build\${buildLeaf}\MiniDAWLab_artefacts\${artefactConfig}\MiniDAWLab.exe"
+$expectedExe = [System.IO.Path]::GetFullPath(
+    [System.IO.Path]::Combine(
+        [System.IO.Path]::Combine(
+            [System.IO.Path]::Combine(
+                [System.IO.Path]::Combine(
+                    [System.IO.Path]::Combine($repoRootPath, 'build'),
+                    $buildLeaf),
+                'MiniDAWLab_artefacts'),
+            $artefactConfig),
+        'MiniDAWLab.exe'))
 $tempCmd = Join-Path $env:TEMP "MiniDAWLab-build-$PID-$([IO.Path]::GetRandomFileName()).cmd"
 Set-Content -Path $tempCmd -Value $batch -Encoding Oem
 try {
@@ -129,11 +146,61 @@ if ($code -ne 0) {
     exit $code
 }
 if (-not $ConfigureOnly) {
+    Write-Host '--- Optional LAME encoder sync ---' -ForegroundColor DarkGray
+    Write-Host "Resolved MiniDAWLab.exe path: $expectedExe" -ForegroundColor DarkGray
+
     if (-not (Test-Path -LiteralPath $expectedExe)) {
-        Write-Error "Build completed with code 0 but the executable is missing:`n  $expectedExe`n`nDelete build\$buildLeaf and re-run, or read errors above the exit code."
+        Write-Warning @"
+Build exited successfully but MiniDAWLab.exe was not found at the expected path:
+  $expectedExe
+
+CMake/JUCE output layout should match: build\$buildLeaf\MiniDAWLab_artefacts\$artefactConfig\MiniDAWLab.exe
+Reconfigure or delete build\$buildLeaf and rebuild. Skipping optional LAME copy.
+"@
         exit 1
     }
+
+    Write-Host "MiniDAWLab.exe exists: yes" -ForegroundColor DarkGray
     Write-Host "OK: " -NoNewline -ForegroundColor Green
     Write-Host $expectedExe
+
+    $lameSrc = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine(
+            [System.IO.Path]::Combine(
+                [System.IO.Path]::Combine($repoRootPath, 'external_tools'),
+                'lame'),
+            'lame.exe'))
+    $exeDirForLame = [System.IO.Path]::GetDirectoryName($expectedExe)
+    $lameDst = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine(
+            [System.IO.Path]::Combine(
+                [System.IO.Path]::Combine($exeDirForLame, 'Tools'),
+                'lame'),
+            'lame.exe'))
+
+    Write-Host "Resolved LAME source path: $lameSrc" -ForegroundColor DarkGray
+    $lameSrcExists = Test-Path -LiteralPath $lameSrc
+    Write-Host "LAME source exists: $lameSrcExists" -ForegroundColor DarkGray
+    Write-Host "Resolved LAME destination path: $lameDst" -ForegroundColor DarkGray
+
+    if (-not $lameSrcExists) {
+        Write-Host 'Optional LAME encoder not found at external_tools/lame/lame.exe; MP3 export will be disabled unless lame.exe is copied manually.' -ForegroundColor DarkYellow
+    }
+    else {
+        try {
+            $lameDstDir = [System.IO.Path]::GetDirectoryName($lameDst)
+            New-Item -ItemType Directory -Path $lameDstDir -Force | Out-Null
+            Copy-Item -LiteralPath $lameSrc -Destination $lameDst -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $lameDst) {
+                Write-Host "LAME copy succeeded: $lameDst" -ForegroundColor Green
+            }
+            else {
+                Write-Warning "LAME copy reported success but destination file is missing: $lameDst"
+            }
+        }
+        catch {
+            Write-Warning "LAME copy failed: $($_.Exception.Message)"
+        }
+    }
 }
 exit 0

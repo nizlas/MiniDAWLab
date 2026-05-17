@@ -1,0 +1,7 @@
+Placeholder — LAME is released under the LGPL (see official LAME distribution).
+
+Do not treat this file as legal advice. Obtain the full LGPL-2.1 text from:
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+When you bundle lame.exe with MiniDAWLab, include the official license texts supplied
+with that LAME build and comply with LGPL obligations for distributing the encoder binary.

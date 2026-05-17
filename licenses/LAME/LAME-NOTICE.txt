@@ -1,0 +1,7 @@
+Placeholder notice — LAME (LAME Ain't an Mp3 Encoder)
+
+This project does not redistribute LAME source code or binaries. If you add lame.exe
+under Tools/lame/ for local testing or packaging, you are responsible for complying with
+LAME's licensing terms and for providing any required notices to end users.
+
+Official project: https://lame.sourceforge.io/

@@ -1,5 +1,6 @@
 #include "app/AudioMixdownExporter.h"
 
+#include "domain/MixdownWavProbe.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "engine/PlaybackEngine.h"
@@ -12,8 +13,36 @@
 #include <cmath>
 #include <memory>
 
+namespace mini_daw_audio_mixdown
+{
+
 namespace
 {
+
+constexpr int kMp3EncodeTimeoutMs = 600000; // 10 minutes
+
+[[nodiscard]] bool isAllowedMp3BitrateKbps(const int kbps) noexcept
+{
+    switch (kbps)
+    {
+    case 128:
+    case 160:
+    case 192:
+    case 224:
+    case 256:
+    case 320:
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] MixdownWaveBits mixdownIntermediateWavBitsForLame(const double sampleRate) noexcept
+{
+    return probeStereoFloatWavSupportedMixdown(sampleRate) ? MixdownWaveBits::IeeeFloat32
+                                                             : MixdownWaveBits::Pcm24;
+}
+
 class ScopedOfflineRenderGate final
 {
 public:
@@ -31,10 +60,8 @@ public:
 private:
     PlaybackEngine& engine_;
 };
-} // namespace
 
-namespace mini_daw_audio_mixdown
-{
+} // namespace
 
 juce::Result resolveActiveLoopMixdownSpan(const bool cycleEnabledFromTransport,
                                           const std::int64_t leftLocatorSamples,
@@ -210,6 +237,183 @@ juce::Result exportStereoMixdownWavBlocking(
     }
 
     writer.reset();
+    return juce::Result::ok();
+}
+
+juce::File findBundledLameExecutable() noexcept
+{
+    const juce::File exeDir
+        = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    const juce::File lameDir = exeDir.getChildFile("Tools").getChildFile("lame");
+    const juce::File winExe = lameDir.getChildFile("lame.exe");
+    if (winExe.existsAsFile())
+    {
+        return winExe;
+    }
+    const juce::File posixExe = lameDir.getChildFile("lame");
+    if (posixExe.existsAsFile())
+    {
+        return posixExe;
+    }
+    return {};
+}
+
+bool isBundledLameEncoderAvailable() noexcept
+{
+    return findBundledLameExecutable().existsAsFile();
+}
+
+juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
+                                           Session& session,
+                                           PlaybackEngine& playbackEngine,
+                                           juce::AudioDeviceManager& deviceManager,
+                                           const std::function<void()>& syncTransportUiFromDomain,
+                                           const juce::File& mp3OutputFile,
+                                           const int bitrateKbps)
+{
+    const juce::File lameExe = findBundledLameExecutable();
+    if (!lameExe.existsAsFile())
+    {
+        return juce::Result::fail(
+            "MP3 encoder not found. Expected Tools/lame/lame.exe beside the application.");
+    }
+
+    if (mp3OutputFile == juce::File{})
+    {
+        return juce::Result::fail("Invalid export path.");
+    }
+
+    if (!isAllowedMp3BitrateKbps(bitrateKbps))
+    {
+        return juce::Result::fail("Invalid MP3 bitrate.");
+    }
+
+    juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+    {
+        return juce::Result::fail("No audio device is open.");
+    }
+
+    const double sampleRate = device->getCurrentSampleRate();
+    if (!std::isfinite(sampleRate) || sampleRate <= 0.0)
+    {
+        return juce::Result::fail("Invalid sample rate.");
+    }
+
+    if (mp3OutputFile.existsAsFile())
+    {
+        const bool overwrite = juce::NativeMessageBox::showYesNoBox(
+            juce::AlertWindow::WarningIcon,
+            "Audio Mixdown",
+            "A file already exists at:\n\n"
+                + mp3OutputFile.getFullPathName()
+                + "\n\nOverwrite it?",
+            nullptr,
+            nullptr);
+        if (!overwrite)
+        {
+            return juce::Result::fail("Export cancelled.");
+        }
+    }
+
+    const juce::File parentDir = mp3OutputFile.getParentDirectory();
+    if (!parentDir.isDirectory())
+    {
+        if (!parentDir.createDirectory())
+        {
+            return juce::Result::fail("Could not create folder:\n" + parentDir.getFullPathName());
+        }
+    }
+
+    juce::File tempWav;
+    for (int attempt = 0; attempt < 16; ++attempt)
+    {
+        (void)attempt;
+        const juce::String unique = juce::String::toHexString(juce::Random::getSystemRandom().nextInt64());
+        tempWav = mp3OutputFile.getSiblingFile(mp3OutputFile.getFileNameWithoutExtension()
+                                               + ".__dal_mp3_source_" + unique + ".wav");
+        if (!tempWav.existsAsFile())
+        {
+            break;
+        }
+    }
+
+    if (tempWav == juce::File{} || tempWav.existsAsFile())
+    {
+        return juce::Result::fail("Could not allocate a temporary WAV file path.");
+    }
+
+    MixdownExportRequest wavRequest;
+    wavRequest.outputFile = tempWav;
+    wavRequest.sampleRate = sampleRate;
+    wavRequest.bits = mixdownIntermediateWavBitsForLame(sampleRate);
+
+    const juce::Result wavResult = exportStereoMixdownWavBlocking(
+        transport,
+        session,
+        playbackEngine,
+        deviceManager,
+        syncTransportUiFromDomain,
+        wavRequest);
+
+    if (wavResult.failed())
+    {
+        (void)tempWav.deleteFile();
+        const juce::String msg = wavResult.getErrorMessage();
+        if (msg == "Export cancelled." || msg.startsWith("Export cancelled"))
+        {
+            return wavResult;
+        }
+        return juce::Result::fail("Temporary WAV creation failed.\n\n" + msg);
+    }
+
+    juce::ChildProcess lameProcess;
+    juce::StringArray args;
+    args.add(lameExe.getFullPathName());
+    args.add("-b");
+    args.add(juce::String(bitrateKbps));
+    args.add(tempWav.getFullPathName());
+    args.add(mp3OutputFile.getFullPathName());
+
+    if (!lameProcess.start(args, juce::ChildProcess::wantStdErr))
+    {
+        const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
+        return juce::Result::fail("MP3 encoding failed (could not start LAME)." + kept);
+    }
+
+    if (!lameProcess.waitForProcessToFinish(kMp3EncodeTimeoutMs))
+    {
+        (void)lameProcess.kill();
+        const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
+        return juce::Result::fail("MP3 encoding timed out." + kept);
+    }
+
+    const auto exitCode = static_cast<int>(lameProcess.getExitCode());
+    const juce::String lameStderr = lameProcess.readAllProcessOutput().trim();
+
+    if (exitCode != 0)
+    {
+        juce::String msg = "MP3 encoding failed.";
+        if (lameStderr.isNotEmpty())
+        {
+            msg << "\n\n" << lameStderr;
+        }
+        msg << "\n\nTemporary WAV kept for debugging:\n" << tempWav.getFullPathName();
+        return juce::Result::fail(msg);
+    }
+
+    if (!mp3OutputFile.existsAsFile() || mp3OutputFile.getSize() == 0)
+    {
+        juce::String msg = "MP3 output file was not created.";
+        if (lameStderr.isNotEmpty())
+        {
+            msg << "\n\n" << lameStderr;
+        }
+        msg << "\n\nTemporary WAV kept for debugging:\n" << tempWav.getFullPathName();
+        return juce::Result::fail(msg);
+    }
+
+    (void)tempWav.deleteFile();
     return juce::Result::ok();
 }
 

@@ -143,3 +143,25 @@ target_link_libraries(MiniDAWLab
 if (MSVC)
     target_compile_options(MiniDAWLab PRIVATE /wd4458)
 endif()
+
+# -----------------------------------------------------------------------------
+# Optional MP3 encoder (packaging / dev convenience): copy locally supplied LAME beside MiniDAWLab.exe.
+# Runtime lookup is unchanged: <executable_dir>/Tools/lame/lame.exe (see Tools/lame/README.txt).
+# Source (not in git): external_tools/lame/lame.exe
+# -----------------------------------------------------------------------------
+set(MINIDAW_LAME_LOCAL_EXE "${CMAKE_CURRENT_SOURCE_DIR}/external_tools/lame/lame.exe")
+if (EXISTS "${MINIDAW_LAME_LOCAL_EXE}")
+    message(STATUS "Optional LAME encoder found at external_tools/lame/lame.exe (post-build will copy beside MiniDAWLab.exe)")
+else()
+    message(STATUS "Optional LAME encoder not found at external_tools/lame/lame.exe; MP3 export will be disabled unless lame.exe is copied manually.")
+endif()
+
+add_custom_command(
+    TARGET MiniDAWLab
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}"
+            -DLAME_SRC="${MINIDAW_LAME_LOCAL_EXE}"
+            "-DLAME_DST=$<TARGET_FILE_DIR:MiniDAWLab>/Tools/lame/lame.exe"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyOptionalLame.cmake"
+    COMMENT "Optional: copy local LAME encoder for MP3 export (if external_tools/lame/lame.exe exists)"
+    VERBATIM)

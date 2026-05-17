@@ -1,0 +1,6 @@
+Placeholder — source attribution
+
+LAME source code is maintained separately from MiniDAWLab. Obtain source from the official
+LAME project per the license terms of the LAME build you use.
+
+This repository does not contain LAME sources.
