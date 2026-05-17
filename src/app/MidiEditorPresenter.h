@@ -69,6 +69,9 @@ public:
     void refreshInstrumentUiIfOpen();
     void syncInstrumentClipTimelineFromDevice();
 
+    /// When `Session` timeline ruler format (BBT / seconds) changes; updates MIDI editor toolbar if open.
+    void syncTimelineRulerFormatUiIfEditorOpen();
+
     /// After seeking from shortcuts that already moved the session playhead (`invokeJumpToLeftLocatorFromWindowShortcut`).
     void notifyMidiEditorExternalTransportSeekIfOpen(std::int64_t targetSample) noexcept;
 

@@ -352,30 +352,60 @@ void TimelineRulerView::paint(juce::Graphics& g)
     paintLocatorCycleBandAndStripe(
         g, bounds, sessionSampleToX, visStart, visLen, locL, locR, cycleOn);
 
-    paintRulerMusicalTickMarks(
-        g,
-        bounds,
-        sessionSampleToX,
-        arrLen,
-        visStart,
-        visLen,
-        sampleRate,
-        spp,
-        musicalTime);
+    if (session_.getTimelineRulerTimeDisplay() == Session::TimelineRulerTimeDisplay::MusicalBarsBeats)
+    {
+        paintRulerMusicalTickMarks(
+            g,
+            bounds,
+            sessionSampleToX,
+            arrLen,
+            visStart,
+            visLen,
+            sampleRate,
+            spp,
+            musicalTime);
+    }
+    else
+    {
+        paintRulerTickMarks(
+            g,
+            bounds,
+            sessionSampleToX,
+            arrLen,
+            visStart,
+            visLen,
+            sampleRate);
+    }
     paintLocatorTriangleHandles(
         g, bounds, sessionSampleToX, visStart, visLen, locL, locR, cycleOn);
-    paintRulerMusicalLabels(
-        g,
-        bounds,
-        sessionSampleToX,
-        arrLen,
-        visStart,
-        visLen,
-        sampleRate,
-        spp,
-        musicalTime,
-        locL,
-        locR);
+    if (session_.getTimelineRulerTimeDisplay() == Session::TimelineRulerTimeDisplay::MusicalBarsBeats)
+    {
+        paintRulerMusicalLabels(
+            g,
+            bounds,
+            sessionSampleToX,
+            arrLen,
+            visStart,
+            visLen,
+            sampleRate,
+            spp,
+            musicalTime,
+            locL,
+            locR);
+    }
+    else
+    {
+        paintRulerTimeLabels(
+            g,
+            bounds,
+            sessionSampleToX,
+            arrLen,
+            visStart,
+            visLen,
+            sampleRate,
+            locL,
+            locR);
+    }
 
     // --- Playhead: only when in the visible [visStart, visStart+visLen) window
     const std::int64_t ph = transport_.readPlayheadSamplesForUi();

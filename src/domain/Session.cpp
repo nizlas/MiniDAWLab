@@ -1495,3 +1495,21 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
 
     return juce::Result::ok();
 }
+
+void Session::setTimelineRulerTimeDisplay(const TimelineRulerTimeDisplay d) noexcept
+{
+    if (timelineRulerTimeDisplay_ == d)
+    {
+        return;
+    }
+    timelineRulerTimeDisplay_ = d;
+    if (onTimelineRulerTimeDisplayChanged_)
+    {
+        onTimelineRulerTimeDisplayChanged_();
+    }
+}
+
+void Session::setOnTimelineRulerTimeDisplayChanged(std::function<void()> callback) noexcept
+{
+    onTimelineRulerTimeDisplayChanged_ = std::move(callback);
+}

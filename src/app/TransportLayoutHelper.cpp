@@ -24,9 +24,12 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
     constexpr int kBpmEditorWidthPx = 44;
     constexpr int kMusicalInnerGapPx = 4;
     constexpr int kTimeSigComboWidthPx = 54;
+    constexpr int kGapTimeSigToFormatPx = 4;
+    constexpr int kTimelineFormatComboWidthPx = 128;
     constexpr int kGapMusicalToSnapPx = 8;
     constexpr int kMusicalClusterWidthPx = kSnapGapAfterTools + kBpmLabelWidthPx + kMusicalInnerGapPx
-                                         + kBpmEditorWidthPx + kMusicalInnerGapPx + kTimeSigComboWidthPx;
+                                         + kBpmEditorWidthPx + kMusicalInnerGapPx + kTimeSigComboWidthPx
+                                         + kGapTimeSigToFormatPx + kTimelineFormatComboWidthPx;
     constexpr int kSnapToggleWidthPx = 52;
     constexpr int kSnapComboWidthPx = 72;
     constexpr int kSnapClusterWidthPx = kSnapToggleWidthPx + 4 + kSnapComboWidthPx;
@@ -71,7 +74,10 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         x += kBpmEditorWidthPx + kMusicalInnerGapPx;
         r.arrangementTimeSignatureCombo.setBounds(x, musicalTop, kTimeSigComboWidthPx, useH);
 
-        const int snapLeft = x + kTimeSigComboWidthPx + kGapMusicalToSnapPx;
+        x += kTimeSigComboWidthPx + kGapTimeSigToFormatPx;
+        r.arrangementTimelineFormatCombo.setBounds(x, musicalTop, kTimelineFormatComboWidthPx, useH);
+
+        const int snapLeft = x + kTimelineFormatComboWidthPx + kGapMusicalToSnapPx;
         r.arrangementSnapToggle.setBounds(snapLeft, musicalTop, kSnapToggleWidthPx, useH);
         r.arrangementSnapResolutionCombo.setBounds(
             snapLeft + kSnapToggleWidthPx + 4, musicalTop, kSnapComboWidthPx, useH);

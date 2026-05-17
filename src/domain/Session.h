@@ -44,6 +44,7 @@
 #include <juce_core/juce_core.h>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -275,6 +276,26 @@ public:
     [[nodiscard]] AudioMixdownProjectSettings getAudioMixdownSettings() const noexcept;
     void setAudioMixdownSettings(AudioMixdownProjectSettings settings) noexcept;
 
+    /// [Message thread] Shared ruler labeling: main timeline + MIDI clip editor stay in sync.
+    enum class TimelineRulerTimeDisplay : std::uint8_t
+    {
+        MusicalBarsBeats = 0,
+        TimeSeconds = 1,
+    };
+
+    /// Shared `juce::ComboBox` item ids (arrangement toolbar + MIDI editor).
+    static constexpr int kTimelineRulerFormatComboIdBarsBeats = 1;
+    static constexpr int kTimelineRulerFormatComboIdSeconds = 2;
+
+    [[nodiscard]] TimelineRulerTimeDisplay getTimelineRulerTimeDisplay() const noexcept
+    {
+        return timelineRulerTimeDisplay_;
+    }
+    void setTimelineRulerTimeDisplay(TimelineRulerTimeDisplay d) noexcept;
+
+    /// [Message thread] Called after the display mode changes (e.g. repaint main + MIDI rulers).
+    void setOnTimelineRulerTimeDisplayChanged(std::function<void()> callback) noexcept;
+
     /// [Message thread] Same effects as loading `file`, but uses an already-parsed model (caller read
     /// `file` beforehand). Caller restores `experimentalInstrumentTracks` rows after timeline + inserts.
     [[nodiscard]] juce::Result applyLoadedProjectModel(
@@ -302,4 +323,7 @@ private:
 
     juce::File currentProjectFile_;
     AudioMixdownProjectSettings audioMixdown_;
+
+    TimelineRulerTimeDisplay timelineRulerTimeDisplay_{TimelineRulerTimeDisplay::MusicalBarsBeats};
+    std::function<void()> onTimelineRulerTimeDisplayChanged_;
 };

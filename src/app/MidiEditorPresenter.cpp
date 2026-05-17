@@ -265,6 +265,14 @@ void MidiEditorPresenter::syncInstrumentClipTimelineFromDevice()
     }
 }
 
+void MidiEditorPresenter::syncTimelineRulerFormatUiIfEditorOpen()
+{
+    if (midiEditorWindow_.get() != nullptr)
+    {
+        midiEditorWindow_->syncTimelineRulerFormatFromSession();
+    }
+}
+
 void MidiEditorPresenter::notifyMidiEditorExternalTransportSeekIfOpen(std::int64_t targetSample) noexcept
 {
     if (midiEditorWindow_.get() != nullptr)

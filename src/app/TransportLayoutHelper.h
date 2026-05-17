@@ -33,6 +33,8 @@ struct TransportLayoutRefs
     juce::TextEditor& arrangementBpmEditor;
     juce::ComboBox& arrangementTimeSignatureCombo;
 
+    juce::ComboBox& arrangementTimelineFormatCombo;
+
     juce::ToggleButton& arrangementSnapToggle;
     juce::ComboBox& arrangementSnapResolutionCombo;
 

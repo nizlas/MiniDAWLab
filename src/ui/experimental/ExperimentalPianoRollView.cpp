@@ -1809,9 +1809,49 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
 
             paintLocatorCycleBandAndStripe(
                 g, rb, xAtSample, visStart, visLen, locL, locR, cycleOn);
-            paintRulerTickMarks(g, rb, xAtSample, arrLen, visStart, visLen, sampleRate);
+            const bool musical
+                = session_->getTimelineRulerTimeDisplay()
+                  == Session::TimelineRulerTimeDisplay::MusicalBarsBeats;
+            if (musical)
+            {
+                const ProjectMusicalTime musicalTime = session_->getProjectMusicalTime();
+                paintRulerMusicalTickMarks(
+                    g,
+                    rb,
+                    xAtSample,
+                    arrLen,
+                    visStart,
+                    visLen,
+                    sampleRate,
+                    samplesPerPixel_,
+                    musicalTime);
+            }
+            else
+            {
+                paintRulerTickMarks(g, rb, xAtSample, arrLen, visStart, visLen, sampleRate);
+            }
             paintLocatorTriangleHandles(g, rb, xAtSample, visStart, visLen, locL, locR, cycleOn);
-            paintRulerTimeLabels(g, rb, xAtSample, arrLen, visStart, visLen, sampleRate, locL, locR);
+            if (musical)
+            {
+                const ProjectMusicalTime musicalTime = session_->getProjectMusicalTime();
+                paintRulerMusicalLabels(
+                    g,
+                    rb,
+                    xAtSample,
+                    arrLen,
+                    visStart,
+                    visLen,
+                    sampleRate,
+                    samplesPerPixel_,
+                    musicalTime,
+                    locL,
+                    locR);
+            }
+            else
+            {
+                paintRulerTimeLabels(
+                    g, rb, xAtSample, arrLen, visStart, visLen, sampleRate, locL, locR);
+            }
         }
 
         if (transport_ != nullptr && arrLen > 0)

@@ -236,6 +236,9 @@ private:
 
     void clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept;
 
+    void configureTimelineRulerFormatControls();
+    void applyTimelineRulerFormatButtonFromSession();
+
 public:
     TransportControlsContent(Transport& transportIn,
                              Session& sessionIn,
@@ -600,6 +603,16 @@ public:
                 },
             });
 
+        session.setOnTimelineRulerTimeDisplayChanged([this]() {
+            applyTimelineRulerFormatButtonFromSession();
+            rulerView.repaint();
+            trackLanesView.repaint();
+            if (midiEditorPresenter_ != nullptr)
+            {
+                midiEditorPresenter_->syncTimelineRulerFormatUiIfEditorOpen();
+            }
+        });
+
         ClipPasteboardController::Callbacks clipPasteCallbacks;
         clipPasteCallbacks.isRecording = [this] { return recorder_.isRecording(); };
         clipPasteCallbacks.isCountInActive = [this] {
@@ -756,8 +769,11 @@ public:
         configureArrangementSnapControls();
         addAndMakeVisible(arrangementSnapToggle_);
         addAndMakeVisible(arrangementSnapResolutionCombo_);
+        configureTimelineRulerFormatControls();
+        addAndMakeVisible(arrangementTimelineFormatCombo_);
         applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), false);
         applyArrangementSnapUiFromSettings(SnapSettings{}, false);
+        applyTimelineRulerFormatButtonFromSession();
 
         projectIoCoordinator_ = std::make_unique<ProjectIoCoordinator>(
             transport,
@@ -905,6 +921,7 @@ public:
 
     ~TransportControlsContent() override
     {
+        session.setOnTimelineRulerTimeDisplayChanged({});
         audioWaveformCache_.setOnPyramidReady({});
         playbackEngine_.setExperimentalInstrumentDeviceLifecycleHooks({}, {}, {});
         deviceManager.removeChangeListener(this);
@@ -1011,6 +1028,7 @@ public:
             arrangementBpmLabel_,
             arrangementBpmEditor_,
             arrangementTimeSignatureCombo_,
+            arrangementTimelineFormatCombo_,
             arrangementSnapToggle_,
             arrangementSnapResolutionCombo_,
             countInStatusLabel_,
@@ -1176,6 +1194,7 @@ private:
     bool arrangementMusicalUiApplyingFromSession_{false};
     juce::ToggleButton arrangementSnapToggle_;
     juce::ComboBox arrangementSnapResolutionCombo_;
+    juce::ComboBox arrangementTimelineFormatCombo_;
     SnapSettings arrangementSnapSettings_;
     bool arrangementSnapUiApplyingFromProject_{false};
 
@@ -1448,6 +1467,33 @@ void mini_daw_app_transport::TransportControlsContent::restoreArrangementSnapFro
     s.enabled = fields.enabled;
     s.resolution = snapResolutionFromProjectString(fields.resolutionKey);
     applyArrangementSnapUiFromSettings(s, true);
+}
+
+void mini_daw_app_transport::TransportControlsContent::configureTimelineRulerFormatControls()
+{
+    arrangementTimelineFormatCombo_.clear(juce::dontSendNotification);
+    arrangementTimelineFormatCombo_.addItem("Bars + Beats", Session::kTimelineRulerFormatComboIdBarsBeats);
+    arrangementTimelineFormatCombo_.addItem("Seconds", Session::kTimelineRulerFormatComboIdSeconds);
+    arrangementTimelineFormatCombo_.setTooltip("Timeline ruler time format (shared with the MIDI editor).");
+    arrangementTimelineFormatCombo_.onChange = [this] {
+        const int id = arrangementTimelineFormatCombo_.getSelectedId();
+        if (id == Session::kTimelineRulerFormatComboIdBarsBeats)
+        {
+            session.setTimelineRulerTimeDisplay(Session::TimelineRulerTimeDisplay::MusicalBarsBeats);
+        }
+        else if (id == Session::kTimelineRulerFormatComboIdSeconds)
+        {
+            session.setTimelineRulerTimeDisplay(Session::TimelineRulerTimeDisplay::TimeSeconds);
+        }
+    };
+}
+
+void mini_daw_app_transport::TransportControlsContent::applyTimelineRulerFormatButtonFromSession()
+{
+    const int id = session.getTimelineRulerTimeDisplay() == Session::TimelineRulerTimeDisplay::MusicalBarsBeats
+                       ? Session::kTimelineRulerFormatComboIdBarsBeats
+                       : Session::kTimelineRulerFormatComboIdSeconds;
+    arrangementTimelineFormatCombo_.setSelectedId(id, juce::dontSendNotification);
 }
 
 void mini_daw_app_transport::TransportControlsContent::invokeDeleteSelectedPlacedClipFromWindowShortcut()

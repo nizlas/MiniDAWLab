@@ -242,6 +242,27 @@ public:
             }
         };
 
+        addAndMakeVisible(timelineRulerFormatCombo_);
+        timelineRulerFormatCombo_.clear(juce::dontSendNotification);
+        timelineRulerFormatCombo_.addItem("Bars + Beats", Session::kTimelineRulerFormatComboIdBarsBeats);
+        timelineRulerFormatCombo_.addItem("Seconds", Session::kTimelineRulerFormatComboIdSeconds);
+        timelineRulerFormatCombo_.setTooltip("Timeline ruler time format (shared with the main arrangement).");
+        timelineRulerFormatCombo_.onChange = [this] {
+            if (sessionForRoll_ == nullptr)
+            {
+                return;
+            }
+            const int id = timelineRulerFormatCombo_.getSelectedId();
+            if (id == Session::kTimelineRulerFormatComboIdBarsBeats)
+            {
+                sessionForRoll_->setTimelineRulerTimeDisplay(Session::TimelineRulerTimeDisplay::MusicalBarsBeats);
+            }
+            else if (id == Session::kTimelineRulerFormatComboIdSeconds)
+            {
+                sessionForRoll_->setTimelineRulerTimeDisplay(Session::TimelineRulerTimeDisplay::TimeSeconds);
+            }
+        };
+
         addAndMakeVisible(followPlayheadToggle_);
         followPlayheadToggle_.setButtonText("Follow");
         followPlayheadToggle_.setClickingTogglesState(true);
@@ -267,6 +288,7 @@ public:
             juce::String("midi-editor: opened hasInstrument=") + (hostIn.hasInstrument() ? "true" : "false"));
 
         syncInstrumentUiFromHost();
+        syncTimelineRulerFormatFromSession();
     }
 
     ~Body() override
@@ -308,6 +330,31 @@ public:
         }
     }
 
+    void syncTimelineRulerFormatFromSession()
+    {
+        if (sessionForRoll_ == nullptr)
+        {
+            timelineRulerFormatCombo_.setSelectedId(Session::kTimelineRulerFormatComboIdBarsBeats,
+                                                    juce::dontSendNotification);
+            timelineRulerFormatCombo_.setEnabled(false);
+            timelineRulerFormatCombo_.setTooltip("Clip-bound session required to share ruler format with the main window.");
+            return;
+        }
+
+        const int id = sessionForRoll_->getTimelineRulerTimeDisplay()
+                               == Session::TimelineRulerTimeDisplay::MusicalBarsBeats
+                           ? Session::kTimelineRulerFormatComboIdBarsBeats
+                           : Session::kTimelineRulerFormatComboIdSeconds;
+        timelineRulerFormatCombo_.setSelectedId(id, juce::dontSendNotification);
+        timelineRulerFormatCombo_.setEnabled(true);
+        timelineRulerFormatCombo_.setTooltip("Timeline ruler time format (shared with the main arrangement).");
+
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            rv->repaint();
+        }
+    }
+
     void bindExternal(ExperimentalMidiPattern* p,
                       InstrumentMidiClip* timelineClip,
                       InstrumentTrackController* trackForClipGate,
@@ -326,6 +373,7 @@ public:
                                                          : std::uint64_t{0};
             syncSlidersFromActivePattern();
             syncInstrumentUiFromHost();
+            syncTimelineRulerFormatFromSession();
             return;
         }
 
@@ -372,6 +420,7 @@ public:
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
+        syncTimelineRulerFormatFromSession();
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine(
@@ -434,6 +483,7 @@ public:
         rebuildPlayerAndRoll();
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
+        syncTimelineRulerFormatFromSession();
     }
 
     void snapshotOpenClipViewportFromRoll() noexcept
@@ -593,6 +643,7 @@ public:
         rowsBox_.setBounds(toolbar.removeFromLeft(104).reduced(0, 2));
         stepsLabel_.setBounds(toolbar.removeFromLeft(44).reduced(0, 4));
         stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
+        timelineRulerFormatCombo_.setBounds(toolbar.removeFromLeft(128).reduced(0, 2));
         followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         bpmLabel_.setBounds(toolbar.removeFromLeft(36).reduced(0, 4));
         bpmSlider_.setBounds(toolbar.removeFromLeft(132).reduced(0, 2));
@@ -773,6 +824,7 @@ private:
     juce::Slider bpmSlider_;
     juce::Label stepsLabel_;
     juce::ComboBox stepsBox_;
+    juce::ComboBox timelineRulerFormatCombo_;
     juce::TextButton followPlayheadToggle_;
     juce::Label modeLabel_;
     collapsible_side_strip::ResizeSplitter midiRollResizeSplitter_;
@@ -1393,6 +1445,14 @@ void ExperimentalMidiEditorWindow::syncInstrumentStateFromHost()
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->syncInstrumentUiFromHost();
+    }
+}
+
+void ExperimentalMidiEditorWindow::syncTimelineRulerFormatFromSession()
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->syncTimelineRulerFormatFromSession();
     }
 }
 

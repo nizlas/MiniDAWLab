@@ -52,6 +52,10 @@ public:
     /// whenever the MIDI roll is shown).
     void syncInstrumentStateFromHost();
 
+    /// Match `Session` bars/beats vs seconds ruler mode (toolbar label + roll repaint); call when the
+    /// session preference changes from the main window or another editor instance.
+    void syncTimelineRulerFormatFromSession();
+
     /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass session/transport/
     /// deviceManager for absolute-timeline roll + shared playhead/locators; `timelineClip` may be null
     /// only for legacy detached use. `mainTimelineViewport` seeds roll zoom when the clip has no saved viewport.
