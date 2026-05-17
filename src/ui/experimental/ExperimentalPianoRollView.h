@@ -189,6 +189,21 @@ private:
     [[nodiscard]] juce::Rectangle<int> getNormalizedMarqueeRect() const noexcept;
     void selectTimelineNotesIntersecting(const juce::Rectangle<int>& r) noexcept;
 
+    enum class TimelineNoteResizeEdge : std::uint8_t
+    {
+        Left,
+        Right
+    };
+
+    [[nodiscard]] bool pianoMelodicTimelineBarsResizeEnabled() const noexcept;
+    [[nodiscard]] std::optional<std::pair<int, TimelineNoteResizeEdge>> findPianoBarResizeEdgeAtPoint(
+        juce::Point<int> pos) const;
+    [[nodiscard]] std::int64_t snapTimelineTickForEdit(std::int64_t tick) const noexcept;
+    [[nodiscard]] std::int64_t minTimelineNoteDurationTicks() const noexcept;
+    void beginTimelineNoteResizeGesture(int noteIndex, TimelineNoteResizeEdge edge);
+    void updateTimelineNoteResizeGesture(juce::Point<int> localPos);
+    void finishTimelineNoteResizeGesture();
+
     enum class TimelineMarqueeInteraction : std::uint8_t
     {
         None,
@@ -270,6 +285,14 @@ private:
     TimelineMarqueeInteraction timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
     juce::Point<int> timelineMarqueeAnchor_;
     juce::Rectangle<int> timelineMarqueeRect_;
+
+    bool timelineNoteResizeActive_ = false;
+    TimelineNoteResizeEdge timelineResizeEdge_{};
+    int timelineResizeNoteIndex_ = -1;
+    std::int64_t timelineResizeOriginalStartTick_ = 0;
+    std::int64_t timelineResizeOriginalDurationTicks_ = 0;
+    /// Inclusive end tick in the model: `startTick + durationTicks` at gesture start (left-edge resize).
+    std::int64_t timelineResizeAnchorEndTick_ = 0;
 
     std::function<void(const juce::String&, std::function<bool()>)> undoablePatternEditHandler_;
 
