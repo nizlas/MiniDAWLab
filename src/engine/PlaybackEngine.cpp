@@ -38,6 +38,7 @@
 
 #include "app/ShortcutDiagnostics.h"
 #include "engine/PlaybackMixHelpers.h"
+#include "engine/RoutingPlanBuilder.h"
 #include "engine/CountInClickOutput.h"
 #include "engine/RecorderService.h"
 #include "domain/Session.h"
@@ -601,26 +602,53 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     }
 
+    const std::shared_ptr<const RoutingPlan> routingPlan
+        = routingPlan_.load(std::memory_order_acquire);
+    const RoutingPlan* const rp = routingPlan.get();
+
     const Track* masterTrackPtr = nullptr;
-    float* const* mixSumTarget = outputChannelData;
-    if (sessionSnap != nullptr && masterScratchCapacity_ >= numSamples && masterScratchPtrs_[0] != nullptr
-        && masterScratchPtrs_[1] != nullptr)
+    float* mixBusL = nullptr;
+    float* mixBusR = nullptr;
+    if (sessionSnap != nullptr)
     {
         masterTrackPtr = playback_mix_helpers::findCanonicalMasterTrack(*sessionSnap);
-        if (masterTrackPtr != nullptr)
+    }
+    if (rp != nullptr && !rp->busScratchL.empty() && rp->masterBusIndex < rp->busScratchL.size())
+    {
+        mixBusL = rp->busScratchL[rp->masterBusIndex];
+        mixBusR = rp->busScratchR[rp->masterBusIndex];
+        for (size_t bi = 0; bi < rp->busScratchL.size(); ++bi)
         {
-            juce::FloatVectorOperations::clear(masterScratchPtrs_[0], numSamples);
-            juce::FloatVectorOperations::clear(masterScratchPtrs_[1], numSamples);
-            mixSumTarget = masterScratchPtrs_;
+            if (rp->busScratchL[bi] != nullptr)
+            {
+                juce::FloatVectorOperations::clear(rp->busScratchL[bi], numSamples);
+            }
+            if (rp->busScratchR[bi] != nullptr)
+            {
+                juce::FloatVectorOperations::clear(rp->busScratchR[bi], numSamples);
+            }
         }
     }
+    else if (sessionSnap != nullptr && masterScratchCapacity_ >= numSamples
+             && masterScratchPtrs_[0] != nullptr && masterScratchPtrs_[1] != nullptr
+             && masterTrackPtr != nullptr)
+    {
+        juce::FloatVectorOperations::clear(masterScratchPtrs_[0], numSamples);
+        juce::FloatVectorOperations::clear(masterScratchPtrs_[1], numSamples);
+        mixBusL = masterScratchPtrs_[0];
+        mixBusR = masterScratchPtrs_[1];
+    }
+
+    float* const mixBusPtrs[2] = { mixBusL, mixBusR };
+    float* const* mixSumTarget
+        = (mixBusL != nullptr && mixBusR != nullptr) ? mixBusPtrs : outputChannelData;
 
     if (countIn_ != nullptr)
     {
         countIn_->audioThread_mixInto(mixSumTarget, numOutputChannels, numSamples);
     }
 
-    const auto finalizeMasterBusToDevice = [&]() noexcept
+    const auto finalizeRoutingToDevice = [&]() noexcept
     {
 #if !defined(NDEBUG)
         if constexpr (shortcut_diagnostics::kShowMasterRoutingDiag)
@@ -629,8 +657,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             if (!loggedOnce)
             {
                 loggedOnce = true;
-                const bool directSumFallback
-                    = (masterTrackPtr == nullptr || mixSumTarget == outputChannelData);
+                const bool directSumFallback = (mixSumTarget == outputChannelData);
                 juce::Logger::writeToLog(
                     juce::String("[MasterRoutingDiag] live block: canonicalMasterId=")
                     + (masterTrackPtr != nullptr
@@ -643,6 +670,38 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             }
         }
 #endif
+        if (rp != nullptr && sessionSnap != nullptr && !rp->busSteps.empty())
+        {
+            for (const RoutingPlan::BusStep& step : rp->busSteps)
+            {
+                if (step.sourceBusIndex < 0
+                    || step.sourceBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                const Track& busTr = sessionSnap->getTrack(step.trackIndex);
+                float* const busStereo[2] = { rp->busScratchL[(size_t)step.sourceBusIndex],
+                                              rp->busScratchR[(size_t)step.sourceBusIndex] };
+                if (step.destBusIndex < 0)
+                {
+                    playback_mix_helpers::processBusChannelStripToOutputs(busTr,
+                                                                          busStereo,
+                                                                          0,
+                                                                          numSamples,
+                                                                          numOutputChannels,
+                                                                          outputChannelData,
+                                                                          pluginHost_);
+                }
+                else if (step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
+                {
+                    float* const destStereo[2] = { rp->busScratchL[(size_t)step.destBusIndex],
+                                                   rp->busScratchR[(size_t)step.destBusIndex] };
+                    playback_mix_helpers::processBusChannelStripToOutputs(
+                        busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_);
+                }
+            }
+            return;
+        }
         if (masterTrackPtr != nullptr && mixSumTarget != outputChannelData)
         {
             playback_mix_helpers::processBusChannelStripToOutputs(*masterTrackPtr,
@@ -742,8 +801,23 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     routingInstSlots[sx].sessionFaderGain = fader;
                 }
 
+                float* const* instMixTarget = mixSumTarget;
+                float* instBusPtrs[2] = { mixBusL, mixBusR };
+                if (rp != nullptr && sessionSnap != nullptr)
+                {
+                    const int destBi = destBusIndexForTrackInPlan(*rp, *sessionSnap, ti);
+                    if (destBi >= 0 && destBi < static_cast<int>(rp->busScratchL.size())
+                        && rp->busScratchL[(size_t)destBi] != nullptr
+                        && rp->busScratchR[(size_t)destBi] != nullptr)
+                    {
+                        instBusPtrs[0] = rp->busScratchL[(size_t)destBi];
+                        instBusPtrs[1] = rp->busScratchR[(size_t)destBi];
+                        instMixTarget = instBusPtrs;
+                    }
+                }
+
                 playback_mix_helpers::mixExperimentalInstrumentAfterTracks(
-                    entry->host, mixSumTarget, numOutputChannels, numSamples, fader, tr.getStereoPan());
+                    entry->host, instMixTarget, numOutputChannels, numSamples, fader, tr.getStereoPan());
 
                 if (sx >= 0)
                 {
@@ -768,7 +842,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     const auto mixInstrumentsAndFinalizeMaster = [&]() noexcept
     {
         mixKeyedInstrumentLanesIntoOutputsIfAny();
-        finalizeMasterBusToDevice();
+        finalizeRoutingToDevice();
     };
 
     if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0
@@ -864,15 +938,41 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             omitClipPlaybackForTrack = recorder_->getRecordingTrackId();
         }
 
-        playback_mix_helpers::renderAudioTracksClipSummingForSegment(*sessionSnap,
-                                                                     timelineStartAudible,
-                                                                     audibleRun,
-                                                                     outFrame0 + silencePrefix,
-                                                                     numOutputChannels,
-                                                                     mixSumTarget,
-                                                                     pluginHost_,
-                                                                     omitClipPlaybackForTrack,
-                                                                     timelineEnd);
+        if (rp != nullptr && !rp->sourceSteps.empty())
+        {
+            for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+            {
+                if (step.destBusIndex < 0
+                    || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                float* const destPtrs[2] = { rp->busScratchL[(size_t)step.destBusIndex],
+                                             rp->busScratchR[(size_t)step.destBusIndex] };
+                playback_mix_helpers::renderAudioTracksClipSummingForSegment(*sessionSnap,
+                                                                             timelineStartAudible,
+                                                                             audibleRun,
+                                                                             outFrame0 + silencePrefix,
+                                                                             2,
+                                                                             destPtrs,
+                                                                             pluginHost_,
+                                                                             omitClipPlaybackForTrack,
+                                                                             timelineEnd,
+                                                                             step.trackIndex);
+            }
+        }
+        else
+        {
+            playback_mix_helpers::renderAudioTracksClipSummingForSegment(*sessionSnap,
+                                                                         timelineStartAudible,
+                                                                         audibleRun,
+                                                                         outFrame0 + silencePrefix,
+                                                                         numOutputChannels,
+                                                                         mixSumTarget,
+                                                                         pluginHost_,
+                                                                         omitClipPlaybackForTrack,
+                                                                         timelineEnd);
+        }
 
         // Timeline order: dispatch transport MIDI toward each Instrument row that has a playback entry.
         if (playbackIntent == PlaybackIntent::Playing && instrumentSnap != nullptr)
@@ -1077,19 +1177,56 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
     juce::FloatVectorOperations::clear(stereoOutputLR[0], numSamples);
     juce::FloatVectorOperations::clear(stereoOutputLR[1], numSamples);
 
-    const Track* masterTrackPtr = nullptr;
-    float* const* mixSumTarget = stereoOutputLR;
-    if (masterScratchCapacity_ >= numSamples && masterScratchPtrs_[0] != nullptr
-        && masterScratchPtrs_[1] != nullptr)
+    std::size_t offlineBusCount = 0;
+    for (int i = 0; i < sessionSnap.getNumTracks(); ++i)
     {
-        masterTrackPtr = playback_mix_helpers::findCanonicalMasterTrack(sessionSnap);
-        if (masterTrackPtr != nullptr)
+        const TrackKind k = sessionSnap.getTrack(i).getKind();
+        if (k == TrackKind::Group || k == TrackKind::Master)
         {
-            juce::FloatVectorOperations::clear(masterScratchPtrs_[0], numSamples);
-            juce::FloatVectorOperations::clear(masterScratchPtrs_[1], numSamples);
-            mixSumTarget = masterScratchPtrs_;
+            ++offlineBusCount;
         }
     }
+    ensureRoutingBusScratchPool(offlineBusCount, juce::jmax(numSamples, kOfflineMixdownBlockCapSamples));
+    std::vector<std::pair<float*, float*>> offlineScratchPairs;
+    offlineScratchPairs.reserve(offlineBusCount);
+    for (const RoutingBusScratchSlot& slot : routingBusScratch_)
+    {
+        offlineScratchPairs.emplace_back(slot.ptrs[0], slot.ptrs[1]);
+    }
+    const std::shared_ptr<const RoutingPlan> offlinePlan
+        = routing_plan_builder::build(sessionSnap, offlineScratchPairs);
+    const RoutingPlan* const rp = offlinePlan.get();
+
+    const Track* masterTrackPtr = playback_mix_helpers::findCanonicalMasterTrack(sessionSnap);
+    float* mixBusL = nullptr;
+    float* mixBusR = nullptr;
+    if (rp != nullptr && !rp->busScratchL.empty() && rp->masterBusIndex < rp->busScratchL.size())
+    {
+        mixBusL = rp->busScratchL[rp->masterBusIndex];
+        mixBusR = rp->busScratchR[rp->masterBusIndex];
+        for (size_t bi = 0; bi < rp->busScratchL.size(); ++bi)
+        {
+            if (rp->busScratchL[bi] != nullptr)
+            {
+                juce::FloatVectorOperations::clear(rp->busScratchL[bi], numSamples);
+            }
+            if (rp->busScratchR[bi] != nullptr)
+            {
+                juce::FloatVectorOperations::clear(rp->busScratchR[bi], numSamples);
+            }
+        }
+    }
+    else if (masterScratchCapacity_ >= numSamples && masterScratchPtrs_[0] != nullptr
+             && masterScratchPtrs_[1] != nullptr && masterTrackPtr != nullptr)
+    {
+        juce::FloatVectorOperations::clear(masterScratchPtrs_[0], numSamples);
+        juce::FloatVectorOperations::clear(masterScratchPtrs_[1], numSamples);
+        mixBusL = masterScratchPtrs_[0];
+        mixBusR = masterScratchPtrs_[1];
+    }
+    float* const mixBusPtrs[2] = { mixBusL, mixBusR };
+    float* const* mixSumTarget
+        = (mixBusL != nullptr && mixBusR != nullptr) ? mixBusPtrs : stereoOutputLR;
 
     const std::int64_t playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
     const std::int64_t renderBase = timelineSegStartSample + playbackShift;
@@ -1105,15 +1242,41 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
         jassert(timelineStartAudible >= 0);
         const int silencePrefix = static_cast<int>(silenceFrames);
 
-        playback_mix_helpers::renderAudioTracksClipSummingForSegment(sessionSnap,
-                                                                     timelineStartAudible,
-                                                                     audibleRun,
-                                                                     silencePrefix,
-                                                                     2,
-                                                                     mixSumTarget,
-                                                                     pluginHost_,
-                                                                     kInvalidTrackId,
-                                                                     sessionSnap.getArrangementExtentSamples());
+        if (rp != nullptr && !rp->sourceSteps.empty())
+        {
+            for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+            {
+                if (step.destBusIndex < 0
+                    || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                float* const destPtrs[2] = { rp->busScratchL[(size_t)step.destBusIndex],
+                                             rp->busScratchR[(size_t)step.destBusIndex] };
+                playback_mix_helpers::renderAudioTracksClipSummingForSegment(sessionSnap,
+                                                                             timelineStartAudible,
+                                                                             audibleRun,
+                                                                             silencePrefix,
+                                                                             2,
+                                                                             destPtrs,
+                                                                             pluginHost_,
+                                                                             kInvalidTrackId,
+                                                                             sessionSnap.getArrangementExtentSamples(),
+                                                                             step.trackIndex);
+            }
+        }
+        else
+        {
+            playback_mix_helpers::renderAudioTracksClipSummingForSegment(sessionSnap,
+                                                                         timelineStartAudible,
+                                                                         audibleRun,
+                                                                         silencePrefix,
+                                                                         2,
+                                                                         mixSumTarget,
+                                                                         pluginHost_,
+                                                                         kInvalidTrackId,
+                                                                         sessionSnap.getArrangementExtentSamples());
+        }
 
         if (instrumentSnap != nullptr)
         {
@@ -1174,12 +1337,58 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                 continue;
             }
 
+            float* const* instMixTarget = mixSumTarget;
+            float* instBusPtrs[2] = { mixBusL, mixBusR };
+            if (rp != nullptr)
+            {
+                const int destBi = destBusIndexForTrackInPlan(*rp, sessionSnap, ti);
+                if (destBi >= 0 && destBi < static_cast<int>(rp->busScratchL.size())
+                    && rp->busScratchL[(size_t)destBi] != nullptr
+                    && rp->busScratchR[(size_t)destBi] != nullptr)
+                {
+                    instBusPtrs[0] = rp->busScratchL[(size_t)destBi];
+                    instBusPtrs[1] = rp->busScratchR[(size_t)destBi];
+                    instMixTarget = instBusPtrs;
+                }
+            }
+
             playback_mix_helpers::mixExperimentalInstrumentAfterTracks(
-                entry->host, mixSumTarget, 2, numSamples, fader, tr.getStereoPan());
+                entry->host, instMixTarget, 2, numSamples, fader, tr.getStereoPan());
         }
     }
 
-    if (masterTrackPtr != nullptr && mixSumTarget != stereoOutputLR)
+    if (rp != nullptr && !rp->busSteps.empty())
+    {
+        for (const RoutingPlan::BusStep& step : rp->busSteps)
+        {
+            if (step.sourceBusIndex < 0
+                || step.sourceBusIndex >= static_cast<int>(rp->busScratchL.size()))
+            {
+                continue;
+            }
+            const Track& busTr = sessionSnap.getTrack(step.trackIndex);
+            float* const busStereo[2] = { rp->busScratchL[(size_t)step.sourceBusIndex],
+                                          rp->busScratchR[(size_t)step.sourceBusIndex] };
+            if (step.destBusIndex < 0)
+            {
+                playback_mix_helpers::processBusChannelStripToOutputs(busTr,
+                                                                      busStereo,
+                                                                      0,
+                                                                      numSamples,
+                                                                      2,
+                                                                      stereoOutputLR,
+                                                                      pluginHost_);
+            }
+            else if (step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
+            {
+                float* const destStereo[2] = { rp->busScratchL[(size_t)step.destBusIndex],
+                                               rp->busScratchR[(size_t)step.destBusIndex] };
+                playback_mix_helpers::processBusChannelStripToOutputs(
+                    busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_);
+            }
+        }
+    }
+    else if (masterTrackPtr != nullptr && mixSumTarget != stereoOutputLR)
     {
         playback_mix_helpers::processBusChannelStripToOutputs(*masterTrackPtr,
                                                               mixSumTarget,
@@ -1189,4 +1398,68 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                               stereoOutputLR,
                                                               pluginHost_);
     }
+}
+
+void PlaybackEngine::ensureRoutingBusScratchPool(const std::size_t numBuses,
+                                                 const int numSamples) noexcept
+{
+    if (numBuses == 0 || numSamples <= 0)
+    {
+        routingBusScratch_.clear();
+        return;
+    }
+    routingBusScratch_.resize(numBuses);
+    for (RoutingBusScratchSlot& slot : routingBusScratch_)
+    {
+        if (slot.buf.getNumSamples() < numSamples || slot.buf.getNumChannels() < 2)
+        {
+            slot.buf.setSize(2, numSamples, false, false, true);
+        }
+        slot.ptrs[0] = slot.buf.getWritePointer(0);
+        slot.ptrs[1] = slot.buf.getWritePointer(1);
+    }
+}
+
+void PlaybackEngine::rebuildRoutingPlanFromSession() noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        routingPlan_.store(nullptr, std::memory_order_release);
+        return;
+    }
+    std::size_t busCount = 0;
+    for (int i = 0; i < snap->getNumTracks(); ++i)
+    {
+        const TrackKind k = snap->getTrack(i).getKind();
+        if (k == TrackKind::Group || k == TrackKind::Master)
+        {
+            ++busCount;
+        }
+    }
+    const int cap = juce::jmax(masterScratchCapacity_, kOfflineMixdownBlockCapSamples);
+    ensureRoutingBusScratchPool(busCount, cap);
+    std::vector<std::pair<float*, float*>> scratchPairs;
+    scratchPairs.reserve(busCount);
+    for (const RoutingBusScratchSlot& slot : routingBusScratch_)
+    {
+        scratchPairs.emplace_back(slot.ptrs[0], slot.ptrs[1]);
+    }
+    const std::shared_ptr<const RoutingPlan> plan = routing_plan_builder::build(*snap, scratchPairs);
+    routingPlan_.store(plan, std::memory_order_release);
+}
+
+int PlaybackEngine::destBusIndexForTrackInPlan(const RoutingPlan& plan,
+                                               const SessionSnapshot& snap,
+                                               const int trackIndex) const noexcept
+{
+    juce::ignoreUnused(snap);
+    for (const RoutingPlan::SourceStep& step : plan.sourceSteps)
+    {
+        if (step.trackIndex == trackIndex)
+        {
+            return step.destBusIndex;
+        }
+    }
+    return static_cast<int>(plan.masterBusIndex);
 }

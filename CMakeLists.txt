@@ -83,6 +83,7 @@ target_sources(MiniDAWLab PRIVATE
     src/diagnostics/UndoDiagnosticFileLog.cpp
     src/diagnostics/DrumNameDiagnosticFileLog.cpp
     src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/AudioWaveformCache.cpp
@@ -92,6 +93,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/CountInClickOutput.cpp
     src/playback/ExperimentalInstrumentPlaybackBridge.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
     src/app/AudioMixdownExporter.cpp
     src/app/AudioMixdownDialog.cpp

@@ -15,7 +15,8 @@ Track::Track(const TrackId id,
              const bool trackOff,
              const bool trackMuted,
              const TrackKind kind,
-             const float stereoPan) noexcept
+             const float stereoPan,
+             const TrackId routedOutputTrackId) noexcept
     : id_(id)
     , name_(std::move(name))
     , placedClips_(std::move(placedClips))
@@ -24,6 +25,7 @@ Track::Track(const TrackId id,
     , trackMuted_(trackMuted)
     , kind_(kind)
     , stereoPan_(sanitizeTrackStereoPan(stereoPan))
+    , routedOutputTrackId_(routedOutputTrackId)
 {
     jassert(id_ != kInvalidTrackId);
 }
@@ -52,5 +54,6 @@ Track Track::renamed(juce::String newName) const noexcept
                  trackOff_,
                  trackMuted_,
                  kind_,
-                 stereoPan_);
+                 stereoPan_,
+                 routedOutputTrackId_);
 }

@@ -187,9 +187,9 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
             if (k != TrackKind::Audio)
             {
                 return juce::Result::fail(
-                    k == TrackKind::Master
-                        ? "Stereo Out cannot host audio clips."
-                        : "Add clip targets an audio lane; activate an audio track header first.");
+                    k == TrackKind::Master ? "Stereo Out cannot host audio clips."
+                    : k == TrackKind::Group ? "Group tracks cannot host audio clips."
+                                            : "Add clip targets an audio lane; activate an audio track header first.");
             }
         }
     }
@@ -418,6 +418,55 @@ void Session::addTrack() noexcept
     }
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
     activeTrackId_ = newId;
+}
+
+void Session::addGroupTrack() noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    int groupCount = 0;
+    for (int i = 0; i < current->getNumTracks(); ++i)
+    {
+        if (current->getTrack(i).getKind() == TrackKind::Group)
+        {
+            ++groupCount;
+        }
+    }
+    const TrackId newId = nextTrackId_++;
+    jassert(newId != kInvalidTrackId);
+    const juce::String newName = juce::String("Group ") + juce::String(groupCount + 1);
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackAdded(*current, newId, newName, TrackKind::Group);
+    if (next == nullptr)
+    {
+        jassert(false);
+        return;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    activeTrackId_ = newId;
+}
+
+void Session::setTrackRoutedOutput(const TrackId trackId, const TrackId destTrackId) noexcept
+{
+    if (trackId == kInvalidTrackId || destTrackId == kInvalidTrackId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackRoutedOutputTo(*current, trackId, destTrackId);
+    if (next == nullptr || next == current)
+    {
+        return;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
 TrackId Session::getActiveTrackId() const noexcept
@@ -1132,10 +1181,18 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         case TrackKind::Master:
             tr.kind = "master";
             break;
+        case TrackKind::Group:
+            tr.kind = "group";
+            break;
         case TrackKind::Audio:
         default:
             tr.kind = "audio";
             break;
+        }
+
+        if (t.getKind() != TrackKind::Master)
+        {
+            tr.routedOutputTrackId = t.getRoutedOutputTrackId();
         }
 
         const bool timelineAudioLane = (t.getKind() == TrackKind::Audio);
@@ -1349,12 +1406,25 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     std::vector<Track> built;
     built.reserve(parsed.tracks.size());
 
+    TrackId masterIdFromFile = kInvalidTrackId;
+    for (const auto& trDto : parsed.tracks)
+    {
+        if (trDto.kind.equalsIgnoreCase("master"))
+        {
+            masterIdFromFile = trDto.id;
+        }
+    }
+
     for (const auto& trDto : parsed.tracks)
     {
         TrackKind tk = TrackKind::Audio;
         if (trDto.kind.equalsIgnoreCase("instrument"))
         {
             tk = TrackKind::Instrument;
+        }
+        else if (trDto.kind.equalsIgnoreCase("group"))
+        {
+            tk = TrackKind::Group;
         }
         else if (trDto.kind.equalsIgnoreCase("master"))
         {
@@ -1437,6 +1507,12 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         const bool trackOff = (tk == TrackKind::Master) ? false : trDto.off;
         const juce::String trackName = (tk == TrackKind::Master) ? juce::String(kMasterTrackDisplayName)
                                                                  : trDto.name;
+        TrackId routeOut = kInvalidTrackId;
+        if (tk != TrackKind::Master)
+        {
+            routeOut = (trDto.routedOutputTrackId != kInvalidTrackId) ? trDto.routedOutputTrackId
+                                                                      : masterIdFromFile;
+        }
         built.emplace_back(
             trDto.id,
             trackName,
@@ -1445,7 +1521,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             trackOff,
             trDto.muted,
             tk,
-            sanitizeTrackStereoPan(trDto.stereoPan));
+            sanitizeTrackStereoPan(trDto.stereoPan),
+            routeOut);
     }
 
     if (built.empty())

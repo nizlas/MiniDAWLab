@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "domain/Track.h"
+#include "engine/RoutingPlan.h"
 #include "transport/Transport.h"
 
 class CountInClickOutput;
@@ -151,6 +152,9 @@ public:
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
 
+    /// [Message thread] Rebuild `RoutingPlan` and bus scratch pool from the current session snapshot.
+    void rebuildRoutingPlanFromSession() noexcept;
+
     /// [Message thread] One stereo offline block (`stereoOutputLR[0]` = L, `[1]` = R), matching realtime summing
     /// order for clips, inserts, instruments, mute/off/fader/pan. Does not advance transport.
     void renderOfflineMixdownBlock(const SessionSnapshot& sessionSnap,
@@ -166,6 +170,12 @@ private:
 
     /// [Message thread] Pre-size stereo master summing scratch (device block and offline cap).
     void ensureMasterScratchCapacity(int numSamples) noexcept;
+
+    void ensureRoutingBusScratchPool(std::size_t numBuses, int numSamples) noexcept;
+
+    [[nodiscard]] int destBusIndexForTrackInPlan(const RoutingPlan& plan,
+                                                 const SessionSnapshot& snap,
+                                                 int trackIndex) const noexcept;
 
     Transport& transport_;
     Session& session_;
@@ -188,4 +198,12 @@ private:
     juce::AudioBuffer<float> masterScratch_;
     float* masterScratchPtrs_[2] = { nullptr, nullptr };
     int masterScratchCapacity_ = 0;
+
+    struct RoutingBusScratchSlot
+    {
+        juce::AudioBuffer<float> buf;
+        float* ptrs[2] = { nullptr, nullptr };
+    };
+    std::vector<RoutingBusScratchSlot> routingBusScratch_;
+    std::atomic<std::shared_ptr<const RoutingPlan>> routingPlan_;
 };

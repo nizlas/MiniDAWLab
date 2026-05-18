@@ -115,6 +115,12 @@ public:
     // `addClipFromFileAtPlayhead` (newest = front within that track when a clip is added).
     void addTrack() noexcept;
 
+    /// [Message thread] Append an empty `TrackKind::Group` bus row (routes to Master by default).
+    void addGroupTrack() noexcept;
+
+    /// [Message thread] Set main output routing (`destTrackId` must be a legal Group or Master target).
+    void setTrackRoutedOutput(TrackId trackId, TrackId destTrackId) noexcept;
+
     // [Message thread] `activeTrackId_` is the lane that receives the next "Add clip" (see
     // `addClipFromFileAtPlayhead`); it becomes the new id after `addTrack()`. **Does not** publish
     // a new snapshot — UI-only / command targeting; keep separate from `SessionSnapshot`.

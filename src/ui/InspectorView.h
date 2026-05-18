@@ -63,6 +63,12 @@ public:
         renameTrackHandler_ = std::move(fn);
     }
 
+    /// [Message thread] Undoable output routing (`TrackLanesEditCoordinator`).
+    void setRoutedOutputHandler(std::function<void(TrackId, TrackId)> fn) noexcept
+    {
+        routedOutputHandler_ = std::move(fn);
+    }
+
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
     void dragOperationEnded(const juce::DragAndDropTarget::SourceDetails& details) override;
@@ -123,6 +129,8 @@ private:
     juce::Label channelVolumeDbUnitLabel_;
     juce::Label panCaptionLabel_;
     InspectorPanControl panField_;
+    juce::Label outputCaptionLabel_;
+    juce::ComboBox outputComboBox_;
     juce::Label insertsSectionLabel_;
     juce::Label preSectionLabel_;
     juce::Label preEmptyLabel_;
@@ -150,7 +158,10 @@ private:
     juce::String activeTrackPlainName_;
 
     std::function<bool(TrackId, juce::String)> renameTrackHandler_;
+    std::function<void(TrackId, TrackId)> routedOutputHandler_;
     bool inspectorNameEditorGuard_ = false;
+    bool outputComboGuard_ = false;
+    std::vector<TrackId> outputComboDestIds_;
 
     TrackId lastShownInsertRowsTrackId_ = kInvalidTrackId;
     TrackId lastShownTrackId_ = kInvalidTrackId;

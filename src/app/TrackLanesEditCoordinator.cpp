@@ -401,6 +401,36 @@ void TrackLanesEditCoordinator::install()
     trackLanesView_.setOnUndoableRenameTrackRequested(renameTrack);
     inspectorView_.setRenameTrackHandler(renameTrack);
 
+    inspectorView_.setRoutedOutputHandler([this](const TrackId trackId, const TrackId destId) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return;
+        }
+        callbacks_.executeUndoableSessionEdit(
+            "Route track output",
+            [this, trackId, destId]() -> bool {
+                const std::shared_ptr<const SessionSnapshot> before
+                    = session_.loadSessionSnapshotForAudioThread();
+                if (before == nullptr)
+                {
+                    return false;
+                }
+                session_.setTrackRoutedOutput(trackId, destId);
+                const std::shared_ptr<const SessionSnapshot> after
+                    = session_.loadSessionSnapshotForAudioThread();
+                if (after == nullptr || after == before)
+                {
+                    return false;
+                }
+                callbacks_.syncViewportFromSession();
+                trackLanesView_.syncTracksFromSession();
+                rulerView_.repaint();
+                trackLanesView_.repaint();
+                inspectorView_.refreshFromSession();
+                return true;
+            });
+    });
+
     // UI-only mutex with the instrument timeline header row. Audio headers paint inactive
     // when the instrument row is the UI-active row; clicking any audio header clears it.
     // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.

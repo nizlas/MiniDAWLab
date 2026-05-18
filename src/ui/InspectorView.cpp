@@ -3,6 +3,7 @@
 #include "domain/Track.h"
 
 #include "domain/Session.h"
+#include "domain/SessionRouting.h"
 #include "domain/SessionSnapshot.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -514,6 +515,30 @@ InspectorView::InspectorView(Session& session)
         session_.setTrackStereoPan(active, pan);
     };
     addAndMakeVisible(panField_);
+
+    outputCaptionLabel_.setText("Output", juce::dontSendNotification);
+    outputCaptionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(outputCaptionLabel_);
+
+    outputComboBox_.onChange = [this] {
+        if (outputComboGuard_ || routedOutputHandler_ == nullptr)
+        {
+            return;
+        }
+        const TrackId active = session_.getActiveTrackId();
+        const int pick = outputComboBox_.getSelectedId();
+        if (active == kInvalidTrackId || pick <= 0)
+        {
+            return;
+        }
+        const size_t ix = static_cast<size_t>(pick - 1);
+        if (ix >= outputComboDestIds_.size())
+        {
+            return;
+        }
+        routedOutputHandler_(active, outputComboDestIds_[ix]);
+    };
+    addAndMakeVisible(outputComboBox_);
 
     insertsSectionLabel_.setText("Inserts", juce::dontSendNotification);
     insertsSectionLabel_.setFont(juce::FontOptions(11.0f));
@@ -1185,6 +1210,55 @@ void InspectorView::refreshFromSession()
         panField_.setPan(tr.getStereoPan(), juce::dontSendNotification);
     }
 
+    const bool showOutputRouting = (tr.getKind() != TrackKind::Master);
+    outputCaptionLabel_.setVisible(showOutputRouting);
+    outputComboBox_.setVisible(showOutputRouting);
+    if (showOutputRouting)
+    {
+        outputComboGuard_ = true;
+        outputComboBox_.clear(juce::dontSendNotification);
+        outputComboDestIds_.clear();
+        const std::shared_ptr<const SessionSnapshot> routeSnap
+            = session_.loadSessionSnapshotForAudioThread();
+        if (routeSnap != nullptr)
+        {
+            const std::vector<TrackId> legal
+                = session_routing::legalOutputDestinations(*routeSnap, active);
+            int selectId = 0;
+            const TrackId currentOut = tr.getRoutedOutputTrackId();
+            for (size_t li = 0; li < legal.size(); ++li)
+            {
+                const TrackId destId = legal[li];
+                outputComboDestIds_.push_back(destId);
+                juce::String label;
+                const int dix = routeSnap->findTrackIndexById(destId);
+                if (dix >= 0 && routeSnap->getTrack(dix).getKind() == TrackKind::Master)
+                {
+                    label = juce::String(kMasterTrackDisplayName);
+                }
+                else if (dix >= 0)
+                {
+                    label = routeSnap->getTrack(dix).getName();
+                }
+                else
+                {
+                    label = juce::String("Track ") + juce::String((juce::int64)destId);
+                }
+                const int itemId = static_cast<int>(li) + 1;
+                outputComboBox_.addItem(label, itemId);
+                if (destId == currentOut)
+                {
+                    selectId = itemId;
+                }
+            }
+            if (selectId > 0)
+            {
+                outputComboBox_.setSelectedId(selectId, juce::dontSendNotification);
+            }
+        }
+        outputComboGuard_ = false;
+    }
+
     const bool nameFocused = activeTrackNameEditor_.hasKeyboardFocus(false);
     if (!nameFocused || switchedTrack)
     {
@@ -1234,6 +1308,11 @@ void InspectorView::resized()
         panField_.setBounds(panRow);
         panField_.toFront(false);
     }
+
+    area.removeFromTop(8);
+    outputCaptionLabel_.setBounds(area.removeFromTop(18));
+    area.removeFromTop(2);
+    outputComboBox_.setBounds(area.removeFromTop(24));
 
     area.removeFromTop(10);
     insertsSectionLabel_.setBounds(area.removeFromTop(18));

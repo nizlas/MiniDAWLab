@@ -72,6 +72,12 @@ namespace
         {
             to->setProperty("muted", true);
         }
+        if (fileVersion >= 14 && !t.kind.equalsIgnoreCase("master") && t.routedOutputTrackId != kInvalidTrackId)
+        {
+            juce::DynamicObject::Ptr outObj = new juce::DynamicObject();
+            outObj->setProperty("trackId", static_cast<std::int64_t>(t.routedOutputTrackId));
+            to->setProperty("output", juce::var(outObj.get()));
+        }
         if (fileVersion >= 9)
         {
             if (!t.inserts.empty())
@@ -1378,6 +1384,22 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         if (trk.kind.equalsIgnoreCase("master"))
         {
             trk.off = false;
+        }
+        if (ver >= 14)
+        {
+            const juce::var& outV = tv.getProperty("output", {});
+            if (outV.isObject())
+            {
+                if (const auto* outObj = outV.getDynamicObject())
+                {
+                    const TrackId parsed = static_cast<TrackId>((std::uint64_t)(std::int64_t)outObj->getProperty(
+                        "trackId"));
+                    if (parsed != kInvalidTrackId)
+                    {
+                        trk.routedOutputTrackId = parsed;
+                    }
+                }
+            }
         }
         if (ver >= 8)
         {

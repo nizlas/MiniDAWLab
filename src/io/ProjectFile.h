@@ -47,8 +47,10 @@ struct ProjectFileTrackV1
 {
     TrackId id = kInvalidTrackId;
     juce::String name;
-    /// v13: `"audio"` (default when absent) or `"instrument"` (hosted instrument timeline lane; multiple allowed).
+    /// v13: `"audio"` (default when absent), `"instrument"`, `"group"`, or `"master"`.
     juce::String kind;
+    /// v14: main output bus (`Group` or `Master` track id). Omitted on master row.
+    TrackId routedOutputTrackId = kInvalidTrackId;
     std::vector<ProjectFileClipV1> clips;
     // v5: linear gain at channel-fader point (mixer). Omitted in JSON when ~ unity (see writer).
     float channelFaderGain = kTrackChannelVolumeUnityGain;

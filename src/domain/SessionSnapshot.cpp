@@ -15,6 +15,7 @@
 
 #include "domain/AudioClip.h"
 #include "domain/ProjectMusicalTime.h"
+#include "domain/SessionRouting.h"
 #include "domain/TrackStereoPan.h"
 
 #include <juce_core/juce_core.h>
@@ -190,7 +191,8 @@ namespace
                      t.isTrackOff(),
                      t.isMuted(),
                      t.getKind(),
-                     t.getStereoPan());
+                     t.getStereoPan(),
+                     t.getRoutedOutputTrackId());
     }
 
     [[nodiscard]] Track duplicateTrackWithMovedClips(const Track& t, std::vector<PlacedClip>&& clips)
@@ -202,7 +204,8 @@ namespace
                      t.isTrackOff(),
                      t.isMuted(),
                      t.getKind(),
-                     t.getStereoPan());
+                     t.getStereoPan(),
+                     t.getRoutedOutputTrackId());
     }
 
     [[nodiscard]] Track duplicateTrackSameClipsWithGain(const Track& t, const float linearGain)
@@ -215,7 +218,20 @@ namespace
                      t.isTrackOff(),
                      t.isMuted(),
                      t.getKind(),
-                     t.getStereoPan());
+                     t.getStereoPan(),
+                     t.getRoutedOutputTrackId());
+    }
+
+    [[nodiscard]] TrackId findLastMasterTrackId(const std::vector<Track>& tracks) noexcept
+    {
+        for (int i = static_cast<int>(tracks.size()) - 1; i >= 0; --i)
+        {
+            if (tracks[(size_t)i].getKind() == TrackKind::Master)
+            {
+                return tracks[(size_t)i].getId();
+            }
+        }
+        return kInvalidTrackId;
     }
 } // namespace
 
@@ -271,7 +287,8 @@ void SessionSnapshot::ensureMasterTrackInvariant(
                         o.isTrackOff(),
                         o.isMuted(),
                         TrackKind::Instrument,
-                        o.getStereoPan());
+                        o.getStereoPan(),
+                        o.getRoutedOutputTrackId());
             const TrackId mid = (allocateMasterId != kInvalidTrackId)
                                     ? allocateMasterId
                                     : (maxTrackIdInList(tracks) + 1);
@@ -281,6 +298,7 @@ void SessionSnapshot::ensureMasterTrackInvariant(
     }
 
     const int keepIdx = chooseCanonicalMasterTrackIndex(tracks, masterIndices);
+    const TrackId keptMasterId = tracks[(size_t)keepIdx].getId();
 
     for (int i = (int)masterIndices.size() - 1; i >= 0; --i)
     {
@@ -298,7 +316,8 @@ void SessionSnapshot::ensureMasterTrackInvariant(
                                     dropped.isTrackOff(),
                                     dropped.isMuted(),
                                     demoted,
-                                    dropped.getStereoPan());
+                                    dropped.getStereoPan(),
+                                    keptMasterId);
     }
 
     Track master = normalizedCanonicalMasterRow(tracks[(size_t)keepIdx]);
@@ -342,8 +361,16 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withSingleEmptyTrack(
         return createEmpty();
     }
     std::vector<Track> v;
-    v.emplace_back(trackId, std::move(trackName), std::vector<PlacedClip>{});
     const TrackId masterId = trackId + 1;
+    v.emplace_back(trackId,
+                   std::move(trackName),
+                   std::vector<PlacedClip>{},
+                   kTrackChannelVolumeUnityGain,
+                   false,
+                   false,
+                   TrackKind::Audio,
+                   kTrackStereoPanCenter,
+                   masterId);
     v.push_back(makeDefaultMasterTrack(masterId));
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{std::move(v), 0, 0, 0});
 }
@@ -373,6 +400,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
         return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     }
     ensureMasterTrackInvariant(tracks, kInvalidTrackId, instrumentLaneIdsForMasterRepair);
+    session_routing::repairRoutingInPlace(tracks, findLastMasterTrackId(tracks));
     const std::int64_t derived = derivedTimelineEndFromTracks(tracks);
     const std::int64_t extentEffective
         = juce::jmax(arrangementExtentSamples, derived);
@@ -666,13 +694,16 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         }
         out.push_back(duplicateTrackSameClips(t));
     }
+    const TrackId masterId = previous.findCanonicalMasterTrackId();
     const Track newRow(newTrackId,
                        std::move(newTrackName),
                        std::vector<PlacedClip>{},
                        kTrackChannelVolumeUnityGain,
                        false,
                        false,
-                       kind);
+                       kind,
+                       kTrackStereoPanCenter,
+                       masterId);
     out.push_back(newRow);
     for (int i = 0; i < previous.getNumTracks(); ++i)
     {
@@ -700,7 +731,9 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
             previous.tracks_, previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
     }
+    const TrackId masterId = previous.findCanonicalMasterTrackId();
     bool found = false;
+    bool removedWasGroup = false;
     std::vector<Track> out;
     out.reserve(static_cast<size_t>(juce::jmax(0, previous.getNumTracks() - 1)));
     for (int i = 0; i < previous.getNumTracks(); ++i)
@@ -715,10 +748,26 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
                     previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(),
                     previous.getProjectMusicalTime()});
             }
+            removedWasGroup = (t.getKind() == TrackKind::Group);
             found = true;
             continue;
         }
-        out.push_back(duplicateTrackSameClips(t));
+        if (removedWasGroup && masterId != kInvalidTrackId && t.getRoutedOutputTrackId() == removedTrackId)
+        {
+            out.push_back(Track(t.getId(),
+                                t.getName(),
+                                t.getPlacedClips(),
+                                t.getChannelFaderGain(),
+                                t.isTrackOff(),
+                                t.isMuted(),
+                                t.getKind(),
+                                t.getStereoPan(),
+                                masterId));
+        }
+        else
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
     }
     if (!found)
     {
@@ -731,6 +780,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
         return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     }
     ensureMasterTrackInvariant(out, kInvalidTrackId, nullptr);
+    session_routing::repairRoutingInPlace(out, findLastMasterTrackId(out));
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out),
         previous.arrangementExtentSamples_,
@@ -1253,7 +1303,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackStereoPan(
                                 t.isTrackOff(),
                                 t.isMuted(),
                                 t.getKind(),
-                                p));
+                                p,
+                                t.getRoutedOutputTrackId()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1262,6 +1313,74 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackStereoPan(
                             previous.getLeftLocatorSamples(),
                             previous.getRightLocatorSamples(),
                             previous.getProjectMusicalTime()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRoutedOutputTo(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const TrackId destTrackId) noexcept
+{
+    if (trackId == kInvalidTrackId || destTrackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    if (previous.getTrack(tIdx).getKind() == TrackKind::Master)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    if (!session_routing::isLegalRoutedOutputTarget(previous, trackId, destTrackId))
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    if (previous.getTrack(tIdx).getRoutedOutputTrackId() == destTrackId)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+        else
+        {
+            out.push_back(Track(t.getId(),
+                                t.getName(),
+                                t.getPlacedClips(),
+                                t.getChannelFaderGain(),
+                                t.isTrackOff(),
+                                t.isMuted(),
+                                t.getKind(),
+                                t.getStereoPan(),
+                                destTrackId));
+        }
+    }
+    return withTracks(std::move(out),
+                      previous.getStoredArrangementExtentSamples(),
+                      previous.getLeftLocatorSamples(),
+                      previous.getRightLocatorSamples(),
+                      previous.getProjectMusicalTime());
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
@@ -1310,7 +1429,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
                                 effectiveOff,
                                 t.isMuted(),
                                 t.getKind(),
-                                t.getStereoPan()));
+                                t.getStereoPan(),
+                                t.getRoutedOutputTrackId()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1359,7 +1479,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
                                 t.isTrackOff(),
                                 trackMuted,
                                 t.getKind(),
-                                t.getStereoPan()));
+                                t.getStereoPan(),
+                                t.getRoutedOutputTrackId()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(

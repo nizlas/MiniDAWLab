@@ -437,6 +437,7 @@ void TrackLanesView::syncTracksFromSession()
 {
     rebuildChildLanesIfNeeded();
     rebuildMasterHeadersIfNeeded();
+    rebuildGroupHeadersIfNeeded();
     resized();
 }
 
@@ -668,6 +669,12 @@ void TrackLanesView::rebuildVisibleTrackEntries() noexcept
         if (session_.getTrackKindAtIndex(i) == TrackKind::Master)
         {
             visibleTrackEntries_.push_back(VisibleTrackEntry{ VisibleTrackKind::Master, tid });
+            continue;
+        }
+
+        if (session_.getTrackKindAtIndex(i) == TrackKind::Group)
+        {
+            visibleTrackEntries_.push_back(VisibleTrackEntry{ VisibleTrackKind::Group, tid });
             continue;
         }
 
@@ -1326,6 +1333,142 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
     masterHeaders_.push_back(std::move(head));
 }
 
+void TrackLanesView::rebuildGroupHeadersIfNeeded()
+{
+    std::unordered_set<TrackId> wanted;
+    const int n = session_.getNumTracks();
+    for (int i = 0; i < n; ++i)
+    {
+        if (session_.getTrackKindAtIndex(i) == TrackKind::Group)
+        {
+            const TrackId tid = session_.getTrackIdAtIndex(i);
+            if (tid != kInvalidTrackId)
+            {
+                wanted.insert(tid);
+            }
+        }
+    }
+
+    for (auto it = groupHeaders_.begin(); it != groupHeaders_.end();)
+    {
+        if (wanted.count(it->first) == 0)
+        {
+            removeChildComponent(it->second.get());
+            it = groupHeaders_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    for (const TrackId tid : wanted)
+    {
+        if (groupHeaders_.count(tid) > 0)
+        {
+            continue;
+        }
+
+        const auto onActive = [this] { repaint(); };
+        TrackHeaderModelProvider modelProvider = [this, tid]() -> TrackHeaderModel {
+            TrackHeaderModel m;
+            m.subtitle = {};
+            const bool sessionSaysActive = (session_.getActiveTrackId() == tid);
+            const bool suppressed
+                = headerActiveSuppressProvider_ != nullptr && headerActiveSuppressProvider_();
+            m.active = sessionSaysActive && !suppressed;
+            m.armed = false;
+            m.armInteractable = false;
+            m.showRecordAndPowerStripCells = true;
+            m.trackNameRenameEnabled = true;
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    const Track& tr = snap->getTrack(idx);
+                    m.name = tr.getName();
+                    m.off = tr.isTrackOff();
+                    m.muted = tr.isMuted();
+                }
+            }
+            m.powerInteractable = !isStructuralTimelineEditBlocked();
+            m.muteInteractable = true;
+            return m;
+        };
+
+        TrackHeaderCallbacks callbacks;
+        callbacks.onActivateName = [this, tid, onActive] {
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onToggleMute = [this, tid, onActive] {
+            bool nowMuted = true;
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    nowMuted = !snap->getTrack(idx).isMuted();
+                }
+            }
+            session_.setTrackMuted(tid, nowMuted);
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onTogglePower = [this, tid, onActive]() -> bool {
+            bool nowOff = true;
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    nowOff = !snap->getTrack(idx).isTrackOff();
+                }
+            }
+            session_.setTrackOff(tid, nowOff);
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+            return true;
+        };
+        callbacks.onRowHeightDrag = [this, tid](const int startH, const int delta) {
+            applyTrackRowHeightDelta(tid, startH, delta);
+        };
+        callbacks.onRowHeightDragEnd = [this, tid] { snapTrackHeaderRowHeightAfterResize(tid, false); };
+        callbacks.canBeginRenameTrack = [this, tid]() {
+            if (isInstrumentMidiClipMoveBlocked())
+            {
+                return false;
+            }
+            return true;
+        };
+        callbacks.onCommitRenameTrack = [this, tid](const juce::String raw) -> bool {
+            if (onUndoableRenameTrackRequested_ == nullptr)
+            {
+                return false;
+            }
+            return onUndoableRenameTrackRequested_(tid, raw);
+        };
+
+        auto head = std::make_unique<TrackHeaderView>(
+            std::move(modelProvider), std::move(callbacks), tid, std::nullopt);
+        addAndMakeVisible(*head);
+        groupHeaders_[tid] = std::move(head);
+    }
+}
+
 ClipWaveformView* TrackLanesView::findLaneAtScreenPosition(const juce::Point<int> screenPos)
 {
     const juce::Point<int> local = getLocalPoint(nullptr, screenPos);
@@ -1468,6 +1611,25 @@ void TrackLanesView::resized()
                 mh.setBounds(0, 0, 0, 0);
             }
             mh.toFront(false);
+        }
+        else if (e.kind == VisibleTrackKind::Group)
+        {
+            auto itG = groupHeaders_.find(e.sessionTrackId);
+            if (itG != groupHeaders_.end() && itG->second != nullptr)
+            {
+                TrackHeaderView& gh = *itG->second;
+                if (!visibleRow.isEmpty())
+                {
+                    auto split = visibleRow;
+                    const int hw = juce::jmin(leftW, split.getWidth());
+                    gh.setBounds(split.removeFromLeft(hw));
+                }
+                else
+                {
+                    gh.setBounds(0, 0, 0, 0);
+                }
+                gh.toFront(false);
+            }
         }
         else
         {

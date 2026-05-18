@@ -705,6 +705,7 @@ public:
         addTrackCornerPlusButton_.onClick = [this] {
             juce::PopupMenu menu;
             menu.addItem(1, "Add Audio Track");
+            menu.addItem(3, "Add Group Track");
             juce::PopupMenu instrMenu;
             instrMenu.addItem(100, "Groove Agent SE");
             instrMenu.addItem(101, "HALion Sonic");
@@ -720,6 +721,14 @@ public:
                     if (result == 1)
                     {
                         safeThis->session.addTrack();
+                        safeThis->syncViewportFromSession();
+                        safeThis->trackLanesView.syncTracksFromSession();
+                        safeThis->inspectorView_.refreshFromSession();
+                        return;
+                    }
+                    if (result == 3)
+                    {
+                        safeThis->session.addGroupTrack();
                         safeThis->syncViewportFromSession();
                         safeThis->trackLanesView.syncTracksFromSession();
                         safeThis->inspectorView_.refreshFromSession();
@@ -1152,6 +1161,7 @@ private:
                 timelineViewport_.clampToExtent(rw, session.getArrangementExtentSamples());
             }
         }
+        playbackEngine_.rebuildRoutingPlanFromSession();
     }
 
     void refreshInstrumentUi()

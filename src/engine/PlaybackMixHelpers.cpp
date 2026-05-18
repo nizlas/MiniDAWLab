@@ -273,7 +273,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             float* const* outputChannelData,
                                             PluginInsertHost* pluginHost,
                                             const TrackId omitClipPlaybackForTrack,
-                                            const std::int64_t timelineEnd) noexcept
+                                            const std::int64_t timelineEnd,
+                                            const int onlyTrackIndex) noexcept
 {
     if (audibleRun <= 0)
     {
@@ -282,8 +283,13 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
 
     for (int ti = 0; ti < sessionSnap.getNumTracks(); ++ti)
     {
+        if (onlyTrackIndex >= 0 && ti != onlyTrackIndex)
+        {
+            continue;
+        }
         const Track& tr = sessionSnap.getTrack(ti);
-        if (tr.getKind() == TrackKind::Instrument || tr.getKind() == TrackKind::Master)
+        if (tr.getKind() == TrackKind::Instrument || tr.getKind() == TrackKind::Group
+            || tr.getKind() == TrackKind::Master)
         {
             continue;
         }

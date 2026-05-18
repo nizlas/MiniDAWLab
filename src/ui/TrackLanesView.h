@@ -60,6 +60,7 @@ enum class VisibleTrackKind
 {
     Audio,
     Instrument,
+    Group,
     Master,
 };
 
@@ -218,6 +219,7 @@ public:
     /// [Message thread] Rebuild visible track rows from canonical `SessionSnapshot::tracks_` order.
     void rebuildVisibleTrackEntries() noexcept;
     void rebuildMasterHeadersIfNeeded();
+    void rebuildGroupHeadersIfNeeded();
 
     /** True when the instrument lane participates in visible layout (`hasInstrumentTrack` + bridged Instrument row). */
     [[nodiscard]] bool isInstrumentTimelineRowVisible() const noexcept;
@@ -292,6 +294,7 @@ private:
     std::vector<std::unique_ptr<TrackHeaderView>> headers_;
     std::vector<std::unique_ptr<ClipWaveformView>> lanes_;
     std::vector<std::unique_ptr<TrackHeaderView>> masterHeaders_;
+    std::unordered_map<TrackId, std::unique_ptr<TrackHeaderView>> groupHeaders_;
 
     /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged attachments).
     std::vector<VisibleTrackEntry> visibleTrackEntries_;

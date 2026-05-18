@@ -74,7 +74,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             float* const* outputChannelData,
                                             PluginInsertHost* pluginHost,
                                             TrackId omitClipPlaybackForTrack,
-                                            std::int64_t timelineEnd) noexcept;
+                                            std::int64_t timelineEnd,
+                                            int onlyTrackIndex = -1) noexcept;
 
 /// [Audio thread] Apply one bus row's channel strip (Pre → fader/mute/off → Post → pan) from stereo
 /// `busScratchStereo` (`[0]`/ `[1]` = L/R) into `outputChannelData` at `destOutFrame0` for `numSamples`.

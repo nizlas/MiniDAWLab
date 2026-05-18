@@ -52,6 +52,8 @@ enum class TrackKind : std::uint8_t
 {
     Audio,
     Instrument,
+    /// Internal summing bus; routes to another Group or Master. No timeline clips.
+    Group,
     /// Final stereo output bus (exactly one row per session). No timeline clips.
     Master,
 };
@@ -79,9 +81,13 @@ public:
                    bool trackOff = false,
                    bool trackMuted = false,
                    TrackKind kind = TrackKind::Audio,
-                   float stereoPan = kTrackStereoPanCenter) noexcept;
+                   float stereoPan = kTrackStereoPanCenter,
+                   TrackId routedOutputTrackId = kInvalidTrackId) noexcept;
 
     [[nodiscard]] TrackKind getKind() const noexcept { return kind_; }
+
+    /// Main output destination (`Group` or `Master` row id). Unused on `Master` rows.
+    [[nodiscard]] TrackId getRoutedOutputTrackId() const noexcept { return routedOutputTrackId_; }
 
     [[nodiscard]] TrackId getId() const noexcept { return id_; }
     [[nodiscard]] const juce::String& getName() const noexcept { return name_; }
@@ -113,4 +119,5 @@ private:
     bool trackMuted_ = false;
     TrackKind kind_ = TrackKind::Audio;
     float stereoPan_ = kTrackStereoPanCenter;
+    TrackId routedOutputTrackId_ = kInvalidTrackId;
 };

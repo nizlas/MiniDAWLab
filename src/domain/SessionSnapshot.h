@@ -203,6 +203,12 @@ public:
         TrackId trackId,
         juce::String newName) noexcept;
 
+    /// [Message thread] Set main output routing for a non-Master row (`destTrackId` must be Group or Master).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRoutedOutputTo(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        TrackId destTrackId) noexcept;
+
     /// [Message thread] Load/undo repair: exactly one `TrackKind::Master` row, last in `tracks`.
     /// Duplicate masters: keep canonical row (name `kMasterTrackDisplayName`, else last in order).
     /// Mis-tagged instrument lanes (`instrumentLaneIds`) demoted; missing master appended.
