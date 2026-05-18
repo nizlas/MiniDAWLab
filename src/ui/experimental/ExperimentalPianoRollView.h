@@ -214,6 +214,16 @@ private:
     void updateTimelineNoteResizeGesture(juce::Point<int> localPos);
     void finishTimelineNoteResizeGesture();
 
+    struct TimelineNoteMoveCapture
+    {
+        int index = -1;
+        TimelineMidiNote original {};
+    };
+    void beginTimelineNoteMoveGesture(const juce::MouseEvent& e);
+    void updateTimelineNoteMoveGesture(juce::Point<int> localPos);
+    void finishTimelineNoteMoveGesture();
+    void clearTimelineNoteMovePending() noexcept;
+
     struct InternalTimelineClipboardItem
     {
         std::int64_t deltaStartTicks = 0;
@@ -319,6 +329,14 @@ private:
     std::int64_t timelineResizeOriginalDurationTicks_ = 0;
     /// Inclusive end tick in the model: `startTick + durationTicks` at gesture start (left-edge resize).
     std::int64_t timelineResizeAnchorEndTick_ = 0;
+
+    bool timelineMovePending_ = false;
+    int timelineMovePrimaryIndex_ = -1;
+    bool timelineNoteMoveActive_ = false;
+    std::vector<TimelineNoteMoveCapture> timelineMoveCaptures_;
+    std::int64_t timelineMoveAnchorAbsSample_ = 0;
+    int timelineMoveAnchorPitch_ = 0;
+    std::int64_t timelineMovePrimaryOrigStartTick_ = 0;
 
     std::function<void(const juce::String&, std::function<bool()>)> undoablePatternEditHandler_;
 

@@ -399,6 +399,10 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         selectedTimelineNoteIndices_.clear();
         timelineNoteResizeActive_ = false;
         timelineResizeNoteIndex_ = -1;
+        timelineMovePending_ = false;
+        timelineMovePrimaryIndex_ = -1;
+        timelineNoteMoveActive_ = false;
+        timelineMoveCaptures_.clear();
         timelineInternalClipboard_.clear();
     }
     timelineClip_ = timelineClip;
@@ -1594,6 +1598,7 @@ void ExperimentalPianoRollView::beginTimelineNoteResizeGesture(
         return;
     }
     timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+    clearTimelineNoteMovePending();
     timelineNoteResizeActive_ = true;
     timelineResizeEdge_ = edge;
     timelineResizeNoteIndex_ = noteIndex;
@@ -1730,6 +1735,231 @@ void ExperimentalPianoRollView::finishTimelineNoteResizeGesture()
     }
 }
 
+void ExperimentalPianoRollView::clearTimelineNoteMovePending() noexcept
+{
+    timelineMovePending_ = false;
+    timelineMovePrimaryIndex_ = -1;
+}
+
+void ExperimentalPianoRollView::beginTimelineNoteMoveGesture(const juce::MouseEvent& e)
+{
+    if (timelineClip_ == nullptr || !isTimelineClipBindingFresh() || timelineMovePrimaryIndex_ < 0)
+    {
+        clearTimelineNoteMovePending();
+        return;
+    }
+    normalizeTimelineNoteSelection();
+    if (selectedTimelineNoteIndices_.count(timelineMovePrimaryIndex_) == 0u)
+    {
+        clearTimelineNoteMovePending();
+        return;
+    }
+
+    timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+    timelineMovePending_ = false;
+    timelineNoteMoveActive_ = true;
+    timelineMoveCaptures_.clear();
+
+    std::vector<int> order;
+    order.reserve(selectedTimelineNoteIndices_.size());
+    for (const int i : selectedTimelineNoteIndices_)
+    {
+        if (i >= 0 && i < (int)pattern_.timelineNotes.size())
+        {
+            order.push_back(i);
+        }
+    }
+    std::sort(order.begin(), order.end());
+    if (order.empty())
+    {
+        timelineNoteMoveActive_ = false;
+        timelineMoveCaptures_.clear();
+        clearTimelineNoteMovePending();
+        return;
+    }
+    timelineMoveCaptures_.reserve(order.size());
+    for (const int i : order)
+    {
+        TimelineNoteMoveCapture cap;
+        cap.index = i;
+        cap.original = pattern_.timelineNotes[(size_t)i];
+        timelineMoveCaptures_.push_back(std::move(cap));
+    }
+
+    const juce::Point<int> down = e.getMouseDownPosition();
+    timelineMoveAnchorAbsSample_ = sampleAtGridX((float)down.x);
+    timelineMoveAnchorPitch_ = pitchAtY(down.y);
+    if (timelineMovePrimaryIndex_ >= 0 && timelineMovePrimaryIndex_ < (int)pattern_.timelineNotes.size())
+    {
+        timelineMovePrimaryOrigStartTick_
+            = pattern_.timelineNotes[(size_t)timelineMovePrimaryIndex_].startTick;
+    }
+    else
+    {
+        timelineMovePrimaryOrigStartTick_ = 0;
+    }
+}
+
+void ExperimentalPianoRollView::updateTimelineNoteMoveGesture(const juce::Point<int> localPos)
+{
+    if (!timelineNoteMoveActive_ || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
+        || timelineMoveCaptures_.empty())
+    {
+        return;
+    }
+
+    const std::int64_t anchorSamp = timelineClip_->timelineAnchorSamples;
+    const std::int64_t vis0 = timelineClip_->startSamples;
+    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t clipLowTick = relativeSamplesToTicks(vis0 - anchorSamp, bpm, tpq, sr);
+    const std::int64_t clipHighTick = relativeSamplesToTicks(vis1 - anchorSamp, bpm, tpq, sr);
+
+    const std::int64_t curAbs = sampleAtGridX((float)localPos.getX());
+    std::int64_t deltaTick = relativeSamplesToTicks(curAbs - timelineMoveAnchorAbsSample_, bpm, tpq, sr);
+    if (musicalSnapGridTicks() > 0)
+    {
+        const std::int64_t rawPrimaryTarget = timelineMovePrimaryOrigStartTick_ + deltaTick;
+        const std::int64_t snapped = snapTimelineTickForEdit(rawPrimaryTarget);
+        deltaTick = snapped - timelineMovePrimaryOrigStartTick_;
+    }
+
+    int deltaPitch = pitchAtY(localPos.getY()) - timelineMoveAnchorPitch_;
+
+    std::int64_t deltaTickMin = std::numeric_limits<std::int64_t>::min() / 4;
+    std::int64_t deltaTickMax = std::numeric_limits<std::int64_t>::max() / 4;
+    int deltaPitchMin = -128;
+    int deltaPitchMax = 128;
+    for (const auto& cap : timelineMoveCaptures_)
+    {
+        const auto& o = cap.original;
+        deltaTickMin = juce::jmax(deltaTickMin, clipLowTick - o.startTick);
+        deltaTickMax = juce::jmin(
+            deltaTickMax, clipHighTick - o.startTick - juce::jmax<std::int64_t>(1, o.durationTicks));
+        deltaPitchMin = juce::jmax(deltaPitchMin, pitchLow_ - o.midiNote);
+        deltaPitchMax = juce::jmin(deltaPitchMax, pitchHigh_ - o.midiNote);
+    }
+    deltaTick = juce::jlimit(deltaTickMin, deltaTickMax, deltaTick);
+    deltaPitch = juce::jlimit(deltaPitchMin, deltaPitchMax, deltaPitch);
+
+    for (const auto& cap : timelineMoveCaptures_)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        auto& n = pattern_.timelineNotes[(size_t)cap.index];
+        const auto& o = cap.original;
+        n.startTick = o.startTick + deltaTick;
+        n.midiNote = o.midiNote + deltaPitch;
+        n.durationTicks = o.durationTicks;
+        n.velocity = o.velocity;
+        n.channel = o.channel;
+    }
+}
+
+void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
+{
+    if (!timelineNoteMoveActive_)
+    {
+        return;
+    }
+    timelineNoteMoveActive_ = false;
+    const auto captures = std::move(timelineMoveCaptures_);
+    timelineMovePrimaryIndex_ = -1;
+    if (captures.empty())
+    {
+        repaint();
+        return;
+    }
+
+    bool anyChange = false;
+    for (const auto& cap : captures)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        const auto& n = pattern_.timelineNotes[(size_t)cap.index];
+        const auto& o = cap.original;
+        if (n.startTick != o.startTick || n.midiNote != o.midiNote)
+        {
+            anyChange = true;
+            break;
+        }
+    }
+    if (!anyChange)
+    {
+        for (const auto& cap : captures)
+        {
+            if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+            {
+                pattern_.timelineNotes[(size_t)cap.index] = cap.original;
+            }
+        }
+        repaint();
+        return;
+    }
+
+    std::vector<TimelineMidiNote> finalNotes;
+    finalNotes.reserve(captures.size());
+    for (const auto& cap : captures)
+    {
+        if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+        {
+            finalNotes.push_back(pattern_.timelineNotes[(size_t)cap.index]);
+        }
+    }
+    if (finalNotes.size() != captures.size())
+    {
+        for (const auto& cap : captures)
+        {
+            if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+            {
+                pattern_.timelineNotes[(size_t)cap.index] = cap.original;
+            }
+        }
+        repaint();
+        return;
+    }
+
+    for (const auto& cap : captures)
+    {
+        pattern_.timelineNotes[(size_t)cap.index] = cap.original;
+    }
+
+    auto applyMove = [this, captures, finalNotes]() -> bool {
+        for (size_t k = 0; k < captures.size(); ++k)
+        {
+            const int idx = captures[k].index;
+            if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+            pattern_.timelineNotes[(size_t)idx] = finalNotes[k];
+        }
+        sortTimelineNotesForEditing();
+        replaceTimelineSelectionWithNotesMatching(finalNotes);
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_("Move MIDI notes", std::move(applyMove));
+    }
+    else
+    {
+        applyMove();
+    }
+}
+
 void ExperimentalPianoRollView::normalizeTimelineNoteSelection() noexcept
 {
     for (auto it = selectedTimelineNoteIndices_.begin(); it != selectedTimelineNoteIndices_.end();)
@@ -1812,6 +2042,7 @@ void ExperimentalPianoRollView::selectTimelineNotesIntersecting(const juce::Rect
 
 void ExperimentalPianoRollView::beginMarqueeSelection(const juce::Point<int> localPos)
 {
+    clearTimelineNoteMovePending();
     clearTimelineNoteSelection();
     timelineMarqueeAnchor_ = localPos;
     timelineMarqueeRect_ = {};
@@ -1875,7 +2106,10 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
 
     timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
 
-    if (!(e.mods.isCtrlDown() || e.mods.isShiftDown()))
+    const bool multiNoteSelectModifier
+        = e.mods.isCtrlDown() || e.mods.isCommandDown() || e.mods.isShiftDown();
+
+    if (!multiNoteSelectModifier)
     {
         if (const auto edgeHit = findPianoBarResizeEdgeAtPoint(e.getPosition()))
         {
@@ -1892,18 +2126,25 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
 
     if (const auto hit = findTimelineNoteIndexAtPoint(e.getPosition()))
     {
-        if (e.mods.isCtrlDown() || e.mods.isShiftDown())
+        if (multiNoteSelectModifier)
         {
             toggleTimelineNoteInSelection(*hit);
+            clearTimelineNoteMovePending();
         }
         else
         {
-            replaceTimelineNoteSelectionWithSingle(*hit);
+            if (selectedTimelineNoteIndices_.count(*hit) == 0u)
+            {
+                replaceTimelineNoteSelectionWithSingle(*hit);
+            }
+            timelineMovePrimaryIndex_ = *hit;
+            timelineMovePending_ = true;
         }
         repaint();
         return;
     }
 
+    clearTimelineNoteMovePending();
     beginMarqueeSelection(e.getPosition());
 }
 
@@ -2366,6 +2607,28 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
+    if (timelineNoteMoveActive_)
+    {
+        updateTimelineNoteMoveGesture(e.getPosition());
+        repaint();
+        return;
+    }
+
+    if (timelineMovePending_ && useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+        && isTimelineClipBindingFresh())
+    {
+        if (e.getDistanceFromDragStart() > kTimelineMarqueeDragThresholdPx)
+        {
+            beginTimelineNoteMoveGesture(e);
+            if (timelineNoteMoveActive_)
+            {
+                updateTimelineNoteMoveGesture(e.getPosition());
+                repaint();
+                return;
+            }
+        }
+    }
+
     if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
         && isTimelineClipBindingFresh())
     {
@@ -2391,8 +2654,13 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
+    finishTimelineNoteMoveGesture();
     finishTimelineNoteResizeGesture();
     finishMarqueeSelection();
+    if (!timelineNoteMoveActive_)
+    {
+        clearTimelineNoteMovePending();
+    }
 
     juce::ignoreUnused(e);
     rulerGestureMode_ = RulerGestureMode::None;
