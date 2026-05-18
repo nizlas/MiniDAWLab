@@ -63,6 +63,10 @@ public:
     void setEditablePitchRange(int lowInclusive, int highInclusive) noexcept;
     [[nodiscard]] int pitchLow() const noexcept { return pitchLow_; }
     [[nodiscard]] int pitchHigh() const noexcept { return pitchHigh_; }
+    /// Topmost visible MIDI pitch at the grid (row 0); encodes vertical pitch scroll (`pitchScrollOffsetRows_`).
+    [[nodiscard]] int topVisibleMidiPitch() const noexcept;
+    /// After a rebind that recreates the roll (e.g. musical undo), restore prior vertical pitch scroll; clamps to range.
+    void restoreVerticalPitchScrollToPriorTopPitch(int previousTopVisibleMidiPitch) noexcept;
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;

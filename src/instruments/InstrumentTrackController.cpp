@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -792,6 +793,25 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
     {
         requiredKitName_ = chosen->requiredKitName;
     }
+    struct LiveMidiRollViewport
+    {
+        std::int64_t visibleStartSamples = 0;
+        double samplesPerPixel = 0.0;
+        bool followEnabled = false;
+    };
+    std::unordered_map<InstrumentMidiClipId, LiveMidiRollViewport> liveMidiRollByClipId;
+    liveMidiRollByClipId.reserve(clips_.size());
+    for (const auto& cp : clips_)
+    {
+        if (cp == nullptr || cp->id == InstrumentMidiClipId{ 0 })
+        {
+            continue;
+        }
+        liveMidiRollByClipId.emplace(cp->id,
+                                     LiveMidiRollViewport{ cp->midiRollVisibleStartSamples,
+                                                           cp->midiRollSamplesPerPixel,
+                                                           cp->midiRollFollowEnabled });
+    }
 
     clips_.clear();
     InstrumentMidiClipId maxId = 0;
@@ -807,13 +827,27 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
         clip->pattern.loop = cdto.loop;
         clip->laneStartFractionPermille = cdto.laneStartFractionPermille;
         clip->laneEndFractionPermille = cdto.laneEndFractionPermille;
-        clip->midiRollVisibleStartSamples = juce::jmax(std::int64_t{0}, cdto.midiRollVisibleStartSamples);
-        clip->midiRollSamplesPerPixel = cdto.midiRollSamplesPerPixel;
-        if (!std::isfinite(clip->midiRollSamplesPerPixel) || clip->midiRollSamplesPerPixel < 0.0)
+        if (const auto it = liveMidiRollByClipId.find(clip->id); it != liveMidiRollByClipId.end())
         {
-            clip->midiRollSamplesPerPixel = 0.0;
+            clip->midiRollVisibleStartSamples
+                = juce::jmax(std::int64_t{ 0 }, it->second.visibleStartSamples);
+            clip->midiRollSamplesPerPixel = it->second.samplesPerPixel;
+            if (!std::isfinite(clip->midiRollSamplesPerPixel) || clip->midiRollSamplesPerPixel < 0.0)
+            {
+                clip->midiRollSamplesPerPixel = 0.0;
+            }
+            clip->midiRollFollowEnabled = it->second.followEnabled;
         }
-        clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
+        else
+        {
+            clip->midiRollVisibleStartSamples = juce::jmax(std::int64_t{ 0 }, cdto.midiRollVisibleStartSamples);
+            clip->midiRollSamplesPerPixel = cdto.midiRollSamplesPerPixel;
+            if (!std::isfinite(clip->midiRollSamplesPerPixel) || clip->midiRollSamplesPerPixel < 0.0)
+            {
+                clip->midiRollSamplesPerPixel = 0.0;
+            }
+            clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
+        }
         clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
         clip->lengthSamples = cdto.lengthSamples;
         clip->timelineAnchorSamples = cdto.timelineAnchorSamples.value_or(cdto.startSamples);

@@ -377,6 +377,25 @@ public:
             return;
         }
 
+        // Musical undo replaces `InstrumentMidiClip` heap objects; `boundTimelineClip_` may dangle until we
+        // rebind. Do not read `boundTimelineClip_->id` or sync into a stale clip — use the last stored id.
+        std::optional<int> preserveVerticalPitchScrollTopMidi;
+        if (auto* oldRoll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (p != nullptr && timelineClip != nullptr && persistentInstrumentClipIdForRebind_ != std::uint64_t{0}
+                && static_cast<InstrumentMidiClipId>(persistentInstrumentClipIdForRebind_) == timelineClip->id)
+            {
+                preserveVerticalPitchScrollTopMidi = oldRoll->topVisibleMidiPitch();
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] bindExternal preserve pitch topMidi="
+                        + juce::String(*preserveVerticalPitchScrollTopMidi) + " clipId="
+                        + juce::String(static_cast<juce::int64>(timelineClip->id)));
+                }
+            }
+        }
+
         if (player_ != nullptr)
         {
             player_->stopPlayback("rebind");
@@ -384,9 +403,15 @@ public:
 
         if (auto* oldRoll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
-            if (boundTimelineClip_ != nullptr)
+            if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr
+                && persistentInstrumentClipIdForRebind_ != std::uint64_t{0})
             {
-                oldRoll->syncViewportToBoundClip();
+                InstrumentMidiClip* const live = instrumentTrackForClipBind_->getClipById(
+                    static_cast<InstrumentMidiClipId>(persistentInstrumentClipIdForRebind_));
+                if (live == boundTimelineClip_)
+                {
+                    oldRoll->syncViewportToBoundClip();
+                }
             }
         }
 
@@ -417,7 +442,7 @@ public:
                 + juce::String((int)p->notes.size()) + " clipStart=" + juce::String(timelineClip->startSamples)
                 + " clipLength=" + juce::String(timelineClip->lengthSamples));
         }
-        rebuildPlayerAndRoll();
+        rebuildPlayerAndRoll(preserveVerticalPitchScrollTopMidi);
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
         syncTimelineRulerFormatFromSession();
@@ -756,13 +781,26 @@ private:
         syncStepsAndSnapUiForPattern();
     }
 
-    void rebuildPlayerAndRoll()
+    void rebuildPlayerAndRoll(std::optional<int> preserveVerticalPitchScrollTopMidi = std::nullopt)
     {
         player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_, activePattern());
         player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
         player_->setPlaybackAllowed([this] { return editorInstrumentGate(); });
         rebuildRollViewOnly();
         resized();
+        if (preserveVerticalPitchScrollTopMidi.has_value())
+        {
+            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+            {
+                rv->restoreVerticalPitchScrollToPriorTopPitch(*preserveVerticalPitchScrollTopMidi);
+                if constexpr (undo_diagnostic::kUndoDiag)
+                {
+                    writeUndoDiagnosticLogLine(
+                        "[UndoDiag] rebuildPlayerAndRoll restored pitch topMidi="
+                        + juce::String(rv->topVisibleMidiPitch()));
+                }
+            }
+        }
     }
 
     void rebuildRollViewOnly()

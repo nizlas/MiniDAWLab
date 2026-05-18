@@ -969,6 +969,18 @@ int ExperimentalPianoRollView::topVisiblePitch() const noexcept
     return pitchHigh_ - pitchScrollOffsetRows_;
 }
 
+int ExperimentalPianoRollView::topVisibleMidiPitch() const noexcept
+{
+    return topVisiblePitch();
+}
+
+void ExperimentalPianoRollView::restoreVerticalPitchScrollToPriorTopPitch(const int previousTopVisibleMidiPitch) noexcept
+{
+    pitchScrollOffsetRows_ = pitchHigh_ - previousTopVisibleMidiPitch;
+    clampPitchScrollOffset();
+    repaint();
+}
+
 std::optional<juce::Rectangle<int>> ExperimentalPianoRollView::visibleRowStripRect(
     const juce::Rectangle<int>& strip, const int midiNote) const noexcept
 {
@@ -2421,7 +2433,7 @@ void ExperimentalPianoRollView::mouseDoubleClick(const juce::MouseEvent& e)
                 pattern_.timelineNotes.erase(pattern_.timelineNotes.begin() + i);
                 if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
                 {
-                    instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+                    instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
                 }
                 adjustTimelineNoteSelectionAfterErase(i);
                 repaint();

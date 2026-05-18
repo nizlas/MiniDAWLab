@@ -1321,10 +1321,7 @@ namespace
             || a.lengthSamples != b.lengthSamples
             || a.timelineAnchorSamples.value_or(a.startSamples) != b.timelineAnchorSamples.value_or(b.startSamples)
             || a.laneStartFractionPermille != b.laneStartFractionPermille
-            || a.laneEndFractionPermille != b.laneEndFractionPermille || a.ticksPerQuarter != b.ticksPerQuarter
-            || a.midiRollVisibleStartSamples != b.midiRollVisibleStartSamples
-            || a.midiRollSamplesPerPixel != b.midiRollSamplesPerPixel
-            || a.midiRollFollowEnabled != b.midiRollFollowEnabled)
+            || a.laneEndFractionPermille != b.laneEndFractionPermille || a.ticksPerQuarter != b.ticksPerQuarter)
         {
             return false;
         }
