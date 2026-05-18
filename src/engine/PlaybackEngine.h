@@ -39,6 +39,7 @@
 // audio thread only. Does **not** own the recorder, does not call `Transport` / `Session`. May be
 // null if recording is not composed in.
 
+#include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 
 #include <atomic>
@@ -163,6 +164,9 @@ private:
     void invokeExperimentalInstrumentBeginBlocks(const ExperimentalInstrumentPlaybackSnapshot* instrumentSnap,
                                                  int numSamples) noexcept;
 
+    /// [Message thread] Pre-size stereo master summing scratch (device block and offline cap).
+    void ensureMasterScratchCapacity(int numSamples) noexcept;
+
     Transport& transport_;
     Session& session_;
     RecorderService* const recorder_;
@@ -179,4 +183,9 @@ private:
     std::atomic<bool> offlineRenderInProgress_{ false };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
+
+    static constexpr int kOfflineMixdownBlockCapSamples = 4096;
+    juce::AudioBuffer<float> masterScratch_;
+    float* masterScratchPtrs_[2] = { nullptr, nullptr };
+    int masterScratchCapacity_ = 0;
 };

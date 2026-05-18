@@ -254,6 +254,17 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
         specs.push_back(s);
     }
 
+    if (!m.showRecordAndPowerStripCells)
+    {
+        TrackHeaderStripButtonSpec mu{};
+        mu.kind = TrackHeaderButtonKind::Mute;
+        mu.enabled = callbacks_.onToggleMute != nullptr && m.muteInteractable;
+        mu.muteActive = m.muted;
+        mu.cellBounds = getMuteButtonBounds();
+        specs.push_back(std::move(mu));
+        return specs;
+    }
+
     TrackHeaderStripButtonSpec p{};
     p.kind = TrackHeaderButtonKind::Power;
     p.enabled = callbacks_.onTogglePower != nullptr && m.powerInteractable;
@@ -418,6 +429,10 @@ void TrackHeaderView::repaintStripHoverCell(std::optional<TrackHeaderButtonKind>
 int TrackHeaderView::computeRightStripCellCount() const noexcept
 {
     const auto m = modelProvider_();
+    if (!m.showRecordAndPowerStripCells)
+    {
+        return 1;
+    }
     if (callbacks_.onOpenInstrumentEditor == nullptr || !m.instrumentEditorAvailable)
     {
         return 3;
@@ -510,7 +525,12 @@ juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
         return {};
     }
     const int cell = kStripControlCellWidthPx;
-    if (computeRightStripCellCount() == 4)
+    const int n = computeRightStripCellCount();
+    if (n <= 1)
+    {
+        return {};
+    }
+    if (n == 4)
     {
         s.removeFromLeft(cell);
     }
@@ -527,7 +547,12 @@ juce::Rectangle<int> TrackHeaderView::getMuteButtonBounds() const noexcept
         return {};
     }
     const int cell = kStripControlCellWidthPx;
-    if (computeRightStripCellCount() == 4)
+    const int n = computeRightStripCellCount();
+    if (n == 1)
+    {
+        return s.removeFromLeft(cell);
+    }
+    if (n == 4)
     {
         s.removeFromLeft(cell);
     }
@@ -543,7 +568,12 @@ juce::Rectangle<int> TrackHeaderView::getPowerButtonBounds() const noexcept
         return {};
     }
     const int cell = kStripControlCellWidthPx;
-    if (computeRightStripCellCount() == 4)
+    const int n = computeRightStripCellCount();
+    if (n <= 1)
+    {
+        return {};
+    }
+    if (n == 4)
     {
         s.removeFromLeft(cell);
     }
@@ -706,6 +736,10 @@ void TrackHeaderView::layoutInlineTrackNameEditor()
 void TrackHeaderView::beginInlineTrackRenameIfPossible(juce::Point<int> const clickLocal)
 {
     if (callbacks_.onCommitRenameTrack == nullptr)
+    {
+        return;
+    }
+    if (!modelProvider_().trackNameRenameEnabled)
     {
         return;
     }

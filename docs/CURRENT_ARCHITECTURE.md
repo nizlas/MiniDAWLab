@@ -80,7 +80,7 @@ Use it alongside [ARCHITECTURE_PRINCIPLES.md](ARCHITECTURE_PRINCIPLES.md), [PROJ
 
 - **`SessionSnapshot`** is **immutable**. Every session edit builds a new snapshot and publishes it with a single atomic store (`Session::sessionSnapshot_`, `memory_order_release`).
 - **`SessionSnapshot::tracks_`** is the **canonical ordered list** of timeline lanes. Row order is what the user sees (headers + lanes) and what undo/redo and project save preserve.
-- **`Track::kind`** is `TrackKind::Audio` or `TrackKind::Instrument`. Instrument lanes are **first-class domain rows**, not UI-only decorations.
+- **`Track::kind`** is `TrackKind::Audio`, `TrackKind::Instrument`, or `TrackKind::Master` (Stereo Out). Instrument lanes are **first-class domain rows**, not UI-only decorations. Exactly one **Master** row exists per snapshot (final output bus; no timeline clips).
 - **`Session::activeTrackId_`** (message-thread only, **not** in the snapshot) selects where **Add clip** targets audio; it does not replace `TrackId` for instrument binding.
 
 **Pointers:** [src/domain/SessionSnapshot.h](../src/domain/SessionSnapshot.h), [src/domain/Track.h](../src/domain/Track.h), [src/domain/Session.h](../src/domain/Session.h), [src/domain/Session.cpp](../src/domain/Session.cpp).
@@ -125,9 +125,9 @@ Do **not** design new features around a single “the” instrument or “primar
 
 ---
 
-## Project file (schema v13)
+## Project file (schema v14)
 
-- **`ProjectFileV1::kCurrentVersion`** is **13** ([src/io/ProjectFile.h](../src/io/ProjectFile.h)).
+- **`ProjectFileV1::kCurrentVersion`** is **14** ([src/io/ProjectFile.h](../src/io/ProjectFile.h)). **v14** adds `tracks[].kind` = `"master"` (Stereo Out row). **v13** introduced mixed `tracks[].kind` + `experimentalInstrumentTracks[].trackId`.
 - **`tracks[]`** persists **mixed lane order** and, for v13+, per-row **`kind`** (`"audio"` / `"instrument"`; absence reads as audio).
 - **`experimentalInstrumentTracks[]`** holds Groove/experimental payloads; for v13+ each row binds with **`trackId`** to a timeline instrument lane.
 - **Pre-v13 projects**: `migrateProjectFileExperimentalInstrumentLanePreV13` in [src/io/ProjectFile.cpp](../src/io/ProjectFile.cpp) may **append** an instrument shell track and bind a legacy payload; extra experimental rows beyond the first supported binding can be dropped with a log line.
@@ -188,6 +188,33 @@ Legacy identifiers and strings may still say **Experimental**, **primary**, **ca
 When adding features, **follow this document and the code paths above**, not the oldest comment or helper name. If a name still encodes singleton behavior (e.g. “first instrument in session” helpers), treat it as **technical debt** until renamed or removed in a dedicated cleanup slice.
 
 Some **API/class header comments** may lag multi-instrument reality (e.g. wording that implies a single experimental shell). Prefer **implementation behavior** and this document over stale prose until a doc-only cleanup aligns comments.
+
+---
+
+## Routing (main output — in progress)
+
+**Plan reference:** [routing_mixbus_master_plan](../../.cursor/plans/routing_mixbus_master_plan_08949036.plan.md) (accepted architecture; implementation is sliced).
+
+### Current (Slice A + B1 + B2)
+
+- **Before:** audio and instrument tracks summed **directly** into the device output buffer (implicit master).
+- **Now:** sources still sum in timeline order, but into a **stereo master scratch** owned by [`PlaybackEngine`](../src/engine/PlaybackEngine.cpp); the **`TrackKind::Master`** row (“Stereo Out”) applies its channel strip (Pre/Post inserts, fader, mute/off, pan) and writes the **only** signal to the device / offline mixdown buffer.
+- **Master row rules:** one per session, normally last in `tracks_`, non-deletable, no clips, no record arm. Pre-v14 projects gain a Master row on load (migration in [`ProjectFile.cpp`](../src/io/ProjectFile.cpp)).
+- **Plugin inserts** on Master use the existing [`PluginInsertHost`](../src/plugins/PluginInsertHost.h) `TrackId` map (no separate hidden master object).
+
+### Accepted future model (not all implemented yet)
+
+| Piece | Role |
+|--------|------|
+| `TrackKind::Audio` / `Instrument` | Sources with optional **output** to Master or a **Group** |
+| `TrackKind::Group` | Internal bus; nested Group→Group allowed; graph must be acyclic |
+| `TrackKind::Master` | Unique final sink to hardware |
+| `RoutingPlan` | Message-thread-built topological order + preallocated bus scratch; audio thread reads plan only |
+| Per-track **Input** | Audio interface input / MIDI input per row (Inspector direction only until a dedicated slice) |
+
+### Explicitly deferred (do not assume in code reviews yet)
+
+Group tracks, `routedOutputTrackId_` / output dropdown, full `RoutingPlan` graph, sends (pre/post fader), FX/reverb buses, sidechain, PDC, per-track input wiring, nested-group UI polish beyond the data model.
 
 ---
 

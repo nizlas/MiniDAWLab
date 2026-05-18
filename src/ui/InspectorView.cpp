@@ -1,5 +1,7 @@
 #include "ui/InspectorView.h"
 
+#include "domain/Track.h"
+
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 
@@ -982,6 +984,14 @@ void InspectorView::commitActiveTrackNameField()
     {
         return;
     }
+    if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+    {
+        const int idx = snap->findTrackIndexById(active);
+        if (idx >= 0 && snap->getTrack(idx).getKind() == TrackKind::Master)
+        {
+            return;
+        }
+    }
     const juce::String trimmed = activeTrackNameEditor_.getText().trim();
     if (trimmed.isEmpty())
     {
@@ -1157,7 +1167,12 @@ void InspectorView::refreshFromSession()
         return;
     }
     const Track& tr = snap->getTrack(idx);
-    activeTrackPlainName_ = tr.getName();
+    const bool masterLane = (tr.getKind() == TrackKind::Master);
+    activeTrackPlainName_ = masterLane ? juce::String(kMasterTrackDisplayName) : tr.getName();
+    activeTrackNameEditor_.setReadOnly(masterLane);
+    activeTrackNameEditor_.setCaretVisible(!masterLane);
+    activeTrackNameEditor_.setEnabled(true);
+    activeTrackNameEditor_.setInterceptsMouseClicks(!masterLane, !masterLane);
 
     const float snapGain = tr.getChannelFaderGain();
     const bool switchedTrack = (lastShownTrackId_ != active);

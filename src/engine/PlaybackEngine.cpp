@@ -36,6 +36,7 @@
 
 #include "engine/PlaybackEngine.h"
 
+#include "app/ShortcutDiagnostics.h"
 #include "engine/PlaybackMixHelpers.h"
 #include "engine/CountInClickOutput.h"
 #include "engine/RecorderService.h"
@@ -335,6 +336,7 @@ PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderS
     , countIn_(countIn)
     , pluginHost_(pluginHost)
 {
+    ensureMasterScratchCapacity(kOfflineMixdownBlockCapSamples);
 }
 
 PlaybackEngine::~PlaybackEngine() = default;
@@ -360,6 +362,23 @@ void PlaybackEngine::setPlaybackOffsetSamples(const std::int64_t samples) noexce
     playbackOffsetSamples_.store(samples, std::memory_order_release);
 }
 
+void PlaybackEngine::ensureMasterScratchCapacity(const int numSamples) noexcept
+{
+    if (numSamples <= 0)
+    {
+        return;
+    }
+    if (masterScratchCapacity_ >= numSamples && masterScratchPtrs_[0] != nullptr
+        && masterScratchPtrs_[1] != nullptr)
+    {
+        return;
+    }
+    masterScratch_.setSize(2, numSamples, false, false, true);
+    masterScratchPtrs_[0] = masterScratch_.getWritePointer(0);
+    masterScratchPtrs_[1] = masterScratch_.getWritePointer(1);
+    masterScratchCapacity_ = numSamples;
+}
+
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     if (device != nullptr)
@@ -367,6 +386,7 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         const double sr = device->getCurrentSampleRate();
         const int bs = device->getCurrentBufferSizeSamples();
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
+        ensureMasterScratchCapacity(juce::jmax(bs, kOfflineMixdownBlockCapSamples));
         if (pluginHost_ != nullptr)
         {
             pluginHost_->prepareForDevice(sr, bs, nOut);
@@ -573,6 +593,68 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     }
 #endif
 
+    for (int ch = 0; ch < numOutputChannels; ++ch)
+    {
+        if (float* row = outputChannelData[ch])
+        {
+            juce::FloatVectorOperations::clear(row, numSamples);
+        }
+    }
+
+    const Track* masterTrackPtr = nullptr;
+    float* const* mixSumTarget = outputChannelData;
+    if (sessionSnap != nullptr && masterScratchCapacity_ >= numSamples && masterScratchPtrs_[0] != nullptr
+        && masterScratchPtrs_[1] != nullptr)
+    {
+        masterTrackPtr = playback_mix_helpers::findCanonicalMasterTrack(*sessionSnap);
+        if (masterTrackPtr != nullptr)
+        {
+            juce::FloatVectorOperations::clear(masterScratchPtrs_[0], numSamples);
+            juce::FloatVectorOperations::clear(masterScratchPtrs_[1], numSamples);
+            mixSumTarget = masterScratchPtrs_;
+        }
+    }
+
+    if (countIn_ != nullptr)
+    {
+        countIn_->audioThread_mixInto(mixSumTarget, numOutputChannels, numSamples);
+    }
+
+    const auto finalizeMasterBusToDevice = [&]() noexcept
+    {
+#if !defined(NDEBUG)
+        if constexpr (shortcut_diagnostics::kShowMasterRoutingDiag)
+        {
+            static bool loggedOnce = false;
+            if (!loggedOnce)
+            {
+                loggedOnce = true;
+                const bool directSumFallback
+                    = (masterTrackPtr == nullptr || mixSumTarget == outputChannelData);
+                juce::Logger::writeToLog(
+                    juce::String("[MasterRoutingDiag] live block: canonicalMasterId=")
+                    + (masterTrackPtr != nullptr
+                           ? juce::String((juce::int64)masterTrackPtr->getId())
+                           : juce::String("-1"))
+                    + " name="
+                    + (masterTrackPtr != nullptr ? masterTrackPtr->getName() : juce::String("(none)"))
+                    + " directSumFallback="
+                    + juce::String(directSumFallback ? "yes" : "no"));
+            }
+        }
+#endif
+        if (masterTrackPtr != nullptr && mixSumTarget != outputChannelData)
+        {
+            playback_mix_helpers::processBusChannelStripToOutputs(*masterTrackPtr,
+                                                                  mixSumTarget,
+                                                                  0,
+                                                                  numSamples,
+                                                                  numOutputChannels,
+                                                                  outputChannelData,
+                                                                  pluginHost_);
+        }
+    };
+
     /// [Audio thread] Sum each keyed instrument whose `trackId` matches a `TrackKind::Instrument`
     /// row in `sessionSnap`, in timeline row order (see MIX ORDER below). When `sessionSnap` is missing
     /// (tear / edge), mix every snapshot entry once so staged-only playback still audible.
@@ -661,7 +743,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 }
 
                 playback_mix_helpers::mixExperimentalInstrumentAfterTracks(
-                    entry->host, outputChannelData, numOutputChannels, numSamples, fader, tr.getStereoPan());
+                    entry->host, mixSumTarget, numOutputChannels, numSamples, fader, tr.getStereoPan());
 
                 if (sx >= 0)
                 {
@@ -678,28 +760,22 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             if (e.host != nullptr)
             {
                 playback_mix_helpers::mixExperimentalInstrumentAfterTracks(
-                    e.host, outputChannelData, numOutputChannels, numSamples, 1.0f, kTrackStereoPanCenter);
+                    e.host, mixSumTarget, numOutputChannels, numSamples, 1.0f, kTrackStereoPanCenter);
             }
         }
     };
 
-    for (int ch = 0; ch < numOutputChannels; ++ch)
+    const auto mixInstrumentsAndFinalizeMaster = [&]() noexcept
     {
-        if (float* row = outputChannelData[ch])
-        {
-            juce::FloatVectorOperations::clear(row, numSamples);
-        }
-    }
-    if (countIn_ != nullptr)
-    {
-        countIn_->audioThread_mixInto(outputChannelData, numOutputChannels, numSamples);
-    }
+        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        finalizeMasterBusToDevice();
+    };
 
     if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0
         || playbackIntent != PlaybackIntent::Playing)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        mixInstrumentsAndFinalizeMaster();
         return;
     }
 
@@ -707,7 +783,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (timelineEnd <= 0 || t0 >= timelineEnd)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        mixInstrumentsAndFinalizeMaster();
         return;
     }
 
@@ -749,7 +825,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (availTimeline <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        mixInstrumentsAndFinalizeMaster();
         return;
     }
 
@@ -793,7 +869,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                      audibleRun,
                                                                      outFrame0 + silencePrefix,
                                                                      numOutputChannels,
-                                                                     outputChannelData,
+                                                                     mixSumTarget,
                                                                      pluginHost_,
                                                                      omitClipPlaybackForTrack,
                                                                      timelineEnd);
@@ -852,12 +928,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         if (firstRun64 <= 0)
         {
             transport_.audioThread_advancePlayheadIfPlaying(0);
-            mixKeyedInstrumentLanesIntoOutputsIfAny();
+            mixInstrumentsAndFinalizeMaster();
             return;
         }
         renderRun(tWork, static_cast<int>(firstRun64), 0, becamePlayingTransport);
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
-        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        mixInstrumentsAndFinalizeMaster();
         return;
     }
 
@@ -869,7 +945,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (firstRun64 <= 0)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);
-        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        mixInstrumentsAndFinalizeMaster();
         return;
     }
 
@@ -880,7 +956,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (!reachedRightLocator)
     {
         transport_.audioThread_advancePlayheadIfPlaying(firstRun64);
-        mixKeyedInstrumentLanesIntoOutputsIfAny();
+        mixInstrumentsAndFinalizeMaster();
         return;
     }
 
@@ -946,7 +1022,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             + juce::String(transport_.audioThread_relaxedLoadWrapPassCount()));
 #endif
     }
-    mixKeyedInstrumentLanesIntoOutputsIfAny();
+    mixInstrumentsAndFinalizeMaster();
 }
 
 void PlaybackEngine::invokeExperimentalInstrumentBeginBlocks(
@@ -996,9 +1072,24 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
     jassert(stereoOutputLR != nullptr && stereoOutputLR[0] != nullptr && stereoOutputLR[1] != nullptr);
 
     invokeExperimentalInstrumentBeginBlocks(instrumentSnap, numSamples);
+    ensureMasterScratchCapacity(juce::jmax(numSamples, kOfflineMixdownBlockCapSamples));
 
     juce::FloatVectorOperations::clear(stereoOutputLR[0], numSamples);
     juce::FloatVectorOperations::clear(stereoOutputLR[1], numSamples);
+
+    const Track* masterTrackPtr = nullptr;
+    float* const* mixSumTarget = stereoOutputLR;
+    if (masterScratchCapacity_ >= numSamples && masterScratchPtrs_[0] != nullptr
+        && masterScratchPtrs_[1] != nullptr)
+    {
+        masterTrackPtr = playback_mix_helpers::findCanonicalMasterTrack(sessionSnap);
+        if (masterTrackPtr != nullptr)
+        {
+            juce::FloatVectorOperations::clear(masterScratchPtrs_[0], numSamples);
+            juce::FloatVectorOperations::clear(masterScratchPtrs_[1], numSamples);
+            mixSumTarget = masterScratchPtrs_;
+        }
+    }
 
     const std::int64_t playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
     const std::int64_t renderBase = timelineSegStartSample + playbackShift;
@@ -1019,7 +1110,7 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                      audibleRun,
                                                                      silencePrefix,
                                                                      2,
-                                                                     stereoOutputLR,
+                                                                     mixSumTarget,
                                                                      pluginHost_,
                                                                      kInvalidTrackId,
                                                                      sessionSnap.getArrangementExtentSamples());
@@ -1052,41 +1143,50 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
         }
     }
 
-    if (instrumentSnap == nullptr)
+    if (instrumentSnap != nullptr)
     {
-        return;
+        for (int ti = 0; ti < sessionSnap.getNumTracks(); ++ti)
+        {
+            const Track& tr = sessionSnap.getTrack(ti);
+            if (tr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            const ExperimentalInstrumentPlaybackEntry* entry =
+                playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
+            if (entry == nullptr || entry->host == nullptr)
+            {
+                continue;
+            }
+
+            if (tr.isTrackOff())
+            {
+                continue;
+            }
+            if (tr.isMuted())
+            {
+                continue;
+            }
+
+            const float fader = tr.getChannelFaderGain();
+            if (fader <= 0.0f)
+            {
+                continue;
+            }
+
+            playback_mix_helpers::mixExperimentalInstrumentAfterTracks(
+                entry->host, mixSumTarget, 2, numSamples, fader, tr.getStereoPan());
+        }
     }
 
-    for (int ti = 0; ti < sessionSnap.getNumTracks(); ++ti)
+    if (masterTrackPtr != nullptr && mixSumTarget != stereoOutputLR)
     {
-        const Track& tr = sessionSnap.getTrack(ti);
-        if (tr.getKind() != TrackKind::Instrument)
-        {
-            continue;
-        }
-        const ExperimentalInstrumentPlaybackEntry* entry =
-            playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
-        if (entry == nullptr || entry->host == nullptr)
-        {
-            continue;
-        }
-
-        if (tr.isTrackOff())
-        {
-            continue;
-        }
-        if (tr.isMuted())
-        {
-            continue;
-        }
-
-        const float fader = tr.getChannelFaderGain();
-        if (fader <= 0.0f)
-        {
-            continue;
-        }
-
-        playback_mix_helpers::mixExperimentalInstrumentAfterTracks(
-            entry->host, stereoOutputLR, 2, numSamples, fader, tr.getStereoPan());
+        playback_mix_helpers::processBusChannelStripToOutputs(*masterTrackPtr,
+                                                              mixSumTarget,
+                                                              0,
+                                                              numSamples,
+                                                              2,
+                                                              stereoOutputLR,
+                                                              pluginHost_);
     }
 }

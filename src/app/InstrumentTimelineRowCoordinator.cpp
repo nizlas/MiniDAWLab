@@ -1303,15 +1303,18 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             if (idx >= 0)
             {
                 m.name = sn->getTrack(idx).getName();
+                m.trackNameRenameEnabled = (sn->getTrack(idx).getKind() != TrackKind::Master);
             }
             else
             {
                 m.name = juce::String("Track ") + juce::String((juce::int64)laneTid);
+                m.trackNameRenameEnabled = true;
             }
         }
         else
         {
             m.name = juce::String("Track ") + juce::String((juce::int64)laneTid);
+            m.trackNameRenameEnabled = true;
         }
         m.instrumentEditorAvailable = mh != nullptr && mh->hasInstrument();
         return m;
@@ -1424,8 +1427,20 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
     callbacks.onRowHeightDragEnd = [this, laneTid, ctl] {
         trackLanes_.snapTrackHeaderRowHeightAfterResize(laneTid, false);
     };
-    callbacks.canBeginRenameTrack = [this] {
-        return !trackLanes_.isStructuralTimelineEditBlocked();
+    callbacks.canBeginRenameTrack = [this, laneTid]() {
+        if (trackLanes_.isInstrumentMidiClipMoveBlocked())
+        {
+            return false;
+        }
+        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+        {
+            const int idx = snap->findTrackIndexById(laneTid);
+            if (idx >= 0 && snap->getTrack(idx).getKind() == TrackKind::Master)
+            {
+                return false;
+            }
+        }
+        return true;
     };
     callbacks.onCommitRenameTrack = [this, laneTid](const juce::String raw) -> bool {
         return trackLanes_.invokeUndoableRenameTrackRequested(laneTid, raw);

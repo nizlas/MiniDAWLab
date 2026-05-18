@@ -17,6 +17,16 @@
 namespace playback_mix_helpers
 {
 
+const Track* findCanonicalMasterTrack(const SessionSnapshot& snap) noexcept
+{
+    const int idx = snap.findCanonicalMasterTrackIndex();
+    if (idx < 0)
+    {
+        return nullptr;
+    }
+    return &snap.getTrack(idx);
+}
+
 int findCoveringRowIndexInLane(const std::vector<PlacedClip>& lane, const std::int64_t t) noexcept
 {
     for (int i = 0; i < (int)lane.size(); ++i)
@@ -273,7 +283,7 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
     for (int ti = 0; ti < sessionSnap.getNumTracks(); ++ti)
     {
         const Track& tr = sessionSnap.getTrack(ti);
-        if (tr.getKind() == TrackKind::Instrument)
+        if (tr.getKind() == TrackKind::Instrument || tr.getKind() == TrackKind::Master)
         {
             continue;
         }
@@ -349,6 +359,104 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
         }
         jassert(out0 == audibleRun);
         jassert(t - timelineStartAudible == static_cast<std::int64_t>(audibleRun));
+    }
+}
+
+void processBusChannelStripToOutputs(const Track& busTrack,
+                                     float* const* busScratchStereo,
+                                     const int destOutFrame0,
+                                     const int numSamples,
+                                     const int numOutputChannels,
+                                     float* const* outputChannelData,
+                                     PluginInsertHost* pluginHost) noexcept
+{
+    if (numSamples <= 0 || busScratchStereo == nullptr || outputChannelData == nullptr)
+    {
+        return;
+    }
+    if (busTrack.isTrackOff())
+    {
+        return;
+    }
+
+    const float storedFaderGain = busTrack.getChannelFaderGain();
+    const float effectiveGain = busTrack.isMuted() ? 0.0f : storedFaderGain;
+    if (!busTrack.isMuted() && storedFaderGain <= 0.0f)
+    {
+        return;
+    }
+
+    const bool useInsert = pluginHost != nullptr
+                           && pluginHost->audioThread_hasActivePluginForTrack(busTrack.getId());
+
+    if (useInsert && effectiveGain > 0.0f)
+    {
+        pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
+        if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+        {
+            if (scratch[0] != nullptr && scratch[1] != nullptr && busScratchStereo[0] != nullptr
+                && busScratchStereo[1] != nullptr)
+            {
+                juce::FloatVectorOperations::copy(scratch[0] + destOutFrame0,
+                                                  busScratchStereo[0] + destOutFrame0,
+                                                  numSamples);
+                juce::FloatVectorOperations::copy(scratch[1] + destOutFrame0,
+                                                  busScratchStereo[1] + destOutFrame0,
+                                                  numSamples);
+            }
+            pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Pre, numSamples);
+            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Post, numSamples);
+            multiplyStereoScratchLR(scratch,
+                                    numSamples,
+                                    trackPanLawGainLeft(busTrack.getStereoPan()),
+                                    trackPanLawGainRight(busTrack.getStereoPan()));
+            addStereoScratchToDeviceOutputs(scratch,
+                                            numSamples,
+                                            destOutFrame0,
+                                            numOutputChannels,
+                                            outputChannelData,
+                                            1.0f);
+        }
+        return;
+    }
+
+    const float gL = trackPanLawGainLeft(busTrack.getStereoPan());
+    const float gR = trackPanLawGainRight(busTrack.getStereoPan());
+
+    if (numOutputChannels == 1)
+    {
+        float* d = outputChannelData[0];
+        if (d != nullptr && busScratchStereo[0] != nullptr && busScratchStereo[1] != nullptr)
+        {
+            const float* l = busScratchStereo[0] + destOutFrame0;
+            const float* r = busScratchStereo[1] + destOutFrame0;
+            float* dest = d + destOutFrame0;
+            for (int i = 0; i < numSamples; ++i)
+            {
+                dest[i] += effectiveGain * 0.5f * (gL * l[i] + gR * r[i]);
+            }
+        }
+        return;
+    }
+
+    if (numOutputChannels >= 1 && busScratchStereo[0] != nullptr)
+    {
+        float* d0 = outputChannelData[0];
+        if (d0 != nullptr)
+        {
+            juce::FloatVectorOperations::addWithMultiply(
+                d0 + destOutFrame0, busScratchStereo[0] + destOutFrame0, effectiveGain * gL, numSamples);
+        }
+    }
+    if (numOutputChannels >= 2 && busScratchStereo[1] != nullptr)
+    {
+        float* d1 = outputChannelData[1];
+        if (d1 != nullptr)
+        {
+            juce::FloatVectorOperations::addWithMultiply(
+                d1 + destOutFrame0, busScratchStereo[1] + destOutFrame0, effectiveGain * gR, numSamples);
+        }
     }
 }
 

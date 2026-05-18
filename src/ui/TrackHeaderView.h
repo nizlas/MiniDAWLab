@@ -48,8 +48,13 @@ struct TrackHeaderModel
     bool powerInteractable = true;
     bool muteInteractable = true;
     bool armInteractable = true;
+    /// When false, Power and Arm cells are omitted from the strip (no greyed placeholders). Used for
+    /// `TrackKind::Master` / Stereo Out — mute-only output channel chrome.
+    bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;
+    /// When false, double-click inline rename is disabled (`TrackKind::Master` / Stereo Out).
+    bool trackNameRenameEnabled = true;
 };
 
 using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;
@@ -123,6 +128,9 @@ public:
 
     /// Empty when instrument editor strip cell is inactive (audio tracks or no instrument).
     [[nodiscard]] juce::Rectangle<int> getInstrumentEditorButtonBounds() const noexcept;
+
+    [[nodiscard]] TrackId getBoundTrackId() const noexcept { return dragTrackId_; }
+    [[nodiscard]] TrackId getTrackId() const noexcept { return dragTrackId_; }
 
     void setSourceForbiddenForHeaderDrag() noexcept;
     void restoreSourceCursorAfterHeaderDrag() noexcept;

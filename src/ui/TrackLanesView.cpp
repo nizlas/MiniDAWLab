@@ -436,6 +436,7 @@ void TrackLanesView::clearCycleRecordingPreviewContext() noexcept
 void TrackLanesView::syncTracksFromSession()
 {
     rebuildChildLanesIfNeeded();
+    rebuildMasterHeadersIfNeeded();
     resized();
 }
 
@@ -664,6 +665,12 @@ void TrackLanesView::rebuildVisibleTrackEntries() noexcept
             continue;
         }
 
+        if (session_.getTrackKindAtIndex(i) == TrackKind::Master)
+        {
+            visibleTrackEntries_.push_back(VisibleTrackEntry{ VisibleTrackKind::Master, tid });
+            continue;
+        }
+
         auto itAttach = instrumentTimelineAttachments_.find(tid);
         if (itAttach == instrumentTimelineAttachments_.end())
         {
@@ -866,13 +873,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 const int idx = snap->findTrackIndexById(tid);
                 if (idx >= 0)
                 {
-                    const Track& tr = snap->getTrack(idx);
-                    m.name = tr.getName();
-                    m.off = tr.isTrackOff();
-                    m.muted = tr.isMuted();
-                }
+                const Track& tr = snap->getTrack(idx);
+                m.name = tr.getName();
+                m.off = tr.isTrackOff();
+                m.muted = tr.isMuted();
+                m.trackNameRenameEnabled = (tr.getKind() != TrackKind::Master);
             }
-            m.powerInteractable = !isStructuralTimelineEditBlocked();
+        }
+        m.powerInteractable = !isStructuralTimelineEditBlocked();
             m.muteInteractable = true;
             m.armInteractable = true;
             return m;
@@ -888,6 +896,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             onActive();
         };
         callbacks.onToggleArm = [this, tid, onActive, onArm] {
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx < 0 || snap->getTrack(idx).getKind() != TrackKind::Audio)
+                {
+                    return;
+                }
+            }
             if (recorder_.getArmedTrackId() == tid)
             {
                 recorder_.disarm();
@@ -1081,7 +1097,22 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         callbacks.onRowHeightDragEnd = [this, tid] {
             snapTrackHeaderRowHeightAfterResize(tid, false);
         };
-        callbacks.canBeginRenameTrack = [this] { return !isStructuralTimelineEditBlocked(); };
+        callbacks.canBeginRenameTrack = [this, tid]() {
+            // Metadata rename: same rules as Inspector / TrackLanesEditCoordinator (recording + count-in only).
+            if (isInstrumentMidiClipMoveBlocked())
+            {
+                return false;
+            }
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0 && snap->getTrack(idx).getKind() == TrackKind::Master)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
         callbacks.onCommitRenameTrack = [this, tid](const juce::String raw) -> bool {
             if (onUndoableRenameTrackRequested_ == nullptr)
             {
@@ -1183,6 +1214,116 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     }
     rebuildVisibleTrackEntries();
     refreshInstrumentHeaderReorderAttachments();
+}
+
+void TrackLanesView::rebuildMasterHeadersIfNeeded()
+{
+    TrackId masterId = kInvalidTrackId;
+    const int n = session_.getNumTracks();
+    for (int i = n - 1; i >= 0; --i)
+    {
+        if (session_.getTrackKindAtIndex(i) == TrackKind::Master)
+        {
+            masterId = session_.getTrackIdAtIndex(i);
+            break;
+        }
+    }
+
+    TrackId boundHeaderId = kInvalidTrackId;
+    if (!masterHeaders_.empty() && masterHeaders_[0] != nullptr)
+    {
+        boundHeaderId = masterHeaders_[0]->getBoundTrackId();
+    }
+
+    const bool needRebuild
+        = (masterId == kInvalidTrackId && !masterHeaders_.empty())
+          || (masterId != kInvalidTrackId && masterHeaders_.size() != 1U)
+          || (masterId != kInvalidTrackId && masterId != boundHeaderId);
+
+    if (!needRebuild)
+    {
+        return;
+    }
+
+    masterHeaders_.clear();
+
+    if (masterId == kInvalidTrackId)
+    {
+        return;
+    }
+
+    const TrackId tid = masterId;
+    const auto onActive = [this] { repaint(); };
+
+    TrackHeaderModelProvider modelProvider = [this, tid]() -> TrackHeaderModel {
+        TrackHeaderModel m;
+        m.subtitle = {};
+        const bool sessionSaysActive = (session_.getActiveTrackId() == tid);
+        const bool suppressed
+            = headerActiveSuppressProvider_ != nullptr && headerActiveSuppressProvider_();
+        m.active = sessionSaysActive && !suppressed;
+        m.armed = false;
+        m.armInteractable = false;
+        m.showRecordAndPowerStripCells = false;
+        m.trackNameRenameEnabled = false;
+        m.off = false;
+        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+        {
+            const int idx = snap->findTrackIndexById(tid);
+            if (idx >= 0)
+            {
+                const Track& tr = snap->getTrack(idx);
+                m.name = juce::String(kMasterTrackDisplayName);
+                m.muted = tr.isMuted();
+            }
+        }
+        else
+        {
+            m.name = juce::String(kMasterTrackDisplayName);
+        }
+        m.powerInteractable = false;
+        m.muteInteractable = true;
+        return m;
+    };
+
+    TrackHeaderCallbacks callbacks;
+    callbacks.onActivateName = [this, tid, onActive] {
+        session_.setActiveTrack(tid);
+        if (onAudioHeaderActivated_ != nullptr)
+        {
+            onAudioHeaderActivated_();
+        }
+        onActive();
+    };
+    callbacks.onToggleMute = [this, tid, onActive] {
+        bool nowMuted = true;
+        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+        {
+            const int idx = snap->findTrackIndexById(tid);
+            if (idx >= 0)
+            {
+                nowMuted = !snap->getTrack(idx).isMuted();
+            }
+        }
+        session_.setTrackMuted(tid, nowMuted);
+        session_.setActiveTrack(tid);
+        if (onAudioHeaderActivated_ != nullptr)
+        {
+            onAudioHeaderActivated_();
+        }
+        onActive();
+    };
+    callbacks.onRowHeightDrag = [this, tid](const int startH, const int delta) {
+        applyTrackRowHeightDelta(tid, startH, delta);
+    };
+    callbacks.onRowHeightDragEnd = [this, tid] { snapTrackHeaderRowHeightAfterResize(tid, false); };
+    callbacks.canBeginRenameTrack = nullptr;
+    callbacks.onCommitRenameTrack = nullptr;
+
+    auto head = std::make_unique<TrackHeaderView>(
+        std::move(modelProvider), std::move(callbacks), tid, std::nullopt);
+    addAndMakeVisible(*head);
+    masterHeaders_.push_back(std::move(head));
 }
 
 ClipWaveformView* TrackLanesView::findLaneAtScreenPosition(const juce::Point<int> screenPos)
@@ -1311,6 +1452,22 @@ void TrackLanesView::resized()
                 itA->second.header->toFront(false);
                 itA->second.midiLane->toFront(false);
             }
+        }
+        else if (e.kind == VisibleTrackKind::Master && !masterHeaders_.empty()
+                 && masterHeaders_[0] != nullptr)
+        {
+            TrackHeaderView& mh = *masterHeaders_[0];
+            if (!visibleRow.isEmpty())
+            {
+                auto split = visibleRow;
+                const int hw = juce::jmin(leftW, split.getWidth());
+                mh.setBounds(split.removeFromLeft(hw));
+            }
+            else
+            {
+                mh.setBounds(0, 0, 0, 0);
+            }
+            mh.toFront(false);
         }
         else
         {

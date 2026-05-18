@@ -41,6 +41,7 @@
 #include "domain/Track.h"
 
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 class AudioClip;
@@ -202,6 +203,18 @@ public:
         TrackId trackId,
         juce::String newName) noexcept;
 
+    /// [Message thread] Load/undo repair: exactly one `TrackKind::Master` row, last in `tracks`.
+    /// Duplicate masters: keep canonical row (name `kMasterTrackDisplayName`, else last in order).
+    /// Mis-tagged instrument lanes (`instrumentLaneIds`) demoted; missing master appended.
+    static void ensureMasterTrackInvariant(
+        std::vector<Track>& tracks,
+        TrackId allocateMasterId = kInvalidTrackId,
+        const std::unordered_set<TrackId>* instrumentLaneIds = nullptr) noexcept;
+
+    /// [Message thread] Re-publish `previous` with master invariant applied (e.g. undo restore).
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> ensuringMasterInvariant(
+        const SessionSnapshot& previous) noexcept;
+
     // [Message thread] **Load-only:** publish a full pre-built track list in one step (e.g. project
     // open). Does not add clips incrementally. `tracks` must be non-empty. Stored arrangement extent
     // is 0 (use `withTracks` overload for v3 load).
@@ -219,7 +232,8 @@ public:
         std::int64_t arrangementExtentSamples,
         std::int64_t leftLocatorSamples,
         std::int64_t rightLocatorSamples,
-        ProjectMusicalTime projectMusicalTime = {}) noexcept;
+        ProjectMusicalTime projectMusicalTime = {},
+        const std::unordered_set<TrackId>* instrumentLaneIdsForMasterRepair = nullptr) noexcept;
 
     /// [Message thread] Replace sanitized `ProjectMusicalTime` only; tracks/clips/locators unchanged.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withMusicalTime(
@@ -246,6 +260,12 @@ public:
     [[nodiscard]] const Track& getTrack(int index) const;
     // -1 if not found.
     [[nodiscard]] int findTrackIndexById(TrackId id) const noexcept;
+
+    /// Index of the canonical `TrackKind::Master` row (last master in timeline order), or -1.
+    [[nodiscard]] int findCanonicalMasterTrackIndex() const noexcept;
+
+    /// Id of the canonical master output bus row, or `kInvalidTrackId` when absent.
+    [[nodiscard]] TrackId findCanonicalMasterTrackId() const noexcept;
 
     [[nodiscard]] std::int64_t getDerivedTimelineLengthSamples() const noexcept;
 

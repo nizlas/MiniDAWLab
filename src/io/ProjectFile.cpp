@@ -5,6 +5,7 @@
 #include "io/ProjectFile.h"
 
 #include "domain/ProjectMusicalTime.h"
+#include "domain/Track.h"
 #include "domain/TrackStereoPan.h"
 #include "ui/SnapSettings.h"
 
@@ -220,6 +221,102 @@ namespace
     /// `experimentalInstrumentTracks` blob. We append one **Instrument** lane to `tracks` and bind `trackId`
     /// before the timeline is built (`Session::loadProjectFromFile`), while remaining on disk format v12.
     /// v13 saves carry real mixed order explicitly.
+    /// All versions: dedupe `kind` = `"master"` (keep canonical row; demote others). Append when missing.
+    void migrateProjectFileMasterTrackPreV14(ProjectFileV1& out) noexcept
+    {
+        auto isInstrumentLaneId = [&out](const TrackId id) noexcept -> bool {
+            for (const auto& et : out.experimentalInstrumentTracks)
+            {
+                if (et.trackId == id)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        std::vector<int> masterIndices;
+        masterIndices.reserve(2U);
+        for (int i = 0; i < (int)out.tracks.size(); ++i)
+        {
+            if (out.tracks[(size_t)i].kind.equalsIgnoreCase("master"))
+            {
+                masterIndices.push_back(i);
+            }
+        }
+
+        if (masterIndices.size() == 1U)
+        {
+            auto& sole = out.tracks[(size_t)masterIndices[0U]];
+            if (isInstrumentLaneId(sole.id))
+            {
+                sole.kind = "instrument";
+                juce::Logger::writeToLog(
+                    "[ProjectFile] load: demoted mis-tagged instrument master track id="
+                    + juce::String((juce::int64)sole.id));
+                masterIndices.clear();
+            }
+        }
+
+        if (!masterIndices.empty())
+        {
+            int keep = masterIndices.back();
+            for (const int mi : masterIndices)
+            {
+                if (out.tracks[(size_t)mi].name.equalsIgnoreCase(kMasterTrackDisplayName))
+                {
+                    keep = mi;
+                    break;
+                }
+            }
+
+            for (const int mi : masterIndices)
+            {
+                if (mi == keep)
+                {
+                    continue;
+                }
+                auto& tr = out.tracks[(size_t)mi];
+                tr.kind = isInstrumentLaneId(tr.id) ? juce::String("instrument") : juce::String("audio");
+                juce::Logger::writeToLog(
+                    "[ProjectFile] load: demoted duplicate master track id="
+                    + juce::String((juce::int64)tr.id) + " to kind=" + tr.kind);
+            }
+
+            out.tracks[(size_t)keep].name = kMasterTrackDisplayName;
+            out.tracks[(size_t)keep].kind = "master";
+            out.tracks[(size_t)keep].off = false;
+        }
+
+        for (const auto& tr : out.tracks)
+        {
+            if (tr.kind.equalsIgnoreCase("master"))
+            {
+                return;
+            }
+        }
+
+        TrackId maxId = 0;
+        for (const auto& tr : out.tracks)
+        {
+            maxId = juce::jmax(maxId, tr.id);
+        }
+        const TrackId masterId = juce::jmax(out.nextTrackId, maxId + 1);
+
+        ProjectFileTrackV1 master;
+        master.id = masterId;
+        master.name = kMasterTrackDisplayName;
+        master.kind = "master";
+        master.channelFaderGain = kTrackChannelVolumeUnityGain;
+        out.tracks.push_back(std::move(master));
+        out.nextTrackId = juce::jmax(out.nextTrackId, masterId + 1);
+
+        juce::Logger::writeToLog(
+            "[ProjectFile] master migration: appended Stereo Out track id="
+            + juce::String((juce::int64)masterId)
+            + " (project version " + juce::String(out.version) + ")");
+    }
+
     void migrateProjectFileExperimentalInstrumentLanePreV13(ProjectFileV1& out) noexcept
     {
         if (out.version >= 13)
@@ -1278,6 +1375,10 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             else if (mv.isInt() || mv.isInt64() || mv.isDouble())
                 trk.muted = static_cast<int>(static_cast<double>(mv) + 0.5) != 0;
         }
+        if (trk.kind.equalsIgnoreCase("master"))
+        {
+            trk.off = false;
+        }
         if (ver >= 8)
         {
             trk.pluginVst3Path = tv.getProperty("pluginVst3Path", {}).toString();
@@ -1335,6 +1436,7 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
     }
 
     migrateProjectFileExperimentalInstrumentLanePreV13(out);
+    migrateProjectFileMasterTrackPreV14(out);
 
     {
         std::unordered_set<PlacedClipId> globalClip;

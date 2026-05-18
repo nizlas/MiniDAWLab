@@ -52,7 +52,12 @@ enum class TrackKind : std::uint8_t
 {
     Audio,
     Instrument,
+    /// Final stereo output bus (exactly one row per session). No timeline clips.
+    Master,
 };
+
+/// System-owned display name for `TrackKind::Master` (not user-renamable).
+inline constexpr const char kMasterTrackDisplayName[] = "Stereo Out";
 
 // ---------------------------------------------------------------------------
 // Track — one lane’s clips (session timeline samples; front-most at index 0 within this track)

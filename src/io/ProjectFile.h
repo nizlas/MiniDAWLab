@@ -164,9 +164,10 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**13** introduces `tracks[].kind` + `experimentalInstrumentTracks[].trackId`).
-    /// Read path accepts `< 13`; see `migrateProjectFileExperimentalInstrumentLanePreV13` in `ProjectFile.cpp`.
-    static constexpr int kCurrentVersion = 13;
+    /// Current JSON writer version (**14** adds `tracks[].kind` = `"master"` / Stereo Out row).
+    /// **13** introduced mixed `tracks[].kind` + `experimentalInstrumentTracks[].trackId`.
+    /// Read path accepts older versions; see migrations in `ProjectFile.cpp`.
+    static constexpr int kCurrentVersion = 14;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

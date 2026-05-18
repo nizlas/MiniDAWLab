@@ -8,6 +8,9 @@ inline constexpr bool kShowKeyDiagnostic = false;
 
 inline constexpr bool kShowShortcutDiagnostics = false;
 
+/// Master bus integration: UI active track vs canonical master row vs engine strip (off by default).
+inline constexpr bool kShowMasterRoutingDiag = false;
+
 [[nodiscard]] inline juce::String hex8(const juce::uint32 x)
 {
     return juce::String::toHexString(x).toUpperCase();

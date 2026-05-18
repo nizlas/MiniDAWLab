@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <unordered_set>
 #include <new>
 #include <optional>
 #include <utility>
@@ -127,8 +128,9 @@ namespace
 Session::Session()
     : sessionSnapshot_(SessionSnapshot::withSingleEmptyTrack(TrackId{1}, juce::String("Track 1")))
 {
-    // One default **track** (empty lane) so the first “Add clip” and the Phase 1 bridge clip query
-    // still make sense. `activeTrackId_` / `nextTrackId_` are set in the header (first track = 1).
+    // One default audio lane plus `Stereo Out` master row (`withSingleEmptyTrack`). `activeTrackId_`
+    // / `nextTrackId_` are set in the header (first track = 1; master id = 2).
+    nextTrackId_ = 3;
 }
 
 Session::~Session() = default;
@@ -179,10 +181,16 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
     }
     {
         const int aIdx = current->findTrackIndexById(activeTrackId_);
-        if (aIdx >= 0 && current->getTrack(aIdx).getKind() != TrackKind::Audio)
+        if (aIdx >= 0)
         {
-            return juce::Result::fail(
-                "Add clip targets an audio lane; activate an audio track header first.");
+            const TrackKind k = current->getTrack(aIdx).getKind();
+            if (k != TrackKind::Audio)
+            {
+                return juce::Result::fail(
+                    k == TrackKind::Master
+                        ? "Stereo Out cannot host audio clips."
+                        : "Add clip targets an audio lane; activate an audio track header first.");
+            }
         }
     }
     try
@@ -457,6 +465,16 @@ TrackKind Session::getTrackKindAtIndex(const int index) const noexcept
     return s->getTrack(index).getKind();
 }
 
+TrackId Session::findCanonicalMasterTrackId() const noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
+    if (s == nullptr)
+    {
+        return kInvalidTrackId;
+    }
+    return s->findCanonicalMasterTrackId();
+}
+
 std::optional<TrackId> Session::appendExperimentalInstrumentShellTrack(juce::String trackDisplayName) noexcept
 {
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
@@ -702,6 +720,11 @@ void Session::removeTrack(const TrackId removedTrackId) noexcept
     {
         return;
     }
+    const int masterIdx = current->findTrackIndexById(removedTrackId);
+    if (masterIdx >= 0 && current->getTrack(masterIdx).getKind() == TrackKind::Master)
+    {
+        return;
+    }
     const int removedIndex = current->findTrackIndexById(removedTrackId);
     if (removedIndex < 0)
     {
@@ -749,17 +772,23 @@ void Session::restoreSessionSnapshotForUndo(std::shared_ptr<const SessionSnapsho
     {
         return;
     }
-    std::atomic_store_explicit(&sessionSnapshot_, restored, std::memory_order_release);
+    const std::shared_ptr<const SessionSnapshot> repaired
+        = SessionSnapshot::ensuringMasterInvariant(*restored);
+    if (repaired == nullptr)
+    {
+        return;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, repaired, std::memory_order_release);
 
-    const int n = restored->getNumTracks();
+    const int n = repaired->getNumTracks();
     if (n <= 0)
     {
         activeTrackId_ = kInvalidTrackId;
         return;
     }
-    if (restored->findTrackIndexById(activeTrackId_) < 0)
+    if (repaired->findTrackIndexById(activeTrackId_) < 0)
     {
-        activeTrackId_ = restored->getTrack(0).getId();
+        activeTrackId_ = repaired->getTrack(0).getId();
     }
 }
 
@@ -815,7 +844,16 @@ void Session::setTrackOff(const TrackId trackId, const bool trackOff) noexcept
         return;
     }
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
-    if (current == nullptr || current->findTrackIndexById(trackId) < 0)
+    if (current == nullptr)
+    {
+        return;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return;
+    }
+    if (current->getTrack(idx).getKind() == TrackKind::Master && trackOff)
     {
         return;
     }
@@ -857,6 +895,10 @@ void Session::setTrackName(const TrackId trackId, juce::String newName) noexcept
     {
         return;
     }
+    if (current->getTrack(idx).getKind() == TrackKind::Master)
+    {
+        return;
+    }
     const juce::String trimmed = newName.trim();
     if (trimmed.isEmpty() || trimmed == current->getTrack(idx).getName())
     {
@@ -875,7 +917,7 @@ void Session::clearClip() noexcept
     const std::shared_ptr<const SessionSnapshot> empty
         = SessionSnapshot::withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     std::atomic_store_explicit(&sessionSnapshot_, empty, std::memory_order_release);
-    nextTrackId_ = 2;
+    nextTrackId_ = 3;
     activeTrackId_ = 1;
 }
 
@@ -1077,12 +1119,24 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         const Track& t = s->getTrack(i);
         ProjectFileTrackV1 tr;
         tr.id = t.getId();
-        tr.name = t.getName();
+        tr.name = (t.getKind() == TrackKind::Master) ? juce::String(kMasterTrackDisplayName) : t.getName();
         tr.channelFaderGain = t.getChannelFaderGain();
         tr.stereoPan = t.getStereoPan();
-        tr.off = t.isTrackOff();
+        tr.off = (t.getKind() == TrackKind::Master) ? false : t.isTrackOff();
         tr.muted = t.isMuted();
-        tr.kind = (t.getKind() == TrackKind::Instrument) ? juce::String("instrument") : juce::String("audio");
+        switch (t.getKind())
+        {
+        case TrackKind::Instrument:
+            tr.kind = "instrument";
+            break;
+        case TrackKind::Master:
+            tr.kind = "master";
+            break;
+        case TrackKind::Audio:
+        default:
+            tr.kind = "audio";
+            break;
+        }
 
         const bool timelineAudioLane = (t.getKind() == TrackKind::Audio);
 
@@ -1282,6 +1336,16 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         }
     }
 
+    std::unordered_set<TrackId> instrumentLaneIds;
+    instrumentLaneIds.reserve(parsed.experimentalInstrumentTracks.size());
+    for (const auto& et : parsed.experimentalInstrumentTracks)
+    {
+        if (et.trackId != kInvalidTrackId)
+        {
+            instrumentLaneIds.insert(et.trackId);
+        }
+    }
+
     std::vector<Track> built;
     built.reserve(parsed.tracks.size());
 
@@ -1291,6 +1355,10 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         if (trDto.kind.equalsIgnoreCase("instrument"))
         {
             tk = TrackKind::Instrument;
+        }
+        else if (trDto.kind.equalsIgnoreCase("master"))
+        {
+            tk = instrumentLaneIds.count(trDto.id) > 0 ? TrackKind::Instrument : TrackKind::Master;
         }
 
         std::vector<PlacedClip> placed;
@@ -1362,15 +1430,19 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         {
             outSkippedClipDetails.add(
                 juce::String("[track ") + juce::String((juce::int64)trDto.id)
-                + "] Skipping WAV clips stored on instrument lane.");
+                + (tk == TrackKind::Master ? "] Skipping WAV clips stored on Stereo Out."
+                                           : "] Skipping WAV clips stored on instrument lane."));
         }
 
+        const bool trackOff = (tk == TrackKind::Master) ? false : trDto.off;
+        const juce::String trackName = (tk == TrackKind::Master) ? juce::String(kMasterTrackDisplayName)
+                                                                 : trDto.name;
         built.emplace_back(
             trDto.id,
-            trDto.name,
+            trackName,
             std::move(placed),
             juce::jlimit(0.0f, kTrackChannelFaderGainMax, trDto.channelFaderGain),
-            trDto.off,
+            trackOff,
             trDto.muted,
             tk,
             sanitizeTrackStereoPan(trDto.stereoPan));
@@ -1382,7 +1454,6 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     }
 
     nextPlacedClipId_ = juce::jmax(parsed.nextPlacedClipId, static_cast<PlacedClipId>(maxClipInFile + 1));
-    nextTrackId_ = juce::jmax(parsed.nextTrackId, static_cast<TrackId>(maxTrackInFile + 1));
 
     ProjectMusicalTime loadedMusical;
     loadedMusical.bpm = parsed.bpm;
@@ -1395,11 +1466,19 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         parsed.arrangementExtentSamples,
         parsed.leftLocatorSamples,
         parsed.rightLocatorSamples,
-        loadedMusical);
+        loadedMusical,
+        &instrumentLaneIds);
     if (next == nullptr)
     {
         return juce::Result::fail("Could not build session from project file.");
     }
+
+    TrackId maxTrackAfterRepair = 0;
+    for (int i = 0; i < next->getNumTracks(); ++i)
+    {
+        maxTrackAfterRepair = juce::jmax(maxTrackAfterRepair, next->getTrack(i).getId());
+    }
+    nextTrackId_ = juce::jmax(parsed.nextTrackId, static_cast<TrackId>(maxTrackAfterRepair + 1));
 
     if (next->findTrackIndexById(parsed.activeTrackId) >= 0)
     {

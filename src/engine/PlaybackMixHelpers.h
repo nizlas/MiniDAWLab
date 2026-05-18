@@ -17,6 +17,9 @@ struct ExperimentalInstrumentPlaybackSnapshot;
 namespace playback_mix_helpers
 {
 
+/// Last `TrackKind::Master` row in timeline order (canonical Stereo Out bus).
+[[nodiscard]] const Track* findCanonicalMasterTrack(const SessionSnapshot& snap) noexcept;
+
 [[nodiscard]] int findCoveringRowIndexInLane(const std::vector<PlacedClip>& lane,
                                              std::int64_t t) noexcept;
 
@@ -72,5 +75,15 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             PluginInsertHost* pluginHost,
                                             TrackId omitClipPlaybackForTrack,
                                             std::int64_t timelineEnd) noexcept;
+
+/// [Audio thread] Apply one bus row's channel strip (Pre → fader/mute/off → Post → pan) from stereo
+/// `busScratchStereo` (`[0]`/ `[1]` = L/R) into `outputChannelData` at `destOutFrame0` for `numSamples`.
+void processBusChannelStripToOutputs(const Track& busTrack,
+                                     float* const* busScratchStereo,
+                                     int destOutFrame0,
+                                     int numSamples,
+                                     int numOutputChannels,
+                                     float* const* outputChannelData,
+                                     PluginInsertHost* pluginHost) noexcept;
 
 } // namespace playback_mix_helpers

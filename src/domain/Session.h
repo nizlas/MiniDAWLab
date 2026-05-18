@@ -131,6 +131,9 @@ public:
 
     [[nodiscard]] TrackKind getTrackKindAtIndex(int index) const noexcept;
 
+    /// Canonical `TrackKind::Master` row (last in snapshot order), or `kInvalidTrackId`.
+    [[nodiscard]] TrackId findCanonicalMasterTrackId() const noexcept;
+
     /// Append an empty `TrackKind::Instrument` lane at the end of **`SessionSnapshot::tracks_`**
     /// (timeline order preserved on save/load and undo/redo).
     /// **Multiple instrument tracks** may exist — this does **not** refuse when another `Instrument`

@@ -6,6 +6,7 @@
 
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
+#include "domain/Track.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
 #include "ui/InspectorView.h"
@@ -48,6 +49,10 @@ void TrackLanesEditCoordinator::install()
                     return false;
                 }
                 const int ix = snap->findTrackIndexById(tid);
+                if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Master)
+                {
+                    return false;
+                }
                 if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Instrument)
                 {
                     if (ExperimentalInstrumentHost* mh = callbacks_.getInstrumentHostForTrack(tid))
@@ -357,6 +362,10 @@ void TrackLanesEditCoordinator::install()
         {
             return false;
         }
+        if (snapBefore->getTrack(ix).getKind() == TrackKind::Master)
+        {
+            return false;
+        }
         if (trimmed == snapBefore->getTrack(ix).getName())
         {
             return false;
@@ -397,6 +406,8 @@ void TrackLanesEditCoordinator::install()
     // No `Session` change — `Session::activeTrackId_` semantics for Add Clip etc. unchanged.
     trackLanesView_.setHeaderActiveSuppressProvider(
         [this] { return callbacks_.hasAnyKeyedInstrumentControllerActive(); });
-    trackLanesView_.setOnAudioHeaderActivated(
-        [this] { callbacks_.deactivateKeyedInstrumentControllersOnly(); });
+    trackLanesView_.setOnAudioHeaderActivated([this] {
+        callbacks_.deactivateKeyedInstrumentControllersOnly();
+        inspectorView_.refreshFromSession();
+    });
 }
