@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <unordered_set>
 
 namespace
@@ -725,6 +726,15 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     root->setProperty("ticksPerQuarter", data.ticksPerQuarter);
     root->setProperty("snapEnabled", data.snapEnabled);
     root->setProperty("snapResolution", data.snapResolution);
+    if (data.hasMainWindowBounds && data.mainWindowBounds.width >= 320 && data.mainWindowBounds.height >= 240)
+    {
+        juce::DynamicObject::Ptr mw = new juce::DynamicObject();
+        mw->setProperty("x", data.mainWindowBounds.x);
+        mw->setProperty("y", data.mainWindowBounds.y);
+        mw->setProperty("width", data.mainWindowBounds.width);
+        mw->setProperty("height", data.mainWindowBounds.height);
+        root->setProperty("mainWindow", juce::var(mw.get()));
+    }
     root->setProperty("tracks", juce::var(trackVars));
 
     if (data.version >= 11 && !data.experimentalInstrumentTracks.empty())
@@ -1096,6 +1106,47 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
         const SnapResolution decoded = snapResolutionFromProjectString(snapKey);
         out.snapResolution = snapResolutionToProjectString(decoded);
+    }
+
+    {
+        const juce::var& mwVar = root.getProperty("mainWindow", {});
+        if (mwVar.isObject())
+        {
+            const auto* dyn = mwVar.getDynamicObject();
+            if (dyn != nullptr)
+            {
+                auto propInt = [](const juce::var& v, int fallback) -> int {
+                    if (v.isInt() || v.isInt64())
+                    {
+                        return static_cast<int>(static_cast<juce::int64>(v));
+                    }
+                    if (v.isDouble())
+                    {
+                        return juce::roundToInt(static_cast<double>(v));
+                    }
+                    if (v.isString())
+                    {
+                        return v.toString().trim().getIntValue();
+                    }
+                    return fallback;
+                };
+                const int x = propInt(dyn->getProperty("x"), std::numeric_limits<int>::min());
+                const int y = propInt(dyn->getProperty("y"), std::numeric_limits<int>::min());
+                const int ww = propInt(dyn->getProperty("width"), 0);
+                const int hh = propInt(dyn->getProperty("height"), 0);
+                constexpr int kMinW = 320;
+                constexpr int kMinH = 240;
+                if (x != std::numeric_limits<int>::min() && y != std::numeric_limits<int>::min() && ww >= kMinW
+                    && hh >= kMinH)
+                {
+                    out.hasMainWindowBounds = true;
+                    out.mainWindowBounds.x = x;
+                    out.mainWindowBounds.y = y;
+                    out.mainWindowBounds.width = juce::jmin(ww, 10000);
+                    out.mainWindowBounds.height = juce::jmin(hh, 10000);
+                }
+            }
+        }
     }
 
     {

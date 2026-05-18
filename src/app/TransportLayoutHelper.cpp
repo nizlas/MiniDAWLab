@@ -31,7 +31,7 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
                                          + kBpmEditorWidthPx + kMusicalInnerGapPx + kTimeSigComboWidthPx
                                          + kGapTimeSigToFormatPx + kTimelineFormatComboWidthPx;
     constexpr int kSnapToggleWidthPx = 52;
-    constexpr int kSnapComboWidthPx = 72;
+    constexpr int kSnapComboWidthPx = 118;
     constexpr int kSnapClusterWidthPx = kSnapToggleWidthPx + 4 + kSnapComboWidthPx;
     constexpr int kToolbarRightReservedPx
         = kMusicalClusterWidthPx + kGapMusicalToSnapPx + kSnapClusterWidthPx;

@@ -109,7 +109,7 @@ public:
     /// Re-anchor smoothed playhead to `targetSample` (e.g. after external `Transport::requestSeek`).
     void resetUiPlayheadAnchorToSample(std::int64_t targetSample) noexcept;
 
-    /// I3f: musical snap for timeline editing (combo ids: 1=Off, 2=1/8, 3=1/16, 4=1/32 at current PPQ).
+    /// Legacy hook: global snap comes from `Session`; kept so older call sites still compile.
     void setMusicalSnapComboId(int id) noexcept;
 
     /// Timeline paint only: 1 = compact hits (drums), 2 = duration bars (melodic). Does not change data or playback.
@@ -311,8 +311,6 @@ private:
     std::int64_t lastObservedClipLengthSamplesUi_ = 0;
     int lastObservedNoteCountUi_ = -1;
 
-    int musicalSnapComboId_ = 1;
-    /// 1 = Hits (default), 2 = Bars.
     int timelineNotesDisplayComboId_ = 1;
     int lastObservedTimelineNoteCountUi_ = -1;
 

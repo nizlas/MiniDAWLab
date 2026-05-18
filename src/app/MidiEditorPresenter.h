@@ -52,6 +52,9 @@ public:
 
         /// Same as legacy `TransportControlsContent::syncInstrumentClipTimelineFromDevice` (staging + all keyed controllers receive device sample-rate).
         std::function<void(double sampleRate)> applyInstrumentClipTimelineSampleRate;
+
+        /// After MIDI editor changes shared `Session` arrangement snap resolution: refresh main toolbar combo (no extra snap math).
+        std::function<void()> syncArrangementSnapToolbarFromSession;
     };
 
     MidiEditorPresenter(Transport& transport,
@@ -71,6 +74,9 @@ public:
 
     /// When `Session` timeline ruler format (BBT / seconds) changes; updates MIDI editor toolbar if open.
     void syncTimelineRulerFormatUiIfEditorOpen();
+
+    /// Main-window snap changed or project loaded; refresh MIDI editor snap toggle + resolution if open.
+    void refreshArrangementSnapMirrorFromSession() noexcept;
 
     /// After seeking from shortcuts that already moved the session playhead (`invokeJumpToLeftLocatorFromWindowShortcut`).
     void notifyMidiEditorExternalTransportSeekIfOpen(std::int64_t targetSample) noexcept;

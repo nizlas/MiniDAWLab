@@ -84,6 +84,11 @@ void ProjectIoCoordinator::saveProject()
             return callbacks_.instrumentCtlByTrackId(laneId);
         });
         const SnapProjectRootFields snapRoot = callbacks_.getSnapProjectRootFieldsForSave();
+        std::optional<ProjectFileMainWindowBoundsV1> mainWinBounds;
+        if (callbacks_.getMainWindowBoundsForProjectSave != nullptr)
+        {
+            mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
+        }
         const juce::Result r = session_.saveProjectToFile(
             transport_,
             session_.getCurrentProjectFile(),
@@ -91,7 +96,8 @@ void ProjectIoCoordinator::saveProject()
             &pluginHost_,
             ctlLookup,
             snapRoot.enabled,
-            snapRoot.resolutionKey);
+            snapRoot.resolutionKey,
+            mainWinBounds);
         if (!r.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(
@@ -162,6 +168,11 @@ void ProjectIoCoordinator::saveProject()
             return callbacks_.instrumentCtlByTrackId(laneId);
         });
         const SnapProjectRootFields snapRoot = callbacks_.getSnapProjectRootFieldsForSave();
+        std::optional<ProjectFileMainWindowBoundsV1> mainWinBounds;
+        if (callbacks_.getMainWindowBoundsForProjectSave != nullptr)
+        {
+            mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
+        }
         const juce::Result r = session_.saveProjectToFile(
             transport_,
             projectFile,
@@ -169,7 +180,8 @@ void ProjectIoCoordinator::saveProject()
             &pluginHost_,
             ctlLookup,
             snapRoot.enabled,
-            snapRoot.resolutionKey);
+            snapRoot.resolutionKey,
+            mainWinBounds);
         if (!r.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(
@@ -295,6 +307,10 @@ void ProjectIoCoordinator::loadProject()
         }
         callbacks_.clearSessionHistory();
         callbacks_.refreshAllUiAfterLoadedProject();
+        if (parsedLoad.hasMainWindowBounds && callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
+        {
+            callbacks_.applyMainWindowBoundsFromLoadedProject(parsedLoad);
+        }
         if (infoNote.isNotEmpty() || skipped.size() > 0)
         {
             juce::String body;

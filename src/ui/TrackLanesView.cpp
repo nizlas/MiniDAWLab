@@ -1951,8 +1951,9 @@ void TrackLanesView::mouseWheelMove(
         }
         const double wPan = (double)twPan;
         const double panNotchPx = juce::jmax(1.0, wPan / 8.0);
-        const std::int64_t step = (d > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
-                                           : -((std::int64_t)std::llround(panNotchPx * spp));
+        const double panD = -d;
+        const std::int64_t step = (panD > 0.0) ? (std::int64_t)std::llround(panNotchPx * spp)
+                                                : -((std::int64_t)std::llround(panNotchPx * spp));
         if (step == 0)
         {
             return;
@@ -1966,7 +1967,7 @@ void TrackLanesView::mouseWheelMove(
     {
         return;
     }
-    const int deltaPx = (int)std::llround(d * (double)defaultRowHeightPx_ * 0.5);
+    const int deltaPx = (int)std::llround(-d * (double)defaultRowHeightPx_ * 0.5);
     if (deltaPx == 0)
     {
         return;

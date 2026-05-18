@@ -3,9 +3,11 @@
 #include <JuceHeader.h>
 
 #include <functional>
+#include <optional>
 #include <utility>
 
 #include "domain/Track.h"
+#include "io/ProjectFile.h"
 #include "ui/SnapSettings.h"
 
 class Transport;
@@ -30,6 +32,9 @@ public:
 
         std::function<SnapProjectRootFields()> getSnapProjectRootFieldsForSave;
         std::function<void(const SnapProjectRootFields&)> restoreSnapProjectRootFieldsToUi;
+
+        std::function<std::optional<ProjectFileMainWindowBoundsV1>()> getMainWindowBoundsForProjectSave;
+        std::function<void(const ProjectFileV1&)> applyMainWindowBoundsFromLoadedProject;
     };
 
     ProjectIoCoordinator(Transport& transport,

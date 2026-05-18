@@ -138,6 +138,16 @@ struct ProjectFileExperimentalInstrumentTrackV1
     std::vector<ProjectFileExperimentalInstrumentClipV1> clips;
 };
 
+/// Optional main application window placement (root `mainWindow` object); omitted in older projects.
+/// Values are **screen** coordinates in pixels (same as `DocumentWindow::getScreenBounds()`).
+struct ProjectFileMainWindowBoundsV1
+{
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
 /// Optional Audio Mixdown UI settings (root `audioMixdown`); omitted in older projects.
 struct ProjectFileAudioMixdownV1
 {
@@ -180,6 +190,9 @@ struct ProjectFileV1
     /// Optional root (Slice C): arrangement snap UI; absent in older files → defaults below.
     bool snapEnabled = false;
     juce::String snapResolution { "1_4" };
+    /// Optional root `mainWindow` object; absent in older files → do not restore window geometry.
+    bool hasMainWindowBounds = false;
+    ProjectFileMainWindowBoundsV1 mainWindowBounds;
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;

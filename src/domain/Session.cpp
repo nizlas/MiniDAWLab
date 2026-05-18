@@ -1037,7 +1037,8 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                                        PluginInsertHost* pluginHost,
                                        ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId,
                                        const bool arrangementSnapEnabled,
-                                       const juce::String arrangementSnapResolutionKey)
+                                       const juce::String arrangementSnapResolutionKey,
+                                       std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -1065,6 +1066,11 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     }
     out.snapEnabled = arrangementSnapEnabled;
     out.snapResolution = arrangementSnapResolutionKey;
+    if (mainWindowBoundsForSave.has_value())
+    {
+        out.hasMainWindowBounds = true;
+        out.mainWindowBounds = *mainWindowBoundsForSave;
+    }
 
     for (int i = 0; i < s->getNumTracks(); ++i)
     {

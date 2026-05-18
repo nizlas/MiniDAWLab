@@ -111,6 +111,12 @@ void MidiEditorPresenter::wireMidiEditorForOpenClip(const TrackId timelineInstru
         [this] { return callbacks_.buildSortedInstrumentMusicalUndoSnapshot(); },
         [this] { callbacks_.invokeUndo(); },
         [this] { callbacks_.invokeRedo(); });
+    w.setArrangementSnapToolbarSyncHandler([this] {
+        if (callbacks_.syncArrangementSnapToolbarFromSession != nullptr)
+        {
+            callbacks_.syncArrangementSnapToolbarFromSession();
+        }
+    });
     w.syncInstrumentStateFromHost();
 }
 
@@ -122,6 +128,7 @@ void MidiEditorPresenter::detachToScratchAfterMissingInstrumentClip(const juce::
     }
     ExperimentalMidiEditorWindow& w = *midiEditorWindow_;
     w.unbindExternalPattern();
+    w.setArrangementSnapToolbarSyncHandler({});
     w.bindTransportCommands(makeMidiEditorTransportCommands());
     w.setInstrumentMusicalUndoUi(
         std::function<void(const juce::String&, std::function<bool()>)>{},
@@ -236,6 +243,7 @@ void MidiEditorPresenter::openMidiEditorForInstrumentClip(const TrackId timeline
     midiEditorWindow_.reset();
     midiEditorWindow_ = std::make_unique<ExperimentalMidiEditorWindow>(*mh);
     wireMidiEditorForOpenClip(timelineInstrumentTrackId, clip);
+    midiEditorWindow_->refreshArrangementSnapMirrorFromSession();
     midiEditorWindow_->setVisible(true);
     midiEditorWindow_->toFront(true);
 }
@@ -270,6 +278,14 @@ void MidiEditorPresenter::syncTimelineRulerFormatUiIfEditorOpen()
     if (midiEditorWindow_.get() != nullptr)
     {
         midiEditorWindow_->syncTimelineRulerFormatFromSession();
+    }
+}
+
+void MidiEditorPresenter::refreshArrangementSnapMirrorFromSession() noexcept
+{
+    if (midiEditorWindow_.get() != nullptr)
+    {
+        midiEditorWindow_->refreshArrangementSnapMirrorFromSession();
     }
 }
 

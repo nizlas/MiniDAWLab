@@ -16,6 +16,7 @@
 #include "app/MidiEditorPresenter.h"
 #include "app/PluginHostUiBindings.h"
 #include "app/ProjectIoCoordinator.h"
+#include "app/ProjectMainWindowBounds.h"
 #include "app/RecordingCoordinator.h"
 #include "app/TrackLanesEditCoordinator.h"
 #include "app/TransportLayoutHelper.h"
@@ -53,6 +54,7 @@
 #include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
+#include "ui/SnapResolutionComboBox.h"
 #include "ui/SnapSettings.h"
 #include "audio/AudioDeviceInfo.h"
 #include "audio/LatencySettingsStore.h"
@@ -601,6 +603,9 @@ public:
                 [this](double sr) {
                     instrumentRuntimeCoordinator_->applyTimelineSampleRateToKeyedAndStaging(sr);
                 },
+                [this]() {
+                    applyArrangementSnapUiFromSettings(session.getArrangementSnapSettings(), true);
+                },
             });
 
         session.setOnTimelineRulerTimeDisplayChanged([this]() {
@@ -821,6 +826,19 @@ public:
                 [this]() -> SnapProjectRootFields { return arrangementSnapPersistenceSnapshotForSave(); },
                 [this](const SnapProjectRootFields& root) {
                     restoreArrangementSnapFromProjectRootFields(root);
+                },
+                [this]() -> std::optional<ProjectFileMainWindowBoundsV1> {
+                    if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                    {
+                        return captureProjectMainWindowBoundsForProjectSave(*dw);
+                    }
+                    return std::nullopt;
+                },
+                [this](const ProjectFileV1& loaded) {
+                    if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                    {
+                        applyLoadedProjectMainWindowBounds(*dw, loaded);
+                    }
                 },
             });
 
@@ -1404,18 +1422,7 @@ void mini_daw_app_transport::TransportControlsContent::configureArrangementSnapC
     arrangementSnapToggle_.setButtonText("Snap");
     arrangementSnapToggle_.onClick = [this] { handleArrangementSnapUiChangedByUser(); };
 
-    arrangementSnapResolutionCombo_.clear(juce::dontSendNotification);
-    arrangementSnapResolutionCombo_.addItem(
-        snapResolutionDisplayName(SnapResolution::Bar), snapResolutionToComboItemId(SnapResolution::Bar));
-    arrangementSnapResolutionCombo_.addItem(
-        snapResolutionDisplayName(SnapResolution::Half), snapResolutionToComboItemId(SnapResolution::Half));
-    arrangementSnapResolutionCombo_.addItem(
-        snapResolutionDisplayName(SnapResolution::Quarter), snapResolutionToComboItemId(SnapResolution::Quarter));
-    arrangementSnapResolutionCombo_.addItem(
-        snapResolutionDisplayName(SnapResolution::Eighth), snapResolutionToComboItemId(SnapResolution::Eighth));
-    arrangementSnapResolutionCombo_.addItem(
-        snapResolutionDisplayName(SnapResolution::Sixteenth),
-        snapResolutionToComboItemId(SnapResolution::Sixteenth));
+    clearAndPopulateSnapResolutionComboBox(arrangementSnapResolutionCombo_);
     arrangementSnapResolutionCombo_.setTooltip("Snap resolution");
     arrangementSnapResolutionCombo_.onChange = [this] { handleArrangementSnapUiChangedByUser(); };
 }
@@ -1430,6 +1437,11 @@ void mini_daw_app_transport::TransportControlsContent::applyArrangementSnapUiFro
                                                  juce::dontSendNotification);
     arrangementSnapUiApplyingFromProject_ = false;
     arrangementSnapSettings_ = s;
+    session.setArrangementSnapSettings(s);
+    if (midiEditorPresenter_ != nullptr)
+    {
+        midiEditorPresenter_->refreshArrangementSnapMirrorFromSession();
+    }
     if (repaintTimeline)
     {
         rulerView.repaint();
@@ -1446,6 +1458,11 @@ void mini_daw_app_transport::TransportControlsContent::handleArrangementSnapUiCh
     arrangementSnapSettings_.enabled = arrangementSnapToggle_.getToggleState();
     arrangementSnapSettings_.resolution
         = snapResolutionFromComboItemId(arrangementSnapResolutionCombo_.getSelectedId());
+    session.setArrangementSnapSettings(arrangementSnapSettings_);
+    if (midiEditorPresenter_ != nullptr)
+    {
+        midiEditorPresenter_->refreshArrangementSnapMirrorFromSession();
+    }
     rulerView.repaint();
     trackLanesView.repaint();
 }

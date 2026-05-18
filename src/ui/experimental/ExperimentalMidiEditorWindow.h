@@ -56,6 +56,12 @@ public:
     /// session preference changes from the main window or another editor instance.
     void syncTimelineRulerFormatFromSession();
 
+    /// Re-read global arrangement snap toggle + resolution from `Session` (shared with main window).
+    void refreshArrangementSnapMirrorFromSession();
+
+    /// Notify main window to refresh its snap toolbar after user edits here (`Session` already updated).
+    void setArrangementSnapToolbarSyncHandler(std::function<void()> fn);
+
     /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass session/transport/
     /// deviceManager for absolute-timeline roll + shared playhead/locators; `timelineClip` may be null
     /// only for legacy detached use. `mainTimelineViewport` is reserved for future sync; default roll zoom uses ~5 bars from session tempo/meter when the clip has no saved viewport.

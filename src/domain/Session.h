@@ -40,6 +40,7 @@
 #include "domain/Track.h"
 #include "domain/AudioMixdownProjectSettings.h"
 #include "io/ProjectFile.h"
+#include "ui/SnapSettings.h"
 
 #include <juce_core/juce_core.h>
 
@@ -238,6 +239,10 @@ public:
     /// [Message thread] Replace full musical metadata (sanitized on snapshot).
     void setProjectMusicalTime(ProjectMusicalTime musicalTime) noexcept;
 
+    /// [Message thread] Global arrangement/MIDI snap — mirrored from the main transport strip (not part of `SessionSnapshot`).
+    [[nodiscard]] SnapSettings getArrangementSnapSettings() const noexcept { return arrangementSnapSettings_; }
+    void setArrangementSnapSettings(SnapSettings settings) noexcept { arrangementSnapSettings_ = settings; }
+
     // [Audio thread] and [Message thread] Acquire the current `SessionSnapshot` pointer; no
     // decode, no session mutation. This is the main handoff the engine uses each block.
     [[nodiscard]] std::shared_ptr<const SessionSnapshot> loadSessionSnapshotForAudioThread() const noexcept;
@@ -261,7 +266,8 @@ public:
         PluginInsertHost* pluginHost = nullptr,
         ExperimentalInstrumentCtlLookupFn instrumentCtlByTrackId = {},
         bool arrangementSnapEnabled = false,
-        juce::String arrangementSnapResolutionKey = "1_4");
+        juce::String arrangementSnapResolutionKey = "1_4",
+        std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave = std::nullopt);
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).
@@ -326,4 +332,6 @@ private:
 
     TimelineRulerTimeDisplay timelineRulerTimeDisplay_{TimelineRulerTimeDisplay::MusicalBarsBeats};
     std::function<void()> onTimelineRulerTimeDisplayChanged_;
+
+    SnapSettings arrangementSnapSettings_;
 };

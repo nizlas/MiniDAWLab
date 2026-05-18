@@ -6,7 +6,9 @@
 
 #include "domain/Session.h"
 #include "domain/ProjectMusicalTime.h"
+#include "domain/ArrangementMusicalSnap.h"
 #include "transport/Transport.h"
+#include "ui/SnapSettings.h"
 #include "ui/TimelineViewportModel.h"
 
 #include <cmath>
@@ -65,40 +67,6 @@ namespace
 
     /// Piano-roll vertical timeline grid: minimum screen spacing before drawing a line at this tier.
     constexpr double kTimelineGridMinorMinPx = 8.0;
-    constexpr double kTimelineGridBeatMinPx = 11.0;
-    constexpr double kTimelineGridBarMinPx = 5.0;
-
-    [[nodiscard]] inline double spacingPxForTickDelta(const std::int64_t deltaTicks,
-                                                      const double bpm,
-                                                      const int tpq,
-                                                      const double sr,
-                                                      const double samplesPerPixel) noexcept
-    {
-        if (deltaTicks <= 0 || samplesPerPixel <= 0.0 || !std::isfinite(samplesPerPixel))
-        {
-            return 0.0;
-        }
-        const std::int64_t ds = ticksToRelativeSamples(deltaTicks, bpm, tpq, sr);
-        if (ds <= 0)
-        {
-            return 0.0;
-        }
-        return (double)ds / samplesPerPixel;
-    }
-
-    [[nodiscard]] inline std::int64_t floorTickToGridStep(const std::int64_t tk,
-                                                         const std::int64_t step) noexcept
-    {
-        if (step <= 1)
-        {
-            return tk;
-        }
-        if (tk >= 0)
-        {
-            return (tk / step) * step;
-        }
-        return ((tk + 1) / step - 1) * step;
-    }
 
     [[nodiscard]] inline int stepGridStrideForMinPx(const float pxPerStepColumn,
                                                     const double minPx) noexcept
@@ -112,6 +80,34 @@ namespace
     }
 
     /// Hit-test only: must match diamond path used when painting timeline hits (compact diamonds).
+    [[nodiscard]] inline bool beatGridNearBarBoundary(const double posBeats, const double barLenBeats) noexcept
+    {
+        if (!(barLenBeats > 1.0e-9) || !std::isfinite(posBeats) || !std::isfinite(barLenBeats))
+        {
+            return false;
+        }
+        double r = std::fmod(posBeats, barLenBeats);
+        if (r < 0.0)
+        {
+            r += barLenBeats;
+        }
+        return r < 1.0e-4 || (barLenBeats - r) < 1.0e-4;
+    }
+
+    [[nodiscard]] inline bool beatGridNearBeatBoundary(const double posBeats) noexcept
+    {
+        if (!std::isfinite(posBeats))
+        {
+            return false;
+        }
+        double r = std::fmod(posBeats, 1.0);
+        if (r < 0.0)
+        {
+            r += 1.0;
+        }
+        return r < 1.0e-4 || (1.0 - r) < 1.0e-4;
+    }
+
     [[nodiscard]] bool pointInTimelineNoteDiamond(float cx,
                                                   float cy,
                                                   float halfW,
@@ -1034,9 +1030,8 @@ int ExperimentalPianoRollView::stepAtTimelineX(const int x) const
     return step;
 }
 
-void ExperimentalPianoRollView::setMusicalSnapComboId(const int id) noexcept
+void ExperimentalPianoRollView::setMusicalSnapComboId(const int /*id*/) noexcept
 {
-    musicalSnapComboId_ = juce::jlimit(1, 4, id);
     repaint();
 }
 
@@ -1054,18 +1049,33 @@ void ExperimentalPianoRollView::setUndoablePatternEditHandler(
 
 std::int64_t ExperimentalPianoRollView::musicalSnapGridTicks() const noexcept
 {
-    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
-    switch (musicalSnapComboId_)
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr || session_ == nullptr || deviceManager_ == nullptr)
     {
-    case 2:
-        return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 2));
-    case 3:
-        return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 4));
-    case 4:
-        return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 8));
-    default:
         return 0;
     }
+    const SnapSettings snap = session_->getArrangementSnapSettings();
+    if (!snap.enabled)
+    {
+        return 0;
+    }
+
+    const ProjectMusicalTime mt = session_->getProjectMusicalTime();
+    const double stepBeats = arrangementSnapGridStepBeats(snap.resolution, mt);
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double spb = samplesPerBeat(mt, sr);
+    if (!std::isfinite(stepBeats) || stepBeats <= 0.0 || !std::isfinite(spb) || spb <= 0.0)
+    {
+        return 0;
+    }
+    const std::int64_t stepSamples = (std::int64_t)std::llround(stepBeats * spb);
+    if (stepSamples <= 0)
+    {
+        return 0;
+    }
+
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    return juce::jmax<std::int64_t>(1, relativeSamplesToTicks(stepSamples, bpm, tpq, sr));
 }
 
 std::int64_t ExperimentalPianoRollView::referenceTimelineGridTicks() const noexcept
@@ -1361,12 +1371,25 @@ ExperimentalPianoRollView::findPianoBarResizeEdgeAtPoint(const juce::Point<int> 
 
 std::int64_t ExperimentalPianoRollView::snapTimelineTickForEdit(const std::int64_t tick) const noexcept
 {
-    const std::int64_t g = musicalSnapGridTicks();
-    if (g <= 0)
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr || session_ == nullptr || deviceManager_ == nullptr)
     {
         return tick;
     }
-    return (std::int64_t)std::llround((double)tick / (double)g) * g;
+    const SnapSettings snap = session_->getArrangementSnapSettings();
+    if (!snap.enabled)
+    {
+        return tick;
+    }
+
+    const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t absS = anchor + ticksToSignedSamples(tick, bpm, tpq, sr);
+    const std::int64_t snappedAbs
+        = snapSampleToGridIfEnabled(absS, snap, session_->getProjectMusicalTime(), sr);
+    const std::int64_t relS = snappedAbs - anchor;
+    return relativeSamplesToTicks(relS, bpm, tpq, sr);
 }
 
 void ExperimentalPianoRollView::sortTimelineNotesForEditing() noexcept
@@ -2175,11 +2198,8 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
     const std::int64_t absClick = sampleAtGridX((float)pos.getX());
     const std::int64_t oldAnchor = timelineClip_->timelineAnchorSamples;
     std::int64_t tickOffset = relativeSamplesToTicks(absClick - oldAnchor, bpm, tpq, sr);
-    const std::int64_t snapG = musicalSnapGridTicks();
-    if (snapG > 0)
-    {
-        tickOffset = (std::int64_t)std::llround((double)tickOffset / (double)snapG) * snapG;
-    }
+    tickOffset = snapTimelineTickForEdit(tickOffset);
+    const std::int64_t snapDur = musicalSnapGridTicks();
 
     const std::int64_t absSnappedNote = oldAnchor + ticksToSignedSamples(tickOffset, bpm, tpq, sr);
     if (absSnappedNote < vis0 || absSnappedNote >= vis1)
@@ -2210,7 +2230,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
         nn.velocity = 100;
         nn.channel = 10;
         nn.startTick = tickOffset;
-        nn.durationTicks = snapG > 0 ? snapG : 240;
+        nn.durationTicks = snapDur > 0 ? snapDur : 240;
 
         auto addAndNotify = [this, nn, commitSortedNotes]() mutable -> bool {
             pattern_.timelineNotes.push_back(nn);
@@ -2257,7 +2277,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
     nn.velocity = 100;
     nn.channel = 10;
     nn.startTick = 0;
-    nn.durationTicks = snapG > 0 ? snapG : 240;
+    nn.durationTicks = snapDur > 0 ? snapDur : 240;
 
     auto rebaseAnchorAndAddNote = [this, newAnchor, deltaShift, nn, commitSortedNotes]() mutable -> bool {
         timelineClip_->timelineAnchorSamples = newAnchor;
@@ -3133,88 +3153,77 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
     }
     else if (timelineClip_ != nullptr)
     {
-        if (pattern_.usesTimelineNotes() && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))
+        if (pattern_.usesTimelineNotes() && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_)
+            && session_ != nullptr)
         {
             const double sr = effectiveDeviceSampleRate(deviceManager_);
-            const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
-            const int tpqI = experimentalEffectiveTicksPerQuarter(pattern_);
-            const std::int64_t tpq = (std::int64_t)tpqI;
             const double spp = samplesPerPixel_;
+            const ProjectMusicalTime mt = session_->getProjectMusicalTime();
+            const SnapSettings snap = session_->getArrangementSnapSettings();
 
-            std::int64_t minorStep = referenceTimelineGridTicks();
-            minorStep = juce::jmax<std::int64_t>(1, minorStep);
-            while (minorStep < tpq * 1024)
+            const double spb = samplesPerBeat(mt, sr);
+            if (spb > 0.0 && std::isfinite(spb))
             {
-                const double px = spacingPxForTickDelta(minorStep, bpm, tpqI, sr, spp);
-                if (px >= kTimelineGridMinorMinPx || minorStep >= tpq)
+                double stepBeats = arrangementSnapGridStepBeats(SnapResolution::Straight_1_16, mt);
+                if (!std::isfinite(stepBeats) || stepBeats <= 0.0)
                 {
-                    break;
+                    stepBeats = 0.25;
                 }
-                minorStep *= 2;
-            }
 
-            const double beatPx = spacingPxForTickDelta(tpq, bpm, tpqI, sr, spp);
-            std::int64_t lineStep = minorStep;
-            bool coarseBarsOnly = false;
-            if (beatPx < kTimelineGridBeatMinPx && tpq > 0)
-            {
-                coarseBarsOnly = true;
-                std::int64_t barStep = 4 * tpq;
-                barStep = juce::jmax<std::int64_t>(1, barStep);
-                while (barStep <= tpq * 16384)
+                if (snap.enabled)
                 {
-                    const double pxBar = spacingPxForTickDelta(barStep, bpm, tpqI, sr, spp);
-                    if (pxBar >= kTimelineGridBarMinPx)
+                    const double pick = arrangementSnapGridStepBeats(snap.resolution, mt);
+                    if (std::isfinite(pick) && pick > 0.0)
                     {
-                        break;
+                        stepBeats = pick;
                     }
-                    barStep *= 2;
-                }
-                lineStep = barStep;
-            }
-
-            const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
-            const std::int64_t visHi = visibleEndSamples();
-            const std::int64_t tickEnd = relativeSamplesToTicks(visHi - anchor, bpm, tpqI, sr) + lineStep * 4;
-
-            const std::int64_t visLo = visibleStartSamples_;
-            std::int64_t tickStartRaw = relativeSamplesToTicks(visLo - anchor, bpm, tpqI, sr) - lineStep * 2;
-            std::int64_t tk = floorTickToGridStep(tickStartRaw, lineStep);
-
-            const juce::Colour colMinor = juce::Colour(0xff333340);
-            const juce::Colour colHalf = juce::Colour(0xff454552);
-            const juce::Colour colBeat = juce::Colour(0xff505060);
-
-            for (; tk <= tickEnd; tk += lineStep)
-            {
-                const std::int64_t absS = anchor + ticksToSignedSamples(tk, bpm, tpqI, sr);
-                const float x = xForSessionSample(absS);
-                if (x < (float)gr.getX() - 2.0f || x > (float)gr.getRight() + 2.0f)
-                {
-                    continue;
                 }
 
-                juce::Colour c = colMinor;
-                if (coarseBarsOnly)
+                while (stepBeats * spb / spp < kTimelineGridMinorMinPx && stepBeats < 1.0e9)
                 {
-                    const bool barHit = tpq > 0 && (tk % (4 * tpq) == 0);
-                    c = barHit ? colBeat : colMinor;
+                    stepBeats *= 2.0;
                 }
-                else
+
+                const std::int64_t visLo = visibleStartSamples_;
+                const std::int64_t visHi = visibleEndSamples();
+                double beatLo = sampleToBeatPosition(visLo, mt, sr);
+                double beatHi = sampleToBeatPosition(visHi, mt, sr);
+                if (beatHi < beatLo)
                 {
-                    const bool beat = tpq > 0 && (tk % tpq == 0);
-                    if (beat)
+                    std::swap(beatLo, beatHi);
+                }
+
+                const std::int64_t kStart = (std::int64_t)std::floor(beatLo / stepBeats) - 2;
+                const std::int64_t kEnd = (std::int64_t)std::ceil(beatHi / stepBeats) + 2;
+
+                const double barLen = beatsPerBar(mt);
+                const juce::Colour colMinor = juce::Colour(0xff333340);
+                const juce::Colour colHalf = juce::Colour(0xff454552);
+                const juce::Colour colBeat = juce::Colour(0xff505060);
+
+                for (std::int64_t k = kStart; k <= kEnd; ++k)
+                {
+                    const double posBeats = (double)k * stepBeats;
+                    const std::int64_t absS = beatToSample(posBeats, mt, sr);
+                    const float x = xForSessionSample(absS);
+                    if (x < (float)gr.getX() - 2.0f || x > (float)gr.getRight() + 2.0f)
+                    {
+                        continue;
+                    }
+
+                    juce::Colour c = colMinor;
+                    if (beatGridNearBarBoundary(posBeats, barLen))
                     {
                         c = colBeat;
                     }
-                    else if (tpq >= 4 && (tk % (tpq / 2) == 0))
+                    else if (beatGridNearBeatBoundary(posBeats))
                     {
                         c = colHalf;
                     }
-                }
 
-                g.setColour(c);
-                g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
+                    g.setColour(c);
+                    g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
+                }
             }
         }
         else if (samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))

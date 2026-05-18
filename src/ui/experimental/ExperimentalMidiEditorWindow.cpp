@@ -8,6 +8,8 @@
 
 #include "domain/Session.h"
 #include "transport/Transport.h"
+#include "ui/SnapSettings.h"
+#include "ui/SnapResolutionComboBox.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TransportShortcutKeys.h"
 #include "ui/CollapsibleSideStrip.h"
@@ -155,18 +157,16 @@ public:
         exportButton_.setButtonText("Export MIDI...");
         exportButton_.onClick = [this] { beginExportMidi(); };
 
-        addAndMakeVisible(snapLabel_);
-        snapLabel_.setText("Snap", juce::dontSendNotification);
-        snapLabel_.setJustificationType(juce::Justification::centredRight);
-        snapLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        addAndMakeVisible(arrangementSnapToggle_);
+        arrangementSnapToggle_.setClickingTogglesState(true);
+        arrangementSnapToggle_.setTooltip("Snap");
+        arrangementSnapToggle_.setButtonText("Snap");
+        arrangementSnapToggle_.onClick = [this] { handleArrangementSnapControlsChangedByUser(); };
 
-        addAndMakeVisible(snapBox_);
-        snapBox_.addItem("Off", 1);
-        snapBox_.addItem("1/8", 2);
-        snapBox_.addItem("1/16", 3);
-        snapBox_.addItem("1/32", 4);
-        snapBox_.setSelectedId(1, juce::dontSendNotification);
-        snapBox_.onChange = [this] { pushSnapToRoll(); };
+        addAndMakeVisible(arrangementSnapResolutionCombo_);
+        clearAndPopulateSnapResolutionComboBox(arrangementSnapResolutionCombo_);
+        arrangementSnapResolutionCombo_.setTooltip("Snap resolution");
+        arrangementSnapResolutionCombo_.onChange = [this] { handleArrangementSnapControlsChangedByUser(); };
 
         addAndMakeVisible(displayLabel_);
         displayLabel_.setText("Display", juce::dontSendNotification);
@@ -289,6 +289,7 @@ public:
 
         syncInstrumentUiFromHost();
         syncTimelineRulerFormatFromSession();
+        syncArrangementSnapUiFromSession();
     }
 
     ~Body() override
@@ -338,6 +339,7 @@ public:
                                                     juce::dontSendNotification);
             timelineRulerFormatCombo_.setEnabled(false);
             timelineRulerFormatCombo_.setTooltip("Clip-bound session required to share ruler format with the main window.");
+            syncArrangementSnapUiFromSession();
             return;
         }
 
@@ -353,6 +355,7 @@ public:
         {
             rv->repaint();
         }
+        syncArrangementSnapUiFromSession();
     }
 
     void bindExternal(ExperimentalMidiPattern* p,
@@ -509,6 +512,7 @@ public:
         syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
         syncTimelineRulerFormatFromSession();
+        syncArrangementSnapUiFromSession();
     }
 
     void snapshotOpenClipViewportFromRoll() noexcept
@@ -660,8 +664,12 @@ public:
         cycleToggleButton_.setBounds(toolbar.removeFromLeft(56).reduced(0, 2));
         recordButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         exportButton_.setBounds(toolbar.removeFromLeft(96).reduced(0, 2));
-        snapLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
-        snapBox_.setBounds(toolbar.removeFromLeft(76).reduced(0, 2));
+        constexpr int kSnapToggleW = 52;
+        constexpr int kSnapGapPx = 4;
+        constexpr int kSnapComboW = 118;
+        arrangementSnapToggle_.setBounds(toolbar.removeFromLeft(kSnapToggleW).reduced(0, 2));
+        toolbar.removeFromLeft(kSnapGapPx);
+        arrangementSnapResolutionCombo_.setBounds(toolbar.removeFromLeft(kSnapComboW).reduced(0, 2));
         displayLabel_.setBounds(toolbar.removeFromLeft(52).reduced(0, 4));
         displayBox_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         rowsLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
@@ -722,6 +730,14 @@ public:
         layoutMidiSideStripChrome();
     }
 
+    void setArrangementSnapToolbarSyncHandler(std::function<void()> fn)
+    {
+        arrangementSnapToolbarSyncHandler_ = std::move(fn);
+    }
+
+    void syncArrangementSnapUiFromSession();
+    void handleArrangementSnapControlsChangedByUser();
+
 private:
     // collapsible_side_strip::Host (stable Body owns strip chrome + per-mode widths, like `TransportControlsContent`).
     [[nodiscard]] int getSideStripWidth() const noexcept override { return midiRollActiveSideStripTotal(); }
@@ -759,7 +775,6 @@ private:
     void sliderDragEnded(juce::Slider* s) override;
 
     void syncStepsAndSnapUiForPattern();
-    void pushSnapToRoll();
     void pushDisplayToRoll();
     void pushRowsModeToRoll();
     [[nodiscard]] juce::String resolveDrumRowDisplayName(int midiNote, int pluginQueryChannel) const noexcept;
@@ -824,7 +839,6 @@ private:
             juce::dontSendNotification);
         roll->setFollowPlayheadEnabled(followPlayheadToggle_.getToggleState());
         viewport_.setViewedComponent(roll, true);
-        roll->setMusicalSnapComboId(snapBox_.getSelectedId());
         roll->setTimelineNotesDisplayComboId(displayBox_.getSelectedId());
         pushTransportGestureBlockToRoll();
 
@@ -852,8 +866,10 @@ private:
     juce::TextButton debugPreviewButton_;
     juce::TextButton debugStopButton_;
     juce::TextButton exportButton_;
-    juce::Label snapLabel_;
-    juce::ComboBox snapBox_;
+    juce::ToggleButton arrangementSnapToggle_;
+    juce::ComboBox arrangementSnapResolutionCombo_;
+    bool arrangementSnapUiApplyingFromSession_{false};
+    std::function<void()> arrangementSnapToolbarSyncHandler_;
     juce::Label displayLabel_;
     juce::ComboBox displayBox_;
     juce::Label rowsLabel_;
@@ -1253,11 +1269,42 @@ void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
     stepsLabel_.setEnabled(!tl);
 }
 
-void ExperimentalMidiEditorWindow::Body::pushSnapToRoll()
+void ExperimentalMidiEditorWindow::Body::syncArrangementSnapUiFromSession()
 {
-    if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    arrangementSnapUiApplyingFromSession_ = true;
+    if (sessionForRoll_ == nullptr)
     {
-        rv->setMusicalSnapComboId(snapBox_.getSelectedId());
+        arrangementSnapToggle_.setToggleState(false, juce::dontSendNotification);
+        arrangementSnapResolutionCombo_.setSelectedId(snapResolutionToComboItemId(SnapResolution::Straight_1_4),
+                                                       juce::dontSendNotification);
+        arrangementSnapToggle_.setEnabled(false);
+        arrangementSnapResolutionCombo_.setEnabled(false);
+        arrangementSnapUiApplyingFromSession_ = false;
+        return;
+    }
+
+    const SnapSettings s = sessionForRoll_->getArrangementSnapSettings();
+    arrangementSnapToggle_.setEnabled(true);
+    arrangementSnapResolutionCombo_.setEnabled(true);
+    arrangementSnapToggle_.setToggleState(s.enabled, juce::dontSendNotification);
+    arrangementSnapResolutionCombo_.setSelectedId(snapResolutionToComboItemId(s.resolution),
+                                                 juce::dontSendNotification);
+    arrangementSnapUiApplyingFromSession_ = false;
+}
+
+void ExperimentalMidiEditorWindow::Body::handleArrangementSnapControlsChangedByUser()
+{
+    if (arrangementSnapUiApplyingFromSession_ || sessionForRoll_ == nullptr)
+    {
+        return;
+    }
+    SnapSettings s;
+    s.enabled = arrangementSnapToggle_.getToggleState();
+    s.resolution = snapResolutionFromComboItemId(arrangementSnapResolutionCombo_.getSelectedId());
+    sessionForRoll_->setArrangementSnapSettings(s);
+    if (arrangementSnapToolbarSyncHandler_)
+    {
+        arrangementSnapToolbarSyncHandler_();
     }
 }
 
@@ -1513,6 +1560,22 @@ void ExperimentalMidiEditorWindow::syncTimelineRulerFormatFromSession()
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->syncTimelineRulerFormatFromSession();
+    }
+}
+
+void ExperimentalMidiEditorWindow::refreshArrangementSnapMirrorFromSession()
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->syncArrangementSnapUiFromSession();
+    }
+}
+
+void ExperimentalMidiEditorWindow::setArrangementSnapToolbarSyncHandler(std::function<void()> fn)
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->setArrangementSnapToolbarSyncHandler(std::move(fn));
     }
 }
 
