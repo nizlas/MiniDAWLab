@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "domain/Session.h"
+#include "domain/SessionRouting.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -12,6 +13,61 @@
 #include "ui/InspectorView.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TrackLanesView.h"
+
+namespace
+{
+    void afterSessionRoutingPresentationChanged(TrackLanesEditCoordinator::Callbacks& callbacks,
+                                                TrackLanesView& trackLanesView,
+                                                TimelineRulerView& rulerView,
+                                                InspectorView& inspectorView) noexcept
+    {
+        if (callbacks.syncViewportFromSession)
+        {
+            callbacks.syncViewportFromSession();
+        }
+        trackLanesView.syncTracksFromSession();
+        rulerView.repaint();
+        trackLanesView.repaint();
+        inspectorView.refreshFromSession();
+    }
+
+    [[nodiscard]] bool applySendDestinationAtUiSlot(Session& session,
+                                                    const TrackId trackId,
+                                                    const int uiSlotIndex,
+                                                    const TrackId destTrackId) noexcept
+    {
+        if (uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+        {
+            return false;
+        }
+        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            return false;
+        }
+        const int tix = snap->findTrackIndexById(trackId);
+        if (tix < 0)
+        {
+            return false;
+        }
+        const int sendIndex
+            = findTrackSendVectorIndexForUiSlot(snap->getTrack(tix).getSends(), uiSlotIndex);
+
+        if (destTrackId == kInvalidTrackId)
+        {
+            if (sendIndex < 0)
+            {
+                return false;
+            }
+            return session.removeTrackSend(trackId, uiSlotIndex);
+        }
+        if (sendIndex >= 0)
+        {
+            return session.setTrackSendDestination(trackId, uiSlotIndex, destTrackId);
+        }
+        return session.insertTrackSend(trackId, uiSlotIndex, destTrackId, kSendAmountUnityLinear);
+    }
+} // namespace
 
 TrackLanesEditCoordinator::TrackLanesEditCoordinator(Session& session,
                                                      PluginInsertHost& pluginHost,
@@ -430,14 +486,94 @@ void TrackLanesEditCoordinator::install()
                 {
                     return false;
                 }
-                callbacks_.syncViewportFromSession();
-                trackLanesView_.syncTracksFromSession();
-                rulerView_.repaint();
-                trackLanesView_.repaint();
-                inspectorView_.refreshFromSession();
+                afterSessionRoutingPresentationChanged(
+                    callbacks_, trackLanesView_, rulerView_, inspectorView_);
                 return true;
             });
     });
+
+    inspectorView_.setTrackSendHandlers(
+        [this](const TrackId trackId, const int sendRowIndex, const TrackId destTrackId) {
+            if (callbacks_.isRecording() || callbacks_.isCountInActive())
+            {
+                return;
+            }
+            callbacks_.executeUndoableSessionEdit(
+                "Set send destination",
+                [this, trackId, sendRowIndex, destTrackId]() -> bool {
+                    if (session_.loadSessionSnapshotForAudioThread() == nullptr)
+                    {
+                        return false;
+                    }
+                    if (!applySendDestinationAtUiSlot(session_, trackId, sendRowIndex, destTrackId))
+                    {
+                        return false;
+                    }
+                    afterSessionRoutingPresentationChanged(
+                        callbacks_, trackLanesView_, rulerView_, inspectorView_);
+                    return true;
+                });
+        },
+        [this](const TrackId trackId, const int sendRowIndex, const float amountLinear) {
+            if (callbacks_.isRecording() || callbacks_.isCountInActive())
+            {
+                return;
+            }
+            callbacks_.executeUndoableSessionEdit(
+                "Set send amount",
+                [this, trackId, sendRowIndex, amountLinear]() -> bool {
+                    const std::shared_ptr<const SessionSnapshot> before
+                        = session_.loadSessionSnapshotForAudioThread();
+                    if (before == nullptr)
+                    {
+                        return false;
+                    }
+                    const int tix = before->findTrackIndexById(trackId);
+                    if (tix < 0
+                        || findTrackSendVectorIndexForUiSlot(before->getTrack(tix).getSends(), sendRowIndex)
+                               < 0)
+                    {
+                        return false;
+                    }
+                    if (!session_.setTrackSendAmount(trackId, sendRowIndex, amountLinear))
+                    {
+                        return false;
+                    }
+                    afterSessionRoutingPresentationChanged(
+                        callbacks_, trackLanesView_, rulerView_, inspectorView_);
+                    return true;
+                });
+        },
+        [this](const TrackId trackId, const int sendRowIndex, const bool enabled) {
+            if (callbacks_.isRecording() || callbacks_.isCountInActive())
+            {
+                return;
+            }
+            callbacks_.executeUndoableSessionEdit(
+                "Set send enabled",
+                [this, trackId, sendRowIndex, enabled]() -> bool {
+                    const std::shared_ptr<const SessionSnapshot> before
+                        = session_.loadSessionSnapshotForAudioThread();
+                    if (before == nullptr)
+                    {
+                        return false;
+                    }
+                    const int tix = before->findTrackIndexById(trackId);
+                    if (tix < 0
+                        || findTrackSendVectorIndexForUiSlot(before->getTrack(tix).getSends(), sendRowIndex)
+                               < 0)
+                    {
+                        return false;
+                    }
+                    if (!session_.setTrackSendEnabled(trackId, sendRowIndex, enabled))
+                    {
+                        return false;
+                    }
+                    afterSessionRoutingPresentationChanged(
+                        callbacks_, trackLanesView_, rulerView_, inspectorView_);
+                    return true;
+                });
+        });
 
     // UI-only mutex with the instrument timeline header row. Audio headers paint inactive
     // when the instrument row is the UI-active row; clicking any audio header clears it.

@@ -27,4 +27,24 @@ void repairRoutingInPlace(std::vector<Track>& tracks, TrackId masterTrackId) noe
                                              TrackId fromTrackId,
                                              TrackId destTrackId) noexcept;
 
+/// True when `fromTrackId` may send to `destTrackId` (Group destination, combined DAG acyclic).
+[[nodiscard]] bool isLegalSendDestination(const SessionSnapshot& snap,
+                                          TrackId fromTrackId,
+                                          TrackId destTrackId) noexcept;
+
+/// Same as `isLegalSendDestination` but evaluates the proposed `tracks` list (e.g. after a local edit).
+[[nodiscard]] bool isLegalSendDestinationForTrackList(const std::vector<Track>& tracks,
+                                                      TrackId fromTrackId,
+                                                      TrackId destTrackId) noexcept;
+
+/// Group rows that are valid send targets for `fromTrackId` (excludes self).
+[[nodiscard]] std::vector<TrackId> legalSendDestinations(const SessionSnapshot& snap,
+                                                         TrackId fromTrackId) noexcept;
+
+/// Sanitize sends (Master cleared, invalid destinations dropped, amounts clamped, cycles broken by disable).
+void repairSendsInPlace(std::vector<Track>& tracks, TrackId masterTrackId) noexcept;
+
+/// Assign/repair `TrackSend::uiSlotIndex` (unique 0..3; drops overflow when no free slot).
+void repairTrackSendUiSlotsInPlace(std::vector<TrackSend>& sends) noexcept;
+
 } // namespace session_routing

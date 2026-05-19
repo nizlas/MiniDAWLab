@@ -43,6 +43,17 @@ struct ProjectFileInsertV1
     juce::String pluginStateBase64;
 };
 
+/// v15: one additive send row (`tap` written as `"postChannelStrip"`).
+struct ProjectFileSendV1
+{
+    TrackId destTrackId = kInvalidTrackId;
+    float amount = 0.0f;
+    bool enabled = true;
+    juce::String tap { "postChannelStrip" };
+    /// Inspector slot 0..3; `-1` means assign compactly on load.
+    int uiSlotIndex = -1;
+};
+
 struct ProjectFileTrackV1
 {
     TrackId id = kInvalidTrackId;
@@ -66,6 +77,8 @@ struct ProjectFileTrackV1
     juce::String pluginStateBase64;
     // v9: ordered insert chain (Pre before Post in array order).
     std::vector<ProjectFileInsertV1> inserts;
+    /// v15: ordered send list; omitted in JSON when empty.
+    std::vector<ProjectFileSendV1> sends;
 };
 
 struct ProjectFileExperimentalInstrumentNoteV1
@@ -166,10 +179,11 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**14** adds `tracks[].kind` = `"master"` / Stereo Out row).
+    /// Current JSON writer version (**15** adds `tracks[].sends[]`).
+    /// **14** adds `tracks[].kind` = `"master"` / Stereo Out row and `output` routing.
     /// **13** introduced mixed `tracks[].kind` + `experimentalInstrumentTracks[].trackId`.
     /// Read path accepts older versions; see migrations in `ProjectFile.cpp`.
-    static constexpr int kCurrentVersion = 14;
+    static constexpr int kCurrentVersion = 15;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

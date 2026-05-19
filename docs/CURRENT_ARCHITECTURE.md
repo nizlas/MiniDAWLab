@@ -80,7 +80,7 @@ Use it alongside [ARCHITECTURE_PRINCIPLES.md](ARCHITECTURE_PRINCIPLES.md), [PROJ
 
 - **`SessionSnapshot`** is **immutable**. Every session edit builds a new snapshot and publishes it with a single atomic store (`Session::sessionSnapshot_`, `memory_order_release`).
 - **`SessionSnapshot::tracks_`** is the **canonical ordered list** of timeline lanes. Row order is what the user sees (headers + lanes) and what undo/redo and project save preserve.
-- **`Track::kind`** is `TrackKind::Audio`, `TrackKind::Instrument`, or `TrackKind::Master` (Stereo Out). Instrument lanes are **first-class domain rows**, not UI-only decorations. Exactly one **Master** row exists per snapshot (final output bus; no timeline clips).
+- **`Track::kind`** is `TrackKind::Audio`, `TrackKind::Instrument`, `TrackKind::Group`, or `TrackKind::Master` (Stereo Out). Instrument lanes are **first-class domain rows**, not UI-only decorations. Exactly one **Master** row exists per snapshot (final output bus; no timeline clips). **Group** rows are internal summing buses (no timeline clips).
 - **`Session::activeTrackId_`** (message-thread only, **not** in the snapshot) selects where **Add clip** targets audio; it does not replace `TrackId` for instrument binding.
 
 **Pointers:** [src/domain/SessionSnapshot.h](../src/domain/SessionSnapshot.h), [src/domain/Track.h](../src/domain/Track.h), [src/domain/Session.h](../src/domain/Session.h), [src/domain/Session.cpp](../src/domain/Session.cpp).
@@ -125,12 +125,14 @@ Do **not** design new features around a single “the” instrument or “primar
 
 ---
 
-## Project file (schema v14)
+## Project file (schema v14 today; v15 planned for sends)
 
-- **`ProjectFileV1::kCurrentVersion`** is **14** ([src/io/ProjectFile.h](../src/io/ProjectFile.h)). **v14** adds `tracks[].kind` = `"master"` (Stereo Out row). **v13** introduced mixed `tracks[].kind` + `experimentalInstrumentTracks[].trackId`.
-- **`tracks[]`** persists **mixed lane order** and, for v13+, per-row **`kind`** (`"audio"` / `"instrument"`; absence reads as audio).
+- **`ProjectFileV1::kCurrentVersion`** is **14** ([src/io/ProjectFile.h](../src/io/ProjectFile.h)) at the time of this writing. **v14** adds per-track **`output`** (`trackId` of a Group or Master) and `tracks[].kind` = `"group"` / `"master"`. **v13** introduced mixed `tracks[].kind` + `experimentalInstrumentTracks[].trackId`.
+- **`tracks[]`** persists **mixed lane order** and, for v13+, per-row **`kind`** (`"audio"` / `"instrument"` / `"group"` / `"master"`; absence reads as audio).
 - **`experimentalInstrumentTracks[]`** holds Groove/experimental payloads; for v13+ each row binds with **`trackId`** to a timeline instrument lane.
 - **Pre-v13 projects**: `migrateProjectFileExperimentalInstrumentLanePreV13` in [src/io/ProjectFile.cpp](../src/io/ProjectFile.cpp) may **append** an instrument shell track and bind a legacy payload; extra experimental rows beyond the first supported binding can be dropped with a log line.
+
+**Planned v15 (sends slice, additive):** optional per-track **`sends`** array — see [Sends V1 (planned)](#sends-v1-planned). v14 projects load with no sends.
 
 ---
 
@@ -191,30 +193,72 @@ Some **API/class header comments** may lag multi-instrument reality (e.g. wordin
 
 ---
 
-## Routing (main output — in progress)
+## Main output routing (implemented)
 
-**Plan reference:** [routing_mixbus_master_plan](../../.cursor/plans/routing_mixbus_master_plan_08949036.plan.md) (accepted architecture; implementation is sliced).
+**Plan reference:** [routing_mixbus_master_plan](../../.cursor/plans/routing_mixbus_master_plan_08949036.plan.md).
 
-### Current (Slice A + B1 + B2)
-
-- **Before:** audio and instrument tracks summed **directly** into the device output buffer (implicit master).
-- **Now:** sources still sum in timeline order, but into a **stereo master scratch** owned by [`PlaybackEngine`](../src/engine/PlaybackEngine.cpp); the **`TrackKind::Master`** row (“Stereo Out”) applies its channel strip (Pre/Post inserts, fader, mute/off, pan) and writes the **only** signal to the device / offline mixdown buffer.
-- **Master row rules:** one per session, normally last in `tracks_`, non-deletable, no clips, no record arm. Pre-v14 projects gain a Master row on load (migration in [`ProjectFile.cpp`](../src/io/ProjectFile.cpp)).
-- **Plugin inserts** on Master use the existing [`PluginInsertHost`](../src/plugins/PluginInsertHost.h) `TrackId` map (no separate hidden master object).
-
-### Accepted future model (not all implemented yet)
+- **Output routing** (`Track::routedOutputTrackId_`): every non-Master row routes its **main/dry** signal to **Stereo Out** or a **Group**. Groups may nest (e.g. Drum Group → Mixbus → Stereo Out). Validation prevents cycles ([`SessionRouting`](../src/domain/SessionRouting.cpp)).
+- **Engine:** [`RoutingPlan`](../src/engine/RoutingPlan.h) + [`RoutingPlanBuilder`](../src/engine/RoutingPlanBuilder.cpp) build a topological bus order (child groups before parents, Master last) and preallocated bus scratch pointers. The audio callback **does not** solve the graph or allocate; it walks `sourceSteps` and `busSteps` only ([`PlaybackEngine`](../src/engine/PlaybackEngine.cpp)).
+- **Sources** (Audio / Instrument) render into the scratch for their **output** destination bus. **Group** buses sum incoming scratch, apply their channel strip, and forward to their output bus. **Master** is the unique hardware sink.
+- **Mixdown parity:** offline render uses the same `RoutingPlan` path as live playback.
+- **UI:** Inspector **Output** dropdown lists legal Master + Group targets. Group/Master rows cannot host clips or recording; Group headers are bus-style (mute-only strip, no record arm).
+- **Persistence:** v14 `tracks[].output.trackId` in [ProjectFile.cpp](../src/io/ProjectFile.cpp).
 
 | Piece | Role |
 |--------|------|
-| `TrackKind::Audio` / `Instrument` | Sources with optional **output** to Master or a **Group** |
-| `TrackKind::Group` | Internal bus; nested Group→Group allowed; graph must be acyclic |
-| `TrackKind::Master` | Unique final sink to hardware |
-| `RoutingPlan` | Message-thread-built topological order + preallocated bus scratch; audio thread reads plan only |
-| Per-track **Input** | Audio interface input / MIDI input per row (Inspector direction only until a dedicated slice) |
+| `TrackKind::Audio` / `Instrument` | Sources; main output → Master or Group |
+| `TrackKind::Group` | Internal bus; output → Group or Master; acyclic nesting |
+| `TrackKind::Master` | Unique final sink to device / mixdown |
+| `RoutingPlan` | Immutable plan: source steps, bus steps, bus scratch pool |
 
-### Explicitly deferred (do not assume in code reviews yet)
+**Still deferred (routing-adjacent, not sends):** per-track **Input** (audio interface / MIDI per row — Inspector direction only until a dedicated slice), sidechain, PDC, multi-output instruments.
 
-Group tracks, `routedOutputTrackId_` / output dropdown, full `RoutingPlan` graph, sends (pre/post fader), FX/reverb buses, sidechain, PDC, per-track input wiring, nested-group UI polish beyond the data model.
+---
+
+## Sends V1 (planned)
+
+**Plan reference:** [sends_fx_reverb_plan](../../.cursor/plans/sends_fx_reverb_plan_9fa7a092.plan.md). **Not yet in code** at the time of this writing; domain/engine/UI slices follow this doc.
+
+### Mental model
+
+- **Output routing** decides where the channel’s **main/dry** signal goes.
+- A **send** is an **additive, level-controlled copy** of the channel’s finished post-channel-strip stereo, scaled by send amount and summed into a **destination Group** bus. Sends do **not** replace or reroute the dry path.
+
+Example: Lead Vocal dry → Vocal Group → Mixbus → Stereo Out; simultaneously Lead Vocal send → Plate Reverb Group → Mixbus → Stereo Out.
+
+### V1 rules
+
+| Topic | Rule |
+|--------|------|
+| Send sources | `TrackKind::Audio`, `Instrument`, **Group** |
+| Send destinations | Existing **Group** rows only (FX/Reverb bus = normal Group by convention: user names it, puts plugins on Group inserts, routes Group output via existing output routing) |
+| Master | **Never** sends; **never** a send destination |
+| Data model | Variable-length `std::vector<TrackSend>` per non-Master row (no fixed slot cap in domain or JSON) |
+| Tap point | **Post-channel-strip:** Pre inserts → fader / mute / off → Post inserts → pan → **send tap** → dry bus + each enabled send destination |
+| Amount | Linear `[0, 2.0]` stored as `amountLinear` (unity = 1.0, max ≈ +6.02 dB); UI presents **dB** (`-inf` at 0, `0.00 dB` at unity) |
+| Validation | Combined **output + send** DAG must stay acyclic; UI and Session setters reject cycle-creating destinations |
+| Engine | `RoutingPlan::SourceStep::sends` and `BusStep::sends`; topo over output **and** send edges; one shared **post-channel-strip stage scratch** per step (render once, add to dry + each send dest); no audio-thread allocation or graph solving |
+| Mixdown | Same send path as live playback |
+| Persistence | **v15** additive: `tracks[].sends[]` with `{ destTrackId, amount, enabled, tap: "postChannelStrip" }` (omit key when empty; do not use `"postFader"` — ambiguous about Post inserts / pan) |
+
+### Inspector (planned UI)
+
+Section order (top → bottom), mirroring signal flow:
+
+1. Track name / kind  
+2. Channel volume  
+3. Pan  
+4. Output  
+5. Inserts (Pre, Post)  
+6. **Sends** (below Inserts)
+
+- Visible on Audio, Instrument, Group. Hidden on Master.
+- **Four fixed visible send rows** bound to the first four entries in the variable list; empty rows show `(none)`; sends beyond row 4 may persist and process but need not be fully editable in V1.
+- Inspector-only: no track-header send controls, no mixer view in V1.
+
+### Explicitly out of scope for sends V1
+
+PDC, sidechain, send automation, pre/post tap toggle, multi-output instruments, per-track input routing, mixer view, MIDI editor / snap changes, new `TrackKind::Fx`.
 
 ---
 
@@ -235,5 +279,7 @@ Group tracks, `routedOutputTrackId_` / output dropdown, full `RoutingPlan` graph
 | Instrument host | [ExperimentalInstrumentHost.h/.cpp](../src/plugins/ExperimentalInstrumentHost.h) |
 | Instrument controller | [InstrumentTrackController.h/.cpp](../src/instruments/InstrumentTrackController.h) |
 | Playback + instrument snapshot | [PlaybackEngine.h/.cpp](../src/engine/PlaybackEngine.h) |
-| Project v13 + migration | [ProjectFile.h](../src/io/ProjectFile.h), [ProjectFile.cpp](../src/io/ProjectFile.cpp) |
+| Project v13+ / v14 routing | [ProjectFile.h](../src/io/ProjectFile.h), [ProjectFile.cpp](../src/io/ProjectFile.cpp) |
+| Main output routing | [SessionRouting.cpp](../src/domain/SessionRouting.cpp), [RoutingPlanBuilder.cpp](../src/engine/RoutingPlanBuilder.cpp), [PlaybackEngine.cpp](../src/engine/PlaybackEngine.cpp) |
+| Sends V1 (planned) | [sends_fx_reverb_plan](../../.cursor/plans/sends_fx_reverb_plan_9fa7a092.plan.md) |
 | Composition root + coordinator map | [MainAppWindow.cpp](../src/app/MainAppWindow.cpp), [InstrumentRuntimeCoordinator](../src/app/InstrumentRuntimeCoordinator.h); see [App-layer coordinator map](#app-layer-coordinator-map) |

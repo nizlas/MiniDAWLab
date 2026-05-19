@@ -69,6 +69,12 @@ public:
         routedOutputHandler_ = std::move(fn);
     }
 
+    /// [Message thread] Undoable send edits (`TrackLanesEditCoordinator`). `sendUiSlotIndex` is 0..3; `destTrackId` = `kInvalidTrackId` clears slot.
+    void setTrackSendHandlers(
+        std::function<void(TrackId, int sendUiSlotIndex, TrackId destTrackId)> destination,
+        std::function<void(TrackId, int sendUiSlotIndex, float amountLinear)> amount,
+        std::function<void(TrackId, int sendUiSlotIndex, bool enabled)> enabled) noexcept;
+
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
     void dragOperationEnded(const juce::DragAndDropTarget::SourceDetails& details) override;
@@ -117,6 +123,14 @@ private:
     void syncInsertsNoActiveTrack();
     void syncInsertsForActiveTrack(TrackId active);
 
+    void syncSendsWhenInspectorDisabled();
+    void syncSendsNoActiveTrack();
+    void syncSendsForActiveTrack(TrackId active, const Track& track);
+
+    void commitSendAmountField(int sendRowIndex);
+    void setSendAmountEditorText(int sendRowIndex, float amountLinear);
+    void populateSendDestCombo(int sendRowIndex, TrackId activeTrackId, const Track& track);
+
     void clearInsertRowStrips();
     void rebuildInsertRowStrips(TrackId active, const std::vector<InspectorInsertRow>& rows);
 
@@ -139,6 +153,24 @@ private:
     juce::Label postEmptyLabel_;
     juce::TextButton addPostInsertButton_;
 
+    static constexpr int kVisibleSendRows = 4;
+
+    struct SendRowUi
+    {
+        juce::ComboBox destCombo;
+        juce::TextEditor amountEditor;
+        juce::Label amountDbUnitLabel;
+        juce::ToggleButton enableToggle;
+        std::vector<TrackId> destIds;
+        bool comboGuard = false;
+        bool amountGuard = false;
+        bool enableGuard = false;
+    };
+
+    juce::Label sendsSectionLabel_;
+    juce::Label sendsExtraLabel_;
+    SendRowUi sendRows_[kVisibleSendRows];
+
     std::unique_ptr<StageDropTarget> preStageDrop_;
     std::unique_ptr<StageDropTarget> postStageDrop_;
     std::optional<InsertStage> insertDragSourceStage_;
@@ -159,6 +191,9 @@ private:
 
     std::function<bool(TrackId, juce::String)> renameTrackHandler_;
     std::function<void(TrackId, TrackId)> routedOutputHandler_;
+    std::function<void(TrackId, int, TrackId)> trackSendDestinationHandler_;
+    std::function<void(TrackId, int, float)> trackSendAmountHandler_;
+    std::function<void(TrackId, int, bool)> trackSendEnabledHandler_;
     bool inspectorNameEditorGuard_ = false;
     bool outputComboGuard_ = false;
     std::vector<TrackId> outputComboDestIds_;

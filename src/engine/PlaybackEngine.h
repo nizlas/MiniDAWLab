@@ -173,6 +173,8 @@ private:
 
     void ensureRoutingBusScratchPool(std::size_t numBuses, int numSamples) noexcept;
 
+    void ensurePostStripStageScratchCapacity(int numSamples) noexcept;
+
     [[nodiscard]] int destBusIndexForTrackInPlan(const RoutingPlan& plan,
                                                  const SessionSnapshot& snap,
                                                  int trackIndex) const noexcept;
@@ -205,5 +207,8 @@ private:
         float* ptrs[2] = { nullptr, nullptr };
     };
     std::vector<RoutingBusScratchSlot> routingBusScratch_;
+    juce::AudioBuffer<float> postStripStageScratch_;
+    float* postStripStagePtrs_[2] = { nullptr, nullptr };
+    int postStripStageCapacity_ = 0;
     std::atomic<std::shared_ptr<const RoutingPlan>> routingPlan_;
 };

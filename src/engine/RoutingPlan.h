@@ -12,10 +12,17 @@ class SessionSnapshot;
 /// Immutable routing topology for one audio block. Built on the message thread; read on the audio thread.
 struct RoutingPlan
 {
+    struct SendTap
+    {
+        int destBusIndex = -1;
+        float amountLinear = 0.0f;
+    };
+
     struct SourceStep
     {
         int trackIndex = -1;
         int destBusIndex = -1;
+        std::vector<SendTap> sends;
     };
 
     struct BusStep
@@ -23,6 +30,7 @@ struct RoutingPlan
         int trackIndex = -1;
         int sourceBusIndex = -1;
         int destBusIndex = -1;
+        std::vector<SendTap> sends;
     };
 
     std::vector<SourceStep> sourceSteps;

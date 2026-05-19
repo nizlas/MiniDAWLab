@@ -466,4 +466,362 @@ void processBusChannelStripToOutputs(const Track& busTrack,
     }
 }
 
+void clearStereoScratch(float* scratchL, float* scratchR, const int numSamples) noexcept
+{
+    if (numSamples <= 0)
+    {
+        return;
+    }
+    if (scratchL != nullptr)
+    {
+        juce::FloatVectorOperations::clear(scratchL, numSamples);
+    }
+    if (scratchR != nullptr)
+    {
+        juce::FloatVectorOperations::clear(scratchR, numSamples);
+    }
+}
+
+void addPostStripStageToDeviceOutputs(float* const* stageStereo,
+                                      const int destOutFrame0,
+                                      const int numSamples,
+                                      const int numOutputChannels,
+                                      float* const* outputChannelData) noexcept
+{
+    addStereoScratchToDeviceOutputs(
+        stageStereo, numSamples, destOutFrame0, numOutputChannels, outputChannelData, 1.0f);
+}
+
+void addPostStripStageToBus(float* stageL,
+                            float* stageR,
+                            float* busL,
+                            float* busR,
+                            const int destOutFrame0,
+                            const int numSamples,
+                            const float gain) noexcept
+{
+    if (numSamples <= 0 || gain <= 0.0f)
+    {
+        return;
+    }
+    if (busL != nullptr && stageL != nullptr)
+    {
+        juce::FloatVectorOperations::addWithMultiply(
+            busL + destOutFrame0, stageL + destOutFrame0, gain, numSamples);
+    }
+    if (busR != nullptr && stageR != nullptr)
+    {
+        juce::FloatVectorOperations::addWithMultiply(
+            busR + destOutFrame0, stageR + destOutFrame0, gain, numSamples);
+    }
+}
+
+namespace
+{
+    void addClipRunToStereoScratch(const AudioClip& clip,
+                                   const int offInMaterial,
+                                   const int run,
+                                   const int outFrame0,
+                                   float* scratchL,
+                                   float* scratchR,
+                                   const float trackGain,
+                                   const float stereoPan) noexcept
+    {
+        float* const scratchPtrs[2] = { scratchL, scratchR };
+        addClipRunToOutputs(clip,
+                            offInMaterial,
+                            run,
+                            outFrame0,
+                            2,
+                            scratchPtrs,
+                            trackGain,
+                            stereoPan);
+    }
+
+    void addStereoScratchToStereoScratch(float* destL,
+                                         float* destR,
+                                         const float* srcL,
+                                         const float* srcR,
+                                         const int outFrame0,
+                                         const int run) noexcept
+    {
+        if (destL != nullptr && srcL != nullptr)
+        {
+            juce::FloatVectorOperations::add(destL + outFrame0, srcL + outFrame0, run);
+        }
+        if (destR != nullptr && srcR != nullptr)
+        {
+            juce::FloatVectorOperations::add(destR + outFrame0, srcR + outFrame0, run);
+        }
+    }
+} // namespace
+
+void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,
+                                              const std::int64_t timelineStartAudible,
+                                              const int audibleRun,
+                                              const int destOutFrame0,
+                                              float* stageL,
+                                              float* stageR,
+                                              PluginInsertHost* pluginHost,
+                                              const TrackId omitClipPlaybackForTrack,
+                                              const std::int64_t timelineEnd,
+                                              const int trackIndex) noexcept
+{
+    if (audibleRun <= 0 || stageL == nullptr || stageR == nullptr || trackIndex < 0
+        || trackIndex >= sessionSnap.getNumTracks())
+    {
+        return;
+    }
+
+    const Track& tr = sessionSnap.getTrack(trackIndex);
+    if (tr.getKind() != TrackKind::Audio)
+    {
+        return;
+    }
+    if (omitClipPlaybackForTrack != kInvalidTrackId && tr.getId() == omitClipPlaybackForTrack)
+    {
+        return;
+    }
+    if (tr.isTrackOff())
+    {
+        return;
+    }
+    const float storedFaderGain = tr.getChannelFaderGain();
+    const float effectiveGain = tr.isMuted() ? 0.0f : storedFaderGain;
+    if (!tr.isMuted() && storedFaderGain <= 0.0f)
+    {
+        return;
+    }
+
+    const std::vector<PlacedClip>& lane = tr.getPlacedClips();
+    const bool useInsert
+        = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
+    std::int64_t t = timelineStartAudible;
+    int out0 = 0;
+    while (out0 < audibleRun)
+    {
+        const int row = findCoveringRowIndexInLane(lane, t);
+        const std::int64_t nextB = minBoundaryStrictlyAfterInLane(lane, t, timelineEnd);
+        jassert(nextB > t);
+        int run = static_cast<int>(juce::jmin(
+            static_cast<std::int64_t>(audibleRun - out0), nextB - t));
+        jassert(run > 0);
+
+        if (row >= 0)
+        {
+            const PlacedClip& p = lane[(size_t)row];
+            const AudioClip& c = p.getAudioClip();
+            const std::int64_t rel = t - p.getStartSample();
+            jassert(rel >= 0);
+            jassert(rel + static_cast<std::int64_t>(run) <= p.getEffectiveLengthSamples());
+            const int off = static_cast<int>(rel + p.getLeftTrimSamples());
+            jassert(off >= 0);
+            jassert(off + run <= c.getNumSamples());
+            const int destFrame = destOutFrame0 + out0;
+
+            if (useInsert && effectiveGain > 0.0f)
+            {
+                pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
+                if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+                {
+                    copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
+                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
+                    scaleStereoScratch(scratch, run, effectiveGain);
+                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
+                    multiplyStereoScratchLR(scratch,
+                                            run,
+                                            trackPanLawGainLeft(tr.getStereoPan()),
+                                            trackPanLawGainRight(tr.getStereoPan()));
+                    addStereoScratchToStereoScratch(
+                        stageL, stageR, scratch[0], scratch[1], destFrame, run);
+                }
+            }
+            else
+            {
+                addClipRunToStereoScratch(
+                    c, off, run, destFrame, stageL, stageR, effectiveGain, tr.getStereoPan());
+            }
+        }
+        t += run;
+        out0 += run;
+    }
+    jassert(out0 == audibleRun);
+}
+
+void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
+                                              const Track& track,
+                                              float* stageL,
+                                              float* stageR,
+                                              const int destOutFrame0,
+                                              const int numSamples,
+                                              PluginInsertHost* pluginHost) noexcept
+{
+    if (host == nullptr || numSamples <= 0 || stageL == nullptr || stageR == nullptr)
+    {
+        return;
+    }
+    clearStereoScratch(stageL, stageR, numSamples);
+    if (track.isTrackOff())
+    {
+        return;
+    }
+    const float storedFaderGain = track.getChannelFaderGain();
+    const float effectiveGain = track.isMuted() ? 0.0f : storedFaderGain;
+    if (!track.isMuted() && storedFaderGain <= 0.0f)
+    {
+        return;
+    }
+
+    const TrackId trackId = track.getId();
+    const bool useInsert
+        = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(trackId);
+
+    if (useInsert && effectiveGain > 0.0f)
+    {
+        pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
+        if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+        {
+            mixExperimentalInstrumentAfterTracks(
+                host, scratch, 2, numSamples, 1.0f, kTrackStereoPanCenter);
+            pluginHost->audioThread_processChainForTrack(trackId, InsertStage::Pre, numSamples);
+            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            pluginHost->audioThread_processChainForTrack(trackId, InsertStage::Post, numSamples);
+            multiplyStereoScratchLR(scratch,
+                                    numSamples,
+                                    trackPanLawGainLeft(track.getStereoPan()),
+                                    trackPanLawGainRight(track.getStereoPan()));
+            addStereoScratchToStereoScratch(
+                stageL, stageR, scratch[0], scratch[1], destOutFrame0, numSamples);
+        }
+        return;
+    }
+
+    float* const stagePtrs[2] = { stageL, stageR };
+    mixExperimentalInstrumentAfterTracks(
+        host, stagePtrs, 2, numSamples, effectiveGain, track.getStereoPan());
+    juce::ignoreUnused(destOutFrame0);
+}
+
+void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
+                                              float* const* busInputStereo,
+                                              float* stageL,
+                                              float* stageR,
+                                              const int destOutFrame0,
+                                              const int numSamples,
+                                              PluginInsertHost* pluginHost) noexcept
+{
+    if (numSamples <= 0 || busInputStereo == nullptr || stageL == nullptr || stageR == nullptr)
+    {
+        return;
+    }
+    if (busTrack.isTrackOff())
+    {
+        clearStereoScratch(stageL, stageR, numSamples);
+        return;
+    }
+
+    const float storedFaderGain = busTrack.getChannelFaderGain();
+    const float effectiveGain = busTrack.isMuted() ? 0.0f : storedFaderGain;
+    if (!busTrack.isMuted() && storedFaderGain <= 0.0f)
+    {
+        clearStereoScratch(stageL, stageR, numSamples);
+        return;
+    }
+
+    const bool useInsert = pluginHost != nullptr
+                           && pluginHost->audioThread_hasActivePluginForTrack(busTrack.getId());
+
+    if (useInsert && effectiveGain > 0.0f)
+    {
+        pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
+        if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+        {
+            if (scratch[0] != nullptr && scratch[1] != nullptr && busInputStereo[0] != nullptr
+                && busInputStereo[1] != nullptr)
+            {
+                juce::FloatVectorOperations::copy(scratch[0] + destOutFrame0,
+                                                  busInputStereo[0] + destOutFrame0,
+                                                  numSamples);
+                juce::FloatVectorOperations::copy(scratch[1] + destOutFrame0,
+                                                  busInputStereo[1] + destOutFrame0,
+                                                  numSamples);
+            }
+            pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Pre, numSamples);
+            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            pluginHost->audioThread_processChainForTrack(busTrack.getId(), InsertStage::Post, numSamples);
+            multiplyStereoScratchLR(scratch,
+                                    numSamples,
+                                    trackPanLawGainLeft(busTrack.getStereoPan()),
+                                    trackPanLawGainRight(busTrack.getStereoPan()));
+            juce::FloatVectorOperations::copy(stageL + destOutFrame0, scratch[0] + destOutFrame0, numSamples);
+            juce::FloatVectorOperations::copy(stageR + destOutFrame0, scratch[1] + destOutFrame0, numSamples);
+        }
+        return;
+    }
+
+    const float gL = trackPanLawGainLeft(busTrack.getStereoPan());
+    const float gR = trackPanLawGainRight(busTrack.getStereoPan());
+    if (busInputStereo[0] != nullptr)
+    {
+        juce::FloatVectorOperations::copy(stageL + destOutFrame0,
+                                          busInputStereo[0] + destOutFrame0,
+                                          numSamples);
+        juce::FloatVectorOperations::multiply(stageL + destOutFrame0, effectiveGain * gL, numSamples);
+    }
+    else
+    {
+        juce::FloatVectorOperations::clear(stageL + destOutFrame0, numSamples);
+    }
+    if (busInputStereo[1] != nullptr)
+    {
+        juce::FloatVectorOperations::copy(stageR + destOutFrame0,
+                                          busInputStereo[1] + destOutFrame0,
+                                          numSamples);
+        juce::FloatVectorOperations::multiply(stageR + destOutFrame0, effectiveGain * gR, numSamples);
+    }
+    else
+    {
+        juce::FloatVectorOperations::clear(stageR + destOutFrame0, numSamples);
+    }
+}
+
+void fanPostStripStageToDryAndSends(float* stageL,
+                                    float* stageR,
+                                    const int destOutFrame0,
+                                    const int numSamples,
+                                    const int dryBusIndex,
+                                    const std::vector<RoutingPlan::SendTap>& sends,
+                                    const RoutingPlan& plan) noexcept
+{
+    if (numSamples <= 0 || stageL == nullptr || stageR == nullptr)
+    {
+        return;
+    }
+    if (dryBusIndex >= 0 && dryBusIndex < static_cast<int>(plan.busScratchL.size()))
+    {
+        addPostStripStageToBus(stageL,
+                               stageR,
+                               plan.busScratchL[(size_t)dryBusIndex],
+                               plan.busScratchR[(size_t)dryBusIndex],
+                               destOutFrame0,
+                               numSamples,
+                               1.0f);
+    }
+    for (const RoutingPlan::SendTap& tap : sends)
+    {
+        if (tap.destBusIndex < 0 || tap.amountLinear <= 0.0f
+            || tap.destBusIndex >= static_cast<int>(plan.busScratchL.size()))
+        {
+            continue;
+        }
+        addPostStripStageToBus(stageL,
+                               stageR,
+                               plan.busScratchL[(size_t)tap.destBusIndex],
+                               plan.busScratchR[(size_t)tap.destBusIndex],
+                               destOutFrame0,
+                               numSamples,
+                               tap.amountLinear);
+    }
+}
+
 } // namespace playback_mix_helpers

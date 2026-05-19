@@ -78,6 +78,32 @@ namespace
             outObj->setProperty("trackId", static_cast<std::int64_t>(t.routedOutputTrackId));
             to->setProperty("output", juce::var(outObj.get()));
         }
+        if (fileVersion >= 15 && !t.sends.empty())
+        {
+            juce::Array<juce::var> sendVars;
+            for (const auto& s : t.sends)
+            {
+                if (s.destTrackId == kInvalidTrackId)
+                {
+                    continue;
+                }
+                juce::DynamicObject::Ptr so = new juce::DynamicObject();
+                so->setProperty("slot", static_cast<std::int64_t>(s.uiSlotIndex));
+                so->setProperty("destTrackId", static_cast<std::int64_t>(s.destTrackId));
+                so->setProperty("amount", (double)s.amount);
+                if (!s.enabled)
+                {
+                    so->setProperty("enabled", false);
+                }
+                so->setProperty("tap",
+                                s.tap.isNotEmpty() ? s.tap : juce::String("postChannelStrip"));
+                sendVars.add(juce::var(so.get()));
+            }
+            if (!sendVars.isEmpty())
+            {
+                to->setProperty("sends", juce::var(sendVars));
+            }
+        }
         if (fileVersion >= 9)
         {
             if (!t.inserts.empty())
@@ -1397,6 +1423,71 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                     if (parsed != kInvalidTrackId)
                     {
                         trk.routedOutputTrackId = parsed;
+                    }
+                }
+            }
+        }
+        if (ver >= 15)
+        {
+            const juce::var& sendsV = tv.getProperty("sends", {});
+            if (sendsV.isArray())
+            {
+                if (const juce::Array<juce::var>* sendArr = sendsV.getArray())
+                {
+                    int compactUiSlot = 0;
+                    for (const juce::var& sv : *sendArr)
+                    {
+                        if (!sv.isObject())
+                        {
+                            continue;
+                        }
+                        const auto* so = sv.getDynamicObject();
+                        if (so == nullptr)
+                        {
+                            continue;
+                        }
+                        const juce::var& destV = so->getProperty("destTrackId");
+                        if (!destV.isInt64() && !destV.isInt())
+                        {
+                            continue;
+                        }
+                        const TrackId destId
+                            = static_cast<TrackId>((std::uint64_t)(std::int64_t)destV);
+                        if (destId == kInvalidTrackId)
+                        {
+                            continue;
+                        }
+                        ProjectFileSendV1 sendRow;
+                        sendRow.destTrackId = destId;
+                        const juce::var& slotV = so->getProperty("slot");
+                        if (slotV.isInt() || slotV.isInt64())
+                        {
+                            sendRow.uiSlotIndex = static_cast<int>((std::int64_t)slotV);
+                        }
+                        else
+                        {
+                            sendRow.uiSlotIndex = juce::jmin(compactUiSlot, kTrackSendInspectorUiSlotCount - 1);
+                            ++compactUiSlot;
+                        }
+                        const juce::var& amtV = so->getProperty("amount");
+                        if (amtV.isDouble() || amtV.isInt() || amtV.isInt64())
+                        {
+                            sendRow.amount = clampTrackSendAmountLinear((float)(double)amtV);
+                        }
+                        const juce::var& enV = so->getProperty("enabled");
+                        if (enV.isBool())
+                        {
+                            sendRow.enabled = (bool)enV;
+                        }
+                        else if (enV.isInt() || enV.isInt64() || enV.isDouble())
+                        {
+                            sendRow.enabled = static_cast<int>((double)enV + 0.5) != 0;
+                        }
+                        {
+                            const juce::var& tapV = so->getProperty("tap");
+                            sendRow.tap = tapV.isVoid() ? juce::String("postChannelStrip") : tapV.toString();
+                        }
+                        trk.sends.push_back(std::move(sendRow));
                     }
                 }
             }

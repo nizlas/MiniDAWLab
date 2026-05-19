@@ -485,6 +485,259 @@ bool Session::setTrackRoutedOutput(const TrackId trackId, const TrackId destTrac
     return true;
 }
 
+bool Session::insertTrackSend(const TrackId trackId,
+                              const int uiSlotIndex,
+                              const TrackId destTrackId,
+                              const float amountLinear) noexcept
+{
+    if (trackId == kInvalidTrackId || destTrackId == kInvalidTrackId
+        || uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    if (!session_routing::isLegalSendDestination(*current, trackId, destTrackId))
+    {
+        return false;
+    }
+    const int beforeIdx = current->findTrackIndexById(trackId);
+    if (beforeIdx < 0)
+    {
+        return false;
+    }
+    const Track& beforeTrack = current->getTrack(beforeIdx);
+    if (findTrackSendVectorIndexForUiSlot(beforeTrack.getSends(), uiSlotIndex) >= 0)
+    {
+        return false;
+    }
+    const int numBefore = beforeTrack.getNumSends();
+    const float clamped = clampTrackSendAmountLinear(amountLinear);
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTrackSendInserted(
+        *current, trackId, uiSlotIndex, destTrackId, clamped);
+    if (next == nullptr)
+    {
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0)
+    {
+        return false;
+    }
+    const Track& after = next->getTrack(afterIdx);
+    if (after.getNumSends() != numBefore + 1)
+    {
+        return false;
+    }
+    const int insertedIndex = findTrackSendVectorIndexForUiSlot(after.getSends(), uiSlotIndex);
+    if (insertedIndex < 0)
+    {
+        return false;
+    }
+    const TrackSend& inserted = after.getSend(insertedIndex);
+    if (inserted.destTrackId != destTrackId || !inserted.enabled
+        || inserted.uiSlotIndex != uiSlotIndex
+        || std::fabs((double)(inserted.amountLinear - clamped)) > 1.0e-6)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
+bool Session::removeTrackSend(const TrackId trackId, const int uiSlotIndex) noexcept
+{
+    if (uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int beforeIdx = current->findTrackIndexById(trackId);
+    if (beforeIdx < 0)
+    {
+        return false;
+    }
+    const Track& beforeTrack = current->getTrack(beforeIdx);
+    if (findTrackSendVectorIndexForUiSlot(beforeTrack.getSends(), uiSlotIndex) < 0)
+    {
+        return false;
+    }
+    const int numBefore = beforeTrack.getNumSends();
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackSendRemoved(*current, trackId, uiSlotIndex);
+    if (next == nullptr)
+    {
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0 || next->getTrack(afterIdx).getNumSends() != numBefore - 1)
+    {
+        return false;
+    }
+    if (findTrackSendVectorIndexForUiSlot(next->getTrack(afterIdx).getSends(), uiSlotIndex) >= 0)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
+bool Session::setTrackSendDestination(const TrackId trackId,
+                                      const int uiSlotIndex,
+                                      const TrackId destTrackId) noexcept
+{
+    if (destTrackId == kInvalidTrackId || uiSlotIndex < 0
+        || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int beforeIdx = current->findTrackIndexById(trackId);
+    if (beforeIdx < 0)
+    {
+        return false;
+    }
+    const Track& beforeTrack = current->getTrack(beforeIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(beforeTrack.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        return false;
+    }
+    if (beforeTrack.getSend(sendIndex).destTrackId == destTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackSendDestination(*current, trackId, uiSlotIndex, destTrackId);
+    if (next == nullptr)
+    {
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0)
+    {
+        return false;
+    }
+    const int afterSendIndex
+        = findTrackSendVectorIndexForUiSlot(next->getTrack(afterIdx).getSends(), uiSlotIndex);
+    if (afterSendIndex < 0 || next->getTrack(afterIdx).getSend(afterSendIndex).destTrackId != destTrackId)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
+bool Session::setTrackSendAmount(const TrackId trackId,
+                                 const int uiSlotIndex,
+                                 const float amountLinear) noexcept
+{
+    if (uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int beforeIdx = current->findTrackIndexById(trackId);
+    if (beforeIdx < 0)
+    {
+        return false;
+    }
+    const Track& beforeTrack = current->getTrack(beforeIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(beforeTrack.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        return false;
+    }
+    const float clamped = clampTrackSendAmountLinear(amountLinear);
+    if (std::fabs((double)(beforeTrack.getSend(sendIndex).amountLinear - clamped)) < 1.0e-6)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackSendAmount(*current, trackId, uiSlotIndex, clamped);
+    if (next == nullptr)
+    {
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0)
+    {
+        return false;
+    }
+    const int afterSendIndex
+        = findTrackSendVectorIndexForUiSlot(next->getTrack(afterIdx).getSends(), uiSlotIndex);
+    if (afterSendIndex < 0
+        || std::fabs((double)(next->getTrack(afterIdx).getSend(afterSendIndex).amountLinear - clamped))
+               > 1.0e-6)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
+bool Session::setTrackSendEnabled(const TrackId trackId, const int uiSlotIndex, const bool enabled) noexcept
+{
+    if (uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int beforeIdx = current->findTrackIndexById(trackId);
+    if (beforeIdx < 0)
+    {
+        return false;
+    }
+    const Track& beforeTrack = current->getTrack(beforeIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(beforeTrack.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        return false;
+    }
+    if (beforeTrack.getSend(sendIndex).enabled == enabled)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackSendEnabled(*current, trackId, uiSlotIndex, enabled);
+    if (next == nullptr)
+    {
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0)
+    {
+        return false;
+    }
+    const int afterSendIndex
+        = findTrackSendVectorIndexForUiSlot(next->getTrack(afterIdx).getSends(), uiSlotIndex);
+    if (afterSendIndex < 0 || next->getTrack(afterIdx).getSend(afterSendIndex).enabled != enabled)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
 TrackId Session::getActiveTrackId() const noexcept
 {
     return activeTrackId_;
@@ -1209,6 +1462,20 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         if (t.getKind() != TrackKind::Master)
         {
             tr.routedOutputTrackId = t.getRoutedOutputTrackId();
+            for (int si = 0; si < t.getNumSends(); ++si)
+            {
+                const TrackSend& send = t.getSend(si);
+                if (send.destTrackId == kInvalidTrackId)
+                {
+                    continue;
+                }
+                ProjectFileSendV1 row;
+                row.destTrackId = send.destTrackId;
+                row.amount = send.amountLinear;
+                row.enabled = send.enabled;
+                row.uiSlotIndex = send.uiSlotIndex;
+                tr.sends.push_back(std::move(row));
+            }
         }
 
         const bool timelineAudioLane = (t.getKind() == TrackKind::Audio);
@@ -1529,6 +1796,24 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             routeOut = (trDto.routedOutputTrackId != kInvalidTrackId) ? trDto.routedOutputTrackId
                                                                       : masterIdFromFile;
         }
+        std::vector<TrackSend> sends;
+        if (tk != TrackKind::Master)
+        {
+            sends.reserve(trDto.sends.size());
+            for (const ProjectFileSendV1& sDto : trDto.sends)
+            {
+                if (sDto.destTrackId == kInvalidTrackId)
+                {
+                    continue;
+                }
+                TrackSend s;
+                s.destTrackId = sDto.destTrackId;
+                s.amountLinear = clampTrackSendAmountLinear(sDto.amount);
+                s.enabled = sDto.enabled;
+                s.uiSlotIndex = sDto.uiSlotIndex;
+                sends.push_back(s);
+            }
+        }
         built.emplace_back(
             trDto.id,
             trackName,
@@ -1538,7 +1823,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             trDto.muted,
             tk,
             sanitizeTrackStereoPan(trDto.stereoPan),
-            routeOut);
+            routeOut,
+            std::move(sends));
     }
 
     if (built.empty())

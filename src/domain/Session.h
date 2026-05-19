@@ -122,6 +122,17 @@ public:
     /// Returns false when the route is illegal or repair rejected the target (no session change).
     [[nodiscard]] bool setTrackRoutedOutput(TrackId trackId, TrackId destTrackId) noexcept;
 
+    [[nodiscard]] bool insertTrackSend(TrackId trackId,
+                                       int uiSlotIndex,
+                                       TrackId destTrackId,
+                                       float amountLinear) noexcept;
+    [[nodiscard]] bool removeTrackSend(TrackId trackId, int uiSlotIndex) noexcept;
+    [[nodiscard]] bool setTrackSendDestination(TrackId trackId,
+                                               int uiSlotIndex,
+                                               TrackId destTrackId) noexcept;
+    [[nodiscard]] bool setTrackSendAmount(TrackId trackId, int uiSlotIndex, float amountLinear) noexcept;
+    [[nodiscard]] bool setTrackSendEnabled(TrackId trackId, int uiSlotIndex, bool enabled) noexcept;
+
     // [Message thread] `activeTrackId_` is the lane that receives the next "Add clip" (see
     // `addClipFromFileAtPlayhead`); it becomes the new id after `addTrack()`. **Does not** publish
     // a new snapshot — UI-only / command targeting; keep separate from `SessionSnapshot`.

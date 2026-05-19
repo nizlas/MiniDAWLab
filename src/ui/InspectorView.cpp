@@ -120,6 +120,79 @@ namespace
         return lin;
     }
 
+    constexpr double kSendAmountMinDb = -60.0;
+    constexpr double kSendAmountMaxDb = 6.02;
+    constexpr float kSendAmountDriftEps = 5.0e-5f;
+
+    [[nodiscard]] juce::String formatSendLinearToDbField(const float amountLinear)
+    {
+        const float clamped = clampTrackSendAmountLinear(amountLinear);
+        if (clamped <= 0.0f)
+        {
+            return juce::String("-Inf");
+        }
+        const float db = juce::Decibels::gainToDecibels(
+            clamped, static_cast<float>(kSendAmountMinDb));
+        const double d = juce::jlimit(kSendAmountMinDb, kSendAmountMaxDb, static_cast<double>(db));
+        if (std::fabs(d) <= 0.00005)
+        {
+            return juce::String("0.00");
+        }
+        if (d > 0.00005)
+        {
+            return juce::String("+") + juce::String(d, 2);
+        }
+        return juce::String(d, 2);
+    }
+
+    [[nodiscard]] bool tryParseSendAmountText(const juce::String raw, float& outLinear)
+    {
+        const juce::String strippedUnit = stripDbUnitSuffix(raw);
+        if (strippedUnit.isEmpty())
+        {
+            return false;
+        }
+        if (isNegativeInfinityText(strippedUnit))
+        {
+            outLinear = 0.0f;
+            return true;
+        }
+        const std::string buf = strippedUnit.toStdString();
+        char* endPtr = nullptr;
+        const double v = std::strtod(buf.c_str(), &endPtr);
+        if (endPtr == buf.c_str())
+        {
+            return false;
+        }
+        while (endPtr != buf.c_str() + buf.size()
+               && std::isspace(static_cast<unsigned char>(*endPtr)))
+        {
+            ++endPtr;
+        }
+        if (endPtr != buf.c_str() + buf.size())
+        {
+            return false;
+        }
+        double db = v;
+        if (db < kSendAmountMinDb)
+        {
+            db = kSendAmountMinDb;
+        }
+        if (db > kSendAmountMaxDb)
+        {
+            db = kSendAmountMaxDb;
+        }
+        if (db <= kSendAmountMinDb + 1.0e-9)
+        {
+            outLinear = 0.0f;
+            return true;
+        }
+        outLinear = clampTrackSendAmountLinear(juce::Decibels::decibelsToGain(
+            static_cast<float>(db), static_cast<float>(kSendAmountMinDb)));
+        return true;
+    }
+
+
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -606,7 +679,118 @@ InspectorView::InspectorView(Session& session)
     };
     addAndMakeVisible(addPostInsertButton_);
 
+    sendsSectionLabel_.setText("Sends", juce::dontSendNotification);
+    sendsSectionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(sendsSectionLabel_);
+
+    sendsExtraLabel_.setFont(juce::FontOptions(10.0f));
+    sendsExtraLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    sendsExtraLabel_.setJustificationType(juce::Justification::centredLeft);
+    sendsExtraLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(sendsExtraLabel_);
+
+    for (int row = 0; row < kVisibleSendRows; ++row)
+    {
+        SendRowUi& ui = sendRows_[row];
+        ui.destCombo.setTextWhenNothingSelected("(none)");
+        ui.destCombo.onChange = [this, row] {
+            SendRowUi& r = sendRows_[row];
+            if (r.comboGuard || trackSendDestinationHandler_ == nullptr)
+            {
+                return;
+            }
+            const TrackId active = session_.getActiveTrackId();
+            if (active == kInvalidTrackId)
+            {
+                return;
+            }
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session_.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return;
+            }
+            const int tix = snap->findTrackIndexById(active);
+            if (tix < 0)
+            {
+                return;
+            }
+
+            const int pick = r.destCombo.getSelectedId();
+            if (pick <= 0)
+            {
+                return;
+            }
+            TrackId dest = kInvalidTrackId;
+            const size_t ix = static_cast<size_t>(pick - 1);
+            if (ix < r.destIds.size())
+            {
+                dest = r.destIds[ix];
+            }
+            if (dest == kInvalidTrackId
+                && findTrackSendVectorIndexForUiSlot(snap->getTrack(tix).getSends(), row) < 0)
+            {
+                return;
+            }
+            trackSendDestinationHandler_(active, row, dest);
+        };
+        addAndMakeVisible(ui.destCombo);
+
+        ui.amountDbUnitLabel.setText("dB", juce::dontSendNotification);
+        ui.amountDbUnitLabel.setFont(juce::FontOptions(12.0f));
+        ui.amountDbUnitLabel.setJustificationType(juce::Justification::centredLeft);
+        ui.amountDbUnitLabel.setInterceptsMouseClicks(false, false);
+        addAndMakeVisible(ui.amountDbUnitLabel);
+
+        ui.amountEditor.setMultiLine(false);
+        ui.amountEditor.setReturnKeyStartsNewLine(false);
+        ui.amountEditor.setFont(juce::FontOptions(12.0f));
+        ui.amountEditor.setJustification(juce::Justification::centred);
+        ui.amountEditor.setIndents(0, 4);
+        ui.amountEditor.setCaretVisible(true);
+        ui.amountEditor.addListener(this);
+        addAndMakeVisible(ui.amountEditor);
+
+        ui.enableToggle.setButtonText("On");
+        ui.enableToggle.onClick = [this, row] {
+            SendRowUi& r = sendRows_[row];
+            if (r.enableGuard || trackSendEnabledHandler_ == nullptr)
+            {
+                return;
+            }
+            const TrackId active = session_.getActiveTrackId();
+            if (active == kInvalidTrackId)
+            {
+                return;
+            }
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session_.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return;
+            }
+            const int tix = snap->findTrackIndexById(active);
+            if (tix < 0
+                || findTrackSendVectorIndexForUiSlot(snap->getTrack(tix).getSends(), row) < 0)
+            {
+                return;
+            }
+            trackSendEnabledHandler_(active, row, r.enableToggle.getToggleState());
+        };
+        addAndMakeVisible(ui.enableToggle);
+    }
+
     refreshFromSession();
+}
+
+void InspectorView::setTrackSendHandlers(
+    std::function<void(TrackId, int, TrackId)> destination,
+    std::function<void(TrackId, int, float)> amount,
+    std::function<void(TrackId, int, bool)> enabled) noexcept
+{
+    trackSendDestinationHandler_ = std::move(destination);
+    trackSendAmountHandler_ = std::move(amount);
+    trackSendEnabledHandler_ = std::move(enabled);
 }
 
 InspectorView::~InspectorView() = default;
@@ -1038,9 +1222,203 @@ void InspectorView::commitActiveTrackNameField()
     }
 }
 
+void InspectorView::setSendAmountEditorText(const int sendRowIndex, const float amountLinear)
+{
+    if (sendRowIndex < 0 || sendRowIndex >= kVisibleSendRows)
+    {
+        return;
+    }
+    SendRowUi& ui = sendRows_[sendRowIndex];
+    ui.amountGuard = true;
+    ui.amountEditor.setText(formatSendLinearToDbField(amountLinear), juce::dontSendNotification);
+    ui.amountGuard = false;
+}
+
+void InspectorView::populateSendDestCombo(const int sendRowIndex,
+                                          const TrackId activeTrackId,
+                                          const Track& track)
+{
+    if (sendRowIndex < 0 || sendRowIndex >= kVisibleSendRows)
+    {
+        return;
+    }
+    SendRowUi& ui = sendRows_[sendRowIndex];
+    ui.comboGuard = true;
+    ui.destCombo.clear(juce::dontSendNotification);
+    ui.destIds.clear();
+    ui.destCombo.addItem("(none)", 1);
+    ui.destIds.push_back(kInvalidTrackId);
+
+    const std::shared_ptr<const SessionSnapshot> routeSnap
+        = session_.loadSessionSnapshotForAudioThread();
+    if (routeSnap != nullptr)
+    {
+        const std::vector<TrackId> legal
+            = session_routing::legalSendDestinations(*routeSnap, activeTrackId);
+        TrackId currentDest = kInvalidTrackId;
+        const int sendIndex = findTrackSendVectorIndexForUiSlot(track.getSends(), sendRowIndex);
+        if (sendIndex >= 0)
+        {
+            currentDest = track.getSend(sendIndex).destTrackId;
+        }
+        int selectId = 1;
+        for (const TrackId destId : legal)
+        {
+            juce::String label;
+            const int dix = routeSnap->findTrackIndexById(destId);
+            if (dix >= 0)
+            {
+                label = routeSnap->getTrack(dix).getName();
+            }
+            else
+            {
+                label = juce::String("Track ") + juce::String((juce::int64)destId);
+            }
+            const int itemId = static_cast<int>(ui.destIds.size()) + 1;
+            ui.destIds.push_back(destId);
+            ui.destCombo.addItem(label, itemId);
+            if (destId == currentDest)
+            {
+                selectId = itemId;
+            }
+        }
+        if (sendIndex >= 0 && currentDest != kInvalidTrackId
+            && std::find(legal.begin(), legal.end(), currentDest) == legal.end())
+        {
+            const int dix = routeSnap->findTrackIndexById(currentDest);
+            juce::String label = (dix >= 0) ? routeSnap->getTrack(dix).getName()
+                                            : juce::String("Track ") + juce::String((juce::int64)currentDest);
+            const int itemId = static_cast<int>(ui.destIds.size()) + 1;
+            ui.destIds.push_back(currentDest);
+            ui.destCombo.addItem(label + " (stored)", itemId);
+            selectId = itemId;
+        }
+        ui.destCombo.setSelectedId(selectId, juce::dontSendNotification);
+    }
+    ui.comboGuard = false;
+}
+
+void InspectorView::commitSendAmountField(const int sendRowIndex)
+{
+    if (sendRowIndex < 0 || sendRowIndex >= kVisibleSendRows || trackSendAmountHandler_ == nullptr)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    const TrackId active = session_.getActiveTrackId();
+    const int tix = snap->findTrackIndexById(active);
+    if (tix < 0)
+    {
+        return;
+    }
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(snap->getTrack(tix).getSends(), sendRowIndex);
+    if (sendIndex < 0)
+    {
+        return;
+    }
+    const float snapAmount = snap->getTrack(tix).getSend(sendIndex).amountLinear;
+    float parsed = snapAmount;
+    if (!tryParseSendAmountText(sendRows_[sendRowIndex].amountEditor.getText(), parsed))
+    {
+        setSendAmountEditorText(sendRowIndex, snapAmount);
+        return;
+    }
+    if (std::fabs((double)(parsed - snapAmount)) <= (double)kSendAmountDriftEps)
+    {
+        return;
+    }
+    trackSendAmountHandler_(active, sendRowIndex, parsed);
+}
+
+void InspectorView::syncSendsWhenInspectorDisabled()
+{
+    sendsSectionLabel_.setVisible(false);
+    sendsExtraLabel_.setVisible(false);
+    for (int row = 0; row < kVisibleSendRows; ++row)
+    {
+        sendRows_[row].destCombo.setVisible(false);
+        sendRows_[row].amountEditor.setVisible(false);
+        sendRows_[row].amountDbUnitLabel.setVisible(false);
+        sendRows_[row].enableToggle.setVisible(false);
+    }
+}
+
+void InspectorView::syncSendsNoActiveTrack()
+{
+    syncSendsWhenInspectorDisabled();
+}
+
+void InspectorView::syncSendsForActiveTrack(const TrackId active, const Track& track)
+{
+    const bool showSends = (track.getKind() != TrackKind::Master);
+    sendsSectionLabel_.setVisible(showSends);
+    sendsExtraLabel_.setVisible(showSends);
+    for (int row = 0; row < kVisibleSendRows; ++row)
+    {
+        const bool rowVisible = showSends;
+        sendRows_[row].destCombo.setVisible(rowVisible);
+        sendRows_[row].amountEditor.setVisible(rowVisible);
+        sendRows_[row].amountDbUnitLabel.setVisible(rowVisible);
+        sendRows_[row].enableToggle.setVisible(rowVisible);
+    }
+    if (!showSends)
+    {
+        sendsExtraLabel_.setText({}, juce::dontSendNotification);
+        return;
+    }
+
+    const int extra = countTrackSendsOutsideInspectorUiSlots(track.getSends());
+    if (extra > 0)
+    {
+        sendsExtraLabel_.setText("(+" + juce::String(extra) + " more sends not shown)",
+                                 juce::dontSendNotification);
+    }
+    else
+    {
+        sendsExtraLabel_.setText({}, juce::dontSendNotification);
+    }
+
+    for (int row = 0; row < kVisibleSendRows; ++row)
+    {
+        populateSendDestCombo(row, active, track);
+        SendRowUi& ui = sendRows_[row];
+        const int sendIndex = findTrackSendVectorIndexForUiSlot(track.getSends(), row);
+        const bool existingSend = sendIndex >= 0;
+
+        ui.destCombo.setEnabled(true);
+        ui.amountEditor.setEnabled(existingSend);
+        ui.enableToggle.setEnabled(existingSend);
+
+        ui.enableGuard = true;
+        if (existingSend)
+        {
+            const TrackSend& send = track.getSend(sendIndex);
+            ui.enableToggle.setToggleState(send.enabled, juce::dontSendNotification);
+            if (!ui.amountEditor.hasKeyboardFocus(false))
+            {
+                setSendAmountEditorText(row, send.amountLinear);
+            }
+        }
+        else
+        {
+            ui.enableToggle.setToggleState(false, juce::dontSendNotification);
+            if (!ui.amountEditor.hasKeyboardFocus(false))
+            {
+                setSendAmountEditorText(row, kSendAmountUnityLinear);
+            }
+        }
+        ui.enableGuard = false;
+    }
+}
+
 void InspectorView::syncInsertsWhenInspectorDisabled()
 {
     insertsSectionLabel_.setVisible(true);
+    syncSendsWhenInspectorDisabled();
     preSectionLabel_.setVisible(true);
     postSectionLabel_.setVisible(true);
     preEmptyLabel_.setVisible(true);
@@ -1173,6 +1551,7 @@ void InspectorView::refreshFromSession()
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
         panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
+        syncSendsWhenInspectorDisabled();
         return;
     }
     setEnabled(true);
@@ -1193,6 +1572,7 @@ void InspectorView::refreshFromSession()
         outputComboBox_.clear(juce::dontSendNotification);
         outputComboDestIds_.clear();
         syncInsertsNoActiveTrack();
+        syncSendsNoActiveTrack();
         return;
     }
     const Track& tr = snap->getTrack(idx);
@@ -1208,6 +1588,7 @@ void InspectorView::refreshFromSession()
     lastShownTrackId_ = active;
 
     syncInsertsForActiveTrack(active);
+    syncSendsForActiveTrack(active, tr);
 
     if (!panField_.isMouseButtonDown())
     {
@@ -1372,6 +1753,33 @@ void InspectorView::resized()
         postStageDrop_->setBounds(postInsertBlockBounds_);
     }
 
+    area.removeFromTop(10);
+    sendsSectionLabel_.setBounds(area.removeFromTop(18));
+    area.removeFromTop(2);
+    if (sendsExtraLabel_.isVisible() && sendsExtraLabel_.getText().isNotEmpty())
+    {
+        sendsExtraLabel_.setBounds(area.removeFromTop(14));
+        area.removeFromTop(2);
+    }
+    constexpr int kSendRowH = 24;
+    constexpr int kSendEnableW = 36;
+    for (int row = 0; row < kVisibleSendRows; ++row)
+    {
+        if (!sendRows_[row].destCombo.isVisible())
+        {
+            continue;
+        }
+        auto rowArea = area.removeFromTop(kSendRowH);
+        sendRows_[row].enableToggle.setBounds(rowArea.removeFromLeft(kSendEnableW).reduced(0, 2));
+        rowArea.removeFromLeft(4);
+        sendRows_[row].amountDbUnitLabel.setBounds(rowArea.removeFromRight(kDbUnitLabelWidth));
+        rowArea.removeFromRight(kGapValueToDbSuffix);
+        sendRows_[row].amountEditor.setBounds(rowArea.removeFromRight(kDbValueFieldWidth));
+        rowArea.removeFromRight(6);
+        sendRows_[row].destCombo.setBounds(rowArea);
+        area.removeFromTop(2);
+    }
+
     syncActiveTrackNameEditorDisplay();
 }
 
@@ -1385,6 +1793,17 @@ void InspectorView::textEditorReturnKeyPressed(juce::TextEditor& editor)
     {
         commitActiveTrackNameField();
     }
+    else
+    {
+        for (int row = 0; row < kVisibleSendRows; ++row)
+        {
+            if (&editor == &sendRows_[row].amountEditor)
+            {
+                commitSendAmountField(row);
+                break;
+            }
+        }
+    }
 }
 
 void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
@@ -1397,21 +1816,45 @@ void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
         return;
     }
 
-    if (&editor != &channelVolumeDbEditor_)
+    if (&editor == &channelVolumeDbEditor_)
     {
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr || snap->getNumTracks() <= 0)
+        {
+            return;
+        }
+        const TrackId active = session_.getActiveTrackId();
+        const int idx = snap->findTrackIndexById(active);
+        if (idx < 0)
+        {
+            return;
+        }
+        setVolumeEditorTextFromLinearGain(snap->getTrack(idx).getChannelFaderGain());
         return;
     }
 
-    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
-    if (snap == nullptr || snap->getNumTracks() <= 0)
-        return;
-
-    const TrackId active = session_.getActiveTrackId();
-    const int idx = snap->findTrackIndexById(active);
-    if (idx < 0)
-        return;
-
-    setVolumeEditorTextFromLinearGain(snap->getTrack(idx).getChannelFaderGain());
+    for (int row = 0; row < kVisibleSendRows; ++row)
+    {
+        if (&editor == &sendRows_[row].amountEditor)
+        {
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session_.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return;
+            }
+            const TrackId active = session_.getActiveTrackId();
+            const int idx = snap->findTrackIndexById(active);
+            const int sendIndex
+                = findTrackSendVectorIndexForUiSlot(snap->getTrack(idx).getSends(), row);
+            if (idx < 0 || sendIndex < 0)
+            {
+                return;
+            }
+            setSendAmountEditorText(row, snap->getTrack(idx).getSend(sendIndex).amountLinear);
+            return;
+        }
+    }
 }
 
 void InspectorView::textEditorFocusLost(juce::TextEditor& editor)
@@ -1423,5 +1866,16 @@ void InspectorView::textEditorFocusLost(juce::TextEditor& editor)
     else if (&editor == &activeTrackNameEditor_)
     {
         commitActiveTrackNameField();
+    }
+    else
+    {
+        for (int row = 0; row < kVisibleSendRows; ++row)
+        {
+            if (&editor == &sendRows_[row].amountEditor)
+            {
+                commitSendAmountField(row);
+                break;
+            }
+        }
     }
 }

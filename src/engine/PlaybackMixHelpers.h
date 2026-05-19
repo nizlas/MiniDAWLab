@@ -1,6 +1,7 @@
 #pragma once
 
 #include "domain/Track.h"
+#include "engine/RoutingPlan.h"
 
 #include <cstdint>
 #include <vector>
@@ -51,6 +52,13 @@ void addStereoScratchToDeviceOutputs(float* const* scratchPtrs,
                                      float* const* outputChannelData,
                                      float trackGain) noexcept;
 
+/// Copy/add post-channel-strip `stage` into `outputChannelData` (mono fold or stereo L/R).
+void addPostStripStageToDeviceOutputs(float* const* stageStereo,
+                                      int destOutFrame0,
+                                      int numSamples,
+                                      int numOutputChannels,
+                                      float* const* outputChannelData) noexcept;
+
 void scaleStereoScratch(float* const* scratchPtrs, int run, float gain) noexcept;
 
 void mixExperimentalInstrumentAfterTracks(ExperimentalInstrumentHost* host,
@@ -86,5 +94,55 @@ void processBusChannelStripToOutputs(const Track& busTrack,
                                      int numOutputChannels,
                                      float* const* outputChannelData,
                                      PluginInsertHost* pluginHost) noexcept;
+
+void clearStereoScratch(float* scratchL, float* scratchR, int numSamples) noexcept;
+
+/// Add post-channel-strip stereo (`stage`) into bus scratch at `destOutFrame0` for `numSamples`.
+void addPostStripStageToBus(float* stageL,
+                            float* stageR,
+                            float* busL,
+                            float* busR,
+                            int destOutFrame0,
+                            int numSamples,
+                            float gain) noexcept;
+
+/// One audio lane: clips → Pre → fader/mute/off → Post → pan → `stageL`/`stageR` (accumulated).
+void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,
+                                              std::int64_t timelineStartAudible,
+                                              int audibleRun,
+                                              int destOutFrame0,
+                                              float* stageL,
+                                              float* stageR,
+                                              PluginInsertHost* pluginHost,
+                                              TrackId omitClipPlaybackForTrack,
+                                              std::int64_t timelineEnd,
+                                              int trackIndex) noexcept;
+
+/// Instrument synth → Pre → fader/mute/off → Post → pan into `stageL`/`stageR` (replaces stage segment).
+void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
+                                              const Track& track,
+                                              float* stageL,
+                                              float* stageR,
+                                              int destOutFrame0,
+                                              int numSamples,
+                                              PluginInsertHost* pluginHost) noexcept;
+
+/// Group bus input scratch → post-channel-strip in `stageL`/`stageR` (replaces stage for segment).
+void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
+                                              float* const* busInputStereo,
+                                              float* stageL,
+                                              float* stageR,
+                                              int destOutFrame0,
+                                              int numSamples,
+                                              PluginInsertHost* pluginHost) noexcept;
+
+/// Dry bus += stage; each send bus += stage * amount (post-channel-strip fan-out).
+void fanPostStripStageToDryAndSends(float* stageL,
+                                    float* stageR,
+                                    int destOutFrame0,
+                                    int numSamples,
+                                    int dryBusIndex,
+                                    const std::vector<RoutingPlan::SendTap>& sends,
+                                    const RoutingPlan& plan) noexcept;
 
 } // namespace playback_mix_helpers

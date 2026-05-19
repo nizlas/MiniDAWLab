@@ -10,6 +10,38 @@
 
 namespace routing_plan_builder
 {
+namespace
+{
+    void appendEnabledGroupSendsForTrack(const SessionSnapshot& snap,
+                                         const Track& tr,
+                                         const std::unordered_map<TrackId, int>& busTrackIndexToBusScratch,
+                                         std::vector<RoutingPlan::SendTap>& out) noexcept
+    {
+        for (int si = 0; si < tr.getNumSends(); ++si)
+        {
+            const TrackSend& send = tr.getSend(si);
+            if (!send.enabled || send.destTrackId == kInvalidTrackId)
+            {
+                continue;
+            }
+            const auto destIt = busTrackIndexToBusScratch.find(send.destTrackId);
+            if (destIt == busTrackIndexToBusScratch.end())
+            {
+                continue;
+            }
+            const int destBi = destIt->second;
+            const int destTi = snap.findTrackIndexById(send.destTrackId);
+            if (destTi < 0 || snap.getTrack(destTi).getKind() != TrackKind::Group)
+            {
+                continue;
+            }
+            RoutingPlan::SendTap tap;
+            tap.destBusIndex = destBi;
+            tap.amountLinear = clampTrackSendAmountLinear(send.amountLinear);
+            out.push_back(tap);
+        }
+    }
+} // namespace
 
 std::shared_ptr<const RoutingPlan> build(
     const SessionSnapshot& snap,
@@ -73,10 +105,11 @@ std::shared_ptr<const RoutingPlan> build(
         RoutingPlan::SourceStep step;
         step.trackIndex = ti;
         step.destBusIndex = destIt->second;
-        plan->sourceSteps.push_back(step);
+        appendEnabledGroupSendsForTrack(snap, tr, busTrackIndexToBusScratch, step.sends);
+        plan->sourceSteps.push_back(std::move(step));
     }
 
-    // Topological order for Group buses (leaves first), Master last.
+    // Topological order for Group buses: combined output + send edges (leaves first), Master last.
     const int numBuses = static_cast<int>(busTrackIndices.size());
     std::vector<int> inDegree((size_t)numBuses, 0);
     std::vector<std::vector<int>> groupEdges((size_t)numBuses);
@@ -88,18 +121,41 @@ std::shared_ptr<const RoutingPlan> build(
         {
             continue;
         }
-        const auto destIt = busTrackIndexToBusScratch.find(busTr.getRoutedOutputTrackId());
-        if (destIt == busTrackIndexToBusScratch.end())
+        const auto outputDestIt = busTrackIndexToBusScratch.find(busTr.getRoutedOutputTrackId());
+        if (outputDestIt != busTrackIndexToBusScratch.end())
         {
-            continue;
+            const int destBi = outputDestIt->second;
+            if (destBi != bi)
+            {
+                groupEdges[(size_t)bi].push_back(destBi);
+                inDegree[(size_t)destBi]++;
+            }
         }
-        const int destBi = destIt->second;
-        if (destBi == bi)
+        for (int si = 0; si < busTr.getNumSends(); ++si)
         {
-            continue;
+            const TrackSend& send = busTr.getSend(si);
+            if (!send.enabled || send.destTrackId == kInvalidTrackId)
+            {
+                continue;
+            }
+            const auto sendDestIt = busTrackIndexToBusScratch.find(send.destTrackId);
+            if (sendDestIt == busTrackIndexToBusScratch.end())
+            {
+                continue;
+            }
+            const int destBi = sendDestIt->second;
+            if (destBi == bi)
+            {
+                continue;
+            }
+            const int destTi = snap.findTrackIndexById(send.destTrackId);
+            if (destTi < 0 || snap.getTrack(destTi).getKind() != TrackKind::Group)
+            {
+                continue;
+            }
+            groupEdges[(size_t)bi].push_back(destBi);
+            inDegree[(size_t)destBi]++;
         }
-        groupEdges[(size_t)bi].push_back(destBi);
-        inDegree[(size_t)destBi]++;
     }
 
     std::queue<int> q;
@@ -128,11 +184,11 @@ std::shared_ptr<const RoutingPlan> build(
         }
     }
 
-    // Append Master (and any stray buses) at end.
     for (int bi = 0; bi < numBuses; ++bi)
     {
         if (std::find(topoBusOrder.begin(), topoBusOrder.end(), bi) == topoBusOrder.end())
         {
+            jassertfalse;
             topoBusOrder.push_back(bi);
         }
     }
@@ -152,8 +208,9 @@ std::shared_ptr<const RoutingPlan> build(
         {
             const auto destIt = busTrackIndexToBusScratch.find(busTr.getRoutedOutputTrackId());
             step.destBusIndex = (destIt != busTrackIndexToBusScratch.end()) ? destIt->second : -1;
+            appendEnabledGroupSendsForTrack(snap, busTr, busTrackIndexToBusScratch, step.sends);
         }
-        plan->busSteps.push_back(step);
+        plan->busSteps.push_back(std::move(step));
     }
 
     return plan;

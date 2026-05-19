@@ -61,6 +61,58 @@ enum class TrackKind : std::uint8_t
 /// System-owned display name for `TrackKind::Master` (not user-renamable).
 inline constexpr const char kMasterTrackDisplayName[] = "Stereo Out";
 
+/// One additive send tap (post-channel-strip in V1; engine/UI in later slices).
+struct TrackSend
+{
+    TrackId destTrackId = kInvalidTrackId;
+    float amountLinear = 0.0f;
+    bool enabled = true;
+    /// Inspector mixer slot (0..`kTrackSendInspectorUiSlotCount - 1`); not used by engine routing.
+    int uiSlotIndex = 0;
+};
+
+/// V1 Inspector exposes this many independent send slots per track.
+inline constexpr int kTrackSendInspectorUiSlotCount = 4;
+
+[[nodiscard]] inline int findTrackSendVectorIndexForUiSlot(const std::vector<TrackSend>& sends,
+                                                           const int uiSlotIndex) noexcept
+{
+    if (uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        return -1;
+    }
+    for (int i = 0; i < static_cast<int>(sends.size()); ++i)
+    {
+        if (sends[(size_t)i].uiSlotIndex == uiSlotIndex)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+[[nodiscard]] inline int countTrackSendsOutsideInspectorUiSlots(
+    const std::vector<TrackSend>& sends) noexcept
+{
+    int extra = 0;
+    for (const TrackSend& s : sends)
+    {
+        if (s.uiSlotIndex < 0 || s.uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+        {
+            ++extra;
+        }
+    }
+    return extra;
+}
+
+inline constexpr float kSendAmountUnityLinear = 1.0f;
+inline constexpr float kSendAmountMaxLinear = 2.0f;
+
+[[nodiscard]] inline float clampTrackSendAmountLinear(const float amountLinear) noexcept
+{
+    return juce::jlimit(0.0f, kSendAmountMaxLinear, amountLinear);
+}
+
 [[nodiscard]] inline constexpr bool trackKindAcceptsTimelineAudioClips(const TrackKind kind) noexcept
 {
     return kind == TrackKind::Audio;
@@ -92,7 +144,8 @@ public:
                    bool trackMuted = false,
                    TrackKind kind = TrackKind::Audio,
                    float stereoPan = kTrackStereoPanCenter,
-                   TrackId routedOutputTrackId = kInvalidTrackId) noexcept;
+                   TrackId routedOutputTrackId = kInvalidTrackId,
+                   std::vector<TrackSend> sends = {}) noexcept;
 
     [[nodiscard]] TrackKind getKind() const noexcept { return kind_; }
 
@@ -117,6 +170,10 @@ public:
     /// Stereo pan [-1,+1]: left … center … right (applied after fader in playback).
     [[nodiscard]] float getStereoPan() const noexcept { return stereoPan_; }
 
+    [[nodiscard]] int getNumSends() const noexcept;
+    [[nodiscard]] const TrackSend& getSend(int index) const;
+    [[nodiscard]] const std::vector<TrackSend>& getSends() const noexcept { return sends_; }
+
     /// [Message thread] Same clips/gain/mute/off/kind/pan; new display name (immutable snapshot pattern).
     [[nodiscard]] Track renamed(juce::String newName) const noexcept;
 
@@ -130,4 +187,5 @@ private:
     TrackKind kind_ = TrackKind::Audio;
     float stereoPan_ = kTrackStereoPanCenter;
     TrackId routedOutputTrackId_ = kInvalidTrackId;
+    std::vector<TrackSend> sends_;
 };

@@ -87,7 +87,8 @@ namespace
                      false,
                      source.isMuted(),
                      TrackKind::Master,
-                     source.getStereoPan());
+                     source.getStereoPan(),
+                     {});
     }
 
     [[nodiscard]] bool trackNameIsCanonicalMaster(const juce::String& name) noexcept
@@ -192,7 +193,8 @@ namespace
                      t.isMuted(),
                      t.getKind(),
                      t.getStereoPan(),
-                     t.getRoutedOutputTrackId());
+                     t.getRoutedOutputTrackId(),
+                     t.getSends());
     }
 
     [[nodiscard]] Track duplicateTrackWithMovedClips(const Track& t, std::vector<PlacedClip>&& clips)
@@ -205,7 +207,8 @@ namespace
                      t.isMuted(),
                      t.getKind(),
                      t.getStereoPan(),
-                     t.getRoutedOutputTrackId());
+                     t.getRoutedOutputTrackId(),
+                     t.getSends());
     }
 
     [[nodiscard]] Track duplicateTrackSameClipsWithGain(const Track& t, const float linearGain)
@@ -219,7 +222,8 @@ namespace
                      t.isMuted(),
                      t.getKind(),
                      t.getStereoPan(),
-                     t.getRoutedOutputTrackId());
+                     t.getRoutedOutputTrackId(),
+                     t.getSends());
     }
 
     [[nodiscard]] TrackId findLastMasterTrackId(const std::vector<Track>& tracks) noexcept
@@ -288,7 +292,8 @@ void SessionSnapshot::ensureMasterTrackInvariant(
                         o.isMuted(),
                         TrackKind::Instrument,
                         o.getStereoPan(),
-                        o.getRoutedOutputTrackId());
+                        o.getRoutedOutputTrackId(),
+                        o.getSends());
             const TrackId mid = (allocateMasterId != kInvalidTrackId)
                                     ? allocateMasterId
                                     : (maxTrackIdInList(tracks) + 1);
@@ -317,7 +322,8 @@ void SessionSnapshot::ensureMasterTrackInvariant(
                                     dropped.isMuted(),
                                     demoted,
                                     dropped.getStereoPan(),
-                                    keptMasterId);
+                                    keptMasterId,
+                                    dropped.getSends());
     }
 
     Track master = normalizedCanonicalMasterRow(tracks[(size_t)keepIdx]);
@@ -404,6 +410,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
     if (masterForRepair != kInvalidTrackId)
     {
         session_routing::repairRoutingInPlace(tracks, masterForRepair);
+        session_routing::repairSendsInPlace(tracks, masterForRepair);
     }
     const std::int64_t derived = derivedTimelineEndFromTracks(tracks);
     const std::int64_t extentEffective
@@ -723,6 +730,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
     if (masterIdAfterAdd != kInvalidTrackId)
     {
         session_routing::repairRoutingInPlace(out, masterIdAfterAdd);
+        session_routing::repairSendsInPlace(out, masterIdAfterAdd);
     }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
@@ -769,7 +777,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
                                 t.isMuted(),
                                 t.getKind(),
                                 t.getStereoPan(),
-                                masterId));
+                                masterId,
+                                t.getSends()));
         }
         else
         {
@@ -787,7 +796,12 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
         return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     }
     ensureMasterTrackInvariant(out, kInvalidTrackId, nullptr);
-    session_routing::repairRoutingInPlace(out, findLastMasterTrackId(out));
+    const TrackId masterAfterRemove = findLastMasterTrackId(out);
+    if (masterAfterRemove != kInvalidTrackId)
+    {
+        session_routing::repairRoutingInPlace(out, masterAfterRemove);
+        session_routing::repairSendsInPlace(out, masterAfterRemove);
+    }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out),
         previous.arrangementExtentSamples_,
@@ -1311,7 +1325,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackStereoPan(
                                 t.isMuted(),
                                 t.getKind(),
                                 p,
-                                t.getRoutedOutputTrackId()));
+                                t.getRoutedOutputTrackId(),
+                                t.getSends()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1380,8 +1395,389 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRoutedOutputTo(
                                 t.isMuted(),
                                 t.getKind(),
                                 t.getStereoPan(),
-                                destTrackId));
+                                destTrackId,
+                                t.getSends()));
         }
+    }
+    return withTracks(std::move(out),
+                      previous.getStoredArrangementExtentSamples(),
+                      previous.getLeftLocatorSamples(),
+                      previous.getRightLocatorSamples(),
+                      previous.getProjectMusicalTime());
+}
+
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendInserted(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const int uiSlotIndex,
+    const TrackId destTrackId,
+    const float amountLinear) noexcept
+{
+    if (trackId == kInvalidTrackId || destTrackId == kInvalidTrackId
+        || uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    if (!session_routing::isLegalSendDestination(previous, trackId, destTrackId))
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+            continue;
+        }
+        std::vector<TrackSend> sends = t.getSends();
+        if (findTrackSendVectorIndexForUiSlot(sends, uiSlotIndex) >= 0)
+        {
+            jassert(false);
+            return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+                previous.tracks_,
+                previous.arrangementExtentSamples_,
+                previous.getLeftLocatorSamples(),
+                previous.getRightLocatorSamples(),
+                previous.getProjectMusicalTime()});
+        }
+        TrackSend inserted;
+        inserted.destTrackId = destTrackId;
+        inserted.amountLinear = clampTrackSendAmountLinear(amountLinear);
+        inserted.enabled = true;
+        inserted.uiSlotIndex = uiSlotIndex;
+        sends.push_back(inserted);
+        out.push_back(Track(t.getId(),
+                            t.getName(),
+                            t.getPlacedClips(),
+                            t.getChannelFaderGain(),
+                            t.isTrackOff(),
+                            t.isMuted(),
+                            t.getKind(),
+                            t.getStereoPan(),
+                            t.getRoutedOutputTrackId(),
+                            std::move(sends)));
+    }
+    return withTracks(std::move(out),
+                      previous.getStoredArrangementExtentSamples(),
+                      previous.getLeftLocatorSamples(),
+                      previous.getRightLocatorSamples(),
+                      previous.getProjectMusicalTime());
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendRemoved(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const int uiSlotIndex) noexcept
+{
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0 || uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const Track& tr = previous.getTrack(tIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(tr.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+            continue;
+        }
+        std::vector<TrackSend> sends = t.getSends();
+        sends.erase(sends.begin() + sendIndex);
+        out.push_back(Track(t.getId(),
+                            t.getName(),
+                            t.getPlacedClips(),
+                            t.getChannelFaderGain(),
+                            t.isTrackOff(),
+                            t.isMuted(),
+                            t.getKind(),
+                            t.getStereoPan(),
+                            t.getRoutedOutputTrackId(),
+                            std::move(sends)));
+    }
+    return withTracks(std::move(out),
+                      previous.getStoredArrangementExtentSamples(),
+                      previous.getLeftLocatorSamples(),
+                      previous.getRightLocatorSamples(),
+                      previous.getProjectMusicalTime());
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendDestination(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const int uiSlotIndex,
+    const TrackId destTrackId) noexcept
+{
+    if (destTrackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0 || uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const Track& tr = previous.getTrack(tIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(tr.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    if (tr.getSend(sendIndex).destTrackId == destTrackId)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+            continue;
+        }
+        std::vector<TrackSend> sends = t.getSends();
+        sends[(size_t)sendIndex].destTrackId = destTrackId;
+        out.push_back(Track(t.getId(),
+                            t.getName(),
+                            t.getPlacedClips(),
+                            t.getChannelFaderGain(),
+                            t.isTrackOff(),
+                            t.isMuted(),
+                            t.getKind(),
+                            t.getStereoPan(),
+                            t.getRoutedOutputTrackId(),
+                            std::move(sends)));
+    }
+    if (!session_routing::isLegalSendDestinationForTrackList(out, trackId, destTrackId))
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    return withTracks(std::move(out),
+                      previous.getStoredArrangementExtentSamples(),
+                      previous.getLeftLocatorSamples(),
+                      previous.getRightLocatorSamples(),
+                      previous.getProjectMusicalTime());
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendAmount(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const int uiSlotIndex,
+    const float amountLinear) noexcept
+{
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0 || uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const Track& tr = previous.getTrack(tIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(tr.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const float clamped = clampTrackSendAmountLinear(amountLinear);
+    if (std::fabs((double)(tr.getSend(sendIndex).amountLinear - clamped)) < 1.0e-6)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+            continue;
+        }
+        std::vector<TrackSend> sends = t.getSends();
+        sends[(size_t)sendIndex].amountLinear = clamped;
+        out.push_back(Track(t.getId(),
+                            t.getName(),
+                            t.getPlacedClips(),
+                            t.getChannelFaderGain(),
+                            t.isTrackOff(),
+                            t.isMuted(),
+                            t.getKind(),
+                            t.getStereoPan(),
+                            t.getRoutedOutputTrackId(),
+                            std::move(sends)));
+    }
+    return withTracks(std::move(out),
+                      previous.getStoredArrangementExtentSamples(),
+                      previous.getLeftLocatorSamples(),
+                      previous.getRightLocatorSamples(),
+                      previous.getProjectMusicalTime());
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendEnabled(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const int uiSlotIndex,
+    const bool enabled) noexcept
+{
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0 || uiSlotIndex < 0 || uiSlotIndex >= kTrackSendInspectorUiSlotCount)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    const Track& tr = previous.getTrack(tIdx);
+    const int sendIndex = findTrackSendVectorIndexForUiSlot(tr.getSends(), uiSlotIndex);
+    if (sendIndex < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    if (tr.getSend(sendIndex).enabled == enabled)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+            continue;
+        }
+        std::vector<TrackSend> sends = t.getSends();
+        sends[(size_t)sendIndex].enabled = enabled;
+        out.push_back(Track(t.getId(),
+                            t.getName(),
+                            t.getPlacedClips(),
+                            t.getChannelFaderGain(),
+                            t.isTrackOff(),
+                            t.isMuted(),
+                            t.getKind(),
+                            t.getStereoPan(),
+                            t.getRoutedOutputTrackId(),
+                            std::move(sends)));
+    }
+    if (enabled
+        && !session_routing::isLegalSendDestinationForTrackList(
+            out, trackId, tr.getSend(sendIndex).destTrackId))
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_,
+            previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
     }
     return withTracks(std::move(out),
                       previous.getStoredArrangementExtentSamples(),
@@ -1437,7 +1833,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
                                 t.isMuted(),
                                 t.getKind(),
                                 t.getStereoPan(),
-                                t.getRoutedOutputTrackId()));
+                                t.getRoutedOutputTrackId(),
+                                t.getSends()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1487,7 +1884,8 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
                                 trackMuted,
                                 t.getKind(),
                                 t.getStereoPan(),
-                                t.getRoutedOutputTrackId()));
+                                t.getRoutedOutputTrackId(),
+                                t.getSends()));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(

@@ -209,6 +209,36 @@ public:
         TrackId trackId,
         TrackId destTrackId) noexcept;
 
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackSendInserted(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        int uiSlotIndex,
+        TrackId destTrackId,
+        float amountLinear) noexcept;
+
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackSendRemoved(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        int uiSlotIndex) noexcept;
+
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackSendDestination(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        int uiSlotIndex,
+        TrackId destTrackId) noexcept;
+
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackSendAmount(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        int uiSlotIndex,
+        float amountLinear) noexcept;
+
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackSendEnabled(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        int uiSlotIndex,
+        bool enabled) noexcept;
+
     /// [Message thread] Load/undo repair: exactly one `TrackKind::Master` row, last in `tracks`.
     /// Duplicate masters: keep canonical row (name `kMasterTrackDisplayName`, else last in order).
     /// Mis-tagged instrument lanes (`instrumentLaneIds`) demoted; missing master appended.
