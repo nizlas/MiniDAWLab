@@ -53,6 +53,10 @@ void TrackLanesEditCoordinator::install()
                 {
                     return false;
                 }
+                if (callbacks_.disarmRecorderIfTrack)
+                {
+                    callbacks_.disarmRecorderIfTrack(tid);
+                }
                 if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Instrument)
                 {
                     if (ExperimentalInstrumentHost* mh = callbacks_.getInstrumentHostForTrack(tid))
@@ -158,6 +162,11 @@ void TrackLanesEditCoordinator::install()
                     {
                         if (*destTrack == kInvalidTrackId
                             || snapBefore->findTrackIndexById(*destTrack) < 0)
+                        {
+                            return false;
+                        }
+                        const int destIx = snapBefore->findTrackIndexById(*destTrack);
+                        if (!trackKindAcceptsTimelineAudioClips(snapBefore->getTrack(destIx).getKind()))
                         {
                             return false;
                         }
@@ -409,16 +418,15 @@ void TrackLanesEditCoordinator::install()
         callbacks_.executeUndoableSessionEdit(
             "Route track output",
             [this, trackId, destId]() -> bool {
-                const std::shared_ptr<const SessionSnapshot> before
-                    = session_.loadSessionSnapshotForAudioThread();
-                if (before == nullptr)
+                if (session_.loadSessionSnapshotForAudioThread() == nullptr)
                 {
                     return false;
                 }
-                session_.setTrackRoutedOutput(trackId, destId);
-                const std::shared_ptr<const SessionSnapshot> after
-                    = session_.loadSessionSnapshotForAudioThread();
-                if (after == nullptr || after == before)
+                if (!session_.setTrackRoutedOutput(trackId, destId))
+                {
+                    return false;
+                }
+                if (session_.loadSessionSnapshotForAudioThread() == nullptr)
                 {
                     return false;
                 }

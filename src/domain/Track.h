@@ -61,6 +61,16 @@ enum class TrackKind : std::uint8_t
 /// System-owned display name for `TrackKind::Master` (not user-renamable).
 inline constexpr const char kMasterTrackDisplayName[] = "Stereo Out";
 
+[[nodiscard]] inline constexpr bool trackKindAcceptsTimelineAudioClips(const TrackKind kind) noexcept
+{
+    return kind == TrackKind::Audio;
+}
+
+[[nodiscard]] inline constexpr bool trackKindAcceptsRecordArm(const TrackKind kind) noexcept
+{
+    return kind == TrackKind::Audio;
+}
+
 // ---------------------------------------------------------------------------
 // Track — one lane’s clips (session timeline samples; front-most at index 0 within this track)
 // ---------------------------------------------------------------------------

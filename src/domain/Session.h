@@ -119,7 +119,8 @@ public:
     void addGroupTrack() noexcept;
 
     /// [Message thread] Set main output routing (`destTrackId` must be a legal Group or Master target).
-    void setTrackRoutedOutput(TrackId trackId, TrackId destTrackId) noexcept;
+    /// Returns false when the route is illegal or repair rejected the target (no session change).
+    [[nodiscard]] bool setTrackRoutedOutput(TrackId trackId, TrackId destTrackId) noexcept;
 
     // [Message thread] `activeTrackId_` is the lane that receives the next "Add clip" (see
     // `addClipFromFileAtPlayhead`); it becomes the new id after `addTrack()`. **Does not** publish

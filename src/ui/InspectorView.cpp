@@ -1188,6 +1188,10 @@ void InspectorView::refreshFromSession()
         inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
         panField_.setPan(0.f, juce::dontSendNotification);
+        outputCaptionLabel_.setVisible(false);
+        outputComboBox_.setVisible(false);
+        outputComboBox_.clear(juce::dontSendNotification);
+        outputComboDestIds_.clear();
         syncInsertsNoActiveTrack();
         return;
     }

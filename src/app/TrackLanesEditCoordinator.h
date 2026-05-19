@@ -43,6 +43,9 @@ public:
         // UI-only header active mutex (audio header vs instrument-row).
         std::function<bool()> hasAnyKeyedInstrumentControllerActive;
         std::function<void()> deactivateKeyedInstrumentControllersOnly;
+
+        /// Clears record-arm when the armed lane is removed (Group/Master cannot be armed from UI).
+        std::function<void(TrackId)> disarmRecorderIfTrack;
     };
 
     TrackLanesEditCoordinator(Session& session,

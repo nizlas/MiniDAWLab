@@ -15,6 +15,7 @@
 #include "domain/Session.h"
 
 #include "domain/AudioClip.h"
+#include "domain/SessionRouting.h"
 #include "domain/MixdownWavProbe.h"
 #include "domain/TrackStereoPan.h"
 #include "instruments/InstrumentTrackController.h"
@@ -184,7 +185,7 @@ juce::Result Session::addClipFromFileAtPlayhead(const juce::File& file,
         if (aIdx >= 0)
         {
             const TrackKind k = current->getTrack(aIdx).getKind();
-            if (k != TrackKind::Audio)
+            if (!trackKindAcceptsTimelineAudioClips(k))
             {
                 return juce::Result::fail(
                     k == TrackKind::Master ? "Stereo Out cannot host audio clips."
@@ -271,7 +272,7 @@ juce::Result Session::addRecordedTakeAtSample(
     {
         const int tIx = current->findTrackIndexById(targetTrackId);
         jassert(tIx >= 0);
-        if (tIx >= 0 && current->getTrack(tIx).getKind() != TrackKind::Audio)
+        if (tIx >= 0 && !trackKindAcceptsTimelineAudioClips(current->getTrack(tIx).getKind()))
         {
             return juce::Result::fail("Recorded takes can only target audio tracks.");
         }
@@ -359,7 +360,7 @@ juce::Result Session::addPlacedClipFromExistingMaterial(
     {
         const int tIx = current->findTrackIndexById(targetTrackId);
         jassert(tIx >= 0);
-        if (tIx >= 0 && current->getTrack(tIx).getKind() != TrackKind::Audio)
+        if (tIx >= 0 && !trackKindAcceptsTimelineAudioClips(current->getTrack(tIx).getKind()))
         {
             return juce::Result::fail("Timeline audio clips attach to audio lanes only.");
         }
@@ -449,24 +450,39 @@ void Session::addGroupTrack() noexcept
     activeTrackId_ = newId;
 }
 
-void Session::setTrackRoutedOutput(const TrackId trackId, const TrackId destTrackId) noexcept
+bool Session::setTrackRoutedOutput(const TrackId trackId, const TrackId destTrackId) noexcept
 {
     if (trackId == kInvalidTrackId || destTrackId == kInvalidTrackId)
     {
-        return;
+        return false;
     }
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
     if (current == nullptr)
     {
-        return;
+        return false;
+    }
+    if (!session_routing::isLegalRoutedOutputTarget(*current, trackId, destTrackId))
+    {
+        return false;
+    }
+    const int tIdx = current->findTrackIndexById(trackId);
+    if (tIdx < 0 || current->getTrack(tIdx).getRoutedOutputTrackId() == destTrackId)
+    {
+        return false;
     }
     const std::shared_ptr<const SessionSnapshot> next
         = SessionSnapshot::withTrackRoutedOutputTo(*current, trackId, destTrackId);
-    if (next == nullptr || next == current)
+    if (next == nullptr)
     {
-        return;
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0 || next->getTrack(afterIdx).getRoutedOutputTrackId() != destTrackId)
+    {
+        return false;
     }
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
 }
 
 TrackId Session::getActiveTrackId() const noexcept
@@ -625,7 +641,7 @@ void Session::moveClipToTrack(
         {
             return;
         }
-        if (current->getTrack(targIdx).getKind() != TrackKind::Audio)
+        if (!trackKindAcceptsTimelineAudioClips(current->getTrack(targIdx).getKind()))
         {
             return;
         }

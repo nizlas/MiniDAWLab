@@ -927,6 +927,12 @@ public:
                 [this] { refreshInstrumentUi(); },
                 [this] { return instrumentRuntimeCoordinator_->hasAnyKeyedInstrumentControllerActive(); },
                 [this] { instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly(); },
+                [this](const TrackId tid) {
+                    if (recorder_.getArmedTrackId() == tid)
+                    {
+                        recorder_.disarm();
+                    }
+                },
             });
         trackLanesEditCoordinator_->install();
 

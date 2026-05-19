@@ -396,6 +396,7 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         {
             experimentalPrepareAllHosts_(sr, bs);
         }
+        rebuildRoutingPlanFromSession();
     }
 }
 

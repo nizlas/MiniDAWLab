@@ -533,6 +533,20 @@ void RecordingCoordinator::numpadRecordToggled()
         juce::Logger::writeToLog("[Rec] start blocked: no armed track");
         return;
     }
+    {
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        const int armedIx = (snap != nullptr) ? snap->findTrackIndexById(armed) : -1;
+        if (armedIx < 0 || !trackKindAcceptsRecordArm(snap->getTrack(armedIx).getKind()))
+        {
+            recorder_.disarm();
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "Recording",
+                "Arm an audio track for recording (Group and Stereo Out cannot be armed).");
+            juce::Logger::writeToLog("[Rec] start blocked: armed track is not an audio lane");
+            return;
+        }
+    }
     if (!session_.hasKnownProjectFile())
     {
         juce::AlertWindow::showMessageBoxAsync(

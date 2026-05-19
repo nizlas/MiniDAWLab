@@ -49,7 +49,7 @@ struct TrackHeaderModel
     bool muteInteractable = true;
     bool armInteractable = true;
     /// When false, Power and Arm cells are omitted from the strip (no greyed placeholders). Used for
-    /// `TrackKind::Master` / Stereo Out — mute-only output channel chrome.
+    /// `TrackKind::Master` / Stereo Out and `TrackKind::Group` — bus rows use mute-only header chrome.
     bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;

@@ -37,39 +37,51 @@ namespace
         return isOutputBusKind(tracks[(size_t)ix].getKind());
     }
 
-    [[nodiscard]] bool groupChainRevisitsBeforeMaster(const std::vector<Track>& tracks,
-                                                      const TrackId startGroupId,
-                                                      const TrackId masterId) noexcept
+    /// Walk `startGroupId`'s output chain (first hop = its `routedOutputTrackId`). Returns false when the
+    /// chain hits `masterId`, any `TrackKind::Master` row, a cycle, a missing/invalid hop, or a non-bus row.
+    [[nodiscard]] bool groupOutputChainReachesMaster(const std::vector<Track>& tracks,
+                                                     const TrackId startGroupId,
+                                                     const TrackId masterId) noexcept
     {
+        const int startIx = findTrackIndexById(tracks, startGroupId);
+        if (startIx < 0 || tracks[(size_t)startIx].getKind() != TrackKind::Group)
+        {
+            return false;
+        }
+
         std::unordered_set<TrackId> seen;
-        TrackId cur = startGroupId;
+        TrackId cur = tracks[(size_t)startIx].getRoutedOutputTrackId();
         for (int guard = 0; guard < static_cast<int>(tracks.size()) + 2; ++guard)
         {
             if (cur == kInvalidTrackId)
             {
-                return true;
+                return false;
             }
             if (cur == masterId)
             {
-                return false;
+                return true;
             }
             if (!seen.insert(cur).second)
             {
-                return true;
+                return false;
             }
             const int ix = findTrackIndexById(tracks, cur);
             if (ix < 0)
             {
-                return true;
+                return false;
             }
             const Track& t = tracks[(size_t)ix];
+            if (t.getKind() == TrackKind::Master)
+            {
+                return true;
+            }
             if (t.getKind() != TrackKind::Group)
             {
-                return t.getKind() != TrackKind::Master;
+                return false;
             }
             cur = t.getRoutedOutputTrackId();
         }
-        return true;
+        return false;
     }
 } // namespace
 
@@ -91,7 +103,7 @@ void repairRoutingInPlace(std::vector<Track>& tracks, const TrackId masterTrackI
             dest = masterTrackId;
         }
         else if (t.getKind() == TrackKind::Group
-                 && groupChainRevisitsBeforeMaster(tracks, t.getId(), masterTrackId))
+                 && !groupOutputChainReachesMaster(tracks, t.getId(), masterTrackId))
         {
             dest = masterTrackId;
         }
@@ -136,6 +148,10 @@ std::vector<TrackId> legalOutputDestinations(const SessionSnapshot& snap, const 
     {
         const Track& t = snap.getTrack(i);
         if (t.getKind() != TrackKind::Group)
+        {
+            continue;
+        }
+        if (t.getId() == fromTrackId)
         {
             continue;
         }
@@ -212,6 +228,10 @@ bool wouldCreateRoutingCycle(const SessionSnapshot& snap,
             return false;
         }
         if (cur == fromTrackId)
+        {
+            return true;
+        }
+        if (cur == kInvalidTrackId)
         {
             return true;
         }

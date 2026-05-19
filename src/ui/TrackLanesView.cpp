@@ -906,7 +906,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             if (const auto snap = session_.loadSessionSnapshotForAudioThread())
             {
                 const int idx = snap->findTrackIndexById(tid);
-                if (idx < 0 || snap->getTrack(idx).getKind() != TrackKind::Audio)
+                if (idx < 0 || !trackKindAcceptsRecordArm(snap->getTrack(idx).getKind()))
                 {
                     return;
                 }
@@ -1379,7 +1379,7 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             m.active = sessionSaysActive && !suppressed;
             m.armed = false;
             m.armInteractable = false;
-            m.showRecordAndPowerStripCells = true;
+            m.showRecordAndPowerStripCells = false;
             m.trackNameRenameEnabled = true;
             if (const auto snap = session_.loadSessionSnapshotForAudioThread())
             {
@@ -1388,11 +1388,9 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                 {
                     const Track& tr = snap->getTrack(idx);
                     m.name = tr.getName();
-                    m.off = tr.isTrackOff();
                     m.muted = tr.isMuted();
                 }
             }
-            m.powerInteractable = !isStructuralTimelineEditBlocked();
             m.muteInteractable = true;
             return m;
         };
@@ -1424,25 +1422,6 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             }
             onActive();
         };
-        callbacks.onTogglePower = [this, tid, onActive]() -> bool {
-            bool nowOff = true;
-            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
-            {
-                const int idx = snap->findTrackIndexById(tid);
-                if (idx >= 0)
-                {
-                    nowOff = !snap->getTrack(idx).isTrackOff();
-                }
-            }
-            session_.setTrackOff(tid, nowOff);
-            session_.setActiveTrack(tid);
-            if (onAudioHeaderActivated_ != nullptr)
-            {
-                onAudioHeaderActivated_();
-            }
-            onActive();
-            return true;
-        };
         callbacks.onRowHeightDrag = [this, tid](const int startH, const int delta) {
             applyTrackRowHeightDelta(tid, startH, delta);
         };
@@ -1460,6 +1439,45 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                 return false;
             }
             return onUndoableRenameTrackRequested_(tid, raw);
+        };
+        auto onDelete = [this](const TrackId id) {
+            if (onDeleteTrackRequested_ != nullptr)
+            {
+                onDeleteTrackRequested_(id);
+            }
+        };
+        callbacks.onShowContextMenu = [this, tid, onActive, onDelete](TrackHeaderView& self,
+                                                                      const juce::MouseEvent&) {
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+
+            juce::PopupMenu menu;
+            constexpr int kDeleteTrackMenuId = 1;
+            const bool editLocked = isStructuralTimelineEditBlocked();
+            juce::PopupMenu::Item deleteItem;
+            deleteItem.itemID = kDeleteTrackMenuId;
+            deleteItem.text = "Delete Track";
+            deleteItem.isEnabled = !editLocked;
+            menu.addItem(deleteItem);
+
+            juce::Component::SafePointer<TrackHeaderView> safeThis(&self);
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(&self),
+                [safeThis, this, onDelete, tid, kDeleteTrackMenuId](const int result) {
+                    if (safeThis == nullptr || result != kDeleteTrackMenuId)
+                    {
+                        return;
+                    }
+                    if (isStructuralTimelineEditBlocked())
+                    {
+                        return;
+                    }
+                    onDelete(tid);
+                });
         };
 
         auto head = std::make_unique<TrackHeaderView>(

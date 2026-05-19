@@ -54,7 +54,7 @@ namespace
     /// no `PlacedClip` audio material in this architecture. `Master` is the final output bus only.
     [[nodiscard]] bool trackAcceptsTimelineAudioClipMaterial(const Track& t) noexcept
     {
-        return t.getKind() == TrackKind::Audio;
+        return trackKindAcceptsTimelineAudioClips(t.getKind());
     }
 
     [[nodiscard]] TrackId maxTrackIdInList(const std::vector<Track>& tracks) noexcept
@@ -400,7 +400,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
         return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     }
     ensureMasterTrackInvariant(tracks, kInvalidTrackId, instrumentLaneIdsForMasterRepair);
-    session_routing::repairRoutingInPlace(tracks, findLastMasterTrackId(tracks));
+    const TrackId masterForRepair = findLastMasterTrackId(tracks);
+    if (masterForRepair != kInvalidTrackId)
+    {
+        session_routing::repairRoutingInPlace(tracks, masterForRepair);
+    }
     const std::int64_t derived = derivedTimelineEndFromTracks(tracks);
     const std::int64_t extentEffective
         = juce::jmax(arrangementExtentSamples, derived);
@@ -715,6 +719,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         }
     }
     ensureMasterTrackInvariant(out, kInvalidTrackId, nullptr);
+    const TrackId masterIdAfterAdd = findLastMasterTrackId(out);
+    if (masterIdAfterAdd != kInvalidTrackId)
+    {
+        session_routing::repairRoutingInPlace(out, masterIdAfterAdd);
+    }
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
@@ -733,7 +742,6 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
     }
     const TrackId masterId = previous.findCanonicalMasterTrackId();
     bool found = false;
-    bool removedWasGroup = false;
     std::vector<Track> out;
     out.reserve(static_cast<size_t>(juce::jmax(0, previous.getNumTracks() - 1)));
     for (int i = 0; i < previous.getNumTracks(); ++i)
@@ -748,11 +756,10 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
                     previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(),
                     previous.getProjectMusicalTime()});
             }
-            removedWasGroup = (t.getKind() == TrackKind::Group);
             found = true;
             continue;
         }
-        if (removedWasGroup && masterId != kInvalidTrackId && t.getRoutedOutputTrackId() == removedTrackId)
+        if (masterId != kInvalidTrackId && t.getRoutedOutputTrackId() == removedTrackId)
         {
             out.push_back(Track(t.getId(),
                                 t.getName(),
