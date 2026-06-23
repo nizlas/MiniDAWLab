@@ -6,6 +6,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "engine/PlaybackEngine.h"
 #include "instruments/InstrumentTrackController.h"
 #include "io/ProjectFile.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -16,6 +17,53 @@
 
 namespace
 {
+    class ScopedInstrumentProcessingLoadGate final
+    {
+    public:
+        ScopedInstrumentProcessingLoadGate(PlaybackEngine& playbackEngine, Session& session) noexcept
+            : playbackEngine_(playbackEngine)
+            , loadGeneration_(session.beginProjectLoadGeneration())
+        {
+            appendProjectLoadDiagnosticLine("load: instrument processing suspended gen="
+                                            + juce::String((juce::int64)loadGeneration_));
+            playbackEngine_.setInstrumentProcessingSuspended(true);
+
+            const double waitStartMs = juce::Time::getMillisecondCounterHiRes();
+            constexpr double kMaxWaitMs = 50.0;
+            while (playbackEngine_.isAudioInsideInstrumentSection())
+            {
+                if (juce::Time::getMillisecondCounterHiRes() - waitStartMs >= kMaxWaitMs)
+                {
+                    break;
+                }
+                juce::Thread::sleep(1);
+            }
+            const int waitedMs
+                = static_cast<int>(juce::Time::getMillisecondCounterHiRes() - waitStartMs + 0.5);
+            appendProjectLoadDiagnosticLine("load: audio instrument section idle ack waited="
+                                            + juce::String(waitedMs) + "ms");
+        }
+
+        ~ScopedInstrumentProcessingLoadGate() noexcept
+        {
+            playbackEngine_.setInstrumentProcessingSuspended(false);
+            appendProjectLoadDiagnosticLine("load: instrument processing resumed gen="
+                                            + juce::String((juce::int64)loadGeneration_));
+        }
+
+        ScopedInstrumentProcessingLoadGate(const ScopedInstrumentProcessingLoadGate&) = delete;
+        ScopedInstrumentProcessingLoadGate& operator=(const ScopedInstrumentProcessingLoadGate&) = delete;
+
+        [[nodiscard]] std::uint64_t loadGeneration() const noexcept
+        {
+            return loadGeneration_;
+        }
+
+    private:
+        PlaybackEngine& playbackEngine_;
+        std::uint64_t loadGeneration_;
+    };
+
     // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
     [[nodiscard]] juce::String firstTimeSaveConflictMessage(const juce::File& projectFolder,
                                                             const juce::File& projectFile)
@@ -329,11 +377,13 @@ ProjectIoCoordinator::ProjectIoCoordinator(Transport& transport,
                                            Session& session,
                                            juce::AudioDeviceManager& deviceManager,
                                            PluginInsertHost& pluginHost,
+                                           PlaybackEngine& playbackEngine,
                                            Callbacks callbacks)
     : transport_(transport)
     , session_(session)
     , deviceManager_(deviceManager)
     , pluginHost_(pluginHost)
+    , playbackEngine_(playbackEngine)
     , callbacks_(std::move(callbacks))
 {
 }
@@ -511,6 +561,10 @@ void ProjectIoCoordinator::loadProject()
                                         + juce::String((int)parsedLoad.experimentalInstrumentTracks.size()));
         transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
         appendProjectLoadDiagnosticLine("load: transport stopped");
+
+        const ScopedInstrumentProcessingLoadGate instrumentLoadGate(playbackEngine_, session_);
+        const std::uint64_t loadGeneration = instrumentLoadGate.loadGeneration();
+
         appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes begin");
         callbacks_.clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
         appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes end");
@@ -526,7 +580,8 @@ void ProjectIoCoordinator::loadProject()
             sampleRate,
             skipped,
             infoNote,
-            &pluginHost_);
+            &pluginHost_,
+            loadGeneration);
         if (!r.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(

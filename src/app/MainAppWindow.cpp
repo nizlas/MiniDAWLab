@@ -840,6 +840,7 @@ public:
             session,
             deviceManager,
             pluginHost_,
+            playbackEngine_,
             ProjectIoCoordinator::Callbacks{
                 [this](TrackId tid) {
                     return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);

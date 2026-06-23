@@ -1643,7 +1643,18 @@ juce::Result Session::loadProjectFromFile(Transport& transport,
         deviceSampleRate,
         outSkippedClipDetails,
         outInfoNote,
-        pluginHost);
+        pluginHost,
+        beginProjectLoadGeneration());
+}
+
+std::uint64_t Session::beginProjectLoadGeneration() noexcept
+{
+    return loadGeneration_.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+std::uint64_t Session::getProjectLoadGeneration() const noexcept
+{
+    return loadGeneration_.load(std::memory_order_acquire);
 }
 
 juce::Result Session::applyLoadedProjectModel(Transport& transport,
@@ -1652,7 +1663,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                               const double deviceSampleRate,
                                               juce::StringArray& outSkippedClipDetails,
                                               juce::String& outInfoNote,
-                                              PluginInsertHost* pluginHost)
+                                              PluginInsertHost* pluginHost,
+                                              const std::uint64_t loadGenerationForDeferredRestore)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -1996,8 +2008,18 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         else
         {
             appendProjectLoadDiagnosticLine("apply: defer plugin insert restore count="
-                                            + juce::String((int)pendingRestores->size()));
-            juce::MessageManager::callAsync([pluginHost, pendingRestores]() {
+                                            + juce::String((int)pendingRestores->size())
+                                            + " gen="
+                                            + juce::String((juce::int64)loadGenerationForDeferredRestore));
+            juce::MessageManager::callAsync([pluginHost, pendingRestores, loadGenerationForDeferredRestore,
+                                               sessionPtr = this]() {
+                if (loadGenerationForDeferredRestore != sessionPtr->getProjectLoadGeneration())
+                {
+                    appendProjectLoadDiagnosticLine(
+                        "load: deferred plugin insert restore stale gen="
+                        + juce::String((juce::int64)loadGenerationForDeferredRestore));
+                    return;
+                }
                 appendProjectLoadDiagnosticLine("load: deferred plugin insert restore begin count="
                                                 + juce::String((int)pendingRestores->size()));
                 for (const PendingPluginInsertRestore& row : *pendingRestores)

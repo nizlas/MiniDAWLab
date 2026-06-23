@@ -12,6 +12,7 @@
 
 class Transport;
 class Session;
+class PlaybackEngine;
 class PluginInsertHost;
 class InstrumentTrackController;
 class ExperimentalInstrumentHost;
@@ -41,6 +42,7 @@ public:
                            Session& session,
                            juce::AudioDeviceManager& deviceManager,
                            PluginInsertHost& pluginHost,
+                           PlaybackEngine& playbackEngine,
                            Callbacks callbacks);
 
     void saveProject();
@@ -51,5 +53,6 @@ private:
     Session& session_;
     juce::AudioDeviceManager& deviceManager_;
     PluginInsertHost& pluginHost_;
+    PlaybackEngine& playbackEngine_;
     Callbacks callbacks_;
 };

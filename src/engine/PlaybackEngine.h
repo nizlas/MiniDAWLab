@@ -152,6 +152,13 @@ public:
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
 
+    /// [Message thread] When true, the audio callback skips all experimental instrument host access
+    /// (snapshot entries and coordinator map iteration via `experimentalBeginBlockAllHosts_`).
+    void setInstrumentProcessingSuspended(bool suspended) noexcept;
+
+    /// [Any thread] True while the audio callback is inside the instrument-host section for the current block.
+    [[nodiscard]] bool isAudioInsideInstrumentSection() const noexcept;
+
     /// [Message thread] Rebuild `RoutingPlan` and bus scratch pool from the current session snapshot.
     void rebuildRoutingPlanFromSession() noexcept;
 
@@ -193,6 +200,8 @@ private:
     std::function<void(int)> experimentalBeginBlockAllHosts_;
     std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
     std::atomic<bool> offlineRenderInProgress_{ false };
+    std::atomic<bool> instrumentProcessingSuspended_{ false };
+    std::atomic<bool> audioInsideInstrumentSection_{ false };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
 

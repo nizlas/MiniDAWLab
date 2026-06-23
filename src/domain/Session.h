@@ -332,7 +332,15 @@ public:
         double deviceSampleRate,
         juce::StringArray& outSkippedClipDetails,
         juce::String& outInfoNote,
-        PluginInsertHost* pluginHost = nullptr);
+        PluginInsertHost* pluginHost = nullptr,
+        std::uint64_t loadGenerationForDeferredRestore = 0);
+
+    /// [Message thread] Increments and returns the current project-load generation (used to stale-guard
+    /// deferred restore callbacks when a newer load begins).
+    [[nodiscard]] std::uint64_t beginProjectLoadGeneration() noexcept;
+
+    /// [Any thread] Current project-load generation (acquire-load).
+    [[nodiscard]] std::uint64_t getProjectLoadGeneration() const noexcept;
 
 private:
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
@@ -355,4 +363,6 @@ private:
     std::function<void()> onTimelineRulerTimeDisplayChanged_;
 
     SnapSettings arrangementSnapSettings_;
+
+    std::atomic<std::uint64_t> loadGeneration_{ 0 };
 };

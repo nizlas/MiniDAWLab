@@ -470,13 +470,45 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
     /// [Audio thread] Same publish discipline as Session: acquire-load retains a const view for this block only.
+    const bool allowInstrumentProcessing
+        = !instrumentProcessingSuspended_.load(std::memory_order_acquire);
+
+    struct AudioInstrumentSectionScope
+    {
+        std::atomic<bool>& insideFlag_;
+        const bool active_;
+        AudioInstrumentSectionScope(std::atomic<bool>& insideFlag, const bool active) noexcept
+            : insideFlag_(insideFlag)
+            , active_(active)
+        {
+            if (active_)
+            {
+                insideFlag_.store(true, std::memory_order_release);
+            }
+        }
+        ~AudioInstrumentSectionScope() noexcept
+        {
+            if (active_)
+            {
+                insideFlag_.store(false, std::memory_order_release);
+            }
+        }
+    };
+    const AudioInstrumentSectionScope instrumentSectionScope { audioInsideInstrumentSection_,
+                                                               allowInstrumentProcessing };
+
     const std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot> instrumentSnap
-        = experimentalInstrumentPlaybackSnapshot_.load(std::memory_order_acquire);
+        = allowInstrumentProcessing
+              ? experimentalInstrumentPlaybackSnapshot_.load(std::memory_order_acquire)
+              : nullptr;
 
     // Per-block RT MIDI delivery uses `audioCallbackBlockSamples_` (see `ExperimentalInstrumentHost`). The
     // snapshot is the engine's source of truth for which host(s) are driven this block — call `beginAudioBlock`
     // here before the optional map/staging lambda so message-thread map drift cannot skip the active host.
-    invokeExperimentalInstrumentBeginBlocks(instrumentSnap.get(), deviceBlockSizeInFrames);
+    if (allowInstrumentProcessing)
+    {
+        invokeExperimentalInstrumentBeginBlocks(instrumentSnap.get(), deviceBlockSizeInFrames);
+    }
 
     const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
     const std::int64_t t0 = transport_.audioThread_loadPlayhead();
@@ -1302,6 +1334,10 @@ void PlaybackEngine::invokeExperimentalInstrumentBeginBlocks(
     const ExperimentalInstrumentPlaybackSnapshot* instrumentSnap,
     const int numSamples) noexcept
 {
+    if (instrumentProcessingSuspended_.load(std::memory_order_acquire))
+    {
+        return;
+    }
     if (instrumentSnap != nullptr)
     {
         for (const auto& e : instrumentSnap->entries)
@@ -1328,6 +1364,16 @@ bool PlaybackEngine::isOfflineRenderInProgress() const noexcept
     return offlineRenderInProgress_.load(std::memory_order_acquire);
 }
 
+void PlaybackEngine::setInstrumentProcessingSuspended(const bool suspended) noexcept
+{
+    instrumentProcessingSuspended_.store(suspended, std::memory_order_release);
+}
+
+bool PlaybackEngine::isAudioInsideInstrumentSection() const noexcept
+{
+    return audioInsideInstrumentSection_.load(std::memory_order_acquire);
+}
+
 std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
 PlaybackEngine::loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept
 {
@@ -1344,7 +1390,10 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
     jassert(numSamples > 0);
     jassert(stereoOutputLR != nullptr && stereoOutputLR[0] != nullptr && stereoOutputLR[1] != nullptr);
 
-    invokeExperimentalInstrumentBeginBlocks(instrumentSnap, numSamples);
+    if (!instrumentProcessingSuspended_.load(std::memory_order_acquire))
+    {
+        invokeExperimentalInstrumentBeginBlocks(instrumentSnap, numSamples);
+    }
     const int offlineCap = juce::jmax(numSamples, kOfflineMixdownBlockCapSamples);
     ensureMasterScratchCapacity(offlineCap);
     ensurePostStripStageScratchCapacity(offlineCap);
