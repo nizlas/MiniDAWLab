@@ -128,6 +128,21 @@ struct ProjectFileExperimentalInstrumentClipV1
     bool midiRollFollowEnabled = false;
 };
 
+/// v16+: persisted `PluginDescription` identity for `instrumentKind` = `"GenericVst3"`.
+/// Plugin binary state uses the shared optional `pluginStateBase64` on the experimental track row (v11+).
+struct ProjectFileGenericVst3DescriptorV1
+{
+    juce::String name;
+    juce::String descriptiveName;
+    juce::String manufacturerName;
+    juce::String pluginFormatName;
+    juce::String category;
+    juce::String fileOrIdentifier;
+    int uniqueId = 0;
+    int deprecatedUid = 0;
+    bool isInstrument = true;
+};
+
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).
 /// Optional `pluginStateBase64`: Base64 `AudioPluginInstance::getStateInformation` when saved with plug-in loaded.
 struct ProjectFileExperimentalInstrumentTrackV1
@@ -151,6 +166,9 @@ struct ProjectFileExperimentalInstrumentTrackV1
     /// v12+ optional: persisted `autoPlugin` kit names (JSON `"drumNoteNamesAutoPlugin"`). Omitted when empty / absent on load.
     std::vector<std::pair<int, juce::String>> drumNoteNameAutoPlugin;
     std::vector<ProjectFileExperimentalInstrumentClipV1> clips;
+    /// v16+: present when JSON carries `genericVst3Descriptor` for catalog instrument restore.
+    bool hasGenericVst3Descriptor = false;
+    ProjectFileGenericVst3DescriptorV1 genericVst3Descriptor;
 };
 
 /// Optional main application window placement (root `mainWindow` object); omitted in older projects.
@@ -179,11 +197,9 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**15** adds `tracks[].sends[]`).
-    /// **14** adds `tracks[].kind` = `"master"` / Stereo Out row and `output` routing.
-    /// **13** introduced mixed `tracks[].kind` + `experimentalInstrumentTracks[].trackId`.
-    /// Read path accepts older versions; see migrations in `ProjectFile.cpp`.
-    static constexpr int kCurrentVersion = 15;
+    /// Current JSON writer version (**16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`).
+    /// **15** adds `tracks[].sends[]`.
+    static constexpr int kCurrentVersion = 16;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

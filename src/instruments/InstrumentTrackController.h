@@ -129,6 +129,15 @@ public:
     /// HALion Sonic instrument lane: same session shell as Groove; no kit name; `instrumentKind` HALionSonic.
     [[nodiscard]] bool bootstrapHalionSonicShellForSessionTrack(TrackId sessionInstrumentTrackId) noexcept;
 
+    /// Generic catalog VST3 instrument lane (`instrumentKind` GenericVst3).
+    [[nodiscard]] bool bootstrapGenericCatalogInstrumentShellForSessionTrack(
+        TrackId sessionInstrumentTrackId) noexcept;
+
+    [[nodiscard]] bool isGenericCatalogInstrument() const noexcept
+    {
+        return experimentalInstrumentKind_ == "GenericVst3";
+    }
+
     /// Legacy path: asks `Session` to append one instrument shell, then binds this controller row.
     /// Prefer `bootstrapGrooveAgentShellForSessionTrack` when naming / ordering is orchestrated externally.
     [[nodiscard]] bool tryAddGrooveAgentInstrumentTrackShell();
@@ -267,6 +276,9 @@ public:
     /// HALion Sonic project restore path (peer to Groove).
     void runPendingHalionSonicProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
 
+    /// Generic catalog VST3 project restore (descriptor + catalog repair; no plugin binary state).
+    void runPendingGenericVst3ProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
+
     /// Device sample rate for **musical** length derivation (message thread). Does not rescale clips.
     void setTimelineSampleRate(double sampleRate) noexcept;
 
@@ -360,6 +372,9 @@ private:
     juce::String pendingPluginStateBase64_;
     bool pendingProjectGrooveAutoload_ = false;
     bool pendingProjectHalionSonicAutoload_ = false;
+    bool pendingProjectGenericVst3Autoload_ = false;
+    bool pendingGenericVst3DescriptorValid_ = false;
+    ProjectFileGenericVst3DescriptorV1 pendingGenericVst3Descriptor_;
     juce::String pendingAdvisoryPluginBundlePath_;
     juce::String pendingInstrumentKind_;
     /// Persisted/display DTO kind for this lane (`GrooveAgentSE` / `HALionSonic`). Not consulted on audio thread.

@@ -14,6 +14,7 @@
 
 #include "domain/Session.h"
 
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "domain/AudioClip.h"
 #include "domain/SessionRouting.h"
 #include "domain/MixdownWavProbe.h"
@@ -25,6 +26,7 @@
 #include "transport/Transport.h"
 
 #include <juce_core/juce_core.h>
+#include <juce_events/juce_events.h>
 
 #include <cstdint>
 #include <exception>
@@ -1655,6 +1657,18 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     outSkippedClipDetails.clear();
     outInfoNote.clear();
 
+    appendProjectLoadDiagnosticLine("apply: enter tracks=" + juce::String((int)parsed.tracks.size())
+                                    + " experimentalInstrumentTracks="
+                                    + juce::String((int)parsed.experimentalInstrumentTracks.size()));
+
+    if (pluginHost != nullptr)
+    {
+        appendProjectLoadDiagnosticLine("apply: before removeAllPlugins");
+        juce::Thread::sleep(120);
+        pluginHost->removeAllPlugins();
+        appendProjectLoadDiagnosticLine("apply: after removeAllPlugins");
+    }
+
     if (!juce::approximatelyEqual(deviceSampleRate, parsed.deviceSampleRateAtSave))
     {
         outInfoNote = "This project was saved with the audio device at "
@@ -1697,6 +1711,8 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             masterIdFromFile = trDto.id;
         }
     }
+
+    appendProjectLoadDiagnosticLine("apply: before build tracks from parsed.tracks");
 
     for (const auto& trDto : parsed.tracks)
     {
@@ -1825,7 +1841,13 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             sanitizeTrackStereoPan(trDto.stereoPan),
             routeOut,
             std::move(sends));
+        appendProjectLoadDiagnosticLine(
+            "apply: built track id=" + juce::String((juce::int64)trDto.id) + " kind="
+            + trDto.kind + " name=\"" + trackName + "\" clips=" + juce::String((int)trDto.clips.size())
+            + " inserts=" + juce::String((int)trDto.inserts.size()));
     }
+
+    appendProjectLoadDiagnosticLine("apply: after build tracks count=" + juce::String((int)built.size()));
 
     if (built.empty())
     {
@@ -1840,6 +1862,7 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     loadedMusical.denominator = parsed.timeSignatureDenominator;
     loadedMusical.ticksPerQuarter = parsed.ticksPerQuarter;
 
+    appendProjectLoadDiagnosticLine("apply: before SessionSnapshot::withTracks");
     const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTracks(
         std::move(built),
         parsed.arrangementExtentSamples,
@@ -1847,6 +1870,7 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         parsed.rightLocatorSamples,
         loadedMusical,
         &instrumentLaneIds);
+    appendProjectLoadDiagnosticLine("apply: after SessionSnapshot::withTracks");
     if (next == nullptr)
     {
         return juce::Result::fail("Could not build session from project file.");
@@ -1868,12 +1892,10 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         activeTrackId_ = next->getTrack(0).getId();
     }
 
-    if (pluginHost != nullptr)
-    {
-        pluginHost->removeAllPlugins();
-    }
-
+    appendProjectLoadDiagnosticLine("apply: before session snapshot publish activeTrackId="
+                                    + juce::String((juce::int64)activeTrackId_));
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    appendProjectLoadDiagnosticLine("apply: after session snapshot publish");
 
     currentProjectFile_ = file;
 
@@ -1910,11 +1932,22 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     const std::int64_t hi = juce::jmax(std::int64_t{0}, tlen);
     const std::int64_t seekTo
         = juce::jlimit<std::int64_t>(0, hi, static_cast<std::int64_t>(parsed.playheadSamples));
+    appendProjectLoadDiagnosticLine("apply: before transport seek playhead=" + juce::String(seekTo));
     transport.requestSeek(seekTo);
     transport.requestCycleEnabled(parsed.cycleEnabled);
+    appendProjectLoadDiagnosticLine("apply: after transport seek");
 
     if (pluginHost != nullptr && parsed.version >= 8)
     {
+        struct PendingPluginInsertRestore
+        {
+            TrackId trackId = kInvalidTrackId;
+            PluginTrackChain chain;
+        };
+        auto pendingRestores = std::make_shared<std::vector<PendingPluginInsertRestore>>();
+        pendingRestores->reserve(parsed.tracks.size());
+
+        appendProjectLoadDiagnosticLine("apply: collect plugin insert restore rows");
         for (const auto& trDto : parsed.tracks)
         {
             if (trDto.kind.equalsIgnoreCase("instrument"))
@@ -1952,11 +1985,36 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             }
             if (!chain.slots.empty())
             {
-                pluginHost->importChain(trDto.id, chain);
+                pendingRestores->push_back(PendingPluginInsertRestore{ trDto.id, std::move(chain) });
             }
+        }
+
+        if (pendingRestores->empty())
+        {
+            appendProjectLoadDiagnosticLine("apply: after plugin insert restore (none)");
+        }
+        else
+        {
+            appendProjectLoadDiagnosticLine("apply: defer plugin insert restore count="
+                                            + juce::String((int)pendingRestores->size()));
+            juce::MessageManager::callAsync([pluginHost, pendingRestores]() {
+                appendProjectLoadDiagnosticLine("load: deferred plugin insert restore begin count="
+                                                + juce::String((int)pendingRestores->size()));
+                for (const PendingPluginInsertRestore& row : *pendingRestores)
+                {
+                    appendProjectLoadDiagnosticLine("load: deferred before importChain trackId="
+                                                    + juce::String((juce::int64)row.trackId) + " slots="
+                                                    + juce::String((int)row.chain.slots.size()));
+                    pluginHost->importChain(row.trackId, row.chain);
+                    appendProjectLoadDiagnosticLine("load: deferred after importChain trackId="
+                                                    + juce::String((juce::int64)row.trackId));
+                }
+                appendProjectLoadDiagnosticLine("load: deferred plugin insert restore complete");
+            });
         }
     }
 
+    appendProjectLoadDiagnosticLine("apply: exit ok");
     return juce::Result::ok();
 }
 

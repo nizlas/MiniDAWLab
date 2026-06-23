@@ -68,6 +68,7 @@ target_sources(MiniDAWLab PRIVATE
     src/plugins/ExperimentalInstrumentHost.cpp
     src/plugins/PluginInsertHost.cpp
     src/plugins/PluginDiscovery.cpp
+    src/plugins/InstrumentCatalog.cpp
     src/plugins/Vst3ChildProcessScan.cpp
     src/plugins/PluginEditorWindows.cpp
     src/audio/AudioDeviceInfo.cpp
@@ -81,6 +82,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/Session.cpp
     src/domain/SessionHistory.cpp
     src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
     src/diagnostics/DrumNameDiagnosticFileLog.cpp
     src/domain/SessionSnapshot.cpp
     src/domain/SessionRouting.cpp

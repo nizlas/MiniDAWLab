@@ -127,6 +127,9 @@ public:
     /// For comparing plugins that crash during scan vs effects/instruments that return.
     [[nodiscard]] juce::Result diagnosticScanVst3FileOnly(const juce::File& vst3File);
 
+    /// [Message thread] Clears callbacks wired to external controllers/UI (safe before unload/teardown).
+    void clearControllerWireCallbacks() noexcept;
+
     /// [Message thread] Closes editor, releases instance. Brief wait lets the audio callback
     /// finish any in-flight block (feasibility slice — not a production RT unload protocol).
     void unloadInstrument();

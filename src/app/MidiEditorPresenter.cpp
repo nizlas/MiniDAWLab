@@ -317,6 +317,10 @@ void MidiEditorPresenter::snapshotOpenClipViewportFromRollIfOpen() noexcept
 
 void MidiEditorPresenter::resetWindowAndBooking() noexcept
 {
+    if (midiEditorWindow_ != nullptr)
+    {
+        midiEditorWindow_->prepareInstrumentUnloadFromHost();
+    }
     midiEditorWindow_.reset();
     midiEditorOpenedForInstrumentTrackId_.reset();
 }

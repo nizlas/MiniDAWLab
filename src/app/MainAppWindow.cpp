@@ -26,10 +26,12 @@
 #include "app/TransportControlsFactory.h"
 #include "app/TransportControlsShortcutTarget.h"
 #include "app/Vst3PluginPickerCoordinator.h"
+#include "plugins/InstrumentCatalog.h"
 #include "app/InstrumentMusicalUndoSnapshot.h"
 #include "app/ArrangementEventSelectionCoordinator.h"
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "app/InstrumentTimelineRowCoordinator.h"
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 
 #include "domain/Session.h"
 #include "domain/ProjectMusicalTime.h"
@@ -707,8 +709,26 @@ public:
             menu.addItem(1, "Add Audio Track");
             menu.addItem(3, "Add Group Track");
             juce::PopupMenu instrMenu;
+            instrMenu.addItem(99, "Rescan instrument plugins...");
+            instrMenu.addSeparator();
             instrMenu.addItem(100, "Groove Agent SE");
             instrMenu.addItem(101, "HALion Sonic");
+            std::vector<mini_daw::InstrumentCatalogEntry> catalogEntries;
+            if (mini_daw::loadInstrumentCatalogFromCache(catalogEntries))
+            {
+                instrMenu.addSeparator();
+                instrMenu.addItem(
+                    juce::PopupMenu::Item("Discovered instruments:").setEnabled(false));
+                constexpr int kCatalogMenuBaseId = 2000;
+                for (size_t i = 0; i < catalogEntries.size(); ++i)
+                {
+                    const juce::String label = catalogEntries[i].description.name.isNotEmpty()
+                                                   ? catalogEntries[i].description.name
+                                                   : juce::File(catalogEntries[i].bundlePath)
+                                                         .getFileNameWithoutExtension();
+                    instrMenu.addItem(kCatalogMenuBaseId + static_cast<int>(i), label);
+                }
+            }
             menu.addSubMenu("Add Instrument Track", instrMenu);
             juce::Component::SafePointer<mini_daw_app_transport::TransportControlsContent> safeThis(this);
             menu.showMenuAsync(
@@ -734,6 +754,14 @@ public:
                         safeThis->inspectorView_.refreshFromSession();
                         return;
                     }
+                    if (result == 99)
+                    {
+                        if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
+                        {
+                            safeThis->addInstrumentTrackCoordinator_->rescanInstrumentPluginsFromMenu();
+                        }
+                        return;
+                    }
                     if (result == 100)
                     {
                         if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
@@ -747,6 +775,24 @@ public:
                         if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
                         {
                             safeThis->addInstrumentTrackCoordinator_->addHalionSonicInstrumentTrackFromMenu();
+                        }
+                        return;
+                    }
+                    constexpr int kCatalogMenuBaseId = 2000;
+                    if (result >= kCatalogMenuBaseId)
+                    {
+                        if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
+                        {
+                            std::vector<mini_daw::InstrumentCatalogEntry> catalogEntries;
+                            if (mini_daw::loadInstrumentCatalogFromCache(catalogEntries))
+                            {
+                                const int idx = result - kCatalogMenuBaseId;
+                                if (idx >= 0 && idx < static_cast<int>(catalogEntries.size()))
+                                {
+                                    safeThis->addInstrumentTrackCoordinator_->addGenericInstrumentTrackFromCatalog(
+                                        catalogEntries[static_cast<size_t>(idx)]);
+                                }
+                            }
                         }
                     }
                 });
@@ -819,17 +865,23 @@ public:
                     }
                 },
                 [this] {
+                    appendProjectLoadDiagnosticLine("load: before syncViewportFromSession");
                     syncViewportFromSession();
+                    appendProjectLoadDiagnosticLine("load: after syncViewportFromSession");
                     if (midiEditorPresenter_ != nullptr)
                     {
                         midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
                     }
+                    appendProjectLoadDiagnosticLine("load: before inspector/header selection refresh");
                     trackLanesView.syncTracksFromSession();
                     inspectorView_.refreshFromSession();
+                    appendProjectLoadDiagnosticLine("load: after inspector/header selection refresh");
                     applyArrangementMusicalUiFromSession(session.getProjectMusicalTime(), false);
                     rulerView.repaint();
                     trackLanesView.repaint();
+                    appendProjectLoadDiagnosticLine("load: before playback bridge/runtime sync");
                     refreshInstrumentUi();
+                    appendProjectLoadDiagnosticLine("load: after playback bridge/runtime sync");
                     resized();
                 },
                 [this]() -> SnapProjectRootFields { return arrangementSnapPersistenceSnapshotForSave(); },
@@ -1555,13 +1607,23 @@ void mini_daw_app_transport::TransportControlsContent::invokePasteClipFromWindow
 
 void mini_daw_app_transport::TransportControlsContent::clearExperimentalInstrumentRuntimesPreserveBridgeOnly() noexcept
 {
+    transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    if (transportPlayPauseStopController_ != nullptr)
+    {
+        transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
+    }
     if (midiEditorPresenter_ != nullptr)
     {
         midiEditorPresenter_->resetWindowAndBooking();
     }
     trackLanesView.syncInstrumentTimelineAttachments({});
     instrumentTimelineRowCoordinator_->clearInstrumentTimelineLanesAndHeaders();
-    instrumentRuntimeCoordinator_->clearRuntimesPreserveBridgeOnly();
+    if (instrumentRuntimeCoordinator_ != nullptr)
+    {
+        instrumentRuntimeCoordinator_->releaseExperimentalInstrumentHostsDeviceResources();
+        juce::Thread::sleep(120);
+        instrumentRuntimeCoordinator_->clearRuntimesPreserveBridgeOnly();
+    }
 }
 
 CreatedTransportUiForMainWindow createTransportUiForMainWindow(

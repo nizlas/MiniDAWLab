@@ -4,6 +4,7 @@
 
 #include "io/ProjectFile.h"
 
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "domain/ProjectMusicalTime.h"
 #include "domain/Track.h"
 #include "domain/TrackStereoPan.h"
@@ -19,6 +20,95 @@
 
 namespace
 {
+    [[nodiscard]] juce::String sanitizeProjectJsonString(juce::String s) noexcept
+    {
+        return s.replaceCharacter('\0', ' ');
+    }
+
+    [[nodiscard]] juce::var genericVst3DescriptorToVar(const ProjectFileGenericVst3DescriptorV1& d)
+    {
+        juce::DynamicObject::Ptr gd = new juce::DynamicObject();
+        if (d.name.isNotEmpty())
+        {
+            gd->setProperty("name", sanitizeProjectJsonString(d.name));
+        }
+        if (d.descriptiveName.isNotEmpty())
+        {
+            gd->setProperty("descriptiveName", sanitizeProjectJsonString(d.descriptiveName));
+        }
+        if (d.manufacturerName.isNotEmpty())
+        {
+            gd->setProperty("manufacturerName", sanitizeProjectJsonString(d.manufacturerName));
+        }
+        if (d.pluginFormatName.isNotEmpty())
+        {
+            gd->setProperty("pluginFormatName", sanitizeProjectJsonString(d.pluginFormatName));
+        }
+        if (d.category.isNotEmpty())
+        {
+            gd->setProperty("category", sanitizeProjectJsonString(d.category));
+        }
+        if (d.fileOrIdentifier.isNotEmpty())
+        {
+            gd->setProperty("fileOrIdentifier", sanitizeProjectJsonString(d.fileOrIdentifier));
+        }
+        if (d.uniqueId != 0)
+        {
+            gd->setProperty("uniqueId", static_cast<juce::int64>(d.uniqueId));
+        }
+        if (d.deprecatedUid != 0)
+        {
+            gd->setProperty("deprecatedUid", static_cast<juce::int64>(d.deprecatedUid));
+        }
+        if (!d.isInstrument)
+        {
+            gd->setProperty("isInstrument", false);
+        }
+        return juce::var(gd.get());
+    }
+
+    [[nodiscard]] juce::Result writeProjectTextAtomically(const juce::File& file, const juce::String& text)
+    {
+        const juce::File parent = file.getParentDirectory();
+        appendProjectSaveDiagnosticLine("save: target=\"" + file.getFullPathName() + "\" bytes="
+                                        + juce::String(text.getNumBytesAsUTF8()));
+        if (!parent.isDirectory())
+        {
+            if (!parent.createDirectory())
+            {
+                const juce::String msg = "Could not create project folder:\n" + parent.getFullPathName();
+                appendProjectSaveDiagnosticLine("save: failed create parent dir=\"" + parent.getFullPathName() + "\"");
+                return juce::Result::fail(msg);
+            }
+        }
+
+        const juce::File tempFile = file.getSiblingFile(file.getFileNameWithoutExtension() + ".dalproj.tmp");
+        appendProjectSaveDiagnosticLine("save: temp=\"" + tempFile.getFullPathName() + "\"");
+        if (tempFile.existsAsFile() && !tempFile.deleteFile())
+        {
+            appendProjectSaveDiagnosticLine("save: failed delete stale temp=\"" + tempFile.getFullPathName() + "\"");
+        }
+
+        // UTF-8 binary write (text mode can fail for non-ASCII plugin metadata in GenericVst3 descriptors).
+        if (!tempFile.replaceWithText(text, false, true))
+        {
+            const juce::String msg = "Could not write temp project file:\n" + tempFile.getFullPathName();
+            appendProjectSaveDiagnosticLine("save: failed temp write");
+            return juce::Result::fail(msg);
+        }
+
+        if (!tempFile.moveFileTo(file))
+        {
+            const juce::String msg = "Could not replace project file:\n" + file.getFullPathName()
+                                     + "\n\nTemporary file kept at:\n" + tempFile.getFullPathName();
+            appendProjectSaveDiagnosticLine("save: failed move temp->target");
+            return juce::Result::fail(msg);
+        }
+
+        appendProjectSaveDiagnosticLine("save: complete target=\"" + file.getFullPathName() + "\"");
+        return juce::Result::ok();
+    }
+
     [[nodiscard]] juce::var trackToVar(const ProjectFileTrackV1& t, const int fileVersion)
     {
         juce::Array<juce::var> clipVars;
@@ -598,6 +688,36 @@ namespace
                     }
                 }
             }
+            const juce::var& gdesc = tv.getProperty("genericVst3Descriptor", {});
+            if (gdesc.isObject())
+            {
+                et.hasGenericVst3Descriptor = true;
+                et.genericVst3Descriptor.name = gdesc.getProperty("name", {}).toString();
+                et.genericVst3Descriptor.descriptiveName = gdesc.getProperty("descriptiveName", {}).toString();
+                et.genericVst3Descriptor.manufacturerName = gdesc.getProperty("manufacturerName", {}).toString();
+                et.genericVst3Descriptor.pluginFormatName = gdesc.getProperty("pluginFormatName", {}).toString();
+                et.genericVst3Descriptor.category = gdesc.getProperty("category", {}).toString();
+                et.genericVst3Descriptor.fileOrIdentifier = gdesc.getProperty("fileOrIdentifier", {}).toString();
+                const juce::var& uid = gdesc.getProperty("uniqueId", {});
+                if (uid.isInt() || uid.isInt64() || uid.isDouble())
+                {
+                    et.genericVst3Descriptor.uniqueId = (int)static_cast<double>(uid);
+                }
+                const juce::var& duid = gdesc.getProperty("deprecatedUid", {});
+                if (duid.isInt() || duid.isInt64() || duid.isDouble())
+                {
+                    et.genericVst3Descriptor.deprecatedUid = (int)static_cast<double>(duid);
+                }
+                const juce::var& isInst = gdesc.getProperty("isInstrument", {});
+                if (isInst.isBool())
+                {
+                    et.genericVst3Descriptor.isInstrument = (bool)isInst;
+                }
+                else if (isInst.isInt() || isInst.isInt64() || isInst.isDouble())
+                {
+                    et.genericVst3Descriptor.isInstrument = static_cast<int>(static_cast<double>(isInst) + 0.5) != 0;
+                }
+            }
             const juce::var& clipsV = tv.getProperty("clips", {});
             if (clipsV.isArray())
             {
@@ -817,6 +937,8 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         return juce::Result::fail("Internal error: only the current project version is supported for writing.");
     }
 
+    appendProjectSaveDiagnosticLine("save: writeProjectFile target=\"" + file.getFullPathName() + "\"");
+
     juce::Array<juce::var> trackVars;
     for (const auto& t : data.tracks)
     {
@@ -871,6 +993,15 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         juce::Array<juce::var> exTracks;
         for (const auto& et : data.experimentalInstrumentTracks)
         {
+            if (et.instrumentKind == "GenericVst3")
+            {
+                appendProjectSaveDiagnosticLine(
+                    "save: GenericVst3 row trackId=" + juce::String((juce::int64)et.trackId) + " name=\""
+                    + et.name + "\" hasDescriptor=" + juce::String(et.hasGenericVst3Descriptor ? "yes" : "no")
+                    + " pluginWasLoadedOnSave=" + juce::String(et.pluginWasLoadedOnSave ? "yes" : "no") + " clips="
+                    + juce::String((int)et.clips.size()) + " bundlePath=\"" + et.pluginBundlePath
+                    + "\" stateBase64Len=" + juce::String(et.pluginStateBase64.length()));
+            }
             juce::DynamicObject::Ptr eo = new juce::DynamicObject();
             if (!et.enabled)
             {
@@ -894,6 +1025,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             if (et.pluginStateBase64.isNotEmpty())
             {
                 eo->setProperty("pluginStateBase64", et.pluginStateBase64);
+            }
+            if (et.instrumentKind == "GenericVst3" && et.hasGenericVst3Descriptor)
+            {
+                eo->setProperty("genericVst3Descriptor", genericVst3DescriptorToVar(et.genericVst3Descriptor));
             }
             if (!et.powerOn)
             {
@@ -941,7 +1076,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 co->setProperty("name", cl.name);
                 co->setProperty("numSteps", cl.numSteps);
                 co->setProperty("stepDenom", cl.stepDenom);
-                co->setProperty("bpm", cl.bpm);
+                if (std::isfinite(cl.bpm))
+                {
+                    co->setProperty("bpm", cl.bpm);
+                }
                 if (!cl.loop)
                 {
                     co->setProperty("loop", false);
@@ -1022,15 +1160,32 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         root->setProperty("audioMixdown", juce::var(amo.get()));
     }
 
+    appendProjectSaveDiagnosticLine("save: begin version=" + juce::String(data.version) + " tracks="
+                                    + juce::String((int)data.tracks.size()) + " experimentalInstrumentTracks="
+                                    + juce::String((int)data.experimentalInstrumentTracks.size()));
+
     const juce::String text = juce::JSON::toString(juce::var(root.get()), true);
     if (text.isEmpty())
     {
+        appendProjectSaveDiagnosticLine("save: failed JSON encode (empty output)");
         return juce::Result::fail("Could not encode project to JSON.");
     }
 
-    if (!file.replaceWithText(text, false, false, nullptr))
     {
-        return juce::Result::fail("Could not write project file.");
+        juce::var parsedBack;
+        const juce::Result parseBack = juce::JSON::parse(text, parsedBack);
+        if (!parseBack.wasOk())
+        {
+            appendProjectSaveDiagnosticLine("save: failed JSON parse-back validation message=\""
+                                            + parseBack.getErrorMessage() + "\"");
+            return juce::Result::fail("Could not encode project to JSON: " + parseBack.getErrorMessage());
+        }
+    }
+
+    const juce::Result writeRes = writeProjectTextAtomically(file, text);
+    if (!writeRes.wasOk())
+    {
+        return writeRes;
     }
     return juce::Result::ok();
 }
@@ -1573,6 +1728,8 @@ void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimental
     t.pluginStateBase64.clear();
     t.pluginWasLoadedOnSave = false;
     t.pluginBundlePath.clear();
+    t.hasGenericVst3Descriptor = false;
+    t.genericVst3Descriptor = {};
     t.drumNoteNameOverrides.clear();
     t.drumNoteNameAutoPlugin.clear();
 }

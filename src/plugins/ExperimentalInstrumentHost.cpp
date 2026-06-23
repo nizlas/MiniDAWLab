@@ -1644,10 +1644,16 @@ ExperimentalInstrumentHost::ExperimentalInstrumentHost()
 
 ExperimentalInstrumentHost::~ExperimentalInstrumentHost()
 {
-    onPluginPitchNamesCacheMayHaveChanged_ = {};
-    drumNamePhaseCAudioProbeShouldSkip_ = {};
+    clearControllerWireCallbacks();
     unloadInstrument();
     writeExperimentalInstrumentLogLine("shutdown: ExperimentalInstrumentHost destroyed");
+}
+
+void ExperimentalInstrumentHost::clearControllerWireCallbacks() noexcept
+{
+    onPluginPitchNamesCacheMayHaveChanged_ = {};
+    onPluginDrumNamesDiscovered_ = {};
+    drumNamePhaseCAudioProbeShouldSkip_ = {};
 }
 
 void ExperimentalInstrumentHost::closeNativeEditor()

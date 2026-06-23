@@ -2,6 +2,7 @@
 
 #include <map>
 
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -249,6 +250,11 @@ void InstrumentRuntimeCoordinator::promoteInstrumentStagingIntoRegistryBoundTo(c
 
 void InstrumentRuntimeCoordinator::removeInstrumentRuntimeForTrack(const TrackId tid) noexcept
 {
+    if (ExperimentalInstrumentHost* const host = getInstrumentHostForTrack(tid))
+    {
+        host->clearControllerWireCallbacks();
+        host->unloadInstrument();
+    }
     instrumentControllersByTrackId_.erase(tid);
     instrumentHostsByTrackId_.erase(tid);
     updateExperimentalPlaybackBridgeAfterRegistryChange();
@@ -338,6 +344,22 @@ bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
 void InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly() noexcept
 {
     playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
+
+    const auto detachAndUnloadHost = [](ExperimentalInstrumentHost* host) noexcept {
+        if (host == nullptr)
+        {
+            return;
+        }
+        host->clearControllerWireCallbacks();
+        host->unloadInstrument();
+    };
+
+    for (auto& kv : instrumentHostsByTrackId_)
+    {
+        detachAndUnloadHost(kv.second.get());
+    }
+    detachAndUnloadHost(instrumentStagingHost_.get());
+
     instrumentStagingController_.reset();
     instrumentStagingHost_.reset();
     instrumentControllersByTrackId_.clear();
@@ -574,6 +596,10 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
                                                InstrumentTrackController* ctl) noexcept
     {
         if (ctl == nullptr || host == nullptr || !ctl->hasInstrumentTrack())
+        {
+            return;
+        }
+        if (ctl->isGenericCatalogInstrument() && !host->hasInstrument())
         {
             return;
         }

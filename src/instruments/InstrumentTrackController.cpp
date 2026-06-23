@@ -1,9 +1,11 @@
 #include "instruments/InstrumentTrackController.h"
 
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "plugins/ExperimentalInstrumentHost.h"
+#include "plugins/InstrumentCatalog.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
 #include <algorithm>
@@ -122,11 +124,13 @@ InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost&
 
 bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
 {
-    // Host-report name formatting varies (“Groove Agent …”, “GrooveAgent SE”, …). Treat any GrooveAgent
-    // substring as loaded so snapshots stay coherent with `hasInstrument()`.
     if (!host_.hasInstrument())
     {
         return false;
+    }
+    if (experimentalInstrumentKind_ == "GenericVst3")
+    {
+        return true;
     }
     const juce::String n = host_.getInstrumentNameForUi();
     return n.containsIgnoreCase("Groove Agent") || n.containsIgnoreCase("GrooveAgent")
@@ -232,6 +236,52 @@ bool InstrumentTrackController::bootstrapHalionSonicShellForSessionTrack(
     pendingProjectHalionSonicAutoload_ = false;
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
+    instrumentLoaded_ = computeInstrumentLoadedFromHost();
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
+bool InstrumentTrackController::bootstrapGenericCatalogInstrumentShellForSessionTrack(
+    const TrackId sessionInstrumentTrackId) noexcept
+{
+    if (sessionInstrumentTrackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    if (trackActive_ && experimentalDomainTrackId_ != sessionInstrumentTrackId)
+    {
+        return false;
+    }
+    if (session_ == nullptr)
+    {
+        return false;
+    }
+    if (const auto snap = session_->loadSessionSnapshotForAudioThread())
+    {
+        const int ix = snap->findTrackIndexById(sessionInstrumentTrackId);
+        if (ix < 0 || snap->getTrack(ix).getKind() != TrackKind::Instrument)
+        {
+            return false;
+        }
+    }
+
+    experimentalDomainTrackId_ = sessionInstrumentTrackId;
+
+    trackActive_ = true;
+    powerOn_ = true;
+    muted_ = false;
+    isActive_ = false;
+    requiredKitName_.clear();
+    experimentalInstrumentKind_ = "GenericVst3";
+    pendingProjectGrooveAutoload_ = false;
+    pendingProjectHalionSonicAutoload_ = false;
+    if (!pendingProjectGenericVst3Autoload_)
+    {
+        pendingAdvisoryPluginBundlePath_.clear();
+        pendingInstrumentKind_.clear();
+    }
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
 
     publishRenderSnapshot();
@@ -643,6 +693,9 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     requiredKitName_.clear();
     pendingProjectGrooveAutoload_ = false;
     pendingProjectHalionSonicAutoload_ = false;
+    pendingProjectGenericVst3Autoload_ = false;
+    pendingGenericVst3DescriptorValid_ = false;
+    pendingGenericVst3Descriptor_ = {};
     pendingAdvisoryPluginBundlePath_.clear();
     pendingInstrumentKind_.clear();
     experimentalInstrumentKind_.clear();
@@ -667,7 +720,81 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         kind = "GrooveAgentSE";
     }
     dto.instrumentKind = kind;
-    if (kind == "HALionSonic")
+    if (kind == "GenericVst3")
+    {
+        dto.requiredKitName.clear();
+        dto.pluginBundlePath = host_.getLastLoadedVst3OriginalPath();
+        dto.pluginWasLoadedOnSave = host_.hasInstrument();
+        dto.hasGenericVst3Descriptor = false;
+        dto.genericVst3Descriptor = {};
+        if (session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
+        {
+            if (const auto snap = session_->loadSessionSnapshotForAudioThread())
+            {
+                const int ix = snap->findTrackIndexById(experimentalDomainTrackId_);
+                if (ix >= 0)
+                {
+                    dto.name = snap->getTrack(ix).getName();
+                }
+            }
+        }
+        if (dto.name.isEmpty() && host_.hasInstrument())
+        {
+            dto.name = host_.getInstrumentNameForUi();
+        }
+        juce::PluginDescription pd;
+        if (host_.getLastLoadedPluginDescription(pd))
+        {
+            dto.hasGenericVst3Descriptor = true;
+            mini_daw::fillProjectGenericVst3DescriptorFromPluginDescription(dto.genericVst3Descriptor, pd);
+        }
+        const bool stateCaptureAttempted = dto.pluginWasLoadedOnSave;
+        juce::String stateCaptureFailure;
+        if (stateCaptureAttempted)
+        {
+            dto.pluginStateBase64 = host_.getCurrentInstrumentStateBase64();
+            if (dto.pluginStateBase64.isEmpty())
+            {
+                stateCaptureFailure = "getStateInformation returned empty or zero bytes";
+            }
+        }
+        appendProjectSaveDiagnosticLine(
+            "save: GenericVst3 controller trackId=" + juce::String((juce::int64)dto.trackId) + " name=\""
+            + dto.name + "\" hostHasInstrument=" + juce::String(host_.hasInstrument() ? "yes" : "no")
+            + " instrumentLoaded=" + juce::String(instrumentLoaded_ ? "yes" : "no") + " pluginWasLoadedOnSave="
+            + juce::String(dto.pluginWasLoadedOnSave ? "yes" : "no") + " hasDescriptor="
+            + juce::String(dto.hasGenericVst3Descriptor ? "yes" : "no") + " bundlePath=\""
+            + dto.pluginBundlePath + "\" stateCaptureAttempted="
+            + juce::String(stateCaptureAttempted ? "yes" : "no") + " stateBase64Len="
+            + juce::String(dto.pluginStateBase64.length()));
+        if (stateCaptureFailure.isNotEmpty())
+        {
+            appendProjectSaveDiagnosticLine(
+                "save: GenericVst3 state capture failed trackId=" + juce::String((juce::int64)dto.trackId)
+                + " reason=\"" + stateCaptureFailure + "\"");
+        }
+        else if (dto.pluginStateBase64.isNotEmpty())
+        {
+            juce::MemoryOutputStream mos;
+            if (juce::Base64::convertFromBase64(mos, dto.pluginStateBase64))
+            {
+                appendProjectSaveDiagnosticLine(
+                    "save: GenericVst3 state capture ok trackId=" + juce::String((juce::int64)dto.trackId)
+                    + " stateBytes=" + juce::String((juce::int64)mos.getDataSize()) + " base64Len="
+                    + juce::String(dto.pluginStateBase64.length()));
+            }
+        }
+        if (dto.hasGenericVst3Descriptor)
+        {
+            appendProjectSaveDiagnosticLine(
+                "save: GenericVst3 descriptor name=\"" + dto.genericVst3Descriptor.name + "\" manufacturer=\""
+                + dto.genericVst3Descriptor.manufacturerName + "\" uniqueId="
+                + juce::String(dto.genericVst3Descriptor.uniqueId) + " isInstrument="
+                + juce::String(dto.genericVst3Descriptor.isInstrument ? "yes" : "no") + " fileOrIdentifier=\""
+                + dto.genericVst3Descriptor.fileOrIdentifier + "\"");
+        }
+    }
+    else if (kind == "HALionSonic")
     {
         dto.name.clear();
         dto.requiredKitName = requiredKitName_;
@@ -680,7 +807,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     }
     dto.pluginBundlePath = host_.getLastLoadedVst3OriginalPath();
     dto.pluginWasLoadedOnSave = host_.hasInstrument();
-    if (dto.pluginWasLoadedOnSave)
+    if (kind != "GenericVst3" && dto.pluginWasLoadedOnSave)
     {
         dto.pluginStateBase64 = host_.getCurrentInstrumentStateBase64();
     }
@@ -960,6 +1087,16 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
     pendingInstrumentKind_ = chosen.instrumentKind;
     experimentalInstrumentKind_ = chosen.instrumentKind;
     pendingPluginStateBase64_ = chosen.pluginStateBase64;
+    if (chosen.instrumentKind == "GenericVst3")
+    {
+        pendingProjectGrooveAutoload_ = false;
+        pendingProjectHalionSonicAutoload_ = false;
+        pendingAdvisoryPluginBundlePath_ = chosen.pluginBundlePath;
+        pendingGenericVst3Descriptor_ = chosen.genericVst3Descriptor;
+        pendingGenericVst3DescriptorValid_ = chosen.hasGenericVst3Descriptor;
+        pendingProjectGenericVst3Autoload_
+            = chosen.hasGenericVst3Descriptor || chosen.pluginWasLoadedOnSave || chosen.pluginBundlePath.isNotEmpty();
+    }
 
     drumLabels_.clear();
     for (const auto& kv : chosen.drumNoteNameOverrides)
@@ -1442,6 +1579,168 @@ void InstrumentTrackController::runPendingHalionSonicProjectAutoload(Experimenta
         {
             outWarning << " Kit hint: " << requiredKitName_ << ".";
         }
+    }
+
+    syncShellWithHostState();
+}
+
+void InstrumentTrackController::runPendingGenericVst3ProjectAutoload(ExperimentalInstrumentHost& host,
+                                                                     juce::String& outWarning)
+{
+    outWarning.clear();
+    const bool kindIsGeneric = experimentalInstrumentKind_ == "GenericVst3"
+                               || pendingInstrumentKind_ == "GenericVst3";
+    if (!trackActive_ || !pendingProjectGenericVst3Autoload_ || !kindIsGeneric)
+    {
+        appendProjectLoadDiagnosticLine(
+            "load: GenericVst3 autoload skipped trackActive=" + juce::String(trackActive_ ? "yes" : "no")
+            + " pendingAutoload=" + juce::String(pendingProjectGenericVst3Autoload_ ? "yes" : "no")
+            + " kindIsGeneric=" + juce::String(kindIsGeneric ? "yes" : "no"));
+        pendingProjectGenericVst3Autoload_ = false;
+        pendingGenericVst3DescriptorValid_ = false;
+        pendingPluginStateBase64_.clear();
+        syncShellWithHostState();
+        return;
+    }
+
+    pendingProjectGenericVst3Autoload_ = false;
+    const bool hadDescriptor = pendingGenericVst3DescriptorValid_;
+    const ProjectFileGenericVst3DescriptorV1 savedDescriptor = pendingGenericVst3Descriptor_;
+    const juce::String savedBundlePath = pendingAdvisoryPluginBundlePath_;
+    const juce::String pendingB64 = pendingPluginStateBase64_;
+    pendingGenericVst3DescriptorValid_ = false;
+    pendingPluginStateBase64_.clear();
+
+    appendProjectLoadDiagnosticLine(
+        "load: GenericVst3 autoload begin trackId=" + juce::String((juce::int64)experimentalDomainTrackId_)
+        + " hadDescriptor=" + juce::String(hadDescriptor ? "yes" : "no") + " bundlePath=\"" + savedBundlePath
+        + "\" statePresent=" + juce::String(pendingB64.isNotEmpty() ? "yes" : "no") + " stateBase64Len="
+        + juce::String(pendingB64.length()));
+
+    juce::MemoryBlock decodedState;
+    const juce::MemoryBlock* statePtr = nullptr;
+    juce::String stateRestoreHostWarning;
+    bool stateRestoreFailed = false;
+    bool stateRestoreAttempted = false;
+
+    if (pendingB64.isNotEmpty())
+    {
+        juce::MemoryOutputStream mos;
+        if (!juce::Base64::convertFromBase64(mos, pendingB64))
+        {
+            stateRestoreFailed = true;
+            appendProjectLoadDiagnosticLine(
+                "load: GenericVst3 state decode failed trackId="
+                + juce::String((juce::int64)experimentalDomainTrackId_) + " reason=invalid-base64");
+            ExperimentalInstrumentHost::appendInstrumentHostLogLine(
+                "plugin-state: restore failed message=\"invalid base64 in project file (GenericVst3)\"");
+        }
+        else
+        {
+            decodedState.replaceAll(mos.getData(), mos.getDataSize());
+            appendProjectLoadDiagnosticLine(
+                "load: GenericVst3 state decoded trackId=" + juce::String((juce::int64)experimentalDomainTrackId_)
+                + " stateBytes=" + juce::String((juce::int64)decodedState.getSize()));
+            if (decodedState.getSize() > 0)
+            {
+                statePtr = &decodedState;
+                stateRestoreAttempted = true;
+            }
+            else
+            {
+                appendProjectLoadDiagnosticLine(
+                    "load: GenericVst3 state restore skipped trackId="
+                    + juce::String((juce::int64)experimentalDomainTrackId_) + " reason=decoded-zero-bytes");
+            }
+        }
+    }
+    else
+    {
+        appendProjectLoadDiagnosticLine(
+            "load: GenericVst3 state restore skipped trackId="
+            + juce::String((juce::int64)experimentalDomainTrackId_) + " reason=no-state-in-project");
+    }
+
+    juce::String displayName = savedDescriptor.name;
+    if (displayName.isEmpty() && session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
+    {
+        if (const auto snap = session_->loadSessionSnapshotForAudioThread())
+        {
+            const int ix = snap->findTrackIndexById(experimentalDomainTrackId_);
+            if (ix >= 0)
+            {
+                displayName = snap->getTrack(ix).getName();
+            }
+        }
+    }
+
+    const mini_daw::GenericVst3ProjectLoadResolution resolved = mini_daw::tryResolveGenericVst3ForProjectLoad(
+        hadDescriptor,
+        savedDescriptor,
+        savedBundlePath,
+        displayName);
+
+    if (!resolved.resolved)
+    {
+        const juce::String label = displayName.isNotEmpty() ? displayName : juce::String("Generic instrument");
+        outWarning = label
+                     + " could not be loaded (plugin path/descriptor could not be resolved). MIDI clips were "
+                       "preserved on a placeholder track.";
+        appendProjectLoadDiagnosticLine("load: GenericVst3 autoload resolve failed label=\"" + label + "\"");
+        syncShellWithHostState();
+        return;
+    }
+
+    appendProjectLoadDiagnosticLine("load: GenericVst3 autoload resolved bundle=\"" + resolved.bundle.getFullPathName()
+                                    + "\" name=\"" + resolved.description.name + "\"");
+
+    const juce::Result loadResult = host.loadInstrumentFromDescription(
+        resolved.description,
+        resolved.bundle,
+        "project-generic-vst3",
+        statePtr,
+        (statePtr != nullptr) ? &stateRestoreHostWarning : nullptr);
+
+    if (!loadResult.wasOk())
+    {
+        const juce::String label = displayName.isNotEmpty() ? displayName : resolved.description.name;
+        outWarning = label + " could not be loaded (" + loadResult.getErrorMessage()
+                     + "). MIDI clips were preserved on a placeholder track.";
+        appendProjectLoadDiagnosticLine(
+            "load: GenericVst3 autoload loadInstrumentFromDescription failed trackId="
+            + juce::String((juce::int64)experimentalDomainTrackId_) + " message=\""
+            + loadResult.getErrorMessage() + "\" stateRestoreAttempted="
+            + juce::String(stateRestoreAttempted ? "yes" : "no"));
+        juce::Logger::writeToLog("[project-autoload-generic] load failed: " + loadResult.getErrorMessage());
+        syncShellWithHostState();
+        return;
+    }
+
+    if (stateRestoreHostWarning.isNotEmpty())
+    {
+        stateRestoreFailed = true;
+        appendProjectLoadDiagnosticLine(
+            "load: GenericVst3 state restore failed trackId="
+            + juce::String((juce::int64)experimentalDomainTrackId_) + " reason=\""
+            + stateRestoreHostWarning + "\"");
+    }
+    else if (stateRestoreAttempted)
+    {
+        appendProjectLoadDiagnosticLine(
+            "load: GenericVst3 state restore ok trackId="
+            + juce::String((juce::int64)experimentalDomainTrackId_));
+    }
+
+    appendProjectLoadDiagnosticLine(
+        "load: GenericVst3 autoload loadInstrumentFromDescription ok trackId="
+        + juce::String((juce::int64)experimentalDomainTrackId_) + " stateRestoreAttempted="
+        + juce::String(stateRestoreAttempted ? "yes" : "no") + " stateRestoreFailed="
+        + juce::String(stateRestoreFailed ? "yes" : "no"));
+
+    if (stateRestoreFailed)
+    {
+        const juce::String label = displayName.isNotEmpty() ? displayName : resolved.description.name;
+        outWarning = label + " loaded, but its saved plugin state could not be restored.";
     }
 
     syncShellWithHostState();

@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -11,10 +12,11 @@
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
 
+#include <unordered_set>
+
 namespace
 {
     // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
-    // `projectFile` = `<projectFolder>/<projectName>.dalproj`.
     [[nodiscard]] juce::String firstTimeSaveConflictMessage(const juce::File& projectFolder,
                                                             const juce::File& projectFile)
     {
@@ -47,6 +49,279 @@ namespace
             }
         }
         return {};
+    }
+
+    void warnIfGenericCatalogInstrumentsUnloadedOnSave(
+        const Session& session,
+        const ProjectIoCoordinator::Callbacks& callbacks)
+    {
+        if (callbacks.instrumentCtlByTrackId == nullptr)
+        {
+            return;
+        }
+        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            return;
+        }
+        int unloadedGenericCount = 0;
+        for (int i = 0; i < snap->getNumTracks(); ++i)
+        {
+            const Track& tr = snap->getTrack(i);
+            if (tr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            InstrumentTrackController* const ctl = callbacks.instrumentCtlByTrackId(tr.getId());
+            if (ctl != nullptr && ctl->hasInstrumentTrack() && ctl->isGenericCatalogInstrument()
+                && !ctl->isInstrumentLoaded())
+            {
+                ++unloadedGenericCount;
+            }
+        }
+        if (unloadedGenericCount <= 0)
+        {
+            return;
+        }
+        juce::String msg = "Note: ";
+        msg << juce::String(unloadedGenericCount) << " generic VST3 instrument track";
+        if (unloadedGenericCount != 1)
+        {
+            msg << "s";
+        }
+        msg << " had no loaded plugin at save time.\n\nMIDI clips are saved, but reload will use a placeholder unless the plugin can be resolved from the catalog.";
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Save project", msg);
+    }
+
+    [[nodiscard]] juce::String stripGenericVst3PlaceholderSuffix(juce::String name)
+    {
+        const juce::String oldSuffix = " (session-only plugin not loaded)";
+        const juce::String newSuffix = " (plugin not loaded)";
+        if (name.endsWith(newSuffix))
+        {
+            return name.dropLastCharacters(newSuffix.length()).trimEnd();
+        }
+        const int oldIdx = name.indexOfIgnoreCase(oldSuffix);
+        if (oldIdx >= 0)
+        {
+            return name.substring(0, oldIdx).trimEnd();
+        }
+        return name;
+    }
+
+    [[nodiscard]] juce::String ensureGenericVst3PlaceholderTrackName(juce::String name)
+    {
+        if (name.containsIgnoreCase("plugin not loaded"))
+        {
+            return name;
+        }
+        return stripGenericVst3PlaceholderSuffix(name) + " (plugin not loaded)";
+    }
+
+    [[nodiscard]] juce::String genericVst3DisplayNameFromRow(
+        const Session& session,
+        const TrackId bindTid,
+        const ProjectFileExperimentalInstrumentTrackV1* rowMaybe)
+    {
+        if (rowMaybe != nullptr && rowMaybe->name.isNotEmpty())
+        {
+            return stripGenericVst3PlaceholderSuffix(rowMaybe->name);
+        }
+        if (const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread())
+        {
+            const int ix = snap->findTrackIndexById(bindTid);
+            if (ix >= 0)
+            {
+                return stripGenericVst3PlaceholderSuffix(snap->getTrack(ix).getName());
+            }
+        }
+        return juce::String("Instrument");
+    }
+
+    void restoreGenericVst3InstrumentTrack(
+        Session& session,
+        const ProjectIoCoordinator::Callbacks& callbacks,
+        const TrackId bindTid,
+        const double sampleRate,
+        const ProjectFileExperimentalInstrumentTrackV1* rowMaybe,
+        const std::vector<ProjectFileTrackV1>* trackRows,
+        juce::String& noteAcc)
+    {
+        if (callbacks.getOrCreateInstrumentRuntimeForTrack == nullptr)
+        {
+            return;
+        }
+        const auto runtime = callbacks.getOrCreateInstrumentRuntimeForTrack(bindTid);
+        ExperimentalInstrumentHost* mh = runtime.first;
+        InstrumentTrackController* ctl = runtime.second;
+        if (ctl == nullptr || mh == nullptr)
+        {
+            return;
+        }
+        ctl->setTimelineSampleRate(sampleRate);
+        if (rowMaybe != nullptr)
+        {
+            ctl->restoreExperimentalInstrumentSingleProjectRow(*rowMaybe, trackRows);
+        }
+
+        juce::String noteOne;
+        ctl->runPendingGenericVst3ProjectAutoload(*mh, noteOne);
+        (void)ctl->bootstrapGenericCatalogInstrumentShellForSessionTrack(bindTid);
+
+        const juce::String displayName = genericVst3DisplayNameFromRow(session, bindTid, rowMaybe);
+        if (mh->hasInstrument())
+        {
+            juce::String restoredName = displayName;
+            if (restoredName.isEmpty())
+            {
+                restoredName = mh->getInstrumentNameForUi();
+            }
+            if (restoredName.isNotEmpty())
+            {
+                session.setTrackName(bindTid, restoredName);
+            }
+            ctl->syncShellWithHostState();
+        }
+        else
+        {
+            const juce::String placeholderName = ensureGenericVst3PlaceholderTrackName(
+                displayName.isNotEmpty() ? displayName : juce::String("Instrument"));
+            session.setTrackName(bindTid, placeholderName);
+            if (noteOne.isEmpty())
+            {
+                noteOne = displayName + " could not be loaded. MIDI clips were preserved on a placeholder track.";
+            }
+        }
+
+        if (noteOne.isNotEmpty())
+        {
+            if (noteAcc.isNotEmpty())
+            {
+                noteAcc << "\n\n";
+            }
+            noteAcc << noteOne;
+        }
+    }
+
+    void restoreGenericCatalogPlaceholderLane(
+        Session& session,
+        const ProjectIoCoordinator::Callbacks& callbacks,
+        const TrackId bindTid,
+        const double sampleRate,
+        const ProjectFileExperimentalInstrumentTrackV1* rowMaybe,
+        const std::vector<ProjectFileTrackV1>* trackRows,
+        juce::String& noteAcc)
+    {
+        if (callbacks.getOrCreateInstrumentRuntimeForTrack == nullptr)
+        {
+            return;
+        }
+        const auto runtime = callbacks.getOrCreateInstrumentRuntimeForTrack(bindTid);
+        InstrumentTrackController* ctl = runtime.second;
+        if (ctl == nullptr)
+        {
+            return;
+        }
+        ctl->setTimelineSampleRate(sampleRate);
+        if (rowMaybe != nullptr)
+        {
+            ctl->restoreExperimentalInstrumentSingleProjectRow(*rowMaybe, trackRows);
+        }
+        (void)ctl->bootstrapGenericCatalogInstrumentShellForSessionTrack(bindTid);
+
+        juce::String laneName;
+        if (const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread())
+        {
+            const int ix = snap->findTrackIndexById(bindTid);
+            if (ix >= 0)
+            {
+                laneName = snap->getTrack(ix).getName();
+            }
+        }
+        if (laneName.isEmpty() && rowMaybe != nullptr && rowMaybe->name.isNotEmpty())
+        {
+            laneName = rowMaybe->name;
+        }
+        if (laneName.isEmpty())
+        {
+            laneName = "Instrument";
+        }
+        const juce::String placeholderName = ensureGenericVst3PlaceholderTrackName(laneName);
+        session.setTrackName(bindTid, placeholderName);
+
+        juce::String note = "Generic catalog instrument \"" + placeholderName
+                            + "\" was restored without a loaded plugin (session-only).";
+        if (rowMaybe != nullptr && !rowMaybe->clips.empty())
+        {
+            note << " MIDI clips on this lane were kept.";
+        }
+        if (noteAcc.isNotEmpty())
+        {
+            noteAcc << "\n\n";
+        }
+        noteAcc << note;
+    }
+
+    void restoreOrphanInstrumentLanesWithoutRuntime(
+        Session& session,
+        const ProjectFileV1& parsedLoad,
+        const ProjectIoCoordinator::Callbacks& callbacks,
+        const double sampleRate,
+        juce::String& noteAcc)
+    {
+        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr || callbacks.instrumentCtlByTrackId == nullptr
+            || callbacks.getOrCreateInstrumentRuntimeForTrack == nullptr)
+        {
+            return;
+        }
+
+        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+        {
+            const Track& tr = snap->getTrack(ti);
+            if (tr.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            const TrackId tid = tr.getId();
+            InstrumentTrackController* const existing = callbacks.instrumentCtlByTrackId(tid);
+            if (existing != nullptr && existing->hasInstrumentTrack()
+                && existing->getExperimentalInstrumentDomainTrackId() == tid)
+            {
+                continue;
+            }
+
+            bool payloadExpectedForLane = false;
+            for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
+            {
+                if (!etRow.enabled)
+                {
+                    continue;
+                }
+                if (etRow.instrumentKind != "GrooveAgentSE" && etRow.instrumentKind != "HALionSonic"
+                    && etRow.instrumentKind != "GenericVst3")
+                {
+                    continue;
+                }
+                const TrackId resolved
+                    = InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
+                        &session,
+                        etRow.trackId,
+                        &parsedLoad.tracks);
+                if (resolved == tid)
+                {
+                    payloadExpectedForLane = true;
+                    break;
+                }
+            }
+            if (payloadExpectedForLane)
+            {
+                continue;
+            }
+
+            restoreGenericCatalogPlaceholderLane(
+                session, callbacks, tid, sampleRate, nullptr, nullptr, noteAcc);
+        }
     }
 } // namespace
 
@@ -102,6 +377,10 @@ void ProjectIoCoordinator::saveProject()
         {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
+        }
+        else
+        {
+            warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
         }
         return;
     }
@@ -187,6 +466,10 @@ void ProjectIoCoordinator::saveProject()
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
         }
+        else
+        {
+            warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
+        }
     });
 }
 
@@ -224,10 +507,18 @@ void ProjectIoCoordinator::loadProject()
                 juce::AlertWindow::WarningIcon, "Load project", parsedRes.getErrorMessage());
             return;
         }
+        appendProjectLoadDiagnosticLine("load: parsed file=\"" + f.getFullPathName() + "\" experimentalInstrumentTracks="
+                                        + juce::String((int)parsedLoad.experimentalInstrumentTracks.size()));
+        transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
+        appendProjectLoadDiagnosticLine("load: transport stopped");
+        appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes begin");
         callbacks_.clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
+        appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes end");
 
+        appendProjectLoadDiagnosticLine("load: before applyLoadedProjectModel (session model replace)");
         juce::StringArray skipped;
         juce::String infoNote;
+        appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel begin");
         const juce::Result r = session_.applyLoadedProjectModel(
             transport_,
             f,
@@ -242,15 +533,85 @@ void ProjectIoCoordinator::loadProject()
                 juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
             return;
         }
+        appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel end");
+        appendProjectLoadDiagnosticLine("load: after applyLoadedProjectModel (session model replaced)");
         callbacks_.restoreSnapProjectRootFieldsToUi(
             { parsedLoad.snapEnabled, parsedLoad.snapResolution });
         juce::String instrumentAutoloadNoteAcc;
         if (!parsedLoad.experimentalInstrumentTracks.empty())
         {
+            std::unordered_set<TrackId> seenExperimentalTrackIds;
+            seenExperimentalTrackIds.reserve(parsedLoad.experimentalInstrumentTracks.size());
             for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
             {
-                if (!etRow.enabled || (etRow.instrumentKind != "GrooveAgentSE" && etRow.instrumentKind != "HALionSonic"))
+                const TrackId rowTid = etRow.trackId;
+                const juce::String rowName = etRow.name.isNotEmpty() ? etRow.name : juce::String("(empty)");
+                appendProjectLoadDiagnosticLine(
+                    "load: experimentalInstrumentTrack row trackId=" + juce::String((juce::int64)rowTid)
+                    + " instrumentKind=" + etRow.instrumentKind + " name=\"" + rowName + "\" clips="
+                    + juce::String((int)etRow.clips.size()) + " enabled="
+                    + juce::String(etRow.enabled ? "true" : "false"));
+                if (rowTid != kInvalidTrackId)
                 {
+                    if (!seenExperimentalTrackIds.insert(rowTid).second)
+                    {
+                        appendProjectLoadDiagnosticLine(
+                            "load: duplicate experimentalInstrumentTrack trackId="
+                            + juce::String((juce::int64)rowTid));
+                    }
+                }
+                bool tracksRowMatch = false;
+                juce::String tracksRowKind;
+                for (const auto& tr : parsedLoad.tracks)
+                {
+                    if (tr.id == rowTid)
+                    {
+                        tracksRowMatch = true;
+                        tracksRowKind = tr.kind;
+                        break;
+                    }
+                }
+                appendProjectLoadDiagnosticLine(
+                    "load: experimental row trackId=" + juce::String((juce::int64)rowTid)
+                    + " tracks[] match=" + juce::String(tracksRowMatch ? "yes" : "NO")
+                    + (tracksRowMatch ? (" kind=" + tracksRowKind) : juce::String{}));
+            }
+            for (const auto& tr : parsedLoad.tracks)
+            {
+                if (!tr.kind.equalsIgnoreCase("instrument"))
+                {
+                    continue;
+                }
+                bool hasExperimentalRow = false;
+                for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
+                {
+                    if (etRow.trackId == tr.id)
+                    {
+                        hasExperimentalRow = true;
+                        break;
+                    }
+                }
+                if (!hasExperimentalRow)
+                {
+                    appendProjectLoadDiagnosticLine(
+                        "load: tracks[] instrument without experimentalInstrumentTrack trackId="
+                        + juce::String((juce::int64)tr.id) + " name=\"" + tr.name + "\"");
+                }
+            }
+            for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
+            {
+                if (!etRow.enabled)
+                {
+                    continue;
+                }
+                const bool isGroove = etRow.instrumentKind == "GrooveAgentSE";
+                const bool isHalion = etRow.instrumentKind == "HALionSonic";
+                const bool isGeneric = etRow.instrumentKind == "GenericVst3";
+                if (!isGroove && !isHalion && !isGeneric)
+                {
+                    appendProjectLoadDiagnosticLine(
+                        "load: skip unknown experimental instrumentKind=\"" + etRow.instrumentKind
+                        + "\" trackId=" + juce::String((juce::int64)etRow.trackId));
                     continue;
                 }
                 const TrackId bindTid = InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
@@ -261,24 +622,52 @@ void ProjectIoCoordinator::loadProject()
                     = session_.loadSessionSnapshotForAudioThread();
                 if (bindTid == kInvalidTrackId || postSnap == nullptr)
                 {
+                    appendProjectLoadDiagnosticLine(
+                        "load: skip experimental restore unresolved trackId="
+                        + juce::String((juce::int64)etRow.trackId));
                     continue;
                 }
                 const int tix = postSnap->findTrackIndexById(bindTid);
                 if (tix < 0 || postSnap->getTrack(tix).getKind() != TrackKind::Instrument)
                 {
+                    appendProjectLoadDiagnosticLine(
+                        "load: skip experimental restore non-instrument lane trackId="
+                        + juce::String((juce::int64)bindTid));
                     continue;
                 }
+                if (isGeneric)
+                {
+                    appendProjectLoadDiagnosticLine("load: before GenericVst3 restore trackId="
+                                                    + juce::String((juce::int64)bindTid));
+                    restoreGenericVst3InstrumentTrack(
+                        session_,
+                        callbacks_,
+                        bindTid,
+                        sampleRate,
+                        &etRow,
+                        &parsedLoad.tracks,
+                        instrumentAutoloadNoteAcc);
+                    appendProjectLoadDiagnosticLine("load: after GenericVst3 restore trackId="
+                                                    + juce::String((juce::int64)bindTid));
+                    continue;
+                }
+                appendProjectLoadDiagnosticLine(
+                    "load: before GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
+                    + " kind=" + etRow.instrumentKind);
                 const auto runtime = callbacks_.getOrCreateInstrumentRuntimeForTrack(bindTid);
                 InstrumentTrackController* ctl = runtime.second;
                 ExperimentalInstrumentHost* mh = runtime.first;
                 if (ctl == nullptr || mh == nullptr)
                 {
+                    appendProjectLoadDiagnosticLine(
+                        "load: skip GrooveAgent/HALion restore missing runtime trackId="
+                        + juce::String((juce::int64)bindTid));
                     continue;
                 }
                 ctl->setTimelineSampleRate(sampleRate);
                 ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
                 juce::String noteOne;
-                if (etRow.instrumentKind == "GrooveAgentSE")
+                if (isGroove)
                 {
                     ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
                 }
@@ -286,6 +675,9 @@ void ProjectIoCoordinator::loadProject()
                 {
                     ctl->runPendingHalionSonicProjectAutoload(*mh, noteOne);
                 }
+                appendProjectLoadDiagnosticLine(
+                    "load: after GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
+                    + " kind=" + etRow.instrumentKind);
                 if (noteOne.isNotEmpty())
                 {
                     if (instrumentAutoloadNoteAcc.isNotEmpty())
@@ -296,7 +688,14 @@ void ProjectIoCoordinator::loadProject()
                 }
             }
         }
+        appendProjectLoadDiagnosticLine("load: before orphan instrument lane restore");
+        restoreOrphanInstrumentLanesWithoutRuntime(
+            session_, parsedLoad, callbacks_, sampleRate, instrumentAutoloadNoteAcc);
+        appendProjectLoadDiagnosticLine("load: after orphan instrument lane restore");
+        appendProjectLoadDiagnosticLine("load: instrument restore complete");
+        appendProjectLoadDiagnosticLine("load: before syncMidiEditorInstrumentStateFromHost");
         callbacks_.syncMidiEditorInstrumentStateFromHost();
+        appendProjectLoadDiagnosticLine("load: after syncMidiEditorInstrumentStateFromHost");
         const juce::String instrumentAutoloadNote(instrumentAutoloadNoteAcc);
         {
             if (infoNote.isNotEmpty())
@@ -306,7 +705,10 @@ void ProjectIoCoordinator::loadProject()
             infoNote << instrumentAutoloadNote;
         }
         callbacks_.clearSessionHistory();
+        appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject begin");
         callbacks_.refreshAllUiAfterLoadedProject();
+        appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject end");
+        appendProjectLoadDiagnosticLine("load: complete");
         if (parsedLoad.hasMainWindowBounds && callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
         {
             callbacks_.applyMainWindowBoundsFromLoadedProject(parsedLoad);

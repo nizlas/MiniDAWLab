@@ -106,6 +106,10 @@ void republishAfterRegistryChange(
         {
             return;
         }
+        if (ctl->isGenericCatalogInstrument() && !host->hasInstrument())
+        {
+            return;
+        }
         const TrackId playbackKey = ctl->getExperimentalInstrumentDomainTrackId();
         if (playbackKey == kInvalidTrackId)
         {

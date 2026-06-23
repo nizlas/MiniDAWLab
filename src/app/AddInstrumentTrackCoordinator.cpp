@@ -10,6 +10,8 @@
 #include "domain/Session.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
+#include "plugins/InstrumentCatalog.h"
+#include "plugins/InstrumentCatalog.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
 namespace
@@ -592,4 +594,126 @@ void AddInstrumentTrackCoordinator::finishAddHalionSonicInstrumentTrackAfterInst
     callbacks_.syncMidiEditorInstrumentClipTimelineFromDeviceIfOpen();
     callbacks_.refreshInstrumentUi();
     callbacks_.requestLayoutResized();
+}
+
+void AddInstrumentTrackCoordinator::rescanInstrumentPluginsFromMenu()
+{
+    bool expectedBusy = false;
+    if (!instrumentCatalogRescanBusy_.compare_exchange_strong(expectedBusy, true))
+    {
+        mini_daw::writeInstrumentCatalogRescanLogLine("rescan ignored (already in progress)");
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                               "Instrument plugins",
+                                               "An instrument plugin rescan is already running.");
+        return;
+    }
+
+    mini_daw::writeInstrumentCatalogRescanLogLine("rescan requested from Add Instrument Track menu");
+
+    AddInstrumentTrackCoordinator* const self = this;
+    std::thread([self] {
+        const mini_daw::InstrumentCatalogRescanSummary summary = mini_daw::rescanInstrumentCatalogBlocking();
+        juce::MessageManager::callAsync([self, summary] {
+            self->instrumentCatalogRescanBusy_.store(false);
+
+            juce::String msg = "Instrument plugin rescan complete.\n\n";
+            msg << "Accepted instruments: " << juce::String(summary.acceptedInstrumentCount) << "\n";
+            msg << "Rejected (effects): " << juce::String(summary.rejectedEffectCount) << "\n";
+            msg << "Validation failures: " << juce::String(summary.rejectedValidationFailedCount) << "\n";
+            msg << "Duplicates skipped: " << juce::String(summary.rejectedDuplicateCount) << "\n\n";
+            msg << "Log: " << mini_daw::getInstrumentCatalogRescanLogFile().getFullPathName() << "\n";
+            msg << "Catalog: " << mini_daw::getInstrumentCatalogV1CacheFile().getFullPathName();
+            if (summary.bbcSymphonyOrchestraFinding.isNotEmpty())
+            {
+                msg << "\n\nBBC Symphony Orchestra: " << summary.bbcSymphonyOrchestraFinding;
+            }
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Instrument plugins", msg);
+        });
+    }).detach();
+}
+
+void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
+    const mini_daw::InstrumentCatalogEntry& entry)
+{
+    Session& session = refs_.session;
+    InstrumentRuntimeCoordinator& instrumentRuntimeCoordinator = refs_.instrumentRuntimeCoordinator;
+
+    const juce::File bundle(entry.bundlePath);
+    if (!bundle.exists())
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon,
+            "Instrument track",
+            "VST3 bundle no longer exists at:\n" + entry.bundlePath);
+        return;
+    }
+
+    const juce::String trackName = entry.description.name.isNotEmpty()
+                                       ? entry.description.name
+                                       : bundle.getFileNameWithoutExtension();
+
+    const std::optional<TrackId> newIdOpt = session.appendExperimentalInstrumentShellTrack(trackName);
+    if (!newIdOpt.has_value())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                               "Instrument track",
+                                               "Could not add instrument track shell.");
+        return;
+    }
+
+    const TrackId tid = *newIdOpt;
+    const auto pr = instrumentRuntimeCoordinator.getOrCreateInstrumentRuntimeForTrack(tid);
+    ExperimentalInstrumentHost* mh = pr.first;
+    InstrumentTrackController* ctl = pr.second;
+
+    if (mh == nullptr || ctl == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                                "Instrument track",
+                                                "Could not allocate instrument runtime.");
+        session.removeTrack(tid);
+        instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
+        callbacks_.refreshInstrumentUi();
+        return;
+    }
+
+    juce::String loadWarn;
+    const juce::Result loadRes = mh->loadInstrumentFromDescription(
+        entry.description, bundle, "catalog-v1", nullptr, &loadWarn);
+
+    if (!loadRes.wasOk())
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon,
+            "Instrument track",
+            "Could not load \"" + trackName + "\" into a new instrument track.\n\n"
+                + loadRes.getErrorMessage());
+        session.removeTrack(tid);
+        instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
+        callbacks_.refreshInstrumentUi();
+        return;
+    }
+
+    if (!ctl->bootstrapGenericCatalogInstrumentShellForSessionTrack(tid))
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                                "Instrument track",
+                                                "Could not bind the loaded instrument to the new timeline row.");
+        mh->unloadInstrument();
+        session.removeTrack(tid);
+        instrumentRuntimeCoordinator.removeInstrumentRuntimeForTrack(tid);
+        callbacks_.refreshInstrumentUi();
+        return;
+    }
+
+    ctl->syncShellWithHostState();
+    instrumentRuntimeCoordinator.updateExperimentalPlaybackBridgeAfterRegistryChange();
+    callbacks_.syncMidiEditorInstrumentClipTimelineFromDeviceIfOpen();
+    callbacks_.refreshInstrumentUi();
+    callbacks_.requestLayoutResized();
+
+    if (loadWarn.isNotEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Instrument track", loadWarn);
+    }
 }
