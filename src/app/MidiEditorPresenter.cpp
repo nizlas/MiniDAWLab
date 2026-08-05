@@ -105,10 +105,6 @@ void MidiEditorPresenter::wireMidiEditorForOpenClip(const TrackId timelineInstru
         [this](const juce::String& lab, std::function<bool()> m) {
             callbacks_.executeUndoableInstrumentEdit(lab, std::move(m));
         },
-        [this](const juce::String& lab, std::vector<InstrumentMusicalUndoSnapshot> before) {
-            callbacks_.commitInstrumentMusicalUndoPair(lab, std::move(before));
-        },
-        [this] { return callbacks_.buildSortedInstrumentMusicalUndoSnapshot(); },
         [this] { callbacks_.invokeUndo(); },
         [this] { callbacks_.invokeRedo(); });
     w.setArrangementSnapToolbarSyncHandler([this] {
@@ -132,8 +128,6 @@ void MidiEditorPresenter::detachToScratchAfterMissingInstrumentClip(const juce::
     w.bindTransportCommands(makeMidiEditorTransportCommands());
     w.setInstrumentMusicalUndoUi(
         std::function<void(const juce::String&, std::function<bool()>)>{},
-        std::function<void(const juce::String&, std::vector<InstrumentMusicalUndoSnapshot>)>{},
-        std::function<std::vector<InstrumentMusicalUndoSnapshot>()>{},
         [this] { callbacks_.invokeUndo(); },
         [this] { callbacks_.invokeRedo(); });
     w.syncInstrumentStateFromHost();

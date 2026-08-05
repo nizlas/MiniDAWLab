@@ -1272,17 +1272,17 @@ std::optional<juce::Rectangle<float>> ExperimentalPianoRollView::getTimelineNote
     return juce::Rectangle<float>(cx - hitHalfW, cy - hitHalfH, 2.f * hitHalfW, 2.f * hitHalfH);
 }
 
-bool ExperimentalPianoRollView::pianoMelodicTimelineBarsResizeEnabled() const noexcept
+bool ExperimentalPianoRollView::timelineBarsResizeEnabled() const noexcept
 {
     return useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
-        && isTimelineClipBindingFresh() && timelineNotesDisplayComboId_ == 2 && rowLabelMode_ == 1
+        && isTimelineClipBindingFresh() && timelineNotesDisplayComboId_ == 2
         && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_);
 }
 
 std::optional<std::pair<int, ExperimentalPianoRollView::TimelineNoteResizeEdge>>
-ExperimentalPianoRollView::findPianoBarResizeEdgeAtPoint(const juce::Point<int> pos) const
+ExperimentalPianoRollView::findTimelineBarResizeEdgeAtPoint(const juce::Point<int> pos) const
 {
-    if (!pianoMelodicTimelineBarsResizeEnabled())
+    if (!timelineBarsResizeEnabled())
     {
         return std::nullopt;
     }
@@ -2134,7 +2134,7 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
 
     if (!multiNoteSelectModifier)
     {
-        if (const auto edgeHit = findPianoBarResizeEdgeAtPoint(e.getPosition()))
+        if (const auto edgeHit = findTimelineBarResizeEdgeAtPoint(e.getPosition()))
         {
             const int ni = edgeHit->first;
             if (selectedTimelineNoteIndices_.count(ni) == 0u)
@@ -2770,8 +2770,8 @@ void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
         }
     }
     const auto gr = gridBounds();
-    if (gr.contains(e.getPosition()) && pianoMelodicTimelineBarsResizeEnabled()
-        && findPianoBarResizeEdgeAtPoint(e.getPosition()))
+    if (gr.contains(e.getPosition()) && timelineBarsResizeEnabled()
+        && findTimelineBarResizeEdgeAtPoint(e.getPosition()))
     {
         setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
         setTooltip(juce::String{});

@@ -126,6 +126,8 @@ struct ProjectFileExperimentalInstrumentClipV1
     double midiRollSamplesPerPixel = 0.0;
     /// v12+ optional: piano-roll Follow playhead. Omitted when false.
     bool midiRollFollowEnabled = false;
+    /// v16+ optional: explicit timeline-note mode for clips saved with no notes yet. Omitted when false.
+    bool timelineMode = false;
 };
 
 /// v16+: persisted `PluginDescription` identity for `instrumentKind` = `"GenericVst3"`.

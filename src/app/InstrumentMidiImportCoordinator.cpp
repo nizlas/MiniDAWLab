@@ -114,7 +114,6 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
 
         const juce::String warningCopy = parseResult.warningMessage;
         std::vector<TimelineMidiNote> notes = std::move(parseResult.notes);
-        const double firstBpm = parseResult.firstTempoBpm;
 
         auto execute = callbacks_.executeUndoableInstrumentEdit;
         auto syncVp = callbacks_.syncViewportFromSession;
@@ -128,7 +127,6 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
                                      tid,
                                      startSamples,
                                      suggestedName,
-                                     firstBpm,
                                      notes = std::move(notes),
                                      syncVp,
                                      refreshInstr]() mutable -> bool {
@@ -139,7 +137,7 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
             }
 
             const InstrumentMidiClipId newId = c->appendImportedTimelineMidiClipAtSamples(
-                std::move(notes), firstBpm, startSamples, suggestedName);
+                std::move(notes), startSamples, suggestedName);
             if (newId == 0)
             {
                 return false;

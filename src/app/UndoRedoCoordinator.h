@@ -49,6 +49,10 @@ public:
 
         /// When `undo_diagnostic::kUndoDiag` is enabled, logs pre-apply instrument bundle context.
         std::function<void(bool isRedoStep)> logInstrumentMusicalUndoPreApplyDiag;
+
+        /// Clips always play at the project tempo: re-align clip bpm after a snapshot restore may have
+        /// changed the project BPM (undo/redo of "Project BPM" edits).
+        std::function<void()> alignInstrumentClipTemposToProjectTempo;
     };
 
     UndoRedoCoordinator(Session& session, PluginInsertHost& pluginHost, Callbacks callbacks);
@@ -63,8 +67,6 @@ public:
 
     void executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator);
     void executeUndoableInstrumentEdit(const juce::String& label, std::function<bool()> mutator);
-    void commitInstrumentMusicalUndoPair(const juce::String& label,
-                                         std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical);
 
     void clearHistory() noexcept;
 

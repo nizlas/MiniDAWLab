@@ -33,9 +33,6 @@ public:
         std::function<ExperimentalInstrumentHost*(TrackId)> getInstrumentHostForTrack;
 
         std::function<void(const juce::String&, std::function<bool()>)> executeUndoableInstrumentEdit;
-        std::function<void(const juce::String&, std::vector<InstrumentMusicalUndoSnapshot>)>
-            commitInstrumentMusicalUndoPair;
-        std::function<std::vector<InstrumentMusicalUndoSnapshot>()> buildSortedInstrumentMusicalUndoSnapshot;
 
         std::function<void()> invokeUndo;
         std::function<void()> invokeRedo;

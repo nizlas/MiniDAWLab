@@ -127,6 +127,11 @@ public:
     /// For comparing plugins that crash during scan vs effects/instruments that return.
     [[nodiscard]] juce::Result diagnosticScanVst3FileOnly(const juce::File& vst3File);
 
+    /// [Message thread] Schedules the same deferred drum-name harvest as native-editor open. For cases
+    /// where a kit may have loaded after the last probe (picked in the already-open editor, state restore).
+    /// Result reaches the track via `setOnPluginDrumNamesDiscovered`.
+    void requestDeferredPluginDrumNameHarvest();
+
     /// [Message thread] Clears callbacks wired to external controllers/UI (safe before unload/teardown).
     void clearControllerWireCallbacks() noexcept;
 

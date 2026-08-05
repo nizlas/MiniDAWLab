@@ -71,8 +71,11 @@ struct ExperimentalMidiPattern
     std::vector<TimelineMidiNote> timelineNotes;
     /// Ticks per quarter for `timelineNotes` (normally 960; saved with clip).
     int ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+    /// Explicit timeline-note mode for clips created empty (no notes yet). Keeps lane trim/move and
+    /// piano-roll timeline editing available before the first note exists. Persisted with the clip.
+    bool timelineMode = false;
 
-    [[nodiscard]] bool usesTimelineNotes() const noexcept { return !timelineNotes.empty(); }
+    [[nodiscard]] bool usesTimelineNotes() const noexcept { return timelineMode || !timelineNotes.empty(); }
 
     [[nodiscard]] double stepDurationMs() const noexcept
     {

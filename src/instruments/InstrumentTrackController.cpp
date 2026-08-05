@@ -2,6 +2,7 @@
 
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
+#include "domain/ProjectMusicalTime.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -667,6 +668,33 @@ std::optional<std::pair<juce::String, DrumLabelSource>> InstrumentTrackControlle
     return std::nullopt;
 }
 
+bool InstrumentTrackController::hasAnyEffectiveDrumLabels() const noexcept
+{
+    for (const auto& kv : drumLabels_)
+    {
+        if (kv.second.manual.isNotEmpty() || kv.second.autoPlugin.isNotEmpty())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void InstrumentTrackController::requestPluginDrumNameProbeIfUnlabeled() noexcept
+{
+    if (hasAnyEffectiveDrumLabels() || !host_.hasInstrument())
+    {
+        return;
+    }
+    const std::uint32_t now = juce::Time::getMillisecondCounter();
+    if (lastDrumNameProbeRequestMs_ != 0 && (now - lastDrumNameProbeRequestMs_) < 2000u)
+    {
+        return;
+    }
+    lastDrumNameProbeRequestMs_ = now;
+    host_.requestDeferredPluginDrumNameHarvest();
+}
+
 void InstrumentTrackController::pruneDrumLabelLayersIfUnused(const int midiNote) noexcept
 {
     const auto it = drumLabels_.find(midiNote);
@@ -839,7 +867,8 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         c.loop = cptr->pattern.loop;
         c.startSamples = cptr->startSamples;
         c.lengthSamples = cptr->lengthSamples;
-        if (!cptr->pattern.timelineNotes.empty())
+        c.timelineMode = cptr->pattern.timelineMode;
+        if (cptr->pattern.usesTimelineNotes())
         {
             c.timelineAnchorSamples.emplace(cptr->timelineAnchorSamples);
         }
@@ -975,6 +1004,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
             }
             clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
         }
+        clip->pattern.timelineMode = cdto.timelineMode;
         clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
         clip->lengthSamples = cdto.lengthSamples;
         clip->timelineAnchorSamples = cdto.timelineAnchorSamples.value_or(cdto.startSamples);
@@ -1134,6 +1164,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
             clip->midiRollSamplesPerPixel = 0.0;
         }
         clip->midiRollFollowEnabled = cdto.midiRollFollowEnabled;
+        clip->pattern.timelineMode = cdto.timelineMode;
         clip->startSamples = juce::jmax(std::int64_t{0}, cdto.startSamples);
         clip->lengthSamples = cdto.lengthSamples;
         clip->timelineAnchorSamples = cdto.timelineAnchorSamples.value_or(cdto.startSamples);
@@ -1158,6 +1189,19 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
             clip->pattern.timelineNotes.push_back(n);
         }
         clips_.push_back(std::move(clip));
+    }
+    // Clips always play at the project tempo: per-clip bpm stored by older project files is overridden
+    // here, before any length derivation below (project musical time is applied before instrument restore).
+    if (session_ != nullptr)
+    {
+        const ProjectMusicalTime musicalTime = sanitizeProjectMusicalTime(session_->getProjectMusicalTime());
+        for (auto& cp : clips_)
+        {
+            if (cp != nullptr)
+            {
+                cp->pattern.bpm = musicalTime.bpm;
+            }
+        }
     }
     for (auto& cp : clips_)
     {
@@ -1800,6 +1844,28 @@ void InstrumentTrackController::notifyClipPatternMutated(const InstrumentMidiCli
     sendChangeMessage();
 }
 
+void InstrumentTrackController::alignClipTemposToProjectTempo() noexcept
+{
+    if (session_ == nullptr)
+    {
+        return;
+    }
+    const ProjectMusicalTime musicalTime = sanitizeProjectMusicalTime(session_->getProjectMusicalTime());
+    bool changed = false;
+    for (auto& cp : clips_)
+    {
+        if (cp != nullptr && cp->pattern.bpm != musicalTime.bpm)
+        {
+            cp->pattern.bpm = musicalTime.bpm;
+            changed = true;
+        }
+    }
+    if (changed)
+    {
+        notifyClipExperimentalMusicalTimingChanged();
+    }
+}
+
 void InstrumentTrackController::notifyClipExperimentalMusicalTimingChanged() noexcept
 {
     double sr = timelineSampleRate_;
@@ -1835,7 +1901,6 @@ void InstrumentTrackController::notifyClipExperimentalMusicalTimingChanged() noe
 
 InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAtSamples(
     std::vector<TimelineMidiNote> timelineNotes,
-    const double firstTempoBpmFromFile,
     const std::int64_t startSamples,
     juce::String suggestedName)
 {
@@ -1866,13 +1931,15 @@ InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAt
     clip->pattern.numSteps = 16;
     clip->pattern.stepDenom = 16;
     clip->pattern.loop = true;
-    if (firstTempoBpmFromFile > 0.0 && std::isfinite(firstTempoBpmFromFile))
     {
-        clip->pattern.bpm = firstTempoBpmFromFile;
-    }
-    else
-    {
-        clip->pattern.bpm = 110.0;
+        // Clips always play at the project tempo; the MIDI file's own tempo events are ignored
+        // (note ticks are musical positions, so bars/beats are preserved exactly).
+        ProjectMusicalTime musicalTime;
+        if (session_ != nullptr)
+        {
+            musicalTime = sanitizeProjectMusicalTime(session_->getProjectMusicalTime());
+        }
+        clip->pattern.bpm = musicalTime.bpm;
     }
 
     clip->laneStartFractionPermille = 0;
@@ -1897,6 +1964,63 @@ InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAt
     {
         recomputeLockedClipLengthFromPatternGrid(*clip);
     }
+
+    clip->midiRollVisibleStartSamples = 0;
+    clip->midiRollSamplesPerPixel = 0.0;
+    clip->midiRollFollowEnabled = false;
+
+    const InstrumentMidiClipId outId = clip->id;
+    clips_.push_back(std::move(clip));
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return outId;
+}
+
+InstrumentMidiClipId InstrumentTrackController::createEmptyTimelineMidiClipAtSamples(
+    const std::int64_t startSamples)
+{
+    if (!trackActive_)
+    {
+        return 0;
+    }
+
+    ProjectMusicalTime musicalTime;
+    if (session_ != nullptr)
+    {
+        musicalTime = sanitizeProjectMusicalTime(session_->getProjectMusicalTime());
+    }
+
+    auto clip = std::make_unique<InstrumentMidiClip>();
+    clip->id = nextClipId_++;
+    clip->name = juce::String("MIDI ") + juce::String(clip->id);
+    clip->startSamples = juce::jmax(std::int64_t{ 0 }, startSamples);
+    clip->timelineAnchorSamples = clip->startSamples;
+
+    clip->pattern.notes.clear();
+    clip->pattern.timelineNotes.clear();
+    clip->pattern.timelineMode = true;
+    clip->pattern.ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+    clip->pattern.numSteps = 16;
+    clip->pattern.stepDenom = 16;
+    clip->pattern.loop = true;
+    // Project tempo (not the 110 import fallback) so the piano-roll grid lines up with the arrangement ruler.
+    clip->pattern.bpm = musicalTime.bpm;
+
+    clip->laneStartFractionPermille = 0;
+    clip->laneEndFractionPermille = 250;
+
+    double sr = timelineSampleRate_;
+    if (sr <= 0.0 || !std::isfinite(sr))
+    {
+        sr = 48000.0;
+    }
+
+    constexpr int kDefaultEmptyClipBars = 2;
+    const double quartersPerBar = (double)musicalTime.numerator * 4.0 / (double)musicalTime.denominator;
+    const double barSeconds = quartersPerBar * 60.0 / musicalTime.bpm;
+    clip->lengthSamples = juce::jmax<std::int64_t>(
+        1, (std::int64_t)std::llround((double)kDefaultEmptyClipBars * barSeconds * sr));
 
     clip->midiRollVisibleStartSamples = 0;
     clip->midiRollSamplesPerPixel = 0.0;

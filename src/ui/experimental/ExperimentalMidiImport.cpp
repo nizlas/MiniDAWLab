@@ -7,8 +7,8 @@
 //
 // SMPTE‑encoded MIDI (`getTimeFormat() <= 0`) is refused with an explicit message.
 //
-// Multiple tempo markers: apply BPM from the chronologically **first** only; callers surface
-// `warningMessage` describing ignored later markers — no tempo map in this slice.
+// Tempo meta events are ignored entirely: imported clips always play at the project tempo (ticks are
+// musical positions, so bar/beat placement is preserved). Multi-tempo files surface `warningMessage`.
 // =============================================================================
 
 #include "ExperimentalMidiImport.h"
@@ -118,7 +118,8 @@ ExperimentalMidiImportResult experimentalImportMidiFile(const juce::File& file, 
                          return a.evInTrack < b.evInTrack;
                      });
 
-    // Tempo markers: first chronological wins BPM; duplicates / extras → user-visible warning.
+    // Tempo markers are ignored for playback (clips adopt the project tempo); multi-tempo files still
+    // get a user-visible note because expressive tempo ramps from the source are not reproduced.
     std::vector<std::pair<double, double>> temposSorted;
     temposSorted.reserve(static_cast<size_t>(flat.size()));
     for (const FlatEvent& fe : flat)
@@ -146,12 +147,8 @@ ExperimentalMidiImportResult experimentalImportMidiFile(const juce::File& file, 
     if ((int) temposSorted.size() > 1)
     {
         out.warningMessage
-            = "This MIDI file contains multiple tempo changes. MiniDAWLab uses only the FIRST tempo "
-              "(by file position) — later tempo changes were ignored until a tempo-map importer exists.";
-    }
-    if (!temposSorted.empty())
-    {
-        out.firstTempoBpm = 60.0 / temposSorted.front().second;
+            = "This MIDI file contains multiple tempo changes. MiniDAWLab plays imported notes at the "
+              "project tempo — the file's tempo changes are ignored (notes keep their bar/beat positions).";
     }
 
     // Note-on / note-off pairing with per-(channel,key) stacks (handles overlapping voices crudely LIFO).

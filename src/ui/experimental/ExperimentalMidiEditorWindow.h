@@ -82,9 +82,6 @@ public:
     /// I3i: global `SessionHistory` integration for clip-bound edits (empty handlers = scratch editor).
     void setInstrumentMusicalUndoUi(
         std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
-        std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
-            onCommitMusicalDragEnd,
-        std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
         std::function<void()> onUndoShortcut,
         std::function<void()> onRedoShortcut);
 

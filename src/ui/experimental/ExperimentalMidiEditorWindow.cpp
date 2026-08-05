@@ -59,7 +59,6 @@ namespace
 class ExperimentalMidiEditorWindow::Body final : public juce::Component,
                                                  public collapsible_side_strip::Host,
                                                  private juce::Timer,
-                                                 private juce::Slider::Listener,
                                                  private juce::ChangeListener
 {
     friend class ExperimentalMidiEditorWindow;
@@ -142,17 +141,6 @@ public:
             player_->stopPlayback("user");
         };
 
-        addAndMakeVisible(bpmLabel_);
-        bpmLabel_.setText("BPM", juce::dontSendNotification);
-        bpmLabel_.setJustificationType(juce::Justification::centredRight);
-        bpmLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-
-        addAndMakeVisible(bpmSlider_);
-        bpmSlider_.setRange(60.0, 200.0, 0.1);
-        bpmSlider_.setValue(110.0);
-        bpmSlider_.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 56, 22);
-        bpmSlider_.addListener(this);
-
         addAndMakeVisible(exportButton_);
         exportButton_.setButtonText("Export MIDI...");
         exportButton_.onClick = [this] { beginExportMidi(); };
@@ -176,7 +164,9 @@ public:
         addAndMakeVisible(displayBox_);
         displayBox_.addItem("Hits", 1);
         displayBox_.addItem("Bars", 2);
-        displayBox_.setSelectedId(1, juce::dontSendNotification);
+        // Default to Bars so drum and melodic editors behave identically: every note is the same
+        // stretchable TimelineMidiNote (drum sounds ignore the duration; the length is a visual aid).
+        displayBox_.setSelectedId(2, juce::dontSendNotification);
         displayBox_.onChange = [this] { pushDisplayToRoll(); };
 
         addAndMakeVisible(rowsLabel_);
@@ -188,7 +178,12 @@ public:
         rowsBox_.addItem("Piano", 1);
         rowsBox_.addItem("Drum Names", 2);
         rowsBox_.setSelectedId(1, juce::dontSendNotification);
-        rowsBox_.onChange = [this] { pushRowsModeToRoll(); };
+        // `onChange` only fires for user selections (programmatic changes use dontSendNotification),
+        // so a manual pick pins the mode until the editor binds to a different track.
+        rowsBox_.onChange = [this] {
+            userRowsModeOverride_ = true;
+            pushRowsModeToRoll();
+        };
 
         addAndMakeVisible(stepsLabel_);
         stepsLabel_.setText("Steps", juce::dontSendNotification);
@@ -297,7 +292,6 @@ public:
         if (instrumentTrackForClipBind_ != nullptr)
             instrumentTrackForClipBind_->removeChangeListener(this);
 
-        bpmSlider_.removeListener(this);
         stopTimer();
         player_->stopPlayback("window-closed");
     }
@@ -428,6 +422,22 @@ public:
 
             if (instrumentTrackForClipBind_ != nullptr)
                 instrumentTrackForClipBind_->addChangeListener(this);
+        }
+
+        if (oldInstrumentTrackGate != instrumentTrackForClipBind_)
+        {
+            // New track binding: default rows to Drum Names when the instrument exposes readable
+            // drum names (e.g. a loaded Groove Agent kit), else Piano. A later manual pick wins.
+            userRowsModeOverride_ = false;
+            const bool hasDrumNames = instrumentTrackForClipBind_ != nullptr
+                                      && instrumentTrackForClipBind_->hasAnyEffectiveDrumLabels();
+            rowsBox_.setSelectedId(hasDrumNames ? 2 : 1, juce::dontSendNotification);
+        }
+        if (instrumentTrackForClipBind_ != nullptr)
+        {
+            // The kit may have been picked in the already-open native editor after the last probe;
+            // re-probe now so labels (and the Drum Names auto-switch) arrive shortly after opening.
+            instrumentTrackForClipBind_->requestPluginDrumNameProbeIfUnlabeled();
         }
 
         boundTimelineClip_ = timelineClip;
@@ -678,8 +688,6 @@ public:
         stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
         timelineRulerFormatCombo_.setBounds(toolbar.removeFromLeft(128).reduced(0, 2));
         followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        bpmLabel_.setBounds(toolbar.removeFromLeft(36).reduced(0, 4));
-        bpmSlider_.setBounds(toolbar.removeFromLeft(132).reduced(0, 2));
         debugPreviewButton_.setBounds(toolbar.removeFromLeft(98).reduced(0, 2));
         debugStopButton_.setBounds(toolbar.removeFromLeft(90).reduced(0, 2));
         modeLabel_.setBounds(toolbar.reduced(8, 0));
@@ -760,19 +768,12 @@ private:
     [[nodiscard]] bool canUseInstrumentUndo() const noexcept;
     void setInstrumentMusicalUndoUi(
         std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
-        std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
-            onCommitMusicalDragEnd,
-        std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
         std::function<void()> onUndoShortcut,
         std::function<void()> onRedoShortcut);
     [[nodiscard]] bool handleTopLevelShortcut(const juce::KeyPress& key);
     void notifyExternalTransportSeek(std::int64_t targetSample) noexcept;
 
     [[nodiscard]] std::optional<std::uint64_t> getBoundInstrumentClipId() const noexcept;
-
-    void sliderValueChanged(juce::Slider* s) override;
-    void sliderDragStarted(juce::Slider* s) override;
-    void sliderDragEnded(juce::Slider* s) override;
 
     void syncStepsAndSnapUiForPattern();
     void pushDisplayToRoll();
@@ -791,7 +792,6 @@ private:
 
     void syncSlidersFromActivePattern()
     {
-        bpmSlider_.setValue(activePattern().bpm, juce::dontSendNotification);
         stepsBox_.setSelectedId(activePattern().numSteps == 32 ? 2 : 1, juce::dontSendNotification);
         syncStepsAndSnapUiForPattern();
     }
@@ -874,8 +874,6 @@ private:
     juce::ComboBox displayBox_;
     juce::Label rowsLabel_;
     juce::ComboBox rowsBox_;
-    juce::Label bpmLabel_;
-    juce::Slider bpmSlider_;
     juce::Label stepsLabel_;
     juce::ComboBox stepsBox_;
     juce::ComboBox timelineRulerFormatCombo_;
@@ -888,14 +886,8 @@ private:
     std::unique_ptr<juce::FileChooser> midiExportChooser_;
 
     std::function<void(const juce::String&, std::function<bool()>)> instrumentUndoableMutate_;
-    std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
-        instrumentCommitMusicalDrag_;
-    std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> instrumentCaptureMusical_;
     std::function<void()> onGlobalUndoRequested_;
     std::function<void()> onGlobalRedoRequested_;
-    bool bpmSliderGestureActive_ = false;
-    std::vector<ProjectFileExperimentalInstrumentTrackV1> bpmDragMusicalBefore_;
-
     /// Stable clip id for post–instrument-undo rebind. Never read `boundTimelineClip_->id` after the
     /// controller may have freed clip storage (`applyExperimentalInstrumentMusicalUndoBlock`).
     std::uint64_t persistentInstrumentClipIdForRebind_ = 0;
@@ -907,6 +899,9 @@ private:
                                       + collapsible_side_strip::kSplitterWidth;
     /// 1 = piano row labels, 2 = drum names — mirrors `rowsBox_`; selects which total width bucket is active.
     int midiRollRowLabelMode_ = 1;
+    /// True once the user manually picked a rows mode for the current track binding; blocks the
+    /// drum-name auto-default until the editor binds to a different track.
+    bool userRowsModeOverride_ = false;
 
     ExperimentalMidiTransportCommands transportCommands_{};
 };
@@ -1012,6 +1007,22 @@ void ExperimentalMidiEditorWindow::Body::changeListenerCallback(juce::ChangeBroa
     juce::ignoreUnused(source);
     if (rowsBox_.getSelectedId() != 2)
     {
+        // Drum names may arrive after the kit finishes loading while the editor already shows the
+        // piano roll: auto-switch to Drum Names unless the user manually picked a rows mode.
+        if (!userRowsModeOverride_ && instrumentTrackForClipBind_ != nullptr)
+        {
+            if (instrumentTrackForClipBind_->hasAnyEffectiveDrumLabels())
+            {
+                rowsBox_.setSelectedId(2, juce::dontSendNotification);
+                pushRowsModeToRoll();
+            }
+            else
+            {
+                // Still unlabeled: keep asking the host to re-probe (rate-limited in the controller)
+                // so a kit picked while both editors are open eventually surfaces its names.
+                instrumentTrackForClipBind_->requestPluginDrumNameProbeIfUnlabeled();
+            }
+        }
         return;
     }
     pushRowsModeToRoll();
@@ -1053,15 +1064,10 @@ bool ExperimentalMidiEditorWindow::Body::canUseInstrumentUndo() const noexcept
 
 void ExperimentalMidiEditorWindow::Body::setInstrumentMusicalUndoUi(
     std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
-    std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
-        onCommitMusicalDragEnd,
-    std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
     std::function<void()> onUndoShortcut,
     std::function<void()> onRedoShortcut)
 {
     instrumentUndoableMutate_ = std::move(onUndoableEdit);
-    instrumentCommitMusicalDrag_ = std::move(onCommitMusicalDragEnd);
-    instrumentCaptureMusical_ = std::move(captureMusical);
     onGlobalUndoRequested_ = std::move(onUndoShortcut);
     onGlobalRedoRequested_ = std::move(onRedoShortcut);
     applyInstrumentUndoGatewayToRoll();
@@ -1090,86 +1096,6 @@ void ExperimentalMidiEditorWindow::Body::applyInstrumentUndoGatewayToRoll()
             rv->setUndoablePatternEditHandler({});
         }
     }
-}
-
-void ExperimentalMidiEditorWindow::Body::sliderValueChanged(juce::Slider* s)
-{
-    if (s != &bpmSlider_)
-    {
-        return;
-    }
-    const double v = bpmSlider_.getValue();
-    auto applyLocal = [this, v] {
-        activePattern().bpm = v;
-        if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
-            && activePattern().usesTimelineNotes())
-        {
-            instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
-        }
-        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
-        {
-            rv->repaint();
-        }
-    };
-    if (!canUseInstrumentUndo())
-    {
-        applyLocal();
-        return;
-    }
-    if (bpmSliderGestureActive_)
-    {
-        applyLocal();
-        return;
-    }
-    if (instrumentUndoableMutate_)
-    {
-        instrumentUndoableMutate_("Edit BPM", [this, v]() -> bool {
-            activePattern().bpm = v;
-            if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr
-                && activePattern().usesTimelineNotes())
-            {
-                instrumentTrackForClipBind_->notifyClipExperimentalMusicalTimingChanged();
-            }
-            if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
-            {
-                rv->repaint();
-            }
-            return true;
-        });
-    }
-    else
-    {
-        applyLocal();
-    }
-}
-
-void ExperimentalMidiEditorWindow::Body::sliderDragStarted(juce::Slider* s)
-{
-    if (s != &bpmSlider_ || !canUseInstrumentUndo() || !instrumentCaptureMusical_
-        || !instrumentCommitMusicalDrag_)
-    {
-        return;
-    }
-    bpmSliderGestureActive_ = true;
-    bpmDragMusicalBefore_ = instrumentCaptureMusical_();
-}
-
-void ExperimentalMidiEditorWindow::Body::sliderDragEnded(juce::Slider* s)
-{
-    if (s != &bpmSlider_)
-    {
-        return;
-    }
-    if (!bpmSliderGestureActive_)
-    {
-        return;
-    }
-    bpmSliderGestureActive_ = false;
-    if (!canUseInstrumentUndo() || !instrumentCommitMusicalDrag_)
-    {
-        return;
-    }
-    instrumentCommitMusicalDrag_("Edit BPM", std::move(bpmDragMusicalBefore_));
 }
 
 std::optional<std::uint64_t> ExperimentalMidiEditorWindow::Body::getBoundInstrumentClipId() const noexcept
@@ -1625,17 +1551,12 @@ void ExperimentalMidiEditorWindow::bindTransportCommands(ExperimentalMidiTranspo
 
 void ExperimentalMidiEditorWindow::setInstrumentMusicalUndoUi(
     std::function<void(const juce::String&, std::function<bool()>)> onUndoableEdit,
-    std::function<void(const juce::String&, std::vector<ProjectFileExperimentalInstrumentTrackV1>)>
-        onCommitMusicalDragEnd,
-    std::function<std::vector<ProjectFileExperimentalInstrumentTrackV1>()> captureMusical,
     std::function<void()> onUndoShortcut,
     std::function<void()> onRedoShortcut)
 {
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->setInstrumentMusicalUndoUi(std::move(onUndoableEdit),
-                                      std::move(onCommitMusicalDragEnd),
-                                      std::move(captureMusical),
                                       std::move(onUndoShortcut),
                                       std::move(onRedoShortcut));
     }

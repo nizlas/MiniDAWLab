@@ -2284,6 +2284,22 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
                     + juce::String(inst->getMainBusNumOutputChannels()));
             }
         }
+
+        if (restoreOk)
+        {
+            // Saved-state autoload restores the kit without the native editor ever opening, so the
+            // editor-open drum-name harvest never fires. Run the same deferred probe now (activeOwner_
+            // is published below, long before the 150 ms timer fires), plus a late retry because some
+            // instruments (Groove Agent) finish loading kit metadata asynchronously after setState.
+            schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
+            auto* const self = this;
+            juce::Timer::callAfterDelay(1500, [self] {
+                if (self != nullptr)
+                {
+                    self->schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
+                }
+            });
+        }
     }
 
     writeExperimentalInstrumentScanBoundaryLine(
@@ -2620,6 +2636,11 @@ void ExperimentalInstrumentHost::scheduleDrumNameDiagLifecyclePhasesAfterRefresh
         }
         self->refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::delayed1000, false);
     });
+}
+
+void ExperimentalInstrumentHost::requestDeferredPluginDrumNameHarvest()
+{
+    schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
 }
 
 void ExperimentalInstrumentHost::schedulePluginPitchNamesRefreshAfterNativeEditorOpened()

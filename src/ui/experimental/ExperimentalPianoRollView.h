@@ -205,8 +205,10 @@ private:
         Right
     };
 
-    [[nodiscard]] bool pianoMelodicTimelineBarsResizeEnabled() const noexcept;
-    [[nodiscard]] std::optional<std::pair<int, TimelineNoteResizeEdge>> findPianoBarResizeEdgeAtPoint(
+    /// Bars-display note resize is available in both row modes (Piano and Drum Names): drum notes share
+    /// the same TimelineMidiNote/durationTicks model, and stretching them is a visual aid for drums.
+    [[nodiscard]] bool timelineBarsResizeEnabled() const noexcept;
+    [[nodiscard]] std::optional<std::pair<int, TimelineNoteResizeEdge>> findTimelineBarResizeEdgeAtPoint(
         juce::Point<int> pos) const;
     [[nodiscard]] std::int64_t snapTimelineTickForEdit(std::int64_t tick) const noexcept;
     [[nodiscard]] std::int64_t minTimelineNoteDurationTicks() const noexcept;

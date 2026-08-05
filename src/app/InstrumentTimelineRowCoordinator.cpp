@@ -738,7 +738,69 @@ private:
             }
             owner_.openMidiEditorForInstrumentClip(laneTimelineTrackId_, clip->id);
             repaint();
+            return;
         }
+
+        createEmptyMidiClipAtEventAndOpenEditor(e);
+    }
+
+    /// Double-click on empty lane space: create a default-length empty MIDI clip at the (snapped) click
+    /// position, select it, and open the MIDI editor so the user can start entering notes immediately.
+    void createEmptyMidiClipAtEventAndOpenEditor(const juce::MouseEvent& e)
+    {
+        InstrumentTrackController* const ac = activeControllerNullable();
+        if (ac == nullptr || !ac->hasInstrumentTrack())
+        {
+            return;
+        }
+        if (owner_.trackLanes_.isInstrumentMidiClipMoveBlocked() || !timelineMappingAvailableForClipDrag_()
+            || !getLaneContentBounds().contains(e.getPosition()))
+        {
+            return;
+        }
+
+        const std::int64_t clickSample = laneTimelineSampleAtLocalX(e.getPosition());
+        const std::int64_t startSample = snapTimelineSample(clickSample);
+
+        const TrackId laneTid = laneTimelineTrackId_;
+        auto createdId = std::make_shared<InstrumentMidiClipId>(0);
+        auto createClip = [this, laneTid, startSample, createdId]() -> bool {
+            InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
+            InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+            if (ctl == nullptr || !ctl->hasInstrumentTrack())
+            {
+                return false;
+            }
+            const InstrumentMidiClipId newId = ctl->createEmptyTimelineMidiClipAtSamples(startSample);
+            if (newId == 0)
+            {
+                return false;
+            }
+            *createdId = newId;
+            if (owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack != nullptr)
+            {
+                owner_.callbacks_.clearAudioAndOtherInstrumentSelectionsForMidiTrack(laneTid);
+            }
+            ctl->setSelectedClipIdsExclusive(newId);
+            owner_.trackLanes_.repaint();
+            owner_.inspector_.refreshFromSession();
+            return true;
+        };
+
+        if (auto execute = owner_.callbacks_.executeUndoableInstrumentEdit; execute != nullptr)
+        {
+            execute(juce::String("Create MIDI clip"), std::move(createClip));
+        }
+        else
+        {
+            createClip();
+        }
+
+        if (*createdId != 0)
+        {
+            owner_.openMidiEditorForInstrumentClip(laneTimelineTrackId_, *createdId);
+        }
+        repaint();
     }
 
     [[nodiscard]] InstrumentTrackController* activeControllerNullable() const noexcept { return boundCtl_; }

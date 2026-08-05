@@ -400,6 +400,12 @@ public:
                         juce::ignoreUnused(isRedoStep);
                     }
                 },
+                [this] {
+                    if (instrumentRuntimeCoordinator_ != nullptr)
+                    {
+                        instrumentRuntimeCoordinator_->alignAllInstrumentClipTemposToProjectTempo();
+                    }
+                },
             });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
@@ -565,26 +571,6 @@ public:
                     {
                         undoRedoCoordinator_->executeUndoableInstrumentEdit(lab, std::move(m));
                     }
-                },
-                [this](const juce::String& lab,
-                      std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical) {
-                    if (undoRedoCoordinator_ != nullptr)
-                    {
-                        undoRedoCoordinator_->commitInstrumentMusicalUndoPair(lab, std::move(beforeMusical));
-                    }
-                },
-                [this]() -> std::vector<ProjectFileExperimentalInstrumentTrackV1> {
-                    const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
-                    if (snap == nullptr)
-                    {
-                        return {};
-                    }
-                    return mini_daw_app_transport::buildSortedInstrumentMusicalUndoSnapshot(
-                        *snap,
-                        InstrumentMusicalUndoSnapshotCallbacks{
-                            [this](TrackId tid) {
-                                return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
-                            } });
                 },
                 [this] { invokeUndoFromWindowShortcut(); },
                 [this] { invokeRedoFromWindowShortcut(); },
@@ -1430,6 +1416,12 @@ void mini_daw_app_transport::TransportControlsContent::commitArrangementBpmFromE
                     return false;
                 }
                 session.setProjectBpm(next.bpm);
+                // Clips always play at the project tempo (undo/redo re-aligns via
+                // refreshAfterSessionSnapshotRestore).
+                if (instrumentRuntimeCoordinator_ != nullptr)
+                {
+                    instrumentRuntimeCoordinator_->alignAllInstrumentClipTemposToProjectTempo();
+                }
                 return true;
             });
     }

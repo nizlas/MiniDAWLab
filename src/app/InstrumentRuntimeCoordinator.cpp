@@ -501,6 +501,21 @@ void InstrumentRuntimeCoordinator::applyTimelineSampleRateToKeyedAndStaging(cons
     }
 }
 
+void InstrumentRuntimeCoordinator::alignAllInstrumentClipTemposToProjectTempo() noexcept
+{
+    if (instrumentStagingController_ != nullptr)
+    {
+        instrumentStagingController_->alignClipTemposToProjectTempo();
+    }
+    for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->alignClipTemposToProjectTempo();
+        }
+    }
+}
+
 void InstrumentRuntimeCoordinator::syncAllKeyedAndStagingShellWithHostState() noexcept
 {
     if (instrumentStagingController_ != nullptr)

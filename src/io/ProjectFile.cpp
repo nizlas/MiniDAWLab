@@ -920,6 +920,15 @@ namespace
                         {
                             c.midiRollFollowEnabled = static_cast<int>(static_cast<double>(mrfo) + 0.5) != 0;
                         }
+                        const juce::var& tlm = cv.getProperty("timelineMode", {});
+                        if (tlm.isBool())
+                        {
+                            c.timelineMode = (bool)tlm;
+                        }
+                        else if (tlm.isInt() || tlm.isInt64() || tlm.isDouble())
+                        {
+                            c.timelineMode = static_cast<int>(static_cast<double>(tlm) + 0.5) != 0;
+                        }
                         et.clips.push_back(std::move(c));
                     }
                 }
@@ -1140,6 +1149,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     {
                         co->setProperty("midiRollFollowEnabled", true);
                     }
+                }
+                if (cl.timelineMode)
+                {
+                    co->setProperty("timelineMode", true);
                 }
                 clipVars.add(juce::var(co.get()));
             }

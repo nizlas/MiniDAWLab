@@ -86,6 +86,9 @@ public:
                                                            std::int64_t deltaSamples) noexcept;
 
     void applyTimelineSampleRateToKeyedAndStaging(double sr) noexcept;
+    /// Clips always play at the project tempo: re-align every keyed + staging controller's clip bpm
+    /// with the session's project BPM (call after project BPM edits and undo/redo snapshot restores).
+    void alignAllInstrumentClipTemposToProjectTempo() noexcept;
     void syncAllKeyedAndStagingShellWithHostState() noexcept;
     void deactivateAllKeyedAndStagingControllers() noexcept;
 

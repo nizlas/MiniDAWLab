@@ -280,6 +280,10 @@ void UndoRedoCoordinator::refreshAfterSessionSnapshotRestore()
     {
         callbacks_.reconcileCycleBookingAfterUndoSnapshotRestore();
     }
+    if (callbacks_.alignInstrumentClipTemposToProjectTempo)
+    {
+        callbacks_.alignInstrumentClipTemposToProjectTempo();
+    }
     if (callbacks_.syncViewportFromSession)
     {
         callbacks_.syncViewportFromSession();
@@ -446,43 +450,6 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
                                    + "\" undoSize=" + juce::String(sessionHistory_.undoStackSize())
                                    + " redoSize=" + juce::String(sessionHistory_.redoStackSize()));
     }
-}
-
-void UndoRedoCoordinator::commitInstrumentMusicalUndoPair(
-    const juce::String& label,
-    std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical)
-{
-    if (callbacks_.stableSortInstrumentMusicalUndoVector)
-    {
-        callbacks_.stableSortInstrumentMusicalUndoVector(beforeMusical);
-    }
-    if (beforeMusical.empty())
-    {
-        return;
-    }
-    std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
-    if (snap == nullptr)
-    {
-        return;
-    }
-    std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical;
-    if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
-    {
-        afterMusical = callbacks_.buildSortedInstrumentMusicalUndoSnapshot();
-    }
-    if (callbacks_.stableSortInstrumentMusicalUndoVector)
-    {
-        callbacks_.stableSortInstrumentMusicalUndoVector(afterMusical);
-    }
-    if (afterMusical.empty() || experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical))
-    {
-        return;
-    }
-    sessionHistory_.record(label,
-                           snap,
-                           snap,
-                           std::nullopt,
-                           InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) });
 }
 
 void UndoRedoCoordinator::clearHistory() noexcept

@@ -229,6 +229,15 @@ public:
     /// Effective label for Drum Names UI: manual if set, else autoPlugin if set; `std::nullopt` if neither.
     [[nodiscard]] std::optional<std::pair<juce::String, DrumLabelSource>> getEffectiveDrumLabel(int midiNote) const;
 
+    /// True when at least one note has an effective drum label (manual or plugin-discovered). Used by the
+    /// MIDI editor to default its rows to Drum Names when readable names exist (e.g. a Groove Agent kit).
+    [[nodiscard]] bool hasAnyEffectiveDrumLabels() const noexcept;
+
+    /// When this track has no drum labels yet but the host holds a loaded instrument, ask the host to
+    /// re-probe plugin drum names (kit may have been picked after the last probe). Rate-limited to one
+    /// request per 2 s; results arrive via `mergeAutoPluginDrumLabels` → change message. Message thread.
+    void requestPluginDrumNameProbeIfUnlabeled() noexcept;
+
     /// One enabled row for `experimentalInstrumentTracks` when `hasInstrumentTrack()`.
     [[nodiscard]] ProjectFileExperimentalInstrumentTrackV1 buildExperimentalInstrumentProjectBlock() const;
 
@@ -292,13 +301,22 @@ public:
     /// BPM / timeline note timing changed (ticks→samples); does **not** rewrite `lengthSamples` from grid.
     void notifyClipExperimentalMusicalTimingChanged() noexcept;
 
+    /// Clips always play at the project tempo: overwrite every clip's `pattern.bpm` with the session's
+    /// project BPM and republish timing when anything changed. Message thread only; no-op without a session.
+    void alignClipTemposToProjectTempo() noexcept;
+
     /// Arrangement import: append one timeline-MIDI clip anchored at `startSamples`. Message thread only.
-    /// Returns **0** when no instrument shell is active (`!trackActive_`).
+    /// The clip adopts the **project tempo** (file tempo events are ignored; note ticks preserve bar/beat
+    /// positions). Returns **0** when no instrument shell is active (`!trackActive_`).
     [[nodiscard]] InstrumentMidiClipId appendImportedTimelineMidiClipAtSamples(
         std::vector<TimelineMidiNote> timelineNotes,
-        double firstTempoBpmFromFile,
         std::int64_t startSamples,
         juce::String suggestedName);
+
+    /// Arrangement double-click on empty lane space: append an empty timeline-mode clip (no notes yet)
+    /// anchored at `startSamples`, defaulting to two project-tempo bars. Message thread only.
+    /// Returns **0** when no instrument shell is active (`!trackActive_`).
+    [[nodiscard]] InstrumentMidiClipId createEmptyTimelineMidiClipAtSamples(std::int64_t startSamples);
 
     /// Arrangement move: shift all currently selected MIDI clips by `deltaSamples`. Clamps as a group so no
     /// clip starts before sample 0. Returns false if nothing changed.
@@ -391,6 +409,9 @@ private:
     };
 
     std::map<int, DrumLabelLayers> drumLabels_;
+
+    /// Rate limit for `requestPluginDrumNameProbeIfUnlabeled` (millisecond counter of the last request).
+    std::uint32_t lastDrumNameProbeRequestMs_ = 0;
 
     void pruneDrumLabelLayersIfUnused(int midiNote) noexcept;
 
