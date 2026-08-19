@@ -1150,6 +1150,17 @@ bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyP
             }
         }
     }
+    if ((key.getKeyCode() == juce::KeyPress::deleteKey || key.getKeyCode() == juce::KeyPress::backspaceKey)
+        && !key.getModifiers().isAnyModifierKeyDown())
+    {
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (rv->handleTimelineNotesDeleteSelectionShortcut())
+            {
+                return true;
+            }
+        }
+    }
     if (midi_transport_shortcuts::isRecordToggleShortcut(key))
     {
         if (transportCommands_.onToggleRecord)

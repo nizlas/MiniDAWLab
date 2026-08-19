@@ -132,8 +132,51 @@ void ExperimentalMidiPatternPlayer::drainNoteOffs(const double nowMs)
         pendingOffs_.pop();
         if (host_.hasInstrument())
         {
-            host_.enqueueMidiMessageFromMessageThread(juce::MidiMessage::noteOff(kMidiChannel, p.midiNote, 0.0f));
+            host_.enqueueMidiMessageFromMessageThread(juce::MidiMessage::noteOff(p.channel, p.midiNote, 0.0f));
         }
+    }
+}
+
+void ExperimentalMidiPatternPlayer::previewSingleNote(const int midiNote, const int velocity, const int channel)
+{
+    previewNotesChord({ PreviewNoteRequest{ midiNote, velocity, channel } });
+}
+
+void ExperimentalMidiPatternPlayer::previewNotesChord(const std::vector<PreviewNoteRequest>& notes)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+    const bool canSend = playbackAllowed_ ? playbackAllowed_() : host_.hasInstrument();
+    if (!canSend || notes.empty())
+    {
+        return;
+    }
+
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    for (const auto& req : notes)
+    {
+        const int pitch = juce::jlimit(0, 127, req.midiNote);
+        const int vel = juce::jlimit(1, 127, req.velocity);
+        const int ch = juce::jlimit(1, 16, req.channel);
+        // Note Off first: a rapid re-audition restarts the attack instead of stacking voices.
+        host_.enqueueMidiMessageFromMessageThread(juce::MidiMessage::noteOff(ch, pitch, 0.0f));
+        host_.enqueueMidiMessageFromMessageThread(
+            juce::MidiMessage::noteOn(ch, pitch, (float)vel / 127.0f));
+        PendingOff off;
+        off.dueMs = nowMs + kDrumGateMs;
+        off.midiNote = pitch;
+        off.channel = ch;
+        pendingOffs_.push(off);
+    }
+
+    // Audition works while pattern playback is stopped: the timer delivers the gated note-offs
+    // and stops itself once the queue is empty (see timerCallback).
+    if (!isTimerRunning())
+    {
+        startTimer(4);
     }
 }
 
@@ -199,7 +242,7 @@ void ExperimentalMidiPatternPlayer::flushAllSound(const char* reason)
         pendingOffs_.pop();
         if (host_.hasInstrument())
         {
-            host_.enqueueMidiMessageFromMessageThread(juce::MidiMessage::noteOff(kMidiChannel, p.midiNote, 0.0f));
+            host_.enqueueMidiMessageFromMessageThread(juce::MidiMessage::noteOff(p.channel, p.midiNote, 0.0f));
         }
     }
     if (host_.hasInstrument())
@@ -210,8 +253,16 @@ void ExperimentalMidiPatternPlayer::flushAllSound(const char* reason)
 
 void ExperimentalMidiPatternPlayer::timerCallback()
 {
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+
     if (!playing_)
     {
+        // Audition-only mode: deliver gated note-offs, then go idle.
+        drainNoteOffs(nowMs);
+        if (pendingOffs_.empty())
+        {
+            stopTimer();
+        }
         return;
     }
     if (!host_.hasInstrument())
@@ -220,7 +271,6 @@ void ExperimentalMidiPatternPlayer::timerCallback()
         return;
     }
 
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
     drainNoteOffs(nowMs);
 
     const double stepMs = pattern_.stepDurationMs();

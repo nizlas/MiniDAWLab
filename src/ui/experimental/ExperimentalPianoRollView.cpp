@@ -143,6 +143,11 @@ bool ExperimentalPianoRollView::keyPressed(const juce::KeyPress& key)
     {
         return false;
     }
+    if ((key.getKeyCode() == juce::KeyPress::deleteKey || key.getKeyCode() == juce::KeyPress::backspaceKey)
+        && !key.getModifiers().isAnyModifierKeyDown())
+    {
+        return handleTimelineNotesDeleteSelectionShortcut();
+    }
     const bool cmd = key.getModifiers().isCommandDown();
     if (!cmd || key.getModifiers().isShiftDown())
     {
@@ -263,6 +268,10 @@ void ExperimentalPianoRollView::textEditorReturnKeyPressed(juce::TextEditor& ed)
     {
         dismissRowLabelEditor(true);
     }
+    else if (velocityValueEditor_.get() == &ed)
+    {
+        dismissVelocityValueEditor(true);
+    }
 }
 
 void ExperimentalPianoRollView::textEditorEscapeKeyPressed(juce::TextEditor& ed)
@@ -271,16 +280,167 @@ void ExperimentalPianoRollView::textEditorEscapeKeyPressed(juce::TextEditor& ed)
     {
         dismissRowLabelEditor(false);
     }
+    else if (velocityValueEditor_.get() == &ed)
+    {
+        dismissVelocityValueEditor(false);
+    }
 }
 
 void ExperimentalPianoRollView::textEditorFocusLost(juce::TextEditor& ed)
 {
+    if (velocityValueEditor_.get() == &ed)
+    {
+        // Click-away cancels: velocity changes must be explicit (Return only).
+        dismissVelocityValueEditor(false);
+        return;
+    }
     if (rowLabelEditor_.get() != &ed)
     {
         return;
     }
     // Escape / click-away: do not auto-commit renames (explicit Return only).
     dismissRowLabelEditor(false);
+}
+
+void ExperimentalPianoRollView::beginVelocityValueEdit(const int noteIndex, const juce::Point<int> anchorPos)
+{
+    if (!useAbsoluteTimeline() || !pattern_.usesTimelineNotes() || timelineClip_ == nullptr
+        || !isTimelineClipBindingFresh() || noteIndex < 0
+        || noteIndex >= (int)pattern_.timelineNotes.size())
+    {
+        return;
+    }
+    dismissRowLabelEditor(false);
+    dismissVelocityValueEditor(false);
+
+    normalizeTimelineNoteSelection();
+    velocityEditorTargetIndices_.clear();
+    if (isTimelineNoteIndexSelected(noteIndex))
+    {
+        velocityEditorTargetIndices_.assign(selectedTimelineNoteIndices_.begin(),
+                                            selectedTimelineNoteIndices_.end());
+        std::sort(velocityEditorTargetIndices_.begin(), velocityEditorTargetIndices_.end());
+    }
+    else
+    {
+        // Unselected note: edit it alone and leave the existing selection untouched.
+        velocityEditorTargetIndices_.push_back(noteIndex);
+    }
+
+    velocityValueEditor_ = std::make_unique<juce::TextEditor>("velocityValueEdit");
+    velocityValueEditor_->setMultiLine(false);
+    velocityValueEditor_->setReturnKeyStartsNewLine(false);
+    velocityValueEditor_->setInputRestrictions(3, "0123456789");
+    velocityValueEditor_->setJustification(juce::Justification::centred);
+    velocityValueEditor_->setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
+    velocityValueEditor_->setText(juce::String(pattern_.timelineNotes[(size_t)noteIndex].velocity), false);
+    velocityValueEditor_->setSelectAllWhenFocused(true);
+    velocityValueEditor_->addListener(this);
+
+    // Slightly above/right of the click, clamped so it is never cut off at the editor edges.
+    juce::Rectangle<int> box(anchorPos.getX() + 8, anchorPos.getY() - 24, 46, 20);
+    box = box.constrainedWithin(getLocalBounds().reduced(2));
+    velocityValueEditor_->setBounds(box);
+    addAndMakeVisible(*velocityValueEditor_);
+    velocityValueEditor_->toFront(false);
+    velocityValueEditor_->grabKeyboardFocus();
+    repaint();
+}
+
+void ExperimentalPianoRollView::dismissVelocityValueEditor(const bool commit)
+{
+    if (velocityValueEditor_ == nullptr)
+    {
+        return;
+    }
+    const juce::String text = velocityValueEditor_->getText().trim();
+    const std::vector<int> targets = std::move(velocityEditorTargetIndices_);
+    velocityEditorTargetIndices_.clear();
+    velocityValueEditor_->removeListener(this);
+    removeChildComponent(velocityValueEditor_.get());
+    velocityValueEditor_.reset();
+    repaint();
+
+    if (!commit || targets.empty() || text.isEmpty() || !text.containsOnly("0123456789"))
+    {
+        return;
+    }
+    const int newVelocity = juce::jlimit(1, 127, text.getIntValue());
+
+    std::vector<int> validTargets;
+    validTargets.reserve(targets.size());
+    bool anyChange = false;
+    for (const int idx : targets)
+    {
+        if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        validTargets.push_back(idx);
+        anyChange = anyChange || pattern_.timelineNotes[(size_t)idx].velocity != newVelocity;
+    }
+    if (validTargets.empty())
+    {
+        return;
+    }
+
+    if (anyChange)
+    {
+        auto applyVelocities = [this, validTargets, newVelocity]() -> bool {
+            for (const int idx : validTargets)
+            {
+                if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+                {
+                    return false;
+                }
+                pattern_.timelineNotes[(size_t)idx].velocity = newVelocity;
+            }
+            if (instrumentTrackController_ != nullptr)
+            {
+                instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+            }
+            repaint();
+            return true;
+        };
+        const char* undoLabel
+            = validTargets.size() > 1 ? "Set MIDI note velocities" : "Set MIDI note velocity";
+        if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr
+            && timelineClip_ != nullptr)
+        {
+            undoablePatternEditHandler_(undoLabel, std::move(applyVelocities));
+        }
+        else
+        {
+            applyVelocities();
+        }
+    }
+
+    // Audition feedback with the velocity-drag rule: chord only when every target shares one
+    // startTick; mixed start times stay silent (no meaningful timing reference).
+    if (player_ != nullptr)
+    {
+        bool sameStart = true;
+        const std::int64_t t0 = pattern_.timelineNotes[(size_t)validTargets.front()].startTick;
+        for (const int idx : validTargets)
+        {
+            if (pattern_.timelineNotes[(size_t)idx].startTick != t0)
+            {
+                sameStart = false;
+                break;
+            }
+        }
+        if (sameStart)
+        {
+            std::vector<ExperimentalMidiPatternPlayer::PreviewNoteRequest> chord;
+            chord.reserve(validTargets.size());
+            for (const int idx : validTargets)
+            {
+                const auto& tn = pattern_.timelineNotes[(size_t)idx];
+                chord.push_back({ tn.midiNote, tn.velocity, (int)tn.channel });
+            }
+            player_->previewNotesChord(chord);
+        }
+    }
 }
 
 int ExperimentalPianoRollView::timelineRulerHeight() const noexcept
@@ -370,12 +530,48 @@ juce::Rectangle<int> ExperimentalPianoRollView::gridBounds() const
     return r;
 }
 
-int ExperimentalPianoRollView::velocityLaneTotalHeight() const noexcept
+int ExperimentalPianoRollView::maxVelocityLaneHeightNow() const noexcept
 {
-    // Never let the lane swallow the grid: always keep at least a few pitch rows visible.
+    // Never let the lane swallow the grid: always keep at least a few pitch rows visible,
+    // and cap at ~50% of the component so tiny windows stay usable.
     const int minGridPx = kRowHeight * 3;
     const int available = getHeight() - timelineRulerHeight() - minGridPx;
-    return juce::jlimit(0, kVelocityLaneHeight, available);
+    return juce::jlimit(0, getHeight() / 2, available);
+}
+
+int ExperimentalPianoRollView::velocityLaneTotalHeight() const noexcept
+{
+    return juce::jlimit(0, maxVelocityLaneHeightNow(), velocityLaneHeightPref_);
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneResizeBandBounds() const
+{
+    const int laneH = velocityLaneTotalHeight();
+    if (laneH <= 0)
+    {
+        return {};
+    }
+    auto r = getLocalBounds();
+    r.removeFromTop(timelineRulerHeight());
+    auto lane = r.removeFromBottom(laneH);
+    return lane.removeFromTop(kVelocityLaneResizeBandPx);
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneCollapsedKnobBounds() const
+{
+    if (velocityLaneTotalHeight() > 0 || maxVelocityLaneHeightNow() <= 0)
+    {
+        return {};
+    }
+    const auto gr = gridBounds();
+    if (gr.isEmpty())
+    {
+        return {};
+    }
+    return { gr.getCentreX() - kVelocityLaneKnobWidth / 2,
+             getHeight() - kVelocityLaneKnobHeight,
+             kVelocityLaneKnobWidth,
+             kVelocityLaneKnobHeight };
 }
 
 juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneBounds() const
@@ -427,6 +623,7 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     if (changed)
     {
         dismissRowLabelEditor(false);
+        dismissVelocityValueEditor(false);
         selectedTimelineNoteIndices_.clear();
         timelineNoteResizeActive_ = false;
         timelineResizeNoteIndex_ = -1;
@@ -438,6 +635,9 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         velocityLaneDragActive_ = false;
         velocityDragCaptures_.clear();
         velocityDragPrimaryIndex_ = -1;
+        velocityLaneResizeActive_ = false;
+        velocityLaneResizeFromCollapsedKnob_ = false;
+        velocityDragAuditionSameStart_ = false;
     }
     timelineClip_ = timelineClip;
     session_ = session;
@@ -962,6 +1162,11 @@ void ExperimentalPianoRollView::resized()
             rowLabelEditor_->setBounds(kb.withY(y).withHeight(kRowHeight).reduced(1, 1));
             rowLabelEditor_->toFront(false);
         }
+    }
+    if (velocityValueEditor_ != nullptr)
+    {
+        // Layout changed under the popup (lane resize, window resize): cancel instead of drifting.
+        dismissVelocityValueEditor(false);
     }
 }
 
@@ -1639,6 +1844,56 @@ bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
     return true;
 }
 
+bool ExperimentalPianoRollView::handleTimelineNotesDeleteSelectionShortcut()
+{
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
+        || !pattern_.usesTimelineNotes())
+    {
+        return false;
+    }
+    normalizeTimelineNoteSelection();
+    if (selectedTimelineNoteIndices_.empty())
+    {
+        return false;
+    }
+
+    // Descending order keeps the remaining indices valid while erasing.
+    std::vector<int> indices(selectedTimelineNoteIndices_.begin(), selectedTimelineNoteIndices_.end());
+    std::sort(indices.begin(), indices.end(), std::greater<int>());
+
+    auto eraseAndNotify = [this, indices]() -> bool {
+        for (const int i : indices)
+        {
+            if (i < 0 || i >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+        }
+        for (const int i : indices)
+        {
+            pattern_.timelineNotes.erase(pattern_.timelineNotes.begin() + i);
+        }
+        selectedTimelineNoteIndices_.clear();
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+
+    const juce::String label = indices.size() > 1 ? "Delete MIDI notes" : "Delete MIDI note";
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_(label, std::move(eraseAndNotify));
+    }
+    else
+    {
+        eraseAndNotify();
+    }
+    return true;
+}
+
 std::int64_t ExperimentalPianoRollView::minTimelineNoteDurationTicks() const noexcept
 {
     const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
@@ -2143,7 +2398,25 @@ void ExperimentalPianoRollView::handleVelocityLaneMouseDown(const juce::MouseEve
     else if (const auto any = findVelocityBarIndexNearX(x, false))
     {
         primary = *any;
-        editIndices.push_back(primary);
+        // No selection relevant to this gesture: expand to every note starting on exactly the same
+        // tick (stacked hits like kick+snare edit and audition as one drum event). More than one
+        // note in the stack behaves as if the user had selected that stack manually.
+        const std::int64_t stackTick = pattern_.timelineNotes[(size_t)primary].startTick;
+        for (int ti = 0; ti < (int)pattern_.timelineNotes.size(); ++ti)
+        {
+            if (pattern_.timelineNotes[(size_t)ti].startTick == stackTick)
+            {
+                editIndices.push_back(ti);
+            }
+        }
+        if (editIndices.size() > 1)
+        {
+            selectedTimelineNoteIndices_.clear();
+            for (const int ti : editIndices)
+            {
+                selectedTimelineNoteIndices_.insert(ti);
+            }
+        }
     }
     else
     {
@@ -2168,10 +2441,30 @@ void ExperimentalPianoRollView::handleVelocityLaneMouseDown(const juce::MouseEve
         return;
     }
 
+    // Chord audition only when every captured note starts on the same tick; mixed start times
+    // would preview as a meaningless cacophony.
+    velocityDragAuditionSameStart_ = true;
+    if (velocityDragCaptures_.size() > 1)
+    {
+        const std::int64_t t0
+            = pattern_.timelineNotes[(size_t)velocityDragCaptures_.front().index].startTick;
+        for (const auto& cap : velocityDragCaptures_)
+        {
+            if (pattern_.timelineNotes[(size_t)cap.index].startTick != t0)
+            {
+                velocityDragAuditionSameStart_ = false;
+                break;
+            }
+        }
+    }
+    velocityDragLastAuditionMs_ = 0.0;
+    velocityDragLastAuditionVelocity_ = -1;
+
     velocityLaneDragActive_ = true;
     velocityDragPrimaryIndex_ = primary;
     velocityDragAnchorVelocity_ = velocityFromLaneY(e.getPosition().getY());
     updateVelocityLaneDrag(e.getPosition());
+    maybeAuditionVelocityDrag(true);
     repaint();
 }
 
@@ -2278,8 +2571,67 @@ void ExperimentalPianoRollView::finishVelocityLaneDragGesture()
     }
 }
 
+void ExperimentalPianoRollView::auditionNote(const int midiNote, const int velocity, const int channel) noexcept
+{
+    if (player_ != nullptr)
+    {
+        player_->previewSingleNote(midiNote, velocity, channel);
+    }
+}
+
+void ExperimentalPianoRollView::maybeAuditionVelocityDrag(const bool force) noexcept
+{
+    if (player_ == nullptr || velocityDragCaptures_.empty() || !velocityDragAuditionSameStart_)
+    {
+        return;
+    }
+    const int primary = velocityDragPrimaryIndex_;
+    if (primary < 0 || primary >= (int)pattern_.timelineNotes.size())
+    {
+        return;
+    }
+    const int primaryVelocity = pattern_.timelineNotes[(size_t)primary].velocity;
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (!force)
+    {
+        if (nowMs - velocityDragLastAuditionMs_ < kVelocityDragAuditionThrottleMs
+            || primaryVelocity == velocityDragLastAuditionVelocity_)
+        {
+            return;
+        }
+    }
+    velocityDragLastAuditionMs_ = nowMs;
+    velocityDragLastAuditionVelocity_ = primaryVelocity;
+
+    std::vector<ExperimentalMidiPatternPlayer::PreviewNoteRequest> chord;
+    chord.reserve(velocityDragCaptures_.size());
+    for (const auto& cap : velocityDragCaptures_)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        const auto& tn = pattern_.timelineNotes[(size_t)cap.index];
+        chord.push_back({ tn.midiNote, tn.velocity, (int)tn.channel });
+    }
+    if (!chord.empty())
+    {
+        player_->previewNotesChord(chord);
+    }
+}
+
 void ExperimentalPianoRollView::paintVelocityLane(juce::Graphics& g)
 {
+    // Minimized: only a small centered handle at the bottom edge (click restores, drag reopens).
+    if (const auto knob = velocityLaneCollapsedKnobBounds(); !knob.isEmpty())
+    {
+        g.setColour(juce::Colour(0xff3a3a44));
+        g.fillRoundedRectangle(knob.toFloat(), 3.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.35f));
+        g.drawRoundedRectangle(knob.toFloat().reduced(0.5f), 3.0f, 1.0f);
+        return;
+    }
+
     const auto lane = velocityLaneBounds();
     const auto header = velocityLaneHeaderBounds();
     if (lane.isEmpty() && header.isEmpty())
@@ -2293,6 +2645,16 @@ void ExperimentalPianoRollView::paintVelocityLane(juce::Graphics& g)
     g.fillRect(header);
     g.setColour(juce::Colours::white.withAlpha(0.14f));
     g.drawHorizontalLine(lane.getY(), (float)juce::jmin(header.getX(), lane.getX()), (float)lane.getRight());
+
+    // Resize grip affordance in the grab band at the lane's top edge. Horizontal centre matches the
+    // minimized knob: both are centred on the editor area right of the key/name strip (the knob uses
+    // gridBounds() and `lane` here excludes the side strip, so the two share one coordinate basis).
+    if (const auto band = velocityLaneResizeBandBounds(); !band.isEmpty())
+    {
+        const int gripCentreX = !lane.isEmpty() ? lane.getCentreX() : band.getCentreX();
+        g.setColour(juce::Colours::white.withAlpha(velocityLaneResizeActive_ ? 0.45f : 0.28f));
+        g.fillRoundedRectangle((float)(gripCentreX - 18), (float)band.getY() + 2.0f, 36.0f, 3.0f, 1.5f);
+    }
 
     if (header.getWidth() >= 46)
     {
@@ -2552,6 +2914,8 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
 
     const bool multiNoteSelectModifier
         = e.mods.isCtrlDown() || e.mods.isCommandDown() || e.mods.isShiftDown();
+    // The second click of a double-click (delete gesture) must not re-audition the note.
+    const bool auditionThisClick = e.getNumberOfClicks() <= 1;
 
     if (!multiNoteSelectModifier)
     {
@@ -2562,6 +2926,11 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
             {
                 replaceTimelineNoteSelectionWithSingle(ni);
             }
+            if (auditionThisClick && ni >= 0 && ni < (int)pattern_.timelineNotes.size())
+            {
+                const auto& tn = pattern_.timelineNotes[(size_t)ni];
+                auditionNote(tn.midiNote, tn.velocity, (int)tn.channel);
+            }
             beginTimelineNoteResizeGesture(ni, edgeHit->second);
             repaint();
             return;
@@ -2570,6 +2939,11 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
 
     if (const auto hit = findTimelineNoteIndexAtPoint(e.getPosition()))
     {
+        if (auditionThisClick && *hit >= 0 && *hit < (int)pattern_.timelineNotes.size())
+        {
+            const auto& tn = pattern_.timelineNotes[(size_t)*hit];
+            auditionNote(tn.midiNote, tn.velocity, (int)tn.channel);
+        }
         if (multiNoteSelectModifier)
         {
             toggleTimelineNoteInSelection(*hit);
@@ -2958,6 +3332,11 @@ void ExperimentalPianoRollView::handleTimelineRulerMouseDrag(const juce::MouseEv
 void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
+    if (velocityValueEditor_ != nullptr)
+    {
+        // Any click outside the popup cancels it (the popup itself is a child and never gets here).
+        dismissVelocityValueEditor(false);
+    }
     if (useAbsoluteTimeline() && timelineClip_ != nullptr && instrumentTrackController_ != nullptr
         && !isTimelineClipBindingFresh())
     {
@@ -2987,11 +3366,43 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
+    if (!kb.isEmpty() && kb.contains(pos) && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+    {
+        // Piano-key / drum-name row click: audition the pitch at velocity 100. No note is created and
+        // timeline events are untouched. Channel mirrors what a grid click would create here
+        // (timeline notes are channel 10, legacy step preview uses the player default).
+        const int pitch = pitchAtY(pos.getY());
+        if (pitch >= pitchLow_ && pitch <= pitchHigh_)
+        {
+            const int channel = (useAbsoluteTimeline() && pattern_.usesTimelineNotes())
+                                    ? 10
+                                    : ExperimentalMidiPatternPlayer::kMidiChannel;
+            auditionNote(pitch, 100, channel);
+        }
+        return;
+    }
+
     const auto rt = rulerTrackBounds();
     if (useAbsoluteTimeline() && !rt.isEmpty() && rt.contains(pos))
     {
         timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
         handleTimelineRulerMouseDown(e, rt);
+        return;
+    }
+
+    const auto laneResizeBand = velocityLaneResizeBandBounds();
+    const auto laneCollapsedKnob = velocityLaneCollapsedKnobBounds();
+    if ((!laneResizeBand.isEmpty() && laneResizeBand.contains(pos))
+        || (!laneCollapsedKnob.isEmpty() && laneCollapsedKnob.contains(pos)))
+    {
+        if (!e.mods.isPopupMenu())
+        {
+            timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+            velocityLaneResizeActive_ = true;
+            velocityLaneResizeFromCollapsedKnob_ = velocityLaneTotalHeight() <= 0;
+            velocityLaneResizeAnchorY_ = pos.getY();
+            velocityLaneResizeAnchorHeight_ = velocityLaneTotalHeight();
+        }
         return;
     }
 
@@ -3009,6 +3420,16 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
     {
         if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr)
         {
+            if (e.mods.isPopupMenu())
+            {
+                // Right-click on a note: exact-velocity popup. Empty grid right-click does nothing
+                // (reserved for a future context menu).
+                if (const auto hit = findTimelineNoteIndexAtPoint(pos))
+                {
+                    beginVelocityValueEdit(*hit, pos);
+                }
+                return;
+            }
             handleTimelineNotesMouseDown(e);
             return;
         }
@@ -3049,9 +3470,25 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (velocityLaneResizeActive_)
+    {
+        // Dragging up (smaller y) grows the lane; snap unusably small heights to fully minimized.
+        int newHeight = velocityLaneResizeAnchorHeight_ + (velocityLaneResizeAnchorY_ - e.getPosition().getY());
+        if (newHeight < kVelocityLaneMinUsableHeight)
+        {
+            newHeight = 0;
+        }
+        velocityLaneHeightPref_ = juce::jlimit(0, maxVelocityLaneHeightNow(), newHeight);
+        clampPitchScrollOffset();
+        resized();
+        repaint();
+        return;
+    }
+
     if (velocityLaneDragActive_)
     {
         updateVelocityLaneDrag(e.getPosition());
+        maybeAuditionVelocityDrag(false);
         repaint();
         return;
     }
@@ -3110,6 +3547,24 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
+    if (velocityLaneResizeActive_)
+    {
+        // A plain click on the minimized knob (no real drag) restores the default lane height.
+        const bool restoreDefault = velocityLaneResizeFromCollapsedKnob_
+                                    && e.getDistanceFromDragStart() < 4
+                                    && velocityLaneTotalHeight() <= 0;
+        velocityLaneResizeActive_ = false;
+        velocityLaneResizeFromCollapsedKnob_ = false;
+        if (restoreDefault)
+        {
+            velocityLaneHeightPref_ = kVelocityLaneHeight;
+            clampPitchScrollOffset();
+            resized();
+        }
+        repaint();
+        return;
+    }
+
     finishVelocityLaneDragGesture();
     finishTimelineNoteMoveGesture();
     finishTimelineNoteResizeGesture();
@@ -3189,11 +3644,23 @@ void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
         return;
     }
 
-    if (velocityLaneDragActive_)
+    if (velocityLaneDragActive_ || velocityLaneResizeActive_)
     {
         setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
         setTooltip(juce::String{});
         return;
+    }
+
+    {
+        const auto laneResizeBand = velocityLaneResizeBandBounds();
+        const auto laneCollapsedKnob = velocityLaneCollapsedKnobBounds();
+        if ((!laneResizeBand.isEmpty() && laneResizeBand.contains(e.getPosition()))
+            || (!laneCollapsedKnob.isEmpty() && laneCollapsedKnob.contains(e.getPosition())))
+        {
+            setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
+            setTooltip(juce::String{});
+            return;
+        }
     }
 
     {

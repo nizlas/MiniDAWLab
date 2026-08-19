@@ -152,6 +152,9 @@ public:
     /// Slice E: copy/paste selected `timelineNotes` within the bound clip (internal clipboard only).
     [[nodiscard]] bool handleTimelineNotesCopyShortcut() noexcept;
     [[nodiscard]] bool handleTimelineNotesPasteShortcut();
+    /// Delete/Backspace: remove all selected timeline notes as one undoable edit ("Delete MIDI notes").
+    /// Returns false (key not consumed) when nothing is selected or the clip binding is unavailable.
+    [[nodiscard]] bool handleTimelineNotesDeleteSelectionShortcut();
 
 private:
     void timerCallback() override;
@@ -162,6 +165,13 @@ private:
 
     void beginRowLabelInlineEdit(int midiNote);
     void dismissRowLabelEditor(bool commit);
+
+    /// Right-click exact-velocity popup: small numeric editor next to the clicked note. Targets the
+    /// whole selection when the clicked note is selected, else just that note (selection untouched).
+    void beginVelocityValueEdit(int noteIndex, juce::Point<int> anchorPos);
+    /// commit=true applies the typed value (clamped 1..127) as one undoable edit and auditions the
+    /// targets (chord only when they share one startTick). commit=false cancels without changes.
+    void dismissVelocityValueEditor(bool commit);
 
     [[nodiscard]] bool useAbsoluteTimeline() const noexcept;
     void seedViewportFromMainTimelineOrFallback();
@@ -232,19 +242,31 @@ private:
     void clearTimelineNoteMovePending() noexcept;
 
     // --- Velocity controller lane (bottom strip; edits TimelineMidiNote velocity only) ---
-    /// Fixed height in this slice; resize/minimize is a later slice.
+    /// Default lane height; also the restore height when the minimized knob is clicked.
     static constexpr int kVelocityLaneHeight = 96;
     static constexpr int kVelocityBarWidthPx = 5;
     static constexpr int kVelocityBarHitToleranceX = 4;
+    /// Top strip of the lane that acts as a vertical resize grab band.
+    static constexpr int kVelocityLaneResizeBandPx = 6;
+    /// Below this the lane is unusably small: resize snaps to fully minimized (0).
+    static constexpr int kVelocityLaneMinUsableHeight = 24;
+    static constexpr int kVelocityLaneKnobWidth = 48;
+    static constexpr int kVelocityLaneKnobHeight = 7;
 
-    /// Bar area right of the side strip (empty when the component is too short to fit the lane).
+    /// Bar area right of the side strip (empty when minimized or the component is too short).
     [[nodiscard]] juce::Rectangle<int> velocityLaneBounds() const;
     /// Bottom-left corner under the keyboard strip ("Velocity" label chrome).
     [[nodiscard]] juce::Rectangle<int> velocityLaneHeaderBounds() const;
     /// Lane minus vertical padding: bar height 0..127 maps into this rect.
     [[nodiscard]] juce::Rectangle<int> velocityLaneInnerBounds() const;
-    /// 0 when the component is too short (always keeps a few pitch rows visible).
+    /// Effective lane height: user preference clamped so a few pitch rows always stay visible.
     [[nodiscard]] int velocityLaneTotalHeight() const noexcept;
+    /// Upper clamp for the lane: min(space keeping 3 pitch rows, ~50% of component height).
+    [[nodiscard]] int maxVelocityLaneHeightNow() const noexcept;
+    /// Full-width resize grab band at the lane's top edge (empty when minimized).
+    [[nodiscard]] juce::Rectangle<int> velocityLaneResizeBandBounds() const;
+    /// Small centered handle at the bottom edge when minimized (click restores, drag reopens).
+    [[nodiscard]] juce::Rectangle<int> velocityLaneCollapsedKnobBounds() const;
     /// Lane bars/editing need the absolute-timeline clip binding; legacy step grid shows a hint only.
     [[nodiscard]] bool velocityLaneEditingAvailable() const noexcept;
     [[nodiscard]] int velocityFromLaneY(int y) const noexcept;
@@ -269,6 +291,31 @@ private:
     int velocityDragPrimaryIndex_ = -1;
     /// `velocityFromLaneY` at mouseDown; delta edits are relative to this so grabbing a bar never jumps.
     int velocityDragAnchorVelocity_ = 0;
+
+    /// Runtime-only lane height preference (0 = minimized). Not persisted; resets when the roll is rebuilt.
+    int velocityLaneHeightPref_ = kVelocityLaneHeight;
+    bool velocityLaneResizeActive_ = false;
+    /// Gesture started on the minimized knob: a click (no real drag) restores the default height.
+    bool velocityLaneResizeFromCollapsedKnob_ = false;
+    int velocityLaneResizeAnchorY_ = 0;
+    int velocityLaneResizeAnchorHeight_ = 0;
+
+    // --- Audition (one-shot preview through the pattern player; no transport/timeline side effects) ---
+    /// Min spacing between velocity-drag re-auditions (Cubase-style "rattle" without event spam).
+    static constexpr double kVelocityDragAuditionThrottleMs = 45.0;
+
+    /// Safe no-op without a player / loaded instrument. Also the reuse point for the future
+    /// right-click exact-velocity popup slice.
+    void auditionNote(int midiNote, int velocity, int channel) noexcept;
+    /// Velocity-drag audition: primary note alone, or the whole capture set as a chord when all
+    /// captured notes share one startTick. Throttled + velocity-change gated unless `force`.
+    void maybeAuditionVelocityDrag(bool force) noexcept;
+
+    /// All captured notes share one startTick (single note trivially qualifies). Selections spanning
+    /// several start times get no drag audition (no meaningful timing reference).
+    bool velocityDragAuditionSameStart_ = false;
+    double velocityDragLastAuditionMs_ = 0.0;
+    int velocityDragLastAuditionVelocity_ = -1;
 
     struct InternalTimelineClipboardItem
     {
@@ -412,6 +459,10 @@ private:
     std::function<void(int, juce::String)> onCommitRowLabelEdit_;
     std::unique_ptr<juce::TextEditor> rowLabelEditor_;
     int rowLabelEditorPitch_ = -1;
+
+    /// Right-click exact-velocity popup (nullptr = closed). Targets are captured when it opens.
+    std::unique_ptr<juce::TextEditor> velocityValueEditor_;
+    std::vector<int> velocityEditorTargetIndices_;
 
     int pitchLow_ = kDrumPitchLow;
     int pitchHigh_ = kDrumPitchHigh;
