@@ -33,6 +33,9 @@ public:
     void activeWindowStatusChanged() override;
     bool keyPressed(const juce::KeyPress& key, juce::Component* originating) override;
 
+    /// [Message thread] Load a ".dalproj" passed on the command line through the normal load pipeline.
+    void openProjectFileFromCommandLine(const juce::File& projectFile);
+
 private:
     [[nodiscard]] bool routeShortcut(const juce::KeyPress& key);
 

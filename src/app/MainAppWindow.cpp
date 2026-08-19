@@ -594,6 +594,12 @@ public:
                 [this]() {
                     applyArrangementSnapUiFromSettings(session.getArrangementSnapSettings(), true);
                 },
+                [this] {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->saveProject();
+                    }
+                },
             });
 
         session.setOnTimelineRulerTimeDisplayChanged([this]() {
@@ -897,6 +903,7 @@ public:
                         applyLoadedProjectMainWindowBounds(*dw, loaded);
                     }
                 },
+                [this] { showSavingProjectToast(); },
             });
 
         addAndMakeVisible(addTrackCornerPlusButton_);
@@ -922,6 +929,15 @@ public:
         countInStatusLabel_.setFont(juce::FontOptions(12.0f));
         countInStatusLabel_.setJustificationType(juce::Justification::centredLeft);
         addAndMakeVisible(countInStatusLabel_);
+        savingProjectToastLabel_.setText("Saving project", juce::dontSendNotification);
+        savingProjectToastLabel_.setJustificationType(juce::Justification::centred);
+        savingProjectToastLabel_.setFont(juce::FontOptions(14.0f));
+        savingProjectToastLabel_.setColour(juce::Label::backgroundColourId, juce::Colour(0xee2a2a33));
+        savingProjectToastLabel_.setColour(juce::Label::textColourId, juce::Colours::white);
+        savingProjectToastLabel_.setColour(juce::Label::outlineColourId,
+                                           juce::Colours::white.withAlpha(0.25f));
+        savingProjectToastLabel_.setInterceptsMouseClicks(false, false);
+        addChildComponent(savingProjectToastLabel_);
         addAndMakeVisible(inspectorView_);
         addAndMakeVisible(inspectorResizeSplitter_);
         addAndMakeVisible(rulerView);
@@ -1061,6 +1077,53 @@ public:
         {
             undoRedoCoordinator_->invokeRedoFromWindowShortcut();
         }
+    }
+
+    void invokeSaveProjectFromWindowShortcut() override
+    {
+        if (projectIoCoordinator_ != nullptr)
+        {
+            projectIoCoordinator_->saveProject();
+        }
+    }
+
+    void invokeLoadProjectFileFromStartup(const juce::File& projectFile) override
+    {
+        if (projectIoCoordinator_ != nullptr)
+        {
+            projectIoCoordinator_->loadProjectFromFile(projectFile);
+        }
+    }
+
+    // [Message thread] Transient non-modal "Saving project" indicator. Painted immediately (before
+    // the synchronous project write blocks the message loop), auto-hidden shortly after. Purely
+    // informational — save errors still surface through the existing alert dialogs.
+    void showSavingProjectToast()
+    {
+        // The active window shows the feedback: when the save came from the MIDI editor (Ctrl+S
+        // there, or a menu save while it is focused), mirror the toast in that window too.
+        if (midiEditorWindow_ != nullptr && midiEditorWindow_->isShowing()
+            && midiEditorWindow_->isActiveWindow())
+        {
+            midiEditorWindow_->showSavingProjectToast();
+        }
+        constexpr int kToastW = 170;
+        constexpr int kToastH = 34;
+        savingProjectToastLabel_.setBounds(
+            juce::jmax(0, (getWidth() - kToastW) / 2), 48, kToastW, kToastH);
+        savingProjectToastLabel_.setVisible(true);
+        savingProjectToastLabel_.toFront(false);
+        if (auto* peer = getPeer())
+        {
+            peer->performAnyPendingRepaintsNow();
+        }
+        juce::Component::SafePointer<juce::Label> toast(&savingProjectToastLabel_);
+        juce::Timer::callAfterDelay(1300, [toast] {
+            if (toast != nullptr)
+            {
+                toast->setVisible(false);
+            }
+        });
     }
 
     void setKeyDiagnosticLine(const juce::String& line) override
@@ -1251,6 +1314,8 @@ private:
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
     /// Count-in / recording line (no always-visible audio device debug; use Audio menu).
     juce::Label countInStatusLabel_;
+    /// Transient "Saving project" indicator (see `showSavingProjectToast`).
+    juce::Label savingProjectToastLabel_;
     std::unique_ptr<RecordingCoordinator> recordingCoordinator_;
     std::unique_ptr<TransportPlayPauseStopController> transportPlayPauseStopController_;
     std::unique_ptr<UndoRedoCoordinator> undoRedoCoordinator_;

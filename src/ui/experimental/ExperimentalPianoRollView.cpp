@@ -638,6 +638,7 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         velocityLaneResizeActive_ = false;
         velocityLaneResizeFromCollapsedKnob_ = false;
         velocityDragAuditionSameStart_ = false;
+        middlePanActive_ = false;
     }
     timelineClip_ = timelineClip;
     session_ = session;
@@ -3145,8 +3146,16 @@ void ExperimentalPianoRollView::applyLeftLocatorRulerX(const float xInTrack, con
     {
         return;
     }
-    const std::int64_t s =
+    std::int64_t s =
         TimelineRulerView::xToSessionSampleClamped(xInTrack, trackWidth, visibleStartSamples_, samplesPerPixel_);
+    // Loop boundaries obey the shared arrangement snap state, exactly like the main-timeline ruler.
+    if (deviceManager_ != nullptr)
+    {
+        s = snapSampleToGridIfEnabled(s,
+                                      session_->getArrangementSnapSettings(),
+                                      session_->getProjectMusicalTime(),
+                                      effectiveDeviceSampleRate(deviceManager_));
+    }
     const std::int64_t t = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
 
     const std::int64_t oldR = session_->getRightLocatorSamples();
@@ -3177,8 +3186,15 @@ void ExperimentalPianoRollView::applyRightLocatorRulerX(const float xInTrack, co
     {
         return;
     }
-    const std::int64_t s =
+    std::int64_t s =
         TimelineRulerView::xToSessionSampleClamped(xInTrack, trackWidth, visibleStartSamples_, samplesPerPixel_);
+    if (deviceManager_ != nullptr)
+    {
+        s = snapSampleToGridIfEnabled(s,
+                                      session_->getArrangementSnapSettings(),
+                                      session_->getProjectMusicalTime(),
+                                      effectiveDeviceSampleRate(deviceManager_));
+    }
     const std::int64_t t = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
 
     const std::int64_t oldR = session_->getRightLocatorSamples();
@@ -3337,6 +3353,23 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         // Any click outside the popup cancels it (the popup itself is a child and never gets here).
         dismissVelocityValueEditor(false);
     }
+    if (e.mods.isMiddleButtonDown())
+    {
+        // Middle-button hand-pan (grab-style); never selects/creates/edits notes.
+        if (useAbsoluteTimeline())
+        {
+            if (!hasValidViewportState())
+            {
+                seedViewportFromMainTimelineOrFallback();
+            }
+            if (hasValidViewportState())
+            {
+                middlePanActive_ = true;
+                middlePanLastX_ = e.position.x;
+            }
+        }
+        return;
+    }
     if (useAbsoluteTimeline() && timelineClip_ != nullptr && instrumentTrackController_ != nullptr
         && !isTimelineClipBindingFresh())
     {
@@ -3470,6 +3503,25 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (middlePanActive_)
+    {
+        if (samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))
+        {
+            const float dx = e.position.x - middlePanLastX_;
+            // Grab-style: content follows the mouse (drag right shows earlier time). Anchor only
+            // advances when at least one sample was consumed, so sub-pixel motion accumulates.
+            const std::int64_t step = (std::int64_t)std::llround((double)dx * samplesPerPixel_);
+            if (step != 0)
+            {
+                middlePanLastX_ = e.position.x;
+                visibleStartSamples_ = juce::jmax(std::int64_t{0}, visibleStartSamples_ - step);
+                sessionTransportSnapshotValid_ = false;
+                syncViewportToBoundClip();
+                repaint();
+            }
+        }
+        return;
+    }
     if (velocityLaneResizeActive_)
     {
         // Dragging up (smaller y) grows the lane; snap unusably small heights to fully minimized.
@@ -3547,6 +3599,11 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
+    if (middlePanActive_)
+    {
+        middlePanActive_ = false;
+        return;
+    }
     if (velocityLaneResizeActive_)
     {
         // A plain click on the minimized knob (no real drag) restores the default lane height.

@@ -52,6 +52,9 @@ public:
 
         /// After MIDI editor changes shared `Session` arrangement snap resolution: refresh main toolbar combo (no extra snap math).
         std::function<void()> syncArrangementSnapToolbarFromSession;
+
+        /// Ctrl+S from the MIDI editor: same save flow as File -> Save Project (`ProjectIoCoordinator`).
+        std::function<void()> invokeSaveProject;
     };
 
     MidiEditorPresenter(Transport& transport,

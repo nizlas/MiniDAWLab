@@ -404,6 +404,10 @@ void ProjectIoCoordinator::saveProject()
     // Normal save: no chooser. Explicit "Save As" / "New project" is deferred.
     if (session_.hasKnownProjectFile())
     {
+        if (callbacks_.showSavingProjectIndicator != nullptr)
+        {
+            callbacks_.showSavingProjectIndicator();
+        }
         callbacks_.snapshotOpenClipViewportFromMidiEditor();
         const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
             return callbacks_.instrumentCtlByTrackId(laneId);
@@ -492,6 +496,10 @@ void ProjectIoCoordinator::saveProject()
                 return;
             }
         }
+        if (callbacks_.showSavingProjectIndicator != nullptr)
+        {
+            callbacks_.showSavingProjectIndicator();
+        }
         callbacks_.snapshotOpenClipViewportFromMidiEditor();
         const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
             return callbacks_.instrumentCtlByTrackId(laneId);
@@ -525,6 +533,33 @@ void ProjectIoCoordinator::saveProject()
 
 void ProjectIoCoordinator::loadProject()
 {
+    const auto fileChooserFlags = juce::FileBrowserComponent::openMode
+                                  | juce::FileBrowserComponent::canSelectFiles;
+    auto chooser = std::make_shared<juce::FileChooser>(
+        "Load project",
+        juce::File{},
+        "*.dalproj;*.mdlproj");
+    chooser->launchAsync(fileChooserFlags, [this, chooser](const juce::FileChooser& fc) {
+        juce::ignoreUnused(chooser);
+        const juce::File f = fc.getResult();
+        if (f.getFullPathName().isEmpty())
+        {
+            return;
+        }
+        loadProjectFromFile(f);
+    });
+}
+
+void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
+{
+    if (!projectFile.existsAsFile())
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon,
+            "Load project",
+            "Project file not found:\n" + projectFile.getFullPathName());
+        return;
+    }
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
     if (device == nullptr)
     {
@@ -535,20 +570,8 @@ void ProjectIoCoordinator::loadProject()
         return;
     }
     const double sampleRate = device->getCurrentSampleRate();
-
-    const auto fileChooserFlags = juce::FileBrowserComponent::openMode
-                                  | juce::FileBrowserComponent::canSelectFiles;
-    auto chooser = std::make_shared<juce::FileChooser>(
-        "Load project",
-        juce::File{},
-        "*.dalproj;*.mdlproj");
-    chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
-        juce::ignoreUnused(chooser);
-        const juce::File f = fc.getResult();
-        if (!f.existsAsFile())
-        {
-            return;
-        }
+    const juce::File f = projectFile;
+    {
         ProjectFileV1 parsedLoad;
         const juce::Result parsedRes = readProjectFile(f, parsedLoad);
         if (!parsedRes.wasOk())
@@ -791,5 +814,5 @@ void ProjectIoCoordinator::loadProject()
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
         }
-    });
+    }
 }

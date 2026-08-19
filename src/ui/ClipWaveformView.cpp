@@ -851,6 +851,11 @@ void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
 // `SessionSnapshot::withClipMoved`, not here.
 void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 {
+    if (e.mods.isMiddleButtonDown())
+    {
+        // Middle button = TrackLanesView hand-pan; never select/edit clips.
+        return;
+    }
     if (laneHost_.onBeginMouseDown)
     {
         laneHost_.onBeginMouseDown(*this);
@@ -1025,6 +1030,10 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
 
 void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (e.mods.isMiddleButtonDown())
+    {
+        return;
+    }
     if (pointerLaneMode_ == PointerLaneMode::TrimLeft && trimPlacedId_.has_value())
     {
         const std::int64_t arrExtent = session_.getArrangementExtentSamples();
@@ -1184,6 +1193,10 @@ void ClipWaveformView::mouseDrag(const juce::MouseEvent& e)
 // publish. Clears cross-lane ghosts and restores invalid-drop cursor on the source lane.
 void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
 {
+    if (e.mods.isMiddleButtonDown())
+    {
+        return;
+    }
     if (laneHost_.clearAllGhosts)
     {
         laneHost_.clearAllGhosts();

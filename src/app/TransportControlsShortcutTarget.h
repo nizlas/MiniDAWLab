@@ -27,4 +27,10 @@ public:
     virtual void invokeJumpToLeftLocatorFromWindowShortcut() = 0;
 
     virtual void invokePlayPauseToggleFromWindowShortcut() = 0;
+
+    /// Ctrl+S: same flow as File -> Save Project (known path saves directly, else Save As chooser).
+    virtual void invokeSaveProjectFromWindowShortcut() = 0;
+
+    /// Command-line ".dalproj" open: load `projectFile` through the normal project-load pipeline.
+    virtual void invokeLoadProjectFileFromStartup(const juce::File& projectFile) = 0;
 };

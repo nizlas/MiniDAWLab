@@ -34,6 +34,8 @@ struct ExperimentalMidiTransportCommands
     std::function<void()> onJumpToLeftLocator;
     /// Same semantics as `TimelineRulerView`'s `isUiInputBlockedByRecording` (count-in + recording).
     std::function<bool()> isUiInputBlockedByRecording;
+    /// Ctrl+S: same flow as File -> Save Project (known path saves directly, else Save As chooser).
+    std::function<void()> onSaveProject;
 };
 
 class ExperimentalMidiEditorWindow final : public juce::DocumentWindow, public juce::KeyListener
@@ -94,6 +96,10 @@ public:
 
     /// Persists piano-roll pan/zoom/Follow on the bound clip (call before project save and when closing).
     void snapshotOpenClipViewportFromRoll() noexcept;
+
+    /// Transient "Saving project" indicator in this window (mirror of the main-window toast); shown
+    /// by the save path when this editor is the active window.
+    void showSavingProjectToast();
 
     bool keyPressed(const juce::KeyPress& key, juce::Component* originating) override;
 

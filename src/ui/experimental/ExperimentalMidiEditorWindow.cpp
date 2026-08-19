@@ -772,6 +772,7 @@ private:
         std::function<void()> onRedoShortcut);
     [[nodiscard]] bool handleTopLevelShortcut(const juce::KeyPress& key);
     void notifyExternalTransportSeek(std::int64_t targetSample) noexcept;
+    void showSavingProjectToast();
 
     [[nodiscard]] std::optional<std::uint64_t> getBoundInstrumentClipId() const noexcept;
 
@@ -904,6 +905,9 @@ private:
     bool userRowsModeOverride_ = false;
 
     ExperimentalMidiTransportCommands transportCommands_{};
+
+    /// Transient "Saving project" indicator (configured lazily in `showSavingProjectToast`).
+    juce::Label savingProjectToastLabel_;
 };
 
 int ExperimentalMidiEditorWindow::Body::getSideStripDefaultWidth() const noexcept
@@ -1128,6 +1132,16 @@ bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyP
         onGlobalRedoRequested_();
         return true;
     }
+    if (cmd && !key.getModifiers().isShiftDown()
+        && (key.getKeyCode() == 's' || key.getKeyCode() == 'S'))
+    {
+        if (transportCommands_.onSaveProject)
+        {
+            transportCommands_.onSaveProject();
+            return true;
+        }
+        return false;
+    }
     if (const bool cKey = (key.getKeyCode() == 'c' || key.getKeyCode() == 'C');
         cmd && cKey && !key.getModifiers().isShiftDown())
     {
@@ -1197,6 +1211,41 @@ void ExperimentalMidiEditorWindow::Body::notifyExternalTransportSeek(const std::
     {
         rv->resetUiPlayheadAnchorToSample(targetSample);
     }
+}
+
+// [Message thread] Mirror of the main-window "Saving project" toast: painted immediately (before the
+// synchronous project write blocks the message loop), auto-hidden shortly after. Purely informational;
+// save errors still surface through the existing alert dialogs.
+void ExperimentalMidiEditorWindow::Body::showSavingProjectToast()
+{
+    if (savingProjectToastLabel_.getParentComponent() == nullptr)
+    {
+        savingProjectToastLabel_.setText("Saving project", juce::dontSendNotification);
+        savingProjectToastLabel_.setJustificationType(juce::Justification::centred);
+        savingProjectToastLabel_.setFont(juce::FontOptions(14.0f));
+        savingProjectToastLabel_.setColour(juce::Label::backgroundColourId, juce::Colour(0xee2a2a33));
+        savingProjectToastLabel_.setColour(juce::Label::textColourId, juce::Colours::white);
+        savingProjectToastLabel_.setColour(juce::Label::outlineColourId,
+                                           juce::Colours::white.withAlpha(0.25f));
+        savingProjectToastLabel_.setInterceptsMouseClicks(false, false);
+        addChildComponent(savingProjectToastLabel_);
+    }
+    constexpr int kToastW = 170;
+    constexpr int kToastH = 34;
+    savingProjectToastLabel_.setBounds(juce::jmax(0, (getWidth() - kToastW) / 2), 48, kToastW, kToastH);
+    savingProjectToastLabel_.setVisible(true);
+    savingProjectToastLabel_.toFront(false);
+    if (auto* peer = getPeer())
+    {
+        peer->performAnyPendingRepaintsNow();
+    }
+    juce::Component::SafePointer<juce::Label> toast(&savingProjectToastLabel_);
+    juce::Timer::callAfterDelay(1300, [toast] {
+        if (toast != nullptr)
+        {
+            toast->setVisible(false);
+        }
+    });
 }
 
 void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
@@ -1580,6 +1629,14 @@ std::optional<std::uint64_t> ExperimentalMidiEditorWindow::getBoundInstrumentCli
         return b->getBoundInstrumentClipId();
     }
     return std::nullopt;
+}
+
+void ExperimentalMidiEditorWindow::showSavingProjectToast()
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->showSavingProjectToast();
+    }
 }
 
 bool ExperimentalMidiEditorWindow::keyPressed(const juce::KeyPress& key, juce::Component* originating)

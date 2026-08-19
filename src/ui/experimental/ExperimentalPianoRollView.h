@@ -317,6 +317,10 @@ private:
     double velocityDragLastAuditionMs_ = 0.0;
     int velocityDragLastAuditionVelocity_ = -1;
 
+    /// Middle-button drag = horizontal hand-pan (grab-style: content follows the mouse).
+    bool middlePanActive_ = false;
+    float middlePanLastX_ = 0.0f;
+
     struct InternalTimelineClipboardItem
     {
         std::int64_t deltaStartTicks = 0;

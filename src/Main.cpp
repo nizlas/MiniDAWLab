@@ -166,6 +166,33 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         *countInOutput_,
         *latencySettingsStore,
         *playbackEngine);
+
+    // ".dalproj" on the command line (Explorer double-click / shell "open"): load it through the
+    // normal project pipeline once the window is up. `getCommandLineParameterArray()` keeps quoted
+    // paths with spaces as one argument and handles Unicode. Missing files surface as a non-fatal
+    // alert inside `loadProjectFromFile`.
+    const juce::StringArray cliArgs = getCommandLineParameterArray();
+    for (const auto& arg : cliArgs)
+    {
+        if (arg.startsWith("-"))
+        {
+            continue;
+        }
+        if (!(arg.endsWithIgnoreCase(".dalproj") || arg.endsWithIgnoreCase(".mdlproj")))
+        {
+            continue;
+        }
+        const juce::File projectFile = juce::File::isAbsolutePath(arg)
+                                           ? juce::File(arg)
+                                           : juce::File::getCurrentWorkingDirectory().getChildFile(arg);
+        juce::MessageManager::callAsync([this, projectFile] {
+            if (mainWindow != nullptr)
+            {
+                mainWindow->openProjectFileFromCommandLine(projectFile);
+            }
+        });
+        break;
+    }
 }
 
 // [Message thread] Reverse of initialise; see file header.

@@ -57,6 +57,12 @@ MidiEditorPresenter::MidiEditorPresenter(Transport& transport,
     c.onStop = [this] { callbacks_.invokeStopOrSeek(); };
     c.onToggleRecord = [this] { callbacks_.invokeRecordToggle(); };
     c.onJumpToLeftLocator = [this] { callbacks_.invokeJumpToLeftLocator(); };
+    c.onSaveProject = [this] {
+        if (callbacks_.invokeSaveProject)
+        {
+            callbacks_.invokeSaveProject();
+        }
+    };
     c.onToggleCycle = [this] {
         if (callbacks_.isUiInputBlockedByRecording != nullptr && callbacks_.isUiInputBlockedByRecording())
         {

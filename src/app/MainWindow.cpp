@@ -76,6 +76,14 @@ void MainWindow::closeButtonPressed()
     juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
+void MainWindow::openProjectFileFromCommandLine(const juce::File& projectFile)
+{
+    if (shortcutTargetFromContent_ != nullptr)
+    {
+        shortcutTargetFromContent_->invokeLoadProjectFileFromStartup(projectFile);
+    }
+}
+
 void MainWindow::activeWindowStatusChanged()
 {
     juce::DocumentWindow::activeWindowStatusChanged();
@@ -160,6 +168,16 @@ bool MainWindow::routeShortcut(const juce::KeyPress& key)
     }
     if (!editorHasFocus)
     {
+        if (key.getModifiers().isCommandDown() && !key.getModifiers().isShiftDown()
+            && (key.getKeyCode() == 's' || key.getKeyCode() == 'S'))
+        {
+            if (shortcutTargetFromContent_ != nullptr)
+            {
+                shortcutTargetFromContent_->invokeSaveProjectFromWindowShortcut();
+                juce::Logger::writeToLog("[Shortcut] Ctrl+S save project");
+                return true;
+            }
+        }
         if (key.isKeyCode(juce::KeyPress::deleteKey))
         {
             if (shortcutTargetFromContent_ != nullptr)

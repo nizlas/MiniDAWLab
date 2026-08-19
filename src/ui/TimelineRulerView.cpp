@@ -19,6 +19,7 @@
 
 #include "ui/TimelineRulerView.h"
 
+#include "domain/ArrangementMusicalSnap.h"
 #include "ui/TimelineLocatorPainter.h"
 #include "transport/Transport.h"
 
@@ -182,8 +183,13 @@ void TimelineRulerView::applyLeftLocatorForLocalX(const float x) noexcept
         return;
     }
     const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
+    // Loop boundaries obey the same arrangement snap state as clip edits (free when snap is off).
+    const std::int64_t snapped = snapSampleToGridIfEnabled(s,
+                                                           session_.getArrangementSnapSettings(),
+                                                           session_.getProjectMusicalTime(),
+                                                           effectiveDisplaySampleRate(deviceManager_));
     const std::int64_t t
-        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), snapped);
 
     // First-creation auto-enable: only fire when the user is creating a valid range from a state
     // where no R locator has ever been set (R == 0). Once R is non-zero, the cycle on/off state
@@ -228,8 +234,13 @@ void TimelineRulerView::applyRightLocatorForLocalX(const float x) noexcept
         return;
     }
     const std::int64_t s = xToSessionSampleClamped(x, w, visStart, spp);
+    // Same snap treatment as the left locator: shared arrangement snap state, no loop-only setting.
+    const std::int64_t snapped = snapSampleToGridIfEnabled(s,
+                                                           session_.getArrangementSnapSettings(),
+                                                           session_.getProjectMusicalTime(),
+                                                           effectiveDisplaySampleRate(deviceManager_));
     const std::int64_t t
-        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
+        = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), snapped);
 
     const std::int64_t oldR = session_.getRightLocatorSamples();
 

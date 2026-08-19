@@ -227,6 +227,11 @@ private:
 
     void mouseDown(const juce::MouseEvent& e) override
     {
+        if (e.mods.isMiddleButtonDown())
+        {
+            // Middle button = TrackLanesView hand-pan; never select/edit MIDI clips.
+            return;
+        }
         hoverEventTrimCueId_.reset();
         hoverLeftTrimHandleId_.reset();
         hoverRightTrimHandleId_.reset();
@@ -401,6 +406,10 @@ private:
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (e.mods.isMiddleButtonDown())
+        {
+            return;
+        }
         if (trimLaneGestureActive_)
         {
             owner_.clearInstrumentMidiCrossTrackDropGhosts();
@@ -508,6 +517,10 @@ private:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
+        if (e.mods.isMiddleButtonDown())
+        {
+            return;
+        }
         owner_.clearInstrumentMidiCrossTrackDropGhosts();
         restoreNormalCursorAfterInvalidMidiDrop();
         InstrumentTrackController* const ac = activeControllerNullable();
@@ -720,6 +733,10 @@ private:
 
     void mouseDoubleClick(const juce::MouseEvent& e) override
     {
+        if (e.mods.isMiddleButtonDown())
+        {
+            return;
+        }
         InstrumentTrackController* const ac = activeControllerNullable();
         if (ac == nullptr)
         {

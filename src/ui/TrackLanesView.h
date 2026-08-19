@@ -247,6 +247,21 @@ public:
 private:
     void timerCallback() override;
 
+    /// Middle-button drag = horizontal hand-pan (grab-style: content follows the mouse). Registered
+    /// with `addMouseListener(..., true)` so the gesture works over child lanes/headers too; the
+    /// children themselves ignore middle-button events (see `ClipWaveformView` / `MidiEventLane`).
+    struct MiddlePanMouseListener final : juce::MouseListener
+    {
+        explicit MiddlePanMouseListener(TrackLanesView& owner) noexcept : owner_(owner) {}
+        void mouseDown(const juce::MouseEvent& e) override;
+        void mouseDrag(const juce::MouseEvent& e) override;
+        void mouseUp(const juce::MouseEvent& e) override;
+        TrackLanesView& owner_;
+    };
+    void beginMiddlePan(float xInLanes) noexcept;
+    void updateMiddlePan(float xInLanes) noexcept;
+    void endMiddlePan() noexcept;
+
     // [Message thread] When not recording, clears accumulated preview; when recording, drains the
     // FIFO to `recordingPreviewPeaks_` and updates the matching lane’s overlay.
     void updateRecordingPreviewOverlaysFromRecorder();
@@ -302,6 +317,10 @@ private:
     int defaultRowHeightPx_ = 96;
     int maxRowHeightPx_ = 480;
     int verticalScrollOffsetPx_ = 0;
+
+    MiddlePanMouseListener middlePanListener_{ *this };
+    bool middlePanActive_ = false;
+    float middlePanLastX_ = 0.0f;
 
     std::unordered_map<TrackId, int> perTrackRowHeightPx_;
 

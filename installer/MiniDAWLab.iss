@@ -26,6 +26,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=no
 UninstallDisplayIcon={app}\MiniDAWLab.exe
+; .dalproj file association below ([Registry]) — tells Explorer to refresh icons/associations.
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -38,6 +40,14 @@ Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "A
 Source: "..\dist\DanielssonsAudioLab-{#AppVersion}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 ; Microsoft Visual C++ 2015-2022 Redistributable (x64) — run silently before first launch
 Source: "..\dist\vendor\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+
+[Registry]
+; Associate .dalproj with the app: double-click in Explorer launches MiniDAWLab.exe "<path>",
+; which loads the project via the command-line open path (see Main.cpp).
+Root: HKA; Subkey: "Software\Classes\.dalproj"; ValueType: string; ValueName: ""; ValueData: "DanielssonsAudioLab.Project"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\DanielssonsAudioLab.Project"; ValueType: string; ValueName: ""; ValueData: "Danielssons Audio Lab Project"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\DanielssonsAudioLab.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\MiniDAWLab.exe,0"
+Root: HKA; Subkey: "Software\Classes\DanielssonsAudioLab.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\MiniDAWLab.exe"" ""%1"""
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\MiniDAWLab.exe"

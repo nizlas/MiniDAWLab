@@ -36,6 +36,9 @@ public:
 
         std::function<std::optional<ProjectFileMainWindowBoundsV1>()> getMainWindowBoundsForProjectSave;
         std::function<void(const ProjectFileV1&)> applyMainWindowBoundsFromLoadedProject;
+
+        /// Optional: transient "Saving project" indicator, invoked right before the project file write.
+        std::function<void()> showSavingProjectIndicator;
     };
 
     ProjectIoCoordinator(Transport& transport,
@@ -47,6 +50,11 @@ public:
 
     void saveProject();
     void loadProject();
+
+    /// [Message thread] Load `projectFile` directly (no chooser) — same pipeline as `loadProject`,
+    /// so project-relative paths resolve identically. Used by the command-line ".dalproj" open path.
+    /// Shows a non-fatal alert when the file is missing or unreadable.
+    void loadProjectFromFile(const juce::File& projectFile);
 
 private:
     Transport& transport_;

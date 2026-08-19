@@ -205,6 +205,8 @@ TrackLanesView::TrackLanesView(
     , waveformCache_(waveformCache)
 {
     setOpaque(true);
+    // Middle-drag hand-pan across the whole lanes band, including over child lanes/headers.
+    addMouseListener(&middlePanListener_, true);
     syncTracksFromSession();
     startTimerHz(kRecordingPreviewTimerHz);
 }
@@ -2222,6 +2224,78 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
     }
     const int lineW = juce::jmin(kTrackHeaderWidth, getWidth());
     g.fillRect(0, yy, lineW, 2);
+}
+
+void TrackLanesView::MiddlePanMouseListener::mouseDown(const juce::MouseEvent& e)
+{
+    if (!e.mods.isMiddleButtonDown())
+    {
+        return;
+    }
+    owner_.beginMiddlePan(e.getEventRelativeTo(&owner_).position.x);
+}
+
+void TrackLanesView::MiddlePanMouseListener::mouseDrag(const juce::MouseEvent& e)
+{
+    if (!owner_.middlePanActive_ || !e.mods.isMiddleButtonDown())
+    {
+        return;
+    }
+    owner_.updateMiddlePan(e.getEventRelativeTo(&owner_).position.x);
+}
+
+void TrackLanesView::MiddlePanMouseListener::mouseUp(const juce::MouseEvent& e)
+{
+    juce::ignoreUnused(e);
+    owner_.endMiddlePan();
+}
+
+void TrackLanesView::beginMiddlePan(const float xInLanes) noexcept
+{
+    for (const auto& lane : lanes_)
+    {
+        if (lane != nullptr && lane->isTimelineEditGestureInProgress())
+        {
+            return;
+        }
+    }
+    middlePanActive_ = true;
+    middlePanLastX_ = xInLanes;
+}
+
+void TrackLanesView::updateMiddlePan(const float xInLanes) noexcept
+{
+    const std::int64_t arr = session_.getArrangementExtentSamples();
+    if (arr <= 0)
+    {
+        return;
+    }
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (spp <= 0.0)
+    {
+        return;
+    }
+    const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+    if (tw <= 0)
+    {
+        return;
+    }
+    const float dx = xInLanes - middlePanLastX_;
+    // Grab-style pan: content follows the mouse, so dragging right shows earlier time.
+    const std::int64_t step = -(std::int64_t)std::llround((double)dx * spp);
+    if (step == 0)
+    {
+        // Keep the anchor so sub-pixel movement accumulates instead of getting lost at deep zoom-in.
+        return;
+    }
+    middlePanLastX_ = xInLanes;
+    timelineViewport_.panBySamples(step, (double)tw, arr);
+    repaint();
+}
+
+void TrackLanesView::endMiddlePan() noexcept
+{
+    middlePanActive_ = false;
 }
 
 void TrackLanesView::mouseWheelMove(
