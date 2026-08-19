@@ -632,6 +632,118 @@ void AddInstrumentTrackCoordinator::rescanInstrumentPluginsFromMenu()
     }).detach();
 }
 
+namespace
+{
+    void showPluginCacheImportSummaryDialog(const mini_daw::Vst3CacheImportSummary& summary)
+    {
+        const juce::String logPath = mini_daw::getPluginCacheImportLogFile().getFullPathName();
+
+        if (summary.errorMessage.isNotEmpty())
+        {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                   "Import plugin cache",
+                                                   summary.errorMessage + "\n\nLog: " + logPath);
+            return;
+        }
+
+        juce::StringArray imported;
+        juce::StringArray notFound;
+        for (const auto& b : summary.bundles)
+        {
+            if (b.written)
+            {
+                imported.add(b.displayName + (b.matchMethod == "bundle-name" ? " (path repaired)" : ""));
+            }
+            else
+            {
+                notFound.add(b.displayName);
+            }
+        }
+
+        juce::String msg;
+        if (!summary.anyWritten)
+        {
+            msg << "Plugin cache import found no matching plugins on this computer.\n\n";
+        }
+        else if (notFound.isEmpty())
+        {
+            msg << "Plugin cache import complete.\n\n";
+        }
+        else
+        {
+            msg << "Plugin cache import partially completed.\n\n";
+        }
+
+        if (!imported.isEmpty())
+        {
+            msg << "Imported " << juce::String(imported.size()) << " plugin description bundle(s):\n";
+            for (const auto& s : imported)
+            {
+                msg << "- " << s << "\n";
+            }
+            msg << "\n";
+        }
+        if (!notFound.isEmpty())
+        {
+            msg << "Not found on this computer:\n";
+            for (const auto& s : notFound)
+            {
+                msg << "- " << s << "\n";
+            }
+            msg << "\nInstall the plugin(s) or check your VST3 folders, then import again.\n\n";
+        }
+        if (summary.anyWritten)
+        {
+            msg << "Local cache was written to:\n" << summary.localCacheFile.getFullPathName() << "\n\n";
+        }
+        msg << "Log: " << logPath;
+
+        juce::AlertWindow::showMessageBoxAsync(
+            summary.anyWritten ? juce::AlertWindow::InfoIcon : juce::AlertWindow::WarningIcon,
+            "Import plugin cache",
+            msg);
+    }
+} // namespace
+
+void AddInstrumentTrackCoordinator::importPluginCacheFromMenu()
+{
+    bool expectedBusy = false;
+    if (!pluginCacheImportBusy_.compare_exchange_strong(expectedBusy, true))
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                               "Import plugin cache",
+                                               "A plugin cache import is already running.");
+        return;
+    }
+
+    pluginCacheImportChooser_ = std::make_unique<juce::FileChooser>(
+        "Import plugin cache",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+        "*.xml");
+
+    AddInstrumentTrackCoordinator* const self = this;
+    pluginCacheImportChooser_->launchAsync(
+        juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+        [self](const juce::FileChooser& chooser) {
+            const juce::File chosen = chooser.getResult();
+            if (chosen == juce::File{})
+            {
+                self->pluginCacheImportBusy_.store(false);
+                return;
+            }
+            // Import scans local VST3 folders on disk; keep it off the message thread.
+            // Same lifetime pattern as rescanInstrumentPluginsFromMenu (coordinator outlives the UI).
+            std::thread([self, chosen] {
+                const mini_daw::Vst3CacheImportSummary summary
+                    = mini_daw::importExperimentalVst3DescriptionsCacheFileWithPathRepair(chosen);
+                juce::MessageManager::callAsync([self, summary] {
+                    self->pluginCacheImportBusy_.store(false);
+                    showPluginCacheImportSummaryDialog(summary);
+                });
+            }).detach();
+        });
+}
+
 void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
     const mini_daw::InstrumentCatalogEntry& entry)
 {

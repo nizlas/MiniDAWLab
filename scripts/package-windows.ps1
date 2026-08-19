@@ -52,7 +52,12 @@ $stageDir = Join-Path $distRoot "$packageBundleName-$Version"
 $zipPath = Join-Path $distRoot "$packageBundleName-$Version.zip"
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build-windows.ps1') -Config Release
+    # Run in a separate process: build-windows.ps1 ends with `exit`, which would otherwise
+    # terminate this script before staging/zip/installer steps run.
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build-windows.ps1') -Config Release
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Release build failed (exit $LASTEXITCODE)."
+    }
 }
 
 if (-not (Test-Path -LiteralPath $releaseExe)) {

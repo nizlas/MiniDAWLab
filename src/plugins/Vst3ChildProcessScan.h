@@ -205,7 +205,8 @@ struct Vst3GrooveCacheLoadCandidate
                                                      juce::String& infoOrWarningOut);
 
 /// Merge / replace one `bundle` in **v2 only** (`experimental-vst3-descriptions-v2.xml`), via temp file + replace.
-/// Call only after a **successful** OOP scan. Never writes or modifies the v1 legacy file.
+/// Call only with known-good descriptions: after a **successful** OOP scan, or from cache import
+/// (`importExperimentalVst3DescriptionsCacheFileWithPathRepair`). Never writes or modifies the v1 legacy file.
 void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
                                                   const std::vector<juce::PluginDescription>& descriptions,
                                                   Vst3ExperimentalCacheScanOutcome scanOutcome
@@ -218,6 +219,48 @@ void mergeExperimentalVst3DescriptionsCacheBundle(const juce::File& vst3Bundle,
 [[nodiscard]] bool mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
                                               const juce::PluginDescription& forPlugin,
                                               const PluginCapabilities& caps);
+
+/// One imported bundle outcome for "Import plugin cache..." (summary dialog + plugin-cache-import.log).
+struct Vst3CacheImportBundleResult
+{
+    /// First description name from the imported bundle, else the bundle file name.
+    juce::String displayName;
+    /// `vst3Path` as stored in the imported file (typically from another machine).
+    juce::String originalPath;
+    /// Local bundle the repaired entry points at; empty when no local match was found.
+    juce::String resolvedLocalPath;
+    /// "exact-path" | "bundle-name" | "not-found" | "no-descriptions".
+    juce::String matchMethod;
+    int descriptionCount = 0;
+    /// True when the repaired bundle could be read back from the local v2 cache after the merge.
+    bool written = false;
+};
+
+/// Result of `importExperimentalVst3DescriptionsCacheFileWithPathRepair`.
+struct Vst3CacheImportSummary
+{
+    bool anyWritten = false;
+    /// Fatal problems only (missing/unreadable/wrong file type); per-bundle misses are in `bundles`.
+    juce::String errorMessage;
+    int cacheVersionParsed = 0;
+    int bundlesInFile = 0;
+    std::vector<Vst3CacheImportBundleResult> bundles;
+    /// Local v2 cache file that repaired bundles were merged into.
+    juce::File localCacheFile;
+};
+
+/// `%APPDATA%\\MiniDAWLab\\plugin-cache-import.log` — appended by cache import.
+[[nodiscard]] juce::File getPluginCacheImportLogFile();
+
+/// "Import plugin cache...": parse a v1/v2 descriptions-cache XML (possibly exported from another machine),
+/// resolve each `bundle` against local VST3 folders (exact stored path, else recursive bundle-name search in
+/// standard + user VST3 folders), rewrite machine-specific paths (`vst3Path`, `fileOrIdentifier` including
+/// inner-module suffixes) to the local install, and merge each repaired bundle into the local v2 cache
+/// atomically (existing entries for other bundles are preserved). Never runs `findAllTypesForFile` or the
+/// OOP scan — this is the supported route for Steinberg products whose raw scan crashes.
+/// Safe from a background thread. Logs to plugin-cache-import.log.
+[[nodiscard]] Vst3CacheImportSummary importExperimentalVst3DescriptionsCacheFileWithPathRepair(
+    const juce::File& importFile);
 
 /// Dev / CI: in-memory + temp-file checks for v1/v2 cache XML (does not touch the user cache file).
 [[nodiscard]] bool verifyExperimentalVst3DescriptionsCachePhase2() noexcept;

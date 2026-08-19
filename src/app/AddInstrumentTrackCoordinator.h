@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
+
+#include <juce_gui_basics/juce_gui_basics.h>
 
 #include "plugins/Vst3ChildProcessScan.h"
 
@@ -41,6 +44,10 @@ public:
     /// Slice 1: discovery/catalog only — no track creation. Runs OOP scan on a background thread.
     void rescanInstrumentPluginsFromMenu();
 
+    /// "Import plugin cache...": pick a portable descriptions-cache XML, repair paths to this machine and
+    /// merge into the local v2 cache on a background thread (never runs the OOP scan). Shows a summary dialog.
+    void importPluginCacheFromMenu();
+
 private:
     void finishAddGrooveAgentInstrumentTrackAfterInstrumentResolved();
     void beginAsyncGrooveAgentOopScanForAddTrack(mini_daw::Vst3GrooveCacheLoadCandidate v1Cand);
@@ -51,4 +58,7 @@ private:
     Refs refs_;
     Callbacks callbacks_;
     std::atomic<bool> instrumentCatalogRescanBusy_{false};
+    std::atomic<bool> pluginCacheImportBusy_{false};
+    /// Kept alive across the async native dialog (juce::FileChooser requirement).
+    std::unique_ptr<juce::FileChooser> pluginCacheImportChooser_;
 };

@@ -696,6 +696,7 @@ public:
             menu.addItem(3, "Add Group Track");
             juce::PopupMenu instrMenu;
             instrMenu.addItem(99, "Rescan instrument plugins...");
+            instrMenu.addItem(98, "Import plugin cache...");
             instrMenu.addSeparator();
             instrMenu.addItem(100, "Groove Agent SE");
             instrMenu.addItem(101, "HALion Sonic");
@@ -745,6 +746,14 @@ public:
                         if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
                         {
                             safeThis->addInstrumentTrackCoordinator_->rescanInstrumentPluginsFromMenu();
+                        }
+                        return;
+                    }
+                    if (result == 98)
+                    {
+                        if (safeThis->addInstrumentTrackCoordinator_ != nullptr)
+                        {
+                            safeThis->addInstrumentTrackCoordinator_->importPluginCacheFromMenu();
                         }
                         return;
                     }

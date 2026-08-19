@@ -1,5 +1,7 @@
 #include "plugins/Vst3ChildProcessScan.h"
 
+#include "plugins/PluginDiscovery.h"
+
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_cryptography/juce_cryptography.h>
 
@@ -1814,6 +1816,237 @@ bool mergeCapabilitiesIntoBundle(const juce::File& vst3Bundle,
         writeVst3OopScanDiagnosticLogLine("v2 capability merge: FAILED reason=exception");
         return false;
     }
+}
+
+// -----------------------------------------------------------------------------
+// "Import plugin cache..." — portable cache import with local path repair.
+// Never runs findAllTypesForFile / OOP scan (the point is to avoid the crashing
+// Steinberg raw-scan path on machines without a good cache).
+// -----------------------------------------------------------------------------
+
+juce::File getPluginCacheImportLogFile()
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("MiniDAWLab")
+        .getChildFile("plugin-cache-import.log");
+}
+
+namespace
+{
+    void appendPluginCacheImportLogLine(const juce::String& message)
+    {
+        try
+        {
+            const juce::File f = getPluginCacheImportLogFile();
+            if (!f.getParentDirectory().isDirectory())
+            {
+                (void)f.getParentDirectory().createDirectory();
+            }
+            (void)f.appendText(juce::Time::getCurrentTime().toISO8601(true) + " " + message + "\n");
+        }
+        catch (...)
+        {
+        }
+    }
+
+    [[nodiscard]] juce::FileSearchPath combinedLocalVst3SearchPathsForImport()
+    {
+        juce::FileSearchPath combined = getStandardVst3SearchPaths();
+        const juce::FileSearchPath user = loadUserVst3SearchPaths();
+        for (int i = 0; i < user.getNumPaths(); ++i)
+        {
+            combined.add(user[i], -1);
+        }
+        return combined;
+    }
+
+    /// Recursive bundle-name search (e.g. "Groove Agent SE.vst3") in standard + user VST3 folders.
+    [[nodiscard]] juce::File findLocalVst3BundleByFileName(const juce::String& bundleFileName)
+    {
+        if (bundleFileName.isEmpty() || !bundleFileName.endsWithIgnoreCase(".vst3"))
+        {
+            return {};
+        }
+        const juce::FileSearchPath roots = combinedLocalVst3SearchPathsForImport();
+        for (int i = 0; i < roots.getNumPaths(); ++i)
+        {
+            const juce::File root = roots[i];
+            if (!root.isDirectory())
+            {
+                continue;
+            }
+            const juce::File direct = root.getChildFile(bundleFileName);
+            if (direct.exists())
+            {
+                return direct;
+            }
+            for (const auto& entry :
+                 juce::RangedDirectoryIterator(root, true, "*", juce::File::findFilesAndDirectories))
+            {
+                const juce::File f = entry.getFile();
+                if (f.getFileName().equalsIgnoreCase(bundleFileName))
+                {
+                    return f;
+                }
+            }
+        }
+        return {};
+    }
+
+    /// Rewrite one imported description's machine-specific paths onto the resolved local bundle.
+    /// An inner-module suffix (e.g. `Contents\x86_64-win\X.vst3`) is kept only when it exists locally;
+    /// otherwise `fileOrIdentifier` falls back to the local bundle root (in-memory Groove/HALion path
+    /// repair re-resolves inner modules at load time).
+    void repairImportedDescriptionPathsToLocalBundle(juce::PluginDescription& d,
+                                                     const juce::String& originalBundlePath,
+                                                     const juce::File& localBundle)
+    {
+        const juce::String local = localBundle.getFullPathName();
+        const juce::String stored = d.fileOrIdentifier;
+        if (originalBundlePath.isNotEmpty() && stored.startsWithIgnoreCase(originalBundlePath))
+        {
+            const juce::String candidate = local + stored.substring(originalBundlePath.length());
+            d.fileOrIdentifier = juce::File(candidate).exists() ? candidate : local;
+        }
+        else if (!juce::File(stored).exists())
+        {
+            d.fileOrIdentifier = local;
+        }
+        d.lastFileModTime = localBundle.getLastModificationTime();
+    }
+} // namespace
+
+Vst3CacheImportSummary importExperimentalVst3DescriptionsCacheFileWithPathRepair(const juce::File& importFile)
+{
+    Vst3CacheImportSummary summary;
+    summary.localCacheFile = getExperimentalVst3DescriptionsV2CacheFile();
+
+    appendPluginCacheImportLogLine("import begin file=\"" + importFile.getFullPathName() + "\"");
+
+    if (!importFile.existsAsFile())
+    {
+        summary.errorMessage = "The selected file does not exist.";
+        appendPluginCacheImportLogLine("import aborted reason=file_missing");
+        return summary;
+    }
+
+    const std::unique_ptr<juce::XmlElement> root = juce::parseXML(importFile);
+    if (root == nullptr)
+    {
+        summary.errorMessage = "The selected file could not be read as XML.";
+        appendPluginCacheImportLogLine("import aborted reason=xml_parse_failed");
+        return summary;
+    }
+    if (!root->hasTagName(vst3_experimental_desc_cache::experimentalCacheRootTag()))
+    {
+        summary.errorMessage = "The selected file is not a MiniDAWLab plugin description cache.\n"
+                               "Expected an experimental-vst3-descriptions XML file "
+                               "(the instrument catalog file is not supported by this importer).";
+        appendPluginCacheImportLogLine("import aborted reason=unexpected_root tag=\"" + root->getTagName() + "\"");
+        return summary;
+    }
+
+    summary.cacheVersionParsed = root->getIntAttribute("version", 0);
+    appendPluginCacheImportLogLine("import parsed cacheVersion=" + juce::String(summary.cacheVersionParsed));
+
+    {
+        const juce::FileSearchPath roots = combinedLocalVst3SearchPathsForImport();
+        for (int i = 0; i < roots.getNumPaths(); ++i)
+        {
+            appendPluginCacheImportLogLine("local vst3 folder: \"" + roots[i].getFullPathName() + "\"");
+        }
+    }
+
+    for (juce::XmlElement* bundle = root->getFirstChildElement(); bundle != nullptr;
+         bundle = bundle->getNextElement())
+    {
+        if (!bundle->hasTagName("bundle"))
+        {
+            continue;
+        }
+        ++summary.bundlesInFile;
+
+        Vst3CacheImportBundleResult r;
+        r.originalPath = bundle->getStringAttribute("vst3Path");
+
+        std::vector<juce::PluginDescription> descriptions;
+        vst3_experimental_desc_cache::collectPluginDescriptionsFromBundle(bundle, descriptions);
+        r.descriptionCount = (int)descriptions.size();
+        r.displayName = (!descriptions.empty() && descriptions.front().name.isNotEmpty())
+                            ? descriptions.front().name
+                            : juce::File(r.originalPath).getFileNameWithoutExtension();
+
+        if (descriptions.empty())
+        {
+            r.matchMethod = "no-descriptions";
+            appendPluginCacheImportLogLine(
+                "bundle \"" + r.originalPath + "\": skipped (no plugin descriptions in imported entry)");
+            summary.bundles.push_back(std::move(r));
+            continue;
+        }
+
+        juce::File localBundle;
+        const juce::File originalAsFile(r.originalPath);
+        if (r.originalPath.isNotEmpty() && originalAsFile.exists())
+        {
+            localBundle = originalAsFile;
+            r.matchMethod = "exact-path";
+        }
+        else
+        {
+            localBundle = findLocalVst3BundleByFileName(originalAsFile.getFileName());
+            r.matchMethod = localBundle.exists() ? "bundle-name" : "not-found";
+        }
+
+        if (!localBundle.exists())
+        {
+            appendPluginCacheImportLogLine("bundle \"" + r.originalPath + "\" name=\"" + r.displayName
+                                           + "\": NOT FOUND in local vst3 folders");
+            summary.bundles.push_back(std::move(r));
+            continue;
+        }
+        r.resolvedLocalPath = localBundle.getFullPathName();
+
+        for (auto& d : descriptions)
+        {
+            repairImportedDescriptionPathsToLocalBundle(d, r.originalPath, localBundle);
+        }
+
+        // Atomic per-bundle merge into the local v2 cache (temp + replace): entries for other bundles
+        // are preserved, a matching entry is replaced, and the fingerprint is recomputed from the
+        // local bundle. Imported <capabilities> are not carried over (not canonical for production).
+        mergeExperimentalVst3DescriptionsCacheBundle(
+            localBundle, descriptions, Vst3ExperimentalCacheScanOutcome::Success);
+
+        std::vector<juce::PluginDescription> readBack;
+        r.written = tryLoadExperimentalVst3DescriptionsFromV2Cache(localBundle, readBack) && !readBack.empty();
+        summary.anyWritten = summary.anyWritten || r.written;
+
+        appendPluginCacheImportLogLine(
+            "bundle \"" + r.originalPath + "\" name=\"" + r.displayName + "\": match=" + r.matchMethod
+            + " local=\"" + r.resolvedLocalPath + "\" descriptions=" + juce::String(r.descriptionCount)
+            + " written=" + (r.written ? "yes" : "no"));
+
+        summary.bundles.push_back(std::move(r));
+    }
+
+    if (summary.bundlesInFile == 0 && summary.errorMessage.isEmpty())
+    {
+        summary.errorMessage = "The selected cache file contains no plugin bundles.";
+    }
+
+    int writtenCount = 0;
+    for (const auto& b : summary.bundles)
+    {
+        if (b.written)
+        {
+            ++writtenCount;
+        }
+    }
+    appendPluginCacheImportLogLine("import done bundlesInFile=" + juce::String(summary.bundlesInFile)
+                                   + " written=" + juce::String(writtenCount) + " output=\""
+                                   + summary.localCacheFile.getFullPathName() + "\"");
+    return summary;
 }
 
 bool verifyExperimentalVst3DescriptionsCachePhase2() noexcept
