@@ -25,6 +25,11 @@ class Session;
 class Transport;
 class TimelineViewportModel;
 
+/// Shared note-strength color: velocity 1..127 mapped muted blue (soft) -> violet/muted red (mid)
+/// -> bright red (hard). Input is clamped. Used for grid notes/hits and velocity-lane bars so the
+/// same value always reads as the same hue.
+[[nodiscard]] juce::Colour colourForMidiVelocity(int velocity) noexcept;
+
 /// Drum hits mode: diamonds at step centers; piano-style rows (range is **per-instance**, see `setEditablePitchRange`).
 /// I3d1: when bound to an `InstrumentMidiClip` + session/transport, X is **session-absolute samples**
 /// with an **independent** zoom/pan (not `TimelineViewportModel`).
@@ -225,6 +230,45 @@ private:
     void updateTimelineNoteMoveGesture(juce::Point<int> localPos);
     void finishTimelineNoteMoveGesture();
     void clearTimelineNoteMovePending() noexcept;
+
+    // --- Velocity controller lane (bottom strip; edits TimelineMidiNote velocity only) ---
+    /// Fixed height in this slice; resize/minimize is a later slice.
+    static constexpr int kVelocityLaneHeight = 96;
+    static constexpr int kVelocityBarWidthPx = 5;
+    static constexpr int kVelocityBarHitToleranceX = 4;
+
+    /// Bar area right of the side strip (empty when the component is too short to fit the lane).
+    [[nodiscard]] juce::Rectangle<int> velocityLaneBounds() const;
+    /// Bottom-left corner under the keyboard strip ("Velocity" label chrome).
+    [[nodiscard]] juce::Rectangle<int> velocityLaneHeaderBounds() const;
+    /// Lane minus vertical padding: bar height 0..127 maps into this rect.
+    [[nodiscard]] juce::Rectangle<int> velocityLaneInnerBounds() const;
+    /// 0 when the component is too short (always keeps a few pitch rows visible).
+    [[nodiscard]] int velocityLaneTotalHeight() const noexcept;
+    /// Lane bars/editing need the absolute-timeline clip binding; legacy step grid shows a hint only.
+    [[nodiscard]] bool velocityLaneEditingAvailable() const noexcept;
+    [[nodiscard]] int velocityFromLaneY(int y) const noexcept;
+    /// Bar onset X for eligible note (in pitch range + inside clip span); nullopt when not drawable.
+    [[nodiscard]] std::optional<float> velocityBarCentreXForNoteIndex(int noteIndex) const;
+    /// Nearest bar within `kVelocityBarHitToleranceX`; ties at the same x prefer the higher velocity
+    /// (its top is what the cursor grabs). `selectedOnly` restricts to the current selection.
+    [[nodiscard]] std::optional<int> findVelocityBarIndexNearX(int x, bool selectedOnly) const;
+    void handleVelocityLaneMouseDown(const juce::MouseEvent& e);
+    void updateVelocityLaneDrag(juce::Point<int> localPos);
+    void finishVelocityLaneDragGesture();
+    void paintVelocityLane(juce::Graphics& g);
+
+    struct VelocityDragCapture
+    {
+        int index = -1;
+        int originalVelocity = 100;
+    };
+    bool velocityLaneDragActive_ = false;
+    /// Single capture -> absolute edit (bar top tracks cursor); multiple -> same delta applied to all.
+    std::vector<VelocityDragCapture> velocityDragCaptures_;
+    int velocityDragPrimaryIndex_ = -1;
+    /// `velocityFromLaneY` at mouseDown; delta edits are relative to this so grabbing a bar never jumps.
+    int velocityDragAnchorVelocity_ = 0;
 
     struct InternalTimelineClipboardItem
     {

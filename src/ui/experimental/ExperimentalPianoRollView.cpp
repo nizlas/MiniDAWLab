@@ -357,6 +357,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::keyboardBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
+    r.removeFromBottom(velocityLaneTotalHeight());
     return r.removeFromLeft(keyboardColumnWidth());
 }
 
@@ -364,8 +365,42 @@ juce::Rectangle<int> ExperimentalPianoRollView::gridBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
+    r.removeFromBottom(velocityLaneTotalHeight());
     r.removeFromLeft(sideStripTotalNow());
     return r;
+}
+
+int ExperimentalPianoRollView::velocityLaneTotalHeight() const noexcept
+{
+    // Never let the lane swallow the grid: always keep at least a few pitch rows visible.
+    const int minGridPx = kRowHeight * 3;
+    const int available = getHeight() - timelineRulerHeight() - minGridPx;
+    return juce::jlimit(0, kVelocityLaneHeight, available);
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneBounds() const
+{
+    auto r = getLocalBounds();
+    r.removeFromTop(timelineRulerHeight());
+    auto lane = r.removeFromBottom(velocityLaneTotalHeight());
+    lane.removeFromLeft(sideStripTotalNow());
+    return lane;
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneHeaderBounds() const
+{
+    auto r = getLocalBounds();
+    r.removeFromTop(timelineRulerHeight());
+    auto lane = r.removeFromBottom(velocityLaneTotalHeight());
+    return lane.removeFromLeft(sideStripTotalNow());
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneInnerBounds() const
+{
+    auto inner = velocityLaneBounds();
+    inner.removeFromTop(6);
+    inner.removeFromBottom(4);
+    return inner;
 }
 
 std::int64_t ExperimentalPianoRollView::visibleEndSamples() const noexcept
@@ -400,6 +435,9 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         timelineNoteMoveActive_ = false;
         timelineMoveCaptures_.clear();
         timelineInternalClipboard_.clear();
+        velocityLaneDragActive_ = false;
+        velocityDragCaptures_.clear();
+        velocityDragPrimaryIndex_ = -1;
     }
     timelineClip_ = timelineClip;
     session_ = session;
@@ -1983,6 +2021,389 @@ void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
     }
 }
 
+juce::Colour colourForMidiVelocity(const int velocity) noexcept
+{
+    const float t = (float)(juce::jlimit(1, 127, velocity) - 1) / 126.0f;
+    const juce::Colour low(0xff5d7fae);  // muted blue (soft)
+    const juce::Colour mid(0xff9a5a96);  // violet / muted red (medium)
+    const juce::Colour high(0xffe0483e); // bright red (hard)
+    return t < 0.5f ? low.interpolatedWith(mid, t * 2.0f)
+                    : mid.interpolatedWith(high, (t - 0.5f) * 2.0f);
+}
+
+bool ExperimentalPianoRollView::velocityLaneEditingAvailable() const noexcept
+{
+    return useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+           && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_) && isTimelineClipBindingFresh();
+}
+
+int ExperimentalPianoRollView::velocityFromLaneY(const int y) const noexcept
+{
+    const auto inner = velocityLaneInnerBounds();
+    if (inner.getHeight() <= 0)
+    {
+        return 100;
+    }
+    const float t = (float)(inner.getBottom() - y) / (float)inner.getHeight();
+    return juce::jlimit(1, 127, juce::roundToInt(t * 127.0f));
+}
+
+std::optional<float> ExperimentalPianoRollView::velocityBarCentreXForNoteIndex(const int noteIndex) const
+{
+    if (!velocityLaneEditingAvailable() || noteIndex < 0
+        || noteIndex >= (int)pattern_.timelineNotes.size())
+    {
+        return std::nullopt;
+    }
+    const auto& tn = pattern_.timelineNotes[(size_t)noteIndex];
+    if (tn.midiNote < pitchLow_ || tn.midiNote > pitchHigh_)
+    {
+        return std::nullopt;
+    }
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const std::int64_t a0
+        = absoluteSampleForTimelineNote(timelineClip_->timelineAnchorSamples, tn, pattern_, sr);
+    const std::int64_t vis0 = timelineClip_->startSamples;
+    const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+    if (a0 < vis0 || a0 >= vis1)
+    {
+        return std::nullopt;
+    }
+    return xForSessionSample(a0);
+}
+
+std::optional<int> ExperimentalPianoRollView::findVelocityBarIndexNearX(const int x,
+                                                                        const bool selectedOnly) const
+{
+    if (!velocityLaneEditingAvailable())
+    {
+        return std::nullopt;
+    }
+    const auto lane = velocityLaneBounds();
+    if (lane.isEmpty())
+    {
+        return std::nullopt;
+    }
+    std::optional<int> best;
+    float bestDist = (float)kVelocityBarHitToleranceX + 0.5f;
+    int bestVelocity = -1;
+    for (int ti = 0; ti < (int)pattern_.timelineNotes.size(); ++ti)
+    {
+        if (selectedOnly && !isTimelineNoteIndexSelected(ti))
+        {
+            continue;
+        }
+        const auto bxOpt = velocityBarCentreXForNoteIndex(ti);
+        if (!bxOpt)
+        {
+            continue;
+        }
+        const float bx = *bxOpt;
+        if (bx < (float)lane.getX() - (float)kVelocityBarHitToleranceX
+            || bx > (float)lane.getRight() + (float)kVelocityBarHitToleranceX)
+        {
+            continue;
+        }
+        const float dist = std::abs((float)x - bx);
+        if (dist > (float)kVelocityBarHitToleranceX)
+        {
+            continue;
+        }
+        const int vel = pattern_.timelineNotes[(size_t)ti].velocity;
+        const bool closer = dist < bestDist - 0.5f;
+        const bool tieButTaller = std::abs(dist - bestDist) <= 0.5f && vel > bestVelocity;
+        if (closer || tieButTaller)
+        {
+            best = ti;
+            bestDist = dist;
+            bestVelocity = vel;
+        }
+    }
+    return best;
+}
+
+void ExperimentalPianoRollView::handleVelocityLaneMouseDown(const juce::MouseEvent& e)
+{
+    if (!velocityLaneEditingAvailable() || e.mods.isPopupMenu() || !e.mods.isLeftButtonDown())
+    {
+        return;
+    }
+    normalizeTimelineNoteSelection();
+    const int x = e.getPosition().getX();
+
+    // Selected bars win within the tolerance (group edit); otherwise the nearest bar is edited alone.
+    std::vector<int> editIndices;
+    int primary = -1;
+    if (const auto sel = findVelocityBarIndexNearX(x, true))
+    {
+        primary = *sel;
+        editIndices.assign(selectedTimelineNoteIndices_.begin(), selectedTimelineNoteIndices_.end());
+        std::sort(editIndices.begin(), editIndices.end());
+    }
+    else if (const auto any = findVelocityBarIndexNearX(x, false))
+    {
+        primary = *any;
+        editIndices.push_back(primary);
+    }
+    else
+    {
+        return;
+    }
+
+    velocityDragCaptures_.clear();
+    velocityDragCaptures_.reserve(editIndices.size());
+    for (const int i : editIndices)
+    {
+        if (i < 0 || i >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        VelocityDragCapture cap;
+        cap.index = i;
+        cap.originalVelocity = pattern_.timelineNotes[(size_t)i].velocity;
+        velocityDragCaptures_.push_back(cap);
+    }
+    if (velocityDragCaptures_.empty())
+    {
+        return;
+    }
+
+    velocityLaneDragActive_ = true;
+    velocityDragPrimaryIndex_ = primary;
+    velocityDragAnchorVelocity_ = velocityFromLaneY(e.getPosition().getY());
+    updateVelocityLaneDrag(e.getPosition());
+    repaint();
+}
+
+void ExperimentalPianoRollView::updateVelocityLaneDrag(const juce::Point<int> localPos)
+{
+    if (!velocityLaneDragActive_ || !velocityLaneEditingAvailable() || velocityDragCaptures_.empty())
+    {
+        return;
+    }
+    const int cursorVelocity = velocityFromLaneY(localPos.getY());
+    if (velocityDragCaptures_.size() == 1)
+    {
+        // Single note: absolute — the bar top tracks the cursor.
+        const auto& cap = velocityDragCaptures_.front();
+        if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+        {
+            pattern_.timelineNotes[(size_t)cap.index].velocity = cursorVelocity;
+        }
+        return;
+    }
+    // Multi-selection: same delta for all, relative differences preserved, each clamped 1..127.
+    const int delta = cursorVelocity - velocityDragAnchorVelocity_;
+    for (const auto& cap : velocityDragCaptures_)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        pattern_.timelineNotes[(size_t)cap.index].velocity
+            = juce::jlimit(1, 127, cap.originalVelocity + delta);
+    }
+}
+
+void ExperimentalPianoRollView::finishVelocityLaneDragGesture()
+{
+    if (!velocityLaneDragActive_)
+    {
+        return;
+    }
+    velocityLaneDragActive_ = false;
+    velocityDragPrimaryIndex_ = -1;
+    const auto captures = std::move(velocityDragCaptures_);
+    velocityDragCaptures_.clear();
+    if (captures.empty())
+    {
+        repaint();
+        return;
+    }
+
+    std::vector<int> finalVelocities;
+    finalVelocities.reserve(captures.size());
+    bool anyChange = false;
+    for (const auto& cap : captures)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            finalVelocities.push_back(cap.originalVelocity);
+            continue;
+        }
+        const int fv = pattern_.timelineNotes[(size_t)cap.index].velocity;
+        finalVelocities.push_back(fv);
+        anyChange = anyChange || fv != cap.originalVelocity;
+    }
+    if (!anyChange)
+    {
+        repaint();
+        return;
+    }
+
+    // Rewind the live preview, then commit once so undo captures the pre-gesture state.
+    for (const auto& cap : captures)
+    {
+        if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+        {
+            pattern_.timelineNotes[(size_t)cap.index].velocity = cap.originalVelocity;
+        }
+    }
+
+    auto applyVelocities = [this, captures, finalVelocities]() -> bool {
+        for (size_t k = 0; k < captures.size(); ++k)
+        {
+            const int idx = captures[k].index;
+            if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+            pattern_.timelineNotes[(size_t)idx].velocity = juce::jlimit(1, 127, finalVelocities[k]);
+        }
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_("Edit MIDI velocity", std::move(applyVelocities));
+    }
+    else
+    {
+        applyVelocities();
+    }
+}
+
+void ExperimentalPianoRollView::paintVelocityLane(juce::Graphics& g)
+{
+    const auto lane = velocityLaneBounds();
+    const auto header = velocityLaneHeaderBounds();
+    if (lane.isEmpty() && header.isEmpty())
+    {
+        return;
+    }
+
+    g.setColour(juce::Colour(0xff17171c));
+    g.fillRect(lane);
+    g.setColour(juce::Colour(0xff23232a));
+    g.fillRect(header);
+    g.setColour(juce::Colours::white.withAlpha(0.14f));
+    g.drawHorizontalLine(lane.getY(), (float)juce::jmin(header.getX(), lane.getX()), (float)lane.getRight());
+
+    if (header.getWidth() >= 46)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.6f));
+        g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
+        g.drawText("Velocity", header.reduced(5, 4), juce::Justification::topLeft, true);
+    }
+
+    if (lane.isEmpty())
+    {
+        return;
+    }
+
+    if (!velocityLaneEditingAvailable())
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.3f));
+        g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
+        g.drawText("Velocity editing is available for timeline MIDI clips", lane,
+                   juce::Justification::centred, true);
+        return;
+    }
+
+    // Match the grid trim hint: shade lane time outside the clip's visible span.
+    {
+        const std::int64_t vis0 = timelineClip_->startSamples;
+        const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
+        float xL = xForSessionSample(vis0);
+        float xR = xForSessionSample(vis1);
+        if (xR < xL)
+        {
+            std::swap(xL, xR);
+        }
+        const float gx0 = (float)lane.getX();
+        const float gx1 = (float)lane.getRight();
+        const float bandL = juce::jlimit(gx0, gx1, xL);
+        const float bandR = juce::jlimit(gx0, gx1, xR);
+        g.setColour(juce::Colours::black.withAlpha(0.36f));
+        if (bandL > gx0 + 0.5f)
+        {
+            g.fillRect(gx0, (float)lane.getY(), bandL - gx0, (float)lane.getHeight());
+        }
+        if (gx1 > bandR + 0.5f)
+        {
+            g.fillRect(bandR, (float)lane.getY(), gx1 - bandR, (float)lane.getHeight());
+        }
+    }
+
+    const auto inner = velocityLaneInnerBounds();
+    if (inner.getHeight() <= 0)
+    {
+        return;
+    }
+
+    // Unselected first, then selected on top so selected bars stay grabbable in dense overlaps.
+    for (const bool selectedPass : { false, true })
+    {
+        for (int ti = 0; ti < (int)pattern_.timelineNotes.size(); ++ti)
+        {
+            const bool noteSelected = isTimelineNoteIndexSelected(ti);
+            if (noteSelected != selectedPass)
+            {
+                continue;
+            }
+            const auto bxOpt = velocityBarCentreXForNoteIndex(ti);
+            if (!bxOpt)
+            {
+                continue;
+            }
+            const float bx = *bxOpt;
+            const float halfW = (float)kVelocityBarWidthPx * 0.5f;
+            if (bx < (float)lane.getX() - halfW || bx > (float)lane.getRight() + halfW)
+            {
+                continue;
+            }
+            const int vel = juce::jlimit(1, 127, pattern_.timelineNotes[(size_t)ti].velocity);
+            const float h = juce::jmax(2.0f, (float)vel / 127.0f * (float)inner.getHeight());
+            const juce::Rectangle<float> bar(
+                bx - halfW, (float)inner.getBottom() - h, (float)kVelocityBarWidthPx, h);
+            const juce::Colour velC = colourForMidiVelocity(vel);
+            if (noteSelected)
+            {
+                g.setColour(velC.withAlpha(0.95f));
+                g.fillRect(bar);
+                g.setColour(juce::Colours::white.withAlpha(0.85f));
+                g.drawRect(bar, 1.1f);
+            }
+            else
+            {
+                g.setColour(velC.withAlpha(0.8f));
+                g.fillRect(bar);
+                g.setColour(velC.darker(0.6f).withAlpha(0.9f));
+                g.drawRect(bar, 1.0f);
+            }
+        }
+    }
+
+    // Numeric readout for the grabbed bar while dragging.
+    if (velocityLaneDragActive_ && velocityDragPrimaryIndex_ >= 0
+        && velocityDragPrimaryIndex_ < (int)pattern_.timelineNotes.size())
+    {
+        if (const auto bxOpt = velocityBarCentreXForNoteIndex(velocityDragPrimaryIndex_))
+        {
+            const int vel = pattern_.timelineNotes[(size_t)velocityDragPrimaryIndex_].velocity;
+            const juce::Rectangle<float> textR(*bxOpt - 16.0f, (float)lane.getY() + 1.0f, 32.0f, 12.0f);
+            g.setColour(juce::Colours::white.withAlpha(0.92f));
+            g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
+            g.drawText(juce::String(vel), textR, juce::Justification::centred, false);
+        }
+    }
+}
+
 void ExperimentalPianoRollView::normalizeTimelineNoteSelection() noexcept
 {
     for (auto it = selectedTimelineNoteIndices_.begin(); it != selectedTimelineNoteIndices_.end();)
@@ -2574,6 +2995,14 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
+    const auto velLane = velocityLaneBounds();
+    if (!velLane.isEmpty() && velLane.contains(pos))
+    {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+        handleVelocityLaneMouseDown(e);
+        return;
+    }
+
     const auto gr = gridBounds();
 
     if (gr.contains(pos))
@@ -2620,6 +3049,13 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 {
+    if (velocityLaneDragActive_)
+    {
+        updateVelocityLaneDrag(e.getPosition());
+        repaint();
+        return;
+    }
+
     if (timelineNoteResizeActive_)
     {
         updateTimelineNoteResizeGesture(e.getPosition());
@@ -2674,6 +3110,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
+    finishVelocityLaneDragGesture();
     finishTimelineNoteMoveGesture();
     finishTimelineNoteResizeGesture();
     finishMarqueeSelection();
@@ -2750,6 +3187,27 @@ void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
         setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
         setTooltip(juce::String{});
         return;
+    }
+
+    if (velocityLaneDragActive_)
+    {
+        setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
+        setTooltip(juce::String{});
+        return;
+    }
+
+    {
+        const auto velLane = velocityLaneBounds();
+        if (!velLane.isEmpty() && velLane.contains(e.getPosition()) && velocityLaneEditingAvailable())
+        {
+            const int x = e.getPosition().getX();
+            const bool nearBar = findVelocityBarIndexNearX(x, true).has_value()
+                                 || findVelocityBarIndexNearX(x, false).has_value();
+            setMouseCursor(nearBar ? juce::MouseCursor::UpDownResizeCursor
+                                   : juce::MouseCursor::NormalCursor);
+            setTooltip(juce::String{});
+            return;
+        }
     }
 
     if (rowLabelMode_ == 2 && rowLabelTooltipProvider_)
@@ -3358,20 +3816,21 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 {
                     noteRect = noteRect.withSizeKeepingCentre(4.0f, noteRect.getHeight());
                 }
+                const juce::Colour velC = colourForMidiVelocity(tn.velocity);
                 if (noteSelected)
                 {
                     g.setColour(juce::Colour(0xff101012));
                     g.fillRoundedRectangle(noteRect, 2.0f);
-                    g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.97f));
+                    g.setColour(velC.brighter(0.45f).withAlpha(0.97f));
                     g.drawRoundedRectangle(noteRect, 2.0f, 2.35f);
-                    g.setColour(juce::Colour(0xff8a2c46).withAlpha(0.88f));
+                    g.setColour(velC.darker(0.55f).withAlpha(0.88f));
                     g.drawRoundedRectangle(noteRect, 2.0f, 1.05f);
                 }
                 else
                 {
-                    g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.78f * velA));
+                    g.setColour(velC.withAlpha(0.78f * velA));
                     g.fillRoundedRectangle(noteRect, 2.0f);
-                    g.setColour(juce::Colour(0xff8a2c46).withAlpha(0.9f));
+                    g.setColour(velC.darker(0.6f).withAlpha(0.9f));
                     g.drawRoundedRectangle(noteRect, 2.0f, 1.1f);
                 }
                 if (pianoRowMode && noteRect.getWidth() >= 24.0f && noteRect.getHeight() >= 11.0f)
@@ -3395,20 +3854,21 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 const float cy = (float)rr.getCentreY();
                 juce::Path diamond;
                 diamond.addQuadrilateral(cx, cy - hitHalfH, cx + hitHalfW, cy, cx, cy + hitHalfH, cx - hitHalfW, cy);
+                const juce::Colour velC = colourForMidiVelocity(tn.velocity);
                 if (noteSelected)
                 {
                     g.setColour(juce::Colour(0xff101012));
                     g.fillPath(diamond);
-                    g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.97f));
+                    g.setColour(velC.brighter(0.45f).withAlpha(0.97f));
                     g.strokePath(diamond, juce::PathStrokeType(2.1f));
-                    g.setColour(juce::Colour(0xff8a2c46).withAlpha(0.82f));
+                    g.setColour(velC.darker(0.55f).withAlpha(0.82f));
                     g.strokePath(diamond, juce::PathStrokeType(1.2f));
                 }
                 else
                 {
-                    g.setColour(juce::Colour(0xff8a2c46).withAlpha(0.85f + 0.15f * velA));
+                    g.setColour(velC.darker(0.6f).withAlpha(0.85f + 0.15f * velA));
                     g.strokePath(diamond, juce::PathStrokeType(1.15f));
-                    g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.65f + 0.35f * velA));
+                    g.setColour(velC.withAlpha(0.65f + 0.35f * velA));
                     g.fillPath(diamond);
                 }
             }
@@ -3443,9 +3903,10 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             const float cy = (float)rr.getCentreY();
             juce::Path diamond;
             diamond.addQuadrilateral(cx, cy - halfH, cx + halfW, cy, cx, cy + halfH, cx - halfW, cy);
-            g.setColour(juce::Colour(0xff8a2c46));
+            const juce::Colour velC = colourForMidiVelocity(hit.velocity);
+            g.setColour(velC.darker(0.6f));
             g.strokePath(diamond, juce::PathStrokeType(1.2f));
-            g.setColour(juce::Colour(0xffe05a7a).withAlpha(0.92f));
+            g.setColour(velC.withAlpha(0.92f));
             g.fillPath(diamond);
             if (pianoRowMode && timelineNotesDisplayComboId_ != 1 && absTime && timelineClip_ != nullptr
                 && cw >= 28.0f && (float)kRowHeight >= 12.0f)
@@ -3562,4 +4023,7 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             }
         }
     }
+
+    // --- Velocity controller lane (bottom strip; spatially disjoint from grid/keyboard)
+    paintVelocityLane(g);
 }
