@@ -135,8 +135,11 @@ $tempCmd = Join-Path $env:TEMP "MiniDAWLab-build-$PID-$([IO.Path]::GetRandomFile
 Set-Content -Path $tempCmd -Value $batch -Encoding Oem
 try {
     Write-Host "Running configure/build (this may take several minutes on a clean tree)..." -ForegroundColor DarkGray
-    $p = Start-Process -FilePath $env:ComSpec -ArgumentList @('/C', $tempCmd) -NoNewWindow -Wait -PassThru
-    $code = $p.ExitCode
+    # Direct invocation (not Start-Process -Wait): -Wait blocks on the whole descendant process tree,
+    # so lingering MSVC daemons (mspdbsrv.exe, vctip.exe) kept the script "hanging" for minutes after
+    # a finished build. Plain invocation waits for cmd.exe only and still streams output.
+    & $env:ComSpec /C $tempCmd
+    $code = $LASTEXITCODE
 } finally {
     Remove-Item -LiteralPath $tempCmd -Force -ErrorAction SilentlyContinue
 }

@@ -291,6 +291,9 @@ public:
     /// Device sample rate for **musical** length derivation (message thread). Does not rescale clips.
     void setTimelineSampleRate(double sampleRate) noexcept;
 
+    /// Same rate as set by `setTimelineSampleRate` (arrangement note-preview tick->sample mapping).
+    [[nodiscard]] double getTimelineSampleRate() const noexcept { return timelineSampleRate_; }
+
     /// Recompute `lengthSamples` from pattern grid + `timelineSampleRate_` (create / load repair /
     /// numSteps or stepDenom edits only — not BPM-only).
     void recomputeLockedClipLengthFromPatternGrid(InstrumentMidiClip& clip) noexcept;

@@ -14,6 +14,7 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
 
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -21,14 +22,149 @@
 
 namespace
 {
+/// Sample<->pixel mapping for the in-clip note preview; mirrors `getEventBoundsForClip`'s inputs so
+/// note bars land in the same coordinate space as the clip rect. `sampleRate <= 0` disables preview.
+struct MidiClipNotePreviewContext
+{
+    std::int64_t previewMoveDeltaSamples = 0;
+    std::int64_t visibleStartSamples = 0;
+    double samplesPerPixel = 0.0;
+    float originX = 0.0f;
+    double sampleRate = 0.0;
+};
+
+/// Cubase-like note preview inside a MIDI clip rect (Slice 1, visual only): one bar per note,
+/// x/width from note timing, y from pitch with **per-clip** min..max pitch scaling. Timeline notes
+/// map through the shared timeline viewport; legacy step clips subdivide the locked clip length.
+/// Drawing is clipped to `eb`; skipped for tiny rects or when no valid sample mapping exists
+/// (permille fallback layout).
+void paintMidiClipNotePreview(juce::Graphics& g,
+                              const juce::Rectangle<float>& eb,
+                              const InstrumentMidiClip& clip,
+                              const MidiClipNotePreviewContext& ctx)
+{
+    constexpr float kMinNoteBarPx = 2.0f;
+    constexpr float kVertPadPx = 3.0f;
+    if (eb.getWidth() < 8.0f || ctx.samplesPerPixel <= 0.0 || !std::isfinite(ctx.samplesPerPixel)
+        || ctx.sampleRate <= 0.0)
+    {
+        return;
+    }
+    const bool timeline = clip.pattern.usesTimelineNotes();
+    const auto& timelineNotes = clip.pattern.timelineNotes;
+    const auto& stepNotes = clip.pattern.notes;
+    if (timeline ? timelineNotes.empty() : stepNotes.empty())
+    {
+        return;
+    }
+
+    int minPitch = 128;
+    int maxPitch = -1;
+    if (timeline)
+    {
+        for (const auto& n : timelineNotes)
+        {
+            minPitch = juce::jmin(minPitch, n.midiNote);
+            maxPitch = juce::jmax(maxPitch, n.midiNote);
+        }
+    }
+    else
+    {
+        for (const auto& n : stepNotes)
+        {
+            minPitch = juce::jmin(minPitch, n.midiNote);
+            maxPitch = juce::jmax(maxPitch, n.midiNote);
+        }
+    }
+    if (minPitch > maxPitch)
+    {
+        return;
+    }
+    if (minPitch == maxPitch)
+    {
+        // Single-pitch clip: widen the range so the one row reads as a centered band.
+        minPitch = juce::jmax(0, minPitch - 2);
+        maxPitch = juce::jmin(127, maxPitch + 2);
+    }
+
+    const juce::Rectangle<float> inner = eb.reduced(1.0f, kVertPadPx);
+    if (inner.isEmpty())
+    {
+        return;
+    }
+    const int rows = maxPitch - minPitch + 1;
+    const float rowH = inner.getHeight() / (float)rows;
+    const float barH = juce::jlimit(1.5f, 7.0f, rowH * 0.8f);
+
+    const juce::Graphics::ScopedSaveState save(g);
+    g.reduceClipRegion(eb.toNearestInt());
+    // Same colour family as the audio lane's waveform (lightblue on the shared clip body fill).
+    g.setColour(juce::Colours::lightblue.withAlpha(0.75f));
+
+    const auto drawNoteBar
+        = [&](const std::int64_t absStart, const std::int64_t absEnd, const int pitch) noexcept {
+              float x0 = TimelineRulerView::sessionSampleToLocalX(
+                  absStart, ctx.originX, ctx.visibleStartSamples, ctx.samplesPerPixel);
+              float x1 = TimelineRulerView::sessionSampleToLocalX(
+                  absEnd, ctx.originX, ctx.visibleStartSamples, ctx.samplesPerPixel);
+              if (x1 < x0)
+              {
+                  std::swap(x0, x1);
+              }
+              x1 = juce::jmax(x1, x0 + kMinNoteBarPx);
+              if (x1 < eb.getX() || x0 > eb.getRight())
+              {
+                  return;
+              }
+              const float yCentre = inner.getBottom() - ((float)(pitch - minPitch) + 0.5f) * rowH;
+              g.fillRect(x0, yCentre - barH * 0.5f, x1 - x0, barH);
+          };
+
+    if (timeline)
+    {
+        const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
+        const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
+        const std::int64_t anchor = clip.timelineAnchorSamples + ctx.previewMoveDeltaSamples;
+        for (const auto& n : timelineNotes)
+        {
+            const std::int64_t s = anchor + ticksToSignedSamples(n.startTick, bpm, tpq, ctx.sampleRate);
+            const std::int64_t d = juce::jmax(
+                std::int64_t{ 1 }, ticksToSignedSamples(n.durationTicks, bpm, tpq, ctx.sampleRate));
+            drawNoteBar(s, s + d, n.midiNote);
+        }
+    }
+    else
+    {
+        const int numSteps = juce::jmax(1, clip.pattern.numSteps);
+        const std::int64_t clipStart = clip.startSamples + ctx.previewMoveDeltaSamples;
+        const std::int64_t len = juce::jmax(std::int64_t{ 1 }, clip.lengthSamples);
+        // Short centered tick per step hit (drums have no meaningful duration on the step grid).
+        const std::int64_t halfBar = juce::jmax(
+            std::int64_t{ 1 }, (std::int64_t)std::llround(0.3 * (double)len / (double)numSteps));
+        for (const auto& n : stepNotes)
+        {
+            const std::int64_t centre
+                = clipStart + clipRelativeSampleAtStepCenter(n.step, numSteps, len);
+            drawNoteBar(centre - halfBar, centre + halfBar, n.midiNote);
+        }
+    }
+}
+
 /// MIDI runtime clip: same outer chrome sequence as placed audio clips (`ClipWaveformView`); label only inside.
+/// Paint order: body fill -> note preview -> selection overlay -> label (border/text stay readable).
 void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
                                     juce::Rectangle<float> eb,
                                     bool selected,
-                                    const juce::String& clipName)
+                                    const juce::String& clipName,
+                                    const InstrumentMidiClip* clipForNotePreview,
+                                    const MidiClipNotePreviewContext& notePreviewCtx)
 {
     using namespace mini_daw::timeline_clip_chrome;
     paintEventChromeBody(g, eb, midiLaneEventBodyFill());
+    if (clipForNotePreview != nullptr)
+    {
+        paintMidiClipNotePreview(g, eb, *clipForNotePreview, notePreviewCtx);
+    }
     if (selected)
     {
         paintEventChromeSelectionOverlay(g, eb);
@@ -171,6 +307,14 @@ private:
             return;
         }
 
+        // Shared per-paint mapping for the in-clip note preview; matches `getEventBoundsForClip`
+        // (same viewport, same origin x — the vertical event margin does not shift x).
+        MidiClipNotePreviewContext noteCtx;
+        noteCtx.visibleStartSamples = owner_.timelineViewport_.getVisibleStartSamples();
+        noteCtx.samplesPerPixel = owner_.timelineViewport_.getSamplesPerPixel();
+        noteCtx.originX = (float)laneContent.getX();
+        noteCtx.sampleRate = ac->getTimelineSampleRate();
+
         for (const auto& up : ac->getClips())
         {
             const auto* c = up.get();
@@ -200,7 +344,8 @@ private:
                     + " selected=" + juce::String(sel ? "true" : "false") + " eventBounds=" + eb.toString());
             }
 
-            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name);
+            noteCtx.previewMoveDeltaSamples = previewDelta;
+            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name, c, noteCtx);
 
             if (!c->pattern.usesTimelineNotes())
             {
