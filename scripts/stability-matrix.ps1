@@ -5,6 +5,7 @@
 #   .\scripts\stability-matrix.ps1 -Project "C:\path\project.dalproj"
 #   .\scripts\stability-matrix.ps1 -Project ... -Iterations 10 -IncludeMixdown
 #   .\scripts\stability-matrix.ps1 -Project ... -Exe "C:\path\MiniDAWLab.exe"
+#   .\scripts\stability-matrix.ps1 -Project ... -PageHeap        (elevated PS; dev only)
 #
 # Runs load-loop, delete-loop and smoke (plus mixdown wav/mp3 with -IncludeMixdown)
 # through the in-process stability scenario runner, collects exit codes
@@ -27,7 +28,12 @@ param(
 
     [switch]$IncludeMixdown,
 
-    [int]$TimeoutSec = 900
+    [int]$TimeoutSec = 900,
+
+    # Stability C4: enable full PageHeap for MiniDAWLab.exe around the run
+    # (requires elevation; see scripts\enable-pageheap.ps1). Alternatively use
+    # scripts\run-stability-with-pageheap.ps1.
+    [switch]$PageHeap
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,13 +91,40 @@ function Invoke-StabilityScenario {
     return [pscustomobject]@{ Name = $Name; ExitCode = $code; Pass = $pass; Seconds = [int]$sw.Elapsed.TotalSeconds; Note = '' }
 }
 
-$results = @()
-$results += Invoke-StabilityScenario -Name 'load-loop' -Arguments @('--stability-load-loop', "`"$Project`"", '--iterations', "$Iterations")
-$results += Invoke-StabilityScenario -Name 'delete-loop' -Arguments @('--stability-delete-loop', "`"$Project`"", '--iterations', "$Iterations")
-$results += Invoke-StabilityScenario -Name 'smoke' -Arguments @('--stability-smoke', "`"$Project`"")
-if ($IncludeMixdown) {
-    $results += Invoke-StabilityScenario -Name 'mixdown-wav' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'wav')
-    $results += Invoke-StabilityScenario -Name 'mixdown-mp3' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'mp3')
+# Stability C4: announce active memory-diagnostic modes so log/console output is unambiguous.
+. (Join-Path $PSScriptRoot 'pageheap-common.ps1')
+$exeImageName = [System.IO.Path]::GetFileName($Exe)
+$exeDir = Split-Path -Parent $Exe
+$isAsanBuild = ($Exe -match 'ninja-asan') -or (Test-Path -LiteralPath (Join-Path $exeDir 'clang_rt.asan_dbg_dynamic-x86_64.dll'))
+Write-Host ""
+Write-Host ("Mode: ASan build = {0}, PageHeap = {1}" -f `
+    $(if ($isAsanBuild) { 'YES (developer testing only)' } else { 'no' }), `
+    $(if ($PageHeap) { 'requested via -PageHeap' } elseif (Get-PageHeapEnabled -ImageName $exeImageName) { 'ALREADY ENABLED for ' + $exeImageName } else { 'no' })) -ForegroundColor Cyan
+
+if ($PageHeap) {
+    & (Join-Path $PSScriptRoot 'enable-pageheap.ps1') -ImageName $exeImageName
+    Write-Warning 'PageHeap active: scenarios will run much slower; consider a larger -TimeoutSec.'
+}
+
+try {
+    $results = @()
+    $results += Invoke-StabilityScenario -Name 'load-loop' -Arguments @('--stability-load-loop', "`"$Project`"", '--iterations', "$Iterations")
+    $results += Invoke-StabilityScenario -Name 'delete-loop' -Arguments @('--stability-delete-loop', "`"$Project`"", '--iterations', "$Iterations")
+    $results += Invoke-StabilityScenario -Name 'smoke' -Arguments @('--stability-smoke', "`"$Project`"")
+    if ($IncludeMixdown) {
+        $results += Invoke-StabilityScenario -Name 'mixdown-wav' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'wav')
+        $results += Invoke-StabilityScenario -Name 'mixdown-mp3' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'mp3')
+    }
+}
+finally {
+    if ($PageHeap) {
+        try {
+            & (Join-Path $PSScriptRoot 'disable-pageheap.ps1') -ImageName $exeImageName
+        } catch {
+            Write-Warning "Failed to disable PageHeap automatically: $($_.Exception.Message)"
+            Write-Warning 'Run .\scripts\disable-pageheap.ps1 manually from an elevated PowerShell.'
+        }
+    }
 }
 
 Write-Host ""

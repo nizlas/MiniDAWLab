@@ -45,9 +45,13 @@ namespace
 
 std::shared_ptr<const RoutingPlan> build(
     const SessionSnapshot& snap,
-    const std::vector<std::pair<float*, float*>>& busScratchPairs) noexcept
+    const std::vector<std::pair<float*, float*>>& busScratchPairs,
+    std::vector<std::shared_ptr<void>> busScratchOwners) noexcept
 {
     auto plan = std::make_shared<RoutingPlan>();
+    // Stability C4B: attach ownership before any early return so every plan that carries scratch
+    // pointers also keeps the underlying buffers alive.
+    plan->busScratchOwners = std::move(busScratchOwners);
 
     const int n = snap.getNumTracks();
     if (n <= 0 || busScratchPairs.empty())

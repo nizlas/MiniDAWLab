@@ -34,11 +34,11 @@
 #>
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet('Debug', 'Release')]
+    [ValidateSet('Debug', 'Release', 'Asan')]
     [string] $Config = 'Debug',
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet('windows-ninja-debug', 'windows-ninja-release')]
+    [ValidateSet('windows-ninja-debug', 'windows-ninja-release', 'windows-ninja-asan')]
     [string] $Preset,
 
     [switch] $ConfigureOnly,
@@ -90,11 +90,20 @@ Write-Host "Using CMake: $resolvedCmake" -ForegroundColor DarkGray
 if ($PSBoundParameters.ContainsKey('Preset') -and $Preset) {
     $cmakePreset = $Preset
 } else {
-    $cmakePreset = if ($Config -eq 'Release') { 'windows-ninja-release' } else { 'windows-ninja-debug' }
+    $cmakePreset = switch ($Config) {
+        'Release' { 'windows-ninja-release' }
+        'Asan'    { 'windows-ninja-asan' }
+        default   { 'windows-ninja-debug' }
+    }
 }
 
-# Match CMakePresets.json; JUCE app output (see juce_add_gui_app)
-$buildLeaf = if ($cmakePreset -eq 'windows-ninja-release') { 'ninja-release' } else { 'ninja-debug' }
+# Match CMakePresets.json; JUCE app output (see juce_add_gui_app).
+# The ASan preset uses CMAKE_BUILD_TYPE=Debug, so JUCE artefacts land in ...\Debug\.
+$buildLeaf = switch ($cmakePreset) {
+    'windows-ninja-release' { 'ninja-release' }
+    'windows-ninja-asan'    { 'ninja-asan' }
+    default                 { 'ninja-debug' }
+}
 $artefactConfig = if ($cmakePreset -eq 'windows-ninja-release') { 'Release' } else { 'Debug' }
 Write-Host "Preset: $cmakePreset" -ForegroundColor DarkGray
 Write-Host "Resolved repo root (from script location): $repoRootPath" -ForegroundColor DarkGray
@@ -204,6 +213,25 @@ Reconfigure or delete build\$buildLeaf and rebuild. Skipping optional LAME copy.
         catch {
             Write-Warning "LAME copy failed: $($_.Exception.Message)"
         }
+    }
+
+    # Stability C4: the ASan build links the *dynamic* ASan runtime (the app uses /MDd). Copy the
+    # clang_rt runtime DLLs next to the exe so it can start from a plain PowerShell window (outside
+    # a VS developer prompt the DLLs are not on PATH and the exe exits with 0xC0000135).
+    if ($cmakePreset -eq 'windows-ninja-asan') {
+        Write-Host '--- ASan runtime DLL sync ---' -ForegroundColor DarkGray
+        $exeDirForAsan = [System.IO.Path]::GetDirectoryName($expectedExe)
+        $asanDlls = @(Get-ChildItem -Path (Join-Path $installPath 'VC\Tools\MSVC\*\bin\Hostx64\x64\clang_rt.asan*dynamic*.dll') -ErrorAction SilentlyContinue)
+        if ($asanDlls.Count -eq 0) {
+            Write-Warning "No clang_rt.asan*dynamic*.dll found under $installPath\VC\Tools\MSVC\...\bin\Hostx64\x64 - run the exe from a VS developer prompt instead."
+        }
+        else {
+            foreach ($dll in $asanDlls) {
+                Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $exeDirForAsan $dll.Name) -Force
+                Write-Host "Copied ASan runtime: $($dll.Name)" -ForegroundColor DarkGray
+            }
+        }
+        Write-Warning 'ASan build is for developer testing only - never package or send this build to testers.'
     }
 }
 exit 0

@@ -1553,14 +1553,19 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
         }
     }
     ensureRoutingBusScratchPool(offlineBusCount, juce::jmax(numSamples, kOfflineMixdownBlockCapSamples));
+    // C4B: the pool is grow-only, so only the first offlineBusCount slots belong to this render.
     std::vector<std::pair<float*, float*>> offlineScratchPairs;
+    std::vector<std::shared_ptr<void>> offlineScratchOwners;
     offlineScratchPairs.reserve(offlineBusCount);
-    for (const RoutingBusScratchSlot& slot : routingBusScratch_)
+    offlineScratchOwners.reserve(offlineBusCount);
+    for (std::size_t i = 0; i < offlineBusCount && i < routingBusScratch_.size(); ++i)
     {
-        offlineScratchPairs.emplace_back(slot.ptrs[0], slot.ptrs[1]);
+        const std::shared_ptr<RoutingBusScratchSlot>& slot = routingBusScratch_[i];
+        offlineScratchPairs.emplace_back(slot->ptrs[0], slot->ptrs[1]);
+        offlineScratchOwners.push_back(slot);
     }
     const std::shared_ptr<const RoutingPlan> offlinePlan
-        = routing_plan_builder::build(sessionSnap, offlineScratchPairs);
+        = routing_plan_builder::build(sessionSnap, offlineScratchPairs, std::move(offlineScratchOwners));
     const RoutingPlan* const rp = offlinePlan.get();
 
     const Track* masterTrackPtr = playback_mix_helpers::findCanonicalMasterTrack(sessionSnap);
@@ -1941,20 +1946,30 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
 void PlaybackEngine::ensureRoutingBusScratchPool(const std::size_t numBuses,
                                                  const int numSamples) noexcept
 {
+    // Stability C4B: grow-only, replace-not-mutate. A previously published RoutingPlan may still be
+    // in use on the audio thread with pointers into these slots, so this function must never free
+    // or reallocate an existing slot's buffer. Slots that are too small are swapped out for fresh
+    // ones; the retired slot stays alive as long as any plan co-owns it (RoutingPlan::busScratchOwners).
     if (numBuses == 0 || numSamples <= 0)
     {
-        routingBusScratch_.clear();
-        return;
+        return; // keep existing capacity; unused slots are retained deliberately
     }
-    routingBusScratch_.resize(numBuses);
-    for (RoutingBusScratchSlot& slot : routingBusScratch_)
+    if (routingBusScratch_.size() < numBuses)
     {
-        if (slot.buf.getNumSamples() < numSamples || slot.buf.getNumChannels() < 2)
+        routingBusScratch_.resize(numBuses); // moves shared_ptrs only; slot objects never relocate
+    }
+    for (std::size_t i = 0; i < numBuses; ++i)
+    {
+        std::shared_ptr<RoutingBusScratchSlot>& slot = routingBusScratch_[i];
+        if (slot == nullptr || slot->buf.getNumSamples() < numSamples
+            || slot->buf.getNumChannels() < 2)
         {
-            slot.buf.setSize(2, numSamples, false, false, true);
+            auto fresh = std::make_shared<RoutingBusScratchSlot>();
+            fresh->buf.setSize(2, numSamples, false, false, true);
+            fresh->ptrs[0] = fresh->buf.getWritePointer(0);
+            fresh->ptrs[1] = fresh->buf.getWritePointer(1);
+            slot = std::move(fresh);
         }
-        slot.ptrs[0] = slot.buf.getWritePointer(0);
-        slot.ptrs[1] = slot.buf.getWritePointer(1);
     }
 }
 
@@ -1978,13 +1993,19 @@ void PlaybackEngine::rebuildRoutingPlanFromSession() noexcept
     const int cap = juce::jmax(masterScratchCapacity_, kOfflineMixdownBlockCapSamples);
     ensureRoutingBusScratchPool(busCount, cap);
     ensurePostStripStageScratchCapacity(cap);
+    // C4B: the plan co-owns its slots so the audio thread can outlive later pool changes.
     std::vector<std::pair<float*, float*>> scratchPairs;
+    std::vector<std::shared_ptr<void>> scratchOwners;
     scratchPairs.reserve(busCount);
-    for (const RoutingBusScratchSlot& slot : routingBusScratch_)
+    scratchOwners.reserve(busCount);
+    for (std::size_t i = 0; i < busCount && i < routingBusScratch_.size(); ++i)
     {
-        scratchPairs.emplace_back(slot.ptrs[0], slot.ptrs[1]);
+        const std::shared_ptr<RoutingBusScratchSlot>& slot = routingBusScratch_[i];
+        scratchPairs.emplace_back(slot->ptrs[0], slot->ptrs[1]);
+        scratchOwners.push_back(slot);
     }
-    const std::shared_ptr<const RoutingPlan> plan = routing_plan_builder::build(*snap, scratchPairs);
+    const std::shared_ptr<const RoutingPlan> plan
+        = routing_plan_builder::build(*snap, scratchPairs, std::move(scratchOwners));
     routingPlan_.store(plan, std::memory_order_release);
 }
 

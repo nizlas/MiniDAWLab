@@ -272,7 +272,12 @@ private:
         juce::AudioBuffer<float> buf;
         float* ptrs[2] = { nullptr, nullptr };
     };
-    std::vector<RoutingBusScratchSlot> routingBusScratch_;
+    /// Stability C4B: slots are shared and immutable once created. The pool only grows, and a slot
+    /// that needs a bigger buffer is *replaced* with a fresh slot (never `setSize` in place); every
+    /// published `RoutingPlan` co-owns its slots via `busScratchOwners`, so the audio thread can
+    /// keep addressing an older plan's buffers while the message thread rebuilds. Unused capacity
+    /// is retained deliberately — freeing it while audio may run is exactly the ASan C4 bug.
+    std::vector<std::shared_ptr<RoutingBusScratchSlot>> routingBusScratch_;
     juce::AudioBuffer<float> postStripStageScratch_;
     float* postStripStagePtrs_[2] = { nullptr, nullptr };
     int postStripStageCapacity_ = 0;
