@@ -1,5 +1,6 @@
 #include "app/AudioMixdownExporter.h"
 
+#include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/MixdownWavProbe.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
@@ -43,19 +44,53 @@ constexpr int kMp3EncodeTimeoutMs = 600000; // 10 minutes
                                                              : MixdownWaveBits::Pcm24;
 }
 
+/// RAII offline-render gate (Stability Slice 2). On the outermost enter it silences the realtime
+/// callback and then *drains* any in-flight callback: `beginOfflineRenderGate` (seq_cst) pairs with
+/// the `audioCallbackInProcessingSection` flag set at the top of the device callback, so after the
+/// bounded wait below no callback is touching plugin hosts / scratch buffers. Nested construction
+/// (WAV render inside MP3 export) only bumps the depth — realtime resumes when the outermost gate
+/// destructs, on every return path.
 class ScopedOfflineRenderGate final
 {
 public:
     explicit ScopedOfflineRenderGate(PlaybackEngine& engine) noexcept
         : engine_(engine)
     {
-        engine_.setOfflineRenderInProgress(true);
+        const bool outermost = engine_.beginOfflineRenderGate();
+        if (!outermost)
+        {
+            appendMixdownDiagnosticLine("export gate enter (nested; realtime already suspended)");
+            return;
+        }
+        appendMixdownDiagnosticLine("export gate enter; realtime suspend set");
+        appendMixdownDiagnosticLine("audio callback idle wait begin");
+        const double waitStartMs = juce::Time::getMillisecondCounterHiRes();
+        constexpr double kMaxWaitMs = 250.0;
+        bool timedOut = false;
+        while (engine_.isAudioCallbackInProcessingSection())
+        {
+            if (juce::Time::getMillisecondCounterHiRes() - waitStartMs >= kMaxWaitMs)
+            {
+                timedOut = true;
+                break;
+            }
+            juce::Thread::sleep(1);
+        }
+        const double waitedMs = juce::Time::getMillisecondCounterHiRes() - waitStartMs;
+        appendMixdownDiagnosticLine("audio callback idle wait end waitedMs="
+                                    + juce::String(waitedMs, 2)
+                                    + " timeout=" + (timedOut ? "YES (proceeding anyway)" : "no"));
     }
 
     ~ScopedOfflineRenderGate()
     {
-        engine_.setOfflineRenderInProgress(false);
+        const bool resumed = engine_.endOfflineRenderGate();
+        appendMixdownDiagnosticLine(resumed ? "export gate exit; realtime resumed"
+                                            : "export gate exit (nested; realtime still suspended)");
     }
+
+    ScopedOfflineRenderGate(const ScopedOfflineRenderGate&) = delete;
+    ScopedOfflineRenderGate& operator=(const ScopedOfflineRenderGate&) = delete;
 
 private:
     PlaybackEngine& engine_;
@@ -93,6 +128,11 @@ juce::Result exportStereoMixdownWavBlocking(
     const std::function<void()>& syncTransportUiFromDomain,
     const MixdownExportRequest& request)
 {
+    appendMixdownDiagnosticLine("wav export requested path=\"" + request.outputFile.getFullPathName()
+                                + "\" sampleRate=" + juce::String(request.sampleRate)
+                                + " bits=" + juce::String(static_cast<int>(request.bits)));
+    writeLastOperationBreadcrumb("mixdown wav render start: " + request.outputFile.getFullPathName());
+
     if (request.outputFile == juce::File())
     {
         return juce::Result::fail("Invalid export path.");
@@ -142,20 +182,13 @@ juce::Result exportStereoMixdownWavBlocking(
     const std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot> instrumentSnap
         = playbackEngine.loadExperimentalInstrumentPlaybackSnapshotForAudioThread();
 
-    if (request.outputFile.existsAsFile())
+    // Overwrite consent is collected by the dialog (async prompt) before export starts. The old
+    // synchronous NativeMessageBox here returned instantly with an arbitrary answer, so callers
+    // must confirm up front; refuse rather than silently overwrite.
+    if (request.outputFile.existsAsFile() && !request.overwriteConfirmed)
     {
-        const bool overwrite = juce::NativeMessageBox::showYesNoBox(
-            juce::AlertWindow::WarningIcon,
-            "Audio Mixdown",
-            "A file already exists at:\n\n"
-                + request.outputFile.getFullPathName()
-                + "\n\nOverwrite it?",
-            nullptr,
-            nullptr);
-        if (!overwrite)
-        {
-            return juce::Result::fail("Export cancelled.");
-        }
+        return juce::Result::fail("Export cancelled (existing file was not confirmed for overwrite):\n"
+                                  + request.outputFile.getFullPathName());
     }
 
     const juce::File parentDir = request.outputFile.getParentDirectory();
@@ -168,6 +201,15 @@ juce::Result exportStereoMixdownWavBlocking(
     }
 
     ScopedOfflineRenderGate offlineGate(playbackEngine);
+
+    // FileOutputStream appends to an existing file (stream starts at the end), which would leave
+    // the old audio in place and write a second WAV after it. Replace the file instead.
+    if (request.outputFile.existsAsFile() && !request.outputFile.deleteFile())
+    {
+        appendMixdownDiagnosticLine("FAIL could not delete existing output file for overwrite");
+        return juce::Result::fail("Could not replace the existing file:\n"
+                                  + request.outputFile.getFullPathName());
+    }
 
     auto fileStream = std::make_unique<juce::FileOutputStream>(request.outputFile);
     if (fileStream->failedToOpen())
@@ -214,8 +256,18 @@ juce::Result exportStereoMixdownWavBlocking(
     juce::AudioBuffer<float> stereoBlock(2, renderQuantum);
     float* stereoPtrs[2] = { stereoBlock.getWritePointer(0), stereoBlock.getWritePointer(1) };
 
+    appendMixdownDiagnosticLine("render start span=" + juce::String((juce::int64)loopSpan.startSample)
+                                + "+" + juce::String((juce::int64)loopSpan.lengthSamples)
+                                + " quantum=" + juce::String(renderQuantum));
+    if (request.progressSink != nullptr)
+    {
+        appendMixdownDiagnosticLine("progress phase: render (determinate)");
+        request.progressSink->setMixdownProgress("Mixing down... 0%", 0.0);
+    }
+
     bool firstBlock = true;
     std::int64_t pos = 0;
+    double lastProgressUpdateMs = juce::Time::getMillisecondCounterHiRes();
     while (pos < loopSpan.lengthSamples)
     {
         const int n = static_cast<int>(
@@ -230,13 +282,32 @@ juce::Result exportStereoMixdownWavBlocking(
 
         if (!writer->writeFromAudioSampleBuffer(stereoBlock, 0, n))
         {
+            appendMixdownDiagnosticLine("FAIL disk write at pos=" + juce::String((juce::int64)pos));
             request.outputFile.deleteFile();
             return juce::Result::fail("Disk write failed during mixdown.");
         }
         pos += static_cast<std::int64_t>(n);
+
+        if (request.progressSink != nullptr)
+        {
+            const double nowMs = juce::Time::getMillisecondCounterHiRes();
+            if (nowMs - lastProgressUpdateMs >= 50.0 || pos >= loopSpan.lengthSamples)
+            {
+                lastProgressUpdateMs = nowMs;
+                const double frac = static_cast<double>(pos)
+                                    / static_cast<double>(loopSpan.lengthSamples);
+                request.progressSink->setMixdownProgress(
+                    "Mixing down... " + juce::String(static_cast<int>(frac * 100.0 + 0.5)) + "%",
+                    frac);
+            }
+        }
     }
 
+    appendMixdownDiagnosticLine("render complete samples=" + juce::String((juce::int64)pos));
+    appendMixdownDiagnosticLine("writer close begin");
     writer.reset();
+    appendMixdownDiagnosticLine("writer close end");
+    appendMixdownDiagnosticLine("wav export ok path=\"" + request.outputFile.getFullPathName() + "\"");
     return juce::Result::ok();
 }
 
@@ -269,8 +340,14 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
                                            juce::AudioDeviceManager& deviceManager,
                                            const std::function<void()>& syncTransportUiFromDomain,
                                            const juce::File& mp3OutputFile,
-                                           const int bitrateKbps)
+                                           const int bitrateKbps,
+                                           MixdownProgressSink* const progressSink,
+                                           const bool overwriteConfirmed)
 {
+    appendMixdownDiagnosticLine("mp3 export requested path=\"" + mp3OutputFile.getFullPathName()
+                                + "\" kbps=" + juce::String(bitrateKbps));
+    writeLastOperationBreadcrumb("mixdown mp3 start: " + mp3OutputFile.getFullPathName());
+
     const juce::File lameExe = findBundledLameExecutable();
     if (!lameExe.existsAsFile())
     {
@@ -300,20 +377,11 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
         return juce::Result::fail("Invalid sample rate.");
     }
 
-    if (mp3OutputFile.existsAsFile())
+    // See the WAV exporter: overwrite consent must be collected by the caller before export.
+    if (mp3OutputFile.existsAsFile() && !overwriteConfirmed)
     {
-        const bool overwrite = juce::NativeMessageBox::showYesNoBox(
-            juce::AlertWindow::WarningIcon,
-            "Audio Mixdown",
-            "A file already exists at:\n\n"
-                + mp3OutputFile.getFullPathName()
-                + "\n\nOverwrite it?",
-            nullptr,
-            nullptr);
-        if (!overwrite)
-        {
-            return juce::Result::fail("Export cancelled.");
-        }
+        return juce::Result::fail("Export cancelled (existing file was not confirmed for overwrite):\n"
+                                  + mp3OutputFile.getFullPathName());
     }
 
     const juce::File parentDir = mp3OutputFile.getParentDirectory();
@@ -324,6 +392,12 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
             return juce::Result::fail("Could not create folder:\n" + parentDir.getFullPathName());
         }
     }
+
+    // Outer gate: keeps realtime suspended through the *entire* MP3 pipeline (temp WAV render,
+    // writer close, LAME encode, temp cleanup), not just the inner WAV render. The nested gate
+    // inside exportStereoMixdownWavBlocking only bumps the depth.
+    appendMixdownDiagnosticLine("mp3 outer gate: hold realtime through render + LAME");
+    ScopedOfflineRenderGate mp3OuterGate(playbackEngine);
 
     juce::File tempWav;
     for (int attempt = 0; attempt < 16; ++attempt)
@@ -347,6 +421,8 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     wavRequest.outputFile = tempWav;
     wavRequest.sampleRate = sampleRate;
     wavRequest.bits = mixdownIntermediateWavBitsForLame(sampleRate);
+    wavRequest.progressSink = progressSink;
+    wavRequest.overwriteConfirmed = true; // temp file was verified non-existent above
 
     const juce::Result wavResult = exportStereoMixdownWavBlocking(
         transport,
@@ -358,6 +434,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
 
     if (wavResult.failed())
     {
+        appendMixdownDiagnosticLine("FAIL mp3 temp wav render: " + wavResult.getErrorMessage());
         (void)tempWav.deleteFile();
         const juce::String msg = wavResult.getErrorMessage();
         if (msg == "Export cancelled." || msg.startsWith("Export cancelled"))
@@ -375,14 +452,45 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     args.add(tempWav.getFullPathName());
     args.add(mp3OutputFile.getFullPathName());
 
+    appendMixdownDiagnosticLine("lame start exe=\"" + lameExe.getFullPathName() + "\"");
+    if (progressSink != nullptr)
+    {
+        appendMixdownDiagnosticLine("progress phase: mp3 encode (indeterminate)");
+        progressSink->setMixdownProgress("Encoding MP3...", -1.0);
+    }
     if (!lameProcess.start(args, juce::ChildProcess::wantStdErr))
     {
+        appendMixdownDiagnosticLine("FAIL lame could not start");
         const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
         return juce::Result::fail("MP3 encoding failed (could not start LAME)." + kept);
     }
 
-    if (!lameProcess.waitForProcessToFinish(kMp3EncodeTimeoutMs))
+    // Wait in short slices so the indeterminate progress indicator keeps animating (LAME itself
+    // reports no usable progress); total wait is still bounded by kMp3EncodeTimeoutMs.
+    bool lameFinished = false;
     {
+        const double lameWaitStartMs = juce::Time::getMillisecondCounterHiRes();
+        for (;;)
+        {
+            if (lameProcess.waitForProcessToFinish(100))
+            {
+                lameFinished = true;
+                break;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() - lameWaitStartMs
+                >= static_cast<double>(kMp3EncodeTimeoutMs))
+            {
+                break;
+            }
+            if (progressSink != nullptr)
+            {
+                progressSink->setMixdownProgress("Encoding MP3...", -1.0);
+            }
+        }
+    }
+    if (!lameFinished)
+    {
+        appendMixdownDiagnosticLine("FAIL lame timed out");
         (void)lameProcess.kill();
         const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
         return juce::Result::fail("MP3 encoding timed out." + kept);
@@ -390,6 +498,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
 
     const auto exitCode = static_cast<int>(lameProcess.getExitCode());
     const juce::String lameStderr = lameProcess.readAllProcessOutput().trim();
+    appendMixdownDiagnosticLine("lame complete exitCode=" + juce::String(exitCode));
 
     if (exitCode != 0)
     {
@@ -414,6 +523,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     }
 
     (void)tempWav.deleteFile();
+    appendMixdownDiagnosticLine("mp3 export ok path=\"" + mp3OutputFile.getFullPathName() + "\"");
     return juce::Result::ok();
 }
 

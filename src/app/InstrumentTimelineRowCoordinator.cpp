@@ -169,14 +169,8 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
     {
         paintEventChromeSelectionOverlay(g, eb);
     }
-    g.setColour(juce::Colours::white.withAlpha(0.85f));
-    g.setFont(11.5f);
     const juce::String label = clipName.trim().isNotEmpty() ? clipName.trim() : juce::String("MIDI");
-    g.drawFittedText(
-        label,
-        clipEventLabelBounds(eb).toNearestInt(),
-        juce::Justification::centredLeft,
-        1);
+    paintEventTopLeftNameLabel(g, eb, label);
 }
 } // namespace
 
@@ -377,6 +371,10 @@ private:
             // Middle button = TrackLanesView hand-pan; never select/edit MIDI clips.
             return;
         }
+        // Any new press invalidates a pending delayed rename open (fast double clicks never rename).
+        ++renameArmGeneration_;
+        mouseDownOnSelectedClipNameLabel_ = false;
+        renameArmedClipId_ = 0;
         hoverEventTrimCueId_.reset();
         hoverLeftTrimHandleId_.reset();
         hoverRightTrimHandleId_.reset();
@@ -513,6 +511,17 @@ private:
                     // Plain click on an already-selected clip: activate only (preserves multi-selection,
                     // including for double-click's first click).
                     ac->setActiveSelectedClipId(clip->id);
+                    // Explorer-style rename arm: single click on the name label of the selected clip.
+                    if (e.getNumberOfClicks() == 1)
+                    {
+                        const auto nameR = mini_daw::timeline_clip_chrome::clipEventTopLeftNameBounds(
+                            getEventBoundsForClip(*clip, getLaneContentBounds(), 0).toFloat());
+                        if (!nameR.isEmpty() && nameR.contains(e.position))
+                        {
+                            mouseDownOnSelectedClipNameLabel_ = true;
+                            renameArmedClipId_ = clip->id;
+                        }
+                    }
                 }
                 else
                 {
@@ -810,10 +819,132 @@ private:
             }
         }
 
+        if (mouseDownOnSelectedClipNameLabel_ && renameArmedClipId_ != 0 && !dragDragging_
+            && e.getDistanceFromDragStart() < kClipDragThresholdPx && e.getNumberOfClicks() == 1)
+        {
+            // Slow second click on the selected clip's name label: open the inline rename editor
+            // after the double-click window (a newer press bumps the generation and cancels this,
+            // so a fast double-click keeps opening the MIDI editor instead).
+            const InstrumentMidiClipId cid = renameArmedClipId_;
+            const int gen = renameArmGeneration_;
+            juce::Component::SafePointer<MidiEventLane> safe(this);
+            juce::Timer::callAfterDelay(
+                mini_daw::timeline_clip_chrome::kClipRenameSecondClickDelayMs, [safe, gen, cid] {
+                    if (safe != nullptr && gen == safe->renameArmGeneration_)
+                    {
+                        safe->beginInlineClipRename(cid);
+                    }
+                });
+        }
+        mouseDownOnSelectedClipNameLabel_ = false;
+        renameArmedClipId_ = 0;
         dragCouldMove_ = false;
         dragDragging_ = false;
         dragEffectivePreviewDeltaSamples_ = 0;
         [[maybe_unused]] const bool hoverDirty = refreshMidiLaneTrimHoverAffordances(e.getPosition());
+        repaint();
+    }
+
+    void beginInlineClipRename(const InstrumentMidiClipId clipId)
+    {
+        InstrumentTrackController* const ac = activeControllerNullable();
+        if (ac == nullptr || clipId == 0 || dragDragging_ || trimLaneGestureActive_)
+        {
+            return;
+        }
+        const InstrumentMidiClip* clip = nullptr;
+        for (const auto& up : ac->getClips())
+        {
+            if (up != nullptr && up->id == clipId)
+            {
+                clip = up.get();
+                break;
+            }
+        }
+        if (clip == nullptr)
+        {
+            return;
+        }
+        const auto laneContent = getLaneContentBounds();
+        if (laneContent.isEmpty())
+        {
+            return;
+        }
+        const auto eb = getEventBoundsForClip(*clip, laneContent, 0);
+        if (eb.isEmpty())
+        {
+            return;
+        }
+        dismissInlineClipRename(false);
+
+        if (clipRenameEditor_ == nullptr)
+        {
+            clipRenameEditor_ = std::make_unique<juce::TextEditor>("midiClipRenameEdit");
+            clipRenameEditor_->setMultiLine(false);
+            clipRenameEditor_->setReturnKeyStartsNewLine(false);
+            clipRenameEditor_->setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
+            clipRenameEditor_->setSelectAllWhenFocused(true);
+            clipRenameEditor_->onReturnKey = [this] { dismissInlineClipRename(true); };
+            clipRenameEditor_->onEscapeKey = [this] { dismissInlineClipRename(false); };
+            // Focus loss commits — same convention as track-header rename.
+            clipRenameEditor_->onFocusLost = [this] { dismissInlineClipRename(true); };
+            addChildComponent(*clipRenameEditor_);
+        }
+
+        renameEditingClipId_ = clipId;
+        clipRenameEditor_->setText(clip->name.trim(), false);
+        juce::Rectangle<int> box = mini_daw::timeline_clip_chrome::clipEventTopLeftNameBounds(
+            eb.toFloat()).toNearestInt();
+        box.setHeight(20);
+        box.setWidth(juce::jmax(box.getWidth(), 96));
+        box = box.constrainedWithin(getLocalBounds().reduced(1));
+        clipRenameEditor_->setBounds(box);
+        clipRenameEditor_->setVisible(true);
+        clipRenameEditor_->toFront(false);
+        clipRenameEditor_->grabKeyboardFocus();
+        repaint();
+    }
+
+    void dismissInlineClipRename(const bool commit)
+    {
+        if (clipRenameEditor_ == nullptr || !clipRenameEditor_->isVisible() || renameDismissInProgress_)
+        {
+            return;
+        }
+        renameDismissInProgress_ = true;
+        const InstrumentMidiClipId cid = renameEditingClipId_;
+        const juce::String text = clipRenameEditor_->getText().trim();
+        renameEditingClipId_ = 0;
+        clipRenameEditor_->setVisible(false);
+
+        // Empty text = cancel (keep the old name): the safest behavior for accidental clears.
+        if (commit && cid != 0 && text.isNotEmpty())
+        {
+            auto execute = owner_.callbacks_.executeUndoableInstrumentEdit;
+            const TrackId laneTid = laneTimelineTrackId_;
+            if (execute != nullptr)
+            {
+                execute(juce::String("Rename MIDI clip"), [this, laneTid, cid, text]() -> bool {
+                    InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
+                    InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+                    if (ctl == nullptr || !ctl->hasInstrumentTrack())
+                    {
+                        return false;
+                    }
+                    const bool ok = ctl->renameInstrumentMidiClip(cid, text);
+                    if (ok)
+                    {
+                        owner_.trackLanes_.repaint();
+                    }
+                    return ok;
+                });
+            }
+            else if (InstrumentTrackController* const ac = activeControllerNullable(); ac != nullptr)
+            {
+                (void)ac->renameInstrumentMidiClip(cid, text);
+            }
+        }
+        renameDismissInProgress_ = false;
         repaint();
     }
 
@@ -882,6 +1013,10 @@ private:
         {
             return;
         }
+        // Double-click never renames: cancel any pending delayed rename open.
+        ++renameArmGeneration_;
+        mouseDownOnSelectedClipNameLabel_ = false;
+        renameArmedClipId_ = 0;
         InstrumentTrackController* const ac = activeControllerNullable();
         if (ac == nullptr)
         {
@@ -1235,6 +1370,16 @@ private:
 
     bool dragCouldMove_ = false;
     bool dragDragging_ = false;
+    // Explorer-style inline clip rename (mirrors `ClipWaveformView`): a slow second click on the
+    // top-left name label of the already-selected clip opens a `TextEditor` (Return commits,
+    // Escape cancels, focus loss commits). `renameArmGeneration_` invalidates the pending delayed
+    // open on any newer press so a fast double-click (opens the MIDI editor) never renames.
+    std::unique_ptr<juce::TextEditor> clipRenameEditor_;
+    InstrumentMidiClipId renameEditingClipId_ = 0;
+    InstrumentMidiClipId renameArmedClipId_ = 0;
+    bool mouseDownOnSelectedClipNameLabel_ = false;
+    int renameArmGeneration_ = 0;
+    bool renameDismissInProgress_ = false;
     juce::Point<int> dragMouseDownLocal_;
     juce::Point<float> dragMouseDownScreen_{};
     std::int64_t dragEffectivePreviewDeltaSamples_ = 0;
@@ -1416,6 +1561,10 @@ void InstrumentTimelineRowCoordinator::tearDownExperimentalInstrumentTimelineUiF
     {
         return;
     }
+    // Detach from the lanes view while the components are still alive: its attachment map stores
+    // raw header/lane pointers, and a later sync would call getParentComponent() on freed
+    // components (UAF crash seen on Delete Track after project load).
+    trackLanes_.detachInstrumentTimelineRowForTrack(tid);
     instrumentMidiEventLanesByTrackId_.erase(tid);
     instrumentTrackHeadersByTrackId_.erase(tid);
 }

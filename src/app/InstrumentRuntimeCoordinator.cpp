@@ -3,6 +3,7 @@
 #include <map>
 
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
+#include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -158,6 +159,23 @@ bool InstrumentRuntimeCoordinator::isKeyedRuntimeRegistryEmpty() const noexcept
     return instrumentHostsByTrackId_.empty();
 }
 
+std::vector<std::tuple<TrackId, const void*, const void*>>
+    InstrumentRuntimeCoordinator::exportKeyedRuntimePointersForDiagnostics() const
+{
+    std::vector<std::tuple<TrackId, const void*, const void*>> out;
+    out.reserve(instrumentHostsByTrackId_.size());
+    for (const auto& [tid, host] : instrumentHostsByTrackId_)
+    {
+        const auto ctlIt = instrumentControllersByTrackId_.find(tid);
+        out.emplace_back(tid,
+                         static_cast<const void*>(host.get()),
+                         ctlIt != instrumentControllersByTrackId_.end()
+                             ? static_cast<const void*>(ctlIt->second.get())
+                             : nullptr);
+    }
+    return out;
+}
+
 ExperimentalInstrumentHost* InstrumentRuntimeCoordinator::stagingInstrumentHostUnchecked() const noexcept
 {
     return instrumentStagingHost_.get();
@@ -250,14 +268,50 @@ void InstrumentRuntimeCoordinator::promoteInstrumentStagingIntoRegistryBoundTo(c
 
 void InstrumentRuntimeCoordinator::removeInstrumentRuntimeForTrack(const TrackId tid) noexcept
 {
-    if (ExperimentalInstrumentHost* const host = getInstrumentHostForTrack(tid))
+    // Publish-before-destroy (F4): retire the runtime out of the registry first, republish the
+    // playback bridge without it, drain the in-flight audio callback (which may still hold the
+    // previous snapshot with raw host/controller pointers), and only then unload/destroy.
+    std::unique_ptr<ExperimentalInstrumentHost> retiredHost;
+    std::unique_ptr<InstrumentTrackController> retiredController;
+    if (const auto it = instrumentHostsByTrackId_.find(tid); it != instrumentHostsByTrackId_.end())
     {
-        host->clearControllerWireCallbacks();
-        host->unloadInstrument();
+        retiredHost = std::move(it->second);
+        instrumentHostsByTrackId_.erase(it);
     }
-    instrumentControllersByTrackId_.erase(tid);
-    instrumentHostsByTrackId_.erase(tid);
+    if (const auto it = instrumentControllersByTrackId_.find(tid);
+        it != instrumentControllersByTrackId_.end())
+    {
+        retiredController = std::move(it->second);
+        instrumentControllersByTrackId_.erase(it);
+    }
+
     updateExperimentalPlaybackBridgeAfterRegistryChange();
+
+    if (retiredHost != nullptr || retiredController != nullptr)
+    {
+        double waitedMs = 0.0;
+        const bool drained = playbackEngine_.waitForAudioCallbackExit(250.0, &waitedMs);
+        if (!drained)
+        {
+            // Stability C2B: identify where the callback is stuck when the drain times out.
+            appendTrackDeleteDiagnosticLine(
+                "drain timeout state: "
+                + playbackEngine_.describeAudioCallbackStateForDiagnostics());
+        }
+        appendTrackDeleteDiagnosticLine(
+            "instrument runtime retire trackId=" + juce::String((juce::int64)tid)
+            + ": bridge republished; callback drain waitedMs=" + juce::String(waitedMs, 2)
+            + " timeout=" + (drained ? "no" : "YES (proceeding anyway)"));
+    }
+
+    if (retiredHost != nullptr)
+    {
+        retiredHost->clearControllerWireCallbacks();
+        retiredHost->unloadInstrument();
+    }
+    // Controller references the host; destroy it first.
+    retiredController.reset();
+    retiredHost.reset();
     runSyncInstrumentTimelineRowAttachmentCallback();
 }
 

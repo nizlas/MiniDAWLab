@@ -1,0 +1,699 @@
+#include "diagnostics/StabilityScenarioRunner.h"
+
+#include "diagnostics/StabilityDiagnosticLog.h"
+#include "diagnostics/StabilityInvariants.h"
+
+#include <atomic>
+#include <cstdlib>
+#include <thread>
+
+#if JUCE_WINDOWS
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+#endif
+
+namespace
+{
+    std::atomic<bool> gStabilityTestModeActive{ false };
+
+    constexpr int kTimerIntervalMs = 50;
+    constexpr int kSettleAfterLoadMs = 1200;
+    constexpr int kSettleAfterDeleteOpMs = 400;
+    constexpr int kSettleDefaultMs = 250;
+
+    [[nodiscard]] juce::int64 nowMs() noexcept
+    {
+        return static_cast<juce::int64>(juce::Time::getMillisecondCounterHiRes());
+    }
+} // namespace
+
+bool isStabilityTestModeActive() noexcept
+{
+    return gStabilityTestModeActive.load(std::memory_order_relaxed);
+}
+
+void setStabilityTestModeActive(const bool active) noexcept
+{
+    gStabilityTestModeActive.store(active, std::memory_order_relaxed);
+}
+
+// -----------------------------------------------------------------------------
+// Command-line parsing
+// -----------------------------------------------------------------------------
+
+StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::StringArray& args,
+                                                               juce::String& errorOut)
+{
+    errorOut.clear();
+    StabilityScenarioRequest req;
+
+    auto fileFromArg = [](const juce::String& a) -> juce::File {
+        return juce::File::isAbsolutePath(a)
+                   ? juce::File(a)
+                   : juce::File::getCurrentWorkingDirectory().getChildFile(a);
+    };
+    auto nextProjectArg = [&args, &fileFromArg](int& i, juce::File& out) -> bool {
+        if (i + 1 >= args.size() || args[i + 1].startsWith("-"))
+        {
+            return false;
+        }
+        ++i;
+        out = fileFromArg(args[i]);
+        return true;
+    };
+    auto setKind = [&req, &errorOut](const StabilityScenarioKind k) -> bool {
+        if (req.kind != StabilityScenarioKind::None)
+        {
+            errorOut = "multiple --stability-* scenario flags given";
+            return false;
+        }
+        req.kind = k;
+        return true;
+    };
+
+    for (int i = 0; i < args.size(); ++i)
+    {
+        const juce::String& a = args[i];
+        if (a == "--stability-load-loop")
+        {
+            if (!setKind(StabilityScenarioKind::LoadLoop)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-load-loop requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-load-alternate")
+        {
+            if (!setKind(StabilityScenarioKind::LoadAlternate)) { return {}; }
+            if (!nextProjectArg(i, req.projectA) || !nextProjectArg(i, req.projectB))
+            {
+                errorOut = "--stability-load-alternate requires two project paths";
+                return {};
+            }
+        }
+        else if (a == "--stability-delete-loop")
+        {
+            if (!setKind(StabilityScenarioKind::DeleteLoop)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-delete-loop requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-open-save-close")
+        {
+            if (!setKind(StabilityScenarioKind::OpenSaveClose)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-open-save-close requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-smoke")
+        {
+            if (!setKind(StabilityScenarioKind::Smoke)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-smoke requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-mixdown")
+        {
+            if (!setKind(StabilityScenarioKind::Mixdown)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-mixdown requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--iterations")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = "--iterations requires a number";
+                return {};
+            }
+            ++i;
+            req.iterations = args[i].getIntValue();
+            if (req.iterations < 1 || req.iterations > 10000)
+            {
+                errorOut = "--iterations must be 1..10000 (got \"" + args[i] + "\")";
+                return {};
+            }
+        }
+        else if (a == "--format")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = "--format requires wav or mp3";
+                return {};
+            }
+            ++i;
+            if (args[i].equalsIgnoreCase("mp3")) { req.mixdownMp3 = true; }
+            else if (args[i].equalsIgnoreCase("wav")) { req.mixdownMp3 = false; }
+            else
+            {
+                errorOut = "--format must be wav or mp3 (got \"" + args[i] + "\")";
+                return {};
+            }
+        }
+        else if (a.startsWith("--stability-") && a != "--stability-crash-test")
+        {
+            errorOut = "unknown stability flag: " + a;
+            return {};
+        }
+    }
+    return req;
+}
+
+// -----------------------------------------------------------------------------
+// Runner
+// -----------------------------------------------------------------------------
+
+StabilityScenarioRunner::StabilityScenarioRunner(StabilityRunnerHooks hooks)
+    : hooks_(std::move(hooks))
+{
+}
+
+StabilityScenarioRunner::~StabilityScenarioRunner()
+{
+    stopTimer();
+}
+
+void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
+{
+    runStartMs_ = nowMs();
+    invariantFailuresAtStart_ = stability_invariants::getStabilityInvariantFailureCount();
+    switch (request.kind)
+    {
+        case StabilityScenarioKind::LoadLoop: scenarioName_ = "load-loop"; break;
+        case StabilityScenarioKind::LoadAlternate: scenarioName_ = "load-alternate"; break;
+        case StabilityScenarioKind::DeleteLoop: scenarioName_ = "delete-loop"; break;
+        case StabilityScenarioKind::OpenSaveClose: scenarioName_ = "open-save-close"; break;
+        case StabilityScenarioKind::Smoke: scenarioName_ = "smoke"; break;
+        case StabilityScenarioKind::Mixdown:
+            scenarioName_ = request.mixdownMp3 ? "mixdown-mp3" : "mixdown-wav";
+            break;
+        case StabilityScenarioKind::None: scenarioName_ = "none"; break;
+    }
+
+    appendStabilityRunLine("================================================================");
+    appendStabilityRunLine("scenario start: " + scenarioName_
+                           + " iterations=" + juce::String(request.iterations)
+                           + " projectA=" + request.projectA.getFullPathName()
+                           + (request.projectB != juce::File{}
+                                  ? " projectB=" + request.projectB.getFullPathName()
+                                  : juce::String{}));
+
+    if (!request.projectA.existsAsFile())
+    {
+        finish(false, "project file not found: " + request.projectA.getFullPathName());
+        return;
+    }
+    if (request.kind == StabilityScenarioKind::LoadAlternate && !request.projectB.existsAsFile())
+    {
+        finish(false, "project file not found: " + request.projectB.getFullPathName());
+        return;
+    }
+
+    switch (request.kind)
+    {
+        case StabilityScenarioKind::LoadLoop:
+            appendLoadLoopSteps(request.projectA, request.iterations);
+            break;
+        case StabilityScenarioKind::LoadAlternate:
+            appendLoadAlternateSteps(request.projectA, request.projectB, request.iterations);
+            break;
+        case StabilityScenarioKind::DeleteLoop:
+            appendDeleteLoopSteps(request.projectA, request.iterations);
+            break;
+        case StabilityScenarioKind::OpenSaveClose:
+            appendOpenSaveCloseSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::Smoke:
+            appendLoadLoopSteps(request.projectA, 3);
+            appendDeleteLoopSteps(request.projectA, 2);
+            appendOpenSaveCloseSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::Mixdown:
+            appendMixdownSteps(request.projectA, request.mixdownMp3);
+            break;
+        case StabilityScenarioKind::None:
+            finish(false, "no scenario requested");
+            return;
+    }
+
+    appendStabilityRunLine("steps queued: " + juce::String(static_cast<int>(steps_.size()))
+                           + " (delete-loop iterations expand at plan time)");
+    resumeAtMs_ = nowMs() + 500; // Initial settle: let startup async work finish first.
+    startTimer(kTimerIntervalMs);
+}
+
+void StabilityScenarioRunner::timerCallback()
+{
+    if (finished_ || nowMs() < resumeAtMs_)
+    {
+        return;
+    }
+    if (nextStepIndex_ >= steps_.size())
+    {
+        finish(true, {});
+        return;
+    }
+
+    // Copy out the step: plan-steps may insert into steps_ while running.
+    const Step step = steps_[nextStepIndex_];
+    ++nextStepIndex_;
+
+    appendStabilityRunLine("step begin: " + step.name);
+    const juce::int64 t0 = nowMs();
+    juce::String failReason;
+    bool ok = false;
+    ok = step.action ? step.action(failReason) : false;
+    const juce::int64 elapsed = nowMs() - t0;
+    if (!ok)
+    {
+        appendStabilityRunLine("step FAIL: " + step.name + " elapsedMs=" + juce::String(elapsed)
+                               + (failReason.isNotEmpty() ? " reason: " + failReason
+                                                          : juce::String{}));
+        finish(false, "step \"" + step.name + "\" failed"
+                          + (failReason.isNotEmpty() ? ": " + failReason : juce::String{}));
+        return;
+    }
+    // Stability C3: verify runtime invariants after every successful step. Also fail when any
+    // invariant failure was logged from an app-internal call site (delete/undo/load hooks) since
+    // the run started — a matrix must never silently pass with invariant failures.
+    if (hooks_.verifyInvariants && !hooks_.verifyInvariants("runner:" + step.name))
+    {
+        appendStabilityRunLine("step INVARIANT FAIL after: " + step.name
+                               + " (see stability-invariant.log)");
+        finish(false, "invariant check failed after step \"" + step.name + "\"");
+        return;
+    }
+    if (stability_invariants::getStabilityInvariantFailureCount() > invariantFailuresAtStart_)
+    {
+        appendStabilityRunLine("step INVARIANT FAIL (logged by app call site) after: " + step.name
+                               + " (see stability-invariant.log)");
+        finish(false, "invariant failure logged during step \"" + step.name + "\"");
+        return;
+    }
+
+    appendStabilityRunLine("step end ok: " + step.name + " elapsedMs=" + juce::String(elapsed));
+    resumeAtMs_ = nowMs() + step.settleMsAfter;
+}
+
+void StabilityScenarioRunner::finish(const bool pass, const juce::String& reason)
+{
+    if (finished_)
+    {
+        return;
+    }
+    finished_ = true;
+    stopTimer();
+
+    if (openSaveCloseCopy_ != juce::File{} && openSaveCloseCopy_.existsAsFile())
+    {
+        (void)openSaveCloseCopy_.deleteFile();
+        appendStabilityRunLine("cleanup: deleted temp project copy "
+                               + openSaveCloseCopy_.getFullPathName());
+    }
+
+    const juce::int64 totalMs = nowMs() - runStartMs_;
+    if (pass)
+    {
+        appendStabilityRunLine("RESULT: PASS scenario=" + scenarioName_
+                               + " totalMs=" + juce::String(totalMs));
+        writeLastOperationBreadcrumb("stability scenario PASS: " + scenarioName_);
+    }
+    else
+    {
+        appendStabilityRunLine("RESULT: FAIL scenario=" + scenarioName_
+                               + " totalMs=" + juce::String(totalMs) + " reason: " + reason);
+        writeLastOperationBreadcrumb("stability scenario FAIL: " + scenarioName_ + " - " + reason);
+    }
+
+    const int exitCode = pass ? 0 : 1;
+
+    // Shutdown watchdog: scenario runs have shown the app shutdown can hang when the audio
+    // callback is wedged inside its processing section (drain "timeout=YES" in
+    // track-delete-diag.log; removeAudioCallback then blocks forever). A test run must always
+    // terminate with the intended exit code, so a detached thread force-exits after a grace
+    // period. When shutdown completes normally the process dies first and this thread with it.
+    std::thread([exitCode] {
+        std::this_thread::sleep_for(std::chrono::seconds(20));
+        appendStabilityRunLine(
+            "WARNING: clean shutdown did not complete within 20s - forcing process exit "
+            "(see drain timeout=YES lines in track-delete-diag.log)");
+#if JUCE_WINDOWS
+        ::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(exitCode));
+#else
+        std::_Exit(exitCode);
+#endif
+    }).detach();
+
+    if (auto* app = juce::JUCEApplication::getInstance())
+    {
+        app->setApplicationReturnValue(exitCode);
+        // Direct quit: bypasses the unsaved-changes quit guard on purpose (deterministic exit;
+        // scenarios routinely leave the session dirty).
+        app->quit();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Step builders
+// -----------------------------------------------------------------------------
+
+void StabilityScenarioRunner::appendLoadAndVerifySteps(const juce::File& project,
+                                                       const juce::String& label)
+{
+    steps_.push_back(Step{
+        label + ": load " + project.getFileName(),
+        [this, project](juce::String&) -> bool {
+            hooks_.loadProjectFromFile(project);
+            return true;
+        },
+        kSettleAfterLoadMs });
+    steps_.push_back(Step{
+        label + ": verify loaded",
+        [this](juce::String& failReason) -> bool {
+            const int n = hooks_.getTrackCount();
+            appendStabilityRunLine("  track count after load: " + juce::String(n));
+            if (n <= 0)
+            {
+                failReason = "no tracks after load (load failed?)";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+}
+
+void StabilityScenarioRunner::appendLoadLoopSteps(const juce::File& project, const int iterations)
+{
+    for (int i = 1; i <= iterations; ++i)
+    {
+        appendLoadAndVerifySteps(project,
+                                 "load-loop " + juce::String(i) + "/" + juce::String(iterations));
+    }
+}
+
+void StabilityScenarioRunner::appendLoadAlternateSteps(const juce::File& a,
+                                                       const juce::File& b,
+                                                       const int iterations)
+{
+    for (int i = 1; i <= iterations; ++i)
+    {
+        const juce::File& f = (i % 2 == 1) ? a : b;
+        appendLoadAndVerifySteps(
+            f, "load-alternate " + juce::String(i) + "/" + juce::String(iterations));
+    }
+}
+
+size_t StabilityScenarioRunner::insertDeleteCycleSteps(const size_t insertAt,
+                                                       const StabilityTrackInfo& track,
+                                                       const bool withPlayback,
+                                                       const bool withMidiEditor,
+                                                       const juce::String& label)
+{
+    const juce::String trackDesc = track.kindName + " \"" + track.name + "\" id="
+                                   + juce::String(static_cast<juce::int64>(track.id));
+    // Baseline track count captured by the delete step, checked by undo/redo steps.
+    auto baseline = std::make_shared<int>(-1);
+    std::vector<Step> cycle;
+
+    if (withPlayback)
+    {
+        cycle.push_back(Step{ label + ": start playback",
+                              [this](juce::String&) -> bool {
+                                  hooks_.setPlaybackActive(true);
+                                  return true;
+                              },
+                              kSettleAfterDeleteOpMs });
+    }
+    if (withMidiEditor && track.isInstrument)
+    {
+        cycle.push_back(Step{
+            label + ": open MIDI editor on " + trackDesc,
+            [this, track](juce::String&) -> bool {
+                const bool opened = hooks_.openMidiEditorOnFirstClip(track.id);
+                appendStabilityRunLine(opened ? "  MIDI editor opened"
+                                              : "  MIDI editor not opened (no clips) - continuing");
+                return true; // No clips is not a failure.
+            },
+            kSettleDefaultMs });
+    }
+
+    cycle.push_back(Step{ label + ": delete " + trackDesc,
+                          [this, track, baseline](juce::String& failReason) -> bool {
+                              *baseline = hooks_.getTrackCount();
+                              hooks_.requestDeleteTrack(track.id);
+                              const int after = hooks_.getTrackCount();
+                              if (after != *baseline - 1)
+                              {
+                                  failReason = "track count after delete: expected "
+                                               + juce::String(*baseline - 1) + " got "
+                                               + juce::String(after);
+                                  return false;
+                              }
+                              return true;
+                          },
+                          kSettleAfterDeleteOpMs });
+    cycle.push_back(Step{ label + ": undo delete of " + trackDesc,
+                          [this, baseline](juce::String& failReason) -> bool {
+                              hooks_.invokeUndo();
+                              const int after = hooks_.getTrackCount();
+                              if (after != *baseline)
+                              {
+                                  failReason = "track count after undo: expected "
+                                               + juce::String(*baseline) + " got "
+                                               + juce::String(after);
+                                  return false;
+                              }
+                              return true;
+                          },
+                          kSettleAfterDeleteOpMs });
+    cycle.push_back(Step{ label + ": redo delete of " + trackDesc,
+                          [this, baseline](juce::String& failReason) -> bool {
+                              hooks_.invokeRedo();
+                              const int after = hooks_.getTrackCount();
+                              if (after != *baseline - 1)
+                              {
+                                  failReason = "track count after redo: expected "
+                                               + juce::String(*baseline - 1) + " got "
+                                               + juce::String(after);
+                                  return false;
+                              }
+                              return true;
+                          },
+                          kSettleAfterDeleteOpMs });
+    cycle.push_back(Step{ label + ": undo (restore) " + trackDesc,
+                          [this, baseline](juce::String& failReason) -> bool {
+                              hooks_.invokeUndo();
+                              const int after = hooks_.getTrackCount();
+                              if (after != *baseline)
+                              {
+                                  failReason = "track count after restore undo: expected "
+                                               + juce::String(*baseline) + " got "
+                                               + juce::String(after);
+                                  return false;
+                              }
+                              return true;
+                          },
+                          kSettleAfterDeleteOpMs });
+
+    if (withMidiEditor && track.isInstrument)
+    {
+        cycle.push_back(Step{ label + ": close MIDI editor",
+                              [this](juce::String&) -> bool {
+                                  hooks_.closeMidiEditor();
+                                  return true;
+                              },
+                              kSettleDefaultMs });
+    }
+    if (withPlayback)
+    {
+        cycle.push_back(Step{ label + ": stop playback",
+                              [this](juce::String&) -> bool {
+                                  hooks_.setPlaybackActive(false);
+                                  return true;
+                              },
+                              kSettleDefaultMs });
+    }
+
+    steps_.insert(steps_.begin() + static_cast<std::ptrdiff_t>(insertAt),
+                  cycle.begin(),
+                  cycle.end());
+    return cycle.size();
+}
+
+void StabilityScenarioRunner::appendDeleteLoopSteps(const juce::File& project, const int iterations)
+{
+    appendLoadAndVerifySteps(project, "delete-loop setup");
+
+    for (int i = 0; i < iterations; ++i)
+    {
+        // Iteration variants: 0 = plain, odd = during playback, even >= 2 = with the MIDI editor
+        // open on instrument tracks. Tracks are enumerated fresh at plan time because TrackIds
+        // are only guaranteed stable across the immediately surrounding delete/undo cycle.
+        const bool withPlayback = (i % 2) == 1;
+        const bool withMidiEditor = i >= 2 && (i % 2) == 0;
+        const juce::String label = "delete-loop iter " + juce::String(i + 1) + "/"
+                                   + juce::String(iterations);
+        steps_.push_back(Step{
+            label + ": plan (enumerate tracks)",
+            [this, label, withPlayback, withMidiEditor](juce::String& failReason) -> bool {
+                const std::vector<StabilityTrackInfo> tracks = hooks_.listDeletableTracks();
+                if (tracks.empty())
+                {
+                    failReason = "no deletable tracks in session";
+                    return false;
+                }
+                appendStabilityRunLine("  " + label + ": " + juce::String((int)tracks.size())
+                                       + " deletable tracks; playback="
+                                       + (withPlayback ? "yes" : "no") + " midiEditor="
+                                       + (withMidiEditor ? "yes" : "no"));
+                size_t insertAt = nextStepIndex_;
+                for (const StabilityTrackInfo& t : tracks)
+                {
+                    insertAt += insertDeleteCycleSteps(
+                        insertAt, t, withPlayback, withMidiEditor, label);
+                }
+                return true;
+            },
+            kSettleDefaultMs });
+    }
+}
+
+void StabilityScenarioRunner::appendOpenSaveCloseSteps(const juce::File& project)
+{
+    // Work on a sibling copy so the user's project file is never modified. A sibling (not a temp
+    // dir) keeps project-relative audio paths ("Audio/...") resolving identically.
+    steps_.push_back(Step{
+        "open-save-close: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(
+                project.getFileNameWithoutExtension() + "-stabilitytest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "open-save-close: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "open-save-close: verify loaded",
+                           [this](juce::String& failReason) -> bool {
+                               const int n = hooks_.getTrackCount();
+                               appendStabilityRunLine("  track count after load: "
+                                                      + juce::String(n));
+                               if (n <= 0)
+                               {
+                                   failReason = "no tracks after load";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{
+        "open-save-close: small undoable edit (rename first track)",
+        [this](juce::String& failReason) -> bool {
+            const std::vector<StabilityTrackInfo> tracks = hooks_.listDeletableTracks();
+            if (tracks.empty())
+            {
+                failReason = "no renameable tracks";
+                return false;
+            }
+            const juce::String newName
+                = "StabTest " + juce::Time::getCurrentTime().formatted("%H%M%S");
+            if (!hooks_.renameTrackUndoable(tracks.front().id, newName))
+            {
+                failReason = "rename refused";
+                return false;
+            }
+            appendStabilityRunLine("  renamed track id="
+                                   + juce::String((juce::int64)tracks.front().id) + " to \""
+                                   + newName + "\"");
+            return true;
+        },
+        kSettleDefaultMs });
+    steps_.push_back(Step{ "open-save-close: save (direct save to test copy)",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           500 });
+    steps_.push_back(Step{ "open-save-close: verify saved file",
+                           [this](juce::String& failReason) -> bool {
+                               if (!openSaveCloseCopy_.existsAsFile()
+                                   || openSaveCloseCopy_.getSize() <= 0)
+                               {
+                                   failReason = "saved test copy missing or empty";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "open-save-close: reload test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "open-save-close: verify reloaded",
+                           [this](juce::String& failReason) -> bool {
+                               const int n = hooks_.getTrackCount();
+                               appendStabilityRunLine("  track count after reload: "
+                                                      + juce::String(n));
+                               if (n <= 0)
+                               {
+                                   failReason = "no tracks after reload";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+}
+
+void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, const bool mp3)
+{
+    appendLoadAndVerifySteps(project, "mixdown setup");
+
+    steps_.push_back(Step{
+        juce::String("mixdown: export ") + (mp3 ? "mp3" : "wav") + " to temp",
+        [this, mp3](juce::String& failReason) -> bool {
+            const juce::File out
+                = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                      .getChildFile(mp3 ? "dal-stability-mixdown.mp3"
+                                        : "dal-stability-mixdown.wav");
+            (void)out.deleteFile();
+            const juce::Result r = hooks_.runMixdownBlocking(out, mp3);
+            if (!r.wasOk())
+            {
+                failReason = "exporter failed: " + r.getErrorMessage();
+                return false;
+            }
+            if (!out.existsAsFile() || out.getSize() <= 0)
+            {
+                failReason = "output missing or empty: " + out.getFullPathName();
+                return false;
+            }
+            appendStabilityRunLine("  mixdown output ok: " + out.getFullPathName() + " ("
+                                   + juce::String(out.getSize()) + " bytes)");
+            (void)out.deleteFile();
+            return true;
+        },
+        kSettleDefaultMs });
+}

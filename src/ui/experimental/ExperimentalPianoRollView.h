@@ -226,6 +226,9 @@ private:
     [[nodiscard]] std::optional<std::pair<int, TimelineNoteResizeEdge>> findTimelineBarResizeEdgeAtPoint(
         juce::Point<int> pos) const;
     [[nodiscard]] std::int64_t snapTimelineTickForEdit(std::int64_t tick) const noexcept;
+    /// Create-on-click variant: floor to the snap cell's start (the cell visually under the
+    /// pointer) instead of nearest grid line. Move/resize/paste keep `snapTimelineTickForEdit`.
+    [[nodiscard]] std::int64_t snapTimelineTickForCreate(std::int64_t tick) const noexcept;
     [[nodiscard]] std::int64_t minTimelineNoteDurationTicks() const noexcept;
     void beginTimelineNoteResizeGesture(int noteIndex, TimelineNoteResizeEdge edge);
     void updateTimelineNoteResizeGesture(juce::Point<int> localPos);

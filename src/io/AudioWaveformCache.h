@@ -34,6 +34,8 @@
 
 #include <juce_core/juce_core.h>
 
+#include "util/AsyncLifetimeToken.h"
+
 class AudioClip;
 
 using AudioWaveformCachePyramidReady = std::function<void(const AudioClip*)>;
@@ -119,4 +121,7 @@ private:
     std::unordered_map<const AudioClip*, Slot> slots_;
     std::unique_ptr<juce::ThreadPool> pool_;
     AudioWaveformCachePyramidReady onPyramidReady_;
+    /// Stability Slice 4: a pending message-thread notify holds a *copy* of `onPyramidReady_`;
+    /// this guard makes that copy no-op once the cache (and its owning window) is gone.
+    mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
 };

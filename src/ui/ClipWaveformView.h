@@ -82,6 +82,10 @@ struct ClipWaveformLaneHost
     std::function<bool(PlacedClipId clipId, ClipTrimEdge edge, std::int64_t newValueSamples)>
         commitClipTrimAsUndoable;
 
+    /** Undoable clip rename ("Rename clip"): display name is project metadata only — the source
+        audio file on disk is never renamed. Empty after trim is rejected by the caller. */
+    std::function<bool(PlacedClipId clipId, juce::String newDisplayName)> commitClipRenameAsUndoable;
+
     /** Active tool from host (e.g. `TransportControlsContent`); empty = `Pointer`. */
     std::function<EditTool()> getActiveEditTool;
 
@@ -200,7 +204,11 @@ private:
         std::shared_ptr<const AudioClip> material;
         std::int64_t materialWindowStart = 0;
         std::int64_t materialWindowEndExcl = 0;
+        // User-facing event name (project metadata; empty = fall back to source file stem).
+        juce::String displayName;
     };
+    // Top-left event label: custom display name if set, else the source file stem.
+    [[nodiscard]] static juce::String clipDisplayLabelForStrip(const TimelineStrip& strip);
     std::vector<TimelineStrip> clipStrips_;
     std::uint64_t lastPeaksFingerprint_ = 0;
 
@@ -354,6 +362,19 @@ private:
     bool dragMovementBeyondThreshold_ = false;
     // Effective span at mousedown (cross-lane ghost, same-lane move); not always full material.
     std::int64_t mouseDownEffectiveNumSamples_ = 0;
+
+    // Explorer-style inline rename: a slow second click on the top-left name label of the already
+    // selected clip opens a `TextEditor` over the label (Return commits, Escape cancels, focus loss
+    // commits — same convention as track-header rename). A pending delayed open is invalidated by
+    // any newer mouse press via `renameArmGeneration_` so fast double clicks never open it.
+    void beginInlineClipRename(PlacedClipId clipId);
+    void dismissInlineClipRename(bool commit);
+    [[nodiscard]] juce::Rectangle<float> eventRectForClipNow(PlacedClipId clipId) const;
+    std::unique_ptr<juce::TextEditor> clipRenameEditor_;
+    PlacedClipId renameEditingClipId_ = kInvalidPlacedClipId;
+    bool mouseDownOnSelectedClipNameLabel_ = false;
+    int renameArmGeneration_ = 0;
+    bool renameDismissInProgress_ = false;
 
     // Drop ghost (this component may be the non-source lane showing a placeholder only).
     bool hasDragGhost_ = false;

@@ -32,6 +32,9 @@ struct ProjectFileClipV1
     std::int64_t materialWindowStartSamples = 0;
     std::int64_t materialWindowEndExclusiveSamples = 0;
     bool hasMaterialWindowInFile = false;
+    // Optional user-facing event name (project metadata only; never renames the source file).
+    // Empty = absent in JSON; UI falls back to the source file stem.
+    juce::String name;
 };
 
 struct ProjectFileInsertV1

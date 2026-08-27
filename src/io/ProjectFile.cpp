@@ -133,6 +133,10 @@ namespace
                     "materialWindowEndExclusiveSamples",
                     static_cast<std::int64_t>(c.materialWindowEndExclusiveSamples));
             }
+            if (c.name.trim().isNotEmpty())
+            {
+                co->setProperty("name", c.name.trim());
+            }
             clipVars.add(juce::var(co.get()));
         }
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
@@ -559,6 +563,8 @@ namespace
                 out.hasMaterialWindowInFile = true;
             }
         }
+        // Optional in all versions: absent -> empty (UI falls back to the source file stem).
+        out.name = v.getProperty("name", {}).toString().trim();
         return juce::Result::ok();
     }
 

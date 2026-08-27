@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "domain/Track.h"
+#include "util/AsyncLifetimeToken.h"
 
 class Session;
 class Transport;
@@ -43,6 +44,8 @@ private:
     InspectorView& inspectorView_;
     Callbacks callbacks_;
     bool importInFlight_ = false;
+    /// Stability Slice 4: FileChooser completions check this before touching the coordinator.
+    mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(InstrumentMidiImportCoordinator)
 };

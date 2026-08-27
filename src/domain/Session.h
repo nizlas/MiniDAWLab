@@ -218,6 +218,10 @@ public:
     // [Message thread] Rename one lane (`Track::getName()`). Trim-only no-op / empty after trim / unknown id: no publish.
     void setTrackName(TrackId trackId, juce::String newName) noexcept;
 
+    // [Message thread] Set one placed clip's display name (project metadata only; the source audio
+    // file on disk is never renamed). Empty after trim / unchanged / unknown id: no publish.
+    void setPlacedClipName(PlacedClipId clipId, juce::String newDisplayName) noexcept;
+
     // [Message thread] Publish the *shared* empty `SessionSnapshot` (see
     // `SessionSnapshot::createEmpty`) — no clips, nothing to play or paint as waveform material.
     void clearClip() noexcept;
@@ -271,6 +275,10 @@ public:
     // [Message thread] Last successfully **saved** or **loaded** project file (empty if never set).
     // Used by the app for project-relative paths (e.g. `Audio/`). Not part of the snapshot.
     [[nodiscard]] juce::File getCurrentProjectFile() const noexcept { return currentProjectFile_; }
+    // [Message thread] Stability Slice 5: `saveProjectToFile` records the written file as current;
+    // an autosave must not hijack the user's save target, so the caller restores it with this.
+    // Also used to detach a recovered autosave so plain Save goes through Save As (empty file).
+    void setCurrentProjectFile(const juce::File& f) noexcept { currentProjectFile_ = f; }
     // [Message thread] Parent directory of `getCurrentProjectFile()`; empty if no project file.
     [[nodiscard]] juce::File getCurrentProjectFolder() const noexcept;
     // [Message thread] True if the user has a known on-disk project (save or load completed).

@@ -31,7 +31,11 @@
 #include "app/ArrangementEventSelectionCoordinator.h"
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "app/InstrumentTimelineRowCoordinator.h"
+#include "app/AudioMixdownExporter.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
+#include "diagnostics/StabilityDiagnosticLog.h"
+#include "diagnostics/StabilityInvariants.h"
+#include "diagnostics/StabilityScenarioRunner.h"
 
 #include "domain/Session.h"
 #include "domain/ProjectMusicalTime.h"
@@ -335,6 +339,8 @@ public:
                     return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
                 },
                 [this] { return trackLanesView.isClipEditGestureInProgress(); },
+                // C2B: immediate routing-plan republish after undo/redo snapshot restore.
+                [this] { playbackEngine_.rebuildRoutingPlanFromSession(); },
                 [this] { trackLanesView.cancelAllClipGesturesAndTransientUiState(); },
                 [this] {
                     if (recordingCoordinator_ != nullptr)
@@ -404,6 +410,24 @@ public:
                     if (instrumentRuntimeCoordinator_ != nullptr)
                     {
                         instrumentRuntimeCoordinator_->alignAllInstrumentClipTemposToProjectTempo();
+                    }
+                },
+                [this] {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                },
+                [this](const InstrumentTrackDeleteUndoSides& sides) {
+                    if (trackLanesEditCoordinator_ != nullptr)
+                    {
+                        trackLanesEditCoordinator_->restoreDeletedInstrumentTrackForUndo(sides);
+                    }
+                },
+                [this](TrackId tid) {
+                    if (trackLanesEditCoordinator_ != nullptr)
+                    {
+                        trackLanesEditCoordinator_->redoTeardownDeletedInstrumentTrack(tid);
                     }
                 },
             });
@@ -959,6 +983,7 @@ public:
 
         trackLanesEditCoordinator_ = std::make_unique<TrackLanesEditCoordinator>(
             session,
+            playbackEngine_,
             pluginHost_,
             trackLanesView,
             rulerView,
@@ -974,8 +999,19 @@ public:
                         undoRedoCoordinator_->executeUndoableSessionEdit(label, std::move(mutator));
                     }
                 },
+                [this](const juce::String& label,
+                       std::function<bool(std::optional<PluginUndoStepSides>&,
+                                          std::optional<InstrumentTrackDeleteUndoSides>&)> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->executeUndoableTrackDelete(label, std::move(mutator));
+                    }
+                },
                 [this] { syncViewportFromSession(); },
                 [this](TrackId tid) { return instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid); },
+                [this](TrackId tid) {
+                    return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                },
                 [this](TrackId tid) {
                     if (midiEditorPresenter_ != nullptr)
                     {
@@ -989,6 +1025,16 @@ public:
                     instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
                 },
                 [this] { refreshInstrumentUi(); },
+                [this](TrackId tid) {
+                    return instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(tid);
+                },
+                [this]() -> double {
+                    if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
+                    {
+                        return dev->getCurrentSampleRate();
+                    }
+                    return 0.0;
+                },
                 [this] { return instrumentRuntimeCoordinator_->hasAnyKeyedInstrumentControllerActive(); },
                 [this] { instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly(); },
                 [this](const TrackId tid) {
@@ -1014,10 +1060,17 @@ public:
             midiEditorPresenter_->syncInstrumentClipTimelineFromDevice();
         }
         instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
+
+        // Stability C3: coordinators (delete/undo/load) trigger invariant checks through this
+        // global registration; the context getters read live subsystem state at check time.
+        stability_invariants::registerGlobalStabilityInvariantChecker(
+            [this](const juce::String& reason)
+            { return stability_invariants::verifyStableState(reason, buildStabilityInvariantContext()); });
     }
 
     ~TransportControlsContent() override
     {
+        stability_invariants::registerGlobalStabilityInvariantChecker(nullptr);
         session.setOnTimelineRulerTimeDisplayChanged({});
         audioWaveformCache_.setOnPyramidReady({});
         playbackEngine_.setExperimentalInstrumentDeviceLifecycleHooks({}, {}, {});
@@ -1087,12 +1140,147 @@ public:
         }
     }
 
+    bool invokeQuitUnsavedGuardFromWindow() override
+    {
+        if (projectIoCoordinator_ == nullptr)
+        {
+            return false;
+        }
+        return projectIoCoordinator_->interceptQuitForUnsavedChanges();
+    }
+
+    void invokeAutosaveRecoveryCheckFromStartup(const bool commandLineProjectOpenQueued) override
+    {
+        if (projectIoCoordinator_ != nullptr)
+        {
+            projectIoCoordinator_->offerAutosaveRecoveryOnStartup(commandLineProjectOpenQueued);
+        }
+    }
+
     void invokeLoadProjectFileFromStartup(const juce::File& projectFile) override
     {
         if (projectIoCoordinator_ != nullptr)
         {
             projectIoCoordinator_->loadProjectFromFile(projectFile);
         }
+    }
+
+    // Stability C2: build hooks over the real coordinators/views and start the scenario runner.
+    // Every hook goes through the same entry point the UI uses (delete = header context-menu path,
+    // undo/redo = window shortcut path, save = Ctrl+S path, mixdown = the real blocking exporter).
+    void invokeStartStabilityScenarioFromStartup(const StabilityScenarioRequest& request) override
+    {
+        StabilityRunnerHooks hooks;
+        hooks.loadProjectFromFile = [this](const juce::File& f) {
+            if (projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->loadProjectFromFile(f);
+            }
+        };
+        hooks.saveProject = [this] { invokeSaveProjectFromWindowShortcut(); };
+        hooks.getTrackCount = [this]() -> int {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            return snap != nullptr ? snap->getNumTracks() : 0;
+        };
+        hooks.listDeletableTracks = [this]() -> std::vector<StabilityTrackInfo> {
+            std::vector<StabilityTrackInfo> out;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return out;
+            }
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                if (tr.getKind() == TrackKind::Master)
+                {
+                    continue;
+                }
+                StabilityTrackInfo info;
+                info.id = tr.getId();
+                info.name = tr.getName();
+                info.isInstrument = tr.getKind() == TrackKind::Instrument;
+                switch (tr.getKind())
+                {
+                    case TrackKind::Audio: info.kindName = "audio"; break;
+                    case TrackKind::Instrument: info.kindName = "instrument"; break;
+                    case TrackKind::Group: info.kindName = "group"; break;
+                    case TrackKind::Master: info.kindName = "master"; break;
+                }
+                out.push_back(std::move(info));
+            }
+            return out;
+        };
+        hooks.requestDeleteTrack = [this](const TrackId tid) {
+            trackLanesView.requestDeleteTrackForHeaderMenu(tid);
+        };
+        hooks.invokeUndo = [this] { invokeUndoFromWindowShortcut(); };
+        hooks.invokeRedo = [this] { invokeRedoFromWindowShortcut(); };
+        hooks.setPlaybackActive = [this](const bool play) {
+            transport.requestPlaybackIntent(play ? PlaybackIntent::Playing
+                                                 : PlaybackIntent::Stopped);
+            if (transportPlayPauseStopController_ != nullptr)
+            {
+                transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
+            }
+        };
+        hooks.renameTrackUndoable = [this](const TrackId tid, juce::String name) -> bool {
+            return trackLanesView.invokeUndoableRenameTrackRequested(tid, std::move(name));
+        };
+        hooks.openMidiEditorOnFirstClip = [this](const TrackId tid) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr || midiEditorPresenter_ == nullptr)
+            {
+                return false;
+            }
+            InstrumentTrackController* const ctl
+                = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+            if (ctl == nullptr || ctl->getClips().empty() || ctl->getClips().front() == nullptr)
+            {
+                return false;
+            }
+            midiEditorPresenter_->openMidiEditorForInstrumentClip(tid, ctl->getClips().front()->id);
+            return true;
+        };
+        hooks.closeMidiEditor = [this] {
+            if (midiEditorPresenter_ != nullptr)
+            {
+                midiEditorPresenter_->resetWindowAndBooking();
+            }
+        };
+        hooks.runMixdownBlocking = [this](const juce::File& outputFile,
+                                          const bool mp3) -> juce::Result {
+            juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr)
+            {
+                return juce::Result::fail("no active audio device");
+            }
+            auto syncUi = [this] {
+                if (transportPlayPauseStopController_ != nullptr)
+                {
+                    transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
+                }
+            };
+            if (mp3)
+            {
+                return mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(
+                    transport, session, playbackEngine_, deviceManager, syncUi, outputFile,
+                    /*bitrateKbps*/ 192, /*progressSink*/ nullptr, /*overwriteConfirmed*/ true);
+            }
+            mini_daw_audio_mixdown::MixdownExportRequest req;
+            req.outputFile = outputFile;
+            req.sampleRate = device->getCurrentSampleRate();
+            req.bits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm24;
+            req.overwriteConfirmed = true;
+            return mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(
+                transport, session, playbackEngine_, deviceManager, syncUi, req);
+        };
+
+        // Stability C3: run the full invariant battery after every scenario step.
+        hooks.verifyInvariants = [this](const juce::String& reason)
+        { return stability_invariants::verifyStableState(reason, buildStabilityInvariantContext()); };
+
+        stabilityScenarioRunner_ = std::make_unique<StabilityScenarioRunner>(std::move(hooks));
+        stabilityScenarioRunner_->start(request);
     }
 
     // [Message thread] Transient non-modal "Saving project" indicator. Painted immediately (before
@@ -1206,6 +1394,19 @@ private:
 
     void showAudioMixdownDialog()
     {
+        // Slice 5 dirty guard now runs when the user clicks Export inside the dialog (not at
+        // dialog open), so settings can be adjusted first; the dialog closes once export starts.
+        const auto confirmSaveBeforeExport = [this](std::function<void()> proceed) {
+            if (projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->confirmUnsavedChangesThen(
+                    ProjectIoCoordinator::UnsavedGuardKind::Export, std::move(proceed));
+            }
+            else if (proceed != nullptr)
+            {
+                proceed();
+            }
+        };
         mini_daw_app_dialogs::showAudioMixdownDialog(*this,
                                                      transport,
                                                      session,
@@ -1213,7 +1414,8 @@ private:
                                                      deviceManager,
                                                      [this]() {
                                                          transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
-                                                     });
+                                                     },
+                                                     confirmSaveBeforeExport);
     }
 
     void showAudioSettingsDialog()
@@ -1247,6 +1449,38 @@ private:
         }
         transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
         inspectorView_.refreshFromSession();
+        updateMainWindowTitleWithDirtyState();
+    }
+
+    /// Stability Slice 5 (Part E): "<ProjectName>[*] - <AppName>" window title; the asterisk marks
+    /// unsaved changes. Polled from the 10 Hz UI timer; setName only runs when the text changes.
+    void updateMainWindowTitleWithDirtyState()
+    {
+        if (projectIoCoordinator_ == nullptr)
+        {
+            return;
+        }
+        auto* dw = findParentComponentOfClass<juce::DocumentWindow>();
+        if (dw == nullptr)
+        {
+            return;
+        }
+        juce::String appName = "Danielssons Audio Lab";
+        if (auto* app = juce::JUCEApplication::getInstance())
+        {
+            appName = app->getApplicationName();
+        }
+        const juce::File pf = session.getCurrentProjectFile();
+        const juce::String projectPart
+            = pf.getFullPathName().isNotEmpty() ? pf.getFileNameWithoutExtension()
+                                                : juce::String("Untitled");
+        const juce::String title = projectPart
+                                   + (projectIoCoordinator_->isProjectDirty() ? "*" : "") + " - "
+                                   + appName;
+        if (dw->getName() != title)
+        {
+            dw->setName(title);
+        }
     }
 
     // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
@@ -1279,6 +1513,86 @@ private:
             }
         }
         playbackEngine_.rebuildRoutingPlanFromSession();
+    }
+
+    // Stability C3: live-context getters for `stability_invariants::verifyStableState`. Each
+    // getter is evaluated at check time on the message thread; all members outlive the global
+    // registration (deregistered first in the destructor).
+    [[nodiscard]] stability_invariants::Context buildStabilityInvariantContext()
+    {
+        stability_invariants::Context ctx;
+        ctx.getSessionSnapshot = [this] { return session.loadSessionSnapshotForAudioThread(); };
+        ctx.getActiveTrackId = [this] { return session.getActiveTrackId(); };
+        ctx.getRoutingPlan = [this] { return playbackEngine_.loadRoutingPlanForDiagnostics(); };
+        ctx.getPlaybackBridgeSnapshot = [this]
+        { return playbackEngine_.loadExperimentalInstrumentPlaybackSnapshotForAudioThread(); };
+        ctx.listInstrumentRuntimes = [this]() -> std::vector<stability_invariants::InstrumentRuntimeInfo>
+        {
+            std::vector<stability_invariants::InstrumentRuntimeInfo> out;
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                for (const auto& [tid, host, ctl] :
+                     instrumentRuntimeCoordinator_->exportKeyedRuntimePointersForDiagnostics())
+                {
+                    out.push_back({ tid, host, ctl });
+                }
+            }
+            return out;
+        };
+        ctx.listInsertChains = [this]() -> std::vector<stability_invariants::InsertEntryInfo>
+        {
+            std::vector<stability_invariants::InsertEntryInfo> out;
+            for (auto& [tid, procs] : pluginHost_.exportChainInstancePointersForDiagnostics())
+            {
+                out.push_back({ tid, std::move(procs) });
+            }
+            return out;
+        };
+        ctx.listPublishedInsertMap = [this]() -> std::vector<stability_invariants::InsertEntryInfo>
+        {
+            std::vector<stability_invariants::InsertEntryInfo> out;
+            for (auto& [tid, procs] : pluginHost_.exportPublishedMapPointersForDiagnostics())
+            {
+                out.push_back({ tid, std::move(procs) });
+            }
+            return out;
+        };
+        ctx.listInstrumentTimelineAttachmentTrackIds = [this]
+        { return trackLanesView.exportInstrumentTimelineAttachmentTrackIdsForDiagnostics(); };
+        ctx.hasStaleHeaderDragSource = [this]
+        { return trackLanesView.hasStaleHeaderDragSourceForDiagnostics(); };
+        ctx.getOpenMidiEditorTrackId = [this]() -> TrackId
+        {
+            if (midiEditorPresenter_ == nullptr)
+            {
+                return kInvalidTrackId;
+            }
+            const std::optional<TrackId> tid = midiEditorPresenter_->openedTrackId();
+            return tid.has_value() ? *tid : kInvalidTrackId;
+        };
+        ctx.describeAutosavePointerIssue = []() -> juce::String
+        {
+            const juce::File pointer
+                = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                      .getChildFile("MiniDAWLab")
+                      .getChildFile("autosave-location.txt");
+            if (!pointer.existsAsFile())
+            {
+                return {};
+            }
+            const juce::String recorded = pointer.loadFileAsString().trim();
+            if (recorded.isEmpty() || !juce::File::isAbsolutePath(recorded))
+            {
+                return "autosave pointer file has no absolute path (recovery falls back cleanly)";
+            }
+            if (!juce::File(recorded).existsAsFile())
+            {
+                return "autosave pointer references missing file " + recorded
+                       + " (recovery falls back cleanly)";
+            }
+            return {};
+        };
+        return ctx;
     }
 
     void refreshInstrumentUi()
@@ -1325,6 +1639,10 @@ private:
     std::unique_ptr<Vst3PluginPickerCoordinator> vst3PluginPickerCoordinator_;
     std::unique_ptr<ExperimentalMidiEditorWindow> midiEditorWindow_;
     std::unique_ptr<MidiEditorPresenter> midiEditorPresenter_;
+    /// NOTE: must stay declared *before* `trackLanesView` — the lanes view's destructor detaches
+    /// instrument row components owned by this coordinator, so the coordinator (and those
+    /// components) must still be alive when `trackLanesView` is destroyed (reverse declaration
+    /// order destruction). See `~TrackLanesView`.
     std::unique_ptr<InstrumentTimelineRowCoordinator> instrumentTimelineRowCoordinator_;
     std::unique_ptr<ProjectIoCoordinator> projectIoCoordinator_;
 
@@ -1366,6 +1684,10 @@ private:
     /// so it is destroyed FIRST in reverse-declaration order, while every UI object it borrows
     /// is still alive. See `TrackLanesEditCoordinator` ctor — it stores `&` to those views.
     std::unique_ptr<TrackLanesEditCoordinator> trackLanesEditCoordinator_;
+
+    /// Stability C2 only (`--stability-*` command line); null in normal use. Declared last:
+    /// its hooks capture `this` and touch most members above, so it must be destroyed first.
+    std::unique_ptr<StabilityScenarioRunner> stabilityScenarioRunner_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportControlsContent)
 };

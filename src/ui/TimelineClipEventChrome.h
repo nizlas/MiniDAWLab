@@ -108,4 +108,46 @@ inline void paintEventChromeTrimHandle(juce::Graphics& g,
     return eventRect.reduced(4.0f, 1.0f + kWaveInset * 0.5f);
 }
 
+inline constexpr float kEventNameLabelFontPx = 11.5f;
+inline constexpr float kEventNameLabelHeightPx = 14.0f;
+inline constexpr float kEventNameLabelMaxWidthPx = 180.0f;
+/// Explorer-style rename: delay after a click-on-selected-label before the inline editor opens,
+/// so a fast double-click (open editor / other double-click action) never triggers rename.
+inline constexpr int kClipRenameSecondClickDelayMs = 400;
+
+/// Top-left name strip (Cubase / file-explorer style) — shared by audio clips and MIDI events for
+/// both painting and rename-click hit-testing. Clamped inside `eventRect`; may be empty for tiny clips.
+[[nodiscard]] inline juce::Rectangle<float> clipEventTopLeftNameBounds(juce::Rectangle<float> eventRect)
+{
+    const float w = juce::jmin(kEventNameLabelMaxWidthPx, eventRect.getWidth() - 8.0f);
+    const float h = juce::jmin(kEventNameLabelHeightPx, eventRect.getHeight() - 4.0f);
+    if (w <= 4.0f || h <= 6.0f)
+    {
+        return {};
+    }
+    return { eventRect.getX() + 4.0f, eventRect.getY() + 2.0f, w, h };
+}
+
+/// Draw `name` in the top-left strip, clipped to the event rect. No-op for empty text or tiny clips.
+inline void paintEventTopLeftNameLabel(juce::Graphics& g,
+                                       juce::Rectangle<float> eventRect,
+                                       const juce::String& name)
+{
+    const juce::String label = name.trim();
+    if (label.isEmpty())
+    {
+        return;
+    }
+    const juce::Rectangle<float> r = clipEventTopLeftNameBounds(eventRect);
+    if (r.isEmpty())
+    {
+        return;
+    }
+    juce::Graphics::ScopedSaveState save(g);
+    g.reduceClipRegion(eventRect.toNearestInt());
+    g.setColour(juce::Colours::white.withAlpha(0.85f));
+    g.setFont(kEventNameLabelFontPx);
+    g.drawFittedText(label, r.toNearestInt(), juce::Justification::centredLeft, 1);
+}
+
 } // namespace mini_daw::timeline_clip_chrome

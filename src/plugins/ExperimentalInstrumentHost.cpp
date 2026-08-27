@@ -1612,11 +1612,13 @@ namespace
         {
             setVisible(false);
             ExperimentalInstrumentHost* const h = &host_;
-            juce::MessageManager::callAsync([h] {
-                if (h != nullptr)
+            juce::MessageManager::callAsync([h, guard = host_.asyncAliveGuard()] {
+                if (!guard.isAlive())
                 {
-                    h->editorWindowClosing();
+                    juce::Logger::writeToLog("[stale-async] skipped: instrument editor close notify");
+                    return;
                 }
+                h->editorWindowClosing();
             });
         }
 
@@ -2293,11 +2295,13 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
             // instruments (Groove Agent) finish loading kit metadata asynchronously after setState.
             schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
             auto* const self = this;
-            juce::Timer::callAfterDelay(1500, [self] {
-                if (self != nullptr)
+            juce::Timer::callAfterDelay(1500, [self, guard = asyncAliveGuard()] {
+                if (!guard.isAlive())
                 {
-                    self->schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
+                    juce::Logger::writeToLog("[stale-async] skipped: drum-name late retry timer");
+                    return;
                 }
+                self->schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
             });
         }
     }
@@ -2622,15 +2626,15 @@ void ExperimentalInstrumentHost::scheduleDrumNameDiagLifecyclePhasesAfterRefresh
     }
 
     auto* const self = this;
-    juce::Timer::callAfterDelay(250, [self] {
-        if (self == nullptr || !drum_name_diag::kDrumNamesDiag)
+    juce::Timer::callAfterDelay(250, [self, guard = asyncAliveGuard()] {
+        if (!guard.isAlive() || !drum_name_diag::kDrumNamesDiag)
         {
             return;
         }
         self->refreshPluginNoteNamesFromActiveInstrumentImpl(drum_name_diag::DrumNameRefreshPhase::delayed250, false);
     });
-    juce::Timer::callAfterDelay(1000, [self] {
-        if (self == nullptr || !drum_name_diag::kDrumNamesDiag)
+    juce::Timer::callAfterDelay(1000, [self, guard = asyncAliveGuard()] {
+        if (!guard.isAlive() || !drum_name_diag::kDrumNamesDiag)
         {
             return;
         }
@@ -2647,9 +2651,10 @@ void ExperimentalInstrumentHost::schedulePluginPitchNamesRefreshAfterNativeEdito
 {
     drumNamePhaseCPendingAfterEditorOpen_ = true;
     auto* const self = this;
-    juce::Timer::callAfterDelay(150, [self] {
-        if (self == nullptr)
+    juce::Timer::callAfterDelay(150, [self, guard = asyncAliveGuard()] {
+        if (!guard.isAlive())
         {
+            juce::Logger::writeToLog("[stale-async] skipped: drum-name after-editor-open timer");
             return;
         }
         // Production: transient host pitch-name caches are diagnostic-only (`kDrumNamesDiag`).

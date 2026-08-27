@@ -19,8 +19,8 @@
 //   4. main window with TransportControlsContent  —  UI can load files and send Transport commands
 //
 // SHUTDOWN ORDER (see shutdown) — JUCE: remove callback before closing device, then release objects
-//   1. destroy main window
-//   2. removeAudioCallback(playbackEngine)
+//   1. removeAudioCallback(playbackEngine)  —  first, so audio never runs during window teardown
+//   2. destroy main window (runtime coordinators / plugin hosts tear down with audio silent)
 //   3. closeAudioDevice
 //   4. destroy playbackEngine, then pluginInsertHost, then recorderService, then session, transport
 //
@@ -82,6 +82,9 @@
 #include "io/ProjectAudioImport.h"
 #include "io/AudioWaveformCache.h"
 #include "io/ProjectFile.h"
+#include "diagnostics/CrashDumpHandler.h"
+#include "diagnostics/StabilityDiagnosticLog.h"
+#include "diagnostics/StabilityScenarioRunner.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
@@ -110,6 +113,42 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         return;
     }
 
+    // Stability C1: minidump on unhandled exception. Installed before any other startup work so
+    // even early-initialisation crashes produce a dump. Not installed in the OOP scan worker
+    // above: scan-worker crashes are contained by design and must not fill the dump folder.
+    installCrashDumpHandler();
+
+    // Hidden verification flag (never exposed in UI): crash deliberately so the dump/breadcrumb/
+    // symbolization pipeline can be checked end to end. See scripts/symbolize-crash.ps1.
+    if (commandLine.contains("--stability-crash-test"))
+    {
+        writeLastOperationBreadcrumb("stability crash test: triggering intentional crash");
+        triggerIntentionalCrashForStabilityTest();
+        return; // not reached
+    }
+
+    // Stability C2: `--stability-*` scenario flags. Parsed before the window exists; the scenario
+    // starts via callAsync below once startup is complete. A parse error fails fast with exit
+    // code 1 (matching the runner's FAIL behavior) so wrapper scripts see bad invocations.
+    juce::String stabilityParseError;
+    const StabilityScenarioRequest stabilityRequest
+        = parseStabilityScenarioFromCommandLine(getCommandLineParameterArray(),
+                                                stabilityParseError);
+    if (stabilityParseError.isNotEmpty())
+    {
+        appendStabilityRunLine("RESULT: FAIL invalid stability arguments: " + stabilityParseError);
+        setApplicationReturnValue(1);
+        quit();
+        return;
+    }
+    if (stabilityRequest.isActive())
+    {
+        setStabilityTestModeActive(true);
+        appendStabilityRunLine("stability test mode active (prompts auto-answer deterministically)");
+    }
+
+    writeLastOperationBreadcrumb("app startup begin");
+
     // Domain objects first: the engine only holds references; safe because we create them
     // in dependency order and tear down in reverse in shutdown.
     transport = std::make_unique<Transport>();
@@ -125,6 +164,13 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
                                                        recorderService.get(),
                                                        countInOutput_.get(),
                                                        pluginInsertHost_.get());
+
+    // Stability Slice 3: publish-before-destroy support. After PluginInsertHost publishes a realtime
+    // map that dropped live plugin instances, drain the in-flight audio callback before the instances
+    // are destroyed. Hook is cleared in shutdown() before the engine is torn down.
+    pluginInsertHost_->setRealtimeDrainAfterPublish([enginePtr = playbackEngine.get()] {
+        (void)enginePtr->waitForAudioCallbackExit(250.0);
+    });
 
     // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present
     // (Stage 2); else pick defaults. Prefer **1 input, 2 outputs**; fall back to output-only.
@@ -172,8 +218,15 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // paths with spaces as one argument and handles Unicode. Missing files surface as a non-fatal
     // alert inside `loadProjectFromFile`.
     const juce::StringArray cliArgs = getCommandLineParameterArray();
+    bool commandLineProjectOpenQueued = false;
     for (const auto& arg : cliArgs)
     {
+        // Stability C2: scenario project paths belong to the runner, not the normal open path
+        // (the runner loads them itself, possibly repeatedly).
+        if (stabilityRequest.isActive())
+        {
+            break;
+        }
         if (arg.startsWith("-"))
         {
             continue;
@@ -185,6 +238,7 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         const juce::File projectFile = juce::File::isAbsolutePath(arg)
                                            ? juce::File(arg)
                                            : juce::File::getCurrentWorkingDirectory().getChildFile(arg);
+        commandLineProjectOpenQueued = true;
         juce::MessageManager::callAsync([this, projectFile] {
             if (mainWindow != nullptr)
             {
@@ -193,6 +247,44 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         });
         break;
     }
+
+    // Stability Slice 5: offer autosave recovery once the window is up. Queued after the
+    // command-line open above, so an explicitly requested project always wins (the coordinator
+    // only logs a breadcrumb in that case and keeps the autosave for the next plain startup).
+    // Stability test mode reuses the "command-line open queued" path: the recovery prompt is
+    // skipped deterministically (breadcrumb logged, autosave kept for the next plain startup).
+    const bool skipRecoveryPrompt = commandLineProjectOpenQueued || stabilityRequest.isActive();
+    juce::MessageManager::callAsync([this, skipRecoveryPrompt] {
+        if (mainWindow != nullptr)
+        {
+            mainWindow->offerAutosaveRecoveryOnStartup(skipRecoveryPrompt);
+        }
+    });
+
+    // Stability C2: start the scenario after the recovery check above (both are queued in order).
+    if (stabilityRequest.isActive())
+    {
+        juce::MessageManager::callAsync([this, stabilityRequest] {
+            if (mainWindow != nullptr)
+            {
+                mainWindow->startStabilityScenario(stabilityRequest);
+            }
+        });
+    }
+
+    writeLastOperationBreadcrumb("app startup complete");
+}
+
+void MiniDAWLabApplication::systemRequestedQuit()
+{
+    // Stability Slice 5: a dirty project shows the save-before-quit prompt; quitting then resumes
+    // from the prompt via JUCEApplication::quit() (which does not re-enter this hook).
+    if (mainWindow != nullptr && mainWindow->tryInterceptQuitForUnsavedChanges())
+    {
+        writeLastOperationBreadcrumb("quit intercepted: unsaved changes prompt shown");
+        return;
+    }
+    quit();
 }
 
 // [Message thread] Reverse of initialise; see file header.
@@ -204,14 +296,27 @@ void MiniDAWLabApplication::shutdown()
         return;
     }
 
-    // Window first so no UI code runs while we tear down audio (matches JUCE’s typical order).
-    mainWindow.reset();
+    writeLastOperationBreadcrumb("app shutdown begin");
 
+    // Stability Slice 1: remove the audio callback *first* so the audio thread can never touch
+    // plugin hosts / instrument runtimes / session state while the window (which owns the
+    // runtime coordinators) is being destroyed. removeAudioCallback blocks until any in-flight
+    // audio callback has returned.
     if (playbackEngine != nullptr)
     {
-        // Unregister *before* closing the device so the engine is never called after destroy.
         deviceManager.removeAudioCallback(playbackEngine.get());
     }
+
+    // Callback is gone; the drain hook (which references the engine) is no longer needed and must
+    // not run once the engine is destroyed below.
+    if (pluginInsertHost_ != nullptr)
+    {
+        pluginInsertHost_->setRealtimeDrainAfterPublish(nullptr);
+    }
+
+    // Window next: coordinators and plugin hosts owned by the window tear down with no audio
+    // callback running.
+    mainWindow.reset();
 
     deviceManager.closeAudioDevice();
 
@@ -223,6 +328,8 @@ void MiniDAWLabApplication::shutdown()
     recorderService.reset();
     session.reset();
     transport.reset();
+
+    writeLastOperationBreadcrumb("app shutdown complete");
 }
 
 // JUCE: generate WinMain / main and the app singleton; DO NOT add another main().

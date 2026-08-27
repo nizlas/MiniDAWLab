@@ -796,6 +796,10 @@ void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
 
     restoreNormalCursorAfterInvalidDrop();
 
+    // Undo/redo restore invalidates any pending or open inline rename (clip may no longer exist).
+    ++renameArmGeneration_;
+    dismissInlineClipRename(false);
+
     selectedPlacedId_.reset();
     publishPlacedClipSelectionToLaneHost();
 
@@ -856,6 +860,9 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
         // Middle button = TrackLanesView hand-pan; never select/edit clips.
         return;
     }
+    // Any new press invalidates a pending delayed rename open (fast double clicks never rename).
+    ++renameArmGeneration_;
+    mouseDownOnSelectedClipNameLabel_ = false;
     if (laneHost_.onBeginMouseDown)
     {
         laneHost_.onBeginMouseDown(*this);
@@ -1003,6 +1010,14 @@ void ClipWaveformView::mouseDown(const juce::MouseEvent& e)
             updateTrimHoverAndCursor(e.position);
             repaint();
             return;
+        }
+        // Explorer-style rename arm: single click on the name label of the already-selected clip.
+        if (selectedPlacedId_.has_value() && *selectedPlacedId_ == ph.id
+            && e.getNumberOfClicks() == 1)
+        {
+            const juce::Rectangle<float> nameR
+                = tc::clipEventTopLeftNameBounds(eventRectForClipNow(ph.id));
+            mouseDownOnSelectedClipNameLabel_ = !nameR.isEmpty() && nameR.contains(e.position);
         }
         selectedPlacedId_ = ph.id;
         publishPlacedClipSelectionToLaneHost();
@@ -1312,10 +1327,161 @@ void ClipWaveformView::mouseUp(const juce::MouseEvent& e)
             timelineViewport_.clampToExtent(tw, session_.getArrangementExtentSamples());
         }
     }
+    if (mouseDownPlacedId_.has_value() && !dragMovementBeyondThreshold_
+        && pointerLaneMode_ == PointerLaneMode::MoveClip && mouseDownOnSelectedClipNameLabel_
+        && e.getNumberOfClicks() == 1)
+    {
+        // Slow second click on the selected clip's name label: open the inline rename editor after
+        // the double-click window has passed (a newer press bumps the generation and cancels this).
+        const PlacedClipId cid = *mouseDownPlacedId_;
+        const int gen = renameArmGeneration_;
+        juce::Component::SafePointer<ClipWaveformView> safe(this);
+        juce::Timer::callAfterDelay(tc::kClipRenameSecondClickDelayMs, [safe, gen, cid] {
+            if (safe != nullptr && gen == safe->renameArmGeneration_)
+            {
+                safe->beginInlineClipRename(cid);
+            }
+        });
+    }
+    mouseDownOnSelectedClipNameLabel_ = false;
     mouseDownPlacedId_.reset();
     dragMovementBeyondThreshold_ = false;
     pointerLaneMode_ = PointerLaneMode::None;
     updateTrimHoverAndCursor(e.position);
+    repaint();
+}
+
+juce::Rectangle<float> ClipWaveformView::eventRectForClipNow(const PlacedClipId clipId) const
+{
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr || clipId == kInvalidPlacedClipId)
+    {
+        return {};
+    }
+    const int tIdx = snap->findTrackIndexById(trackId_);
+    if (tIdx < 0)
+    {
+        return {};
+    }
+    const juce::Rectangle<float> b = getLocalBounds().toFloat();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    if (b.getWidth() <= 0.0f || spp <= 0.0)
+    {
+        return {};
+    }
+    const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+    const juce::Rectangle<float> eventTrackY = b.reduced(0.0f, tc::kEventVerticalMargin);
+    const Track& tr = snap->getTrack(tIdx);
+    for (int i = 0; i < tr.getNumPlacedClips(); ++i)
+    {
+        const PlacedClip& pc = tr.getPlacedClip(i);
+        if (pc.getId() != clipId)
+        {
+            continue;
+        }
+        const std::int64_t a0 = pc.getStartSample();
+        const std::int64_t a1 = a0 + pc.getEffectiveLengthSamples();
+        if (a0 >= a1)
+        {
+            return {};
+        }
+        const float ex0
+            = TimelineRulerView::sessionSampleToLocalX(a0, b.getX(), visStart, spp);
+        const float ex1
+            = TimelineRulerView::sessionSampleToLocalX(a1, b.getX(), visStart, spp);
+        const float x0 = juce::jmin(ex0, ex1);
+        const float x1 = juce::jmax(ex0, ex1);
+        return { x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
+    }
+    return {};
+}
+
+void ClipWaveformView::beginInlineClipRename(const PlacedClipId clipId)
+{
+    if (clipId == kInvalidPlacedClipId || pointerLaneMode_ != PointerLaneMode::None)
+    {
+        return;
+    }
+    const juce::Rectangle<float> eventRect = eventRectForClipNow(clipId);
+    if (eventRect.isEmpty())
+    {
+        return;
+    }
+    juce::String seed;
+    for (const TimelineStrip& strip : clipStrips_)
+    {
+        if (strip.clipId == clipId)
+        {
+            seed = clipDisplayLabelForStrip(strip);
+            break;
+        }
+    }
+    dismissInlineClipRename(false);
+
+    if (clipRenameEditor_ == nullptr)
+    {
+        clipRenameEditor_ = std::make_unique<juce::TextEditor>("clipRenameEdit");
+        clipRenameEditor_->setMultiLine(false);
+        clipRenameEditor_->setReturnKeyStartsNewLine(false);
+        clipRenameEditor_->setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
+        clipRenameEditor_->setSelectAllWhenFocused(true);
+        clipRenameEditor_->onReturnKey = [this] { dismissInlineClipRename(true); };
+        clipRenameEditor_->onEscapeKey = [this] { dismissInlineClipRename(false); };
+        // Focus loss commits — same convention as track-header rename.
+        clipRenameEditor_->onFocusLost = [this] { dismissInlineClipRename(true); };
+        addChildComponent(*clipRenameEditor_);
+    }
+
+    renameEditingClipId_ = clipId;
+    clipRenameEditor_->setText(seed, false);
+    juce::Rectangle<int> box = tc::clipEventTopLeftNameBounds(eventRect).toNearestInt();
+    box.setHeight(20);
+    box.setWidth(juce::jmax(box.getWidth(), 96));
+    box = box.constrainedWithin(getLocalBounds().reduced(1));
+    clipRenameEditor_->setBounds(box);
+    clipRenameEditor_->setVisible(true);
+    clipRenameEditor_->toFront(false);
+    clipRenameEditor_->grabKeyboardFocus();
+    repaint();
+}
+
+void ClipWaveformView::dismissInlineClipRename(const bool commit)
+{
+    if (clipRenameEditor_ == nullptr || !clipRenameEditor_->isVisible() || renameDismissInProgress_)
+    {
+        return;
+    }
+    renameDismissInProgress_ = true;
+    const PlacedClipId cid = renameEditingClipId_;
+    const juce::String text = clipRenameEditor_->getText().trim();
+    renameEditingClipId_ = kInvalidPlacedClipId;
+    clipRenameEditor_->setVisible(false);
+
+    // Empty text = cancel (keep the old name): the safest behavior for accidental clears.
+    if (commit && cid != kInvalidPlacedClipId && text.isNotEmpty())
+    {
+        juce::String currentLabel;
+        for (const TimelineStrip& strip : clipStrips_)
+        {
+            if (strip.clipId == cid)
+            {
+                currentLabel = clipDisplayLabelForStrip(strip);
+                break;
+            }
+        }
+        if (text != currentLabel)
+        {
+            if (laneHost_.commitClipRenameAsUndoable)
+            {
+                (void)laneHost_.commitClipRenameAsUndoable(cid, text);
+            }
+            else
+            {
+                session_.setPlacedClipName(cid, text);
+            }
+        }
+    }
+    renameDismissInProgress_ = false;
     repaint();
 }
 
@@ -1439,6 +1605,7 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
         strip.material = placed.getMaterial();
         strip.materialWindowStart = placed.getMaterialWindowStartSamples();
         strip.materialWindowEndExcl = placed.getMaterialWindowEndExclusiveSamples();
+        strip.displayName = placed.getDisplayName();
         {
             const std::int64_t eff = placed.getEffectiveLengthSamples();
             strip.materialNumSamples
@@ -2059,6 +2226,21 @@ void ClipWaveformView::paint(juce::Graphics& g)
     }
 }
 
+juce::String ClipWaveformView::clipDisplayLabelForStrip(const TimelineStrip& strip)
+{
+    const juce::String custom = strip.displayName.trim();
+    if (custom.isNotEmpty())
+    {
+        return custom;
+    }
+    if (strip.material != nullptr)
+    {
+        return juce::File::createFileWithoutCheckingPath(strip.material->getSourceFilePath())
+            .getFileNameWithoutExtension();
+    }
+    return {};
+}
+
 void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
                                          const juce::Rectangle<float>& bounds,
                                          const std::int64_t visStart,
@@ -2255,6 +2437,7 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
         {
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
+        tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
     }
 
     // --- (3) Same shade+hatch *style* for every row the interval function marks. **Order r = n-1…0**:
@@ -2477,6 +2660,9 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
         {
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
+        // Live label over the blitted raster: never stale after rename (raster fingerprint does not
+        // include the display name).
+        tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
     }
 
     if (recordingCycleBehindLayersActive_)

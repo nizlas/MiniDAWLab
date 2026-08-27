@@ -203,6 +203,14 @@ public:
         TrackId trackId,
         juce::String newName) noexcept;
 
+    /// [Message thread] Set the user-facing display name of one placed clip (trimmed; project
+    /// metadata only — the source audio file on disk is untouched). Unknown id, empty name after
+    /// trim, or unchanged name: no-op copy of `previous`.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withClipRenamed(
+        const SessionSnapshot& previous,
+        PlacedClipId clipId,
+        juce::String newDisplayName) noexcept;
+
     /// [Message thread] Set main output routing for a non-Master row (`destTrackId` must be Group or Master).
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRoutedOutputTo(
         const SessionSnapshot& previous,

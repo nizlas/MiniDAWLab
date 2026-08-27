@@ -66,8 +66,15 @@ void AudioClipImportCoordinator::launchAddClipAtPlayheadPicker(
     // the picker. We record playhead and decode in this callback — the agreed “at add
     // time” read for placement (not the audio thread).
     chooser->launchAsync(fileChooserFlags,
-                         [this, chooser, activateTrackBeforeImport](const juce::FileChooser& fc) {
+                         [this, chooser, activateTrackBeforeImport,
+                          guard = asyncLifetime_.guard()](const juce::FileChooser& fc) {
                              juce::ignoreUnused(chooser);
+                             if (!guard.isAlive())
+                             {
+                                 juce::Logger::writeToLog(
+                                     "[stale-async] skipped: audio import file chooser");
+                                 return;
+                             }
                              struct ClearImportInFlight
                              {
                                  bool& b;

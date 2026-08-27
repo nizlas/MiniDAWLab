@@ -439,6 +439,32 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 {
     juce::ignoreUnused(context);
 
+    // [Audio thread] Dekker-style pairing with `beginOfflineRenderGate`: publish "callback in flight"
+    // *before* reading the offline gate (both seq_cst). Either this callback sees the gate and goes
+    // silent, or the gating thread sees this flag and waits for the RAII clear below — so an offline
+    // render can never overlap a callback that touches plugin hosts / scratch buffers.
+    audioCallbackInProcessingSection_.store(true, std::memory_order_seq_cst);
+    struct AudioCallbackSectionClear
+    {
+        std::atomic<bool>& flag_;
+        std::atomic<int>& phase_;
+        ~AudioCallbackSectionClear() noexcept
+        {
+            phase_.store(static_cast<int>(AudioCallbackPhase::Idle), std::memory_order_relaxed);
+            flag_.store(false, std::memory_order_seq_cst);
+        }
+    };
+    const AudioCallbackSectionClear callbackSectionClear { audioCallbackInProcessingSection_,
+                                                           audioCallbackPhase_ };
+
+    // Stability C2B diagnostics: coarse phase marker (relaxed; never used for synchronization).
+    const auto setCallbackPhase = [this](const AudioCallbackPhase p) noexcept {
+        audioCallbackPhase_.store(static_cast<int>(p), std::memory_order_relaxed);
+    };
+    setCallbackPhase(AudioCallbackPhase::Begin);
+    audioCallbackLastBlockSamples_.store(numSamples, std::memory_order_relaxed);
+    audioCallbackEnterCount_.fetch_add(1, std::memory_order_relaxed);
+
     // [Audio thread] Phase 4: route mono input[0] to the recorder SPSC path only while `isRecording()`
     // and valid input pointers; does not access Session. `pushInputBlock` still no-ops if not recording
     // — this call site avoids touching the recorder SPSC at all when idle.
@@ -449,14 +475,17 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         && inputChannelData != nullptr
         && inputChannelData[0] != nullptr)
     {
+        setCallbackPhase(AudioCallbackPhase::RecorderPush);
         recorder_->pushInputBlock(inputChannelData[0], numSamples);
     }
 
     const int deviceBlockSizeInFrames = numSamples;
+    setCallbackPhase(AudioCallbackPhase::TransportBeginBlock);
     transport_.audioThread_beginBlock();
 
-    if (offlineRenderInProgress_.load(std::memory_order_acquire))
+    if (offlineRenderGateDepth_.load(std::memory_order_seq_cst) > 0)
     {
+        setCallbackPhase(AudioCallbackPhase::OfflineGateSilence);
         for (int ch = 0; ch < numOutputChannels; ++ch)
         {
             if (float* row = outputChannelData[ch])
@@ -468,6 +497,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         return;
     }
 
+    setCallbackPhase(AudioCallbackPhase::LoadSnapshot);
     const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
     /// [Audio thread] Same publish discipline as Session: acquire-load retains a const view for this block only.
     const bool allowInstrumentProcessing
@@ -507,6 +537,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     // here before the optional map/staging lambda so message-thread map drift cannot skip the active host.
     if (allowInstrumentProcessing)
     {
+        setCallbackPhase(AudioCallbackPhase::InstrumentBeginBlock);
         invokeExperimentalInstrumentBeginBlocks(instrumentSnap.get(), deviceBlockSizeInFrames);
     }
 
@@ -645,6 +676,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     }
 #endif
 
+    setCallbackPhase(AudioCallbackPhase::MixPrep);
     for (int ch = 0; ch < numOutputChannels; ++ch)
     {
         if (float* row = outputChannelData[ch])
@@ -696,11 +728,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     if (countIn_ != nullptr)
     {
+        setCallbackPhase(AudioCallbackPhase::CountIn);
         countIn_->audioThread_mixInto(mixSumTarget, numOutputChannels, numSamples);
     }
 
     const auto finalizeRoutingToDevice = [&]() noexcept
     {
+        setCallbackPhase(AudioCallbackPhase::FinalizeRouting);
 #if !defined(NDEBUG)
         if constexpr (shortcut_diagnostics::kShowMasterRoutingDiag)
         {
@@ -725,6 +759,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             && postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
             && postStripStageCapacity_ >= numSamples)
         {
+            setCallbackPhase(AudioCallbackPhase::FinalizeStagedBusLoop);
             float* const stageStereo[2] = { postStripStagePtrs_[0], postStripStagePtrs_[1] };
             for (const RoutingPlan::BusStep& step : rp->busSteps)
             {
@@ -733,7 +768,22 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     continue;
                 }
+                // C2B ROOT-CAUSE FIX: `RoutingPlan` and `SessionSnapshot` are published as two
+                // independent atomics, so after a structural edit (track delete / undo / redo) this
+                // callback can observe a *fresh* snapshot with a *stale* plan whose `trackIndex` is
+                // out of range or points at a re-purposed row. `getTrack` uses `.at()` — an OOB
+                // index throws, and a throw inside this noexcept lambda terminates (Debug: wedged
+                // audio thread inside the CRT assert dialog; Release: process abort). Skip the step
+                // instead: one block renders without this bus, then the rebuilt plan takes over.
+                if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+                {
+                    continue;
+                }
                 const Track& busTr = sessionSnap->getTrack(step.trackIndex);
+                if (busTr.getKind() != TrackKind::Group && busTr.getKind() != TrackKind::Master)
+                {
+                    continue;
+                }
                 float* const busStereo[2] = { rp->busScratchL[(size_t)step.sourceBusIndex],
                                               rp->busScratchR[(size_t)step.sourceBusIndex] };
                 playback_mix_helpers::applyBusPostChannelStripFromInputToStage(busTr,
@@ -766,6 +816,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
         if (rp != nullptr && sessionSnap != nullptr && !rp->busSteps.empty())
         {
+            setCallbackPhase(AudioCallbackPhase::FinalizeLegacyBusLoop);
             for (const RoutingPlan::BusStep& step : rp->busSteps)
             {
                 if (step.sourceBusIndex < 0
@@ -773,7 +824,16 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     continue;
                 }
+                // C2B: stale-plan guard (see staged loop above).
+                if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+                {
+                    continue;
+                }
                 const Track& busTr = sessionSnap->getTrack(step.trackIndex);
+                if (busTr.getKind() != TrackKind::Group && busTr.getKind() != TrackKind::Master)
+                {
+                    continue;
+                }
                 float* const busStereo[2] = { rp->busScratchL[(size_t)step.sourceBusIndex],
                                               rp->busScratchR[(size_t)step.sourceBusIndex] };
                 if (step.destBusIndex < 0)
@@ -798,6 +858,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
         if (masterTrackPtr != nullptr && mixSumTarget != outputChannelData)
         {
+            setCallbackPhase(AudioCallbackPhase::FinalizeMasterFallback);
             playback_mix_helpers::processBusChannelStripToOutputs(*masterTrackPtr,
                                                                   mixSumTarget,
                                                                   0,
@@ -813,6 +874,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     /// (tear / edge), mix every snapshot entry once so staged-only playback still audible.
     const auto mixKeyedInstrumentLanesIntoOutputsIfAny = [&]()
     {
+        setCallbackPhase(AudioCallbackPhase::InstrumentMix);
         if (instrumentSnap == nullptr || instrumentSnap->entries.empty())
         {
             return;
@@ -1084,6 +1146,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
         jassert(segRun > 0);
 
+        setCallbackPhase(AudioCallbackPhase::ClipRender);
         const std::int64_t renderBase = segT0 + playbackShift;
         std::int64_t silenceFrames = 0;
         if (renderBase < 0)
@@ -1113,6 +1176,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             {
                 if (step.destBusIndex < 0
                     || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                // C2B: stale-plan guard (see finalize staged bus loop).
+                if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
                 {
                     continue;
                 }
@@ -1182,6 +1250,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         // Timeline order: dispatch transport MIDI toward each Instrument row that has a playback entry.
         if (playbackIntent == PlaybackIntent::Playing && instrumentSnap != nullptr)
         {
+            setCallbackPhase(AudioCallbackPhase::TransportMidiSchedule);
             const bool segDisc = forceSegDiscontinuity || becamePlayingTransport;
             for (int instTi = 0; instTi < sessionSnap->getNumTracks(); ++instTi)
             {
@@ -1354,14 +1423,87 @@ void PlaybackEngine::invokeExperimentalInstrumentBeginBlocks(
     }
 }
 
-void PlaybackEngine::setOfflineRenderInProgress(const bool on) noexcept
+bool PlaybackEngine::beginOfflineRenderGate() noexcept
 {
-    offlineRenderInProgress_.store(on, std::memory_order_release);
+    return offlineRenderGateDepth_.fetch_add(1, std::memory_order_seq_cst) == 0;
+}
+
+bool PlaybackEngine::endOfflineRenderGate() noexcept
+{
+    const int previous = offlineRenderGateDepth_.fetch_sub(1, std::memory_order_seq_cst);
+    jassert(previous > 0);
+    return previous == 1;
 }
 
 bool PlaybackEngine::isOfflineRenderInProgress() const noexcept
 {
-    return offlineRenderInProgress_.load(std::memory_order_acquire);
+    return offlineRenderGateDepth_.load(std::memory_order_seq_cst) > 0;
+}
+
+bool PlaybackEngine::isAudioCallbackInProcessingSection() const noexcept
+{
+    return audioCallbackInProcessingSection_.load(std::memory_order_seq_cst);
+}
+
+juce::String PlaybackEngine::describeAudioCallbackStateForDiagnostics() const noexcept
+{
+    const auto phaseName = [](const int p) noexcept -> const char* {
+        switch (static_cast<AudioCallbackPhase>(p))
+        {
+            case AudioCallbackPhase::Idle: return "idle";
+            case AudioCallbackPhase::Begin: return "begin";
+            case AudioCallbackPhase::RecorderPush: return "recorder-push";
+            case AudioCallbackPhase::TransportBeginBlock: return "transport-begin-block";
+            case AudioCallbackPhase::OfflineGateSilence: return "offline-gate-silence";
+            case AudioCallbackPhase::LoadSnapshot: return "load-snapshot";
+            case AudioCallbackPhase::InstrumentBeginBlock: return "instrument-begin-block";
+            case AudioCallbackPhase::MixPrep: return "mix-prep";
+            case AudioCallbackPhase::CountIn: return "count-in";
+            case AudioCallbackPhase::ClipRender: return "clip-render";
+            case AudioCallbackPhase::TransportMidiSchedule: return "transport-midi-schedule";
+            case AudioCallbackPhase::InstrumentMix: return "instrument-mix";
+            case AudioCallbackPhase::FinalizeRouting: return "finalize-routing";
+            case AudioCallbackPhase::FinalizeStagedBusLoop: return "finalize-staged-bus-loop";
+            case AudioCallbackPhase::FinalizeLegacyBusLoop: return "finalize-legacy-bus-loop";
+            case AudioCallbackPhase::FinalizeMasterFallback: return "finalize-master-fallback";
+        }
+        return "unknown";
+    };
+    return juce::String("callbackPhase=")
+           + phaseName(audioCallbackPhase_.load(std::memory_order_relaxed))
+           + " inSection="
+           + (audioCallbackInProcessingSection_.load(std::memory_order_seq_cst) ? "yes" : "no")
+           + " lastBlockSamples="
+           + juce::String(audioCallbackLastBlockSamples_.load(std::memory_order_relaxed))
+           + " enterCount="
+           + juce::String((juce::int64)audioCallbackEnterCount_.load(std::memory_order_relaxed))
+           + " gateDepth=" + juce::String(offlineRenderGateDepth_.load(std::memory_order_seq_cst))
+           + " intent="
+           + juce::String(static_cast<int>(transport_.audioThread_loadIntent()))
+           + " playhead=" + juce::String(transport_.audioThread_loadPlayhead())
+           + " "
+           + (pluginHost_ != nullptr ? pluginHost_->describeAudioThreadInsertStateForDiagnostics()
+                                     : juce::String("insert=n/a"));
+}
+
+bool PlaybackEngine::waitForAudioCallbackExit(const double maxWaitMs, double* const waitedMsOut) noexcept
+{
+    const double startMs = juce::Time::getMillisecondCounterHiRes();
+    bool drained = true;
+    while (audioCallbackInProcessingSection_.load(std::memory_order_seq_cst))
+    {
+        if (juce::Time::getMillisecondCounterHiRes() - startMs >= maxWaitMs)
+        {
+            drained = false;
+            break;
+        }
+        juce::Thread::sleep(1);
+    }
+    if (waitedMsOut != nullptr)
+    {
+        *waitedMsOut = juce::Time::getMillisecondCounterHiRes() - startMs;
+    }
+    return drained;
 }
 
 void PlaybackEngine::setInstrumentProcessingSuspended(const bool suspended) noexcept
@@ -1474,6 +1616,11 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
             {
                 if (step.destBusIndex < 0
                     || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                // C2B: stale-plan guard (see live finalize staged bus loop).
+                if (step.trackIndex < 0 || step.trackIndex >= sessionSnap.getNumTracks())
                 {
                     continue;
                 }
@@ -1703,7 +1850,16 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
             {
                 continue;
             }
+            // C2B: stale-plan guard (see live finalize staged bus loop).
+            if (step.trackIndex < 0 || step.trackIndex >= sessionSnap.getNumTracks())
+            {
+                continue;
+            }
             const Track& busTr = sessionSnap.getTrack(step.trackIndex);
+            if (busTr.getKind() != TrackKind::Group && busTr.getKind() != TrackKind::Master)
+            {
+                continue;
+            }
             float* const busStereo[2] = { rp->busScratchL[(size_t)step.sourceBusIndex],
                                           rp->busScratchR[(size_t)step.sourceBusIndex] };
             playback_mix_helpers::applyBusPostChannelStripFromInputToStage(busTr,
@@ -1739,7 +1895,16 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
             {
                 continue;
             }
+            // C2B: stale-plan guard (see live finalize staged bus loop).
+            if (step.trackIndex < 0 || step.trackIndex >= sessionSnap.getNumTracks())
+            {
+                continue;
+            }
             const Track& busTr = sessionSnap.getTrack(step.trackIndex);
+            if (busTr.getKind() != TrackKind::Group && busTr.getKind() != TrackKind::Master)
+            {
+                continue;
+            }
             float* const busStereo[2] = { rp->busScratchL[(size_t)step.sourceBusIndex],
                                           rp->busScratchR[(size_t)step.sourceBusIndex] };
             if (step.destBusIndex < 0)

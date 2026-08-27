@@ -76,11 +76,37 @@ void MainWindow::closeButtonPressed()
     juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
+bool MainWindow::tryInterceptQuitForUnsavedChanges()
+{
+    if (shortcutTargetFromContent_ != nullptr)
+    {
+        return shortcutTargetFromContent_->invokeQuitUnsavedGuardFromWindow();
+    }
+    return false;
+}
+
+void MainWindow::offerAutosaveRecoveryOnStartup(const bool commandLineProjectOpenQueued)
+{
+    if (shortcutTargetFromContent_ != nullptr)
+    {
+        shortcutTargetFromContent_->invokeAutosaveRecoveryCheckFromStartup(
+            commandLineProjectOpenQueued);
+    }
+}
+
 void MainWindow::openProjectFileFromCommandLine(const juce::File& projectFile)
 {
     if (shortcutTargetFromContent_ != nullptr)
     {
         shortcutTargetFromContent_->invokeLoadProjectFileFromStartup(projectFile);
+    }
+}
+
+void MainWindow::startStabilityScenario(const StabilityScenarioRequest& request)
+{
+    if (shortcutTargetFromContent_ != nullptr)
+    {
+        shortcutTargetFromContent_->invokeStartStabilityScenarioFromStartup(request);
     }
 }
 

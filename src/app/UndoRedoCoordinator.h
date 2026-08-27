@@ -24,6 +24,11 @@ public:
         std::function<bool()> isCountInActive;
         std::function<bool()> isClipEditGestureInProgress;
 
+        /// Stability C2B: rebuild the engine routing plan immediately after the timeline snapshot is
+        /// restored (before slow plugin/instrument restore work), so the audio callback never runs a
+        /// long window with a fresh snapshot and a stale plan (stale `trackIndex` values).
+        std::function<void()> rebuildRoutingPlanFromSession;
+
         std::function<void()> cancelAllClipGesturesAndTransientUiState;
         std::function<void()> reconcileCycleBookingAfterUndoSnapshotRestore;
         std::function<void()> syncViewportFromSession;
@@ -53,6 +58,18 @@ public:
         /// Clips always play at the project tempo: re-align clip bpm after a snapshot restore may have
         /// changed the project BPM (undo/redo of "Project BPM" edits).
         std::function<void()> alignInstrumentClipTemposToProjectTempo;
+
+        /// Stability Slice 5: invoked after every recorded edit and after undo/redo application, so
+        /// instrument/plugin edits (which do not swap the session snapshot) mark the project dirty.
+        std::function<void()> markProjectDirty;
+
+        /// Delete-Track undo: recreate the instrument runtime (host + controller + plugin) for the
+        /// restored session row from the captured project row, using the same restore path as
+        /// project load. Invoked after the timeline snapshot (and insert chain) are applied.
+        std::function<void(const InstrumentTrackDeleteUndoSides&)> restoreDeletedInstrumentTrackRuntime;
+        /// Delete-Track redo: re-run the hardened instrument runtime teardown (editors, timeline UI,
+        /// publish-before-destroy retire) after the timeline snapshot removed the row again.
+        std::function<void(TrackId)> teardownDeletedInstrumentTrackRuntimeForRedo;
     };
 
     UndoRedoCoordinator(Session& session, PluginInsertHost& pluginHost, Callbacks callbacks);
@@ -67,6 +84,14 @@ public:
 
     void executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator);
     void executeUndoableInstrumentEdit(const juce::String& label, std::function<bool()> mutator);
+
+    /// Delete Track: like `executeUndoableSessionEdit`, but the mutator may also hand back the
+    /// pre-teardown insert chain (`outPluginSides`) and, for instrument tracks, the full captured
+    /// project row (`outInstrumentDelete`) so undo can restore inserts and the instrument runtime.
+    void executeUndoableTrackDelete(
+        const juce::String& label,
+        std::function<bool(std::optional<PluginUndoStepSides>& outPluginSides,
+                           std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete)> mutator);
 
     void clearHistory() noexcept;
 

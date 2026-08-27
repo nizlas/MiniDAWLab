@@ -35,7 +35,8 @@ void SessionHistory::record(juce::String label,
                             std::shared_ptr<const SessionSnapshot> before,
                             std::shared_ptr<const SessionSnapshot> after,
                             std::optional<PluginUndoStepSides> pluginSides,
-                            std::optional<InstrumentUndoStepSides> instrumentSides) noexcept
+                            std::optional<InstrumentUndoStepSides> instrumentSides,
+                            std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete) noexcept
 {
     if (before == nullptr || after == nullptr)
     {
@@ -70,7 +71,8 @@ void SessionHistory::record(juce::String label,
                           std::move(before),
                           std::move(after),
                           std::move(pluginSides),
-                          std::move(instrumentSides) });
+                          std::move(instrumentSides),
+                          std::move(instrumentTrackDelete) });
     while (static_cast<int>(undo_.size()) > maxSteps_)
     {
         undo_.pop_front();
@@ -100,6 +102,7 @@ std::optional<SessionHistoryRestoreBundle> SessionHistory::popUndo() noexcept
     bundle.timelineSnapshot = step.before;
     bundle.pluginSides = step.pluginSides;
     bundle.instrumentSides = step.instrumentSides;
+    bundle.instrumentTrackDelete = step.instrumentTrackDelete;
     bundle.isRedo = false;
     if constexpr (undo_diagnostic::kUndoDiag)
     {
@@ -128,6 +131,7 @@ std::optional<SessionHistoryRestoreBundle> SessionHistory::popRedo() noexcept
     bundle.timelineSnapshot = step.after;
     bundle.pluginSides = step.pluginSides;
     bundle.instrumentSides = step.instrumentSides;
+    bundle.instrumentTrackDelete = step.instrumentTrackDelete;
     bundle.isRedo = true;
     if constexpr (undo_diagnostic::kUndoDiag)
     {

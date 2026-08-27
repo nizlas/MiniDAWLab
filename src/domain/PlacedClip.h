@@ -33,6 +33,8 @@
 #include <cstdint>
 #include <memory>
 
+#include <juce_core/juce_core.h>
+
 class AudioClip;
 
 // Stable per-placement identity for UI (selection, move) and for `SessionSnapshot::withClipMoved`.
@@ -114,6 +116,11 @@ public:
     [[nodiscard]] PlacedClip withRightEdgeVisibleLength(std::int64_t newVisibleLength) const noexcept;
     [[nodiscard]] PlacedClip withLeftEdgeTrim(std::int64_t newLeftTrimSamples) const noexcept;
 
+    /// User-facing event name (project metadata only — never renames the source audio file).
+    /// Empty = no custom name; UI falls back to the source file stem.
+    [[nodiscard]] const juce::String& getDisplayName() const noexcept { return displayName_; }
+    [[nodiscard]] PlacedClip withDisplayName(juce::String newDisplayName) const noexcept;
+
 private:
     [[nodiscard]] PlacedClip replicatedWith(std::int64_t startSampleOnTimeline,
                                             std::int64_t leftTrimSamples,
@@ -126,4 +133,5 @@ private:
     std::int64_t visibleLengthSamples_ = 0;
     std::int64_t materialWindowStartSamples_ = 0;
     std::int64_t materialWindowEndExclusiveSamples_ = 0;
+    juce::String displayName_;
 };

@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 
+struct StabilityScenarioRequest;
+
 /// Narrow surface used by MainWindow shortcut routing (`routeShortcut`).
 class TransportControlsShortcutTarget
 {
@@ -33,4 +35,16 @@ public:
 
     /// Command-line ".dalproj" open: load `projectFile` through the normal project-load pipeline.
     virtual void invokeLoadProjectFileFromStartup(const juce::File& projectFile) = 0;
+
+    /// Stability Slice 5: quit interception. Returns false when the app may quit immediately
+    /// (no unsaved changes); returns true when a save prompt was shown and quit resumes (or is
+    /// cancelled) from that prompt.
+    [[nodiscard]] virtual bool invokeQuitUnsavedGuardFromWindow() = 0;
+
+    /// Stability Slice 5: startup autosave recovery offer (skipped when a command-line ".dalproj"
+    /// open is already queued).
+    virtual void invokeAutosaveRecoveryCheckFromStartup(bool commandLineProjectOpenQueued) = 0;
+
+    /// Stability C2: start an in-process `--stability-*` scenario (see StabilityScenarioRunner.h).
+    virtual void invokeStartStabilityScenarioFromStartup(const StabilityScenarioRequest& request) = 0;
 };

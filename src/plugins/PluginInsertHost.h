@@ -28,6 +28,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -149,6 +150,29 @@ public:
     /// [Audio thread] Acquire-loads the published map; true iff any insert on this track is stereo-ready.
     [[nodiscard]] bool audioThread_hasActivePluginForTrack(TrackId trackId) const noexcept;
 
+    /// [Any thread] Stability C2B diagnostics: which insert (track/slot/stage) the audio thread is
+    /// currently inside, or "insert=idle". Read by gate-timeout logging only.
+    [[nodiscard]] juce::String describeAudioThreadInsertStateForDiagnostics() const noexcept;
+
+    /// [Message thread] Stability C3 introspection: `{trackId, live AudioPluginInstance pointers}`
+    /// per chain in the message-thread registry. Diagnostics only; no locks.
+    [[nodiscard]] std::vector<std::pair<TrackId, std::vector<const void*>>>
+        exportChainInstancePointersForDiagnostics() const;
+
+    /// [Message thread] Stability C3 introspection: `{trackId, processor pointers}` per entry in
+    /// the currently *published* realtime map. Diagnostics only; no locks.
+    [[nodiscard]] std::vector<std::pair<TrackId, std::vector<const void*>>>
+        exportPublishedMapPointersForDiagnostics() const;
+
+    /// [Message thread] Optional hook run after publishing a realtime map that dropped live plugin
+    /// instances, *before* those instances are released/destroyed (Stability Slice 3, publish-before-
+    /// destroy). Wired to `PlaybackEngine::waitForAudioCallbackExit` so an in-flight audio callback
+    /// still holding the old map cannot touch freed AudioProcessor pointers.
+    void setRealtimeDrainAfterPublish(std::function<void()> drain) noexcept
+    {
+        realtimeDrainAfterPublish_ = std::move(drain);
+    }
+
     using PluginUndoRecorder = void (*)(void* context, const juce::String& label, const PluginUndoStepSides& sides);
     void setUndoRecorder(void* context, PluginUndoRecorder recorder) noexcept
     {
@@ -203,8 +227,13 @@ private:
     [[nodiscard]] bool tryPrepareStereoInsert(juce::AudioPluginInstance& inst, double sr, int bs);
     void logStereoLayoutFailure(TrackId trackId) const;
 
+    /// [Message thread] Retires one track's live slots: moves them out of `chains_`, republishes the
+    /// realtime map, runs the drain hook, then releases/destroys the retired instances (F5 fix).
+    void retireChainPublishDrainAndDestroy(TrackId trackId);
+
     juce::AudioPluginFormatManager formatManager_;
     std::unordered_map<TrackId, std::vector<LiveInsertSlot>> chains_;
+    std::function<void()> realtimeDrainAfterPublish_;
     InsertSlotId nextInsertSlotId_ = 1;
 
     double sampleRate_ = 0.0;
@@ -218,6 +247,11 @@ private:
     juce::MidiBuffer midiScratch_;
     /// Set true after the one-shot `callAsync` mismatch warning; cleared in `prepareForDevice`.
     std::atomic<bool> scratchMismatchNotified_{ false };
+    /// Stability C2B diagnostics: set around each `processBlock` call on the audio thread
+    /// (relaxed; -1 = idle). Never used for synchronization.
+    std::atomic<std::int64_t> audioThreadInsertTrackId_{ -1 };
+    std::atomic<int> audioThreadInsertSlotIndex_{ -1 };
+    std::atomic<int> audioThreadInsertStage_{ -1 };
     /// At most one stereo-layout warning while re-preparing instances for a device (message thread).
     std::atomic<bool> stereoPrepareFailureOneShot_{ false };
 

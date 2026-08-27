@@ -38,6 +38,7 @@
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
 #include "plugins/Vst3ChildProcessScan.h"
+#include "util/AsyncLifetimeToken.h"
 
 namespace experimental_instrument_host_detail
 {
@@ -198,7 +199,18 @@ public:
                                                  float outputGain = 1.0f,
                                                  float stereoPan = 0.0f) noexcept;
 
+public:
+    /// Stability Slice 4: capture this guard in Timer::callAfterDelay / MessageManager::callAsync
+    /// lambdas and check `isAlive()` before touching the host. Invalidated when the host is
+    /// destroyed (`clearControllerWireCallbacks` alone does not cover raw-`this` timer captures).
+    [[nodiscard]] mini_daw::AsyncCallbackGuard asyncAliveGuard() const noexcept
+    {
+        return asyncLifetime_.guard();
+    }
+
 private:
+    mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
+
     struct InstrumentOwner
     {
         std::unique_ptr<juce::AudioPluginInstance> inst;

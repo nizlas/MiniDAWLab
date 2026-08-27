@@ -105,6 +105,8 @@ std::shared_ptr<const RoutingPlan> build(
         RoutingPlan::SourceStep step;
         step.trackIndex = ti;
         step.destBusIndex = destIt->second;
+        step.builtFromTrackId = tr.getId();
+        step.builtFromTrackKind = tr.getKind();
         appendEnabledGroupSendsForTrack(snap, tr, busTrackIndexToBusScratch, step.sends);
         plan->sourceSteps.push_back(std::move(step));
     }
@@ -200,6 +202,8 @@ std::shared_ptr<const RoutingPlan> build(
         RoutingPlan::BusStep step;
         step.trackIndex = trackIndex;
         step.sourceBusIndex = bi;
+        step.builtFromTrackId = busTr.getId();
+        step.builtFromTrackKind = busTr.getKind();
         if (busTr.getKind() == TrackKind::Master)
         {
             step.destBusIndex = -1;

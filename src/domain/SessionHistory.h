@@ -39,6 +39,16 @@ struct InstrumentUndoStepSides
     std::vector<ProjectFileExperimentalInstrumentTrackV1> after;
 };
 
+/// Delete-Track undo payload for an *instrument* track: the full project row (MIDI clips, plugin
+/// identity + state Base64, drum labels) captured **before** runtime teardown. Undo restores the
+/// session row from the timeline snapshot, then recreates the runtime from `row` via the same
+/// restore path project load uses; redo re-runs the hardened runtime teardown for `trackId`.
+struct InstrumentTrackDeleteUndoSides
+{
+    TrackId trackId = kInvalidTrackId;
+    ProjectFileExperimentalInstrumentTrackV1 row;
+};
+
 struct SessionHistoryRestoreBundle
 {
     /// Always non-null when `popUndo` / `popRedo` returns has_value.
@@ -47,6 +57,8 @@ struct SessionHistoryRestoreBundle
     std::optional<PluginUndoStepSides> pluginSides {};
     /// I3i: experimental instrument musical state (no plugin blobs); apply after timeline (+ plugin).
     std::optional<InstrumentUndoStepSides> instrumentSides {};
+    /// Delete Track: instrument runtime restore (undo) / teardown (redo) payload; apply last.
+    std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -65,7 +77,9 @@ public:
                 std::shared_ptr<const SessionSnapshot> before,
                 std::shared_ptr<const SessionSnapshot> after,
                 std::optional<PluginUndoStepSides> pluginSides = std::nullopt,
-                std::optional<InstrumentUndoStepSides> instrumentSides = std::nullopt) noexcept;
+                std::optional<InstrumentUndoStepSides> instrumentSides = std::nullopt,
+                std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete
+                = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
     /// restore (`pluginSides` present — caller applies `before` chain).
@@ -86,6 +100,7 @@ private:
         std::shared_ptr<const SessionSnapshot> after;
         std::optional<PluginUndoStepSides> pluginSides;
         std::optional<InstrumentUndoStepSides> instrumentSides;
+        std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete;
     };
 
     int maxSteps_;

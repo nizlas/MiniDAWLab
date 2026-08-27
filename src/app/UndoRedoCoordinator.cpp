@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "diagnostics/StabilityInvariants.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 #include "domain/Session.h"
@@ -57,6 +58,10 @@ void UndoRedoCoordinator::onPluginUndoRecord(const juce::String& label, const Pl
     }
     PluginUndoStepSides copy = sides;
     sessionHistory_.record(label, snap, snap, std::move(copy), std::nullopt);
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
 }
 
 void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
@@ -121,6 +126,13 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
         const std::shared_ptr<const SessionSnapshot> restoredWithLocators
             = SessionSnapshot::withLocators(*bundle->timelineSnapshot, curL, curR);
         session_.restoreSessionSnapshotForUndo(restoredWithLocators);
+        // C2B: republish the routing plan against the restored snapshot *now* — the plugin/
+        // instrument restore below can take seconds, and a stale plan across that window feeds
+        // stale track indices to the audio callback.
+        if (callbacks_.rebuildRoutingPlanFromSession)
+        {
+            callbacks_.rebuildRoutingPlanFromSession();
+        }
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine("[UndoDiag] invokeUndo restored timeline="
@@ -152,7 +164,15 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
             callbacks_.rebindMidiEditorAfterInstrumentMusicalUndo();
         }
     }
+    if (bundle->instrumentTrackDelete.has_value() && callbacks_.restoreDeletedInstrumentTrackRuntime)
+    {
+        // Undo of Delete Track: the timeline snapshot restored the session row; now recreate the
+        // instrument runtime from the captured project row (same restore path as project load).
+        callbacks_.restoreDeletedInstrumentTrackRuntime(*bundle->instrumentTrackDelete);
+    }
     refreshAfterSessionSnapshotRestore();
+    // Stability C3: verify runtime invariants right after the undo completed.
+    (void) stability_invariants::runRegisteredStabilityInvariantsCheck("undo-end");
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         const auto liveNow = session_.loadSessionSnapshotForAudioThread();
@@ -223,6 +243,11 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
         const std::shared_ptr<const SessionSnapshot> restoredWithLocators
             = SessionSnapshot::withLocators(*bundle->timelineSnapshot, curL, curR);
         session_.restoreSessionSnapshotForUndo(restoredWithLocators);
+        // C2B: same immediate plan republish as the undo path (see invokeUndo).
+        if (callbacks_.rebuildRoutingPlanFromSession)
+        {
+            callbacks_.rebuildRoutingPlanFromSession();
+        }
         if constexpr (undo_diagnostic::kUndoDiag)
         {
             writeUndoDiagnosticLogLine("[UndoDiag] invokeRedo restored timeline="
@@ -254,7 +279,16 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
             callbacks_.rebindMidiEditorAfterInstrumentMusicalUndo();
         }
     }
+    if (bundle->instrumentTrackDelete.has_value()
+        && callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo)
+    {
+        // Redo of Delete Track: the timeline snapshot removed the row again (and pluginSides->after
+        // evicted inserts); retire the recreated instrument runtime with the hardened teardown.
+        callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo(bundle->instrumentTrackDelete->trackId);
+    }
     refreshAfterSessionSnapshotRestore();
+    // Stability C3: verify runtime invariants right after the redo completed.
+    (void) stability_invariants::runRegisteredStabilityInvariantsCheck("redo-end");
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         const auto liveNow = session_.loadSessionSnapshotForAudioThread();
@@ -267,6 +301,11 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
 
 void UndoRedoCoordinator::refreshAfterSessionSnapshotRestore()
 {
+    // Undo/redo moved the project away from its last saved state (possibly instrument-side only).
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine(
@@ -367,6 +406,61 @@ void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, 
     }
 }
 
+void UndoRedoCoordinator::executeUndoableTrackDelete(
+    const juce::String& label,
+    std::function<bool(std::optional<PluginUndoStepSides>& outPluginSides,
+                       std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete)> mutator)
+{
+    std::shared_ptr<const SessionSnapshot> before = session_.loadSessionSnapshotForAudioThread();
+    if (before == nullptr)
+    {
+        if constexpr (undo_diagnostic::kUndoDiag)
+        {
+            writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableTrackDelete skip: null before label=\""
+                                       + label + "\"");
+        }
+        return;
+    }
+    std::optional<PluginUndoStepSides> pluginSides;
+    std::optional<InstrumentTrackDeleteUndoSides> instrumentDelete;
+    if (!mutator(pluginSides, instrumentDelete))
+    {
+        if constexpr (undo_diagnostic::kUndoDiag)
+        {
+            writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableTrackDelete mutator=false label=\""
+                                       + label + "\"");
+        }
+        return;
+    }
+    std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
+    if (after == nullptr || after.get() == before.get())
+    {
+        if constexpr (undo_diagnostic::kUndoDiag)
+        {
+            writeUndoDiagnosticLogLine(
+                "[UndoDiag] executeUndoableTrackDelete skip: null/unchanged after label=\"" + label
+                + "\"");
+        }
+        return;
+    }
+    sessionHistory_.record(label,
+                           std::move(before),
+                           std::move(after),
+                           std::move(pluginSides),
+                           std::nullopt,
+                           std::move(instrumentDelete));
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableTrackDelete recorded label=\"" + label
+                                   + "\" undoSize=" + juce::String(sessionHistory_.undoStackSize())
+                                   + " redoSize=" + juce::String(sessionHistory_.redoStackSize()));
+    }
+}
+
 void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& label,
                                                        std::function<bool()> mutator)
 {
@@ -444,6 +538,10 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
                            snap,
                            std::nullopt,
                            InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) });
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit recorded label=\"" + label

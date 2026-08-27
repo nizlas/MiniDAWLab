@@ -141,7 +141,7 @@ PlacedClip PlacedClip::replicatedWith(const std::int64_t startSampleOnTimeline,
 {
     jassert(material_ != nullptr);
     jassert(id_ != kInvalidPlacedClipId);
-    return PlacedClip(
+    PlacedClip out(
         id_,
         material_,
         startSampleOnTimeline,
@@ -149,6 +149,15 @@ PlacedClip PlacedClip::replicatedWith(const std::int64_t startSampleOnTimeline,
         visibleLengthSamples,
         materialWindowStartSamples_,
         materialWindowEndExclusiveSamples_);
+    out.displayName_ = displayName_;
+    return out;
+}
+
+PlacedClip PlacedClip::withDisplayName(juce::String newDisplayName) const noexcept
+{
+    PlacedClip out = *this;
+    out.displayName_ = std::move(newDisplayName);
+    return out;
 }
 
 PlacedClip PlacedClip::withStartSampleOnTimeline(const std::int64_t newStartSampleOnTimeline) const noexcept

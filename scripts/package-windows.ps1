@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Stages a Release tree under dist, downloads the Microsoft VC++ x64 redistributable once, builds a
@@ -98,6 +98,20 @@ if (Test-Path -LiteralPath $stageDir) {
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $stageDir 'MiniDAWLab.exe') -Force
+
+# Stability C1: archive the Release PDB (and its matching exe) under dist\symbols so crash
+# minidumps from this exact build can be symbolized later (scripts\symbolize-crash.ps1).
+# The symbols folder is intentionally NOT part of the staged tree, zip, or installer.
+$releasePdb = Join-Path $repoRoot 'build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.pdb'
+$symbolsDir = Join-Path $distRoot "symbols\$packageBundleName-$Version"
+if (Test-Path -LiteralPath $releasePdb) {
+    New-Item -ItemType Directory -Path $symbolsDir -Force | Out-Null
+    Copy-Item -LiteralPath $releasePdb -Destination (Join-Path $symbolsDir 'MiniDAWLab.pdb') -Force
+    Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $symbolsDir 'MiniDAWLab.exe') -Force
+    Write-Host "Archived symbols for crash symbolization: $symbolsDir" -ForegroundColor Green
+} else {
+    Write-Warning "Release PDB not found at $releasePdb — crash dumps from this build cannot be symbolized. Rebuild Release (CMake now sets /Zi + /DEBUG for Release) and re-run."
+}
 
 # Optional MP3 encoder + LAME license placeholders (omit if missing — runtime shows encoder not found)
 $lameLocal = Join-Path $repoRoot 'external_tools\lame\lame.exe'

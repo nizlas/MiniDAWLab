@@ -1216,8 +1216,11 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipSplit(
             std::shared_ptr<const AudioClip> mat = orig.getMaterial();
             const std::int64_t ws = orig.getMaterialWindowStartSamples();
             const std::int64_t we = orig.getMaterialWindowEndExclusiveSamples();
-            v.emplace_back(leftNewId, mat, S, L, vLeft, ws, we);
-            v.emplace_back(rightNewId, mat, splitT, L + vLeft, vRight, ws, we);
+            // Both halves inherit the user-facing display name (split is not a rename).
+            v.push_back(PlacedClip(leftNewId, mat, S, L, vLeft, ws, we)
+                            .withDisplayName(orig.getDisplayName()));
+            v.push_back(PlacedClip(rightNewId, mat, splitT, L + vLeft, vRight, ws, we)
+                            .withDisplayName(orig.getDisplayName()));
             any = true;
             rowChanged = true;
         }
@@ -1894,6 +1897,55 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
                             previous.getLeftLocatorSamples(),
                             previous.getRightLocatorSamples(),
                             previous.getProjectMusicalTime()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withClipRenamed(
+    const SessionSnapshot& previous,
+    const PlacedClipId clipId,
+    juce::String newDisplayName) noexcept
+{
+    const juce::String trimmed = newDisplayName.trim();
+    if (clipId == kInvalidPlacedClipId || trimmed.isEmpty())
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    bool anyChanged = false;
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        std::vector<PlacedClip> v = t.getPlacedClips();
+        bool rowChanged = false;
+        for (PlacedClip& p : v)
+        {
+            if (p.getId() == clipId && p.getDisplayName() != trimmed)
+            {
+                p = p.withDisplayName(trimmed);
+                rowChanged = true;
+            }
+        }
+        if (rowChanged)
+        {
+            anyChanged = true;
+            out.push_back(duplicateTrackWithMovedClips(t, std::move(v)));
+        }
+        else
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+    }
+    if (!anyChanged)
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
+            previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_, previous.getLeftLocatorSamples(),
+        previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRenamed(const SessionSnapshot& previous,

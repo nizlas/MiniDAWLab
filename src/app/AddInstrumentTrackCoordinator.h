@@ -7,6 +7,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "plugins/Vst3ChildProcessScan.h"
+#include "util/AsyncLifetimeToken.h"
 
 namespace mini_daw
 {
@@ -61,4 +62,8 @@ private:
     std::atomic<bool> pluginCacheImportBusy_{false};
     /// Kept alive across the async native dialog (juce::FileChooser requirement).
     std::unique_ptr<juce::FileChooser> pluginCacheImportChooser_;
+
+    /// Stability Slice 4: invalidated on destruction; every detached-thread / callAsync / chooser
+    /// completion checks the guard before touching `this`.
+    mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
 };

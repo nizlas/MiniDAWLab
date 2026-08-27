@@ -1636,6 +1636,29 @@ std::int64_t ExperimentalPianoRollView::snapTimelineTickForEdit(const std::int64
     return relativeSamplesToTicks(relS, bpm, tpq, sr);
 }
 
+std::int64_t ExperimentalPianoRollView::snapTimelineTickForCreate(const std::int64_t tick) const noexcept
+{
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr || session_ == nullptr || deviceManager_ == nullptr)
+    {
+        return tick;
+    }
+    const SnapSettings snap = session_->getArrangementSnapSettings();
+    if (!snap.enabled)
+    {
+        return tick;
+    }
+
+    const std::int64_t anchor = timelineClip_->timelineAnchorSamples;
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t absS = anchor + ticksToSignedSamples(tick, bpm, tpq, sr);
+    const std::int64_t snappedAbs
+        = snapSampleToGridFloorIfEnabled(absS, snap, session_->getProjectMusicalTime(), sr);
+    const std::int64_t relS = snappedAbs - anchor;
+    return relativeSamplesToTicks(relS, bpm, tpq, sr);
+}
+
 void ExperimentalPianoRollView::sortTimelineNotesForEditing() noexcept
 {
     std::sort(
@@ -2994,12 +3017,50 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
     const std::int64_t absClick = sampleAtGridX((float)pos.getX());
     const std::int64_t oldAnchor = timelineClip_->timelineAnchorSamples;
     std::int64_t tickOffset = relativeSamplesToTicks(absClick - oldAnchor, bpm, tpq, sr);
-    tickOffset = snapTimelineTickForEdit(tickOffset);
+    // Create uses floor-to-cell-start: the snap cell visually under the pointer is the target
+    // (nearest-snap here made clicks past a cell midpoint land in the next cell).
+    tickOffset = snapTimelineTickForCreate(tickOffset);
     const std::int64_t snapDur = musicalSnapGridTicks();
 
     const std::int64_t absSnappedNote = oldAnchor + ticksToSignedSamples(tickOffset, bpm, tpq, sr);
     if (absSnappedNote < vis0 || absSnappedNote >= vis1)
     {
+        return;
+    }
+
+    // Toggle guard: a note already sitting exactly on the create target (tick + pitch + channel)
+    // is deleted instead of stacked. This makes double-click in the same cell create/delete
+    // consistently even when the painted glyph (narrow Hits diamond) misses the raw hit-test.
+    constexpr int kCreateNoteChannel = 10;
+    for (int i = (int)pattern_.timelineNotes.size() - 1; i >= 0; --i)
+    {
+        const auto& tn = pattern_.timelineNotes[(size_t)i];
+        if (tn.startTick != tickOffset || tn.midiNote != pitch || tn.channel != kCreateNoteChannel)
+        {
+            continue;
+        }
+        auto eraseAndNotify = [this, i]() -> bool {
+            if (i < 0 || i >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+            pattern_.timelineNotes.erase(pattern_.timelineNotes.begin() + i);
+            if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+            {
+                instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+            }
+            adjustTimelineNoteSelectionAfterErase(i);
+            repaint();
+            return true;
+        };
+        if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            undoablePatternEditHandler_("Delete MIDI note", std::move(eraseAndNotify));
+        }
+        else
+        {
+            eraseAndNotify();
+        }
         return;
     }
 
@@ -3024,7 +3085,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
         TimelineMidiNote nn;
         nn.midiNote = pitch;
         nn.velocity = 100;
-        nn.channel = 10;
+        nn.channel = kCreateNoteChannel;
         nn.startTick = tickOffset;
         nn.durationTicks = snapDur > 0 ? snapDur : 240;
 
@@ -3036,6 +3097,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
             {
                 instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
             }
+            auditionNote(nn.midiNote, nn.velocity, nn.channel);
             repaint();
             return true;
         };
@@ -3071,7 +3133,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
     TimelineMidiNote nn;
     nn.midiNote = pitch;
     nn.velocity = 100;
-    nn.channel = 10;
+    nn.channel = kCreateNoteChannel;
     nn.startTick = 0;
     nn.durationTicks = snapDur > 0 ? snapDur : 240;
 
@@ -3088,6 +3150,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
         {
             instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
         }
+        auditionNote(nn.midiNote, nn.velocity, nn.channel);
         repaint();
         return true;
     };

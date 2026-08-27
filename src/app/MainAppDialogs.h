@@ -30,7 +30,10 @@ void showAudioMixdownDialog(juce::Component& parent,
                             Session& session,
                             PlaybackEngine& playbackEngine,
                             juce::AudioDeviceManager& deviceManager,
-                            std::function<void()> updatePlayPauseButtonFromTransport);
+                            std::function<void()> updatePlayPauseButtonFromTransport,
+                            /// Slice 5 unsaved-changes guard; invoked with the export continuation
+                            /// when the user clicks Export. Null: export proceeds directly.
+                            std::function<void(std::function<void()>)> confirmSaveBeforeExport = nullptr);
 
 void showHelpMenuPopup(juce::Component& helpButtonAnchor,
                        juce::Component::SafePointer<juce::Component> menuOwnerLifetime,

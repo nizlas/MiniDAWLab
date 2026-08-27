@@ -23,6 +23,11 @@ struct RoutingPlan
         int trackIndex = -1;
         int destBusIndex = -1;
         std::vector<SendTap> sends;
+        /// Stability C3: identity of the track this step was built from. Lets invariant checks
+        /// (and diagnostics) verify that `trackIndex` still refers to the same session row after
+        /// structural edits. Not used by the realtime render path.
+        TrackId builtFromTrackId = kInvalidTrackId;
+        TrackKind builtFromTrackKind = TrackKind::Audio;
     };
 
     struct BusStep
@@ -31,6 +36,9 @@ struct RoutingPlan
         int sourceBusIndex = -1;
         int destBusIndex = -1;
         std::vector<SendTap> sends;
+        /// Stability C3: see SourceStep.
+        TrackId builtFromTrackId = kInvalidTrackId;
+        TrackKind builtFromTrackKind = TrackKind::Master;
     };
 
     std::vector<SourceStep> sourceSteps;

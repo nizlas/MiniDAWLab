@@ -2,6 +2,7 @@
 
 #include "app/AudioMixdownExporter.h"
 
+#include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/AudioMixdownProjectSettings.h"
 #include "domain/MixdownWavProbe.h"
 #include "domain/Session.h"
@@ -13,6 +14,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <cmath>
+#include <cstdint>
 namespace
 {
 
@@ -96,6 +98,167 @@ namespace
     return kTable[static_cast<unsigned>(idx)];
 }
 
+/// Everything needed to run the export after the settings dialog has closed.
+struct MixdownStartPlan
+{
+    bool mp3 = false;
+    juce::File outputFile;
+    int mp3BitrateKbps = 192;
+    mini_daw_audio_mixdown::MixdownWaveBits wavBits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm24;
+};
+
+/// Small always-on-top desktop window with a status line and a progress bar. Export is blocking
+/// on the message thread (Slice 2 safety: no message dispatch runs concurrently with the offline
+/// render), so updates are painted synchronously via `ComponentPeer::performAnyPendingRepaintsNow`
+/// instead of pumping the event loop.
+class MixdownProgressWindow final : public juce::Component,
+                                    public mini_daw_audio_mixdown::MixdownProgressSink
+{
+public:
+    MixdownProgressWindow()
+    {
+        setOpaque(true);
+        setSize(440, 104);
+        setAlwaysOnTop(true);
+        addToDesktop(juce::ComponentPeer::windowHasDropShadow);
+        if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        {
+            setCentrePosition(display->userArea.getCentre());
+        }
+        setVisible(true);
+        toFront(false);
+        appendMixdownDiagnosticLine("progress ui shown");
+        flushPaintNow();
+    }
+
+    ~MixdownProgressWindow() override
+    {
+        appendMixdownDiagnosticLine("progress ui closed");
+    }
+
+    void setMixdownProgress(const juce::String& statusText, const double fraction01) override
+    {
+        statusText_ = statusText;
+        fraction_ = fraction01;
+        ++pulseCounter_;
+        repaint();
+        flushPaintNow();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(juce::Colour(0xff2a2a33));
+        g.setColour(juce::Colours::white.withAlpha(0.25f));
+        g.drawRect(getLocalBounds(), 1);
+
+        g.setColour(juce::Colours::white);
+        g.setFont(juce::FontOptions(15.0f));
+        g.drawText(statusText_, 16, 14, getWidth() - 32, 22, juce::Justification::centredLeft);
+
+        const juce::Rectangle<int> barArea(16, 52, getWidth() - 32, 22);
+        g.setColour(juce::Colours::black.withAlpha(0.35f));
+        g.fillRect(barArea);
+        g.setColour(mp3EncoderReadyLabelColour());
+        if (fraction_ >= 0.0)
+        {
+            const int w = juce::roundToInt(barArea.getWidth() * juce::jlimit(0.0, 1.0, fraction_));
+            g.fillRect(barArea.withWidth(w));
+        }
+        else
+        {
+            // Indeterminate: a segment bouncing left-right, advanced by each progress pulse.
+            const int segW = juce::jmax(24, barArea.getWidth() / 4);
+            const int span = juce::jmax(1, barArea.getWidth() - segW);
+            const int offset = static_cast<int>((pulseCounter_ * 10) % (2 * span));
+            const int x = offset <= span ? offset : (2 * span - offset);
+            g.fillRect(barArea.getX() + x, barArea.getY(), segW, barArea.getHeight());
+        }
+        g.setColour(juce::Colours::white.withAlpha(0.4f));
+        g.drawRect(barArea, 1);
+    }
+
+private:
+    void flushPaintNow()
+    {
+        if (auto* peer = getPeer())
+        {
+            peer->performAnyPendingRepaintsNow();
+        }
+    }
+
+    juce::String statusText_ { "Preparing..." };
+    double fraction_ = -1.0;
+    std::uint64_t pulseCounter_ = 0;
+};
+
+/// Runs the confirmed export (dialog already closed). Blocking on the message thread; live
+/// feedback comes from `MixdownProgressWindow`. Shows the final success/failure alert.
+void runConfirmedMixdownExport(Transport& transport,
+                               Session& session,
+                               PlaybackEngine& playbackEngine,
+                               juce::AudioDeviceManager& deviceManager,
+                               const std::function<void()>& syncTransportUiFromDomain,
+                               const MixdownStartPlan& plan)
+{
+    const char* const fmt = plan.mp3 ? "mp3" : "wav";
+    juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
+    if (dev == nullptr)
+    {
+        appendMixdownDiagnosticLine(juce::String("FINAL ") + fmt
+                                    + " export failed: no audio device at export start");
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                               "Audio Mixdown",
+                                               "No audio device is open.");
+        return;
+    }
+
+    MixdownProgressWindow progress;
+    juce::Result result = juce::Result::ok();
+    if (plan.mp3)
+    {
+        result = mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(transport,
+                                                                        session,
+                                                                        playbackEngine,
+                                                                        deviceManager,
+                                                                        syncTransportUiFromDomain,
+                                                                        plan.outputFile,
+                                                                        plan.mp3BitrateKbps,
+                                                                        &progress,
+                                                                        true);
+    }
+    else
+    {
+        mini_daw_audio_mixdown::MixdownExportRequest request;
+        request.outputFile = plan.outputFile;
+        request.sampleRate = dev->getCurrentSampleRate();
+        request.bits = plan.wavBits;
+        request.progressSink = &progress;
+        request.overwriteConfirmed = true;
+        result = mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(transport,
+                                                                        session,
+                                                                        playbackEngine,
+                                                                        deviceManager,
+                                                                        syncTransportUiFromDomain,
+                                                                        request);
+    }
+
+    if (result.failed())
+    {
+        const juce::String msg = result.getErrorMessage();
+        appendMixdownDiagnosticLine(juce::String("FINAL ") + fmt + " export failed: "
+                                    + msg.replaceCharacter('\n', ' '));
+        writeLastOperationBreadcrumb(juce::String("mixdown ") + fmt + " failed");
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Audio Mixdown", msg);
+        return;
+    }
+
+    appendMixdownDiagnosticLine(juce::String("FINAL ") + fmt + " export ok");
+    writeLastOperationBreadcrumb(juce::String("mixdown ") + fmt + " end ok");
+    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                           "Audio Mixdown",
+                                           "Export complete:\n" + plan.outputFile.getFullPathName());
+}
+
 [[nodiscard]] int mp3BitrateComboIdFromKbps(const int kbps) noexcept
 {
     const int k = clampMp3BitRateKbps(kbps);
@@ -124,12 +287,14 @@ public:
                               Session& session,
                               PlaybackEngine& playbackEngine,
                               juce::AudioDeviceManager& deviceManager,
-                              std::function<void()> syncTransportUiFromDomain)
+                              std::function<void()> syncTransportUiFromDomain,
+                              std::function<void(std::function<void()>)> confirmSaveBeforeExport)
         : transport_(transport)
         , session_(session)
         , playbackEngine_(playbackEngine)
         , deviceManager_(deviceManager)
         , syncTransportUiFromDomain_(std::move(syncTransportUiFromDomain))
+        , confirmSaveBeforeExport_(std::move(confirmSaveBeforeExport))
     {
         addAndMakeVisible(nameLabel_);
         nameLabel_.setText("Name", juce::dontSendNotification);
@@ -472,6 +637,10 @@ private:
 
     void handleExportClicked()
     {
+        const bool mp3 = fileTypeCombo_.getSelectedId() == 2;
+        appendMixdownDiagnosticLine(juce::String("export clicked format=") + (mp3 ? "mp3" : "wav"));
+        writeLastOperationBreadcrumb("mixdown export requested");
+
         pushMixdownUiToSession();
 
         juce::AudioIODevice* const dev = deviceManager_.getCurrentAudioDevice();
@@ -483,73 +652,12 @@ private:
             return;
         }
 
-        if (fileTypeCombo_.getSelectedId() == 2)
+        if (mp3 && !mini_daw_audio_mixdown::isBundledLameEncoderAvailable())
         {
-            if (!mini_daw_audio_mixdown::isBundledLameEncoderAvailable())
-            {
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::AlertWindow::WarningIcon,
-                    "Audio Mixdown",
-                    "MP3 encoder not found. Expected Tools/lame/lame.exe beside the application.");
-                return;
-            }
-
-            std::shared_ptr<const SessionSnapshot> snapMp3 = session_.loadSessionSnapshotForAudioThread();
-            if (snapMp3 == nullptr)
-            {
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                       "Audio Mixdown",
-                                                       "Session snapshot is not available.");
-                return;
-            }
-
-            mini_daw_audio_mixdown::ActiveLoopMixdownSpan loopProbeMp3 {};
-            const juce::Result spanProbeMp3 = mini_daw_audio_mixdown::resolveActiveLoopMixdownSpan(
-                transport_.readCycleEnabledForUi(),
-                snapMp3->getLeftLocatorSamples(),
-                snapMp3->getRightLocatorSamples(),
-                loopProbeMp3);
-            if (spanProbeMp3.failed())
-            {
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                       "Audio Mixdown",
-                                                       spanProbeMp3.getErrorMessage());
-                return;
-            }
-
-            const juce::File folderMp3(pathEditor_.getText().trim());
-            const juce::String baseMp3 = sanitizeFileBaseName(nameEditor_.getText());
-            const juce::File outMp3 = folderMp3.getChildFile(baseMp3 + ".mp3");
-            const int kbps = kbpsFromMp3BitrateComboId(mp3BitrateCombo_.getSelectedId());
-
-            const juce::Result resultMp3 = mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(
-                transport_,
-                session_,
-                playbackEngine_,
-                deviceManager_,
-                syncTransportUiFromDomain_,
-                outMp3,
-                kbps);
-
-            if (resultMp3.failed())
-            {
-                const juce::String msg = resultMp3.getErrorMessage();
-                if (msg == "Export cancelled." || msg.startsWith("Export cancelled"))
-                {
-                    return;
-                }
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                       "Audio Mixdown",
-                                                       msg);
-                return;
-            }
-
-            pushMixdownUiToSession();
-
-            if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
-            {
-                dw->exitModalState(1);
-            }
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Audio Mixdown",
+                "MP3 encoder not found. Expected Tools/lame/lame.exe beside the application.");
             return;
         }
 
@@ -576,55 +684,114 @@ private:
             return;
         }
 
+        MixdownStartPlan plan;
+        plan.mp3 = mp3;
         const juce::File folder(pathEditor_.getText().trim());
         const juce::String base = sanitizeFileBaseName(nameEditor_.getText());
-        const juce::File outFile = folder.getChildFile(base + ".wav");
-
-        mini_daw_audio_mixdown::MixdownExportRequest request;
-        request.outputFile = outFile;
-        request.sampleRate = dev->getCurrentSampleRate();
-
+        plan.outputFile = folder.getChildFile(base + (mp3 ? ".mp3" : ".wav"));
+        plan.mp3BitrateKbps = kbpsFromMp3BitrateComboId(mp3BitrateCombo_.getSelectedId());
         switch (waveBitsCombo_.getSelectedId())
         {
         case 16:
-            request.bits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm16;
+            plan.wavBits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm16;
             break;
         case 32:
-            request.bits = mini_daw_audio_mixdown::MixdownWaveBits::IeeeFloat32;
+            plan.wavBits = mini_daw_audio_mixdown::MixdownWaveBits::IeeeFloat32;
             break;
         case 24:
         default:
-            request.bits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm24;
+            plan.wavBits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm24;
             break;
         }
 
-        const juce::Result result = mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(
-            transport_,
-            session_,
-            playbackEngine_,
-            deviceManager_,
-            syncTransportUiFromDomain_,
-            request);
-
-        if (result.failed())
-        {
-            const juce::String msg = result.getErrorMessage();
-            if (msg == "Export cancelled." || msg.startsWith("Export cancelled"))
+        // Save-before-export prompt (Slice 5) resolves first; the dialog stays open behind the
+        // prompt so Cancel / a failed save leaves the user exactly where they were.
+        const auto proceed = [safeThis = juce::Component::SafePointer<AudioMixdownDialogContent>(this),
+                              plan] {
+            if (safeThis == nullptr)
             {
+                appendMixdownDiagnosticLine("export continuation skipped: dialog already destroyed");
                 return;
             }
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                   "Audio Mixdown",
-                                                   msg);
+            safeThis->beginConfirmedExport(plan);
+        };
+        if (confirmSaveBeforeExport_ != nullptr)
+        {
+            confirmSaveBeforeExport_(proceed);
+        }
+        else
+        {
+            proceed();
+        }
+    }
+
+    /// Export is confirmed (save prompt resolved). Ask about overwrite, then close the settings
+    /// dialog and start the export from a queued continuation that no longer touches this content.
+    void beginConfirmedExport(const MixdownStartPlan& plan)
+    {
+        if (!plan.outputFile.existsAsFile())
+        {
+            closeDialogAndStartExport(plan);
             return;
         }
+        // Async prompt with callback (same pattern as the Slice 5 save prompts). The synchronous
+        // NativeMessageBox::showYesNoBox returned instantly with an arbitrary answer here (see
+        // mixdown-diag.log "export cancelled at overwrite prompt" ~10 ms after the click), so the
+        // user never saw the question.
+        appendMixdownDiagnosticLine("overwrite prompt shown path=\""
+                                    + plan.outputFile.getFullPathName() + "\"");
+        juce::AlertWindow::showOkCancelBox(
+            juce::AlertWindow::WarningIcon,
+            "Audio Mixdown",
+            "A file already exists at:\n\n" + plan.outputFile.getFullPathName() + "\n\nOverwrite it?",
+            "Overwrite",
+            "Cancel",
+            this,
+            juce::ModalCallbackFunction::create(
+                [safeThis = juce::Component::SafePointer<AudioMixdownDialogContent>(this),
+                 plan](const int result) {
+                    if (result != 1) // Cancel / dismissed
+                    {
+                        appendMixdownDiagnosticLine(
+                            "export cancelled at overwrite prompt; dialog stays open");
+                        writeLastOperationBreadcrumb(juce::String("mixdown ")
+                                                     + (plan.mp3 ? "mp3" : "wav") + " cancelled");
+                        return;
+                    }
+                    if (safeThis == nullptr)
+                    {
+                        appendMixdownDiagnosticLine(
+                            "overwrite confirmed but dialog already destroyed; export skipped");
+                        return;
+                    }
+                    appendMixdownDiagnosticLine("overwrite confirmed by user");
+                    safeThis->closeDialogAndStartExport(plan);
+                }));
+    }
 
-        pushMixdownUiToSession();
+    /// Final step: close the settings dialog, then run the export from a queued continuation that
+    /// no longer touches this (destroyed) content.
+    void closeDialogAndStartExport(const MixdownStartPlan& plan)
+    {
+        // App-lifetime references (owned by the application object): safe to use from the queued
+        // continuation after this dialog content is destroyed.
+        Transport& transport = transport_;
+        Session& session = session_;
+        PlaybackEngine& playbackEngine = playbackEngine_;
+        juce::AudioDeviceManager& deviceManager = deviceManager_;
+        const std::function<void()> syncTransportUi = syncTransportUiFromDomain_;
 
+        appendMixdownDiagnosticLine(juce::String("dialog closed before export start format=")
+                                    + (plan.mp3 ? "mp3" : "wav"));
         if (auto* dw = findParentComponentOfClass<juce::DialogWindow>())
         {
             dw->exitModalState(1);
         }
+        juce::MessageManager::callAsync(
+            [&transport, &session, &playbackEngine, &deviceManager, syncTransportUi, plan] {
+                runConfirmedMixdownExport(
+                    transport, session, playbackEngine, deviceManager, syncTransportUi, plan);
+            });
     }
 
     Transport& transport_;
@@ -632,6 +799,8 @@ private:
     PlaybackEngine& playbackEngine_;
     juce::AudioDeviceManager& deviceManager_;
     std::function<void()> syncTransportUiFromDomain_;
+    /// Slice 5 unsaved-changes guard: invoked with the continuation that starts the export.
+    std::function<void(std::function<void()>)> confirmSaveBeforeExport_;
 
     bool floatWaveSupportedAtDialogOpen_ = false;
 
@@ -675,10 +844,15 @@ void showAudioMixdownDialog(juce::Component& parent,
                             Session& session,
                             PlaybackEngine& playbackEngine,
                             juce::AudioDeviceManager& deviceManager,
-                            std::function<void()> updatePlayPauseButtonFromTransport)
+                            std::function<void()> updatePlayPauseButtonFromTransport,
+                            std::function<void(std::function<void()>)> confirmSaveBeforeExport)
 {
-    auto* body = new AudioMixdownDialogContent(
-        transport, session, playbackEngine, deviceManager, std::move(updatePlayPauseButtonFromTransport));
+    auto* body = new AudioMixdownDialogContent(transport,
+                                               session,
+                                               playbackEngine,
+                                               deviceManager,
+                                               std::move(updatePlayPauseButtonFromTransport),
+                                               std::move(confirmSaveBeforeExport));
 
     juce::DialogWindow::LaunchOptions opt;
     opt.content.setOwned(body);

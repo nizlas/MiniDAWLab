@@ -75,8 +75,14 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
         juce::File{},
         "*.mid;*.midi");
 
-    chooser->launchAsync(fileChooserFlags, [this, chooser, tid](const juce::FileChooser& fc) {
+    chooser->launchAsync(fileChooserFlags, [this, chooser, tid,
+                                            guard = asyncLifetime_.guard()](const juce::FileChooser& fc) {
         juce::ignoreUnused(chooser);
+        if (!guard.isAlive())
+        {
+            juce::Logger::writeToLog("[stale-async] skipped: MIDI import file chooser");
+            return;
+        }
         struct ClearImportInFlight
         {
             bool& b;

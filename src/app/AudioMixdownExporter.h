@@ -23,11 +23,27 @@ enum class MixdownWaveBits : int
     IeeeFloat32 = 32,
 };
 
+/// [Message thread] Progress feedback during blocking export. `fraction01` is 0..1 for determinate
+/// progress; pass a negative value for an indeterminate phase (e.g. LAME encoding). The exporter
+/// calls this from inside the blocking render loop; implementations should repaint synchronously
+/// (message dispatch is not pumped during export).
+class MixdownProgressSink
+{
+public:
+    virtual ~MixdownProgressSink() = default;
+    virtual void setMixdownProgress(const juce::String& statusText, double fraction01) = 0;
+};
+
 struct MixdownExportRequest
 {
     juce::File outputFile;
     double sampleRate = 0.0;
     MixdownWaveBits bits = MixdownWaveBits::Pcm24;
+    /// Optional live progress feedback (non-owning; must outlive the blocking export call).
+    MixdownProgressSink* progressSink = nullptr;
+    /// True when the caller already asked the user about overwriting `outputFile` (skips the
+    /// exporter's own overwrite prompt).
+    bool overwriteConfirmed = false;
 };
 
 /// Half-open timeline span **[startSample, startSample + lengthSamples)** used for mixdown.
@@ -71,6 +87,8 @@ struct ActiveLoopMixdownSpan
     juce::AudioDeviceManager& deviceManager,
     const std::function<void()>& syncTransportUiFromDomain,
     const juce::File& mp3OutputFile,
-    int bitrateKbps);
+    int bitrateKbps,
+    MixdownProgressSink* progressSink = nullptr,
+    bool overwriteConfirmed = false);
 
 } // namespace mini_daw_audio_mixdown

@@ -217,6 +217,10 @@ TrackLanesView::~TrackLanesView()
     clearCycleRecordingPreviewContext();
     // `TrackLanesView`'s JUCE `Component` has no `removeFromParent()`; keep non-owned shell children
     // alive for `TransportControlsContent`. `removeChildComponent` does not delete the child.
+    // ORDER DEPENDENCY: the attachment pointers below reference components owned by
+    // `InstrumentTimelineRowCoordinator`. This is only safe because `TransportControlsContent`
+    // declares `trackLanesView` *after* `instrumentTimelineRowCoordinator_` (members are destroyed
+    // in reverse declaration order, so this view dies first while those components are still alive).
     auto detachFromParentIfAny = [](juce::Component* c) noexcept {
         if (c == nullptr)
         {
@@ -238,6 +242,10 @@ TrackLanesView::~TrackLanesView()
 void TrackLanesView::setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept
 {
     trackHeaderPluginHost_ = std::move(host);
+    for (const auto& h : headers_)
+    {
+        cancelHeaderDragIfSourceIs(h.get());
+    }
     headers_.clear();
     lanes_.clear();
     aggregatedSelectedPlacedClip_.reset();
@@ -469,6 +477,12 @@ void TrackLanesView::setOnUndoableClipTrimRequested(
     onUndoableClipTrimRequested_ = std::move(fn);
 }
 
+void TrackLanesView::setOnUndoableClipRenameRequested(
+    std::function<bool(PlacedClipId, juce::String)> fn) noexcept
+{
+    onUndoableClipRenameRequested_ = std::move(fn);
+}
+
 void TrackLanesView::setActiveEditToolProvider(std::function<EditTool()> fn) noexcept
 {
     activeEditToolProvider_ = std::move(fn);
@@ -562,6 +576,7 @@ void TrackLanesView::syncInstrumentTimelineAttachments(
         if (keep.count(it->first) == 0)
         {
             InstrumentTimelineAttachment& slot = it->second;
+            cancelHeaderDragIfSourceIs(slot.header);
             if (slot.header != nullptr && slot.header->getParentComponent() == this)
             {
                 removeChildComponent(slot.header);
@@ -596,6 +611,30 @@ void TrackLanesView::syncInstrumentTimelineAttachments(
             addAndMakeVisible(*dst.midiLane);
         }
     }
+
+    refreshInstrumentHeaderReorderAttachments();
+    rebuildVisibleTrackEntries();
+    resized();
+}
+
+void TrackLanesView::detachInstrumentTimelineRowForTrack(const TrackId tid) noexcept
+{
+    const auto it = instrumentTimelineAttachments_.find(tid);
+    if (it == instrumentTimelineAttachments_.end())
+    {
+        return;
+    }
+    InstrumentTimelineAttachment& slot = it->second;
+    cancelHeaderDragIfSourceIs(slot.header);
+    if (slot.header != nullptr && slot.header->getParentComponent() == this)
+    {
+        removeChildComponent(slot.header);
+    }
+    if (slot.midiLane != nullptr && slot.midiLane->getParentComponent() == this)
+    {
+        removeChildComponent(slot.midiLane);
+    }
+    instrumentTimelineAttachments_.erase(it);
 
     refreshInstrumentHeaderReorderAttachments();
     rebuildVisibleTrackEntries();
@@ -797,6 +836,10 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
     const int n = session_.getNumTracks();
     if (n <= 0)
     {
+        for (const auto& h : headers_)
+        {
+            cancelHeaderDragIfSourceIs(h.get());
+        }
         headers_.clear();
         lanes_.clear();
         perTrackRowHeightPx_.clear();
@@ -836,6 +879,10 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         rebuildVisibleTrackEntries();
         refreshInstrumentHeaderReorderAttachments();
         return;
+    }
+    for (const auto& h : headers_)
+    {
+        cancelHeaderDragIfSourceIs(h.get());
     }
     headers_.clear();
     lanes_.clear();
@@ -1195,6 +1242,15 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 }
                 return true;
             };
+        host.commitClipRenameAsUndoable =
+            [this](const PlacedClipId id, juce::String newName) -> bool {
+                if (onUndoableClipRenameRequested_ != nullptr)
+                {
+                    return onUndoableClipRenameRequested_(id, std::move(newName));
+                }
+                session_.setPlacedClipName(id, std::move(newName));
+                return true;
+            };
         host.getActiveEditTool = [this]() -> EditTool {
             return activeEditToolProvider_ != nullptr ? activeEditToolProvider_() : EditTool::Pointer;
         };
@@ -1254,6 +1310,10 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
         return;
     }
 
+    for (const auto& h : masterHeaders_)
+    {
+        cancelHeaderDragIfSourceIs(h.get());
+    }
     masterHeaders_.clear();
 
     if (masterId == kInvalidTrackId)
@@ -1355,6 +1415,7 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
     {
         if (wanted.count(it->first) == 0)
         {
+            cancelHeaderDragIfSourceIs(it->second.get());
             removeChildComponent(it->second.get());
             it = groupHeaders_.erase(it);
         }
@@ -2092,6 +2153,15 @@ void TrackLanesView::endHeaderTrackDrag(const TrackId movedId)
 
     clearHeaderTrackDragState();
     repaint();
+}
+
+void TrackLanesView::cancelHeaderDragIfSourceIs(const TrackHeaderView* const header) noexcept
+{
+    if (header != nullptr && headerTrackDragSourceView_ == header)
+    {
+        clearHeaderTrackDragState();
+        repaint();
+    }
 }
 
 void TrackLanesView::clearHeaderTrackDragState() noexcept

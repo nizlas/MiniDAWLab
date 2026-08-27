@@ -307,7 +307,15 @@ void AudioWaveformCache::completeBackgroundPyramidBuild(
     if (callbackCopy != nullptr && built != nullptr)
     {
         const AudioClip* key = material.get();
-        juce::MessageManager::callAsync([cb = std::move(callbackCopy), key] { cb(key); });
+        juce::MessageManager::callAsync(
+            [cb = std::move(callbackCopy), key, guard = asyncLifetime_.guard()] {
+                if (!guard.isAlive())
+                {
+                    juce::Logger::writeToLog("[stale-async] skipped: waveform pyramid-ready notify");
+                    return;
+                }
+                cb(key);
+            });
     }
 }
 

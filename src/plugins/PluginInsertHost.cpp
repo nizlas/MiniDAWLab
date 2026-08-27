@@ -712,7 +712,9 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
     }
     eraseLastHostAppliedStateForTrack(lastHostAppliedState_, trackId);
     closeEditorsForTrack(trackId);
-    chains_.erase(trackId);
+    // Publish-before-destroy (F5): same retire discipline as evict — the old live slots must not be
+    // destroyed while a callback can still hold the previously published map.
+    retireChainPublishDrainAndDestroy(trackId);
 
     std::vector<LiveInsertSlot> built;
     built.reserve(chain.slots.size());
@@ -825,6 +827,37 @@ std::vector<InsertRowView> PluginInsertHost::getInsertRowsForTrack(const TrackId
     return rows;
 }
 
+void PluginInsertHost::retireChainPublishDrainAndDestroy(const TrackId trackId)
+{
+    std::vector<LiveInsertSlot> retired;
+    if (const auto it = chains_.find(trackId); it != chains_.end())
+    {
+        retired = std::move(it->second);
+        chains_.erase(it);
+    }
+    if (retired.empty())
+    {
+        rebuildAudioThreadMapAndPublish();
+        return;
+    }
+    // Publish-before-destroy (F5): the audio callback may still be running with the previously
+    // published map whose raw AudioProcessor pointers point into `retired`. Publish the map without
+    // this track first, drain the in-flight callback, and only then release/destroy the instances.
+    rebuildAudioThreadMapAndPublish();
+    if (realtimeDrainAfterPublish_ != nullptr)
+    {
+        realtimeDrainAfterPublish_();
+    }
+    for (auto& live : retired)
+    {
+        if (live.instance != nullptr)
+        {
+            live.instance->releaseResources();
+        }
+    }
+    retired.clear();
+}
+
 void PluginInsertHost::removeAllPlugins() noexcept
 {
     for (const auto& kv : editorWindows_)
@@ -845,7 +878,18 @@ void PluginInsertHost::removeAllPlugins() noexcept
     paramsWindows_.clear();
     editorOpenState_.clear();
     lastHostAppliedState_.clear();
-    for (auto& kv : chains_)
+
+    // Publish-before-destroy (F5): move every live chain out, publish the now-empty realtime map,
+    // drain any in-flight audio callback still holding the old map, then release/destroy.
+    std::unordered_map<TrackId, std::vector<LiveInsertSlot>> retired = std::move(chains_);
+    chains_.clear();
+    nextInsertSlotId_ = 1;
+    rebuildAudioThreadMapAndPublish();
+    if (!retired.empty() && realtimeDrainAfterPublish_ != nullptr)
+    {
+        realtimeDrainAfterPublish_();
+    }
+    for (auto& kv : retired)
     {
         for (auto& live : kv.second)
         {
@@ -855,9 +899,7 @@ void PluginInsertHost::removeAllPlugins() noexcept
             }
         }
     }
-    chains_.clear();
-    nextInsertSlotId_ = 1;
-    rebuildAudioThreadMapAndPublish();
+    retired.clear();
 }
 
 void PluginInsertHost::evictPluginForTrackNoUndo(const TrackId trackId) noexcept
@@ -868,18 +910,7 @@ void PluginInsertHost::evictPluginForTrackNoUndo(const TrackId trackId) noexcept
     }
     eraseLastHostAppliedStateForTrack(lastHostAppliedState_, trackId);
     closeEditorsForTrack(trackId);
-    if (const auto it = chains_.find(trackId); it != chains_.end())
-    {
-        for (auto& live : it->second)
-        {
-            if (live.instance != nullptr)
-            {
-                live.instance->releaseResources();
-            }
-        }
-        chains_.erase(it);
-    }
-    rebuildAudioThreadMapAndPublish();
+    retireChainPublishDrainAndDestroy(trackId);
 }
 
 void PluginInsertHost::removePlugin(const TrackId trackId)
@@ -1294,13 +1325,84 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
 
     juce::AudioBuffer<float> view(scratchPtrs_.data(), kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
+    int slotIndex = -1;
     for (const auto& sp : hit->slots)
     {
+        ++slotIndex;
         if (sp.processor == nullptr || !sp.layoutOk || sp.stage != stage)
         {
             continue;
         }
+        // Stability C2B diagnostics: mark which insert is being processed so a wedged
+        // processBlock can be identified from the message thread (gate-timeout logging).
+        audioThreadInsertTrackId_.store(static_cast<std::int64_t>(trackId),
+                                        std::memory_order_relaxed);
+        audioThreadInsertSlotIndex_.store(slotIndex, std::memory_order_relaxed);
+        audioThreadInsertStage_.store(static_cast<int>(stage), std::memory_order_relaxed);
         sp.processor->processBlock(view, midiScratch_);
+        audioThreadInsertTrackId_.store(-1, std::memory_order_relaxed);
+        audioThreadInsertSlotIndex_.store(-1, std::memory_order_relaxed);
+        audioThreadInsertStage_.store(-1, std::memory_order_relaxed);
         midiScratch_.clear();
     }
+}
+
+std::vector<std::pair<TrackId, std::vector<const void*>>>
+    PluginInsertHost::exportChainInstancePointersForDiagnostics() const
+{
+    std::vector<std::pair<TrackId, std::vector<const void*>>> out;
+    out.reserve(chains_.size());
+    for (const auto& [trackId, slots] : chains_)
+    {
+        std::vector<const void*> instances;
+        instances.reserve(slots.size());
+        for (const LiveInsertSlot& s : slots)
+        {
+            if (s.instance != nullptr)
+            {
+                instances.push_back(static_cast<const void*>(s.instance.get()));
+            }
+        }
+        out.emplace_back(trackId, std::move(instances));
+    }
+    return out;
+}
+
+std::vector<std::pair<TrackId, std::vector<const void*>>>
+    PluginInsertHost::exportPublishedMapPointersForDiagnostics() const
+{
+    std::vector<std::pair<TrackId, std::vector<const void*>>> out;
+    const std::shared_ptr<const PluginAudioThreadMap> m
+        = std::atomic_load_explicit(&audioThreadMap_, std::memory_order_acquire);
+    if (m == nullptr)
+    {
+        return out;
+    }
+    out.reserve(m->entries.size());
+    for (const PluginAudioThreadMap::Entry& e : m->entries)
+    {
+        std::vector<const void*> procs;
+        procs.reserve(e.slots.size());
+        for (const PluginAudioThreadMap::SlotProc& sp : e.slots)
+        {
+            if (sp.processor != nullptr)
+            {
+                procs.push_back(static_cast<const void*>(sp.processor));
+            }
+        }
+        out.emplace_back(e.trackId, std::move(procs));
+    }
+    return out;
+}
+
+juce::String PluginInsertHost::describeAudioThreadInsertStateForDiagnostics() const noexcept
+{
+    const std::int64_t tid = audioThreadInsertTrackId_.load(std::memory_order_relaxed);
+    if (tid < 0)
+    {
+        return "insert=idle";
+    }
+    return "insert=processing trackId=" + juce::String(tid)
+           + " slot=" + juce::String(audioThreadInsertSlotIndex_.load(std::memory_order_relaxed))
+           + " stage=" + juce::String(audioThreadInsertStage_.load(std::memory_order_relaxed));
 }

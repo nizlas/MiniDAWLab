@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "domain/Track.h"
+#include "util/AsyncLifetimeToken.h"
 
 class Session;
 class Transport;
@@ -48,4 +49,6 @@ private:
     InspectorView& inspectorView_;
     Callbacks callbacks_;
     bool importInFlight_ = false;
+    /// Stability Slice 4: FileChooser completions check this before touching the coordinator.
+    mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
 };

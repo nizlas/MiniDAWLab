@@ -2067,6 +2067,24 @@ bool InstrumentTrackController::applyInstrumentMidiClipVisibleTrim(const Instrum
     return true;
 }
 
+bool InstrumentTrackController::renameInstrumentMidiClip(const InstrumentMidiClipId id,
+                                                         juce::String newName) noexcept
+{
+    InstrumentMidiClip* const c = getClipById(id);
+    if (c == nullptr)
+    {
+        return false;
+    }
+    const juce::String trimmed = newName.trim();
+    if (trimmed.isEmpty() || trimmed == c->name)
+    {
+        return false;
+    }
+    c->name = trimmed;
+    sendChangeMessage();
+    return true;
+}
+
 std::int64_t InstrumentTrackController::clampInstrumentMidiClipMoveDeltaForCurrentSelection(
     const std::int64_t deltaSamples) const noexcept
 {

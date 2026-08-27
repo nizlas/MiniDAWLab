@@ -175,6 +175,10 @@ public:
     void setOnUndoableClipTrimRequested(
         std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> fn) noexcept;
 
+    /// [Message thread] Undoable clip display-name rename ("Rename clip"); metadata only.
+    void setOnUndoableClipRenameRequested(
+        std::function<bool(PlacedClipId, juce::String)> fn) noexcept;
+
     void setActiveEditToolProvider(std::function<EditTool()> fn) noexcept;
 
     void setOnUndoableClipSplitRequested(
@@ -212,6 +216,11 @@ public:
     /// [Message thread] Replace all instrument-shell UI bridges (Groove-Agent rows). Omit a `TrackId` to detach it.
     void syncInstrumentTimelineAttachments(const std::vector<InstrumentTimelineAttachment>& rows) noexcept;
 
+    /// [Message thread] Drop the attachment for one track **before** its header/lane components are
+    /// destroyed (track delete). The attachment map stores raw pointers; detaching after destruction
+    /// would call into freed components (UAF crash in `syncInstrumentTimelineAttachments`).
+    void detachInstrumentTimelineRowForTrack(TrackId tid) noexcept;
+
     /// [Message thread] After shell id changes (`tryAddGrooveAgent…` / project restore), reinstall header-drag host.
     void refreshInstrumentHeaderReorderAttachments() noexcept;
     /// Undo-bundled reorder: publishes `session.moveTrack(movedId, destSessionIndex)` (see `Main`).
@@ -243,6 +252,27 @@ public:
 
     /// [Message thread] After header bottom-edge resize: snap to clean name-only or full name+buttons height.
     void snapTrackHeaderRowHeightAfterResize(TrackId tid, bool headerHasSubtitle) noexcept;
+
+    /// [Message thread] Stability C3 introspection: trackIds of all instrument timeline
+    /// attachments (each should map to a live Instrument session row). Diagnostics only.
+    [[nodiscard]] std::vector<TrackId> exportInstrumentTimelineAttachmentTrackIdsForDiagnostics() const
+    {
+        std::vector<TrackId> out;
+        out.reserve(instrumentTimelineAttachments_.size());
+        for (const auto& [tid, att] : instrumentTimelineAttachments_)
+        {
+            juce::ignoreUnused(att);
+            out.push_back(tid);
+        }
+        return out;
+    }
+
+    /// [Message thread] Stability C3: true when the header-drag source pointer survived past the
+    /// drag (the stale-pointer class guarded by `cancelHeaderDragIfSourceIs`). Diagnostics only.
+    [[nodiscard]] bool hasStaleHeaderDragSourceForDiagnostics() const noexcept
+    {
+        return !headerTrackDragActive_ && headerTrackDragSourceView_ != nullptr;
+    }
 
 private:
     void timerCallback() override;
@@ -283,6 +313,10 @@ private:
     void updateHeaderTrackDrag(TrackId movedId, juce::Point<int> screenPos);
     void endHeaderTrackDrag(TrackId movedId);
     void clearHeaderTrackDragState() noexcept;
+    /// Call before destroying any `TrackHeaderView` that could be the active drag source:
+    /// `headerTrackDragSourceView_` is a raw pointer, so destroying the source mid-drag would
+    /// otherwise leave a stale pointer and stuck drag-overlay state.
+    void cancelHeaderDragIfSourceIs(const TrackHeaderView* header) noexcept;
     [[nodiscard]] int yForVisibleInsertGapK(int k) const noexcept;
     [[nodiscard]] int audioLaneIndexFromTrackId(TrackId tid) const noexcept;
     [[nodiscard]] int rowHeightForTrack(TrackId tid) const noexcept;
@@ -359,6 +393,7 @@ private:
     std::function<void(TrackId)> onDeleteTrackRequested_;
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
+    std::function<bool(PlacedClipId, juce::String)> onUndoableClipRenameRequested_;
     std::function<EditTool()> activeEditToolProvider_;
     std::function<void(PlacedClipId, std::int64_t, bool)> onUndoableClipSplitRequested_;
     std::function<bool()> headerActiveSuppressProvider_;

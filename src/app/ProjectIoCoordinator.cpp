@@ -3,6 +3,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
+#include "diagnostics/StabilityDiagnosticLog.h"
+#include "diagnostics/StabilityInvariants.h"
+#include "diagnostics/StabilityScenarioRunner.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -310,6 +313,53 @@ namespace
         noteAcc << note;
     }
 
+    // -----------------------------------------------------------------------
+    // Stability Slice 5: autosave locations.
+    //
+    // Project saves require audio clip paths to be `Audio/`-relative to the *target* file's
+    // folder, so an autosave of a project with audio clips must live next to the project file.
+    // A pointer file in %APPDATA% records where the most recent autosave was written so the
+    // startup recovery check can find per-project autosaves.
+    // -----------------------------------------------------------------------
+
+    [[nodiscard]] juce::File autosaveAppDataDirectory()
+    {
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+            .getChildFile("MiniDAWLab");
+    }
+
+    [[nodiscard]] juce::File autosavePointerFile()
+    {
+        return autosaveAppDataDirectory().getChildFile("autosave-location.txt");
+    }
+
+    /// Autosave target for projects that have never been saved (no project folder yet).
+    /// Works for MIDI-only projects; audio-clip projects fail the relative-path check (logged).
+    [[nodiscard]] juce::File defaultAppDataAutosaveFile()
+    {
+        return autosaveAppDataDirectory().getChildFile("autosave.dalproj");
+    }
+
+    /// The autosave file recorded by the pointer file, or the %APPDATA% default; a non-existing
+    /// return means "no autosave present".
+    [[nodiscard]] juce::File findExistingAutosaveFile()
+    {
+        const juce::File pointer = autosavePointerFile();
+        if (pointer.existsAsFile())
+        {
+            const juce::String recorded = pointer.loadFileAsString().trim();
+            if (recorded.isNotEmpty() && juce::File::isAbsolutePath(recorded))
+            {
+                const juce::File f(recorded);
+                if (f.existsAsFile())
+                {
+                    return f;
+                }
+            }
+        }
+        return defaultAppDataAutosaveFile();
+    }
+
     void restoreOrphanInstrumentLanesWithoutRuntime(
         Session& session,
         const ProjectFileV1& parsedLoad,
@@ -386,10 +436,34 @@ ProjectIoCoordinator::ProjectIoCoordinator(Transport& transport,
     , playbackEngine_(playbackEngine)
     , callbacks_(std::move(callbacks))
 {
+    // Startup baseline: the empty/default session counts as clean. Re-capture once the message
+    // queue settles, in case remaining startup wiring publishes fresh session snapshots.
+    markProjectCleanNow();
+    juce::MessageManager::callAsync([this, guard = asyncLifetime_.guard()] {
+        if (!guard.isAlive())
+        {
+            return;
+        }
+        if (!instrumentOrPluginEditsSinceClean_)
+        {
+            markProjectCleanNow();
+        }
+    });
 }
 
 void ProjectIoCoordinator::saveProject()
 {
+    saveProjectThen({});
+}
+
+void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
+{
+    const auto reportDone = [onDone](const bool saved) {
+        if (onDone != nullptr)
+        {
+            onDone(saved);
+        }
+    };
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
     if (device == nullptr)
     {
@@ -397,6 +471,7 @@ void ProjectIoCoordinator::saveProject()
             juce::AlertWindow::WarningIcon,
             "Save project",
             "No active audio device; cannot include device sample rate in the project file.");
+        reportDone(false);
         return;
     }
     const double sampleRate = device->getCurrentSampleRate();
@@ -418,6 +493,8 @@ void ProjectIoCoordinator::saveProject()
         {
             mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
         }
+        writeLastOperationBreadcrumb("project save start: "
+                                     + session_.getCurrentProjectFile().getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
             transport_,
             session_.getCurrentProjectFile(),
@@ -429,12 +506,18 @@ void ProjectIoCoordinator::saveProject()
             mainWinBounds);
         if (!r.wasOk())
         {
+            writeLastOperationBreadcrumb("project save failed");
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
+            reportDone(false);
         }
         else
         {
+            writeLastOperationBreadcrumb("project save end ok");
+            markProjectCleanNow();
+            deleteAutosaveArtifactsAfterSuccessfulSave();
             warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
+            reportDone(true);
         }
         return;
     }
@@ -446,11 +529,18 @@ void ProjectIoCoordinator::saveProject()
         "Save project as…",
         juce::File{},
         "*.dalproj");
-    chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate](const juce::FileChooser& fc) {
+    chooser->launchAsync(fileChooserFlags, [this, chooser, sampleRate, reportDone,
+                                            guard = asyncLifetime_.guard()](const juce::FileChooser& fc) {
         juce::ignoreUnused(chooser);
+        if (!guard.isAlive())
+        {
+            juce::Logger::writeToLog("[stale-async] skipped: save-project-as file chooser");
+            return;
+        }
         juce::File userPick = fc.getResult();
         if (userPick.getFullPathName().isEmpty())
         {
+            reportDone(false);
             return;
         }
         if (!userPick.hasFileExtension("dalproj"))
@@ -465,6 +555,7 @@ void ProjectIoCoordinator::saveProject()
                 juce::AlertWindow::WarningIcon,
                 "Save project",
                 "Invalid project name.");
+            reportDone(false);
             return;
         }
         const juce::File parentDir = userPick.getParentDirectory();
@@ -476,6 +567,7 @@ void ProjectIoCoordinator::saveProject()
             {
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::AlertWindow::WarningIcon, "Save project", conflict);
+                reportDone(false);
                 return;
             }
         }
@@ -485,6 +577,7 @@ void ProjectIoCoordinator::saveProject()
                 juce::AlertWindow::WarningIcon,
                 "Save project",
                 "Could not create the project folder:\n" + projectFolder.getFullPathName());
+            reportDone(false);
             return;
         }
         {
@@ -493,6 +586,7 @@ void ProjectIoCoordinator::saveProject()
             {
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::AlertWindow::WarningIcon, "Save project", conflict2);
+                reportDone(false);
                 return;
             }
         }
@@ -510,6 +604,7 @@ void ProjectIoCoordinator::saveProject()
         {
             mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
         }
+        writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
             transport_,
             projectFile,
@@ -521,17 +616,37 @@ void ProjectIoCoordinator::saveProject()
             mainWinBounds);
         if (!r.wasOk())
         {
+            writeLastOperationBreadcrumb("project save failed");
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
+            reportDone(false);
         }
         else
         {
+            writeLastOperationBreadcrumb("project save end ok");
+            markProjectCleanNow();
+            deleteAutosaveArtifactsAfterSuccessfulSave();
             warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
+            reportDone(true);
         }
     });
 }
 
 void ProjectIoCoordinator::loadProject()
+{
+    confirmUnsavedChangesThen(UnsavedGuardKind::LoadProject,
+                              [this, guard = asyncLifetime_.guard()] {
+                                  if (!guard.isAlive())
+                                  {
+                                      juce::Logger::writeToLog(
+                                          "[stale-async] skipped: load-project after unsaved prompt");
+                                      return;
+                                  }
+                                  launchLoadProjectChooser();
+                              });
+}
+
+void ProjectIoCoordinator::launchLoadProjectChooser()
 {
     const auto fileChooserFlags = juce::FileBrowserComponent::openMode
                                   | juce::FileBrowserComponent::canSelectFiles;
@@ -539,8 +654,14 @@ void ProjectIoCoordinator::loadProject()
         "Load project",
         juce::File{},
         "*.dalproj;*.mdlproj");
-    chooser->launchAsync(fileChooserFlags, [this, chooser](const juce::FileChooser& fc) {
+    chooser->launchAsync(fileChooserFlags, [this, chooser,
+                                            guard = asyncLifetime_.guard()](const juce::FileChooser& fc) {
         juce::ignoreUnused(chooser);
+        if (!guard.isAlive())
+        {
+            juce::Logger::writeToLog("[stale-async] skipped: load-project file chooser");
+            return;
+        }
         const juce::File f = fc.getResult();
         if (f.getFullPathName().isEmpty())
         {
@@ -572,10 +693,12 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
     const double sampleRate = device->getCurrentSampleRate();
     const juce::File f = projectFile;
     {
+        writeLastOperationBreadcrumb("project load start: " + f.getFullPathName());
         ProjectFileV1 parsedLoad;
         const juce::Result parsedRes = readProjectFile(f, parsedLoad);
         if (!parsedRes.wasOk())
         {
+            writeLastOperationBreadcrumb("project load failed (parse)");
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Load project", parsedRes.getErrorMessage());
             return;
@@ -607,6 +730,7 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
             loadGeneration);
         if (!r.wasOk())
         {
+            writeLastOperationBreadcrumb("project load failed (apply model)");
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
             return;
@@ -787,6 +911,10 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         callbacks_.refreshAllUiAfterLoadedProject();
         appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject end");
         appendProjectLoadDiagnosticLine("load: complete");
+        markProjectCleanNow();
+        writeLastOperationBreadcrumb("project load end ok: " + f.getFullPathName());
+        // Stability C3: verify runtime invariants right after the load completed.
+        (void) stability_invariants::runRegisteredStabilityInvariantsCheck("project-load-end");
         if (parsedLoad.hasMainWindowBounds && callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
         {
             callbacks_.applyMainWindowBoundsFromLoadedProject(parsedLoad);
@@ -815,4 +943,323 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
                 juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
         }
     }
+}
+
+// =============================================================================
+// Stability Slice 5: unsaved-work protection (dirty flag, prompts, autosave, recovery)
+// =============================================================================
+
+bool ProjectIoCoordinator::isProjectDirty() const noexcept
+{
+    if (instrumentOrPluginEditsSinceClean_)
+    {
+        return true;
+    }
+    const std::shared_ptr<const SessionSnapshot> live = session_.loadSessionSnapshotForAudioThread();
+    return live.get() != cleanSessionSnapshot_.get();
+}
+
+void ProjectIoCoordinator::markProjectCleanNow() noexcept
+{
+    cleanSessionSnapshot_ = session_.loadSessionSnapshotForAudioThread();
+    instrumentOrPluginEditsSinceClean_ = false;
+}
+
+void ProjectIoCoordinator::markProjectDirtyFromEdit() noexcept
+{
+    instrumentOrPluginEditsSinceClean_ = true;
+}
+
+void ProjectIoCoordinator::confirmUnsavedChangesThen(const UnsavedGuardKind kind,
+                                                     std::function<void()> proceed)
+{
+    if (!isProjectDirty())
+    {
+        if (proceed != nullptr)
+        {
+            proceed();
+        }
+        return;
+    }
+
+    juce::String title, message, saveButton, withoutButton, kindName;
+    switch (kind)
+    {
+        case UnsavedGuardKind::LoadProject:
+            title = "Load project";
+            message = "Project has unsaved changes. Save before loading another project?";
+            saveButton = "Save and Load";
+            withoutButton = "Load Without Saving";
+            kindName = "load";
+            break;
+        case UnsavedGuardKind::QuitApp:
+            title = "Quit";
+            message = "Project has unsaved changes. Save before quitting?";
+            saveButton = "Save and Quit";
+            withoutButton = "Quit Without Saving";
+            kindName = "quit";
+            break;
+        case UnsavedGuardKind::Export:
+            title = "Audio mixdown";
+            message = "Project has unsaved changes. Save before export?";
+            saveButton = "Save and Export";
+            withoutButton = "Export Without Saving";
+            kindName = "export";
+            break;
+    }
+
+    // Stability C2: never block a scenario run on a modal prompt. Deterministic auto-answer:
+    // always "proceed without saving" (scenarios intentionally leave the session dirty).
+    if (isStabilityTestModeActive())
+    {
+        appendStabilityRunLine("unsaved-changes prompt auto-answered: " + kindName
+                               + " without saving");
+        writeLastOperationBreadcrumb("unsaved-changes prompt auto-answered (stability test): "
+                                     + kindName);
+        if (proceed != nullptr)
+        {
+            proceed();
+        }
+        return;
+    }
+
+    writeLastOperationBreadcrumb("unsaved-changes prompt shown: " + kindName);
+    juce::AlertWindow::showYesNoCancelBox(
+        juce::AlertWindow::QuestionIcon,
+        title,
+        message,
+        saveButton,
+        withoutButton,
+        "Cancel",
+        nullptr,
+        juce::ModalCallbackFunction::create(
+            [this, proceed = std::move(proceed), kindName,
+             guard = asyncLifetime_.guard()](const int result) {
+                if (!guard.isAlive())
+                {
+                    juce::Logger::writeToLog("[stale-async] skipped: unsaved-changes prompt result");
+                    return;
+                }
+                if (result == 1) // "Save and X"
+                {
+                    writeLastOperationBreadcrumb("unsaved-changes prompt: save-and-" + kindName);
+                    saveProjectThen([this, proceed, kindName, guard](const bool saved) {
+                        if (!guard.isAlive())
+                        {
+                            return;
+                        }
+                        if (!saved)
+                        {
+                            // Save failed or Save As was cancelled: the pending operation is aborted.
+                            writeLastOperationBreadcrumb(
+                                "unsaved-changes prompt: " + kindName
+                                + " aborted (save failed or cancelled)");
+                            return;
+                        }
+                        if (proceed != nullptr)
+                        {
+                            proceed();
+                        }
+                    });
+                }
+                else if (result == 2) // "X Without Saving"
+                {
+                    writeLastOperationBreadcrumb("unsaved-changes prompt: " + kindName
+                                                 + "-without-saving");
+                    writeAutosaveIfDirty(kindName + "-without-saving");
+                    if (proceed != nullptr)
+                    {
+                        proceed();
+                    }
+                }
+                else // Cancel
+                {
+                    writeLastOperationBreadcrumb("unsaved-changes prompt: cancelled (" + kindName
+                                                 + ")");
+                }
+            }));
+}
+
+bool ProjectIoCoordinator::interceptQuitForUnsavedChanges()
+{
+    if (!isProjectDirty())
+    {
+        return false;
+    }
+    confirmUnsavedChangesThen(UnsavedGuardKind::QuitApp, [] {
+        if (auto* app = juce::JUCEApplication::getInstance())
+        {
+            app->quit();
+        }
+    });
+    return true;
+}
+
+juce::File ProjectIoCoordinator::resolveAutosaveTargetFile() const
+{
+    // Audio clip paths must stay `Audio/`-relative to the written file's folder, so a project
+    // with a known on-disk location autosaves next to its own project file.
+    if (session_.hasKnownProjectFile())
+    {
+        return session_.getCurrentProjectFile().getSiblingFile("autosave.dalproj");
+    }
+    return defaultAppDataAutosaveFile();
+}
+
+void ProjectIoCoordinator::writeAutosaveIfDirty(const juce::String& reason)
+{
+    if (!isProjectDirty())
+    {
+        return;
+    }
+    appendProjectSaveDiagnosticLine("autosave start (" + reason + ")");
+    juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
+    if (device == nullptr)
+    {
+        appendProjectSaveDiagnosticLine("autosave failed: no active audio device");
+        return;
+    }
+    const double sampleRate = device->getCurrentSampleRate();
+    const juce::File autosaveFile = resolveAutosaveTargetFile();
+    if (!autosaveFile.getParentDirectory().isDirectory()
+        && !autosaveFile.getParentDirectory().createDirectory())
+    {
+        appendProjectSaveDiagnosticLine("autosave failed: cannot create folder "
+                                        + autosaveFile.getParentDirectory().getFullPathName());
+        return;
+    }
+
+    callbacks_.snapshotOpenClipViewportFromMidiEditor();
+    const ExperimentalInstrumentCtlLookupFn ctlLookup([this](const TrackId laneId) noexcept {
+        return callbacks_.instrumentCtlByTrackId(laneId);
+    });
+    const SnapProjectRootFields snapRoot = callbacks_.getSnapProjectRootFieldsForSave();
+    std::optional<ProjectFileMainWindowBoundsV1> mainWinBounds;
+    if (callbacks_.getMainWindowBoundsForProjectSave != nullptr)
+    {
+        mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
+    }
+
+    // `saveProjectToFile` records the written file as the current project on success; the autosave
+    // must never hijack the user's normal save target, so restore it afterwards.
+    const juce::File normalProjectFile = session_.getCurrentProjectFile();
+    writeLastOperationBreadcrumb("autosave start (" + reason + "): "
+                                 + autosaveFile.getFullPathName());
+    const juce::Result r = session_.saveProjectToFile(
+        transport_,
+        autosaveFile,
+        sampleRate,
+        &pluginHost_,
+        ctlLookup,
+        snapRoot.enabled,
+        snapRoot.resolutionKey,
+        mainWinBounds);
+    session_.setCurrentProjectFile(normalProjectFile);
+
+    if (!r.wasOk())
+    {
+        appendProjectSaveDiagnosticLine("autosave failed: " + r.getErrorMessage());
+        writeLastOperationBreadcrumb("autosave failed (" + reason + ")");
+        return;
+    }
+    (void)autosavePointerFile().replaceWithText(autosaveFile.getFullPathName() + "\n");
+    appendProjectSaveDiagnosticLine("autosave end ok: " + autosaveFile.getFullPathName());
+    writeLastOperationBreadcrumb("autosave end ok (" + reason + ")");
+}
+
+void ProjectIoCoordinator::deleteAutosaveArtifactsAfterSuccessfulSave()
+{
+    const juce::File pointer = autosavePointerFile();
+    juce::File recorded;
+    if (pointer.existsAsFile())
+    {
+        const juce::String s = pointer.loadFileAsString().trim();
+        if (s.isNotEmpty() && juce::File::isAbsolutePath(s))
+        {
+            recorded = juce::File(s);
+        }
+    }
+    bool deletedAny = false;
+    for (const juce::File& f : { recorded, defaultAppDataAutosaveFile(), resolveAutosaveTargetFile() })
+    {
+        if (f.getFullPathName().isNotEmpty() && f.existsAsFile() && f.deleteFile())
+        {
+            deletedAny = true;
+        }
+    }
+    (void)pointer.deleteFile();
+    if (deletedAny)
+    {
+        appendProjectSaveDiagnosticLine("autosave cleared after successful save");
+    }
+}
+
+void ProjectIoCoordinator::offerAutosaveRecoveryOnStartup(const bool commandLineProjectOpenQueued)
+{
+    const juce::File autosaveFile = findExistingAutosaveFile();
+    if (!autosaveFile.existsAsFile())
+    {
+        return;
+    }
+    if (commandLineProjectOpenQueued)
+    {
+        // The explicitly requested project wins; the autosave is kept for the next plain startup.
+        writeLastOperationBreadcrumb("autosave present but command-line project open takes priority: "
+                                     + autosaveFile.getFullPathName());
+        appendProjectSaveDiagnosticLine("recovery: skipped (command-line project open queued)");
+        return;
+    }
+    writeLastOperationBreadcrumb("autosave recovery prompt shown: " + autosaveFile.getFullPathName());
+    juce::AlertWindow::showYesNoCancelBox(
+        juce::AlertWindow::QuestionIcon,
+        "Recover autosaved project",
+        "An autosaved project was found:\n" + autosaveFile.getFullPathName() + "\n\nRecover it?",
+        "Recover",
+        "Ignore",
+        "Delete Autosave",
+        nullptr,
+        juce::ModalCallbackFunction::create(
+            [this, autosaveFile, guard = asyncLifetime_.guard()](const int result) {
+                if (!guard.isAlive())
+                {
+                    juce::Logger::writeToLog("[stale-async] skipped: autosave recovery prompt result");
+                    return;
+                }
+                if (result == 1) // Recover
+                {
+                    writeLastOperationBreadcrumb("autosave recovery: recover chosen");
+                    loadProjectFromFile(autosaveFile);
+                    if (session_.getCurrentProjectFile() == autosaveFile)
+                    {
+                        // Loaded OK. Detach the autosave path so plain Save goes through Save As
+                        // (the original project is never overwritten silently), and flag the
+                        // recovered state as unsaved so quit/load prompts protect it.
+                        session_.setCurrentProjectFile(juce::File());
+                        markProjectDirtyFromEdit();
+                        appendProjectSaveDiagnosticLine(
+                            "recovery: autosave loaded; save path cleared (use Save As)");
+                        // Stability C3: verify invariants after autosave recovery completed.
+                        (void) stability_invariants::runRegisteredStabilityInvariantsCheck(
+                            "autosave-recovery-end");
+                    }
+                    else
+                    {
+                        appendProjectSaveDiagnosticLine("recovery: autosave load failed");
+                    }
+                }
+                else if (result == 2) // Ignore
+                {
+                    writeLastOperationBreadcrumb("autosave recovery: ignored (file kept)");
+                    appendProjectSaveDiagnosticLine(
+                        "recovery: ignored; autosave kept for next startup");
+                }
+                else // Delete Autosave
+                {
+                    const bool deleted = autosaveFile.deleteFile();
+                    (void)autosavePointerFile().deleteFile();
+                    writeLastOperationBreadcrumb("autosave recovery: autosave deleted");
+                    appendProjectSaveDiagnosticLine(juce::String("recovery: delete autosave ")
+                                                    + (deleted ? "ok" : "FAILED"));
+                }
+            }));
 }

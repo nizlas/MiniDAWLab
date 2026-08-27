@@ -30,7 +30,9 @@ public:
     void initialise(const juce::String& commandLine) override;
     void shutdown() override;
 
-    void systemRequestedQuit() override { quit(); }
+    /// Stability Slice 5: quits immediately when the project is clean; otherwise shows the
+    /// save-before-quit prompt (quit resumes from the prompt). Implemented in Main.cpp.
+    void systemRequestedQuit() override;
 
     ~MiniDAWLabApplication() override;
 

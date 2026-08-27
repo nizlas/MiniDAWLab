@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "app/InstrumentRuntimeCoordinator.h"
+#include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/Session.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -196,12 +197,14 @@ void AddInstrumentTrackCoordinator::beginAsyncGrooveAgentOopScanForAddTrack(
     const juce::File scanTarget = mini_daw::getGrooveAgentSeVst3BundlePathForOopScanFallback();
 
     AddInstrumentTrackCoordinator* const self = this;
+    const mini_daw::AsyncCallbackGuard aliveGuard = asyncLifetime_.guard();
 
     if (!scanTarget.exists())
     {
-        juce::MessageManager::callAsync([self, v1Cand]() mutable {
-            if (self == nullptr)
+        juce::MessageManager::callAsync([self, aliveGuard, v1Cand]() mutable {
+            if (!aliveGuard.isAlive())
             {
+                juce::Logger::writeToLog("[stale-async] skipped: GrooveAgent add-track cached fallback");
                 return;
             }
             auto pr = self->refs_.instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
@@ -218,12 +221,13 @@ void AddInstrumentTrackCoordinator::beginAsyncGrooveAgentOopScanForAddTrack(
         return;
     }
 
-    std::thread([self, scanTarget, v1Cand]() mutable {
+    std::thread([self, aliveGuard, scanTarget, v1Cand]() mutable {
         const mini_daw::Vst3OopScanResult scanResult
             = mini_daw::runVst3OopScanBlocking(scanTarget, mini_daw::kVst3OopScanReplyTimeoutMs);
-        juce::MessageManager::callAsync([self, scanResult, scanTarget, v1Cand]() mutable {
-            if (self == nullptr)
+        juce::MessageManager::callAsync([self, aliveGuard, scanResult, scanTarget, v1Cand]() mutable {
+            if (!aliveGuard.isAlive())
             {
+                juce::Logger::writeToLog("[stale-async] skipped: GrooveAgent add-track OOP scan completion");
                 return;
             }
             auto pr = self->refs_.instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
@@ -422,12 +426,14 @@ void AddInstrumentTrackCoordinator::beginAsyncHalionSonicOopScanForAddTrack(
     const juce::File scanTarget = mini_daw::getHalionSonicVst3BundlePathForOopScanFallback();
 
     AddInstrumentTrackCoordinator* const self = this;
+    const mini_daw::AsyncCallbackGuard aliveGuard = asyncLifetime_.guard();
 
     if (!scanTarget.exists())
     {
-        juce::MessageManager::callAsync([self, v1Cand]() mutable {
-            if (self == nullptr)
+        juce::MessageManager::callAsync([self, aliveGuard, v1Cand]() mutable {
+            if (!aliveGuard.isAlive())
             {
+                juce::Logger::writeToLog("[stale-async] skipped: HALion add-track cached fallback");
                 return;
             }
             auto pr = self->refs_.instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
@@ -444,12 +450,13 @@ void AddInstrumentTrackCoordinator::beginAsyncHalionSonicOopScanForAddTrack(
         return;
     }
 
-    std::thread([self, scanTarget, v1Cand]() mutable {
+    std::thread([self, aliveGuard, scanTarget, v1Cand]() mutable {
         const mini_daw::Vst3OopScanResult scanResult
             = mini_daw::runVst3OopScanBlocking(scanTarget, mini_daw::kVst3OopScanReplyTimeoutMs);
-        juce::MessageManager::callAsync([self, scanResult, scanTarget, v1Cand]() mutable {
-            if (self == nullptr)
+        juce::MessageManager::callAsync([self, aliveGuard, scanResult, scanTarget, v1Cand]() mutable {
+            if (!aliveGuard.isAlive())
             {
+                juce::Logger::writeToLog("[stale-async] skipped: HALion add-track OOP scan completion");
                 return;
             }
             auto pr = self->refs_.instrumentRuntimeCoordinator.getExperimentRuntimePairForGrooveAdds();
@@ -609,12 +616,20 @@ void AddInstrumentTrackCoordinator::rescanInstrumentPluginsFromMenu()
     }
 
     mini_daw::writeInstrumentCatalogRescanLogLine("rescan requested from Add Instrument Track menu");
+    writeLastOperationBreadcrumb("plugin rescan start");
 
     AddInstrumentTrackCoordinator* const self = this;
-    std::thread([self] {
+    const mini_daw::AsyncCallbackGuard aliveGuard = asyncLifetime_.guard();
+    std::thread([self, aliveGuard] {
         const mini_daw::InstrumentCatalogRescanSummary summary = mini_daw::rescanInstrumentCatalogBlocking();
-        juce::MessageManager::callAsync([self, summary] {
+        juce::MessageManager::callAsync([self, aliveGuard, summary] {
+            if (!aliveGuard.isAlive())
+            {
+                juce::Logger::writeToLog("[stale-async] skipped: instrument plugin rescan completion");
+                return;
+            }
             self->instrumentCatalogRescanBusy_.store(false);
+            writeLastOperationBreadcrumb("plugin rescan end");
 
             juce::String msg = "Instrument plugin rescan complete.\n\n";
             msg << "Accepted instruments: " << juce::String(summary.acceptedInstrumentCount) << "\n";
@@ -722,9 +737,15 @@ void AddInstrumentTrackCoordinator::importPluginCacheFromMenu()
         "*.xml");
 
     AddInstrumentTrackCoordinator* const self = this;
+    const mini_daw::AsyncCallbackGuard aliveGuard = asyncLifetime_.guard();
     pluginCacheImportChooser_->launchAsync(
         juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-        [self](const juce::FileChooser& chooser) {
+        [self, aliveGuard](const juce::FileChooser& chooser) {
+            if (!aliveGuard.isAlive())
+            {
+                juce::Logger::writeToLog("[stale-async] skipped: plugin cache import file chooser");
+                return;
+            }
             const juce::File chosen = chooser.getResult();
             if (chosen == juce::File{})
             {
@@ -733,11 +754,18 @@ void AddInstrumentTrackCoordinator::importPluginCacheFromMenu()
             }
             // Import scans local VST3 folders on disk; keep it off the message thread.
             // Same lifetime pattern as rescanInstrumentPluginsFromMenu (coordinator outlives the UI).
-            std::thread([self, chosen] {
+            writeLastOperationBreadcrumb("plugin cache import start: " + chosen.getFullPathName());
+            std::thread([self, aliveGuard, chosen] {
                 const mini_daw::Vst3CacheImportSummary summary
                     = mini_daw::importExperimentalVst3DescriptionsCacheFileWithPathRepair(chosen);
-                juce::MessageManager::callAsync([self, summary] {
+                juce::MessageManager::callAsync([self, aliveGuard, summary] {
+                    if (!aliveGuard.isAlive())
+                    {
+                        juce::Logger::writeToLog("[stale-async] skipped: plugin cache import completion");
+                        return;
+                    }
                     self->pluginCacheImportBusy_.store(false);
+                    writeLastOperationBreadcrumb("plugin cache import end");
                     showPluginCacheImportSummaryDialog(summary);
                 });
             }).detach();

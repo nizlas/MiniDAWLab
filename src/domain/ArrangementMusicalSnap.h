@@ -172,3 +172,52 @@ namespace arrangement_snap_detail
     }
     return snapSampleToGrid(sampleOnTimeline, mt, settings.resolution, sampleRate);
 }
+
+/// Floor variant: grid line at or before `sampleOnTimeline` (>= 0). Used for click-to-create so a
+/// click anywhere inside a snap cell targets that cell's start (never rounds up past the midpoint
+/// like `snapSampleToGrid`). The epsilon keeps clicks exactly on a grid line from jittering down
+/// to the previous cell due to floating-point noise.
+[[nodiscard]] inline std::int64_t snapSampleToGridFloor(std::int64_t sampleOnTimeline,
+                                                        ProjectMusicalTime mt,
+                                                        SnapResolution resolution,
+                                                        double sampleRate) noexcept
+{
+    mt = sanitizeProjectMusicalTime(mt);
+    sampleOnTimeline = (sampleOnTimeline < 0) ? 0 : sampleOnTimeline;
+
+    const double stepBeats = arrangementSnapGridStepBeats(resolution, mt);
+    if (!std::isfinite(stepBeats) || stepBeats <= 0.0)
+    {
+        return sampleOnTimeline;
+    }
+
+    const double spb = samplesPerBeat(mt, sampleRate);
+    if (!std::isfinite(spb) || spb <= 0.0)
+    {
+        return sampleOnTimeline;
+    }
+
+    const double beats = static_cast<double>(sampleOnTimeline) / spb;
+    if (!std::isfinite(beats))
+    {
+        return sampleOnTimeline;
+    }
+
+    constexpr double kGridLineEpsilonSteps = 1.0e-9;
+    const double snappedBeats
+        = std::floor(beats / stepBeats + kGridLineEpsilonSteps) * stepBeats;
+    const std::int64_t out = beatToSample(snappedBeats, mt, sampleRate);
+    return (out < 0) ? std::int64_t{ 0 } : out;
+}
+
+[[nodiscard]] inline std::int64_t snapSampleToGridFloorIfEnabled(std::int64_t sampleOnTimeline,
+                                                                 const SnapSettings& settings,
+                                                                 ProjectMusicalTime mt,
+                                                                 double sampleRate) noexcept
+{
+    if (!settings.enabled)
+    {
+        return (sampleOnTimeline < 0) ? std::int64_t{ 0 } : sampleOnTimeline;
+    }
+    return snapSampleToGridFloor(sampleOnTimeline, mt, settings.resolution, sampleRate);
+}

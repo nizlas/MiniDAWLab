@@ -83,6 +83,10 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/SessionHistory.cpp
     src/diagnostics/UndoDiagnosticFileLog.cpp
     src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/CrashDumpHandler.cpp
+    src/diagnostics/StabilityScenarioRunner.cpp
+    src/diagnostics/StabilityInvariants.cpp
     src/diagnostics/DrumNameDiagnosticFileLog.cpp
     src/domain/SessionSnapshot.cpp
     src/domain/SessionRouting.cpp
@@ -147,6 +151,17 @@ target_link_libraries(MiniDAWLab
 # Safe to silence; module sources compile as part of this target.
 if (MSVC)
     target_compile_options(MiniDAWLab PRIVATE /wd4458)
+
+    # Stability C1: produce a PDB in Release too so crash minidumps can be symbolized
+    # (scripts/package-windows.ps1 archives it under dist\symbols). /OPT:REF and /OPT:ICF
+    # keep the Release linker optimizations that /DEBUG would otherwise disable.
+    target_compile_options(MiniDAWLab PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(MiniDAWLab PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+endif()
+
+if (WIN32)
+    # Stability C1: MiniDumpWriteDump in src/diagnostics/CrashDumpHandler.cpp.
+    target_link_libraries(MiniDAWLab PRIVATE dbghelp)
 endif()
 
 # -----------------------------------------------------------------------------

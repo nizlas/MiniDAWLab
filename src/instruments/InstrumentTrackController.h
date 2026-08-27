@@ -351,6 +351,10 @@ public:
     [[nodiscard]] std::int64_t clampInstrumentMidiClipMoveDeltaForCurrentSelection(
         std::int64_t deltaSamples) const noexcept;
 
+    /// Set the user-facing clip name (trimmed). Returns false when unknown id, empty after trim,
+    /// or unchanged. Display/persistence metadata only — playback and note data untouched.
+    [[nodiscard]] bool renameInstrumentMidiClip(InstrumentMidiClipId id, juce::String newName) noexcept;
+
     [[nodiscard]] std::shared_ptr<const InstrumentTrackRenderSnapshot> loadRenderSnapshotForAudioThread() const noexcept
     {
         return std::atomic_load_explicit(&renderSnapshot_, std::memory_order_acquire);

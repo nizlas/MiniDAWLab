@@ -144,13 +144,63 @@ public:
     // Positive reads later material; negative reads earlier. Wrap decisions still use unshifted playhead.
     void setPlaybackOffsetSamples(std::int64_t samples) noexcept;
 
-    /// [Any thread] Offline mixdown gate: while true, `audioDeviceIOCallbackWithContext` outputs silence only.
-    void setOfflineRenderInProgress(bool on) noexcept;
+    /// [Message thread] Offline mixdown gate (depth-counted so WAV-inside-MP3 nests safely). While the
+    /// depth is > 0, `audioDeviceIOCallbackWithContext` outputs silence only and never touches plugin
+    /// hosts / scratch buffers. Returns true when this call made the gate active (depth 0 -> 1); the
+    /// caller must then drain the in-flight callback via `isAudioCallbackInProcessingSection()`.
+    bool beginOfflineRenderGate() noexcept;
+    /// [Message thread] Decrements the gate depth. Returns true when realtime processing resumed
+    /// (depth 1 -> 0).
+    bool endOfflineRenderGate() noexcept;
     [[nodiscard]] bool isOfflineRenderInProgress() const noexcept;
+
+    /// [Any thread] True while the device callback is between its entry and exit for the current block
+    /// (set before the offline gate is checked, so a successful gate + drain guarantees no callback is
+    /// touching engine/plugin/scratch state). Seq-cst pairing with `beginOfflineRenderGate`.
+    [[nodiscard]] bool isAudioCallbackInProcessingSection() const noexcept;
+
+    /// [Message thread] Bounded sleep-wait until no device callback is in flight (drains the callback
+    /// that may still hold a previously published snapshot/map). Publish the new realtime view *before*
+    /// calling this, then destroy the retired objects afterwards. Returns true when drained; false on
+    /// timeout. `waitedMsOut` (optional) receives the elapsed wait time.
+    bool waitForAudioCallbackExit(double maxWaitMs, double* waitedMsOut = nullptr) noexcept;
+
+    /// Stability C2B: coarse "where is the audio callback right now" marker, published with relaxed
+    /// stores from the audio thread. Read from the message thread purely for gate-timeout
+    /// diagnostics (never for synchronization).
+    enum class AudioCallbackPhase : int
+    {
+        Idle = 0,
+        Begin,
+        RecorderPush,
+        TransportBeginBlock,
+        OfflineGateSilence,
+        LoadSnapshot,
+        InstrumentBeginBlock,
+        MixPrep,
+        CountIn,
+        ClipRender,
+        TransportMidiSchedule,
+        InstrumentMix,
+        FinalizeRouting,
+        FinalizeStagedBusLoop,
+        FinalizeLegacyBusLoop,
+        FinalizeMasterFallback,
+    };
+
+    /// [Any thread] One diagnostic line describing the callback's current phase, last block size,
+    /// playhead, and transport intent. Logged by gate sites when `waitForAudioCallbackExit` times out.
+    [[nodiscard]] juce::String describeAudioCallbackStateForDiagnostics() const noexcept;
 
     /// [Any thread] Same acquire-load discipline as instrument snapshot reads inside the device callback.
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
+
+    /// [Message thread] Stability C3: current published routing plan for invariant checks only.
+    [[nodiscard]] std::shared_ptr<const RoutingPlan> loadRoutingPlanForDiagnostics() const noexcept
+    {
+        return routingPlan_.load(std::memory_order_acquire);
+    }
 
     /// [Message thread] When true, the audio callback skips all experimental instrument host access
     /// (snapshot entries and coordinator map iteration via `experimentalBeginBlockAllHosts_`).
@@ -199,9 +249,16 @@ private:
     std::function<void()> experimentalReleaseAllHosts_;
     std::function<void(int)> experimentalBeginBlockAllHosts_;
     std::atomic<std::int64_t> playbackOffsetSamples_{ 0 };
-    std::atomic<bool> offlineRenderInProgress_{ false };
+    std::atomic<int> offlineRenderGateDepth_{ 0 };
     std::atomic<bool> instrumentProcessingSuspended_{ false };
     std::atomic<bool> audioInsideInstrumentSection_{ false };
+    std::atomic<bool> audioCallbackInProcessingSection_{ false };
+    /// Stability C2B diagnostics only (see AudioCallbackPhase). Relaxed stores on the audio thread.
+    std::atomic<int> audioCallbackPhase_{ 0 };
+    std::atomic<int> audioCallbackLastBlockSamples_{ 0 };
+    /// Incremented at every callback entry; a frozen value across timeout logs = stuck callback,
+    /// an advancing value = callbacks still cycling (flag observed true by unlucky sampling).
+    std::atomic<std::uint64_t> audioCallbackEnterCount_{ 0 };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
 

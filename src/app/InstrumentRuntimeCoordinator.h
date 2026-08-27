@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -77,6 +78,11 @@ public:
     void updateExperimentalPlaybackBridgeAfterRegistryChange();
 
     [[nodiscard]] bool isKeyedRuntimeRegistryEmpty() const noexcept;
+
+    /// [Message thread] Stability C3 introspection: `{trackId, host*, controller*}` for every keyed
+    /// runtime (staging excluded). Diagnostics only.
+    [[nodiscard]] std::vector<std::tuple<TrackId, const void*, const void*>>
+        exportKeyedRuntimePointersForDiagnostics() const;
     [[nodiscard]] ExperimentalInstrumentHost* stagingInstrumentHostUnchecked() const noexcept;
     [[nodiscard]] InstrumentTrackController* stagingInstrumentControllerUnchecked() const noexcept;
 

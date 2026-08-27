@@ -1230,6 +1230,46 @@ void Session::setTrackName(const TrackId trackId, juce::String newName) noexcept
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::setPlacedClipName(const PlacedClipId clipId, juce::String newDisplayName) noexcept
+{
+    if (clipId == kInvalidPlacedClipId)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return;
+    }
+    const juce::String trimmed = newDisplayName.trim();
+    if (trimmed.isEmpty())
+    {
+        return;
+    }
+    bool foundWithDifferentName = false;
+    for (int ti = 0; ti < current->getNumTracks() && !foundWithDifferentName; ++ti)
+    {
+        const Track& tr = current->getTrack(ti);
+        for (int ci = 0; ci < tr.getNumPlacedClips(); ++ci)
+        {
+            const PlacedClip& p = tr.getPlacedClip(ci);
+            if (p.getId() == clipId)
+            {
+                foundWithDifferentName = (p.getDisplayName() != trimmed);
+                break;
+            }
+        }
+    }
+    if (!foundWithDifferentName)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withClipRenamed(*current, clipId, trimmed);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::clearClip() noexcept
 {
     // “No file”: one **empty** default track (id 1), same as a fresh `Session` — not the shared
@@ -1533,6 +1573,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                     c.materialWindowEndExclusiveSamples = we;
                 }
                 c.visibleLengthSamples = (matN > 0 && eff < fullTail) ? eff : 0;
+                c.name = p.getDisplayName();
                 tr.clips.push_back(std::move(c));
             }
         }
@@ -1804,6 +1845,10 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                 {
                     placed.emplace_back(
                         cDto.id, material, cDto.startSample, l, static_cast<std::int64_t>(-1));
+                }
+                if (cDto.name.isNotEmpty())
+                {
+                    placed.back() = placed.back().withDisplayName(cDto.name);
                 }
             }
         }
