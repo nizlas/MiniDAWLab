@@ -32,6 +32,8 @@ enum class StabilityScenarioKind
     OpenSaveClose,
     Smoke,
     Mixdown,
+    Autosave,        // C5: load, dirty edit, forced autosave, verify file/pointer/original.
+    RecoverAutosave, // C5: as Autosave, then in-process recovery and post-recovery verification.
 };
 
 struct StabilityScenarioRequest
@@ -89,6 +91,19 @@ struct StabilityRunnerHooks
     /// Stability C3: runs `stability_invariants::verifyStableState` over the live app state.
     /// Called after every step; a false return fails the scenario.
     std::function<bool(const juce::String& reason)> verifyInvariants;
+
+    // --- Stability C5: autosave/recovery hooks (ProjectIoCoordinator test surface) ---
+    /// Writes an autosave immediately (project must be dirty). False + reason on failure.
+    std::function<bool(juce::String& failReason)> forceAutosaveNow;
+    /// Runs the recovery-prompt "Recover" steps without a prompt. False + reason on failure.
+    std::function<bool(juce::String& failReason)> recoverAutosaveNow;
+    /// Where the next autosave for the current project would be written.
+    std::function<juce::File()> getAutosaveFilePath;
+    /// The %APPDATA% autosave pointer file.
+    std::function<juce::File()> getAutosavePointerFilePath;
+    std::function<bool()> isProjectDirty;
+    /// Full path of the session's current save target; empty when never saved / after recovery.
+    std::function<juce::String()> getCurrentProjectPath;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -117,6 +132,8 @@ private:
     void appendDeleteLoopSteps(const juce::File& project, int iterations);
     void appendOpenSaveCloseSteps(const juce::File& project);
     void appendMixdownSteps(const juce::File& project, bool mp3);
+    /// C5. `withRecovery` selects the recover-autosave variant.
+    void appendAutosaveSteps(const juce::File& project, bool withRecovery);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

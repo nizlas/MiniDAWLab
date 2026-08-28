@@ -3,7 +3,7 @@
 # =============================================================================
 # Usage:
 #   .\scripts\stability-matrix.ps1 -Project "C:\path\project.dalproj"
-#   .\scripts\stability-matrix.ps1 -Project ... -Iterations 10 -IncludeMixdown
+#   .\scripts\stability-matrix.ps1 -Project ... -Iterations 10 -IncludeMixdown -IncludeAutosave
 #   .\scripts\stability-matrix.ps1 -Project ... -Exe "C:\path\MiniDAWLab.exe"
 #   .\scripts\stability-matrix.ps1 -Project ... -PageHeap        (elevated PS; dev only)
 #
@@ -27,6 +27,9 @@ param(
     [int]$Iterations = 5,
 
     [switch]$IncludeMixdown,
+
+    # Stability C5: also run the autosave and recover-autosave scenarios.
+    [switch]$IncludeAutosave,
 
     [int]$TimeoutSec = 900,
 
@@ -115,6 +118,10 @@ try {
         $results += Invoke-StabilityScenario -Name 'mixdown-wav' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'wav')
         $results += Invoke-StabilityScenario -Name 'mixdown-mp3' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'mp3')
     }
+    if ($IncludeAutosave) {
+        $results += Invoke-StabilityScenario -Name 'autosave' -Arguments @('--stability-autosave', "`"$Project`"")
+        $results += Invoke-StabilityScenario -Name 'recover-autosave' -Arguments @('--stability-recover-autosave', "`"$Project`"")
+    }
 }
 finally {
     if ($PageHeap) {
@@ -165,6 +172,7 @@ Write-Host "  $runLog"
 Write-Host "  $(Join-Path $appData 'project-load-diag.log')"
 Write-Host "  $(Join-Path $appData 'track-delete-diag.log')"
 Write-Host "  $(Join-Path $appData 'mixdown-diag.log')"
+Write-Host "  $(Join-Path $appData 'autosave-diag.log')"
 Write-Host "  $(Join-Path $appData 'last-operation.txt')"
 Write-Host "  $crashDumps"
 

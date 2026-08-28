@@ -53,6 +53,11 @@ void appendStabilityInvariantLine(const juce::String& message)
     appendTimestampedLine("stability-invariant.log", "[invariant]", message);
 }
 
+void appendAutosaveDiagnosticLine(const juce::String& message)
+{
+    appendTimestampedLine("autosave-diag.log", "[autosave]", message);
+}
+
 void writeLastOperationBreadcrumb(const juce::String& status)
 {
     try

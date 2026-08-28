@@ -930,6 +930,21 @@ public:
                 [this] { showSavingProjectToast(); },
             });
 
+        // Stability C5: app-level states that must block a periodic autosave tick. Everything
+        // else (save/load/export/undo/redo/delete) runs synchronously on the message thread and
+        // cannot overlap the timer; modal prompts are covered inside the coordinator.
+        projectIoCoordinator_->setAutosaveBlockReasonProvider([this]() -> juce::String {
+            if (recorder_.isRecording())
+            {
+                return "recording active";
+            }
+            if (recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive())
+            {
+                return "count-in active";
+            }
+            return {};
+        });
+
         addAndMakeVisible(addTrackCornerPlusButton_);
         if (shortcut_diagnostics::kShowKeyDiagnostic)
         {
@@ -1279,6 +1294,40 @@ public:
         hooks.verifyInvariants = [this](const juce::String& reason)
         { return stability_invariants::verifyStableState(reason, buildStabilityInvariantContext()); };
 
+        // Stability C5: autosave/recovery hooks over the real coordinator paths.
+        hooks.forceAutosaveNow = [this](juce::String& failReason) -> bool {
+            if (projectIoCoordinator_ == nullptr)
+            {
+                failReason = "no project IO coordinator";
+                return false;
+            }
+            return projectIoCoordinator_->forceAutosaveNowForStabilityTest(failReason);
+        };
+        hooks.recoverAutosaveNow = [this](juce::String& failReason) -> bool {
+            if (projectIoCoordinator_ == nullptr)
+            {
+                failReason = "no project IO coordinator";
+                return false;
+            }
+            return projectIoCoordinator_->recoverAutosaveNowForStabilityTest(failReason);
+        };
+        hooks.getAutosaveFilePath = [this]() -> juce::File {
+            return projectIoCoordinator_ != nullptr
+                       ? projectIoCoordinator_->getCurrentAutosavePathForDiagnostics()
+                       : juce::File{};
+        };
+        hooks.getAutosavePointerFilePath = []() -> juce::File {
+            return ProjectIoCoordinator::getAutosavePointerPathForDiagnostics();
+        };
+        hooks.isProjectDirty = [this]() -> bool {
+            return projectIoCoordinator_ != nullptr && projectIoCoordinator_->isProjectDirty();
+        };
+        hooks.getCurrentProjectPath = [this]() -> juce::String {
+            return session.hasKnownProjectFile()
+                       ? session.getCurrentProjectFile().getFullPathName()
+                       : juce::String{};
+        };
+
         stabilityScenarioRunner_ = std::make_unique<StabilityScenarioRunner>(std::move(hooks));
         stabilityScenarioRunner_->start(request);
     }
@@ -1580,7 +1629,10 @@ private:
             {
                 return {};
             }
-            const juce::String recorded = pointer.loadFileAsString().trim();
+            // C5 pointer format: line 1 = autosave path, line 2 (optional) = original project.
+            juce::StringArray lines;
+            pointer.readLines(lines);
+            const juce::String recorded = lines.size() > 0 ? lines[0].trim() : juce::String{};
             if (recorded.isEmpty() || !juce::File::isAbsolutePath(recorded))
             {
                 return "autosave pointer file has no absolute path (recovery falls back cleanly)";
@@ -1591,6 +1643,13 @@ private:
                        + " (recovery falls back cleanly)";
             }
             return {};
+        };
+        // Stability C5 (invariant 8): a recovered autosave must never own the save path.
+        ctx.getCurrentProjectFilePath = [this]() -> juce::String
+        {
+            return session.hasKnownProjectFile()
+                       ? session.getCurrentProjectFile().getFullPathName()
+                       : juce::String{};
         };
         return ctx;
     }

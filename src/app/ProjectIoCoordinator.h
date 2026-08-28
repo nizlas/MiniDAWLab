@@ -20,7 +20,7 @@ class PluginInsertHost;
 class InstrumentTrackController;
 class ExperimentalInstrumentHost;
 
-class ProjectIoCoordinator
+class ProjectIoCoordinator : private juce::Timer
 {
 public:
     struct Callbacks
@@ -103,7 +103,37 @@ public:
     /// ".dalproj" open is already queued, the prompt is skipped (breadcrumb only).
     void offerAutosaveRecoveryOnStartup(bool commandLineProjectOpenQueued);
 
+    // ---------------------------------------------------------------------
+    // Stability C5: periodic autosave + recovery certification.
+    // ---------------------------------------------------------------------
+
+    /// [Message thread] Optional provider consulted by the periodic autosave tick. Return a short
+    /// non-empty reason (e.g. "recording") to block the tick; it is logged and retried next tick.
+    void setAutosaveBlockReasonProvider(std::function<juce::String()> provider) noexcept
+    {
+        getAutosaveBlockReason_ = std::move(provider);
+    }
+
+    /// [Message thread, stability test only] Write an autosave immediately, bypassing the periodic
+    /// timer (the dirty/blocked policy still applies). False + reason on any failure or skip.
+    bool forceAutosaveNowForStabilityTest(juce::String& failReasonOut);
+
+    /// [Message thread, stability test only] Run the same steps as the recovery prompt's "Recover"
+    /// button (load autosave, clear save path, mark dirty) without showing any prompt.
+    bool recoverAutosaveNowForStabilityTest(juce::String& failReasonOut);
+
+    /// [Message thread] Where the next autosave for the current project would be written.
+    [[nodiscard]] juce::File getCurrentAutosavePathForDiagnostics() const;
+
+    /// The %APPDATA% pointer file recording the most recent autosave location.
+    [[nodiscard]] static juce::File getAutosavePointerPathForDiagnostics();
+
 private:
+    void timerCallback() override;
+    /// Returns non-empty skip/block reason when the periodic tick must not autosave right now.
+    [[nodiscard]] juce::String periodicAutosaveBlockReason() const;
+    /// Shared autosave writer; returns ok/failure and logs everything to autosave-diag.log.
+    juce::Result writeAutosaveNow(const juce::String& reason);
     void launchLoadProjectChooser();
     [[nodiscard]] juce::File resolveAutosaveTargetFile() const;
     void deleteAutosaveArtifactsAfterSuccessfulSave();
@@ -121,4 +151,7 @@ private:
     std::shared_ptr<const SessionSnapshot> cleanSessionSnapshot_;
     /// Instrument/plugin edits do not swap the session snapshot; they set this flag instead.
     bool instrumentOrPluginEditsSinceClean_ = false;
+
+    /// Stability C5: app-level block states (recording, count-in, ...) for the periodic tick.
+    std::function<juce::String()> getAutosaveBlockReason_;
 };

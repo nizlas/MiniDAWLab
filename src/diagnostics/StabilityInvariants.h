@@ -64,6 +64,10 @@ struct Context
     std::function<TrackId()> getOpenMidiEditorTrackId;
     /// Empty string when the autosave pointer state is consistent; otherwise a description.
     std::function<juce::String()> describeAutosavePointerIssue;
+    /// Stability C5: the session's current save target path (empty when never saved / recovered).
+    /// A recovered autosave must never claim the save path, so a current path whose file name is
+    /// "autosave.dalproj" is an invariant failure.
+    std::function<juce::String()> getCurrentProjectFilePath;
 };
 
 /// Runs all checks; logs every failure ("INVARIANT FAIL ...") and allowed anomalies
@@ -80,5 +84,11 @@ void registerGlobalStabilityInvariantChecker(std::function<bool(const juce::Stri
 
 /// Invokes the registered checker (true when none is registered). [Message thread]
 bool runRegisteredStabilityInvariantsCheck(const juce::String& reason);
+
+/// Stability C5: while true, invariant 8 (save path must not be an autosave file) is downgraded
+/// to a note — mid-recovery the autosave *is* briefly the current file until the path is cleared.
+/// Set/cleared by ProjectIoCoordinator around the recovery load. [Message thread]
+void setAutosaveRecoveryInProgress(bool inProgress) noexcept;
+[[nodiscard]] bool isAutosaveRecoveryInProgress() noexcept;
 
 } // namespace stability_invariants

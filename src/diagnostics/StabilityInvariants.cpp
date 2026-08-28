@@ -477,6 +477,30 @@ bool verifyStableState(const juce::String& reason, const Context& ctx)
         }
     }
 
+    // Invariant 8 (Stability C5): a recovered autosave must never claim the session's save path —
+    // recovery clears it so plain Save goes through Save As. If the current save target *is* an
+    // autosave file, a Ctrl+S would silently overwrite the recovery snapshot.
+    if (ctx.getCurrentProjectFilePath)
+    {
+        const juce::String currentPath = ctx.getCurrentProjectFilePath();
+        if (currentPath.isNotEmpty()
+            && juce::File(currentPath).getFileName().equalsIgnoreCase("autosave.dalproj"))
+        {
+            if (isAutosaveRecoveryInProgress())
+            {
+                // Transient mid-recovery state: the load just completed and the coordinator
+                // clears the save path immediately afterwards.
+                report.note("autosave-save-path",
+                            "save path is the autosave (recovery in progress): " + currentPath);
+            }
+            else
+            {
+                report.fail("autosave-save-path",
+                            "current project save path is an autosave file: " + currentPath);
+            }
+        }
+    }
+
     if (report.failCount > 0)
     {
         appendStabilityInvariantLine("verify FAILED reason=" + reason + " failures="
@@ -497,6 +521,21 @@ bool verifyStableState(const juce::String& reason, const Context& ctx)
 int getStabilityInvariantFailureCount() noexcept
 {
     return g_invariantFailureCount.load(std::memory_order_relaxed);
+}
+
+namespace
+{
+    bool g_autosaveRecoveryInProgress = false; // Message thread only.
+}
+
+void setAutosaveRecoveryInProgress(const bool inProgress) noexcept
+{
+    g_autosaveRecoveryInProgress = inProgress;
+}
+
+bool isAutosaveRecoveryInProgress() noexcept
+{
+    return g_autosaveRecoveryInProgress;
 }
 
 void registerGlobalStabilityInvariantChecker(std::function<bool(const juce::String&)> checker)

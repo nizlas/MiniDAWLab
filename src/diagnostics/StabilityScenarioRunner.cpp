@@ -128,6 +128,24 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-autosave")
+        {
+            if (!setKind(StabilityScenarioKind::Autosave)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-autosave requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-recover-autosave")
+        {
+            if (!setKind(StabilityScenarioKind::RecoverAutosave)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-recover-autosave requires a project path";
+                return {};
+            }
+        }
         else if (a == "--iterations")
         {
             if (i + 1 >= args.size())
@@ -196,6 +214,8 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::Mixdown:
             scenarioName_ = request.mixdownMp3 ? "mixdown-mp3" : "mixdown-wav";
             break;
+        case StabilityScenarioKind::Autosave: scenarioName_ = "autosave"; break;
+        case StabilityScenarioKind::RecoverAutosave: scenarioName_ = "recover-autosave"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -239,6 +259,12 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::Mixdown:
             appendMixdownSteps(request.projectA, request.mixdownMp3);
+            break;
+        case StabilityScenarioKind::Autosave:
+            appendAutosaveSteps(request.projectA, /*withRecovery*/ false);
+            break;
+        case StabilityScenarioKind::RecoverAutosave:
+            appendAutosaveSteps(request.projectA, /*withRecovery*/ true);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -665,6 +691,197 @@ void StabilityScenarioRunner::appendOpenSaveCloseSteps(const juce::File& project
                                return true;
                            },
                            kSettleDefaultMs });
+}
+
+void StabilityScenarioRunner::appendAutosaveSteps(const juce::File& project,
+                                                  const bool withRecovery)
+{
+    const juce::String label = withRecovery ? juce::String("recover-autosave")
+                                            : juce::String("autosave");
+    appendLoadAndVerifySteps(project, label + " setup");
+
+    // Shared across steps: original-file fingerprint, the rename applied as the dirty edit, and
+    // the autosave target captured at force time.
+    auto originalHash = std::make_shared<juce::String>();
+    auto renamedTo = std::make_shared<juce::String>();
+    auto autosaveFile = std::make_shared<juce::File>();
+
+    steps_.push_back(Step{
+        label + ": record original project file fingerprint",
+        [project, originalHash](juce::String& failReason) -> bool {
+            juce::MemoryBlock data;
+            if (!project.loadFileAsData(data))
+            {
+                failReason = "could not read project file";
+                return false;
+            }
+            *originalHash = juce::MD5(data).toHexString();
+            appendStabilityRunLine("  original md5=" + *originalHash + " size="
+                                   + juce::String(project.getSize()));
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{
+        label + ": dirty edit (rename first track)",
+        [this, renamedTo](juce::String& failReason) -> bool {
+            const std::vector<StabilityTrackInfo> tracks = hooks_.listDeletableTracks();
+            if (tracks.empty())
+            {
+                failReason = "no renameable tracks";
+                return false;
+            }
+            *renamedTo = "AutosaveTest " + juce::Time::getCurrentTime().formatted("%H%M%S");
+            if (!hooks_.renameTrackUndoable(tracks.front().id, *renamedTo))
+            {
+                failReason = "rename refused";
+                return false;
+            }
+            if (hooks_.isProjectDirty && !hooks_.isProjectDirty())
+            {
+                failReason = "project not dirty after undoable rename";
+                return false;
+            }
+            appendStabilityRunLine("  renamed first track to \"" + *renamedTo
+                                   + "\"; project dirty=yes");
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{
+        label + ": force autosave",
+        [this, autosaveFile](juce::String& failReason) -> bool {
+            if (!hooks_.forceAutosaveNow)
+            {
+                failReason = "forceAutosaveNow hook missing";
+                return false;
+            }
+            *autosaveFile = hooks_.getAutosaveFilePath ? hooks_.getAutosaveFilePath()
+                                                       : juce::File{};
+            return hooks_.forceAutosaveNow(failReason);
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{
+        label + ": verify autosave file and pointer",
+        [this, autosaveFile](juce::String& failReason) -> bool {
+            if (!autosaveFile->existsAsFile() || autosaveFile->getSize() <= 0)
+            {
+                failReason = "autosave file missing or empty: "
+                             + autosaveFile->getFullPathName();
+                return false;
+            }
+            const juce::File pointer = hooks_.getAutosavePointerFilePath
+                                           ? hooks_.getAutosavePointerFilePath()
+                                           : juce::File{};
+            if (!pointer.existsAsFile())
+            {
+                failReason = "autosave pointer file missing: " + pointer.getFullPathName();
+                return false;
+            }
+            juce::StringArray lines;
+            pointer.readLines(lines);
+            const juce::String recorded = lines.size() > 0 ? lines[0].trim() : juce::String{};
+            if (recorded != autosaveFile->getFullPathName())
+            {
+                failReason = "pointer file records \"" + recorded + "\" but autosave is \""
+                             + autosaveFile->getFullPathName() + "\"";
+                return false;
+            }
+            appendStabilityRunLine("  autosave ok: " + autosaveFile->getFullPathName() + " ("
+                                   + juce::String(autosaveFile->getSize())
+                                   + " bytes), pointer matches");
+            return true;
+        },
+        kSettleDefaultMs });
+
+    if (withRecovery)
+    {
+        steps_.push_back(Step{
+            label + ": recover autosave in-process",
+            [this](juce::String& failReason) -> bool {
+                if (!hooks_.recoverAutosaveNow)
+                {
+                    failReason = "recoverAutosaveNow hook missing";
+                    return false;
+                }
+                return hooks_.recoverAutosaveNow(failReason);
+            },
+            kSettleAfterLoadMs });
+
+        steps_.push_back(Step{
+            label + ": verify recovered state",
+            [this, renamedTo](juce::String& failReason) -> bool {
+                const int n = hooks_.getTrackCount();
+                if (n <= 0)
+                {
+                    failReason = "no tracks after recovery";
+                    return false;
+                }
+                const juce::String currentPath
+                    = hooks_.getCurrentProjectPath ? hooks_.getCurrentProjectPath()
+                                                   : juce::String{};
+                if (currentPath.isNotEmpty())
+                {
+                    failReason = "recovered project still has a save path (\"" + currentPath
+                                 + "\"); Save would not go through Save As";
+                    return false;
+                }
+                if (hooks_.isProjectDirty && !hooks_.isProjectDirty())
+                {
+                    failReason = "recovered project is not marked dirty";
+                    return false;
+                }
+                const std::vector<StabilityTrackInfo> tracks = hooks_.listDeletableTracks();
+                if (tracks.empty() || tracks.front().name != *renamedTo)
+                {
+                    failReason = "dirty edit not present after recovery (first track is \""
+                                 + (tracks.empty() ? juce::String("<none>") : tracks.front().name)
+                                 + "\", expected \"" + *renamedTo + "\")";
+                    return false;
+                }
+                appendStabilityRunLine("  recovered: tracks=" + juce::String(n)
+                                       + " savePath=<cleared> dirty=yes edit preserved");
+                return true;
+            },
+            kSettleDefaultMs });
+    }
+
+    steps_.push_back(Step{
+        label + ": verify original project file unchanged",
+        [project, originalHash](juce::String& failReason) -> bool {
+            juce::MemoryBlock data;
+            if (!project.loadFileAsData(data))
+            {
+                failReason = "could not re-read project file";
+                return false;
+            }
+            const juce::String nowHash = juce::MD5(data).toHexString();
+            if (nowHash != *originalHash)
+            {
+                failReason = "original project file changed during the scenario (md5 "
+                             + *originalHash + " -> " + nowHash + ")";
+                return false;
+            }
+            appendStabilityRunLine("  original project file unchanged (md5 verified)");
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{
+        label + ": cleanup autosave artifacts",
+        [this, autosaveFile](juce::String&) -> bool {
+            const bool fileDeleted = autosaveFile->existsAsFile() && autosaveFile->deleteFile();
+            const juce::File pointer = hooks_.getAutosavePointerFilePath
+                                           ? hooks_.getAutosavePointerFilePath()
+                                           : juce::File{};
+            const bool pointerDeleted = pointer.existsAsFile() && pointer.deleteFile();
+            appendStabilityRunLine(juce::String("  cleanup: autosave ")
+                                   + (fileDeleted ? "deleted" : "absent/kept") + ", pointer "
+                                   + (pointerDeleted ? "deleted" : "absent/kept"));
+            return true;
+        },
+        kSettleDefaultMs });
 }
 
 void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, const bool mp3)

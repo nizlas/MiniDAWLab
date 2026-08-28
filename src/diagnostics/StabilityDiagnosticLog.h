@@ -27,3 +27,7 @@ void appendStabilityRunLine(const juce::String& message);
 /// Appends one timestamped line to `stability-invariant.log` (mirrors to juce::Logger).
 /// Written by the Stability C3 runtime invariant checks (`StabilityInvariants`).
 void appendStabilityInvariantLine(const juce::String& message);
+
+/// Appends one timestamped line to `autosave-diag.log` (mirrors to juce::Logger).
+/// Written by the Stability C5 periodic autosave / recovery paths (`ProjectIoCoordinator`).
+void appendAutosaveDiagnosticLine(const juce::String& message);

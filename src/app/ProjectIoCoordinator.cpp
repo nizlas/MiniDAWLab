@@ -341,13 +341,17 @@ namespace
     }
 
     /// The autosave file recorded by the pointer file, or the %APPDATA% default; a non-existing
-    /// return means "no autosave present".
+    /// return means "no autosave present". Stability C5: a stale/malformed pointer (recorded
+    /// autosave missing) is logged and removed so it cannot confuse later startups.
     [[nodiscard]] juce::File findExistingAutosaveFile()
     {
         const juce::File pointer = autosavePointerFile();
         if (pointer.existsAsFile())
         {
-            const juce::String recorded = pointer.loadFileAsString().trim();
+            // Line 1 = autosave path; line 2 (optional, C5) = the original project it belongs to.
+            juce::StringArray lines;
+            pointer.readLines(lines);
+            const juce::String recorded = lines.size() > 0 ? lines[0].trim() : juce::String{};
             if (recorded.isNotEmpty() && juce::File::isAbsolutePath(recorded))
             {
                 const juce::File f(recorded);
@@ -355,9 +359,25 @@ namespace
                 {
                     return f;
                 }
+                appendAutosaveDiagnosticLine(
+                    "recovery scan: stale pointer (recorded autosave missing): " + recorded
+                    + " - pointer removed");
+                (void)pointer.deleteFile();
+            }
+            else
+            {
+                appendAutosaveDiagnosticLine(
+                    "recovery scan: malformed pointer file - pointer removed");
+                (void)pointer.deleteFile();
             }
         }
-        return defaultAppDataAutosaveFile();
+        const juce::File fallback = defaultAppDataAutosaveFile();
+        if (fallback.existsAsFile() && !pointer.existsAsFile())
+        {
+            appendAutosaveDiagnosticLine("recovery scan: autosave without pointer file found: "
+                                         + fallback.getFullPathName() + " (informational)");
+        }
+        return fallback;
     }
 
     void restoreOrphanInstrumentLanesWithoutRuntime(
@@ -449,6 +469,11 @@ ProjectIoCoordinator::ProjectIoCoordinator(Transport& transport,
             markProjectCleanNow();
         }
     });
+
+    // Stability C5: conservative periodic autosave. The first tick fires a full interval after
+    // startup, so the window/session are stable by then; the timer dies with this coordinator
+    // (before app shutdown tears the session down).
+    startTimer(60 * 1000);
 }
 
 void ProjectIoCoordinator::saveProject()
@@ -1112,21 +1137,34 @@ void ProjectIoCoordinator::writeAutosaveIfDirty(const juce::String& reason)
     {
         return;
     }
-    appendProjectSaveDiagnosticLine("autosave start (" + reason + ")");
+    (void)writeAutosaveNow(reason);
+}
+
+juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
+{
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    const juce::File autosaveFile = resolveAutosaveTargetFile();
+    const juce::String projectDesc = session_.hasKnownProjectFile()
+                                         ? session_.getCurrentProjectFile().getFullPathName()
+                                         : juce::String("(never saved)");
+    appendAutosaveDiagnosticLine("write begin (" + reason + "): project=" + projectDesc
+                                 + " target=" + autosaveFile.getFullPathName()
+                                 + " dirty=" + (isProjectDirty() ? "yes" : "no"));
+
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
     if (device == nullptr)
     {
-        appendProjectSaveDiagnosticLine("autosave failed: no active audio device");
-        return;
+        appendAutosaveDiagnosticLine("write FAIL: no active audio device (previous autosave, if "
+                                     "any, left untouched)");
+        return juce::Result::fail("no active audio device");
     }
     const double sampleRate = device->getCurrentSampleRate();
-    const juce::File autosaveFile = resolveAutosaveTargetFile();
     if (!autosaveFile.getParentDirectory().isDirectory()
         && !autosaveFile.getParentDirectory().createDirectory())
     {
-        appendProjectSaveDiagnosticLine("autosave failed: cannot create folder "
-                                        + autosaveFile.getParentDirectory().getFullPathName());
-        return;
+        appendAutosaveDiagnosticLine("write FAIL: cannot create folder "
+                                     + autosaveFile.getParentDirectory().getFullPathName());
+        return juce::Result::fail("cannot create autosave folder");
     }
 
     callbacks_.snapshotOpenClipViewportFromMidiEditor();
@@ -1141,7 +1179,9 @@ void ProjectIoCoordinator::writeAutosaveIfDirty(const juce::String& reason)
     }
 
     // `saveProjectToFile` records the written file as the current project on success; the autosave
-    // must never hijack the user's normal save target, so restore it afterwards.
+    // must never hijack the user's normal save target, so restore it afterwards. The write itself
+    // is atomic (temp file + move, see ProjectFile.cpp), so a crash mid-write can never leave a
+    // half-written file at the autosave path.
     const juce::File normalProjectFile = session_.getCurrentProjectFile();
     writeLastOperationBreadcrumb("autosave start (" + reason + "): "
                                  + autosaveFile.getFullPathName());
@@ -1156,15 +1196,139 @@ void ProjectIoCoordinator::writeAutosaveIfDirty(const juce::String& reason)
         mainWinBounds);
     session_.setCurrentProjectFile(normalProjectFile);
 
+    const int elapsedMs = static_cast<int>(juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);
     if (!r.wasOk())
     {
-        appendProjectSaveDiagnosticLine("autosave failed: " + r.getErrorMessage());
+        // Dirty state is deliberately untouched: a failed autosave protects nothing, so the next
+        // tick (or quit prompt) must still see the project as unsaved.
+        appendAutosaveDiagnosticLine("write FAIL (" + reason + "): " + r.getErrorMessage()
+                                     + " elapsedMs=" + juce::String(elapsedMs)
+                                     + " (previous autosave, if any, left untouched)");
         writeLastOperationBreadcrumb("autosave failed (" + reason + ")");
+        return r;
+    }
+
+    // Pointer file: line 1 = autosave path, line 2 = the project it belongs to (C5 metadata so a
+    // stale autosave is distinguishable from the current project's).
+    const bool pointerOk = autosavePointerFile().replaceWithText(
+        autosaveFile.getFullPathName() + "\n" + projectDesc + "\n");
+    appendAutosaveDiagnosticLine("write ok (" + reason + "): " + autosaveFile.getFullPathName()
+                                 + " size=" + juce::String(autosaveFile.getSize())
+                                 + " elapsedMs=" + juce::String(elapsedMs)
+                                 + " pointer=" + (pointerOk ? "updated" : "WRITE FAILED"));
+    writeLastOperationBreadcrumb("autosave end ok (" + reason + ")");
+    return juce::Result::ok();
+}
+
+// -----------------------------------------------------------------------------
+// Stability C5: periodic autosave tick
+// -----------------------------------------------------------------------------
+
+juce::String ProjectIoCoordinator::periodicAutosaveBlockReason() const
+{
+    // Scenario runs drive autosave explicitly (via forceAutosaveNowForStabilityTest); a periodic
+    // write in the middle of a delete/load loop would make runs nondeterministic.
+    if (isStabilityTestModeActive())
+    {
+        return "stability-test-mode";
+    }
+    // Covers the recovery prompt, unsaved-changes prompts, alerts, and modal pickers. Load/save/
+    // export/mixdown/undo/redo/track-delete all run synchronously on the message thread, so this
+    // timer cannot fire in the middle of them.
+    if (juce::ModalComponentManager::getInstance()->getNumModalComponents() > 0)
+    {
+        return "modal dialog open";
+    }
+    if (getAutosaveBlockReason_ != nullptr)
+    {
+        const juce::String appReason = getAutosaveBlockReason_();
+        if (appReason.isNotEmpty())
+        {
+            return appReason;
+        }
+    }
+    return {};
+}
+
+void ProjectIoCoordinator::timerCallback()
+{
+    if (!isProjectDirty())
+    {
+        return; // Nothing to protect; stay silent so autosave-diag.log does not fill up idle.
+    }
+    const juce::String blockReason = periodicAutosaveBlockReason();
+    if (blockReason.isNotEmpty())
+    {
+        // Skip (never queue): the next tick retries in 60s.
+        appendAutosaveDiagnosticLine("tick skipped: " + blockReason + " (dirty=yes)");
         return;
     }
-    (void)autosavePointerFile().replaceWithText(autosaveFile.getFullPathName() + "\n");
-    appendProjectSaveDiagnosticLine("autosave end ok: " + autosaveFile.getFullPathName());
-    writeLastOperationBreadcrumb("autosave end ok (" + reason + ")");
+    (void)writeAutosaveNow("periodic");
+}
+
+bool ProjectIoCoordinator::forceAutosaveNowForStabilityTest(juce::String& failReasonOut)
+{
+    if (!isProjectDirty())
+    {
+        failReasonOut = "project is not dirty";
+        return false;
+    }
+    if (getAutosaveBlockReason_ != nullptr)
+    {
+        const juce::String appReason = getAutosaveBlockReason_();
+        if (appReason.isNotEmpty())
+        {
+            failReasonOut = "blocked: " + appReason;
+            return false;
+        }
+    }
+    const juce::Result r = writeAutosaveNow("stability-test-forced");
+    if (!r.wasOk())
+    {
+        failReasonOut = r.getErrorMessage();
+        return false;
+    }
+    return true;
+}
+
+bool ProjectIoCoordinator::recoverAutosaveNowForStabilityTest(juce::String& failReasonOut)
+{
+    const juce::File autosaveFile = findExistingAutosaveFile();
+    if (!autosaveFile.existsAsFile())
+    {
+        failReasonOut = "no autosave file found";
+        return false;
+    }
+    appendAutosaveDiagnosticLine("recovery (stability test): loading "
+                                 + autosaveFile.getFullPathName());
+    // Invariant 8 tolerates the save path *being* the autosave only while this flag is set.
+    stability_invariants::setAutosaveRecoveryInProgress(true);
+    loadProjectFromFile(autosaveFile);
+    if (session_.getCurrentProjectFile() != autosaveFile)
+    {
+        stability_invariants::setAutosaveRecoveryInProgress(false);
+        appendAutosaveDiagnosticLine("recovery (stability test): autosave load FAILED");
+        failReasonOut = "autosave load failed (current project file was not updated)";
+        return false;
+    }
+    // Same policy as the recovery prompt's "Recover" button: never claim the original save path.
+    session_.setCurrentProjectFile(juce::File());
+    stability_invariants::setAutosaveRecoveryInProgress(false);
+    markProjectDirtyFromEdit();
+    appendAutosaveDiagnosticLine(
+        "recovery (stability test): loaded; save path cleared (Save goes through Save As)");
+    (void) stability_invariants::runRegisteredStabilityInvariantsCheck("autosave-recovery-end");
+    return true;
+}
+
+juce::File ProjectIoCoordinator::getCurrentAutosavePathForDiagnostics() const
+{
+    return resolveAutosaveTargetFile();
+}
+
+juce::File ProjectIoCoordinator::getAutosavePointerPathForDiagnostics()
+{
+    return autosavePointerFile();
 }
 
 void ProjectIoCoordinator::deleteAutosaveArtifactsAfterSuccessfulSave()
@@ -1191,6 +1355,7 @@ void ProjectIoCoordinator::deleteAutosaveArtifactsAfterSuccessfulSave()
     if (deletedAny)
     {
         appendProjectSaveDiagnosticLine("autosave cleared after successful save");
+        appendAutosaveDiagnosticLine("cleared after successful manual save (autosave + pointer)");
     }
 }
 
@@ -1228,6 +1393,9 @@ void ProjectIoCoordinator::offerAutosaveRecoveryOnStartup(const bool commandLine
                 if (result == 1) // Recover
                 {
                     writeLastOperationBreadcrumb("autosave recovery: recover chosen");
+                    // Invariant 8 tolerates the transient "save path is the autosave" state
+                    // only while this flag is set (cleared right after the path is detached).
+                    stability_invariants::setAutosaveRecoveryInProgress(true);
                     loadProjectFromFile(autosaveFile);
                     if (session_.getCurrentProjectFile() == autosaveFile)
                     {
@@ -1235,16 +1403,23 @@ void ProjectIoCoordinator::offerAutosaveRecoveryOnStartup(const bool commandLine
                         // (the original project is never overwritten silently), and flag the
                         // recovered state as unsaved so quit/load prompts protect it.
                         session_.setCurrentProjectFile(juce::File());
+                        stability_invariants::setAutosaveRecoveryInProgress(false);
                         markProjectDirtyFromEdit();
                         appendProjectSaveDiagnosticLine(
                             "recovery: autosave loaded; save path cleared (use Save As)");
+                        appendAutosaveDiagnosticLine(
+                            "recovery (prompt): loaded " + autosaveFile.getFullPathName()
+                            + "; save path cleared (Save goes through Save As)");
                         // Stability C3: verify invariants after autosave recovery completed.
                         (void) stability_invariants::runRegisteredStabilityInvariantsCheck(
                             "autosave-recovery-end");
                     }
                     else
                     {
+                        stability_invariants::setAutosaveRecoveryInProgress(false);
                         appendProjectSaveDiagnosticLine("recovery: autosave load failed");
+                        appendAutosaveDiagnosticLine("recovery (prompt): autosave load FAILED: "
+                                                     + autosaveFile.getFullPathName());
                     }
                 }
                 else if (result == 2) // Ignore
@@ -1252,14 +1427,20 @@ void ProjectIoCoordinator::offerAutosaveRecoveryOnStartup(const bool commandLine
                     writeLastOperationBreadcrumb("autosave recovery: ignored (file kept)");
                     appendProjectSaveDiagnosticLine(
                         "recovery: ignored; autosave kept for next startup");
+                    appendAutosaveDiagnosticLine(
+                        "recovery (prompt): ignored; autosave kept for next startup: "
+                        + autosaveFile.getFullPathName());
                 }
                 else // Delete Autosave
                 {
                     const bool deleted = autosaveFile.deleteFile();
-                    (void)autosavePointerFile().deleteFile();
+                    const bool pointerDeleted = autosavePointerFile().deleteFile();
                     writeLastOperationBreadcrumb("autosave recovery: autosave deleted");
                     appendProjectSaveDiagnosticLine(juce::String("recovery: delete autosave ")
                                                     + (deleted ? "ok" : "FAILED"));
+                    appendAutosaveDiagnosticLine(juce::String("recovery (prompt): delete autosave ")
+                                                 + (deleted ? "ok" : "FAILED") + ", pointer "
+                                                 + (pointerDeleted ? "deleted" : "not deleted"));
                 }
             }));
 }

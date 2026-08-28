@@ -168,7 +168,61 @@ launch of MiniDAWLab.exe slow.
    .\scripts\disable-pageheap.ps1
    ```
 
-## 8. Known findings / limitations
+## 8. Autosave and crash recovery (Stability C5)
+
+Autosave is a **safety net**, not a substitute for Save. It never touches the
+user's project file and never changes what Ctrl+S does.
+
+Where the files live:
+
+- Saved project: `<projectFolder>\autosave.dalproj` (next to the project file
+  so `Audio/`-relative clip paths keep resolving).
+- Never-saved project: `%APPDATA%\MiniDAWLab\autosave.dalproj` (works for
+  MIDI-only/internal data; a never-saved project referencing external audio
+  may fail the relative-path check — the failure is logged, nothing breaks).
+- Pointer file: `%APPDATA%\MiniDAWLab\autosave-location.txt` (line 1 =
+  autosave path, line 2 = the project it belongs to).
+- Diagnostics: `%APPDATA%\MiniDAWLab\autosave-diag.log` (tick skips, writes
+  with size/elapsed, failures, recovery outcomes, stale-pointer cleanup).
+
+Policy: a periodic tick fires every 60 s and writes only when the project is
+dirty and nothing blocks it (recording/count-in, any modal dialog, stability
+test mode). Skips are logged with a reason and simply retried on the next
+tick. Writes are atomic (temp file + move) and a failed write never deletes a
+previous valid autosave and never clears the dirty state. A successful manual
+save deletes the autosave and pointer.
+
+Automated scenarios:
+
+```powershell
+.\build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe --stability-autosave "C:\path\project.dalproj"
+.\build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe --stability-recover-autosave "C:\path\project.dalproj"
+# or as part of the matrix:
+.\scripts\stability-matrix.ps1 -Project "C:\path\project.dalproj" -IncludeAutosave
+```
+
+They load the project, make a dirty edit, force an autosave, verify the file,
+pointer, and that the original project file is byte-identical afterwards; the
+recover variant additionally runs the recovery path in-process and verifies
+the recovered project is dirty, contains the edit, and has **no** save path
+(so Save goes through Save As and can never silently overwrite the original).
+
+Manual recovery test:
+
+1. Open a project, make an edit (dirty), do not save.
+2. Wait ≥ 60 s for the periodic autosave (check `autosave-diag.log` for
+   "write ok"), or run the `--stability-autosave` scenario instead.
+3. Kill the process (Task Manager), or use `--stability-crash-test` if you
+   also want to exercise the crash-dump pipeline.
+4. Restart the app normally; choose **Recover** in the prompt.
+5. Verify the edit is present, the title/save state is unsaved, and Ctrl+S
+   opens Save As. **Ignore** keeps the autosave for the next startup;
+   **Delete Autosave** removes the file and pointer.
+
+After a crash with an autosave present, collect `autosave-diag.log` together
+with the crash dump and the other logs in section 7.
+
+## 9. Known findings / limitations
 
 - ASan works with this MSVC/JUCE/Ninja setup (verified 2026-08-27, VS 2026
   MSVC 14.50). `/RTC1` must stay off in the ASan preset; incremental linking
