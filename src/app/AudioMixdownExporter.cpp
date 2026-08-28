@@ -44,6 +44,64 @@ constexpr int kMp3EncodeTimeoutMs = 600000; // 10 minutes
                                                              : MixdownWaveBits::Pcm24;
 }
 
+/// A non-existing unique sibling of `destination` (same folder, so the final move is a cheap
+/// same-volume rename). Returns an invalid File if no free name could be found.
+[[nodiscard]] juce::File allocateUniqueSiblingTempFile(const juce::File& destination,
+                                                       const juce::String& tag,
+                                                       const juce::String& extension)
+{
+    for (int attempt = 0; attempt < 16; ++attempt)
+    {
+        (void)attempt;
+        const juce::String unique
+            = juce::String::toHexString(juce::Random::getSystemRandom().nextInt64());
+        const juce::File candidate = destination.getSiblingFile(
+            destination.getFileNameWithoutExtension() + tag + unique + extension);
+        if (!candidate.existsAsFile())
+        {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+/// Safe-overwrite finalize: the fully rendered/encoded `tempFile` replaces `destination`. The old
+/// destination is only deleted *after* the new content exists completely, so a failed export can
+/// never destroy the previous file. Logs every step; on failure the temp is removed.
+[[nodiscard]] juce::Result replaceDestinationWithRenderedTemp(const juce::File& tempFile,
+                                                              const juce::File& destination)
+{
+    if (destination.existsAsFile() && !destination.deleteFile())
+    {
+        appendMixdownDiagnosticLine("FAIL could not delete existing output for replace (locked?) path=\""
+                                    + destination.getFullPathName() + "\"");
+        (void)tempFile.deleteFile();
+        return juce::Result::fail(
+            "Could not replace the existing file (it may be open in another program):\n"
+            + destination.getFullPathName());
+    }
+    if (!tempFile.moveFileTo(destination))
+    {
+        appendMixdownDiagnosticLine("FAIL could not move rendered temp into place temp=\""
+                                    + tempFile.getFullPathName() + "\"");
+        (void)tempFile.deleteFile();
+        return juce::Result::fail("Could not move the rendered file into place:\n"
+                                  + destination.getFullPathName());
+    }
+    if (!destination.existsAsFile() || destination.getSize() <= 0)
+    {
+        appendMixdownDiagnosticLine("FAIL final output missing or empty after replace path=\""
+                                    + destination.getFullPathName() + "\"");
+        return juce::Result::fail("Export finished but the output file is missing or empty:\n"
+                                  + destination.getFullPathName());
+    }
+    appendMixdownDiagnosticLine(
+        "replace ok final path=\"" + destination.getFullPathName() + "\" size="
+        + juce::String(destination.getSize()) + " mtime="
+        + destination.getLastModificationTime().toISO8601(true));
+    return juce::Result::ok();
+}
+
 /// RAII offline-render gate (Stability Slice 2). On the outermost enter it silences the realtime
 /// callback and then *drains* any in-flight callback: `beginOfflineRenderGate` (seq_cst) pairs with
 /// the `audioCallbackInProcessingSection` flag set at the top of the device callback, so after the
@@ -185,7 +243,11 @@ juce::Result exportStereoMixdownWavBlocking(
     // Overwrite consent is collected by the dialog (async prompt) before export starts. The old
     // synchronous NativeMessageBox here returned instantly with an arbitrary answer, so callers
     // must confirm up front; refuse rather than silently overwrite.
-    if (request.outputFile.existsAsFile() && !request.overwriteConfirmed)
+    const bool destinationExisted = request.outputFile.existsAsFile();
+    appendMixdownDiagnosticLine(juce::String("wav destination existed=")
+                                + (destinationExisted ? "yes" : "no")
+                                + " overwriteConfirmed=" + (request.overwriteConfirmed ? "yes" : "no"));
+    if (destinationExisted && !request.overwriteConfirmed)
     {
         return juce::Result::fail("Export cancelled (existing file was not confirmed for overwrite):\n"
                                   + request.outputFile.getFullPathName());
@@ -202,19 +264,23 @@ juce::Result exportStereoMixdownWavBlocking(
 
     ScopedOfflineRenderGate offlineGate(playbackEngine);
 
-    // FileOutputStream appends to an existing file (stream starts at the end), which would leave
-    // the old audio in place and write a second WAV after it. Replace the file instead.
-    if (request.outputFile.existsAsFile() && !request.outputFile.deleteFile())
+    // Safe overwrite: render into a unique sibling temp file, then replace the destination only
+    // after the render fully succeeded. The old file survives any render/disk failure, and
+    // FileOutputStream never sees an existing file (it would append to one).
+    const juce::File renderTempFile
+        = allocateUniqueSiblingTempFile(request.outputFile, ".__dal_wav_render_", ".wav");
+    if (renderTempFile == juce::File{})
     {
-        appendMixdownDiagnosticLine("FAIL could not delete existing output file for overwrite");
-        return juce::Result::fail("Could not replace the existing file:\n"
-                                  + request.outputFile.getFullPathName());
+        return juce::Result::fail("Could not allocate a temporary render file path.");
     }
+    appendMixdownDiagnosticLine("wav render temp=\"" + renderTempFile.getFullPathName() + "\"");
 
-    auto fileStream = std::make_unique<juce::FileOutputStream>(request.outputFile);
+    auto fileStream = std::make_unique<juce::FileOutputStream>(renderTempFile);
     if (fileStream->failedToOpen())
     {
-        return juce::Result::fail("Could not open file for writing:\n" + request.outputFile.getFullPathName());
+        appendMixdownDiagnosticLine("FAIL could not open render temp for writing");
+        return juce::Result::fail("Could not open file for writing:\n"
+                                  + renderTempFile.getFullPathName());
     }
 
     juce::WavAudioFormat wavFormat;
@@ -227,29 +293,39 @@ juce::Result exportStereoMixdownWavBlocking(
                                                                               0));
     if (writer == nullptr)
     {
+        (void)renderTempFile.deleteFile();
         return juce::Result::fail("Could not create WAV writer for the requested format.");
     }
+
+    // Closes the writer (releasing the file handle) and removes the temp; the destination is
+    // untouched on every one of these failure paths.
+    const auto failAndDiscardTemp = [&writer, &renderTempFile](const juce::String& message) {
+        writer.reset();
+        (void)renderTempFile.deleteFile();
+        return juce::Result::fail(message);
+    };
 
     if (request.bits == MixdownWaveBits::IeeeFloat32)
     {
         if (!writer->isFloatingPoint())
         {
-            return juce::Result::fail("This build cannot write IEEE float WAV (writer is not floating-point).");
+            return failAndDiscardTemp(
+                "This build cannot write IEEE float WAV (writer is not floating-point).");
         }
         if (writer->getBitsPerSample() != 32)
         {
-            return juce::Result::fail("Unexpected WAV writer bit depth for float export.");
+            return failAndDiscardTemp("Unexpected WAV writer bit depth for float export.");
         }
     }
     else
     {
         if (writer->isFloatingPoint())
         {
-            return juce::Result::fail("WAV writer unexpectedly reported floating-point for PCM export.");
+            return failAndDiscardTemp("WAV writer unexpectedly reported floating-point for PCM export.");
         }
         if (writer->getBitsPerSample() != bits)
         {
-            return juce::Result::fail("WAV writer bit depth does not match the requested format.");
+            return failAndDiscardTemp("WAV writer bit depth does not match the requested format.");
         }
     }
 
@@ -283,8 +359,7 @@ juce::Result exportStereoMixdownWavBlocking(
         if (!writer->writeFromAudioSampleBuffer(stereoBlock, 0, n))
         {
             appendMixdownDiagnosticLine("FAIL disk write at pos=" + juce::String((juce::int64)pos));
-            request.outputFile.deleteFile();
-            return juce::Result::fail("Disk write failed during mixdown.");
+            return failAndDiscardTemp("Disk write failed during mixdown.");
         }
         pos += static_cast<std::int64_t>(n);
 
@@ -307,6 +382,14 @@ juce::Result exportStereoMixdownWavBlocking(
     appendMixdownDiagnosticLine("writer close begin");
     writer.reset();
     appendMixdownDiagnosticLine("writer close end");
+
+    // Only now (render fully succeeded, file handle closed) does the old destination get replaced.
+    const juce::Result replaceResult
+        = replaceDestinationWithRenderedTemp(renderTempFile, request.outputFile);
+    if (replaceResult.failed())
+    {
+        return replaceResult;
+    }
     appendMixdownDiagnosticLine("wav export ok path=\"" + request.outputFile.getFullPathName() + "\"");
     return juce::Result::ok();
 }
@@ -378,7 +461,11 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     }
 
     // See the WAV exporter: overwrite consent must be collected by the caller before export.
-    if (mp3OutputFile.existsAsFile() && !overwriteConfirmed)
+    const bool destinationExisted = mp3OutputFile.existsAsFile();
+    appendMixdownDiagnosticLine(juce::String("mp3 destination existed=")
+                                + (destinationExisted ? "yes" : "no")
+                                + " overwriteConfirmed=" + (overwriteConfirmed ? "yes" : "no"));
+    if (destinationExisted && !overwriteConfirmed)
     {
         return juce::Result::fail("Export cancelled (existing file was not confirmed for overwrite):\n"
                                   + mp3OutputFile.getFullPathName());
@@ -399,23 +486,22 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     appendMixdownDiagnosticLine("mp3 outer gate: hold realtime through render + LAME");
     ScopedOfflineRenderGate mp3OuterGate(playbackEngine);
 
-    juce::File tempWav;
-    for (int attempt = 0; attempt < 16; ++attempt)
-    {
-        (void)attempt;
-        const juce::String unique = juce::String::toHexString(juce::Random::getSystemRandom().nextInt64());
-        tempWav = mp3OutputFile.getSiblingFile(mp3OutputFile.getFileNameWithoutExtension()
-                                               + ".__dal_mp3_source_" + unique + ".wav");
-        if (!tempWav.existsAsFile())
-        {
-            break;
-        }
-    }
-
-    if (tempWav == juce::File{} || tempWav.existsAsFile())
+    const juce::File tempWav
+        = allocateUniqueSiblingTempFile(mp3OutputFile, ".__dal_mp3_source_", ".wav");
+    if (tempWav == juce::File{})
     {
         return juce::Result::fail("Could not allocate a temporary WAV file path.");
     }
+    // LAME encodes into a temp MP3 too; the real destination is only replaced after a successful
+    // encode, so a LAME failure can never leave the old MP3 half-overwritten or deleted.
+    const juce::File tempMp3
+        = allocateUniqueSiblingTempFile(mp3OutputFile, ".__dal_mp3_encode_", ".mp3");
+    if (tempMp3 == juce::File{})
+    {
+        return juce::Result::fail("Could not allocate a temporary MP3 file path.");
+    }
+    appendMixdownDiagnosticLine("mp3 temps wav=\"" + tempWav.getFullPathName() + "\" mp3=\""
+                                + tempMp3.getFullPathName() + "\"");
 
     MixdownExportRequest wavRequest;
     wavRequest.outputFile = tempWav;
@@ -450,7 +536,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     args.add("-b");
     args.add(juce::String(bitrateKbps));
     args.add(tempWav.getFullPathName());
-    args.add(mp3OutputFile.getFullPathName());
+    args.add(tempMp3.getFullPathName());
 
     appendMixdownDiagnosticLine("lame start exe=\"" + lameExe.getFullPathName() + "\"");
     if (progressSink != nullptr)
@@ -492,6 +578,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     {
         appendMixdownDiagnosticLine("FAIL lame timed out");
         (void)lameProcess.kill();
+        (void)tempMp3.deleteFile();
         const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
         return juce::Result::fail("MP3 encoding timed out." + kept);
     }
@@ -502,6 +589,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
 
     if (exitCode != 0)
     {
+        (void)tempMp3.deleteFile();
         juce::String msg = "MP3 encoding failed.";
         if (lameStderr.isNotEmpty())
         {
@@ -511,8 +599,9 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
         return juce::Result::fail(msg);
     }
 
-    if (!mp3OutputFile.existsAsFile() || mp3OutputFile.getSize() == 0)
+    if (!tempMp3.existsAsFile() || tempMp3.getSize() == 0)
     {
+        (void)tempMp3.deleteFile();
         juce::String msg = "MP3 output file was not created.";
         if (lameStderr.isNotEmpty())
         {
@@ -523,6 +612,13 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     }
 
     (void)tempWav.deleteFile();
+
+    // Encode fully succeeded; only now is the old destination replaced (see WAV path).
+    const juce::Result replaceResult = replaceDestinationWithRenderedTemp(tempMp3, mp3OutputFile);
+    if (replaceResult.failed())
+    {
+        return replaceResult;
+    }
     appendMixdownDiagnosticLine("mp3 export ok path=\"" + mp3OutputFile.getFullPathName() + "\"");
     return juce::Result::ok();
 }

@@ -10,6 +10,13 @@ builds miss.
 > installer** produced by `.\scripts\package-windows.ps1`. ASan/PageHeap builds
 > are slow, memory-heavy, and abort on the first detected error.
 
+> **When to run what:** the scenarios and matrix in this document are heavy
+> gates, not per-edit checks. For ordinary implementation slices use the tiered
+> policy in **`docs/DEVELOPMENT_TEST_POLICY.md`** (Level 0–4) and run only the
+> scenarios relevant to the changed subsystem. The full matrix is Level 3:
+> explicit request, pre-commit batch, multi-subsystem or crash-fix changes,
+> and pre-release only.
+
 ---
 
 ## 1. What ASan is and when to use it
@@ -175,22 +182,44 @@ user's project file and never changes what Ctrl+S does.
 
 Where the files live:
 
-- Saved project: `<projectFolder>\autosave.dalproj` (next to the project file
-  so `Audio/`-relative clip paths keep resolving).
+- Saved project: `<projectFolder>\<projectStem>_autosave.dalproj` (e.g.
+  `beakon_test5_autosave.dalproj`, next to the project file so
+  `Audio/`-relative clip paths keep resolving). The project-specific name
+  means projects sharing a folder get distinct autosaves.
 - Never-saved project: `%APPDATA%\MiniDAWLab\autosave.dalproj` (works for
   MIDI-only/internal data; a never-saved project referencing external audio
   may fail the relative-path check — the failure is logged, nothing breaks).
 - Pointer file: `%APPDATA%\MiniDAWLab\autosave-location.txt` (line 1 =
-  autosave path, line 2 = the project it belongs to).
+  autosave path, line 2 = the project it belongs to). Recovery always goes
+  through the pointer, never filename guessing.
 - Diagnostics: `%APPDATA%\MiniDAWLab\autosave-diag.log` (tick skips, writes
-  with size/elapsed, failures, recovery outcomes, stale-pointer cleanup).
+  with size/elapsed/next interval, failures, recovery outcomes,
+  stale-pointer cleanup).
 
-Policy: a periodic tick fires every 60 s and writes only when the project is
-dirty and nothing blocks it (recording/count-in, any modal dialog, stability
-test mode). Skips are logged with a reason and simply retried on the next
-tick. Writes are atomic (temp file + move) and a failed write never deletes a
+Backward compatibility: autosaves written by older builds were all named
+`<projectFolder>\autosave.dalproj`. A pointer that references such a file
+still recovers normally (logged as `legacy pointer accepted`), and a
+successful manual save also cleans up a legacy-named sibling autosave. The
+next autosave after that uses the new project-specific name.
+
+Policy (adaptive interval): an internal tick fires every 60 s, but writes
+follow an adaptive schedule so large projects are not autosaved too
+aggressively:
+
+- First autosave: roughly 60–120 s after the project becomes dirty (the
+  first tick that observes the dirty state schedules a write one minute out).
+- After a successful write, the next interval depends on how long that write
+  took: `< 250 ms` → 2 min, `250 ms–1 s` → 5 min, `1–3 s` → 10 min,
+  `> 3 s` → 15 min (also logged as a slow-write note).
+- A write only happens when the project is dirty and nothing blocks it
+  (recording/count-in, any modal dialog, stability test mode). Blocked or
+  failed writes are logged with a reason and retried on the next tick
+  without resetting the schedule; a clean project resets the schedule.
+
+Writes are atomic (temp file + move) and a failed write never deletes a
 previous valid autosave and never clears the dirty state. A successful manual
-save deletes the autosave and pointer.
+save deletes the autosave (including a legacy-named one) and the pointer,
+but never an autosave the pointer attributes to a *different* project.
 
 Automated scenarios:
 
@@ -201,17 +230,21 @@ Automated scenarios:
 .\scripts\stability-matrix.ps1 -Project "C:\path\project.dalproj" -IncludeAutosave
 ```
 
-They load the project, make a dirty edit, force an autosave, verify the file,
-pointer, and that the original project file is byte-identical afterwards; the
-recover variant additionally runs the recovery path in-process and verifies
-the recovered project is dirty, contains the edit, and has **no** save path
-(so Save goes through Save As and can never silently overwrite the original).
+They load the project, make a dirty edit, force an autosave, verify the file
+(project-specific `<stem>_autosave.dalproj` name), the pointer (path + owner
+lines), and that the original project file is byte-identical afterwards; the
+recover variant additionally runs the recovery path in-process, verifies the
+recovered project is dirty, contains the edit, and has **no** save path
+(so Save goes through Save As and can never silently overwrite the original),
+and finally stages a legacy-named `autosave.dalproj` with a matching pointer
+to verify old autosaves still recover.
 
 Manual recovery test:
 
 1. Open a project, make an edit (dirty), do not save.
-2. Wait ≥ 60 s for the periodic autosave (check `autosave-diag.log` for
-   "write ok"), or run the `--stability-autosave` scenario instead.
+2. Wait for the periodic autosave — first write lands 60–120 s after the
+   edit (check `autosave-diag.log` for "write ok" and the chosen
+   `nextIntervalSec`), or run the `--stability-autosave` scenario instead.
 3. Kill the process (Task Manager), or use `--stability-crash-test` if you
    also want to exercise the crash-dump pipeline.
 4. Restart the app normally; choose **Recover** in the prompt.

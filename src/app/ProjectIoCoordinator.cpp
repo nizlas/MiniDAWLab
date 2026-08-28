@@ -322,6 +322,35 @@ namespace
     // startup recovery check can find per-project autosaves.
     // -----------------------------------------------------------------------
 
+    // Autosave polish: adaptive periodic-autosave policy. All thresholds live here; nothing
+    // else in the file hardcodes an interval. The periodic timer ticks once per minute, but a
+    // write only happens when the adaptive due time has passed, so large/slow projects are not
+    // autosaved every minute forever.
+    namespace autosave_policy
+    {
+        /// Internal tick; also the retry cadence when a due autosave is blocked or fails.
+        constexpr int kTickMs = 60 * 1000;
+        /// Minimum delay between the first tick that observes a dirty project and the first write.
+        constexpr int kFirstDelayMs = 60 * 1000;
+
+        // Last-write-duration thresholds -> next interval.
+        constexpr int kFastWriteMs = 250;
+        constexpr int kSlowWriteMs = 1000;
+        constexpr int kVerySlowWriteMs = 3000;
+        constexpr int kIntervalFastMs = 2 * 60 * 1000;
+        constexpr int kIntervalDefaultMs = 5 * 60 * 1000;
+        constexpr int kIntervalSlowMs = 10 * 60 * 1000;
+        constexpr int kIntervalVerySlowMs = 15 * 60 * 1000;
+
+        [[nodiscard]] constexpr int intervalForElapsedMs(const int elapsedMs) noexcept
+        {
+            if (elapsedMs < kFastWriteMs) { return kIntervalFastMs; }
+            if (elapsedMs <= kSlowWriteMs) { return kIntervalDefaultMs; }
+            if (elapsedMs <= kVerySlowWriteMs) { return kIntervalSlowMs; }
+            return kIntervalVerySlowMs;
+        }
+    } // namespace autosave_policy
+
     [[nodiscard]] juce::File autosaveAppDataDirectory()
     {
         return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -357,6 +386,15 @@ namespace
                 const juce::File f(recorded);
                 if (f.existsAsFile())
                 {
+                    // Backward compatibility: autosaves written before the project-specific
+                    // naming ("<stem>_autosave.dalproj") were all called "autosave.dalproj".
+                    // The pointer is authoritative, so they still recover fine; log for triage.
+                    if (f.getFileName().equalsIgnoreCase("autosave.dalproj")
+                        && f != defaultAppDataAutosaveFile())
+                    {
+                        appendAutosaveDiagnosticLine("legacy pointer accepted: path="
+                                                     + f.getFullPathName());
+                    }
                     return f;
                 }
                 appendAutosaveDiagnosticLine(
@@ -470,10 +508,12 @@ ProjectIoCoordinator::ProjectIoCoordinator(Transport& transport,
         }
     });
 
-    // Stability C5: conservative periodic autosave. The first tick fires a full interval after
-    // startup, so the window/session are stable by then; the timer dies with this coordinator
-    // (before app shutdown tears the session down).
-    startTimer(60 * 1000);
+    // Stability C5 + autosave polish: the timer ticks once per minute, but writes follow the
+    // adaptive schedule in timerCallback (first write >= 60s after dirty is observed, then an
+    // interval derived from how long the last write took; see autosave_policy). The first tick
+    // fires a full minute after startup, so the window/session are stable by then; the timer
+    // dies with this coordinator (before app shutdown tears the session down).
+    startTimer(autosave_policy::kTickMs);
 }
 
 void ProjectIoCoordinator::saveProject()
@@ -518,6 +558,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
         }
+        std::optional<ProjectFileMainWindowBoundsV1> midiEditorWinBounds;
+        if (callbacks_.getMidiEditorWindowBoundsForProjectSave != nullptr)
+        {
+            midiEditorWinBounds = callbacks_.getMidiEditorWindowBoundsForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: "
                                      + session_.getCurrentProjectFile().getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
@@ -528,7 +573,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             ctlLookup,
             snapRoot.enabled,
             snapRoot.resolutionKey,
-            mainWinBounds);
+            mainWinBounds,
+            midiEditorWinBounds);
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -629,6 +675,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
         }
+        std::optional<ProjectFileMainWindowBoundsV1> midiEditorWinBounds;
+        if (callbacks_.getMidiEditorWindowBoundsForProjectSave != nullptr)
+        {
+            midiEditorWinBounds = callbacks_.getMidiEditorWindowBoundsForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
             transport_,
@@ -638,7 +689,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             ctlLookup,
             snapRoot.enabled,
             snapRoot.resolutionKey,
-            mainWinBounds);
+            mainWinBounds,
+            midiEditorWinBounds);
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -940,7 +992,9 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         writeLastOperationBreadcrumb("project load end ok: " + f.getFullPathName());
         // Stability C3: verify runtime invariants right after the load completed.
         (void) stability_invariants::runRegisteredStabilityInvariantsCheck("project-load-end");
-        if (parsedLoad.hasMainWindowBounds && callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
+        // Always invoked (even without saved bounds) so the MIDI editor bounds memo is seeded or
+        // cleared per project; the callee no-ops per window when the project has no bounds.
+        if (callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
         {
             callbacks_.applyMainWindowBoundsFromLoadedProject(parsedLoad);
         }
@@ -988,6 +1042,8 @@ void ProjectIoCoordinator::markProjectCleanNow() noexcept
 {
     cleanSessionSnapshot_ = session_.loadSessionSnapshotForAudioThread();
     instrumentOrPluginEditsSinceClean_ = false;
+    // A clean project needs no autosave; the next dirty phase starts from the initial delay.
+    nextPeriodicAutosaveDueMs_ = 0;
 }
 
 void ProjectIoCoordinator::markProjectDirtyFromEdit() noexcept
@@ -1123,10 +1179,14 @@ bool ProjectIoCoordinator::interceptQuitForUnsavedChanges()
 juce::File ProjectIoCoordinator::resolveAutosaveTargetFile() const
 {
     // Audio clip paths must stay `Audio/`-relative to the written file's folder, so a project
-    // with a known on-disk location autosaves next to its own project file.
+    // with a known on-disk location autosaves next to its own project file. The name is
+    // project-specific ("<stem>_autosave.dalproj") so projects sharing a folder get distinct
+    // autosaves; the stem comes from an existing on-disk file, so it needs no sanitizing.
     if (session_.hasKnownProjectFile())
     {
-        return session_.getCurrentProjectFile().getSiblingFile("autosave.dalproj");
+        const juce::File projectFile = session_.getCurrentProjectFile();
+        return projectFile.getSiblingFile(projectFile.getFileNameWithoutExtension()
+                                          + "_autosave.dalproj");
     }
     return defaultAppDataAutosaveFile();
 }
@@ -1147,8 +1207,11 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     const juce::String projectDesc = session_.hasKnownProjectFile()
                                          ? session_.getCurrentProjectFile().getFullPathName()
                                          : juce::String("(never saved)");
+    const juce::String targetKind
+        = session_.hasKnownProjectFile() ? juce::String("project-specific") : juce::String("appdata");
     appendAutosaveDiagnosticLine("write begin (" + reason + "): project=" + projectDesc
                                  + " target=" + autosaveFile.getFullPathName()
+                                 + " kind=" + targetKind
                                  + " dirty=" + (isProjectDirty() ? "yes" : "no"));
 
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
@@ -1177,6 +1240,11 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     {
         mainWinBounds = callbacks_.getMainWindowBoundsForProjectSave();
     }
+    std::optional<ProjectFileMainWindowBoundsV1> midiEditorWinBounds;
+    if (callbacks_.getMidiEditorWindowBoundsForProjectSave != nullptr)
+    {
+        midiEditorWinBounds = callbacks_.getMidiEditorWindowBoundsForProjectSave();
+    }
 
     // `saveProjectToFile` records the written file as the current project on success; the autosave
     // must never hijack the user's normal save target, so restore it afterwards. The write itself
@@ -1193,7 +1261,8 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
         ctlLookup,
         snapRoot.enabled,
         snapRoot.resolutionKey,
-        mainWinBounds);
+        mainWinBounds,
+        midiEditorWinBounds);
     session_.setCurrentProjectFile(normalProjectFile);
 
     const int elapsedMs = static_cast<int>(juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);
@@ -1212,10 +1281,20 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     // stale autosave is distinguishable from the current project's).
     const bool pointerOk = autosavePointerFile().replaceWithText(
         autosaveFile.getFullPathName() + "\n" + projectDesc + "\n");
+    lastAutosaveElapsedMs_ = elapsedMs;
     appendAutosaveDiagnosticLine("write ok (" + reason + "): " + autosaveFile.getFullPathName()
+                                 + " kind=" + targetKind
                                  + " size=" + juce::String(autosaveFile.getSize())
                                  + " elapsedMs=" + juce::String(elapsedMs)
                                  + " pointer=" + (pointerOk ? "updated" : "WRITE FAILED"));
+    if (elapsedMs > autosave_policy::kVerySlowWriteMs)
+    {
+        appendAutosaveDiagnosticLine("note: autosave write was slow (elapsedMs="
+                                     + juce::String(elapsedMs)
+                                     + "); periodic interval backs off to "
+                                     + juce::String(autosave_policy::kIntervalVerySlowMs / 1000)
+                                     + "s");
+    }
     writeLastOperationBreadcrumb("autosave end ok (" + reason + ")");
     return juce::Result::ok();
 }
@@ -1252,18 +1331,55 @@ juce::String ProjectIoCoordinator::periodicAutosaveBlockReason() const
 
 void ProjectIoCoordinator::timerCallback()
 {
+    namespace policy = autosave_policy;
     if (!isProjectDirty())
     {
-        return; // Nothing to protect; stay silent so autosave-diag.log does not fill up idle.
+        // Nothing to protect; drop any schedule so the next dirty phase starts from the initial
+        // delay again. Stay silent so autosave-diag.log does not fill up while idle.
+        nextPeriodicAutosaveDueMs_ = 0;
+        return;
+    }
+    const juce::int64 nowMs = juce::Time::currentTimeMillis();
+    if (nextPeriodicAutosaveDueMs_ == 0)
+    {
+        // First tick that observes the dirty state: schedule, do not write yet. Combined with
+        // the minute tick this puts the first write 60-120s after the project became dirty.
+        nextPeriodicAutosaveDueMs_ = nowMs + policy::kFirstDelayMs;
+        appendAutosaveDiagnosticLine(
+            "tick: dirty observed; first autosave due "
+            + juce::Time(nextPeriodicAutosaveDueMs_).formatted("%H:%M:%S"));
+        return;
+    }
+    if (nowMs < nextPeriodicAutosaveDueMs_)
+    {
+        appendAutosaveDiagnosticLine("tick skipped: not due nextDue="
+                                     + juce::Time(nextPeriodicAutosaveDueMs_).formatted("%H:%M:%S")
+                                     + " (dirty=yes)");
+        return;
     }
     const juce::String blockReason = periodicAutosaveBlockReason();
     if (blockReason.isNotEmpty())
     {
-        // Skip (never queue): the next tick retries in 60s.
-        appendAutosaveDiagnosticLine("tick skipped: " + blockReason + " (dirty=yes)");
+        // Skip (never queue) and keep the due time in the past: the next tick retries in 60s.
+        appendAutosaveDiagnosticLine("tick skipped: blocked reason=" + blockReason
+                                     + " (dirty=yes, autosave due; retrying next tick)");
         return;
     }
-    (void)writeAutosaveNow("periodic");
+    const juce::Result r = writeAutosaveNow("periodic");
+    if (r.wasOk())
+    {
+        const int nextIntervalMs = policy::intervalForElapsedMs(lastAutosaveElapsedMs_);
+        nextPeriodicAutosaveDueMs_ = nowMs + nextIntervalMs;
+        appendAutosaveDiagnosticLine(
+            "periodic schedule: elapsedMs=" + juce::String(lastAutosaveElapsedMs_)
+            + " nextIntervalSec=" + juce::String(nextIntervalMs / 1000) + " nextDue="
+            + juce::Time(nextPeriodicAutosaveDueMs_).formatted("%H:%M:%S"));
+    }
+    else
+    {
+        // Failed write protected nothing; retry on the next tick (due time stays in the past).
+        appendAutosaveDiagnosticLine("periodic schedule: write failed; retrying next tick");
+    }
 }
 
 bool ProjectIoCoordinator::forceAutosaveNowForStabilityTest(juce::String& failReasonOut)
@@ -1299,8 +1415,14 @@ bool ProjectIoCoordinator::recoverAutosaveNowForStabilityTest(juce::String& fail
         failReasonOut = "no autosave file found";
         return false;
     }
-    appendAutosaveDiagnosticLine("recovery (stability test): loading "
-                                 + autosaveFile.getFullPathName());
+    {
+        juce::StringArray pointerLines;
+        autosavePointerFile().readLines(pointerLines);
+        const juce::String owner = pointerLines.size() > 1 ? pointerLines[1].trim()
+                                                           : juce::String("(unknown/legacy)");
+        appendAutosaveDiagnosticLine("recovery (stability test): loading "
+                                     + autosaveFile.getFullPathName() + " owner=" + owner);
+    }
     // Invariant 8 tolerates the save path *being* the autosave only while this flag is set.
     stability_invariants::setAutosaveRecoveryInProgress(true);
     loadProjectFromFile(autosaveFile);
@@ -1335,16 +1457,42 @@ void ProjectIoCoordinator::deleteAutosaveArtifactsAfterSuccessfulSave()
 {
     const juce::File pointer = autosavePointerFile();
     juce::File recorded;
+    juce::String recordedOwner;
     if (pointer.existsAsFile())
     {
-        const juce::String s = pointer.loadFileAsString().trim();
+        // Line 1 = autosave path; line 2 (optional) = the original project it belongs to.
+        juce::StringArray lines;
+        pointer.readLines(lines);
+        const juce::String s = lines.size() > 0 ? lines[0].trim() : juce::String{};
         if (s.isNotEmpty() && juce::File::isAbsolutePath(s))
         {
             recorded = juce::File(s);
         }
+        recordedOwner = lines.size() > 1 ? lines[1].trim() : juce::String{};
     }
+    // With project-specific autosave names, the recorded autosave can belong to a *different*
+    // project (e.g. the user saved project B while project A's autosave is still recorded).
+    // Only delete the recorded file when the pointer's owner line matches this project (or is
+    // missing, for pre-C5/legacy pointers); the pointer itself is always cleared.
+    const juce::String currentProjectPath = session_.hasKnownProjectFile()
+                                                ? session_.getCurrentProjectFile().getFullPathName()
+                                                : juce::String{};
+    if (recorded.getFullPathName().isNotEmpty() && recordedOwner.isNotEmpty()
+        && currentProjectPath.isNotEmpty() && recordedOwner != currentProjectPath)
+    {
+        appendAutosaveDiagnosticLine("cleanup: recorded autosave kept (belongs to different "
+                                     "project: " + recordedOwner + ")");
+        recorded = juce::File{};
+    }
+    // Legacy sibling "autosave.dalproj" (pre-project-specific naming) is also cleaned up, so an
+    // old autosave next to this project cannot trigger recovery prompts after a successful save.
+    const juce::File legacySibling = session_.hasKnownProjectFile()
+                                         ? session_.getCurrentProjectFile().getSiblingFile(
+                                               "autosave.dalproj")
+                                         : juce::File{};
     bool deletedAny = false;
-    for (const juce::File& f : { recorded, defaultAppDataAutosaveFile(), resolveAutosaveTargetFile() })
+    for (const juce::File& f :
+         { recorded, defaultAppDataAutosaveFile(), resolveAutosaveTargetFile(), legacySibling })
     {
         if (f.getFullPathName().isNotEmpty() && f.existsAsFile() && f.deleteFile())
         {

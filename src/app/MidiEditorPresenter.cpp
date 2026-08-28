@@ -4,6 +4,7 @@
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#include "app/ProjectMainWindowBounds.h"
 #include "domain/Session.h"
 #include "engine/RecorderService.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -240,10 +241,16 @@ void MidiEditorPresenter::openMidiEditorForInstrumentClip(const TrackId timeline
 
     alignInstrumentClipSelectionForMidiEditor(*ctl, clipId);
     midiEditorOpenedForInstrumentTrackId_ = timelineInstrumentTrackId;
+    rememberMidiEditorWindowBoundsIfWindowExists();
     midiEditorWindow_.reset();
     midiEditorWindow_ = std::make_unique<ExperimentalMidiEditorWindow>(*mh);
     wireMidiEditorForOpenClip(timelineInstrumentTrackId, clip);
     midiEditorWindow_->refreshArrangementSnapMirrorFromSession();
+    if (midiEditorWindowBoundsMemo_.has_value())
+    {
+        (void)applyProjectWindowBoundsClamped(*midiEditorWindow_, *midiEditorWindowBoundsMemo_,
+                                              kMidiEditorWindowMinW, kMidiEditorWindowMinH);
+    }
     midiEditorWindow_->setVisible(true);
     midiEditorWindow_->toFront(true);
 }
@@ -319,10 +326,50 @@ void MidiEditorPresenter::resetWindowAndBooking() noexcept
 {
     if (midiEditorWindow_ != nullptr)
     {
+        rememberMidiEditorWindowBoundsIfWindowExists();
         midiEditorWindow_->prepareInstrumentUnloadFromHost();
     }
     midiEditorWindow_.reset();
     midiEditorOpenedForInstrumentTrackId_.reset();
+}
+
+void MidiEditorPresenter::rememberMidiEditorWindowBoundsIfWindowExists() noexcept
+{
+    if (midiEditorWindow_ == nullptr)
+    {
+        return;
+    }
+    const std::optional<ProjectFileMainWindowBoundsV1> b = captureProjectWindowBoundsForProjectSave(
+        *midiEditorWindow_, kMidiEditorWindowMinW, kMidiEditorWindowMinH);
+    if (b.has_value())
+    {
+        midiEditorWindowBoundsMemo_ = b;
+    }
+}
+
+void MidiEditorPresenter::setMidiEditorWindowBoundsFromLoadedProject(
+    const ProjectFileV1& projectFile) noexcept
+{
+    if (projectFile.hasMidiEditorWindowBounds)
+    {
+        midiEditorWindowBoundsMemo_ = projectFile.midiEditorWindowBounds;
+    }
+    else
+    {
+        midiEditorWindowBoundsMemo_.reset();
+    }
+    if (midiEditorWindow_ != nullptr && midiEditorWindowBoundsMemo_.has_value())
+    {
+        (void)applyProjectWindowBoundsClamped(*midiEditorWindow_, *midiEditorWindowBoundsMemo_,
+                                              kMidiEditorWindowMinW, kMidiEditorWindowMinH);
+    }
+}
+
+std::optional<ProjectFileMainWindowBoundsV1>
+MidiEditorPresenter::getMidiEditorWindowBoundsForProjectSave() noexcept
+{
+    rememberMidiEditorWindowBoundsIfWindowExists();
+    return midiEditorWindowBoundsMemo_;
 }
 
 void MidiEditorPresenter::resetWindowAndBookingIfOpenOnTrack(const TrackId tid) noexcept
@@ -330,6 +377,7 @@ void MidiEditorPresenter::resetWindowAndBookingIfOpenOnTrack(const TrackId tid) 
     if (midiEditorOpenedForInstrumentTrackId_.has_value()
         && midiEditorOpenedForInstrumentTrackId_.value() == tid)
     {
+        rememberMidiEditorWindowBoundsIfWindowExists();
         midiEditorWindow_.reset();
         midiEditorOpenedForInstrumentTrackId_.reset();
     }

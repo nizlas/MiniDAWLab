@@ -764,11 +764,21 @@ void StabilityScenarioRunner::appendAutosaveSteps(const juce::File& project,
 
     steps_.push_back(Step{
         label + ": verify autosave file and pointer",
-        [this, autosaveFile](juce::String& failReason) -> bool {
+        [this, project, autosaveFile](juce::String& failReason) -> bool {
             if (!autosaveFile->existsAsFile() || autosaveFile->getSize() <= 0)
             {
                 failReason = "autosave file missing or empty: "
                              + autosaveFile->getFullPathName();
+                return false;
+            }
+            // Autosave polish: a saved project's autosave must use the project-specific name
+            // "<stem>_autosave.dalproj" next to the project file.
+            const juce::String expectedName
+                = project.getFileNameWithoutExtension() + "_autosave.dalproj";
+            if (!autosaveFile->getFileName().equalsIgnoreCase(expectedName))
+            {
+                failReason = "autosave file name is \"" + autosaveFile->getFileName()
+                             + "\", expected project-specific \"" + expectedName + "\"";
                 return false;
             }
             const juce::File pointer = hooks_.getAutosavePointerFilePath
@@ -788,9 +798,17 @@ void StabilityScenarioRunner::appendAutosaveSteps(const juce::File& project,
                              + autosaveFile->getFullPathName() + "\"";
                 return false;
             }
+            // Line 2 (owner) must attribute the autosave to the original project.
+            const juce::String owner = lines.size() > 1 ? lines[1].trim() : juce::String{};
+            if (owner != project.getFullPathName())
+            {
+                failReason = "pointer owner line is \"" + owner + "\", expected \""
+                             + project.getFullPathName() + "\"";
+                return false;
+            }
             appendStabilityRunLine("  autosave ok: " + autosaveFile->getFullPathName() + " ("
                                    + juce::String(autosaveFile->getSize())
-                                   + " bytes), pointer matches");
+                                   + " bytes), pointer + owner match");
             return true;
         },
         kSettleDefaultMs });
@@ -882,19 +900,91 @@ void StabilityScenarioRunner::appendAutosaveSteps(const juce::File& project,
             return true;
         },
         kSettleDefaultMs });
+
+    if (withRecovery)
+    {
+        // Backward compatibility: autosaves written before the project-specific naming were all
+        // "<projectFolder>\autosave.dalproj", referenced by the pointer file. Simulate one and
+        // verify recovery still accepts it via pointer metadata (never filename guessing).
+        auto legacyFile = std::make_shared<juce::File>();
+        steps_.push_back(Step{
+            label + ": create legacy autosave + pointer (compat)",
+            [this, project, legacyFile](juce::String& failReason) -> bool {
+                *legacyFile = project.getSiblingFile("autosave.dalproj");
+                if (!project.copyFileTo(*legacyFile))
+                {
+                    failReason = "could not create legacy autosave copy: "
+                                 + legacyFile->getFullPathName();
+                    return false;
+                }
+                const juce::File pointer = hooks_.getAutosavePointerFilePath
+                                               ? hooks_.getAutosavePointerFilePath()
+                                               : juce::File{};
+                if (!pointer.replaceWithText(legacyFile->getFullPathName() + "\n"
+                                             + project.getFullPathName() + "\n"))
+                {
+                    failReason = "could not write legacy pointer file";
+                    return false;
+                }
+                appendStabilityRunLine("  legacy autosave staged: "
+                                       + legacyFile->getFullPathName());
+                return true;
+            },
+            kSettleDefaultMs });
+
+        steps_.push_back(Step{
+            label + ": recover legacy autosave (compat)",
+            [this](juce::String& failReason) -> bool {
+                if (!hooks_.recoverAutosaveNow)
+                {
+                    failReason = "recoverAutosaveNow hook missing";
+                    return false;
+                }
+                return hooks_.recoverAutosaveNow(failReason);
+            },
+            kSettleAfterLoadMs });
+
+        steps_.push_back(Step{
+            label + ": verify legacy recovery + cleanup (compat)",
+            [this, legacyFile](juce::String& failReason) -> bool {
+                const juce::String currentPath
+                    = hooks_.getCurrentProjectPath ? hooks_.getCurrentProjectPath()
+                                                   : juce::String{};
+                if (currentPath.isNotEmpty())
+                {
+                    failReason = "legacy recovery left a save path (\"" + currentPath + "\")";
+                    return false;
+                }
+                if (hooks_.getTrackCount() <= 0)
+                {
+                    failReason = "no tracks after legacy recovery";
+                    return false;
+                }
+                const bool fileDeleted = legacyFile->existsAsFile() && legacyFile->deleteFile();
+                const juce::File pointer = hooks_.getAutosavePointerFilePath
+                                               ? hooks_.getAutosavePointerFilePath()
+                                               : juce::File{};
+                const bool pointerDeleted = pointer.existsAsFile() && pointer.deleteFile();
+                appendStabilityRunLine(juce::String("  legacy recovery ok; cleanup: autosave ")
+                                       + (fileDeleted ? "deleted" : "absent/kept") + ", pointer "
+                                       + (pointerDeleted ? "deleted" : "absent/kept"));
+                return true;
+            },
+            kSettleDefaultMs });
+    }
 }
 
 void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, const bool mp3)
 {
     appendLoadAndVerifySteps(project, "mixdown setup");
 
+    const juce::File out
+        = juce::File::getSpecialLocation(juce::File::tempDirectory)
+              .getChildFile(mp3 ? "dal-stability-mixdown.mp3" : "dal-stability-mixdown.wav");
+
     steps_.push_back(Step{
         juce::String("mixdown: export ") + (mp3 ? "mp3" : "wav") + " to temp",
-        [this, mp3](juce::String& failReason) -> bool {
-            const juce::File out
-                = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                      .getChildFile(mp3 ? "dal-stability-mixdown.mp3"
-                                        : "dal-stability-mixdown.wav");
+        [this, out, mp3](juce::String& failReason) -> bool {
             (void)out.deleteFile();
             const juce::Result r = hooks_.runMixdownBlocking(out, mp3);
             if (!r.wasOk())
@@ -909,6 +999,50 @@ void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, cons
             }
             appendStabilityRunLine("  mixdown output ok: " + out.getFullPathName() + " ("
                                    + juce::String(out.getSize()) + " bytes)");
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // Overwrite regression test (tester report: "export did not replace the existing file").
+    // The destination is replaced with a small known sentinel, then exported over; if the second
+    // export silently skips/cancels/fails to replace, the sentinel is still there and this fails.
+    static const juce::String kSentinelText = "DAL_MIXDOWN_OVERWRITE_SENTINEL";
+    steps_.push_back(Step{
+        juce::String("mixdown: overwrite ") + (mp3 ? "mp3" : "wav") + " (sentinel replace)",
+        [this, out, mp3](juce::String& failReason) -> bool {
+            if (!out.replaceWithText(kSentinelText))
+            {
+                failReason = "could not write sentinel to " + out.getFullPathName();
+                return false;
+            }
+            const juce::int64 sentinelSize = out.getSize();
+            const juce::Result r = hooks_.runMixdownBlocking(out, mp3);
+            if (!r.wasOk())
+            {
+                failReason = "overwrite export failed: " + r.getErrorMessage();
+                return false;
+            }
+            if (!out.existsAsFile() || out.getSize() <= sentinelSize)
+            {
+                failReason = "output missing or not larger than sentinel after overwrite: "
+                             + out.getFullPathName();
+                return false;
+            }
+            juce::FileInputStream probe(out);
+            juce::MemoryBlock head;
+            probe.readIntoMemoryBlock(head, 64);
+            const juce::String headText = juce::String::fromUTF8(
+                static_cast<const char*>(head.getData()),
+                static_cast<int>(head.getSize()));
+            if (headText.contains(kSentinelText))
+            {
+                failReason = "destination still contains the sentinel; file was not replaced: "
+                             + out.getFullPathName();
+                return false;
+            }
+            appendStabilityRunLine("  overwrite ok: sentinel (" + juce::String(sentinelSize)
+                                   + " bytes) replaced by " + juce::String(out.getSize())
+                                   + " bytes of audio");
             (void)out.deleteFile();
             return true;
         },

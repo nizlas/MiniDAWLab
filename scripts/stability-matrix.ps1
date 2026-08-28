@@ -12,6 +12,11 @@
 # (0 = PASS, 1 = FAIL) and prints a summary. Each scenario has a hard timeout;
 # a timed-out app is killed and counted as FAIL.
 #
+# NOTE: this is a Level 3 test (see docs/DEVELOPMENT_TEST_POLICY.md). It is NOT
+# intended after every small edit — for ordinary feature work run the targeted
+# scenario flags directly (e.g. --stability-mixdown, --stability-autosave,
+# --stability-load-loop) or just a Debug build + manual check.
+#
 # Logs (all under %APPDATA%\MiniDAWLab):
 #   stability-run.log, project-load-diag.log, track-delete-diag.log,
 #   mixdown-diag.log, last-operation.txt, crash-dumps\

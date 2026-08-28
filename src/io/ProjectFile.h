@@ -184,6 +184,9 @@ struct ProjectFileMainWindowBoundsV1
     int y = 0;
     int width = 0;
     int height = 0;
+    /// Optional `maximized` JSON property (absent in older files → false). When true, the saved
+    /// x/y/w/h are the maximized bounds; restore applies bounds first, then re-maximizes.
+    bool maximized = false;
 };
 
 /// Optional Audio Mixdown UI settings (root `audioMixdown`); omitted in older projects.
@@ -231,6 +234,10 @@ struct ProjectFileV1
     /// Optional root `mainWindow` object; absent in older files → do not restore window geometry.
     bool hasMainWindowBounds = false;
     ProjectFileMainWindowBoundsV1 mainWindowBounds;
+    /// Optional root `midiEditorWindow` object; same shape/coordinates as `mainWindow`. Absent in
+    /// older files → MIDI editor opens with its default centred size. Never auto-opens the editor.
+    bool hasMidiEditorWindowBounds = false;
+    ProjectFileMainWindowBoundsV1 midiEditorWindowBounds;
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;

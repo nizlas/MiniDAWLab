@@ -19,6 +19,7 @@ Use this order of authority for **intent vs live shape**:
 | [`docs/CURRENT_ARCHITECTURE.md`](../../../docs/CURRENT_ARCHITECTURE.md) | **Baseline for how the codebase is wired today** — prefer over phase narratives, older docs, or chat when they disagree unless an explicit steer supersedes it |
 | [`docs/IMPLEMENTATION_GUIDE.md`](../../../docs/IMPLEMENTATION_GUIDE.md) | Phase discipline, escalation, workflow, Phase 1 interpretation, C++/clarity norms |
 | [`docs/VALIDATION_CHECKLIST.md`](../../../docs/VALIDATION_CHECKLIST.md) | Mandatory validation gate before declaring work complete |
+| [`docs/DEVELOPMENT_TEST_POLICY.md`](../../../docs/DEVELOPMENT_TEST_POLICY.md) | **Which tests to run for a slice (Level 0–4)** — do not run the full stability matrix for ordinary changes; pick the smallest falsifying test and report level + skipped tests |
 
 **Process / history (not primary “current wiring”)**
 

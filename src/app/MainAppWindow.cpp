@@ -924,8 +924,44 @@ public:
                 [this](const ProjectFileV1& loaded) {
                     if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
                     {
-                        applyLoadedProjectMainWindowBounds(*dw, loaded);
+                        if (loaded.hasMainWindowBounds)
+                        {
+                            const ProjectWindowBoundsRestoreOutcome outcome
+                                = applyProjectWindowBoundsClamped(*dw, loaded.mainWindowBounds, 320, 240);
+                            appendProjectLoadDiagnosticLine(
+                                "load: main window bounds restore x="
+                                + juce::String(loaded.mainWindowBounds.x)
+                                + " y=" + juce::String(loaded.mainWindowBounds.y)
+                                + " w=" + juce::String(loaded.mainWindowBounds.width)
+                                + " h=" + juce::String(loaded.mainWindowBounds.height)
+                                + " maximized=" + juce::String(loaded.mainWindowBounds.maximized ? 1 : 0)
+                                + " outcome=" + describeWindowBoundsRestoreOutcome(outcome));
+                        }
+                        else
+                        {
+                            appendProjectLoadDiagnosticLine(
+                                "load: no main window bounds in project (keeping current placement)");
+                        }
                     }
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->setMidiEditorWindowBoundsFromLoadedProject(loaded);
+                        appendProjectLoadDiagnosticLine(
+                            loaded.hasMidiEditorWindowBounds
+                                ? juce::String("load: MIDI editor bounds memo seeded x="
+                                               + juce::String(loaded.midiEditorWindowBounds.x) + " y="
+                                               + juce::String(loaded.midiEditorWindowBounds.y) + " w="
+                                               + juce::String(loaded.midiEditorWindowBounds.width) + " h="
+                                               + juce::String(loaded.midiEditorWindowBounds.height))
+                                : juce::String("load: no MIDI editor bounds in project (memo cleared)"));
+                    }
+                },
+                [this]() -> std::optional<ProjectFileMainWindowBoundsV1> {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        return midiEditorPresenter_->getMidiEditorWindowBoundsForProjectSave();
+                    }
+                    return std::nullopt;
                 },
                 [this] { showSavingProjectToast(); },
             });
@@ -1275,6 +1311,14 @@ public:
                     transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
                 }
             };
+            // Normal users get the replace prompt in the mixdown dialog; scenario runs are
+            // headless and deliberately re-export to the same temp output, so overwrite is
+            // auto-confirmed here (and logged, so a diag trace never looks like a silent skip).
+            if (outputFile.existsAsFile())
+            {
+                appendMixdownDiagnosticLine("stability test: overwrite auto-confirmed path=\""
+                                            + outputFile.getFullPathName() + "\"");
+            }
             if (mp3)
             {
                 return mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(
@@ -1641,6 +1685,14 @@ private:
             {
                 return "autosave pointer references missing file " + recorded
                        + " (recovery falls back cleanly)";
+            }
+            // Autosave polish: line 2 (owner project) must be an absolute path when present, so
+            // cleanup/recovery can attribute the autosave to the right project.
+            const juce::String owner = lines.size() > 1 ? lines[1].trim() : juce::String{};
+            if (owner.isNotEmpty() && owner != "(never saved)"
+                && !juce::File::isAbsolutePath(owner))
+            {
+                return "autosave pointer line 2 (owner) is not an absolute path: " + owner;
             }
             return {};
         };

@@ -39,6 +39,8 @@ public:
 
         std::function<std::optional<ProjectFileMainWindowBoundsV1>()> getMainWindowBoundsForProjectSave;
         std::function<void(const ProjectFileV1&)> applyMainWindowBoundsFromLoadedProject;
+        /// Optional: last known MIDI editor window bounds (live window or memo); nullopt = omit.
+        std::function<std::optional<ProjectFileMainWindowBoundsV1>()> getMidiEditorWindowBoundsForProjectSave;
 
         /// Optional: transient "Saving project" indicator, invoked right before the project file write.
         std::function<void()> showSavingProjectIndicator;
@@ -154,4 +156,11 @@ private:
 
     /// Stability C5: app-level block states (recording, count-in, ...) for the periodic tick.
     std::function<juce::String()> getAutosaveBlockReason_;
+
+    /// Autosave polish: adaptive periodic schedule. 0 = no autosave scheduled (project clean or
+    /// dirty state not yet observed by a tick). The timer still ticks every minute; a write only
+    /// happens once this due time (juce::Time::currentTimeMillis) has passed.
+    juce::int64 nextPeriodicAutosaveDueMs_ = 0;
+    /// Duration of the most recent successful autosave write (drives the next interval); -1 = none.
+    int lastAutosaveElapsedMs_ = -1;
 };

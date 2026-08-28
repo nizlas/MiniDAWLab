@@ -743,8 +743,9 @@ private:
         juce::AlertWindow::showOkCancelBox(
             juce::AlertWindow::WarningIcon,
             "Audio Mixdown",
-            "A file already exists at:\n\n" + plan.outputFile.getFullPathName() + "\n\nOverwrite it?",
-            "Overwrite",
+            "\"" + plan.outputFile.getFileName() + "\" already exists.\n\n"
+                + plan.outputFile.getFullPathName() + "\n\nDo you want to replace it?",
+            "Replace",
             "Cancel",
             this,
             juce::ModalCallbackFunction::create(

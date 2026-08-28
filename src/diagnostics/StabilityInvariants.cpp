@@ -483,8 +483,12 @@ bool verifyStableState(const juce::String& reason, const Context& ctx)
     if (ctx.getCurrentProjectFilePath)
     {
         const juce::String currentPath = ctx.getCurrentProjectFilePath();
-        if (currentPath.isNotEmpty()
-            && juce::File(currentPath).getFileName().equalsIgnoreCase("autosave.dalproj"))
+        // Recognized autosave names: the legacy/never-saved "autosave.dalproj" and the
+        // project-specific "<stem>_autosave.dalproj" (autosave polish).
+        const juce::String currentName = juce::File(currentPath).getFileName();
+        const bool isAutosaveName = currentName.equalsIgnoreCase("autosave.dalproj")
+                                    || currentName.endsWithIgnoreCase("_autosave.dalproj");
+        if (currentPath.isNotEmpty() && isAutosaveName)
         {
             if (isAutosaveRecoveryInProgress())
             {

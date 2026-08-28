@@ -88,6 +88,15 @@ public:
     void snapshotOpenClipViewportFromRollIfOpen() noexcept;
     void resetWindowAndBooking() noexcept;
 
+    /// Project load: remember (or clear) saved MIDI editor window bounds for this project.
+    /// Never auto-opens the editor; bounds apply on the next `openMidiEditorForInstrumentClip`.
+    void setMidiEditorWindowBoundsFromLoadedProject(const ProjectFileV1& projectFile) noexcept;
+
+    /// Project save: live window bounds if the editor window exists (even hidden), else the last
+    /// remembered bounds (from load or a previously open editor). nullopt = omit from project file.
+    [[nodiscard]] std::optional<ProjectFileMainWindowBoundsV1>
+    getMidiEditorWindowBoundsForProjectSave() noexcept;
+
     /// When deleting an instrument lane / track that had the MIDI editor targeted at it.
     void resetWindowAndBookingIfOpenOnTrack(TrackId tid) noexcept;
 
@@ -102,6 +111,10 @@ private:
     std::unique_ptr<ExperimentalMidiEditorWindow>& midiEditorWindow_;
     Callbacks callbacks_;
     std::optional<TrackId> midiEditorOpenedForInstrumentTrackId_;
+    /// Last known MIDI editor window bounds for the current project (loaded or user-moved).
+    std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsMemo_;
+
+    void rememberMidiEditorWindowBoundsIfWindowExists() noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiEditorPresenter)
 };
