@@ -240,3 +240,19 @@ with the crash dump and the other logs in section 7.
 - PageHeap `/full` can push memory usage very high on plugin-heavy projects;
   if the machine runs out of memory, retry with a smaller project or fewer
   iterations.
+
+## 10. Release certification gate (C6)
+
+Before any build is sent to an external tester, run the certification gate,
+which wraps everything in this document into one PASS/FAIL sequence with a
+written report:
+
+```powershell
+.\scripts\certify-release.ps1 -Project "C:\path\project.dalproj" -Iterations 5
+# stronger, after memory/lifetime-sensitive changes:
+.\scripts\certify-release.ps1 -Project "C:\path\project.dalproj" -IncludeAsan
+```
+
+See `docs/RELEASE_CERTIFICATION.md` for the full checklist, what to send to
+the tester (Release installer only), and what to archive internally. The
+tester-facing release notes template is `docs/TESTER_RELEASE_NOTES_TEMPLATE.md`.
