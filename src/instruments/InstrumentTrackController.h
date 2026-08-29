@@ -41,8 +41,8 @@ struct InstrumentMidiClip
     /// Matches `startSamples` until left trim moves the visible edge; outward left trim may place
     /// `startSamples` earlier than this anchor (empty lead-in before tick zero).
     std::int64_t timelineAnchorSamples = 0;
-    /// Locked pattern span in samples (explicit; user trim deferred). Recomputed only on clip create,
-    /// load when missing/zero, or **numSteps / stepDenom** change — **not** on BPM-only edits.
+    /// Locked pattern span in samples (explicit; user trim deferred). Recomputed only on clip create
+    /// or load when missing/zero — **not** on BPM-only edits.
     std::int64_t lengthSamples = 0;
     /// Legacy fractional lane layout when main timeline mapping is unavailable (fallback).
     int laneStartFractionPermille = 0;
@@ -293,10 +293,6 @@ public:
 
     /// Same rate as set by `setTimelineSampleRate` (arrangement note-preview tick->sample mapping).
     [[nodiscard]] double getTimelineSampleRate() const noexcept { return timelineSampleRate_; }
-
-    /// Recompute `lengthSamples` from pattern grid + `timelineSampleRate_` (create / load repair /
-    /// numSteps or stepDenom edits only — not BPM-only).
-    void recomputeLockedClipLengthFromPatternGrid(InstrumentMidiClip& clip) noexcept;
 
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;

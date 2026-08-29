@@ -26,100 +26,47 @@ namespace
         int channel = 1;
     };
 
-    /// Groove-Agent transport gate expressed as samples — kept in sync with
-    /// `InstrumentTrackController::publishRenderSnapshot` for step/legacy export duration.
-    [[nodiscard]] int controllerStyleGateSamples(const double sampleRate) noexcept
-    {
-        double sr = sampleRate;
-        if (sr <= 0.0 || !std::isfinite(sr))
-        {
-            sr = 48000.0;
-        }
-        return juce::jmax(1, (int)std::llround(0.001 * 100.0 * sr));
-    }
-
-    /// Collect timeline or step notes with transport-matched inclusion and minimum one-tick length.
+    /// Collect timeline notes with transport-matched inclusion and minimum one-tick length.
     void collectNotesForExport(const InstrumentMidiClip& clip,
                                const int tpq,
                                const double bpm,
                                const double sampleRate,
                                std::vector<ExportNoteTick>& out)
     {
+        juce::ignoreUnused(tpq, bpm);
         out.clear();
         const auto& pat = clip.pattern;
         const bool filterToClipSamples = clip.lengthSamples > 0;
         const std::int64_t clipEndEx = clip.startSamples + clip.lengthSamples;
 
-        if (pat.usesTimelineNotes())
+        for (const auto& tn : pat.timelineNotes)
         {
-            for (const auto& tn : pat.timelineNotes)
+            if (tn.startTick < 0)
             {
-                if (tn.startTick < 0)
-                {
-                    continue;
-                }
-                if (filterToClipSamples)
-                {
-                    const std::int64_t absS =
-                        absoluteSampleForTimelineNote(clip.timelineAnchorSamples, tn, pat, sampleRate);
-                    if (absS < clip.startSamples || absS >= clipEndEx)
-                    {
-                        continue;
-                    }
-                }
-
-                ExportNoteTick e;
-                e.midiNote = juce::jlimit(0, 127, tn.midiNote);
-                e.velocity = juce::jlimit(1, 127, tn.velocity);
-                e.channel = juce::jlimit(1, 16, (int)tn.channel);
-                e.startTick = tn.startTick;
-                std::int64_t offTick = e.startTick + juce::jmax<std::int64_t>(1, tn.durationTicks);
-                if (offTick <= e.startTick)
-                {
-                    offTick = e.startTick + 1;
-                }
-                e.endTick = offTick;
-                out.push_back(e);
+                continue;
             }
-        }
-        else
-        {
-            const int ns = juce::jmax(1, pat.numSteps);
-            const std::int64_t lengthForStepPlacement =
-                clip.lengthSamples > 0
-                    ? clip.lengthSamples
-                    : juce::jmax<std::int64_t>(1, experimentalPatternMusicalLengthSamples(pat, sampleRate));
-
-            const int gateSamples = controllerStyleGateSamples(sampleRate);
-            const std::int64_t durationTicks =
-                juce::jmax<std::int64_t>(1, relativeSamplesToTicks(gateSamples, bpm, tpq, sampleRate));
-
-            for (const auto& n : pat.notes)
+            if (filterToClipSamples)
             {
-                if (n.step < 0 || n.step >= pat.numSteps)
-                {
-                    continue;
-                }
                 const std::int64_t absS =
-                    absoluteSampleForNoteInClip(clip.startSamples, n.step, ns, lengthForStepPlacement);
-                // Legacy step grid matches `publishRenderSnapshot`: no sample-window cull; only invalid
-                // steps are skipped above.
-
-                const std::int64_t relS = absS - clip.startSamples;
-                const std::int64_t startTick = relativeSamplesToTicks(relS, bpm, tpq, sampleRate);
-
-                ExportNoteTick e;
-                e.midiNote = juce::jlimit(0, 127, n.midiNote);
-                e.velocity = juce::jlimit(1, 127, n.velocity);
-                e.channel = 10;
-                e.startTick = startTick;
-                e.endTick = startTick + durationTicks;
-                if (e.endTick <= e.startTick)
+                    absoluteSampleForTimelineNote(clip.timelineAnchorSamples, tn, pat, sampleRate);
+                if (absS < clip.startSamples || absS >= clipEndEx)
                 {
-                    e.endTick = e.startTick + 1;
+                    continue;
                 }
-                out.push_back(e);
             }
+
+            ExportNoteTick e;
+            e.midiNote = juce::jlimit(0, 127, tn.midiNote);
+            e.velocity = juce::jlimit(1, 127, tn.velocity);
+            e.channel = juce::jlimit(1, 16, (int)tn.channel);
+            e.startTick = tn.startTick;
+            std::int64_t offTick = e.startTick + juce::jmax<std::int64_t>(1, tn.durationTicks);
+            if (offTick <= e.startTick)
+            {
+                offTick = e.startTick + 1;
+            }
+            e.endTick = offTick;
+            out.push_back(e);
         }
 
         std::sort(out.begin(), out.end(), [](const ExportNoteTick& a, const ExportNoteTick& b) noexcept {

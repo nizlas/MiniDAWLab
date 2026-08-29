@@ -84,15 +84,7 @@ struct ProjectFileTrackV1
     std::vector<ProjectFileSendV1> sends;
 };
 
-struct ProjectFileExperimentalInstrumentNoteV1
-{
-    int midiNote = 60;
-    int step = 0;
-    int velocity = 100;
-    int lengthSteps = 1;
-};
-
-/// v12: editable tick-domain notes (I3f). Omitted in JSON when empty (legacy step-only clips).
+/// v12: editable tick-domain notes (I3f).
 struct ProjectFileExperimentalTimelineNoteV12
 {
     int midiNote = 60;
@@ -107,10 +99,7 @@ struct ProjectFileExperimentalInstrumentClipV1
 {
     std::uint64_t id = 0;
     juce::String name { "MIDI 1" };
-    int numSteps = 16;
-    int stepDenom = 16;
     double bpm = 110.0;
-    bool loop = true;
     /// I3d1: optional in v11 JSON (default 0); load path may derive length when absent/zero.
     std::int64_t startSamples = 0;
     std::int64_t lengthSamples = 0;
@@ -119,7 +108,6 @@ struct ProjectFileExperimentalInstrumentClipV1
     std::optional<std::int64_t> timelineAnchorSamples;
     int laneStartFractionPermille = 0;
     int laneEndFractionPermille = 250;
-    std::vector<ProjectFileExperimentalInstrumentNoteV1> notes;
     /// v12: internal PPQ domain (default 960).
     int ticksPerQuarter = 960;
     std::vector<ProjectFileExperimentalTimelineNoteV12> timelineNotes;
@@ -129,8 +117,6 @@ struct ProjectFileExperimentalInstrumentClipV1
     double midiRollSamplesPerPixel = 0.0;
     /// v12+ optional: piano-roll Follow playhead. Omitted when false.
     bool midiRollFollowEnabled = false;
-    /// v16+ optional: explicit timeline-note mode for clips saved with no notes yet. Omitted when false.
-    bool timelineMode = false;
 };
 
 /// v16+: persisted `PluginDescription` identity for `instrumentKind` = `"GenericVst3"`.

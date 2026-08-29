@@ -20,9 +20,10 @@
 namespace
 {
     constexpr bool kMidiEditorVerbosePianoRollMouseLog = false;
-    /// Plain wheel over keys/grid: target ~12 pitch rows per **physical** notch. Many hosts/OSes report
-    /// `wheel.deltaY` ≈ 0.25 per notch, so scale by 48 so one notch ≈ one octave; sub-line deltas accumulate.
-    constexpr float kPitchScrollRowsPerWheelDelta = 48.0f;
+    /// Plain wheel over keys/grid: target ~1 pitch row per **physical** notch (Conny item 2: fine vertical
+    /// positioning). Many hosts/OSes report `wheel.deltaY` ≈ 0.25 per notch, so scale by 4 so one notch ≈ one
+    /// note/drum row; high-resolution trackpad sub-line deltas accumulate in `pitchWheelScrollRemainder_`.
+    constexpr float kPitchScrollRowsPerWheelDelta = 4.0f;
     /// Timeline marquee: ignore sub-pixel jitter so a plain click does not start a drag rect.
     constexpr float kTimelineMarqueeDragThresholdPx = 5.0f;
 
@@ -67,17 +68,6 @@ namespace
 
     /// Piano-roll vertical timeline grid: minimum screen spacing before drawing a line at this tier.
     constexpr double kTimelineGridMinorMinPx = 8.0;
-
-    [[nodiscard]] inline int stepGridStrideForMinPx(const float pxPerStepColumn,
-                                                    const double minPx) noexcept
-    {
-        if (!(pxPerStepColumn > 1.0e-6f) || !std::isfinite(pxPerStepColumn))
-        {
-            return 1;
-        }
-        const int stride = (int)std::ceil(minPx / (double)pxPerStepColumn);
-        return juce::jmax(1, stride);
-    }
 
     /// Hit-test only: must match diamond path used when painting timeline hits (compact diamonds).
     [[nodiscard]] inline bool beatGridNearBarBoundary(const double posBeats, const double barLenBeats) noexcept
@@ -133,6 +123,10 @@ ExperimentalPianoRollView::ExperimentalPianoRollView(ExperimentalMidiPattern& pa
     setOpaque(true);
     setWantsKeyboardFocus(true);
     setMouseClickGrabsKeyboardFocus(false);
+    pitchScrollbar_.setAutoHide(false);
+    pitchScrollbar_.setSingleStepSize(1.0);
+    pitchScrollbar_.addListener(this);
+    addAndMakeVisible(pitchScrollbar_);
     uiTimerHzConfigured_ = kMidiRollTimerHzIdle;
     startTimerHz(kMidiRollTimerHzIdle);
 }
@@ -180,6 +174,7 @@ void ExperimentalPianoRollView::setEditablePitchRange(const int lowInclusive, co
     pitchHigh_ = hi;
     pitchWheelScrollRemainder_ = 0.0f;
     clampPitchScrollOffset();
+    syncPitchScrollbarFromState();
     dismissRowLabelEditor(false);
     repaint();
     if (auto* vp = getParentComponent())
@@ -304,7 +299,7 @@ void ExperimentalPianoRollView::textEditorFocusLost(juce::TextEditor& ed)
 
 void ExperimentalPianoRollView::beginVelocityValueEdit(const int noteIndex, const juce::Point<int> anchorPos)
 {
-    if (!useAbsoluteTimeline() || !pattern_.usesTimelineNotes() || timelineClip_ == nullptr
+    if (!useAbsoluteTimeline() || timelineClip_ == nullptr
         || !isTimelineClipBindingFresh() || noteIndex < 0
         || noteIndex >= (int)pattern_.timelineNotes.size())
     {
@@ -527,6 +522,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::gridBounds() const
     r.removeFromTop(timelineRulerHeight());
     r.removeFromBottom(velocityLaneTotalHeight());
     r.removeFromLeft(sideStripTotalNow());
+    r.removeFromRight(kPitchScrollbarWidthPx);
     return r;
 }
 
@@ -655,7 +651,6 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
     sessionTransportSnapshotValid_ = false;
     uiRulerSeekDisplayHold_.reset();
     clipGeometrySnapshotValid_ = false;
-    lastObservedNoteCountUi_ = -1;
     lastObservedTimelineNoteCountUi_ = -1;
     if (transport_ != nullptr && timelineClip_ != nullptr && session_ != nullptr)
     {
@@ -721,7 +716,6 @@ void ExperimentalPianoRollView::seedOrResetViewport()
     sessionTransportSnapshotValid_ = false;
     uiRulerSeekDisplayHold_.reset();
     clipGeometrySnapshotValid_ = false;
-    lastObservedNoteCountUi_ = -1;
     lastObservedTimelineNoteCountUi_ = -1;
     repaint();
 }
@@ -895,20 +889,7 @@ void ExperimentalPianoRollView::timerCallback()
     }
     const bool transportPlaying = absTime && transport_ != nullptr
                                   && transport_->readPlaybackIntentForUi() == PlaybackIntent::Playing;
-    const bool previewPlaying = player_ != nullptr && player_->isPlaying();
     const bool wasTransportPlaying = wasTransportPlayingUi_;
-
-    if (previewPlaying && absTime && timelineClip_ != nullptr && timelineClip_->lengthSamples > 0)
-    {
-        const double lenClip = (double)juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-        uiPreviewDisplayAbsSample_ = (double)timelineClip_->startSamples
-                                   + (double)player_->getPlayheadNormalized() * lenClip;
-    }
-    else
-    {
-        uiPreviewDisplayAbsSample_
-            = timelineClip_ != nullptr ? (double)timelineClip_->startSamples : 0.0;
-    }
 
     bool structuralRepaint = false;
     bool viewportMoved = false;
@@ -1068,11 +1049,9 @@ void ExperimentalPianoRollView::timerCallback()
         structuralRepaint = true;
     }
 
-    const int noteCount = (int)pattern_.notes.size();
     const int tnCount = (int)pattern_.timelineNotes.size();
-    if (noteCount != lastObservedNoteCountUi_ || tnCount != lastObservedTimelineNoteCountUi_)
+    if (tnCount != lastObservedTimelineNoteCountUi_)
     {
-        lastObservedNoteCountUi_ = noteCount;
         lastObservedTimelineNoteCountUi_ = tnCount;
         structuralRepaint = true;
     }
@@ -1094,38 +1073,25 @@ void ExperimentalPianoRollView::timerCallback()
         lastOffscreenGatePlayheadInView_ = true;
         repaint();
     }
-    else if (transportPlaying || previewPlaying)
+    else if (transportPlaying)
     {
-        if (!absTime)
+        const auto gr = gridBounds();
+        constexpr float kMarginPx = 24.0f;
+        const float x = xForSessionSampleD(uiPlayheadDisplaySamples_);
+        const bool nowNear = x >= (float)gr.getX() - kMarginPx && x <= (float)gr.getRight() + kMarginPx;
+        const bool wasNear = lastOffscreenGatePlayheadInView_;
+        if (!nowNear && !wasNear)
         {
-            lastOffscreenGatePlayheadInView_ = true;
-            repaint();
+            lastOffscreenGatePlayheadInView_ = false;
         }
-        else if (previewPlaying)
+        else
         {
-            lastOffscreenGatePlayheadInView_ = true;
             repaint();
-        }
-        else if (transportPlaying)
-        {
-            const auto gr = gridBounds();
-            constexpr float kMarginPx = 24.0f;
-            const float x = xForSessionSampleD(uiPlayheadDisplaySamples_);
-            const bool nowNear = x >= (float)gr.getX() - kMarginPx && x <= (float)gr.getRight() + kMarginPx;
-            const bool wasNear = lastOffscreenGatePlayheadInView_;
-            if (!nowNear && !wasNear)
-            {
-                lastOffscreenGatePlayheadInView_ = false;
-            }
-            else
-            {
-                repaint();
-                lastOffscreenGatePlayheadInView_ = nowNear;
-            }
+            lastOffscreenGatePlayheadInView_ = nowNear;
         }
     }
 
-    const int wantHz = (transportPlaying || previewPlaying) ? kMidiRollTimerHzAnimating : kMidiRollTimerHzIdle;
+    const int wantHz = transportPlaying ? kMidiRollTimerHzAnimating : kMidiRollTimerHzIdle;
     if (wantHz != uiTimerHzConfigured_)
     {
         uiTimerHzConfigured_ = wantHz;
@@ -1147,6 +1113,14 @@ void ExperimentalPianoRollView::resized()
         repaint();
     }
     clampPitchScrollOffset();
+    {
+        // Scrollbar strip: same vertical extent as the note grid, flush against the right edge.
+        auto strip = getLocalBounds();
+        strip.removeFromTop(timelineRulerHeight());
+        strip.removeFromBottom(velocityLaneTotalHeight());
+        pitchScrollbar_.setBounds(strip.removeFromRight(kPitchScrollbarWidthPx));
+        syncPitchScrollbarFromState();
+    }
     if (rowLabelEditor_ != nullptr && rowLabelEditorPitch_ >= pitchLow_ && rowLabelEditorPitch_ <= pitchHigh_)
     {
         const auto kb = keyboardBounds();
@@ -1169,13 +1143,6 @@ void ExperimentalPianoRollView::resized()
         // Layout changed under the popup (lane resize, window resize): cancel instead of drifting.
         dismissVelocityValueEditor(false);
     }
-}
-
-float ExperimentalPianoRollView::cellWidth() const
-{
-    const auto gr = gridBounds();
-    const int n = juce::jmax(1, pattern_.numSteps);
-    return (float)gr.getWidth() / (float)n;
 }
 
 int ExperimentalPianoRollView::pitchAtY(const int y) const
@@ -1208,6 +1175,34 @@ void ExperimentalPianoRollView::clampPitchScrollOffset() noexcept
     pitchScrollOffsetRows_ = juce::jlimit(0, maxPitchScrollOffsetRows(), pitchScrollOffsetRows_);
 }
 
+void ExperimentalPianoRollView::syncPitchScrollbarFromState()
+{
+    const juce::ScopedValueSetter<bool> guard(pitchScrollbarSyncing_, true);
+    const int totalRows = juce::jmax(1, pitchHigh_ - pitchLow_ + 1);
+    pitchScrollbar_.setRangeLimits({0.0, (double)totalRows}, juce::dontSendNotification);
+    pitchScrollbar_.setCurrentRange((double)pitchScrollOffsetRows_,
+                                    (double)juce::jmin(totalRows, countVisiblePitchRows()),
+                                    juce::dontSendNotification);
+}
+
+void ExperimentalPianoRollView::scrollBarMoved(juce::ScrollBar* bar, const double newRangeStart)
+{
+    if (bar != &pitchScrollbar_ || pitchScrollbarSyncing_)
+    {
+        return;
+    }
+    const int newOffset = (int)std::llround(newRangeStart);
+    if (newOffset == pitchScrollOffsetRows_)
+    {
+        return;
+    }
+    pitchScrollOffsetRows_ = newOffset;
+    pitchWheelScrollRemainder_ = 0.0f;
+    clampPitchScrollOffset();
+    resized();
+    repaint();
+}
+
 int ExperimentalPianoRollView::topVisiblePitch() const noexcept
 {
     return pitchHigh_ - pitchScrollOffsetRows_;
@@ -1222,7 +1217,13 @@ void ExperimentalPianoRollView::restoreVerticalPitchScrollToPriorTopPitch(const 
 {
     pitchScrollOffsetRows_ = pitchHigh_ - previousTopVisibleMidiPitch;
     clampPitchScrollOffset();
+    syncPitchScrollbarFromState();
     repaint();
+}
+
+int ExperimentalPianoRollView::preferredComponentHeightForPitchRows(const int rows) const noexcept
+{
+    return timelineRulerHeight() + juce::jmax(1, rows) * kRowHeight + juce::jmax(0, velocityLaneHeightPref_);
 }
 
 void ExperimentalPianoRollView::setVelocityLaneHeightPreference(const int heightPx) noexcept
@@ -1256,37 +1257,6 @@ std::optional<juce::Rectangle<int>> ExperimentalPianoRollView::visibleRowStripRe
     }
     const int y = strip.getY() + visRow * kRowHeight;
     return strip.withY(y).withHeight(kRowHeight);
-}
-
-int ExperimentalPianoRollView::stepAtPatternX(const int x) const
-{
-    const auto gr = gridBounds();
-    const int relX = x - gr.getX();
-    const float cw = cellWidth();
-    if (cw <= 0.0f)
-    {
-        return 0;
-    }
-    const int s = (int)((float)relX / cw);
-    return juce::jlimit(0, juce::jmax(0, pattern_.numSteps - 1), s);
-}
-
-int ExperimentalPianoRollView::stepAtTimelineX(const int x) const
-{
-    if (timelineClip_ == nullptr)
-    {
-        return 0;
-    }
-    const std::int64_t len = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-    const std::int64_t absS = sampleAtGridX((float)x);
-    const std::int64_t rel = absS - timelineClip_->startSamples;
-    const std::int64_t clampedRel = juce::jlimit(std::int64_t{0}, len - 1, rel);
-    const int ns = juce::jmax(1, pattern_.numSteps);
-    const int step = (int)juce::jlimit(
-        0,
-        juce::jmax(0, ns - 1),
-        (int)std::floor((double)clampedRel * (double)ns / (double)len));
-    return step;
 }
 
 void ExperimentalPianoRollView::setMusicalSnapComboId(const int /*id*/) noexcept
@@ -1350,7 +1320,7 @@ std::int64_t ExperimentalPianoRollView::referenceTimelineGridTicks() const noexc
 
 std::optional<int> ExperimentalPianoRollView::findTimelineNoteIndexAtPoint(juce::Point<int> pos) const
 {
-    if (timelineClip_ == nullptr || !pattern_.usesTimelineNotes() || !useAbsoluteTimeline())
+    if (timelineClip_ == nullptr || !useAbsoluteTimeline())
     {
         return std::nullopt;
     }
@@ -1447,7 +1417,7 @@ std::optional<int> ExperimentalPianoRollView::findTimelineNoteIndexAtPoint(juce:
 
 std::optional<juce::Rectangle<float>> ExperimentalPianoRollView::getTimelineNoteVisualBounds(const int noteIndex) const
 {
-    if (timelineClip_ == nullptr || !pattern_.usesTimelineNotes() || !useAbsoluteTimeline())
+    if (timelineClip_ == nullptr || !useAbsoluteTimeline())
     {
         return std::nullopt;
     }
@@ -1533,7 +1503,7 @@ std::optional<juce::Rectangle<float>> ExperimentalPianoRollView::getTimelineNote
 
 bool ExperimentalPianoRollView::timelineBarsResizeEnabled() const noexcept
 {
-    return useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+    return useAbsoluteTimeline() && timelineClip_ != nullptr
         && isTimelineClipBindingFresh() && timelineNotesDisplayComboId_ == 2
         && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_);
 }
@@ -1750,7 +1720,7 @@ std::int64_t ExperimentalPianoRollView::computeTimelinePasteAnchorTick() const
 bool ExperimentalPianoRollView::handleTimelineNotesCopyShortcut() noexcept
 {
     if (!useAbsoluteTimeline() || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
-        || !pattern_.usesTimelineNotes())
+       )
     {
         return false;
     }
@@ -1805,7 +1775,7 @@ bool ExperimentalPianoRollView::handleTimelineNotesCopyShortcut() noexcept
 bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
 {
     if (!useAbsoluteTimeline() || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
-        || !pattern_.usesTimelineNotes())
+       )
     {
         return false;
     }
@@ -1886,7 +1856,7 @@ bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
 bool ExperimentalPianoRollView::handleTimelineNotesDeleteSelectionShortcut()
 {
     if (!useAbsoluteTimeline() || timelineClip_ == nullptr || !isTimelineClipBindingFresh()
-        || !pattern_.usesTimelineNotes())
+       )
     {
         return false;
     }
@@ -2327,7 +2297,7 @@ juce::Colour colourForMidiVelocity(const int velocity) noexcept
 
 bool ExperimentalPianoRollView::velocityLaneEditingAvailable() const noexcept
 {
-    return useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+    return useAbsoluteTimeline() && timelineClip_ != nullptr
            && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_) && isTimelineClipBindingFresh();
 }
 
@@ -2868,7 +2838,7 @@ void ExperimentalPianoRollView::adjustTimelineNoteSelectionAfterErase(const int 
 void ExperimentalPianoRollView::selectTimelineNotesIntersecting(const juce::Rectangle<int>& r) noexcept
 {
     selectedTimelineNoteIndices_.clear();
-    if (!pattern_.usesTimelineNotes() || timelineClip_ == nullptr || r.isEmpty())
+    if (timelineClip_ == nullptr || r.isEmpty())
     {
         return;
     }
@@ -3480,12 +3450,11 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
     if (!kb.isEmpty() && kb.contains(pos) && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
     {
         // Piano-key / drum-name row click: audition the pitch at velocity 100. No note is created and
-        // timeline events are untouched. Channel mirrors what a grid click would create here
-        // (timeline notes are channel 10, legacy step preview uses the player default).
+        // timeline events are untouched. Bound clips use channel 10; unbound uses the player default.
         const int pitch = pitchAtY(pos.getY());
         if (pitch >= pitchLow_ && pitch <= pitchHigh_)
         {
-            const int channel = (useAbsoluteTimeline() && pattern_.usesTimelineNotes())
+            const int channel = (useAbsoluteTimeline())
                                     ? 10
                                     : ExperimentalMidiPatternPlayer::kMidiChannel;
             auditionNote(pitch, 100, channel);
@@ -3529,7 +3498,7 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
     if (gr.contains(pos))
     {
-        if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr)
+        if (useAbsoluteTimeline() && timelineClip_ != nullptr)
         {
             if (e.mods.isPopupMenu())
             {
@@ -3544,38 +3513,8 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
             handleTimelineNotesMouseDown(e);
             return;
         }
+        // Unbound editor (no clip): nothing to edit.
         timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
-        const int step = useAbsoluteTimeline() ? stepAtTimelineX(pos.getX()) : stepAtPatternX(pos.getX());
-        const int pitch = pitchAtY(pos.getY());
-        if (kMidiEditorVerbosePianoRollMouseLog)
-        {
-            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-                "piano-roll: mouseDown x=" + juce::String(pos.getX()) + " y=" + juce::String(pos.getY())
-                + " note=" + juce::String(pitch) + " step=" + juce::String(step));
-        }
-        auto toggleAndNotify = [this, pitch, step]() -> bool {
-            pattern_.toggleHit(pitch, step);
-            if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
-            {
-                instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
-            }
-            repaint();
-            return true;
-        };
-        if (undoablePatternEditHandler_ && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
-        {
-            undoablePatternEditHandler_("Toggle drum step", std::move(toggleAndNotify));
-        }
-        else
-        {
-            toggleAndNotify();
-        }
-        if (kMidiEditorVerbosePianoRollMouseLog)
-        {
-            ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-                "piano-roll: toggle note=" + juce::String(pitch) + " step=" + juce::String(step) + " noteCount="
-                + juce::String((int)pattern_.notes.size()));
-        }
     }
 }
 
@@ -3637,7 +3576,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
-    if (timelineMovePending_ && useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+    if (timelineMovePending_ && useAbsoluteTimeline() && timelineClip_ != nullptr
         && isTimelineClipBindingFresh())
     {
         if (e.getDistanceFromDragStart() > kTimelineMarqueeDragThresholdPx)
@@ -3652,7 +3591,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
         }
     }
 
-    if (useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+    if (useAbsoluteTimeline() && timelineClip_ != nullptr
         && isTimelineClipBindingFresh())
     {
         updateMarqueeSelection(e);
@@ -3734,7 +3673,7 @@ void ExperimentalPianoRollView::mouseDoubleClick(const juce::MouseEvent& e)
     }
 
     const auto gr = gridBounds();
-    if (gr.contains(pos) && useAbsoluteTimeline() && pattern_.usesTimelineNotes() && timelineClip_ != nullptr
+    if (gr.contains(pos) && useAbsoluteTimeline() && timelineClip_ != nullptr
         && isTimelineClipBindingFresh())
     {
         if (const auto hit = findTimelineNoteIndexAtPoint(pos))
@@ -3983,9 +3922,6 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         }
     }
 
-    const float cw = cellWidth();
-    const int nSteps = juce::jmax(1, pattern_.numSteps);
-
     const int topP = topVisiblePitch();
     const int nVisRows = countVisiblePitchRows();
     const int bottomP = topP - (nVisRows - 1);
@@ -4168,52 +4104,12 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             }
         }
 
-        if (player_ != nullptr && player_->isPlaying() && timelineClip_ != nullptr
-            && timelineClip_->lengthSamples > 0)
-        {
-            const float px = xForSessionSampleD(uiPreviewDisplayAbsSample_);
-            if (px >= rb.getX() - 2.0f && px <= rb.getRight() + 2.0f)
-            {
-                g.setColour(juce::Colour(0xffe85566));
-                g.drawLine(
-                    px,
-                    rb.getY() + 1.0f,
-                    px,
-                    rb.getY() + timeline_locator_paint::kRulerPlayheadMarkerLengthPx + 1.0f,
-                    1.15f);
-            }
-        }
     }
 
-    // --- drawStepGrid
-    if (!absTime)
+    // --- drawTimelineGrid
+    if (absTime && timelineClip_ != nullptr)
     {
-        const int stride = stepGridStrideForMinPx(cw, kTimelineGridMinorMinPx);
-        for (int s = 0; s <= nSteps; s += stride)
-        {
-            const int x = gr.getX() + (int)((float)s * cw);
-            juce::Colour c = juce::Colour(0xff333340);
-            if (s % 4 == 0)
-            {
-                c = juce::Colour(0xff454552);
-            }
-            if (s % nSteps == 0)
-            {
-                c = juce::Colour(0xff505060);
-            }
-            g.setColour(c);
-            g.drawVerticalLine(x, (float)gr.getY(), (float)gr.getBottom());
-        }
-        if (stride > 1 && (nSteps % stride) != 0)
-        {
-            const int x = gr.getX() + (int)((float)nSteps * cw);
-            g.setColour(juce::Colour(0xff505060));
-            g.drawVerticalLine(x, (float)gr.getY(), (float)gr.getBottom());
-        }
-    }
-    else if (timelineClip_ != nullptr)
-    {
-        if (pattern_.usesTimelineNotes() && samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_)
+        if (samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_)
             && session_ != nullptr)
         {
             const double sr = effectiveDeviceSampleRate(deviceManager_);
@@ -4286,42 +4182,6 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
                 }
             }
         }
-        else if (samplesPerPixel_ > 0.0 && std::isfinite(samplesPerPixel_))
-        {
-            const std::int64_t lenPat = juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
-            const float spanPx =
-                std::fabs(xForSessionSample(timelineClip_->startSamples + lenPat)
-                          - xForSessionSample(timelineClip_->startSamples));
-            const float pxPerStepCol = spanPx / (float)juce::jmax(1, nSteps);
-            const int stride = stepGridStrideForMinPx(pxPerStepCol, kTimelineGridMinorMinPx);
-
-            auto drawStepLine = [&](const int s) {
-                const std::int64_t rel =
-                    (std::int64_t)std::llround((double)s * (double)lenPat / (double)nSteps);
-                const std::int64_t absS = timelineClip_->startSamples + rel;
-                const float x = xForSessionSample(absS);
-                juce::Colour c = juce::Colour(0xff333340);
-                if (s % 4 == 0)
-                {
-                    c = juce::Colour(0xff454552);
-                }
-                if (s == 0 || s == nSteps)
-                {
-                    c = juce::Colour(0xff505060);
-                }
-                g.setColour(c);
-                g.drawVerticalLine(juce::roundToInt(x), (float)gr.getY(), (float)gr.getBottom());
-            };
-
-            for (int s = 0; s <= nSteps; s += stride)
-            {
-                drawStepLine(s);
-            }
-            if (stride > 1 && (nSteps % stride) != 0)
-            {
-                drawStepLine(nSteps);
-            }
-        }
     }
 
     // --- drawLocatorLines (grid — thin verticals only; filled ranges live in ruler strip only)
@@ -4344,23 +4204,10 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         }
     }
 
-    // --- drawNotes (step diamonds and/or timeline bars)
-    float cellWForDiamond = cw;
-    if (!pattern_.usesTimelineNotes() && absTime && timelineClip_ != nullptr && nSteps > 0
-        && samplesPerPixel_ > 0.0)
-    {
-        const std::int64_t len = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-        const float x0 = xForSessionSample(timelineClip_->startSamples);
-        const float x1 = xForSessionSample(timelineClip_->startSamples + len / nSteps);
-        cellWForDiamond = juce::jmax(3.0f, std::fabs(x1 - x0));
-    }
+    // --- drawNotes (timeline hits/bars)
     const bool pianoRowMode = (rowLabelMode_ == 1);
-    const float diamondScale = pianoRowMode ? 1.1f : 1.0f;
-    const float halfW =
-        juce::jmax(3.0f, juce::jmin(cellWForDiamond * 0.55f, (float)kRowHeight * 0.85f) * 0.5f) * diamondScale;
-    const float halfH = juce::jmax(3.0f, (float)kRowHeight * 0.75f * 0.5f) * diamondScale;
 
-    if (pattern_.usesTimelineNotes() && timelineClip_ != nullptr && samplesPerPixel_ > 0.0)
+    if (timelineClip_ != nullptr && samplesPerPixel_ > 0.0)
     {
         const double sr = effectiveDeviceSampleRate(deviceManager_);
         const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
@@ -4476,57 +4323,6 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
             }
         }
     }
-    else
-    {
-        for (const auto& hit : pattern_.notes)
-        {
-            if (hit.midiNote < pitchLow_ || hit.midiNote > pitchHigh_)
-            {
-                continue;
-            }
-            const auto rrOpt = visibleRowStripRect(gr, hit.midiNote);
-            if (!rrOpt)
-            {
-                continue;
-            }
-            const auto& rr = *rrOpt;
-            float cx;
-            if (absTime && timelineClip_ != nullptr)
-            {
-                const std::int64_t lenClip = juce::jmax(std::int64_t{1}, timelineClip_->lengthSamples);
-                const std::int64_t absNote = absoluteSampleForNoteInClip(
-                    timelineClip_->startSamples, hit.step, pattern_.numSteps, lenClip);
-                cx = xForSessionSample(absNote);
-            }
-            else
-            {
-                cx = (float)gr.getX() + ((float)hit.step + 0.5f) * cw;
-            }
-            const float cy = (float)rr.getCentreY();
-            juce::Path diamond;
-            diamond.addQuadrilateral(cx, cy - halfH, cx + halfW, cy, cx, cy + halfH, cx - halfW, cy);
-            const juce::Colour velC = colourForMidiVelocity(hit.velocity);
-            g.setColour(velC.darker(0.6f));
-            g.strokePath(diamond, juce::PathStrokeType(1.2f));
-            g.setColour(velC.withAlpha(0.92f));
-            g.fillPath(diamond);
-            if (pianoRowMode && timelineNotesDisplayComboId_ != 1 && absTime && timelineClip_ != nullptr
-                && cw >= 28.0f && (float)kRowHeight >= 12.0f)
-            {
-                const float lh = (float)juce::jmax(0, rr.getHeight() - 2);
-                if (lh >= 9.0f)
-                {
-                    const juce::String label = juce::MidiMessage::getMidiNoteName(hit.midiNote, true, true, 3);
-                    const float lw = juce::jmax(24.0f, cw - 4.0f);
-                    const juce::Rectangle<float> labelR(cx - lw * 0.5f, (float)rr.getY() + 1.0f, lw, lh);
-                    g.setColour(juce::Colours::white.withAlpha(0.92f));
-                    g.setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
-                    g.drawText(label, labelR, juce::Justification::centred, true);
-                }
-            }
-        }
-    }
-
     if (timelineMarqueeInteraction_ == TimelineMarqueeInteraction::Dragging)
     {
         const auto marq = getNormalizedMarqueeRect();
@@ -4548,27 +4344,6 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         {
             g.setColour(juce::Colour(0xff66ddff));
             g.drawLine(px, (float)gr.getY(), px, (float)gr.getBottom(), 1.35f);
-        }
-    }
-
-    // --- drawPreviewPlayhead (grid)
-    if (player_ != nullptr && player_->isPlaying())
-    {
-        const float ph = player_->getPlayheadNormalized();
-        if (absTime && timelineClip_ != nullptr && timelineClip_->lengthSamples > 0)
-        {
-            const float px = xForSessionSampleD(uiPreviewDisplayAbsSample_);
-            if (px >= (float)gr.getX() - 2.0f && px <= (float)gr.getRight() + 2.0f)
-            {
-                g.setColour(juce::Colour(0xffe85566));
-                g.drawLine(px, (float)gr.getY(), px, (float)gr.getBottom(), 1.15f);
-            }
-        }
-        else if (cw > 0.0f)
-        {
-            const float px = (float)gr.getX() + ph * (float)gr.getWidth();
-            g.setColour(juce::Colour(0xffe85566));
-            g.drawLine(px, (float)gr.getY(), px, (float)gr.getBottom(), 1.2f);
         }
     }
 

@@ -50,31 +50,18 @@ void paintMidiClipNotePreview(juce::Graphics& g,
     {
         return;
     }
-    const bool timeline = clip.pattern.usesTimelineNotes();
     const auto& timelineNotes = clip.pattern.timelineNotes;
-    const auto& stepNotes = clip.pattern.notes;
-    if (timeline ? timelineNotes.empty() : stepNotes.empty())
+    if (timelineNotes.empty())
     {
         return;
     }
 
     int minPitch = 128;
     int maxPitch = -1;
-    if (timeline)
+    for (const auto& n : timelineNotes)
     {
-        for (const auto& n : timelineNotes)
-        {
-            minPitch = juce::jmin(minPitch, n.midiNote);
-            maxPitch = juce::jmax(maxPitch, n.midiNote);
-        }
-    }
-    else
-    {
-        for (const auto& n : stepNotes)
-        {
-            minPitch = juce::jmin(minPitch, n.midiNote);
-            maxPitch = juce::jmax(maxPitch, n.midiNote);
-        }
+        minPitch = juce::jmin(minPitch, n.midiNote);
+        maxPitch = juce::jmax(maxPitch, n.midiNote);
     }
     if (minPitch > maxPitch)
     {
@@ -120,33 +107,15 @@ void paintMidiClipNotePreview(juce::Graphics& g,
               g.fillRect(x0, yCentre - barH * 0.5f, x1 - x0, barH);
           };
 
-    if (timeline)
+    const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
+    const std::int64_t anchor = clip.timelineAnchorSamples + ctx.previewMoveDeltaSamples;
+    for (const auto& n : timelineNotes)
     {
-        const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
-        const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
-        const std::int64_t anchor = clip.timelineAnchorSamples + ctx.previewMoveDeltaSamples;
-        for (const auto& n : timelineNotes)
-        {
-            const std::int64_t s = anchor + ticksToSignedSamples(n.startTick, bpm, tpq, ctx.sampleRate);
-            const std::int64_t d = juce::jmax(
-                std::int64_t{ 1 }, ticksToSignedSamples(n.durationTicks, bpm, tpq, ctx.sampleRate));
-            drawNoteBar(s, s + d, n.midiNote);
-        }
-    }
-    else
-    {
-        const int numSteps = juce::jmax(1, clip.pattern.numSteps);
-        const std::int64_t clipStart = clip.startSamples + ctx.previewMoveDeltaSamples;
-        const std::int64_t len = juce::jmax(std::int64_t{ 1 }, clip.lengthSamples);
-        // Short centered tick per step hit (drums have no meaningful duration on the step grid).
-        const std::int64_t halfBar = juce::jmax(
-            std::int64_t{ 1 }, (std::int64_t)std::llround(0.3 * (double)len / (double)numSteps));
-        for (const auto& n : stepNotes)
-        {
-            const std::int64_t centre
-                = clipStart + clipRelativeSampleAtStepCenter(n.step, numSteps, len);
-            drawNoteBar(centre - halfBar, centre + halfBar, n.midiNote);
-        }
+        const std::int64_t s = anchor + ticksToSignedSamples(n.startTick, bpm, tpq, ctx.sampleRate);
+        const std::int64_t d = juce::jmax(
+            std::int64_t{ 1 }, ticksToSignedSamples(n.durationTicks, bpm, tpq, ctx.sampleRate));
+        drawNoteBar(s, s + d, n.midiNote);
     }
 }
 
@@ -341,10 +310,6 @@ private:
             noteCtx.previewMoveDeltaSamples = previewDelta;
             paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name, c, noteCtx);
 
-            if (!c->pattern.usesTimelineNotes())
-            {
-                continue;
-            }
             const bool hideTrimCues = trimLaneGestureActive_ && trimLaneClipId_ == c->id;
             const bool onEventBodyTrimCue = hoverEventTrimCueId_ == c->id
                                             && !hoverLeftTrimHandleId_.has_value()
@@ -416,7 +381,7 @@ private:
             for (auto it = clips.rbegin(); it != clips.rend(); ++it)
             {
                 InstrumentMidiClip* const c = it->get();
-                if (c == nullptr || !c->pattern.usesTimelineNotes())
+                if (c == nullptr)
                 {
                     continue;
                 }
@@ -648,7 +613,7 @@ private:
             for (const InstrumentMidiClipId cid : ac->getSelectedClipIds())
             {
                 const InstrumentMidiClip* const c = ac->getClipById(cid);
-                if (c == nullptr || !c->pattern.usesTimelineNotes() || c->lengthSamples <= 0)
+                if (c == nullptr || c->lengthSamples <= 0)
                 {
                     continue;
                 }
@@ -1334,7 +1299,7 @@ private:
         for (auto it = clips.rbegin(); it != clips.rend(); ++it)
         {
             const auto* c = it->get();
-            if (c == nullptr || !c->pattern.usesTimelineNotes())
+            if (c == nullptr)
             {
                 continue;
             }

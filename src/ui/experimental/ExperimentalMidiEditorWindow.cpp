@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <utility>
 
 namespace
 {
@@ -66,17 +67,10 @@ class ExperimentalMidiEditorWindow::Body final : public juce::Component,
 public:
     explicit Body(ExperimentalInstrumentHost& hostIn)
         : host_(hostIn)
-        , player_(std::make_unique<ExperimentalMidiPatternPlayer>(hostIn, pattern_))
+        , player_(std::make_unique<ExperimentalMidiPatternPlayer>(hostIn))
         , midiRollResizeSplitter_(*this)
         , midiRollCollapsedKnob_(*this)
     {
-        pattern_.numSteps = 16;
-        pattern_.stepDenom = 16;
-        pattern_.bpm = 110.0;
-        pattern_.loop = true;
-
-        player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
-
         addAndMakeVisible(viewport_);
         viewport_.setScrollBarsShown(false, true);
         addAndMakeVisible(midiRollResizeSplitter_);
@@ -127,20 +121,6 @@ public:
         transportStopButton_.setEnabled(false);
         cycleToggleButton_.setEnabled(false);
 
-        addAndMakeVisible(debugPreviewButton_);
-        debugPreviewButton_.setButtonText("Debug Preview");
-        debugPreviewButton_.setTooltip("Local pattern preview only; does not start main transport.");
-        debugPreviewButton_.onClick = [this] {
-            player_->startPlayback();
-        };
-
-        addAndMakeVisible(debugStopButton_);
-        debugStopButton_.setButtonText("Preview Stop");
-        debugStopButton_.setEnabled(false);
-        debugStopButton_.onClick = [this] {
-            player_->stopPlayback("user");
-        };
-
         addAndMakeVisible(exportButton_);
         exportButton_.setButtonText("Export MIDI...");
         exportButton_.onClick = [this] { beginExportMidi(); };
@@ -185,58 +165,6 @@ public:
             pushRowsModeToRoll();
         };
 
-        addAndMakeVisible(stepsLabel_);
-        stepsLabel_.setText("Steps", juce::dontSendNotification);
-        stepsLabel_.setJustificationType(juce::Justification::centredRight);
-        stepsLabel_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-
-        addAndMakeVisible(stepsBox_);
-        stepsBox_.addItem("16 steps", 1);
-        stepsBox_.addItem("32 steps", 2);
-        stepsBox_.setSelectedId(1, juce::dontSendNotification);
-        stepsBox_.onChange = [this] {
-            if (activePattern().usesTimelineNotes())
-            {
-                return;
-            }
-            const int id = stepsBox_.getSelectedId();
-            const int newSteps = (id == 2) ? 32 : 16;
-            if (newSteps == activePattern().numSteps)
-            {
-                return;
-            }
-
-            auto applyStepsChange = [this, newSteps]() -> bool {
-                activePattern().numSteps = newSteps;
-                activePattern().notes.erase(
-                    std::remove_if(
-                        activePattern().notes.begin(),
-                        activePattern().notes.end(),
-                        [newSteps](const PrototypeMidiNote& n) { return n.step >= newSteps; }),
-                    activePattern().notes.end());
-                if (boundTimelineClip_ != nullptr && instrumentTrackForClipBind_ != nullptr)
-                {
-                    instrumentTrackForClipBind_->recomputeLockedClipLengthFromPatternGrid(*boundTimelineClip_);
-                    instrumentTrackForClipBind_->sendChangeMessage();
-                }
-                if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
-                {
-                    rv->seedOrResetViewport();
-                    rv->repaint();
-                }
-                return true;
-            };
-
-            if (canUseInstrumentUndo() && static_cast<bool>(instrumentUndoableMutate_))
-            {
-                instrumentUndoableMutate_("Change steps", std::move(applyStepsChange));
-            }
-            else
-            {
-                applyStepsChange();
-            }
-        };
-
         addAndMakeVisible(timelineRulerFormatCombo_);
         timelineRulerFormatCombo_.clear(juce::dontSendNotification);
         timelineRulerFormatCombo_.addItem("Bars + Beats", Session::kTimelineRulerFormatComboIdBarsBeats);
@@ -268,6 +196,11 @@ public:
             }
         };
 
+        addAndMakeVisible(fitDrumsButton_);
+        fitDrumsButton_.setButtonText("Fit Drums");
+        fitDrumsButton_.onClick = [this] { applyFitDrums(); };
+        updateFitDrumsButtonState();
+
         addAndMakeVisible(modeLabel_);
         modeLabel_.setFont(juce::FontOptions(11.0f));
         modeLabel_.setJustificationType(juce::Justification::centredLeft);
@@ -276,8 +209,7 @@ public:
         rebuildRollViewOnly();
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-            "midi-editor: window opened steps=" + juce::String(pattern_.numSteps) + " bpm="
-            + juce::String(pattern_.bpm, 2));
+            "midi-editor: window opened bpm=" + juce::String(pattern_.bpm, 2));
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             juce::String("midi-editor: opened hasInstrument=") + (hostIn.hasInstrument() ? "true" : "false"));
@@ -293,17 +225,6 @@ public:
             instrumentTrackForClipBind_->removeChangeListener(this);
 
         stopTimer();
-        player_->stopPlayback("window-closed");
-    }
-
-    void stopForHostUnload()
-    {
-        player_->stopPlayback("instrument-unloaded");
-    }
-
-    void prepareBeforeHostUnload()
-    {
-        player_->stopPlayback("instrument-unloaded");
     }
 
     void syncInstrumentUiFromHost()
@@ -368,7 +289,6 @@ public:
             persistentInstrumentClipIdForRebind_ = (timelineClip != nullptr)
                                                          ? static_cast<std::uint64_t>(timelineClip->id)
                                                          : std::uint64_t{0};
-            syncSlidersFromActivePattern();
             syncInstrumentUiFromHost();
             syncTimelineRulerFormatFromSession();
             return;
@@ -391,11 +311,6 @@ public:
                         + juce::String(static_cast<juce::int64>(timelineClip->id)));
                 }
             }
-        }
-
-        if (player_ != nullptr)
-        {
-            player_->stopPlayback("rebind");
         }
 
         if (auto* oldRoll = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
@@ -452,11 +367,11 @@ public:
         {
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
                 "midi-editor: bindExternal patternPtr=" + ptrToLog(p) + " noteCount="
-                + juce::String((int)p->notes.size()) + " clipStart=" + juce::String(timelineClip->startSamples)
+                + juce::String((int)p->timelineNotes.size()) + " clipStart="
+                + juce::String(timelineClip->startSamples)
                 + " clipLength=" + juce::String(timelineClip->lengthSamples));
         }
         rebuildPlayerAndRoll(preserveVerticalPitchScrollTopMidi);
-        syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
         syncTimelineRulerFormatFromSession();
         if constexpr (undo_diagnostic::kUndoDiag)
@@ -495,10 +410,6 @@ public:
         {
             return;
         }
-        if (player_ != nullptr)
-        {
-            player_->stopPlayback("rebind");
-        }
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
             if (boundTimelineClip_ != nullptr)
@@ -519,7 +430,6 @@ public:
         deviceManagerForRoll_ = nullptr;
         mainTimelineViewportForRoll_ = nullptr;
         rebuildPlayerAndRoll();
-        syncSlidersFromActivePattern();
         syncInstrumentUiFromHost();
         syncTimelineRulerFormatFromSession();
         syncArrangementSnapUiFromSession();
@@ -607,7 +517,6 @@ public:
         lastInstrumentName_ = instrumentName;
         lastRequiredKitName_ = requiredKitForUi;
 
-        debugPreviewButton_.setEnabled(canPlayPattern);
         const bool clipTimelineBound =
             externalPattern_ != nullptr && boundTimelineClip_ != nullptr;
         exportButton_.setEnabled(clipTimelineBound);
@@ -662,16 +571,10 @@ public:
         const juce::Colour labelColour =
             canPlayPattern ? juce::Colour(0xffc8c8d8) : juce::Colour(0xffffaa88);
 
-        modeLabel_.setText(
-            juce::String("I3f: timeline MIDI — import MIDI from the instrument track header (arrangement). ")
-                + "When the clip has timeline notes they drive transport; step grid is for empty/legacy clips only. "
-                  "Snap applies to click‑to‑add timing. Preview uses step timing; main Play uses the timeline.\n"
-                + instPart + "\n"
-                + "Timing: ~4 ms message timer; not sample-accurate." + kitLine,
-            juce::dontSendNotification);
+        // Status only (instrument name / gate reason / required kit). The old I3f prototype
+        // explainer and "Debug Preview" timing notes were removed with the debug preview UI.
+        modeLabel_.setText(instPart + kitLine, juce::dontSendNotification);
         modeLabel_.setColour(juce::Label::textColourId, labelColour);
-
-        updateDebugStopButtonState();
 
         if (!changed)
         {
@@ -691,11 +594,6 @@ public:
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
                 "midi-editor: instrument available name=\"" + instrumentName + "\"");
         }
-    }
-
-    void updateDebugStopButtonState()
-    {
-        debugStopButton_.setEnabled(editorInstrumentGate() && player_ != nullptr && player_->isPlaying());
     }
 
     void resized() override
@@ -718,12 +616,9 @@ public:
         displayBox_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
         rowsLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
         rowsBox_.setBounds(toolbar.removeFromLeft(104).reduced(0, 2));
-        stepsLabel_.setBounds(toolbar.removeFromLeft(44).reduced(0, 4));
-        stepsBox_.setBounds(toolbar.removeFromLeft(100).reduced(0, 2));
         timelineRulerFormatCombo_.setBounds(toolbar.removeFromLeft(128).reduced(0, 2));
         followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        debugPreviewButton_.setBounds(toolbar.removeFromLeft(98).reduced(0, 2));
-        debugStopButton_.setBounds(toolbar.removeFromLeft(90).reduced(0, 2));
+        fitDrumsButton_.setBounds(toolbar.removeFromLeft(78).reduced(0, 2));
         modeLabel_.setBounds(toolbar.reduced(8, 0));
 
         // Lay out the viewport first, then size the roll to match the viewport's *content budget*.
@@ -764,7 +659,7 @@ public:
                 + juce::String(outerH) + " rollBounds=" + rv->getBounds().toString() + " boundExternal="
                 + juce::String(externalPattern_ != nullptr ? "true" : "false") + " patternPtr="
                 + ptrToLog(&activePattern()) + " externalPatternPtr=" + ptrToLog(externalPattern_)
-                + " noteCount=" + juce::String((int)activePattern().notes.size()) + " visibleStart="
+                + " noteCount=" + juce::String((int)activePattern().timelineNotes.size()) + " visibleStart="
                 + juce::String(rv->getViewportVisibleStartSamples()) + " spp="
                 + juce::String(rv->getViewportSamplesPerPixel()));
         }
@@ -810,13 +705,20 @@ private:
 
     [[nodiscard]] std::optional<std::uint64_t> getBoundInstrumentClipId() const noexcept;
 
-    void syncStepsAndSnapUiForPattern();
     void pushDisplayToRoll();
     void pushRowsModeToRoll();
     [[nodiscard]] juce::String resolveDrumRowDisplayName(int midiNote, int pluginQueryChannel) const noexcept;
     [[nodiscard]] juce::String resolveDrumRowHoverTooltip(int midiNote, int pluginQueryChannel) const noexcept;
     void beginExportMidi();
     void launchMidiExportFileChooser();
+
+    /// Useful drum rows = min..max of pitches with non-empty effective drum labels (cached data only).
+    /// Pitches used by clip notes are a fallback when no names exist; they never widen a named range,
+    /// since stray notes outside the kit would otherwise defeat the fit (Conny feedback).
+    [[nodiscard]] std::optional<std::pair<int, int>> computeUsefulDrumPitchRange() const;
+    /// "Fit Drums": scroll + resize the editor window so the useful drum rows fit (drum mode only).
+    void applyFitDrums();
+    void updateFitDrumsButtonState();
 
     InstrumentTrackController* instrumentTrackForClipBind_ = nullptr;
     InstrumentMidiClip* boundTimelineClip_ = nullptr;
@@ -825,16 +727,9 @@ private:
     juce::AudioDeviceManager* deviceManagerForRoll_ = nullptr;
     const TimelineViewportModel* mainTimelineViewportForRoll_ = nullptr;
 
-    void syncSlidersFromActivePattern()
-    {
-        stepsBox_.setSelectedId(activePattern().numSteps == 32 ? 2 : 1, juce::dontSendNotification);
-        syncStepsAndSnapUiForPattern();
-    }
-
     void rebuildPlayerAndRoll(std::optional<int> preserveVerticalPitchScrollTopMidi = std::nullopt)
     {
-        player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_, activePattern());
-        player_->setPlaybackUiCallback([this] { updateDebugStopButtonState(); });
+        player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_);
         player_->setPlaybackAllowed([this] { return editorInstrumentGate(); });
         rebuildRollViewOnly();
         resized();
@@ -859,7 +754,7 @@ private:
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: rebuild roll begin activePatternPtr=" + ptrToLog(&ap) + " externalPatternPtr="
             + ptrToLog(externalPattern_) + " internalPatternPtr=" + ptrToLog(&pattern_)
-            + " noteCount=" + juce::String((int)ap.notes.size()));
+            + " noteCount=" + juce::String((int)ap.timelineNotes.size()));
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
         applyPianoRollPitchRangeForInstrument(*roll, instrumentTrackForClipBind_);
@@ -898,8 +793,6 @@ private:
     juce::TextButton transportStopButton_;
     juce::TextButton cycleToggleButton_;
     juce::TextButton recordButton_;
-    juce::TextButton debugPreviewButton_;
-    juce::TextButton debugStopButton_;
     juce::TextButton exportButton_;
     juce::ToggleButton arrangementSnapToggle_;
     juce::ComboBox arrangementSnapResolutionCombo_;
@@ -909,10 +802,9 @@ private:
     juce::ComboBox displayBox_;
     juce::Label rowsLabel_;
     juce::ComboBox rowsBox_;
-    juce::Label stepsLabel_;
-    juce::ComboBox stepsBox_;
     juce::ComboBox timelineRulerFormatCombo_;
     juce::TextButton followPlayheadToggle_;
+    juce::TextButton fitDrumsButton_;
     juce::Label modeLabel_;
     collapsible_side_strip::ResizeSplitter midiRollResizeSplitter_;
     collapsible_side_strip::CollapsedKnob midiRollCollapsedKnob_;
@@ -1282,13 +1174,6 @@ void ExperimentalMidiEditorWindow::Body::showSavingProjectToast()
     });
 }
 
-void ExperimentalMidiEditorWindow::Body::syncStepsAndSnapUiForPattern()
-{
-    const bool tl = activePattern().usesTimelineNotes();
-    stepsBox_.setEnabled(!tl);
-    stepsLabel_.setEnabled(!tl);
-}
-
 void ExperimentalMidiEditorWindow::Body::syncArrangementSnapUiFromSession()
 {
     arrangementSnapUiApplyingFromSession_ = true;
@@ -1434,7 +1319,118 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
                            " pitchRange="}
             + juce::String(pitchLow) + juce::String{"-"} + juce::String(pitchHigh));
     }
+    updateFitDrumsButtonState();
     layoutMidiSideStripChrome();
+}
+
+void ExperimentalMidiEditorWindow::Body::updateFitDrumsButtonState()
+{
+    const bool drumMode = midiRollRowLabelMode_ == 2;
+    fitDrumsButton_.setEnabled(drumMode);
+    fitDrumsButton_.setTooltip(drumMode ? juce::String("Fit editor to populated drum rows")
+                                        : juce::String("Available in drum mode"));
+}
+
+std::optional<std::pair<int, int>> ExperimentalMidiEditorWindow::Body::computeUsefulDrumPitchRange() const
+{
+    const auto* rv = dynamic_cast<const ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    if (rv == nullptr)
+    {
+        return std::nullopt;
+    }
+    const int pl = rv->pitchLow();
+    const int ph = rv->pitchHigh();
+    int lo = 128;
+    int hi = -1;
+    const auto extend = [&lo, &hi, pl, ph](const int n) {
+        if (n >= pl && n <= ph)
+        {
+            lo = juce::jmin(lo, n);
+            hi = juce::jmax(hi, n);
+        }
+    };
+    if (instrumentTrackForClipBind_ != nullptr)
+    {
+        for (int n = pl; n <= ph; ++n)
+        {
+            const auto eff = instrumentTrackForClipBind_->getEffectiveDrumLabel(n);
+            if (eff.has_value() && eff->first.isNotEmpty())
+            {
+                extend(n);
+            }
+        }
+    }
+    if (hi >= lo)
+    {
+        // Named drum rows exist: they alone define the fit. Clip notes outside the kit's named
+        // rows are ignored here on purpose (they'd stretch the fit over rows with no drum sound).
+        return std::make_pair(lo, hi);
+    }
+    const auto& ap = externalPattern_ != nullptr ? *externalPattern_ : pattern_;
+    for (const auto& n : ap.timelineNotes)
+    {
+        extend(n.midiNote);
+    }
+    if (hi < lo)
+    {
+        return std::nullopt;
+    }
+    return std::make_pair(lo, hi);
+}
+
+void ExperimentalMidiEditorWindow::Body::applyFitDrums()
+{
+    auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    if (rv == nullptr || midiRollRowLabelMode_ != 2)
+    {
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "midi-editor: fit drum range unavailable reason=not-drum-mode");
+        return;
+    }
+    const auto range = computeUsefulDrumPitchRange();
+    if (!range.has_value())
+    {
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            "midi-editor: fit drum range unavailable reason=no-named-or-used-rows");
+        return;
+    }
+    const int lo = range->first;
+    const int hi = range->second;
+    const int rows = hi - lo + 1;
+
+    // Target editor-window height so the grid shows exactly the useful rows (exact fit, no padding).
+    const int targetBodyH = kToolbarH + rv->preferredComponentHeightForPitchRows(rows);
+    int appliedHeight = -1;
+    if (auto* win = dynamic_cast<juce::ResizableWindow*>(getTopLevelComponent()))
+    {
+        const auto wb = win->getBounds();
+        const int deltaH = targetBodyH - getHeight();
+        const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(wb);
+        const auto userArea = display != nullptr
+                                  ? display->userArea
+                                  : juce::Rectangle<int>(0, 0, 1920, 1080);
+        auto nb = wb.withHeight(juce::jlimit(kToolbarH, juce::jmax(kToolbarH, userArea.getHeight()),
+                                             wb.getHeight() + deltaH));
+        // Keep x/y where possible; if the bottom would leave the work area, slide the window up.
+        if (nb.getBottom() > userArea.getBottom())
+        {
+            nb.setY(juce::jmax(userArea.getY(), userArea.getBottom() - nb.getHeight()));
+        }
+        if (nb.getY() < userArea.getY())
+        {
+            nb.setY(userArea.getY());
+        }
+        win->setBounds(nb);
+        appliedHeight = nb.getHeight();
+    }
+    // Window resize has already cascaded through Body::resized -> roll layout; now pin the top row.
+    // If the screen limited the height, this still puts the useful range's top at the top of the grid.
+    rv->restoreVerticalPitchScrollToPriorTopPitch(hi);
+
+    ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+        "midi-editor: fit drum range applied minPitch=" + juce::String(lo) + " maxPitch=" + juce::String(hi)
+        + " rows=" + juce::String(rows) + " targetHeight=" + juce::String(targetBodyH)
+        + " appliedWindowHeight=" + juce::String(appliedHeight));
 }
 
 void ExperimentalMidiEditorWindow::Body::beginExportMidi()
@@ -1534,7 +1530,11 @@ ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumen
     setWantsKeyboardFocus(true);
     setContentOwned(new Body(host), true);
     setResizable(true, true);
-    setResizeLimits(640, 420, 10000, 10000);
+    // No artificial minimum (Conny): the user may collapse the window until the grid disappears,
+    // e.g. shrink-wrapping a small drum kit's rows with the velocity lane hidden. Layout code
+    // (Body::resized, roll gridBounds/velocity clamps) already tolerates near-zero client areas,
+    // and the OS enforces its own practical native-frame minimum.
+    setResizeLimits(1, 1, 10000, 10000);
     centreWithSize(kInitialEditorWidth, kInitialEditorHeight);
 
     if (drum_name_diag::kDrumNamesDiag)
@@ -1554,17 +1554,12 @@ void ExperimentalMidiEditorWindow::closeButtonPressed()
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->snapshotOpenClipViewportFromRoll();
-        b->stopForHostUnload();
     }
     setVisible(false);
 }
 
 void ExperimentalMidiEditorWindow::prepareInstrumentUnloadFromHost()
 {
-    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
-    {
-        b->prepareBeforeHostUnload();
-    }
 }
 
 void ExperimentalMidiEditorWindow::syncInstrumentStateFromHost()
@@ -1610,7 +1605,7 @@ void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* 
 {
     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
         "midi-editor: bindExternalPattern begin patternPtr=" + ptrToLog(pattern) + " noteCount="
-        + juce::String(pattern != nullptr ? (int)pattern->notes.size() : -1));
+        + juce::String(pattern != nullptr ? (int)pattern->timelineNotes.size() : -1));
 
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {

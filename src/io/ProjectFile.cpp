@@ -749,29 +749,11 @@ namespace
                         {
                             c.name = "MIDI 1";
                         }
-                        c.numSteps = 16;
-                        const juce::var& ns = cv.getProperty("numSteps", {});
-                        if (ns.isInt() || ns.isInt64() || ns.isDouble())
-                        {
-                            c.numSteps = juce::jmax(1, (int)static_cast<double>(ns));
-                        }
-                        c.stepDenom = 16;
-                        const juce::var& sd = cv.getProperty("stepDenom", {});
-                        if (sd.isInt() || sd.isInt64() || sd.isDouble())
-                        {
-                            c.stepDenom = juce::jmax(1, (int)static_cast<double>(sd));
-                        }
                         c.bpm = 110.0;
                         const juce::var& bp = cv.getProperty("bpm", {});
                         if (bp.isDouble() || bp.isInt() || bp.isInt64())
                         {
                             c.bpm = (double)bp;
-                        }
-                        c.loop = true;
-                        const juce::var& lp = cv.getProperty("loop", {});
-                        if (lp.isBool())
-                        {
-                            c.loop = (bool)lp;
                         }
                         c.laneStartFractionPermille = 0;
                         const juce::var& ls = cv.getProperty("laneStartFractionPermille", {});
@@ -812,43 +794,6 @@ namespace
                             if (taOk)
                             {
                                 c.timelineAnchorSamples = ta;
-                            }
-                        }
-                        const juce::var& notesV = cv.getProperty("notes", {});
-                        if (notesV.isArray())
-                        {
-                            const juce::Array<juce::var>* na = notesV.getArray();
-                            if (na != nullptr)
-                            {
-                                for (const juce::var& nv : *na)
-                                {
-                                    if (!nv.isObject())
-                                    {
-                                        continue;
-                                    }
-                                    ProjectFileExperimentalInstrumentNoteV1 n;
-                                    const juce::var& mn = nv.getProperty("midiNote", {});
-                                    if (mn.isInt() || mn.isInt64() || mn.isDouble())
-                                    {
-                                        n.midiNote = (int)static_cast<double>(mn);
-                                    }
-                                    const juce::var& st = nv.getProperty("step", {});
-                                    if (st.isInt() || st.isInt64() || st.isDouble())
-                                    {
-                                        n.step = (int)static_cast<double>(st);
-                                    }
-                                    const juce::var& vl = nv.getProperty("velocity", {});
-                                    if (vl.isInt() || vl.isInt64() || vl.isDouble())
-                                    {
-                                        n.velocity = (int)static_cast<double>(vl);
-                                    }
-                                    const juce::var& ln = nv.getProperty("lengthSteps", {});
-                                    if (ln.isInt() || ln.isInt64() || ln.isDouble())
-                                    {
-                                        n.lengthSteps = juce::jmax(1, (int)static_cast<double>(ln));
-                                    }
-                                    c.notes.push_back(n);
-                                }
                             }
                         }
                         c.ticksPerQuarter = 960;
@@ -925,15 +870,6 @@ namespace
                         else if (mrfo.isInt() || mrfo.isInt64() || mrfo.isDouble())
                         {
                             c.midiRollFollowEnabled = static_cast<int>(static_cast<double>(mrfo) + 0.5) != 0;
-                        }
-                        const juce::var& tlm = cv.getProperty("timelineMode", {});
-                        if (tlm.isBool())
-                        {
-                            c.timelineMode = (bool)tlm;
-                        }
-                        else if (tlm.isInt() || tlm.isInt64() || tlm.isDouble())
-                        {
-                            c.timelineMode = static_cast<int>(static_cast<double>(tlm) + 0.5) != 0;
                         }
                         et.clips.push_back(std::move(c));
                     }
@@ -1123,15 +1059,9 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 juce::DynamicObject::Ptr co = new juce::DynamicObject();
                 co->setProperty("id", static_cast<std::int64_t>(cl.id));
                 co->setProperty("name", cl.name);
-                co->setProperty("numSteps", cl.numSteps);
-                co->setProperty("stepDenom", cl.stepDenom);
                 if (std::isfinite(cl.bpm))
                 {
                     co->setProperty("bpm", cl.bpm);
-                }
-                if (!cl.loop)
-                {
-                    co->setProperty("loop", false);
                 }
                 co->setProperty("startSamples", static_cast<juce::int64>(cl.startSamples));
                 co->setProperty("lengthSamples", static_cast<juce::int64>(cl.lengthSamples));
@@ -1153,17 +1083,6 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 {
                     co->setProperty("laneEndFractionPermille", cl.laneEndFractionPermille);
                 }
-                juce::Array<juce::var> noteVars;
-                for (const auto& n : cl.notes)
-                {
-                    juce::DynamicObject::Ptr no = new juce::DynamicObject();
-                    no->setProperty("midiNote", n.midiNote);
-                    no->setProperty("step", n.step);
-                    no->setProperty("velocity", n.velocity);
-                    no->setProperty("lengthSteps", n.lengthSteps);
-                    noteVars.add(juce::var(no.get()));
-                }
-                co->setProperty("notes", juce::var(noteVars));
                 co->setProperty("ticksPerQuarter", cl.ticksPerQuarter);
                 if (!cl.timelineNotes.empty())
                 {
@@ -1189,10 +1108,6 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     {
                         co->setProperty("midiRollFollowEnabled", true);
                     }
-                }
-                if (cl.timelineMode)
-                {
-                    co->setProperty("timelineMode", true);
                 }
                 clipVars.add(juce::var(co.get()));
             }
@@ -1824,28 +1739,14 @@ namespace
     [[nodiscard]] bool experimentalInstrumentClipMusicalEqual(const ProjectFileExperimentalInstrumentClipV1& a,
                                                              const ProjectFileExperimentalInstrumentClipV1& b) noexcept
     {
-        if (a.id != b.id || a.name != b.name || a.numSteps != b.numSteps || a.stepDenom != b.stepDenom
-            || a.bpm != b.bpm || a.loop != b.loop || a.startSamples != b.startSamples
+        if (a.id != b.id || a.name != b.name
+            || a.bpm != b.bpm || a.startSamples != b.startSamples
             || a.lengthSamples != b.lengthSamples
             || a.timelineAnchorSamples.value_or(a.startSamples) != b.timelineAnchorSamples.value_or(b.startSamples)
             || a.laneStartFractionPermille != b.laneStartFractionPermille
             || a.laneEndFractionPermille != b.laneEndFractionPermille || a.ticksPerQuarter != b.ticksPerQuarter)
         {
             return false;
-        }
-        if (a.notes.size() != b.notes.size())
-        {
-            return false;
-        }
-        for (size_t i = 0; i < a.notes.size(); ++i)
-        {
-            const auto& p = a.notes[i];
-            const auto& q = b.notes[i];
-            if (p.midiNote != q.midiNote || p.step != q.step || p.velocity != q.velocity
-                || p.lengthSteps != q.lengthSteps)
-            {
-                return false;
-            }
         }
         if (a.timelineNotes.size() != b.timelineNotes.size())
         {

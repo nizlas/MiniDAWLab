@@ -36,7 +36,8 @@ class TimelineViewportModel;
 class ExperimentalPianoRollView final : public juce::Component,
                                           public juce::SettableTooltipClient,
                                           private juce::Timer,
-                                          private juce::TextEditor::Listener
+                                          private juce::TextEditor::Listener,
+                                          private juce::ScrollBar::Listener
 {
 public:
     /// Default drum-oriented editor span (Groove Agent–class lanes).
@@ -59,7 +60,7 @@ public:
     static constexpr int kMidiEditorKeyboardLaneWidthDrumNamesDefault = 60;
     static constexpr int kMidiEditorKeyboardLaneWidthDrumNamesMin = 44;
 
-    /// Absolute-timeline mode only (0 in legacy step-local mode).
+    /// Present when the roll is bound to a session clip; 0 when unbound.
     static constexpr int kRulerHeight = 22;
 
     ExperimentalPianoRollView(ExperimentalMidiPattern& pattern, ExperimentalMidiPatternPlayer* player);
@@ -84,7 +85,7 @@ public:
     bool keyPressed(const juce::KeyPress& key) override;
     void resized() override;
 
-    /// Absolute timeline mode (clip editor). Pass nullptrs to use legacy clip-local step grid (internal pattern only).
+    /// Bind the roll to a session clip (absolute timeline). Pass nullptrs when unbound.
     /// When the clip has no saved roll viewport, horizontal zoom is seeded to ~5 bars using `Session` tempo/meter (not main-timeline zoom).
     void setSessionTimelineContext(InstrumentMidiClip* timelineClip,
                                    Session* session,
@@ -141,6 +142,10 @@ public:
     [[nodiscard]] std::int64_t getViewportVisibleStartSamples() const noexcept { return visibleStartSamples_; }
     [[nodiscard]] double getViewportSamplesPerPixel() const noexcept { return samplesPerPixel_; }
 
+    /// Component height that would show exactly `rows` pitch rows: ruler + rows*kRowHeight + the
+    /// velocity lane height preference (unclamped best-effort; the lane re-clamps at layout time).
+    [[nodiscard]] int preferredComponentHeightForPitchRows(int rows) const noexcept;
+
     /// Current velocity lane height preference in px (0 = minimized). For project UI persistence.
     [[nodiscard]] int velocityLaneHeightPreference() const noexcept { return velocityLaneHeightPref_; }
     /// Restore velocity lane height from project UI metadata (clamped; 0 = minimized).
@@ -164,6 +169,8 @@ public:
 private:
     void timerCallback() override;
 
+    void scrollBarMoved(juce::ScrollBar* bar, double newRangeStart) override;
+
     void textEditorReturnKeyPressed(juce::TextEditor&) override;
     void textEditorEscapeKeyPressed(juce::TextEditor&) override;
     void textEditorFocusLost(juce::TextEditor&) override;
@@ -186,15 +193,12 @@ private:
     [[nodiscard]] int pitchAtY(int y) const;
     [[nodiscard]] int sideStripTotalNow() const noexcept;
     [[nodiscard]] int sideStripContentWidthNow() const noexcept;
-    [[nodiscard]] int stepAtPatternX(int x) const;
-    [[nodiscard]] int stepAtTimelineX(int x) const;
     [[nodiscard]] int timelineRulerHeight() const noexcept;
     [[nodiscard]] juce::Rectangle<int> rulerCornerBounds() const;
     [[nodiscard]] juce::Rectangle<int> rulerTrackBounds() const;
     [[nodiscard]] juce::Rectangle<int> keyboardBounds() const;
     [[nodiscard]] juce::Rectangle<int> gridBounds() const;
     [[nodiscard]] std::int64_t visibleEndSamples() const noexcept;
-    [[nodiscard]] float cellWidth() const;
     [[nodiscard]] std::int64_t musicalSnapGridTicks() const noexcept;
     [[nodiscard]] std::int64_t referenceTimelineGridTicks() const noexcept;
     void handleTimelineNotesMouseDown(const juce::MouseEvent& e);
@@ -275,7 +279,7 @@ private:
     [[nodiscard]] juce::Rectangle<int> velocityLaneResizeBandBounds() const;
     /// Small centered handle at the bottom edge when minimized (click restores, drag reopens).
     [[nodiscard]] juce::Rectangle<int> velocityLaneCollapsedKnobBounds() const;
-    /// Lane bars/editing need the absolute-timeline clip binding; legacy step grid shows a hint only.
+    /// Lane bars/editing need a bound session clip.
     [[nodiscard]] bool velocityLaneEditingAvailable() const noexcept;
     [[nodiscard]] int velocityFromLaneY(int y) const noexcept;
     /// Bar onset X for eligible note (in pitch range + inside clip span); nullopt when not drawable.
@@ -362,9 +366,14 @@ private:
     void syncUiPlayheadAfterRulerSeek(std::int64_t seekTargetSamples) noexcept;
     void maybeFollowViewportToAnchorSample(double anchorSamples) noexcept;
 
+    /// Right-side vertical scrollbar strip (between grid and component right edge).
+    static constexpr int kPitchScrollbarWidthPx = 12;
+
     [[nodiscard]] int countVisiblePitchRows() const noexcept;
     [[nodiscard]] int maxPitchScrollOffsetRows() const noexcept;
     void clampPitchScrollOffset() noexcept;
+    /// Push `pitchScrollOffsetRows_` + visible row count into the right-side scrollbar (no notification).
+    void syncPitchScrollbarFromState();
     [[nodiscard]] int topVisiblePitch() const noexcept;
     [[nodiscard]] std::optional<juce::Rectangle<int>> visibleRowStripRect(const juce::Rectangle<int>& strip,
                                                                           int midiNote) const noexcept;
@@ -414,7 +423,6 @@ private:
     bool clipGeometrySnapshotValid_ = false;
     std::int64_t lastObservedClipStartSamplesUi_ = 0;
     std::int64_t lastObservedClipLengthSamplesUi_ = 0;
-    int lastObservedNoteCountUi_ = -1;
 
     int timelineNotesDisplayComboId_ = 1;
     int lastObservedTimelineNoteCountUi_ = -1;
@@ -455,9 +463,6 @@ private:
     /// Last tick believed playing; used for stop-edge repaint.
     bool wasTransportPlayingUi_ = false;
 
-    /// Latest preview absolute sample for paint when clip-bound (Debug Preview).
-    double uiPreviewDisplayAbsSample_ = 0.0;
-
     /// Until `readPlayheadSamplesForUi` catches up after `requestSeek`, keep ruler/grid playhead on
     /// the requested sample (audio thread commits seek asynchronously).
     std::optional<std::int64_t> uiRulerSeekDisplayHold_;
@@ -483,6 +488,12 @@ private:
     int pitchScrollOffsetRows_ = 0;
     /// Fractional pitch rows from high-res / sub-line wheel deltas (applied with `trunc` in `mouseWheelMove`).
     float pitchWheelScrollRemainder_ = 0.0f;
+
+    /// Right-side vertical scrollbar; range unit = pitch rows (0 = topmost). Kept in sync via
+    /// `syncPitchScrollbarFromState`; user drags land in `scrollBarMoved`.
+    juce::ScrollBar pitchScrollbar_ { true };
+    /// Guards against feedback while pushing state into the scrollbar programmatically.
+    bool pitchScrollbarSyncing_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExperimentalPianoRollView)
 };
