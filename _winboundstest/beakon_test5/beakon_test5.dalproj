@@ -34524,10 +34524,18 @@
                        "width":  900,
                        "height":  600
                    },
+    "midiEditorWorkspace":  {
+                                "open":  true,
+                                "instrumentTrackId":  5,
+                                "clipId":  1,
+                                "topVisibleMidiPitch":  84,
+                                "velocityLaneHeight":  140,
+                                "rowLabelMode":  1
+                            },
     "midiEditorWindow":  {
-                             "x":  150,
-                             "y":  120,
-                             "width":  1100,
-                             "height":  650
+                             "x":  180,
+                             "y":  140,
+                             "width":  300,
+                             "height":  200
                          }
 }

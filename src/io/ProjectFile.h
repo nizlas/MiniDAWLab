@@ -189,6 +189,25 @@ struct ProjectFileMainWindowBoundsV1
     bool maximized = false;
 };
 
+/// Optional MIDI editor workspace (root `midiEditorWorkspace`); omitted in older projects and when
+/// the editor was closed at save. Window bounds live separately in `midiEditorWindow`. Horizontal
+/// roll scroll/zoom/Follow are per-clip (`midiRoll*` clip fields), not duplicated here.
+struct ProjectFileMidiEditorWorkspaceV1
+{
+    /// True when the MIDI editor window was open (visible) at save; load may auto-reopen it.
+    bool open = false;
+    /// Timeline instrument track the editor was bound to (0 = unknown).
+    juce::int64 instrumentTrackId = 0;
+    /// Bound `InstrumentMidiClip` id (0 = unknown/scratch).
+    juce::int64 clipId = 0;
+    /// Vertical pitch scroll: topmost visible MIDI pitch at the grid (-1 = absent).
+    int topVisibleMidiPitch = -1;
+    /// Velocity lane height in px; 0 = minimized, -1 = absent (use default).
+    int velocityLaneHeight = -1;
+    /// Row label mode: 1 = piano, 2 = drum names, 0 = absent (auto from kit).
+    int rowLabelMode = 0;
+};
+
 /// Optional Audio Mixdown UI settings (root `audioMixdown`); omitted in older projects.
 struct ProjectFileAudioMixdownV1
 {
@@ -238,6 +257,9 @@ struct ProjectFileV1
     /// older files → MIDI editor opens with its default centred size. Never auto-opens the editor.
     bool hasMidiEditorWindowBounds = false;
     ProjectFileMainWindowBoundsV1 midiEditorWindowBounds;
+    /// Optional root `midiEditorWorkspace` object; absent in older files → no auto-reopen.
+    bool hasMidiEditorWorkspace = false;
+    ProjectFileMidiEditorWorkspaceV1 midiEditorWorkspace;
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;

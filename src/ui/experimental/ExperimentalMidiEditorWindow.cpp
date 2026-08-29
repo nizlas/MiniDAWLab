@@ -536,6 +536,40 @@ public:
         }
     }
 
+    [[nodiscard]] MidiEditorWorkspaceUiState captureWorkspaceUiStateFromBody() const noexcept
+    {
+        MidiEditorWorkspaceUiState s;
+        if (const auto* rv = dynamic_cast<const ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            s.topVisibleMidiPitch = rv->topVisibleMidiPitch();
+            s.velocityLaneHeight = rv->velocityLaneHeightPreference();
+        }
+        s.rowLabelMode = juce::jlimit(1, 2, rowsBox_.getSelectedId());
+        return s;
+    }
+
+    void applyWorkspaceUiStateToBody(const MidiEditorWorkspaceUiState& s) noexcept
+    {
+        if (s.rowLabelMode == 1 || s.rowLabelMode == 2)
+        {
+            // Pin as a user pick so a later async drum-label probe cannot flip the restored mode.
+            userRowsModeOverride_ = true;
+            rowsBox_.setSelectedId(s.rowLabelMode, juce::dontSendNotification);
+            pushRowsModeToRoll();
+        }
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            if (s.velocityLaneHeight >= 0)
+            {
+                rv->setVelocityLaneHeightPreference(s.velocityLaneHeight);
+            }
+            if (s.topVisibleMidiPitch >= 0)
+            {
+                rv->restoreVerticalPitchScrollToPriorTopPitch(s.topVisibleMidiPitch);
+            }
+        }
+    }
+
     [[nodiscard]] ExperimentalMidiPattern& activePattern() noexcept
     {
         return externalPattern_ != nullptr ? *externalPattern_ : pattern_;
@@ -1662,5 +1696,22 @@ void ExperimentalMidiEditorWindow::snapshotOpenClipViewportFromRoll() noexcept
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->snapshotOpenClipViewportFromRoll();
+    }
+}
+
+MidiEditorWorkspaceUiState ExperimentalMidiEditorWindow::captureWorkspaceUiState() const noexcept
+{
+    if (const auto* b = dynamic_cast<const Body*>(getContentComponent()))
+    {
+        return b->captureWorkspaceUiStateFromBody();
+    }
+    return {};
+}
+
+void ExperimentalMidiEditorWindow::applyWorkspaceUiState(const MidiEditorWorkspaceUiState& s) noexcept
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        b->applyWorkspaceUiStateToBody(s);
     }
 }

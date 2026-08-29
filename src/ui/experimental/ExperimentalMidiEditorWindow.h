@@ -21,6 +21,18 @@ namespace juce
 class AudioDeviceManager;
 }
 
+/// Conny 1B: internal MIDI editor view state persisted per project (window bounds live separately).
+/// Horizontal roll pan/zoom/Follow are per-clip (`midiRoll*` fields) and not duplicated here.
+struct MidiEditorWorkspaceUiState
+{
+    /// Topmost visible MIDI pitch (vertical pitch scroll); -1 = unknown.
+    int topVisibleMidiPitch = -1;
+    /// Velocity lane height in px; 0 = minimized, -1 = unknown.
+    int velocityLaneHeight = -1;
+    /// Rows mode: 1 = piano, 2 = drum names, 0 = unknown (keep auto default from kit).
+    int rowLabelMode = 0;
+};
+
 /// I3h: non-owning handles + callbacks into `TransportControlsContent` — one global transport; no
 /// duplicated `Transport` / `Session` / recorder state in the MIDI editor.
 struct ExperimentalMidiTransportCommands
@@ -96,6 +108,13 @@ public:
 
     /// Persists piano-roll pan/zoom/Follow on the bound clip (call before project save and when closing).
     void snapshotOpenClipViewportFromRoll() noexcept;
+
+    /// Current internal view state for project save (vertical pitch scroll, velocity lane, rows mode).
+    [[nodiscard]] MidiEditorWorkspaceUiState captureWorkspaceUiState() const noexcept;
+
+    /// Restore internal view state after `bindExternalPattern` (unknown fields are left unchanged).
+    /// A restored rows mode is pinned as a user pick so async drum-label probes do not flip it back.
+    void applyWorkspaceUiState(const MidiEditorWorkspaceUiState& s) noexcept;
 
     /// Transient "Saving project" indicator in this window (mirror of the main-window toast); shown
     /// by the save path when this editor is the active window.

@@ -41,6 +41,10 @@ public:
         std::function<void(const ProjectFileV1&)> applyMainWindowBoundsFromLoadedProject;
         /// Optional: last known MIDI editor window bounds (live window or memo); nullopt = omit.
         std::function<std::optional<ProjectFileMainWindowBoundsV1>()> getMidiEditorWindowBoundsForProjectSave;
+        /// Optional (Conny 1B): open MIDI editor workspace (track/clip/view) for save; nullopt = closed.
+        std::function<std::optional<ProjectFileMidiEditorWorkspaceV1>()> getMidiEditorWorkspaceForProjectSave;
+        /// Optional (Conny 1B): after load end, reopen the MIDI editor when the project saved it open.
+        std::function<void(const ProjectFileV1&)> restoreMidiEditorWorkspaceFromLoadedProject;
 
         /// Optional: transient "Saving project" indicator, invoked right before the project file write.
         std::function<void()> showSavingProjectIndicator;

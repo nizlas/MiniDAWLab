@@ -563,6 +563,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             midiEditorWinBounds = callbacks_.getMidiEditorWindowBoundsForProjectSave();
         }
+        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspace;
+        if (callbacks_.getMidiEditorWorkspaceForProjectSave != nullptr)
+        {
+            midiEditorWorkspace = callbacks_.getMidiEditorWorkspaceForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: "
                                      + session_.getCurrentProjectFile().getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
@@ -574,7 +579,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             snapRoot.enabled,
             snapRoot.resolutionKey,
             mainWinBounds,
-            midiEditorWinBounds);
+            midiEditorWinBounds,
+            midiEditorWorkspace);
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -680,6 +686,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             midiEditorWinBounds = callbacks_.getMidiEditorWindowBoundsForProjectSave();
         }
+        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspace;
+        if (callbacks_.getMidiEditorWorkspaceForProjectSave != nullptr)
+        {
+            midiEditorWorkspace = callbacks_.getMidiEditorWorkspaceForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
             transport_,
@@ -690,7 +701,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             snapRoot.enabled,
             snapRoot.resolutionKey,
             mainWinBounds,
-            midiEditorWinBounds);
+            midiEditorWinBounds,
+            midiEditorWorkspace);
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -998,6 +1010,13 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         {
             callbacks_.applyMainWindowBoundsFromLoadedProject(parsedLoad);
         }
+        // Conny 1B: reopen the MIDI editor when the project saved it as open (after the session,
+        // instrument runtimes, clips and main window are all restored). Skips safely when the
+        // saved track/clip no longer exists; never opens plugin editor windows.
+        if (callbacks_.restoreMidiEditorWorkspaceFromLoadedProject != nullptr)
+        {
+            callbacks_.restoreMidiEditorWorkspaceFromLoadedProject(parsedLoad);
+        }
         if (infoNote.isNotEmpty() || skipped.size() > 0)
         {
             juce::String body;
@@ -1245,6 +1264,11 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     {
         midiEditorWinBounds = callbacks_.getMidiEditorWindowBoundsForProjectSave();
     }
+    std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspace;
+    if (callbacks_.getMidiEditorWorkspaceForProjectSave != nullptr)
+    {
+        midiEditorWorkspace = callbacks_.getMidiEditorWorkspaceForProjectSave();
+    }
 
     // `saveProjectToFile` records the written file as the current project on success; the autosave
     // must never hijack the user's normal save target, so restore it afterwards. The write itself
@@ -1262,7 +1286,8 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
         snapRoot.enabled,
         snapRoot.resolutionKey,
         mainWinBounds,
-        midiEditorWinBounds);
+        midiEditorWinBounds,
+        midiEditorWorkspace);
     session_.setCurrentProjectFile(normalProjectFile);
 
     const int elapsedMs = static_cast<int>(juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);

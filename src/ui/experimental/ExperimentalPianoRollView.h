@@ -141,6 +141,11 @@ public:
     [[nodiscard]] std::int64_t getViewportVisibleStartSamples() const noexcept { return visibleStartSamples_; }
     [[nodiscard]] double getViewportSamplesPerPixel() const noexcept { return samplesPerPixel_; }
 
+    /// Current velocity lane height preference in px (0 = minimized). For project UI persistence.
+    [[nodiscard]] int velocityLaneHeightPreference() const noexcept { return velocityLaneHeightPref_; }
+    /// Restore velocity lane height from project UI metadata (clamped; 0 = minimized).
+    void setVelocityLaneHeightPreference(int heightPx) noexcept;
+
     /// Note-name / piano key column content width (excludes splitter chrome; zero when fully collapsed).
     [[nodiscard]] int keyboardColumnWidth() const noexcept;
     /// Runtime-only UI preference (expand/collapse + lane width). App-wide persistence is a future follow-up.

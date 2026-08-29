@@ -1225,6 +1225,21 @@ void ExperimentalPianoRollView::restoreVerticalPitchScrollToPriorTopPitch(const 
     repaint();
 }
 
+void ExperimentalPianoRollView::setVelocityLaneHeightPreference(const int heightPx) noexcept
+{
+    // Same snap-to-minimized policy as the interactive resize. No upper clamp here: the component
+    // may not be laid out yet at restore time; `velocityLaneTotalHeight()` clamps at use time.
+    int h = heightPx;
+    if (h < kVelocityLaneMinUsableHeight)
+    {
+        h = 0;
+    }
+    velocityLaneHeightPref_ = juce::jmax(0, h);
+    clampPitchScrollOffset();
+    resized();
+    repaint();
+}
+
 std::optional<juce::Rectangle<int>> ExperimentalPianoRollView::visibleRowStripRect(
     const juce::Rectangle<int>& strip, const int midiNote) const noexcept
 {

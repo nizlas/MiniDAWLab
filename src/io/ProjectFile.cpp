@@ -1004,14 +1004,36 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         }
         return juce::var(mw.get());
     };
-    if (data.hasMainWindowBounds && data.mainWindowBounds.width >= 320 && data.mainWindowBounds.height >= 240)
+    // Window sizes are persisted exactly as captured; the only write guard is against junk.
+    if (data.hasMainWindowBounds && data.mainWindowBounds.width >= 1 && data.mainWindowBounds.height >= 1)
     {
         root->setProperty("mainWindow", makeWindowBoundsVar(data.mainWindowBounds));
     }
-    if (data.hasMidiEditorWindowBounds && data.midiEditorWindowBounds.width >= 320
-        && data.midiEditorWindowBounds.height >= 240)
+    if (data.hasMidiEditorWindowBounds && data.midiEditorWindowBounds.width >= 1
+        && data.midiEditorWindowBounds.height >= 1)
     {
         root->setProperty("midiEditorWindow", makeWindowBoundsVar(data.midiEditorWindowBounds));
+    }
+    if (data.hasMidiEditorWorkspace)
+    {
+        const ProjectFileMidiEditorWorkspaceV1& ws = data.midiEditorWorkspace;
+        juce::DynamicObject::Ptr o = new juce::DynamicObject();
+        o->setProperty("open", ws.open);
+        o->setProperty("instrumentTrackId", ws.instrumentTrackId);
+        o->setProperty("clipId", ws.clipId);
+        if (ws.topVisibleMidiPitch >= 0)
+        {
+            o->setProperty("topVisibleMidiPitch", ws.topVisibleMidiPitch);
+        }
+        if (ws.velocityLaneHeight >= 0)
+        {
+            o->setProperty("velocityLaneHeight", ws.velocityLaneHeight);
+        }
+        if (ws.rowLabelMode == 1 || ws.rowLabelMode == 2)
+        {
+            o->setProperty("rowLabelMode", ws.rowLabelMode);
+        }
+        root->setProperty("midiEditorWorkspace", juce::var(o.get()));
     }
     root->setProperty("tracks", juce::var(trackVars));
 
@@ -1454,10 +1476,8 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             const int y = propInt(dyn->getProperty("y"), std::numeric_limits<int>::min());
             const int ww = propInt(dyn->getProperty("width"), 0);
             const int hh = propInt(dyn->getProperty("height"), 0);
-            constexpr int kMinW = 320;
-            constexpr int kMinH = 240;
-            if (x == std::numeric_limits<int>::min() || y == std::numeric_limits<int>::min() || ww < kMinW
-                || hh < kMinH)
+            if (x == std::numeric_limits<int>::min() || y == std::numeric_limits<int>::min() || ww < 1
+                || hh < 1)
             {
                 return false;
             }
@@ -1472,6 +1492,30 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             = readWindowBoundsObject(root.getProperty("mainWindow", {}), out.mainWindowBounds);
         out.hasMidiEditorWindowBounds
             = readWindowBoundsObject(root.getProperty("midiEditorWindow", {}), out.midiEditorWindowBounds);
+    }
+
+    {
+        const juce::var& wsVar = root.getProperty("midiEditorWorkspace", {});
+        if (wsVar.isObject())
+        {
+            if (const auto* dyn = wsVar.getDynamicObject())
+            {
+                ProjectFileMidiEditorWorkspaceV1& ws = out.midiEditorWorkspace;
+                ws.open = static_cast<bool>(dyn->getProperty("open"));
+                ws.instrumentTrackId
+                    = static_cast<juce::int64>(dyn->getProperty("instrumentTrackId"));
+                ws.clipId = static_cast<juce::int64>(dyn->getProperty("clipId"));
+                const juce::var topPitch = dyn->getProperty("topVisibleMidiPitch");
+                ws.topVisibleMidiPitch
+                    = topPitch.isVoid() ? -1 : juce::jlimit(-1, 127, static_cast<int>(topPitch));
+                const juce::var laneH = dyn->getProperty("velocityLaneHeight");
+                ws.velocityLaneHeight
+                    = laneH.isVoid() ? -1 : juce::jlimit(-1, 4000, static_cast<int>(laneH));
+                const int mode = static_cast<int>(dyn->getProperty("rowLabelMode"));
+                ws.rowLabelMode = (mode == 1 || mode == 2) ? mode : 0;
+                out.hasMidiEditorWorkspace = true;
+            }
+        }
     }
 
     {

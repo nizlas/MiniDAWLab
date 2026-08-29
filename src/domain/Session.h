@@ -297,7 +297,8 @@ public:
         bool arrangementSnapEnabled = false,
         juce::String arrangementSnapResolutionKey = "1_4",
         std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave = std::nullopt,
-        std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave = std::nullopt);
+        std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave = std::nullopt,
+        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave = std::nullopt);
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).

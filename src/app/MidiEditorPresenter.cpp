@@ -10,6 +10,7 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "transport/Transport.h"
 
+#include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 
@@ -248,8 +249,19 @@ void MidiEditorPresenter::openMidiEditorForInstrumentClip(const TrackId timeline
     midiEditorWindow_->refreshArrangementSnapMirrorFromSession();
     if (midiEditorWindowBoundsMemo_.has_value())
     {
-        (void)applyProjectWindowBoundsClamped(*midiEditorWindow_, *midiEditorWindowBoundsMemo_,
-                                              kMidiEditorWindowMinW, kMidiEditorWindowMinH);
+        (void)applyProjectWindowBoundsClamped(*midiEditorWindow_, *midiEditorWindowBoundsMemo_);
+    }
+    {
+        // Velocity lane height is track-agnostic; pitch scroll and rows mode belong to the track
+        // they were captured on (drum vs melodic ranges differ) and must not leak across tracks.
+        MidiEditorWorkspaceUiState toApply = midiEditorUiStateMemo_;
+        if (!midiEditorUiStateMemoTrackId_.has_value()
+            || *midiEditorUiStateMemoTrackId_ != timelineInstrumentTrackId)
+        {
+            toApply.topVisibleMidiPitch = -1;
+            toApply.rowLabelMode = 0;
+        }
+        midiEditorWindow_->applyWorkspaceUiState(toApply);
     }
     midiEditorWindow_->setVisible(true);
     midiEditorWindow_->toFront(true);
@@ -339,12 +351,25 @@ void MidiEditorPresenter::rememberMidiEditorWindowBoundsIfWindowExists() noexcep
     {
         return;
     }
-    const std::optional<ProjectFileMainWindowBoundsV1> b = captureProjectWindowBoundsForProjectSave(
-        *midiEditorWindow_, kMidiEditorWindowMinW, kMidiEditorWindowMinH);
+    const std::optional<ProjectFileMainWindowBoundsV1> b
+        = captureProjectWindowBoundsForProjectSave(*midiEditorWindow_);
     if (b.has_value())
     {
         midiEditorWindowBoundsMemo_ = b;
     }
+    else
+    {
+        // A live window whose bounds fail the capture guard must never be silent: this is exactly
+        // how "saved but placement forgotten" reports start.
+        const juce::Rectangle<int> r = midiEditorWindow_->getScreenBounds();
+        appendProjectSaveDiagnosticLine("midi editor bounds capture rejected: x="
+                                        + juce::String(r.getX()) + " y=" + juce::String(r.getY())
+                                        + " w=" + juce::String(r.getWidth())
+                                        + " h=" + juce::String(r.getHeight())
+                                        + " (memo left unchanged)");
+    }
+    midiEditorUiStateMemo_ = midiEditorWindow_->captureWorkspaceUiState();
+    midiEditorUiStateMemoTrackId_ = midiEditorOpenedForInstrumentTrackId_;
 }
 
 void MidiEditorPresenter::setMidiEditorWindowBoundsFromLoadedProject(
@@ -358,10 +383,24 @@ void MidiEditorPresenter::setMidiEditorWindowBoundsFromLoadedProject(
     {
         midiEditorWindowBoundsMemo_.reset();
     }
+    if (projectFile.hasMidiEditorWorkspace)
+    {
+        const ProjectFileMidiEditorWorkspaceV1& ws = projectFile.midiEditorWorkspace;
+        midiEditorUiStateMemo_.topVisibleMidiPitch = ws.topVisibleMidiPitch;
+        midiEditorUiStateMemo_.velocityLaneHeight = ws.velocityLaneHeight;
+        midiEditorUiStateMemo_.rowLabelMode = ws.rowLabelMode;
+        midiEditorUiStateMemoTrackId_ = ws.instrumentTrackId != 0
+                                            ? std::optional<TrackId>(static_cast<TrackId>(ws.instrumentTrackId))
+                                            : std::nullopt;
+    }
+    else
+    {
+        midiEditorUiStateMemo_ = {};
+        midiEditorUiStateMemoTrackId_.reset();
+    }
     if (midiEditorWindow_ != nullptr && midiEditorWindowBoundsMemo_.has_value())
     {
-        (void)applyProjectWindowBoundsClamped(*midiEditorWindow_, *midiEditorWindowBoundsMemo_,
-                                              kMidiEditorWindowMinW, kMidiEditorWindowMinH);
+        (void)applyProjectWindowBoundsClamped(*midiEditorWindow_, *midiEditorWindowBoundsMemo_);
     }
 }
 
@@ -370,6 +409,88 @@ MidiEditorPresenter::getMidiEditorWindowBoundsForProjectSave() noexcept
 {
     rememberMidiEditorWindowBoundsIfWindowExists();
     return midiEditorWindowBoundsMemo_;
+}
+
+std::optional<ProjectFileMidiEditorWorkspaceV1>
+MidiEditorPresenter::getMidiEditorWorkspaceForProjectSave() noexcept
+{
+    rememberMidiEditorWindowBoundsIfWindowExists();
+    if (midiEditorWindow_ == nullptr || !midiEditorWindow_->isVisible())
+    {
+        // Closed editor: omit the workspace so load never auto-opens it. Bounds and the in-session
+        // view memo still persist separately for the next manual open.
+        return std::nullopt;
+    }
+    ProjectFileMidiEditorWorkspaceV1 ws;
+    ws.open = true;
+    ws.instrumentTrackId = midiEditorOpenedForInstrumentTrackId_.has_value()
+                               ? static_cast<juce::int64>(*midiEditorOpenedForInstrumentTrackId_)
+                               : 0;
+    const std::optional<std::uint64_t> clipId = midiEditorWindow_->getBoundInstrumentClipId();
+    ws.clipId = clipId.has_value() ? static_cast<juce::int64>(*clipId) : 0;
+    ws.topVisibleMidiPitch = midiEditorUiStateMemo_.topVisibleMidiPitch;
+    ws.velocityLaneHeight = midiEditorUiStateMemo_.velocityLaneHeight;
+    ws.rowLabelMode = midiEditorUiStateMemo_.rowLabelMode;
+    return ws;
+}
+
+void MidiEditorPresenter::tryRestoreMidiEditorWorkspaceAfterProjectLoad(
+    const ProjectFileV1& projectFile) noexcept
+{
+    if (!projectFile.hasMidiEditorWorkspace || !projectFile.midiEditorWorkspace.open)
+    {
+        return;
+    }
+    const ProjectFileMidiEditorWorkspaceV1& ws = projectFile.midiEditorWorkspace;
+    const auto tid = static_cast<TrackId>(ws.instrumentTrackId);
+    const auto clipId = static_cast<InstrumentMidiClipId>(ws.clipId);
+    appendProjectLoadDiagnosticLine("load: MIDI editor restore requested track="
+                                    + juce::String(ws.instrumentTrackId)
+                                    + " clip=" + juce::String(ws.clipId));
+    if (tid == 0 || clipId == 0)
+    {
+        appendProjectLoadDiagnosticLine("load: MIDI editor restore skipped (no track/clip identity)");
+        return;
+    }
+    if (callbacks_.getInstrumentControllerForTrack == nullptr
+        || callbacks_.getInstrumentHostForTrack == nullptr)
+    {
+        appendProjectLoadDiagnosticLine("load: MIDI editor restore skipped (no runtime lookups)");
+        return;
+    }
+    InstrumentTrackController* const ctl = callbacks_.getInstrumentControllerForTrack(tid);
+    if (ctl == nullptr)
+    {
+        appendProjectLoadDiagnosticLine("load: MIDI editor restore skipped (instrument track "
+                                        + juce::String(ws.instrumentTrackId) + " missing)");
+        return;
+    }
+    if (ctl->getClipById(clipId) == nullptr)
+    {
+        appendProjectLoadDiagnosticLine("load: MIDI editor restore skipped (clip "
+                                        + juce::String(ws.clipId) + " missing on track "
+                                        + juce::String(ws.instrumentTrackId) + ")");
+        return;
+    }
+    openMidiEditorForInstrumentClip(tid, clipId);
+    if (midiEditorWindow_ != nullptr && midiEditorWindow_->isVisible())
+    {
+        appendProjectLoadDiagnosticLine(
+            "load: MIDI editor restore applied bounds="
+            + (midiEditorWindowBoundsMemo_.has_value()
+                   ? juce::String(midiEditorWindowBoundsMemo_->x) + ","
+                         + juce::String(midiEditorWindowBoundsMemo_->y) + " "
+                         + juce::String(midiEditorWindowBoundsMemo_->width) + "x"
+                         + juce::String(midiEditorWindowBoundsMemo_->height)
+                   : juce::String("(default)"))
+            + " topPitch=" + juce::String(ws.topVisibleMidiPitch)
+            + " velLane=" + juce::String(ws.velocityLaneHeight)
+            + " rowsMode=" + juce::String(ws.rowLabelMode));
+    }
+    else
+    {
+        appendProjectLoadDiagnosticLine("load: MIDI editor restore did not open a window");
+    }
 }
 
 void MidiEditorPresenter::resetWindowAndBookingIfOpenOnTrack(const TrackId tid) noexcept

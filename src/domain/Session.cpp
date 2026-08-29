@@ -1441,7 +1441,8 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                                        const bool arrangementSnapEnabled,
                                        const juce::String arrangementSnapResolutionKey,
                                        std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave,
-                                       std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave)
+                                       std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave,
+                                       std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -1478,6 +1479,11 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     {
         out.hasMidiEditorWindowBounds = true;
         out.midiEditorWindowBounds = *midiEditorWindowBoundsForSave;
+    }
+    if (midiEditorWorkspaceForSave.has_value())
+    {
+        out.hasMidiEditorWorkspace = true;
+        out.midiEditorWorkspace = *midiEditorWorkspaceForSave;
     }
 
     for (int i = 0; i < s->getNumTracks(); ++i)

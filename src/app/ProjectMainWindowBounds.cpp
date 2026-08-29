@@ -4,9 +4,6 @@
 
 namespace
 {
-    constexpr int kMainWindowMinW = 320;
-    constexpr int kMainWindowMinH = 240;
-
     [[nodiscard]] bool rectHasVisibleOverlapOnDisplays(const juce::Rectangle<int>& r, const int minW,
                                                       const int minH) noexcept
     {
@@ -34,10 +31,15 @@ const char* describeWindowBoundsRestoreOutcome(const ProjectWindowBoundsRestoreO
 }
 
 std::optional<ProjectFileMainWindowBoundsV1> captureProjectWindowBoundsForProjectSave(
-    juce::DocumentWindow& w, const int minW, const int minH) noexcept
+    juce::DocumentWindow& w) noexcept
 {
+    if (w.isMinimised())
+    {
+        // Iconic windows report junk screen bounds; keep whatever was remembered before.
+        return std::nullopt;
+    }
     const juce::Rectangle<int> r = w.getScreenBounds();
-    if (r.getWidth() < minW || r.getHeight() < minH)
+    if (r.getWidth() < 1 || r.getHeight() < 1)
     {
         return std::nullopt;
     }
@@ -54,9 +56,8 @@ std::optional<ProjectFileMainWindowBoundsV1> captureProjectWindowBoundsForProjec
     return b;
 }
 
-ProjectWindowBoundsRestoreOutcome applyProjectWindowBoundsClamped(juce::DocumentWindow& w,
-                                                                  const ProjectFileMainWindowBoundsV1& b,
-                                                                  const int minW, const int minH) noexcept
+ProjectWindowBoundsRestoreOutcome applyProjectWindowBoundsClamped(
+    juce::DocumentWindow& w, const ProjectFileMainWindowBoundsV1& b) noexcept
 {
     const auto relayoutAndRepaint = [&w]() noexcept {
         if (auto* c = w.getContentComponent())
@@ -79,8 +80,9 @@ ProjectWindowBoundsRestoreOutcome applyProjectWindowBoundsClamped(juce::Document
         w.setFullScreen(false);
     }
 
-    const int width = juce::jlimit(minW, 10000, b.width);
-    const int height = juce::jlimit(minH, 10000, b.height);
+    // Size is restored exactly as saved; only guard against nonsense so the window stays grabbable.
+    const int width = juce::jlimit(1, 10000, b.width);
+    const int height = juce::jlimit(1, 10000, b.height);
     juce::Rectangle<int> proposed(b.x, b.y, width, height);
 
     const int visProbeW = juce::jmin(64, width);
@@ -128,7 +130,7 @@ ProjectWindowBoundsRestoreOutcome applyProjectWindowBoundsClamped(juce::Document
 std::optional<ProjectFileMainWindowBoundsV1> captureProjectMainWindowBoundsForProjectSave(
     juce::DocumentWindow& w) noexcept
 {
-    return captureProjectWindowBoundsForProjectSave(w, kMainWindowMinW, kMainWindowMinH);
+    return captureProjectWindowBoundsForProjectSave(w);
 }
 
 void applyLoadedProjectMainWindowBounds(juce::DocumentWindow& w,
@@ -138,6 +140,5 @@ void applyLoadedProjectMainWindowBounds(juce::DocumentWindow& w,
     {
         return;
     }
-    (void)applyProjectWindowBoundsClamped(w, projectFile.mainWindowBounds, kMainWindowMinW,
-                                          kMainWindowMinH);
+    (void)applyProjectWindowBoundsClamped(w, projectFile.mainWindowBounds);
 }

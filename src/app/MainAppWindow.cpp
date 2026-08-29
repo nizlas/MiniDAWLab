@@ -927,7 +927,7 @@ public:
                         if (loaded.hasMainWindowBounds)
                         {
                             const ProjectWindowBoundsRestoreOutcome outcome
-                                = applyProjectWindowBoundsClamped(*dw, loaded.mainWindowBounds, 320, 240);
+                                = applyProjectWindowBoundsClamped(*dw, loaded.mainWindowBounds);
                             appendProjectLoadDiagnosticLine(
                                 "load: main window bounds restore x="
                                 + juce::String(loaded.mainWindowBounds.x)
@@ -962,6 +962,19 @@ public:
                         return midiEditorPresenter_->getMidiEditorWindowBoundsForProjectSave();
                     }
                     return std::nullopt;
+                },
+                [this]() -> std::optional<ProjectFileMidiEditorWorkspaceV1> {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        return midiEditorPresenter_->getMidiEditorWorkspaceForProjectSave();
+                    }
+                    return std::nullopt;
+                },
+                [this](const ProjectFileV1& loaded) {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->tryRestoreMidiEditorWorkspaceAfterProjectLoad(loaded);
+                    }
                 },
                 [this] { showSavingProjectToast(); },
             });

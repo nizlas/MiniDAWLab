@@ -88,14 +88,24 @@ public:
     void snapshotOpenClipViewportFromRollIfOpen() noexcept;
     void resetWindowAndBooking() noexcept;
 
-    /// Project load: remember (or clear) saved MIDI editor window bounds for this project.
-    /// Never auto-opens the editor; bounds apply on the next `openMidiEditorForInstrumentClip`.
+    /// Project load: remember (or clear) saved MIDI editor window bounds and internal view state
+    /// for this project. Never opens the editor here (see `tryRestoreMidiEditorWorkspaceAfterProjectLoad`).
     void setMidiEditorWindowBoundsFromLoadedProject(const ProjectFileV1& projectFile) noexcept;
 
     /// Project save: live window bounds if the editor window exists (even hidden), else the last
     /// remembered bounds (from load or a previously open editor). nullopt = omit from project file.
     [[nodiscard]] std::optional<ProjectFileMainWindowBoundsV1>
     getMidiEditorWindowBoundsForProjectSave() noexcept;
+
+    /// Project save (Conny 1B): open state + bound track/clip + internal view. Only returned while
+    /// the editor window is actually visible; a closed editor omits the workspace (no auto-reopen).
+    [[nodiscard]] std::optional<ProjectFileMidiEditorWorkspaceV1>
+    getMidiEditorWorkspaceForProjectSave() noexcept;
+
+    /// After a completed project load: reopen the MIDI editor when the project saved it as open.
+    /// Missing track/clip is skipped safely with a project-load diagnostic line. Never opens plugin
+    /// editor windows.
+    void tryRestoreMidiEditorWorkspaceAfterProjectLoad(const ProjectFileV1& projectFile) noexcept;
 
     /// When deleting an instrument lane / track that had the MIDI editor targeted at it.
     void resetWindowAndBookingIfOpenOnTrack(TrackId tid) noexcept;
@@ -113,6 +123,10 @@ private:
     std::optional<TrackId> midiEditorOpenedForInstrumentTrackId_;
     /// Last known MIDI editor window bounds for the current project (loaded or user-moved).
     std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsMemo_;
+    /// Last known internal view state (vertical pitch scroll, velocity lane, rows mode) and the
+    /// track it belongs to. Track-specific fields are only re-applied when reopening the same track.
+    MidiEditorWorkspaceUiState midiEditorUiStateMemo_;
+    std::optional<TrackId> midiEditorUiStateMemoTrackId_;
 
     void rememberMidiEditorWindowBoundsIfWindowExists() noexcept;
 
