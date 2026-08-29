@@ -248,10 +248,18 @@ private:
         int index = -1;
         TimelineMidiNote original {};
     };
+    using TimelineNoteResizeCapture = TimelineNoteMoveCapture;
     void beginTimelineNoteMoveGesture(const juce::MouseEvent& e);
     void updateTimelineNoteMoveGesture(juce::Point<int> localPos);
     void finishTimelineNoteMoveGesture();
     void clearTimelineNoteMovePending() noexcept;
+
+    [[nodiscard]] bool currentEditCandidatesOverlap(
+        const std::vector<int>& ignoreIndices,
+        const std::vector<TimelineMidiNote>& candidates,
+        const std::vector<TimelineMidiNote>* grandfatherOriginals) const noexcept;
+    void flashForbiddenNoDropCursor();
+    void updateTimelineNoteEditCursor();
 
     // --- Velocity controller lane (bottom strip; edits TimelineMidiNote velocity only) ---
     /// Default lane height; also the restore height when the minimized knob is clicked.
@@ -440,6 +448,10 @@ private:
     std::int64_t timelineResizeOriginalDurationTicks_ = 0;
     /// Inclusive end tick in the model: `startTick + durationTicks` at gesture start (left-edge resize).
     std::int64_t timelineResizeAnchorEndTick_ = 0;
+    std::vector<TimelineNoteResizeCapture> timelineResizeCaptures_;
+    bool timelineResizeInvalid_ = false;
+    bool timelineMoveInvalid_ = false;
+    double forbiddenCursorFlashUntilMs_ = 0.0;
 
     bool timelineMovePending_ = false;
     int timelineMovePrimaryIndex_ = -1;

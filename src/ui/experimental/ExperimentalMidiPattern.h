@@ -166,3 +166,108 @@ struct ExperimentalMidiPattern
     return timelineAnchorSamplesForTickZero
            + ticksToRelativeSamples(n.startTick, p.bpm > 0.0 ? p.bpm : 120.0, tpq, sampleRate);
 }
+
+/// Exclusive end tick: `start + max(1, duration)`. Touching `a.end == b.start` is not an overlap.
+[[nodiscard]] inline std::int64_t timelineNoteEndTick(const TimelineMidiNote& n) noexcept
+{
+    return n.startTick + juce::jmax<std::int64_t>(1, n.durationTicks);
+}
+
+/// Same pitch **and** channel (channel is part of note identity in the editor model).
+[[nodiscard]] inline bool timelineNotesSharePitchAndChannel(const TimelineMidiNote& a,
+                                                            const TimelineMidiNote& b) noexcept
+{
+    return a.midiNote == b.midiNote && a.channel == b.channel;
+}
+
+/// Positive-duration overlap on the same pitch/channel. End-to-start touching is allowed.
+[[nodiscard]] inline bool timelineNotesIntervalsOverlap(const TimelineMidiNote& a,
+                                                        const TimelineMidiNote& b) noexcept
+{
+    if (!timelineNotesSharePitchAndChannel(a, b))
+    {
+        return false;
+    }
+    return a.startTick < timelineNoteEndTick(b) && b.startTick < timelineNoteEndTick(a);
+}
+
+struct TimelineNoteOverlapConflict
+{
+    int candidateIndex = -1;
+    int otherIndex = -1;
+    bool otherIsCandidate = false;
+};
+
+struct TimelineNoteOverlapCheck
+{
+    bool valid = true;
+    TimelineNoteOverlapConflict conflict;
+};
+
+/// Validates a candidate batch against remaining notes and against itself.
+/// `ignoreIndices` are existing-note slots being replaced (their originals are not obstacles).
+/// When `grandfatherOriginals` has the same size as `candidates`, a candidate-vs-candidate overlap
+/// is allowed only if that pair already overlapped (old projects; do not freeze a broken selection).
+[[nodiscard]] inline TimelineNoteOverlapCheck validateTimelineNotesNoOverlap(
+    const std::vector<TimelineMidiNote>& existing,
+    const std::vector<int>& ignoreIndices,
+    const std::vector<TimelineMidiNote>& candidates,
+    const std::int64_t minDurationTicks,
+    const std::vector<TimelineMidiNote>* grandfatherOriginals = nullptr) noexcept
+{
+    TimelineNoteOverlapCheck r;
+    const std::int64_t minD = juce::jmax<std::int64_t>(1, minDurationTicks);
+    const bool grandfather = grandfatherOriginals != nullptr
+                             && grandfatherOriginals->size() == candidates.size();
+
+    const auto ignored = [&ignoreIndices](const int i) noexcept {
+        return std::find(ignoreIndices.begin(), ignoreIndices.end(), i) != ignoreIndices.end();
+    };
+
+    for (int c = 0; c < (int)candidates.size(); ++c)
+    {
+        const auto& cand = candidates[(size_t)c];
+        if (cand.durationTicks < minD)
+        {
+            r.valid = false;
+            r.conflict.candidateIndex = c;
+            r.conflict.otherIndex = -1;
+            r.conflict.otherIsCandidate = false;
+            return r;
+        }
+        for (int e = 0; e < (int)existing.size(); ++e)
+        {
+            if (ignored(e))
+            {
+                continue;
+            }
+            if (timelineNotesIntervalsOverlap(cand, existing[(size_t)e]))
+            {
+                r.valid = false;
+                r.conflict.candidateIndex = c;
+                r.conflict.otherIndex = e;
+                r.conflict.otherIsCandidate = false;
+                return r;
+            }
+        }
+        for (int d = c + 1; d < (int)candidates.size(); ++d)
+        {
+            if (!timelineNotesIntervalsOverlap(cand, candidates[(size_t)d]))
+            {
+                continue;
+            }
+            if (grandfather
+                && timelineNotesIntervalsOverlap((*grandfatherOriginals)[(size_t)c],
+                                                 (*grandfatherOriginals)[(size_t)d]))
+            {
+                continue;
+            }
+            r.valid = false;
+            r.conflict.candidateIndex = c;
+            r.conflict.otherIndex = d;
+            r.conflict.otherIsCandidate = true;
+            return r;
+        }
+    }
+    return r;
+}

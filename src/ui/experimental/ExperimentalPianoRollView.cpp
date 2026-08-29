@@ -10,6 +10,7 @@
 #include "transport/Transport.h"
 #include "ui/SnapSettings.h"
 #include "ui/TimelineViewportModel.h"
+#include "ui/ForbiddenCursor.h"
 
 #include <cmath>
 #include <limits>
@@ -881,6 +882,15 @@ float ExperimentalPianoRollView::xForSessionSampleD(const double s) const noexce
 
 void ExperimentalPianoRollView::timerCallback()
 {
+    if (forbiddenCursorFlashUntilMs_ > 0.0
+        && juce::Time::getMillisecondCounterHiRes() >= forbiddenCursorFlashUntilMs_)
+    {
+        forbiddenCursorFlashUntilMs_ = 0.0;
+        if (!timelineResizeInvalid_ && !timelineMoveInvalid_)
+        {
+            setMouseCursor(juce::MouseCursor::NormalCursor);
+        }
+    }
     const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
     const bool absTime = useAbsoluteTimeline();
     if (absTime && timelineClip_ != nullptr && !isTimelineClipBindingFresh())
@@ -1825,6 +1835,12 @@ bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
         return true;
     }
 
+    if (currentEditCandidatesOverlap({}, toAdd, nullptr))
+    {
+        flashForbiddenNoDropCursor();
+        return true;
+    }
+
     const std::vector<TimelineMidiNote> selectionSnapshot = toAdd;
 
     auto applyPaste = [this, toAdd = std::move(toAdd), selectionSnapshot]() mutable -> bool {
@@ -1914,6 +1930,40 @@ std::int64_t ExperimentalPianoRollView::minTimelineNoteDurationTicks() const noe
     return juce::jmax<std::int64_t>(1, (std::int64_t)(tpq / 16));
 }
 
+bool ExperimentalPianoRollView::currentEditCandidatesOverlap(
+    const std::vector<int>& ignoreIndices,
+    const std::vector<TimelineMidiNote>& candidates,
+    const std::vector<TimelineMidiNote>* grandfatherOriginals) const noexcept
+{
+    return !validateTimelineNotesNoOverlap(pattern_.timelineNotes,
+                                           ignoreIndices,
+                                           candidates,
+                                           minTimelineNoteDurationTicks(),
+                                           grandfatherOriginals)
+                .valid;
+}
+
+void ExperimentalPianoRollView::flashForbiddenNoDropCursor()
+{
+    setMouseCursor(getForbiddenNoDropMouseCursor());
+    forbiddenCursorFlashUntilMs_ = juce::Time::getMillisecondCounterHiRes() + 450.0;
+}
+
+void ExperimentalPianoRollView::updateTimelineNoteEditCursor()
+{
+    if (timelineResizeInvalid_ || timelineMoveInvalid_)
+    {
+        setMouseCursor(getForbiddenNoDropMouseCursor());
+        return;
+    }
+    if (timelineNoteResizeActive_)
+    {
+        setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+        return;
+    }
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
 void ExperimentalPianoRollView::beginTimelineNoteResizeGesture(
     const int noteIndex,
     const ExperimentalPianoRollView::TimelineNoteResizeEdge edge)
@@ -1925,18 +1975,46 @@ void ExperimentalPianoRollView::beginTimelineNoteResizeGesture(
     timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
     clearTimelineNoteMovePending();
     timelineNoteResizeActive_ = true;
+    timelineResizeInvalid_ = false;
     timelineResizeEdge_ = edge;
     timelineResizeNoteIndex_ = noteIndex;
     const auto& n = pattern_.timelineNotes[(size_t)noteIndex];
     timelineResizeOriginalStartTick_ = n.startTick;
     timelineResizeOriginalDurationTicks_ = n.durationTicks;
     timelineResizeAnchorEndTick_ = n.startTick + juce::jmax<std::int64_t>(1, n.durationTicks);
+
+    // Click-to-resize of an unselected note already replaced the selection with that note,
+    // so capturing the selection always matches "resize all selected" vs "resize this one".
+    timelineResizeCaptures_.clear();
+    std::vector<int> order;
+    order.reserve(selectedTimelineNoteIndices_.size());
+    for (const int i : selectedTimelineNoteIndices_)
+    {
+        if (i >= 0 && i < (int)pattern_.timelineNotes.size())
+        {
+            order.push_back(i);
+        }
+    }
+    if (std::find(order.begin(), order.end(), noteIndex) == order.end())
+    {
+        order.push_back(noteIndex);
+    }
+    std::sort(order.begin(), order.end());
+    timelineResizeCaptures_.reserve(order.size());
+    for (const int i : order)
+    {
+        TimelineNoteResizeCapture cap;
+        cap.index = i;
+        cap.original = pattern_.timelineNotes[(size_t)i];
+        timelineResizeCaptures_.push_back(std::move(cap));
+    }
 }
 
 void ExperimentalPianoRollView::updateTimelineNoteResizeGesture(const juce::Point<int> localPos)
 {
     if (!timelineNoteResizeActive_ || timelineClip_ == nullptr || timelineResizeNoteIndex_ < 0
-        || timelineResizeNoteIndex_ >= (int)pattern_.timelineNotes.size())
+        || timelineResizeNoteIndex_ >= (int)pattern_.timelineNotes.size()
+        || timelineResizeCaptures_.empty())
     {
         return;
     }
@@ -1955,45 +2033,75 @@ void ExperimentalPianoRollView::updateTimelineNoteResizeGesture(const juce::Poin
     std::int64_t rawTick = relativeSamplesToTicks(mouseAbs - anchor, bpm, tpq, sr);
     const std::int64_t tSnap = snapTimelineTickForEdit(rawTick);
 
-    auto& n = pattern_.timelineNotes[(size_t)timelineResizeNoteIndex_];
-
+    std::int64_t startDelta = 0;
+    std::int64_t durationDelta = 0;
     if (timelineResizeEdge_ == TimelineNoteResizeEdge::Right)
     {
-        const std::int64_t start = timelineResizeOriginalStartTick_;
-        std::int64_t endTick = tSnap;
-        if (musicalSnapGridTicks() <= 0)
-        {
-            endTick = rawTick;
-        }
-        endTick = juce::jmax(endTick, start + minD);
+        std::int64_t endTick = (musicalSnapGridTicks() <= 0) ? rawTick : tSnap;
+        endTick = juce::jmax(endTick, timelineResizeOriginalStartTick_ + minD);
         endTick = juce::jmin(endTick, clipHighTick);
-        endTick = juce::jmax(endTick, start + minD);
-        n.startTick = start;
-        n.durationTicks = endTick - start;
-        if (n.durationTicks < minD)
+        endTick = juce::jmax(endTick, timelineResizeOriginalStartTick_ + minD);
+        durationDelta = juce::jmax(minD, endTick - timelineResizeOriginalStartTick_)
+                        - timelineResizeOriginalDurationTicks_;
+        for (const auto& cap : timelineResizeCaptures_)
         {
-            n.durationTicks = minD;
+            const std::int64_t origDur = juce::jmax<std::int64_t>(1, cap.original.durationTicks);
+            durationDelta = juce::jmax(durationDelta, minD - origDur);
+            durationDelta = juce::jmin(durationDelta, clipHighTick - cap.original.startTick - origDur);
         }
     }
     else
     {
         const std::int64_t endT = timelineResizeAnchorEndTick_;
-        std::int64_t newStart = tSnap;
-        if (musicalSnapGridTicks() <= 0)
-        {
-            newStart = rawTick;
-        }
+        std::int64_t newStart = (musicalSnapGridTicks() <= 0) ? rawTick : tSnap;
         newStart = juce::jmin(newStart, endT - minD);
         newStart = juce::jmax(newStart, clipLowTick);
         newStart = juce::jmin(newStart, endT - minD);
-        n.startTick = newStart;
-        n.durationTicks = endT - newStart;
-        if (n.durationTicks < minD)
+        startDelta = newStart - timelineResizeOriginalStartTick_;
+        // Same start-edge delta for every selected note; end stays fixed. Clamp the shared
+        // delta so no note drops below min length or leaves the clip.
+        for (const auto& cap : timelineResizeCaptures_)
         {
-            n.startTick = endT - minD;
-            n.durationTicks = minD;
+            const std::int64_t origEnd
+                = cap.original.startTick + juce::jmax<std::int64_t>(1, cap.original.durationTicks);
+            startDelta = juce::jmax(startDelta, clipLowTick - cap.original.startTick);
+            startDelta = juce::jmin(startDelta, origEnd - minD - cap.original.startTick);
         }
     }
+
+    std::vector<int> ignore;
+    std::vector<TimelineMidiNote> candidates;
+    std::vector<TimelineMidiNote> originals;
+    ignore.reserve(timelineResizeCaptures_.size());
+    candidates.reserve(timelineResizeCaptures_.size());
+    originals.reserve(timelineResizeCaptures_.size());
+
+    for (const auto& cap : timelineResizeCaptures_)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        TimelineMidiNote next = cap.original;
+        const std::int64_t origEnd
+            = cap.original.startTick + juce::jmax<std::int64_t>(1, cap.original.durationTicks);
+        if (timelineResizeEdge_ == TimelineNoteResizeEdge::Right)
+        {
+            next.startTick = cap.original.startTick;
+            next.durationTicks = juce::jmax(minD, origEnd - cap.original.startTick + durationDelta);
+        }
+        else
+        {
+            next.startTick = cap.original.startTick + startDelta;
+            next.durationTicks = juce::jmax(minD, origEnd - next.startTick);
+        }
+        ignore.push_back(cap.index);
+        originals.push_back(cap.original);
+        candidates.push_back(next);
+        pattern_.timelineNotes[(size_t)cap.index] = next;
+    }
+
+    timelineResizeInvalid_ = currentEditCandidatesOverlap(ignore, candidates, &originals);
 }
 
 void ExperimentalPianoRollView::finishTimelineNoteResizeGesture()
@@ -2003,61 +2111,95 @@ void ExperimentalPianoRollView::finishTimelineNoteResizeGesture()
         return;
     }
 
-    const int idx = timelineResizeNoteIndex_;
+    const auto captures = std::move(timelineResizeCaptures_);
+    const bool invalid = timelineResizeInvalid_;
     timelineNoteResizeActive_ = false;
+    timelineResizeInvalid_ = false;
     timelineResizeNoteIndex_ = -1;
+    timelineResizeCaptures_.clear();
 
-    if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+    if (captures.empty())
     {
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
 
-    auto& n = pattern_.timelineNotes[(size_t)idx];
-    const std::int64_t finalS = n.startTick;
-    const std::int64_t finalD = n.durationTicks;
-    const std::int64_t origS = timelineResizeOriginalStartTick_;
-    const std::int64_t origD = timelineResizeOriginalDurationTicks_;
+    const auto restore = [this, &captures]() {
+        for (const auto& cap : captures)
+        {
+            if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+            {
+                pattern_.timelineNotes[(size_t)cap.index] = cap.original;
+            }
+        }
+    };
 
-    if (finalS == origS && finalD == origD)
+    if (invalid)
     {
+        restore();
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
 
-    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+    bool anyChange = false;
+    std::vector<TimelineMidiNote> finals;
+    finals.reserve(captures.size());
+    for (const auto& cap : captures)
     {
-        n.startTick = origS;
-        n.durationTicks = origD;
-
-        undoablePatternEditHandler_(
-            "Resize MIDI note",
-            [this, idx, finalS, finalD]() -> bool {
-                if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
-                {
-                    return false;
-                }
-                auto& nn = pattern_.timelineNotes[(size_t)idx];
-                nn.startTick = finalS;
-                nn.durationTicks = finalD;
-                if (instrumentTrackController_ != nullptr)
-                {
-                    instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
-                }
-                repaint();
-                return true;
-            });
+        if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
+        {
+            restore();
+            updateTimelineNoteEditCursor();
+            repaint();
+            return;
+        }
+        const auto& n = pattern_.timelineNotes[(size_t)cap.index];
+        finals.push_back(n);
+        if (n.startTick != cap.original.startTick || n.durationTicks != cap.original.durationTicks)
+        {
+            anyChange = true;
+        }
     }
-    else
+    if (!anyChange)
     {
-        n.startTick = finalS;
-        n.durationTicks = finalD;
+        restore();
+        updateTimelineNoteEditCursor();
+        repaint();
+        return;
+    }
+
+    restore();
+
+    auto applyResize = [this, captures, finals]() -> bool {
+        for (size_t k = 0; k < captures.size(); ++k)
+        {
+            const int idx = captures[k].index;
+            if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+            pattern_.timelineNotes[(size_t)idx] = finals[k];
+        }
         if (instrumentTrackController_ != nullptr)
         {
             instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
         }
         repaint();
+        return true;
+    };
+
+    const juce::String label = captures.size() > 1 ? "Resize MIDI notes" : "Resize MIDI note";
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_(label, std::move(applyResize));
     }
+    else
+    {
+        applyResize();
+    }
+    updateTimelineNoteEditCursor();
 }
 
 void ExperimentalPianoRollView::clearTimelineNoteMovePending() noexcept
@@ -2083,6 +2225,7 @@ void ExperimentalPianoRollView::beginTimelineNoteMoveGesture(const juce::MouseEv
     timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
     timelineMovePending_ = false;
     timelineNoteMoveActive_ = true;
+    timelineMoveInvalid_ = false;
     timelineMoveCaptures_.clear();
 
     std::vector<int> order;
@@ -2169,6 +2312,13 @@ void ExperimentalPianoRollView::updateTimelineNoteMoveGesture(const juce::Point<
     deltaTick = juce::jlimit(deltaTickMin, deltaTickMax, deltaTick);
     deltaPitch = juce::jlimit(deltaPitchMin, deltaPitchMax, deltaPitch);
 
+    std::vector<int> ignore;
+    std::vector<TimelineMidiNote> candidates;
+    std::vector<TimelineMidiNote> originals;
+    ignore.reserve(timelineMoveCaptures_.size());
+    candidates.reserve(timelineMoveCaptures_.size());
+    originals.reserve(timelineMoveCaptures_.size());
+
     for (const auto& cap : timelineMoveCaptures_)
     {
         if (cap.index < 0 || cap.index >= (int)pattern_.timelineNotes.size())
@@ -2182,7 +2332,12 @@ void ExperimentalPianoRollView::updateTimelineNoteMoveGesture(const juce::Point<
         n.durationTicks = o.durationTicks;
         n.velocity = o.velocity;
         n.channel = o.channel;
+        ignore.push_back(cap.index);
+        originals.push_back(o);
+        candidates.push_back(n);
     }
+
+    timelineMoveInvalid_ = currentEditCandidatesOverlap(ignore, candidates, &originals);
 }
 
 void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
@@ -2192,10 +2347,27 @@ void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
         return;
     }
     timelineNoteMoveActive_ = false;
+    const bool invalid = timelineMoveInvalid_;
+    timelineMoveInvalid_ = false;
     const auto captures = std::move(timelineMoveCaptures_);
     timelineMovePrimaryIndex_ = -1;
     if (captures.empty())
     {
+        updateTimelineNoteEditCursor();
+        repaint();
+        return;
+    }
+
+    if (invalid)
+    {
+        for (const auto& cap : captures)
+        {
+            if (cap.index >= 0 && cap.index < (int)pattern_.timelineNotes.size())
+            {
+                pattern_.timelineNotes[(size_t)cap.index] = cap.original;
+            }
+        }
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
@@ -2224,6 +2396,7 @@ void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
                 pattern_.timelineNotes[(size_t)cap.index] = cap.original;
             }
         }
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
@@ -2246,6 +2419,7 @@ void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
                 pattern_.timelineNotes[(size_t)cap.index] = cap.original;
             }
         }
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
@@ -2283,6 +2457,7 @@ void ExperimentalPianoRollView::finishTimelineNoteMoveGesture()
     {
         applyMove();
     }
+    updateTimelineNoteEditCursor();
 }
 
 juce::Colour colourForMidiVelocity(const int velocity) noexcept
@@ -3074,6 +3249,12 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
         nn.startTick = tickOffset;
         nn.durationTicks = snapDur > 0 ? snapDur : 240;
 
+        if (currentEditCandidatesOverlap({}, {nn}, nullptr))
+        {
+            flashForbiddenNoDropCursor();
+            return;
+        }
+
         auto addAndNotify = [this, nn, commitSortedNotes]() mutable -> bool {
             pattern_.timelineNotes.push_back(nn);
             commitSortedNotes();
@@ -3121,6 +3302,19 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
     nn.channel = kCreateNoteChannel;
     nn.startTick = 0;
     nn.durationTicks = snapDur > 0 ? snapDur : 240;
+
+    {
+        std::vector<TimelineMidiNote> shifted = pattern_.timelineNotes;
+        for (auto& tn : shifted)
+        {
+            tn.startTick += deltaShift;
+        }
+        if (!validateTimelineNotesNoOverlap(shifted, {}, {nn}, minTimelineNoteDurationTicks()).valid)
+        {
+            flashForbiddenNoDropCursor();
+            return;
+        }
+    }
 
     auto rebaseAnchorAndAddNote = [this, newAnchor, deltaShift, nn, commitSortedNotes]() mutable -> bool {
         timelineClip_->timelineAnchorSamples = newAnchor;
@@ -3565,6 +3759,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
     if (timelineNoteResizeActive_)
     {
         updateTimelineNoteResizeGesture(e.getPosition());
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
@@ -3572,6 +3767,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
     if (timelineNoteMoveActive_)
     {
         updateTimelineNoteMoveGesture(e.getPosition());
+        updateTimelineNoteEditCursor();
         repaint();
         return;
     }
@@ -3585,6 +3781,7 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
             if (timelineNoteMoveActive_)
             {
                 updateTimelineNoteMoveGesture(e.getPosition());
+                updateTimelineNoteEditCursor();
                 repaint();
                 return;
             }
@@ -3711,9 +3908,9 @@ void ExperimentalPianoRollView::mouseDoubleClick(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
 {
-    if (timelineNoteResizeActive_)
+    if (timelineNoteResizeActive_ || timelineNoteMoveActive_)
     {
-        setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+        updateTimelineNoteEditCursor();
         setTooltip(juce::String{});
         return;
     }
