@@ -83,6 +83,7 @@ target_sources(MiniDAWLab PRIVATE
     src/domain/SessionHistory.cpp
     src/diagnostics/UndoDiagnosticFileLog.cpp
     src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/PlaybackUiLoadLog.cpp
     src/diagnostics/StabilityDiagnosticLog.cpp
     src/diagnostics/CrashDumpHandler.cpp
     src/diagnostics/StabilityScenarioRunner.cpp
@@ -108,6 +109,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/EditToolIconStrip.cpp
     src/ui/ToolStripIconImages.cpp
     src/ui/PlayheadOverlay.cpp
+    src/ui/UiPlayheadClock.cpp
     src/ui/ForbiddenCursor.cpp
     src/ui/TimelineRulerView.cpp
     src/ui/TimelineLocatorPainter.cpp

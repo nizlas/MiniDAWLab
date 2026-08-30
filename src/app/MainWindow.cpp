@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 
 #include "app/ShortcutDiagnostics.h"
+#include "diagnostics/TransportShortcutDiagLog.h"
 #include "app/TransportControlsFactory.h"
 #include "app/TransportControlsShortcutTarget.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
@@ -17,6 +18,8 @@
 #include "transport/Transport.h"
 
 #include "audio/LatencySettingsStore.h"
+
+#include <typeinfo>
 
 MainWindow::MainWindow(const juce::String& name,
                        Transport& transport,
@@ -148,6 +151,17 @@ bool MainWindow::keyPressed(const juce::KeyPress& key, juce::Component* originat
 bool MainWindow::routeShortcut(const juce::KeyPress& key)
 {
     shortcut_diagnostics::logShortcutRouterKey(key);
+    if constexpr (transport_shortcut_diag::kEnabled)
+    {
+        const juce::Component* focused = juce::Component::getCurrentlyFocusedComponent();
+        transport_shortcut_diag::appendLine(
+            "router key=0x" + juce::String::toHexString((juce::uint32)key.getKeyCode())
+            + " ch=0x" + juce::String::toHexString((juce::uint32)key.getTextCharacter())
+            + " desc=\"" + key.getTextDescription() + "\" focus="
+            + (focused != nullptr ? juce::String(typeid(*focused).name()) : juce::String("none"))
+            + " matchJumpL="
+            + (midi_transport_shortcuts::isJumpToLeftLocatorShortcut(key) ? "Y" : "n"));
+    }
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         const bool cmd = key.getModifiers().isCommandDown();

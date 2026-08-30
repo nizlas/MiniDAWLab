@@ -192,6 +192,27 @@ public:
     /// playhead, and transport intent. Logged by gate sites when `waitForAudioCallbackExit` times out.
     [[nodiscard]] juce::String describeAudioCallbackStateForDiagnostics() const noexcept;
 
+    /// Aggregated audio callback cost since the previous snapshot. Purely diagnostic: the audio
+    /// thread accumulates relaxed atomics (two clock reads per block), the message thread drains
+    /// them. `budgetPercent` = callback duration relative to the wall-clock time one block of audio
+    /// represents, i.e. 100% means the callback used its entire real-time budget.
+    struct AudioCallbackLoadSnapshot
+    {
+        std::uint64_t blocks = 0;
+        double minMs = 0.0;
+        double meanMs = 0.0;
+        double maxMs = 0.0;
+        double meanBudgetPercent = 0.0;
+        double maxBudgetPercent = 0.0;
+        std::uint32_t nearOverruns = 0; ///< blocks over 70% of budget
+        std::uint32_t overruns = 0;     ///< blocks over 100% of budget
+        int lastBlockSamples = 0;
+        double sampleRate = 0.0;
+    };
+
+    /// [Message thread] Read and clear the accumulated audio callback load window.
+    [[nodiscard]] AudioCallbackLoadSnapshot snapshotAudioCallbackLoadAndReset() noexcept;
+
     /// [Any thread] Same acquire-load discipline as instrument snapshot reads inside the device callback.
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
@@ -224,6 +245,9 @@ public:
 private:
     void invokeExperimentalInstrumentBeginBlocks(const ExperimentalInstrumentPlaybackSnapshot* instrumentSnap,
                                                  int numSamples) noexcept;
+
+    /// [Audio thread] Fold one finished callback into the diagnostic load window (relaxed atomics).
+    void audioThread_accumulateCallbackLoad(int numSamples, std::int64_t startTicks) noexcept;
 
     /// [Message thread] Pre-size stereo master summing scratch (device block and offline cap).
     void ensureMasterScratchCapacity(int numSamples) noexcept;
@@ -259,6 +283,17 @@ private:
     /// Incremented at every callback entry; a frozen value across timeout logs = stuck callback,
     /// an advancing value = callbacks still cycling (flag observed true by unlucky sampling).
     std::atomic<std::uint64_t> audioCallbackEnterCount_{ 0 };
+
+    /// Load window (see `AudioCallbackLoadSnapshot`). Relaxed only; never used for synchronization.
+    std::atomic<std::uint64_t> loadWindowBlocks_{ 0 };
+    std::atomic<double> loadWindowSumMs_{ 0.0 };
+    std::atomic<double> loadWindowMinMs_{ 0.0 };
+    std::atomic<double> loadWindowMaxMs_{ 0.0 };
+    std::atomic<double> loadWindowSumBudgetPercent_{ 0.0 };
+    std::atomic<double> loadWindowMaxBudgetPercent_{ 0.0 };
+    std::atomic<std::uint32_t> loadWindowNearOverruns_{ 0 };
+    std::atomic<std::uint32_t> loadWindowOverruns_{ 0 };
+    std::atomic<double> deviceSampleRateForDiagnostics_{ 0.0 };
 
     PlaybackIntent lastTransportIntentInCallback_ = PlaybackIntent::Stopped;
 

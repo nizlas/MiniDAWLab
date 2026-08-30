@@ -89,6 +89,9 @@ struct ProjectFileExperimentalTimelineNoteV12
 {
     int midiNote = 60;
     int velocity = 100;
+    /// Note-off velocity 0 … 127. Optional in JSON: projects saved before off-velocity support
+    /// load as 64 (no schema bump; the key is simply absent).
+    int offVelocity = 64;
     /// 1 … 16 saved as JSON int.
     int channel = 1;
     std::int64_t startTick = 0;
@@ -115,8 +118,9 @@ struct ProjectFileExperimentalInstrumentClipV1
     std::int64_t midiRollVisibleStartSamples = 0;
     /// v12+ optional: MIDI roll zoom; absence or 0 = no per-clip roll viewport in file.
     double midiRollSamplesPerPixel = 0.0;
-    /// v12+ optional: piano-roll Follow playhead. Omitted when false.
-    bool midiRollFollowEnabled = false;
+    /// v12+ optional: piano-roll Follow playhead. Always written on save; absent on load → **true**
+    /// (Follow defaults ON; older files that omitted the field when false load as ON by design).
+    bool midiRollFollowEnabled = true;
 };
 
 /// v16+: persisted `PluginDescription` identity for `instrumentKind` = `"GenericVst3"`.
@@ -173,6 +177,9 @@ struct ProjectFileMainWindowBoundsV1
     /// Optional `maximized` JSON property (absent in older files → false). When true, the saved
     /// x/y/w/h are the maximized bounds; restore applies bounds first, then re-maximizes.
     bool maximized = false;
+    /// Optional `followPlayhead` JSON property, only used on the root `mainWindow` object (the
+    /// MIDI editor persists its Follow per clip). Absent in older files → **true** (Follow ON).
+    bool followPlayhead = true;
 };
 
 /// Optional MIDI editor workspace (root `midiEditorWorkspace`); omitted in older projects and when

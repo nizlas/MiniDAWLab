@@ -78,6 +78,19 @@ public:
         addAndMakeVisible(midiRollCollapsedKnob_);
         midiRollCollapsedKnob_.setVisible(false);
 
+        // Selected-note MIDI byte fields (Cubase-style compact info): note-on velocity + note-off
+        // (release) velocity for the current selection. Placed before the tool buttons.
+        configureSelectedNoteField(selectedNoteVelLabel_,
+                                   selectedNoteVelField_,
+                                   "Vel",
+                                   "Note-on velocity.",
+                                   /*offField=*/false);
+        configureSelectedNoteField(selectedNoteOffLabel_,
+                                   selectedNoteOffField_,
+                                   "Off",
+                                   "Note-off velocity; many instruments ignore this.",
+                                   /*offField=*/true);
+
         addAndMakeVisible(transportPlayButton_);
         transportPlayButton_.setButtonText("Play");
         transportPlayButton_.onClick = [this] {
@@ -217,6 +230,11 @@ public:
         syncInstrumentUiFromHost();
         syncTimelineRulerFormatFromSession();
         syncArrangementSnapUiFromSession();
+
+        // Selection lives in the piano roll and changes from many gestures; poll it here instead of
+        // threading a change callback through every selection mutation.
+        refreshSelectedNoteVelocityFields();
+        startTimerHz(10);
     }
 
     ~Body() override
@@ -601,6 +619,12 @@ public:
         auto a = getLocalBounds();
         auto toolbar = a.removeFromTop(kToolbarH);
         toolbar.reduce(6, 4);
+        constexpr int kSelectedNoteLabelW = 26;
+        constexpr int kSelectedNoteFieldW = 34;
+        selectedNoteVelLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
+        selectedNoteVelField_.setBounds(toolbar.removeFromLeft(kSelectedNoteFieldW).reduced(0, 3));
+        selectedNoteOffLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
+        selectedNoteOffField_.setBounds(toolbar.removeFromLeft(kSelectedNoteFieldW).reduced(0, 3));
         transportPlayButton_.setBounds(toolbar.removeFromLeft(58).reduced(0, 2));
         transportStopButton_.setBounds(toolbar.removeFromLeft(52).reduced(0, 2));
         cycleToggleButton_.setBounds(toolbar.removeFromLeft(56).reduced(0, 2));
@@ -712,6 +736,19 @@ private:
     void beginExportMidi();
     void launchMidiExportFileChooser();
 
+    /// Wires one compact selected-note byte field (label + numeric editor) with Enter = commit,
+    /// Escape / focus loss = revert to the displayed selection value.
+    void configureSelectedNoteField(juce::Label& label,
+                                    juce::TextEditor& field,
+                                    const juce::String& text,
+                                    const juce::String& tooltip,
+                                    bool offField);
+    /// Pushes the roll's current selection into the Vel / Off fields (blank when nothing is
+    /// selected or the selection mixes values). Never touches a field the user is typing in.
+    void refreshSelectedNoteVelocityFields();
+    /// Applies the typed value to every selected note as one undoable edit.
+    void commitSelectedNoteVelocityField(bool offField);
+
     /// Useful drum rows = min..max of pitches with non-empty effective drum labels (cached data only).
     /// Pitches used by clip notes are a fallback when no names exist; they never widen a named range,
     /// since stray notes outside the kit would otherwise defeat the fit (Conny feedback).
@@ -794,6 +831,10 @@ private:
     juce::TextButton cycleToggleButton_;
     juce::TextButton recordButton_;
     juce::TextButton exportButton_;
+    juce::Label selectedNoteVelLabel_;
+    juce::TextEditor selectedNoteVelField_;
+    juce::Label selectedNoteOffLabel_;
+    juce::TextEditor selectedNoteOffField_;
     juce::ToggleButton arrangementSnapToggle_;
     juce::ComboBox arrangementSnapResolutionCombo_;
     bool arrangementSnapUiApplyingFromSession_{false};
@@ -915,8 +956,90 @@ void ExperimentalMidiEditorWindow::Body::layoutMidiSideStripChrome()
     }
 }
 
+void ExperimentalMidiEditorWindow::Body::configureSelectedNoteField(juce::Label& label,
+                                                                    juce::TextEditor& field,
+                                                                    const juce::String& text,
+                                                                    const juce::String& tooltip,
+                                                                    const bool offField)
+{
+    addAndMakeVisible(label);
+    label.setText(text, juce::dontSendNotification);
+    label.setJustificationType(juce::Justification::centredRight);
+    label.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+    label.setTooltip(tooltip);
+
+    addAndMakeVisible(field);
+    field.setMultiLine(false);
+    field.setReturnKeyStartsNewLine(false);
+    field.setInputRestrictions(3, "0123456789");
+    field.setJustification(juce::Justification::centred);
+    field.setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
+    field.setSelectAllWhenFocused(true);
+    field.setTooltip(tooltip);
+    // Enter/Escape release focus after commit/revert: a TextEditor that keeps focus consumes every
+    // later digit keypress as text input, silently killing transport shortcuts (numpad 1) until
+    // the user happens to click elsewhere.
+    field.onReturnKey = [this, offField, &field] {
+        commitSelectedNoteVelocityField(offField);
+        field.giveAwayKeyboardFocus();
+    };
+    field.onEscapeKey = [this, &field] {
+        refreshSelectedNoteVelocityFields();
+        field.giveAwayKeyboardFocus();
+    };
+    field.onFocusLost = [this] { refreshSelectedNoteVelocityFields(); };
+}
+
+void ExperimentalMidiEditorWindow::Body::refreshSelectedNoteVelocityFields()
+{
+    ExperimentalPianoRollView::SelectedNotesVelocitySummary s;
+    if (const auto* rv = dynamic_cast<const ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+    {
+        s = rv->summarizeSelectedNotesVelocities();
+    }
+    const bool haveSelection = s.selectedCount > 0;
+
+    const auto push = [haveSelection](juce::TextEditor& field, const std::optional<int>& value) {
+        field.setEnabled(haveSelection);
+        if (field.hasKeyboardFocus(true))
+        {
+            return;
+        }
+        const juce::String want = value.has_value() ? juce::String(*value) : juce::String();
+        if (field.getText() != want)
+        {
+            field.setText(want, false);
+        }
+    };
+    push(selectedNoteVelField_, s.velocity);
+    push(selectedNoteOffField_, s.offVelocity);
+}
+
+void ExperimentalMidiEditorWindow::Body::commitSelectedNoteVelocityField(const bool offField)
+{
+    auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    juce::TextEditor& field = offField ? selectedNoteOffField_ : selectedNoteVelField_;
+    const juce::String text = field.getText().trim();
+    if (rv == nullptr || text.isEmpty() || !text.containsOnly("0123456789"))
+    {
+        refreshSelectedNoteVelocityFields();
+        return;
+    }
+    const int typed = text.getIntValue();
+    if (offField)
+    {
+        rv->applyOffVelocityToSelectedNotes(typed);
+    }
+    else
+    {
+        rv->applyVelocityToSelectedNotes(typed);
+    }
+    refreshSelectedNoteVelocityFields();
+}
+
 void ExperimentalMidiEditorWindow::Body::timerCallback()
 {
+    refreshSelectedNoteVelocityFields();
     if (transportCommands_.transport == nullptr)
     {
         return;
@@ -967,15 +1090,9 @@ void ExperimentalMidiEditorWindow::Body::setTransportCommands(ExperimentalMidiTr
     cycleToggleButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onToggleCycle));
     recordButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onToggleRecord));
     pushTransportGestureBlockToRoll();
-    if (ok)
-    {
-        timerCallback();
-        startTimerHz(10);
-    }
-    else
-    {
-        stopTimer();
-    }
+    // The timer also drives the selected-note Vel / Off fields, so it stays on without transport.
+    timerCallback();
+    startTimerHz(10);
 }
 
 void ExperimentalMidiEditorWindow::Body::pushTransportGestureBlockToRoll()

@@ -37,6 +37,9 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         = kMusicalClusterWidthPx + kGapMusicalToSnapPx + kSnapClusterWidthPx;
     const auto fullToolbarRow = area.removeFromTop(kToolbarRowH);
     auto row = fullToolbarRow;
+    // Far right of the row: the main-arrangement Follow toggle, then diagnostics/count-in.
+    constexpr int kFollowToggleWidth = 64;
+    r.mainFollowPlayheadToggle.setBounds(row.removeFromRight(kFollowToggleWidth).reduced(2, 2));
     if (shortcut_diagnostics::kShowKeyDiagnostic)
     {
         r.keyDiagLabel.setBounds(row.removeFromRight(300).reduced(2, 0));
@@ -159,10 +162,13 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
                 + " laneW=" + juce::String(laneW));
         }
 
-        const int topY = r.trackLanesView.getY() + TrackLanesView::kArrangementTimelineHeaderGutterPx;
+        // The overlay covers the ruler band too and draws the short ruler marker segment itself,
+        // so playhead frames never invalidate the buffered ruler (see PlayheadOverlay).
+        const int topY = r.trackLanesView.getY();
         const int bottomY = r.trackLanesView.getBottom();
         if (laneW > 0 && bottomY > topY)
         {
+            r.lanePlayheadOverlay->setRulerBandHeightPx(gutter);
             r.lanePlayheadOverlay->setBounds(laneContentLeft, topY, laneW, bottomY - topY);
             r.lanePlayheadOverlay->setVisible(true);
             r.lanePlayheadOverlay->toFront(false);

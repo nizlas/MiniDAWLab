@@ -46,3 +46,6 @@ external_tools/lame/lame.exe
 
 # debug information files
 *.dwo
+
+# Local DAL scratch/test projects and probe scripts
+_winboundstest/

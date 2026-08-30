@@ -16,6 +16,7 @@
 #include "instruments/InstrumentTrackController.h"
 #include "domain/PlacedClip.h"
 #include "transport/Transport.h"
+#include "diagnostics/UiPaintLoadCounters.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 
@@ -205,6 +206,16 @@ TrackLanesView::TrackLanesView(
     , waveformCache_(waveformCache)
 {
     setOpaque(true);
+    // NOT a decorative optimization — do not remove. The transparent `PlayheadOverlay` (sibling
+    // above this view) invalidates a narrow full-height stripe ~60×/s during playback, and without
+    // buffering every component under that stripe re-runs `paint`: that steady playback repaint tax
+    // was the confirmed root cause of the main-window playback-dependent zoom freeze (Follow OFF,
+    // stable viewport; see MAIN_WINDOW_ZOOM_UI_FREEZE_FORENSIC_AUDIT.md §20). Buffering caches the
+    // rendered subtree (grid + audio lanes + instrument row + headers) so stripes become image
+    // blits. A child's own `repaint()` still invalidates the matching buffer region on its way to
+    // the peer, so all existing content-change paths keep working — but lane visual changes must
+    // now invalidate explicitly; they can no longer rely on overlay stripes exposing stale content.
+    setBufferedToImage(true);
     // Middle-drag hand-pan across the whole lanes band, including over child lanes/headers.
     addMouseListener(&middlePanListener_, true);
     syncTracksFromSession();
@@ -1744,6 +1755,7 @@ void TrackLanesView::resized()
 
 void TrackLanesView::paint(juce::Graphics& g)
 {
+    MINIDAW_UI_PAINT_COUNT(lanesViewPaints);
     const auto bounds = getLocalBounds();
     if (bounds.isEmpty())
     {
@@ -1784,6 +1796,15 @@ void TrackLanesView::paint(juce::Graphics& g)
             (float)gutterBottom,
             (float)tw,
             (float)(bounds.getBottom() - gutterBottom));
+        // Dirty-region cull (zoom-freeze fix): playhead stripe underpaints repaint this view
+        // ~60×/s during playback with a clip region a few px wide — the grid loop then covers
+        // only that window instead of every visible grid line.
+        const juce::Rectangle<int> dirtyPx = g.getClipBounds();
+        const std::int64_t cullGridStart
+            = visStart + (std::int64_t)std::llround(((double)dirtyPx.getX() - 2.0 - (double)hx) * spp);
+        const std::int64_t cullGridEnd
+            = visStart
+              + (std::int64_t)std::llround(((double)dirtyPx.getRight() + 2.0 - (double)hx) * spp);
         timeline_locator_paint::paintArrangementMusicalVerticalGrid(
             g,
             gridBounds,
@@ -1793,7 +1814,9 @@ void TrackLanesView::paint(juce::Graphics& g)
             visLen,
             effectiveDisplaySampleRate(deviceManager_),
             spp,
-            session_.getProjectMusicalTime());
+            session_.getProjectMusicalTime(),
+            cullGridStart,
+            cullGridEnd);
     }
 
     const int vr = static_cast<int>(visibleTrackEntries_.size());
@@ -2359,8 +2382,9 @@ void TrackLanesView::updateMiddlePan(const float xInLanes) noexcept
         return;
     }
     middlePanLastX_ = xInLanes;
+    // No direct repaint: the viewport listener repaints ruler+lanes via a coalesced flush
+    // (one dirty-marking per message batch — repaint-storm fix, see CoalescedRepaintFlusher).
     timelineViewport_.panBySamples(step, (double)tw, arr);
-    repaint();
 }
 
 void TrackLanesView::endMiddlePan() noexcept
@@ -2409,8 +2433,8 @@ void TrackLanesView::mouseWheelMove(
         const double factor = std::pow(0.85, d);
         const double sppMax
             = juce::jmax(1.0, (double)juce::jmax(std::int64_t{1}, arr) / w);
+        // No direct repaint: coalesced via the viewport listener (repaint-storm fix).
         timelineViewport_.zoomAroundSample(factor, x, w, arr, kSppMin, sppMax);
-        repaint();
         return;
     }
     if (e.mods.isShiftDown())
@@ -2439,8 +2463,8 @@ void TrackLanesView::mouseWheelMove(
         {
             return;
         }
+        // No direct repaint: coalesced via the viewport listener (repaint-storm fix).
         timelineViewport_.panBySamples(step, wPan, arr);
-        repaint();
         return;
     }
 

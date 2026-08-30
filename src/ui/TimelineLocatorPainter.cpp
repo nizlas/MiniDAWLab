@@ -304,7 +304,9 @@ void paintRulerTickMarks(
     const std::int64_t arrLen,
     const std::int64_t visStart,
     const std::int64_t visLen,
-    const double sampleRate)
+    const double sampleRate,
+    const std::int64_t cullStartSamples,
+    const std::int64_t cullEndSamples)
 {
     if (arrLen <= 0)
     {
@@ -322,14 +324,26 @@ void paintRulerTickMarks(
     juce::ignoreUnused(labelStepSec);
 
     g.setColour(juce::Colour(0xff7a8aa0).withAlpha(0.55f));
-    for (int k = 0;; ++k)
+    // Start at the first tick index at/just before the visible range and stop past its end, so
+    // paint cost is bounded by the visible span — not the whole arrangement (freeze audit: these
+    // loops ran from sample 0 on every ruler repaint). A caller-supplied cull window (dirty clip
+    // region) narrows the loop further so stripe repaints stay O(stripe).
+    const std::int64_t effStart = juce::jmax(visStart, cullStartSamples);
+    const std::int64_t effEnd
+        = juce::jmin(visStart + visLen, cullEndSamples);
+    const double tickStepSamples = tickStepSec * sampleRate;
+    for (std::int64_t k = tickStepSamples > 0.0
+                              ? (std::int64_t)std::llround(std::floor((double)effStart / tickStepSamples))
+                              : 0;
+         ;
+         ++k)
     {
-        const std::int64_t s = (std::int64_t)std::llround((double)k * tickStepSec * sampleRate);
-        if (s >= arrLen)
+        const std::int64_t s = (std::int64_t)std::llround((double)k * tickStepSamples);
+        if (s >= arrLen || s >= effEnd)
         {
             break;
         }
-        if (s < visStart || s >= visStart + visLen)
+        if (s < effStart)
         {
             continue;
         }
@@ -356,7 +370,9 @@ void paintRulerTimeLabels(
     const std::int64_t visLen,
     const double sampleRate,
     const std::int64_t locL,
-    const std::int64_t locR)
+    const std::int64_t locR,
+    const std::int64_t cullStartSamples,
+    const std::int64_t cullEndSamples)
 {
     if (arrLen <= 0)
     {
@@ -379,15 +395,24 @@ void paintRulerTimeLabels(
     const float labelBaselineY = bounds.getBottom() - 1.0f - hShort - 3.0f;
     const float skipRadius = kLocatorTriangleHalfWidth + 2.0f;
 
-    for (int k = 0;; ++k)
+    // Same visible-first-index bound as the tick loop above (cost bounded by visible span). These
+    // labels are placement-stateless (each drawn independently), so a caller cull window (padded by
+    // the caller for label half-width) may narrow the loop itself without changing full-paint output.
+    const std::int64_t effStart = juce::jmax(visStart, cullStartSamples);
+    const std::int64_t effEnd = juce::jmin(visStart + visLen, cullEndSamples);
+    const double labelStepSamples = labelStepSec * sampleRate;
+    for (std::int64_t k = labelStepSamples > 0.0
+                              ? (std::int64_t)std::llround(std::floor((double)effStart / labelStepSamples))
+                              : 0;
+         ;
+         ++k)
     {
-        const std::int64_t samp
-            = (std::int64_t)std::llround((double)k * labelStepSec * sampleRate);
-        if (samp >= arrLen)
+        const std::int64_t samp = (std::int64_t)std::llround((double)k * labelStepSamples);
+        if (samp >= arrLen || samp >= effEnd)
         {
             break;
         }
-        if (samp < visStart || samp >= visStart + visLen)
+        if (samp < effStart)
         {
             continue;
         }
@@ -573,7 +598,9 @@ void paintRulerMusicalTickMarks(
     const std::int64_t visLen,
     const double sampleRate,
     const double samplesPerPixel,
-    ProjectMusicalTime musicalTime)
+    ProjectMusicalTime musicalTime,
+    const std::int64_t cullStartSamples,
+    const std::int64_t cullEndSamples)
 {
     juce::ignoreUnused(arrangementExtentSamples);
     if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
@@ -591,12 +618,14 @@ void paintRulerMusicalTickMarks(
     }
 
     const float hShort = juce::jmax(3.0f, bounds.getHeight() * 0.35f);
-    const std::int64_t visEnd = visStart + visLen;
+    // Stateless tick strokes: the caller's cull window (dirty clip region) may narrow the loop.
+    const std::int64_t effStart = juce::jmax(visStart, cullStartSamples);
+    const std::int64_t effEnd = juce::jmin(visStart + visLen, cullEndSamples);
     const float bottomY = bounds.getBottom();
 
-    for (std::int64_t s = alignSampleCeil(visStart, step); s < visEnd; s += step)
+    for (std::int64_t s = alignSampleCeil(effStart, step); s < effEnd; s += step)
     {
-        if (s < visStart)
+        if (s < effStart)
         {
             continue;
         }
@@ -621,7 +650,9 @@ void paintRulerMusicalLabels(
     const double samplesPerPixel,
     ProjectMusicalTime musicalTime,
     const std::int64_t locL,
-    const std::int64_t locR)
+    const std::int64_t locR,
+    const std::int64_t cullStartSamples,
+    const std::int64_t cullEndSamples)
 {
     juce::ignoreUnused(arrangementExtentSamples);
     if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
@@ -653,6 +684,18 @@ void paintRulerMusicalLabels(
     g.setColour(juce::Colours::white.withAlpha(0.55f));
 
     const std::int64_t visEnd = visStart + visLen;
+
+    // Placement/spacing decisions below must be identical for stripe and full repaints (stateful
+    // `lastLabelRightX` / beat suppression), so the loop always runs the full visible span; the
+    // cull window only skips the final `drawText` for labels that cannot touch the dirty region.
+    const bool cullActive
+        = cullStartSamples != kNoCullStartSamples || cullEndSamples != kNoCullEndSamples;
+    const float cullX0 = cullActive
+                             ? sampleToX(juce::jmax(visStart, cullStartSamples))
+                             : bounds.getX();
+    const float cullX1 = cullActive
+                             ? sampleToX(juce::jmin(visEnd, cullEndSamples))
+                             : bounds.getRight();
 
     const auto drawOneLabel = [&](const std::int64_t samp, const juce::String& text) {
         if (samp < visStart || samp >= visEnd)
@@ -695,7 +738,11 @@ void paintRulerMusicalLabels(
             labelBaselineY - kRulerLabelStripHeightPx,
             tw,
             kRulerLabelStripHeightPx);
-        g.drawText(text, labelRect, juce::Justification::centredBottom);
+        if (!cullActive || (labelRect.getRight() >= cullX0 - 2.0f && labelRect.getX() <= cullX1 + 2.0f))
+        {
+            g.drawText(text, labelRect, juce::Justification::centredBottom);
+        }
+        // Logically "placed" even when the render was culled, so spacing state matches full paint.
         return true;
     };
 
@@ -800,7 +847,9 @@ void paintArrangementMusicalVerticalGrid(
     const std::int64_t visLen,
     const double sampleRate,
     const double samplesPerPixel,
-    ProjectMusicalTime musicalTime)
+    ProjectMusicalTime musicalTime,
+    const std::int64_t cullStartSamples,
+    const std::int64_t cullEndSamples)
 {
     juce::ignoreUnused(arrangementExtentSamples);
     if (gridBounds.getWidth() <= 1.0f || gridBounds.getHeight() <= 1.0f)
@@ -817,16 +866,18 @@ void paintArrangementMusicalVerticalGrid(
         return;
     }
 
-    const std::int64_t visEnd = visStart + visLen;
+    // Stateless grid strokes: the caller's cull window (dirty clip region) may narrow the loop.
+    const std::int64_t effStart = juce::jmax(visStart, cullStartSamples);
+    const std::int64_t effEnd = juce::jmin(visStart + visLen, cullEndSamples);
     const float y0 = gridBounds.getY();
     const float y1 = gridBounds.getBottom();
 
     juce::Graphics::ScopedSaveState ss(g);
     g.reduceClipRegion(gridBounds.toNearestIntEdges());
 
-    for (std::int64_t s = alignSampleCeil(visStart, step); s < visEnd; s += step)
+    for (std::int64_t s = alignSampleCeil(effStart, step); s < effEnd; s += step)
     {
-        if (s < visStart)
+        if (s < effStart)
         {
             continue;
         }

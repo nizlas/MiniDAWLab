@@ -28,6 +28,15 @@
 
 #include <juce_core/juce_core.h>
 
+/// Note-off velocity used for new notes and for note data that predates off-velocity support.
+inline constexpr int kDefaultMidiNoteOffVelocity = 64;
+
+/// Clamp any loaded/edited note-off velocity into the MIDI-valid range.
+[[nodiscard]] inline int sanitizeMidiNoteOffVelocity(const int v) noexcept
+{
+    return juce::jlimit(0, 127, v);
+}
+
 /// I3f: editable note in PPQ‑tick clock time **relative to the clip’s MIDI file position 0** (song start).
 /// `startTick` may be arbitrarily large — leading silence before the first hit is intentional and preserved.
 /// `durationTicks` is stored for future editing; drums still use fixed transport gate samples.
@@ -36,6 +45,9 @@ struct TimelineMidiNote
     int midiNote = 60;
     /// 1 … 127 stored for realism; clipped at playback scheduling.
     int velocity = 100;
+    /// MIDI note-off (release) velocity, 0 … 127. Default **64** matches Cubase's visible default.
+    /// Sent on scheduled note ends for MIDI correctness; many instruments ignore the value.
+    int offVelocity = kDefaultMidiNoteOffVelocity;
     /// 1 … 16 (shown on channel messages in the MIDI file).
     std::uint8_t channel = 1;
     /// Ticks since MIDI time zero for this clip, in `ticksPerQuarter` domain (usually 960).

@@ -876,6 +876,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
             ProjectFileExperimentalTimelineNoteV12 t;
             t.midiNote = nn.midiNote;
             t.velocity = nn.velocity;
+            t.offVelocity = sanitizeMidiNoteOffVelocity(nn.offVelocity);
             t.channel = (int)juce::jlimit(1, 16, (int)nn.channel);
             t.startTick = nn.startTick;
             t.durationTicks = nn.durationTicks;
@@ -994,6 +995,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
             TimelineMidiNote n;
             n.midiNote = tn.midiNote;
             n.velocity = tn.velocity;
+            n.offVelocity = sanitizeMidiNoteOffVelocity(tn.offVelocity);
             n.channel = (std::uint8_t)juce::jlimit(1, 16, tn.channel);
             n.startTick = tn.startTick;
             n.durationTicks = juce::jmax<std::int64_t>(1, tn.durationTicks);
@@ -1134,6 +1136,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
             TimelineMidiNote n;
             n.midiNote = tn.midiNote;
             n.velocity = tn.velocity;
+            n.offVelocity = sanitizeMidiNoteOffVelocity(tn.offVelocity);
             n.channel = (std::uint8_t)juce::jlimit(1, 16, tn.channel);
             n.startTick = tn.startTick;
             n.durationTicks = juce::jmax<std::int64_t>(1, tn.durationTicks);
@@ -1867,7 +1870,7 @@ InstrumentMidiClipId InstrumentTrackController::appendImportedTimelineMidiClipAt
 
     clip->midiRollVisibleStartSamples = 0;
     clip->midiRollSamplesPerPixel = 0.0;
-    clip->midiRollFollowEnabled = false;
+    clip->midiRollFollowEnabled = true;
 
     const InstrumentMidiClipId outId = clip->id;
     clips_.push_back(std::move(clip));
@@ -1919,7 +1922,7 @@ InstrumentMidiClipId InstrumentTrackController::createEmptyTimelineMidiClipAtSam
 
     clip->midiRollVisibleStartSamples = 0;
     clip->midiRollSamplesPerPixel = 0.0;
-    clip->midiRollFollowEnabled = false;
+    clip->midiRollFollowEnabled = true;
 
     const InstrumentMidiClipId outId = clip->id;
     clips_.push_back(std::move(clip));
@@ -2089,7 +2092,7 @@ std::vector<InstrumentMidiClipId> InstrumentTrackController::appendDeepCopiedIns
         clip->timelineAnchorSamples = newAnchor;
         clip->midiRollVisibleStartSamples = 0;
         clip->midiRollSamplesPerPixel = 0.0;
-        clip->midiRollFollowEnabled = false;
+        clip->midiRollFollowEnabled = true;
         const InstrumentMidiClipId nid = clip->id;
         clips_.push_back(std::move(clip));
         out.push_back(nid);
@@ -2165,6 +2168,7 @@ void InstrumentTrackController::publishRenderSnapshot()
                 }
                 ev.midiNote = (std::uint8_t)juce::jlimit(0, 127, tn.midiNote);
                 ev.velocity = (std::uint8_t)juce::jlimit(1, 127, tn.velocity);
+                ev.offVelocity = (std::uint8_t)sanitizeMidiNoteOffVelocity(tn.offVelocity);
                 ev.midiChannel = (std::uint8_t)juce::jlimit(1, 16, (int)tn.channel);
                 if (ev.absSample < plan.startSamples || ev.absSample >= plan.endSamplesExclusive)
                 {
@@ -2226,6 +2230,20 @@ void InstrumentTrackController::publishRenderSnapshot()
                         + juce::String(static_cast<juce::int64>(std::int64_t(arrangeMaxExclusive)))
                         + juce::String(")");
 
+        // Off-velocity audit aid: how many scheduled note ends will carry a non-default release
+        // velocity (the value the audio thread puts into `MidiMessage::noteOff`).
+        int nonDefaultOffVelocityNotes = 0;
+        for (const auto& pl : snap->clips)
+        {
+            for (const auto& ev : pl.notes)
+            {
+                if ((int)ev.offVelocity != kDefaultMidiNoteOffVelocity)
+                {
+                    ++nonDefaultOffVelocityNotes;
+                }
+            }
+        }
+
         appendExperimentalPlaybackRoutingLogLine(
             juce::String("instrument-render-snapshot: tid=")
             + juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(experimentalDomainTrackId_)))
@@ -2236,7 +2254,9 @@ void InstrumentTrackController::publishRenderSnapshot()
             + juce::String(" hostHasInstrument=") + juce::String(host_.hasInstrument() ? "yes" : "no")
             + juce::String(" playbackEnabled=") + juce::String(snap->playbackEnabled ? "yes" : "no")
             + juce::String(" clipPlans=") + juce::String(static_cast<int>(snap->clips.size()))
-            + juce::String(" noteEventsTotal=") + juce::String(routedNoteRows) + juce::String(" ") + arrangeSpan);
+            + juce::String(" noteEventsTotal=") + juce::String(routedNoteRows)
+            + juce::String(" nonDefaultOffVelocityNotes=") + juce::String(nonDefaultOffVelocityNotes)
+            + juce::String(" ") + arrangeSpan);
 #endif
     }
 
@@ -2260,7 +2280,7 @@ void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstr
         const auto& p = rtPendingOffs_[(size_t)i];
         const int c = juce::jlimit(1, 16, p.midiChannel);
         host.audioThread_addMidiEventForCurrentBlock(
-            off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+            off0, juce::MidiMessage::noteOff(c, p.midiNote, (juce::uint8)juce::jlimit(0, 127, p.offVelocity)));
     }
     rtPendingOffCount_ = 0;
     rtLastSegEndTimeline_ = -1;
@@ -2316,7 +2336,9 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
         {
             const auto& p = rtPendingOffs_[(size_t)i];
             const int c = juce::jlimit(1, 16, p.midiChannel);
-            emitCounted(off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+            emitCounted(off0,
+                        juce::MidiMessage::noteOff(
+                            c, p.midiNote, (juce::uint8)juce::jlimit(0, 127, p.offVelocity)));
         }
         rtPendingOffCount_ = 0;
     }
@@ -2327,6 +2349,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
         {
             const PendingTransportNoteOff p = rtPendingOffs_[(size_t)i];
             const int c = juce::jlimit(1, 16, p.midiChannel);
+            const auto offVel = (juce::uint8)juce::jlimit(0, 127, p.offVelocity);
             if (p.dueAbsSample >= segEnd)
             {
                 rtPendingOffs_[(size_t)w++] = p;
@@ -2336,10 +2359,10 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
             {
                 const int rel = static_cast<int>(p.dueAbsSample - timelineSegStart);
                 const int o = juce::jlimit(0, deviceBlockNumSamples - 1, rel + bufferOffsetInDevice);
-                emitCounted(o, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+                emitCounted(o, juce::MidiMessage::noteOff(c, p.midiNote, offVel));
                 continue;
             }
-            emitCounted(off0, juce::MidiMessage::noteOff(c, p.midiNote, 0.0f));
+            emitCounted(off0, juce::MidiMessage::noteOff(c, p.midiNote, offVel));
         }
         rtPendingOffCount_ = w;
     }
@@ -2379,6 +2402,9 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
             const int noteCh = juce::jlimit(1, 16, (int)ev.midiChannel);
             emitCounted(onOffset, juce::MidiMessage::noteOn(noteCh, (int)ev.midiNote, vel));
 
+            // Scheduled note ends send a **true** Note Off carrying the note's stored release
+            // velocity (MIDI correctness; instruments are free to ignore the value).
+            const auto offVel = (juce::uint8)juce::jlimit(0, 127, (int)ev.offVelocity);
             const std::int64_t dueAbs = (ev.noteOffAbsSample > ev.absSample)
                                             ? ev.noteOffAbsSample
                                             : (ev.absSample + static_cast<std::int64_t>(gate));
@@ -2386,18 +2412,19 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
             {
                 const int offRel = static_cast<int>(dueAbs - timelineSegStart);
                 const int o = juce::jlimit(0, deviceBlockNumSamples - 1, offRel + bufferOffsetInDevice);
-                emitCounted(o, juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, 0.0f));
+                emitCounted(o, juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
             }
             else if (dueAbs >= segEnd)
             {
                 if (rtPendingOffCount_ < kMaxPendingTransportOffs)
                 {
-                    rtPendingOffs_[(size_t)rtPendingOffCount_++] = { dueAbs, (int)ev.midiNote, noteCh };
+                    rtPendingOffs_[(size_t)rtPendingOffCount_++]
+                        = { dueAbs, (int)ev.midiNote, noteCh, (int)ev.offVelocity };
                 }
                 else
                 {
                     emitCounted(juce::jmax(0, deviceBlockNumSamples - 1),
-                                juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, 0.0f));
+                                juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
                 }
             }
         }

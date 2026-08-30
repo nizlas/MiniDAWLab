@@ -38,6 +38,9 @@ struct TransportLayoutRefs
     juce::ToggleButton& arrangementSnapToggle;
     juce::ComboBox& arrangementSnapResolutionCombo;
 
+    /// Main-arrangement Follow toggle: far right of the toolbar row.
+    juce::Button& mainFollowPlayheadToggle;
+
     juce::Label& countInStatusLabel;
     juce::Label& keyDiagLabel;
     /// May be null when shortcut diagnostics UI is not constructed.

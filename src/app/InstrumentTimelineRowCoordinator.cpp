@@ -1,6 +1,7 @@
 #include "app/InstrumentTimelineRowCoordinator.h"
 
 #include "app/InstrumentRuntimeCoordinator.h"
+#include "diagnostics/UiPaintLoadCounters.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -16,6 +17,8 @@
 
 #include <cmath>
 #include <limits>
+#include <tuple>
+#include <unordered_map>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -31,7 +34,29 @@ struct MidiClipNotePreviewContext
     double samplesPerPixel = 0.0;
     float originX = 0.0f;
     double sampleRate = 0.0;
+    /// Dirty-region cull window in lane-local px (zoom-freeze fix): note bars fully outside this
+    /// window are skipped before any tick→sample math. Defaults cover everything (full repaint).
+    float cullX0 = -1.0e12f;
+    float cullX1 = 1.0e12f;
+    /// Per-clip pitch range from the lane's cache (valid when min <= max); avoids rescanning all
+    /// notes on every playhead-stripe repaint. Invalid → the preview scans and uses its own result.
+    int cachedMinPitch = 128;
+    int cachedMaxPitch = -1;
 };
+
+/// Full pitch scan over a clip's timeline notes (used to scale the preview rows). O(all notes) —
+/// callers cache the result per clip and invalidate on controller change broadcasts.
+[[nodiscard]] std::pair<int, int> scanClipNotePitchRange(const InstrumentMidiClip& clip) noexcept
+{
+    int minPitch = 128;
+    int maxPitch = -1;
+    for (const auto& n : clip.pattern.timelineNotes)
+    {
+        minPitch = juce::jmin(minPitch, n.midiNote);
+        maxPitch = juce::jmax(maxPitch, n.midiNote);
+    }
+    return { minPitch, maxPitch };
+}
 
 /// Cubase-like note preview inside a MIDI clip rect (Slice 1, visual only): one bar per note,
 /// x/width from note timing, y from pitch with **per-clip** min..max pitch scaling. Timeline notes
@@ -56,12 +81,14 @@ void paintMidiClipNotePreview(juce::Graphics& g,
         return;
     }
 
-    int minPitch = 128;
-    int maxPitch = -1;
-    for (const auto& n : timelineNotes)
+    int minPitch = ctx.cachedMinPitch;
+    int maxPitch = ctx.cachedMaxPitch;
+    if (minPitch > maxPitch)
     {
-        minPitch = juce::jmin(minPitch, n.midiNote);
-        maxPitch = juce::jmax(maxPitch, n.midiNote);
+        MINIDAW_UI_PAINT_ADD(midiLaneNoteIterations, timelineNotes.size());
+        const auto range = scanClipNotePitchRange(clip);
+        minPitch = range.first;
+        maxPitch = range.second;
     }
     if (minPitch > maxPitch)
     {
@@ -110,8 +137,34 @@ void paintMidiClipNotePreview(juce::Graphics& g,
     const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
     const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
     const std::int64_t anchor = clip.timelineAnchorSamples + ctx.previewMoveDeltaSamples;
+
+    // Dirty-region note cull (zoom-freeze fix): convert the dirty px window once to a tick window
+    // relative to the clip anchor, then reject notes with two integer-ish compares before any
+    // tick→sample math. `ticksToSignedSamples` is linear (samples = ticks * 60*sr/(bpm*tpq)).
+    // Padding covers the enforced minimum bar width plus antialiasing.
+    const double samplesPerTick = (60.0 * ctx.sampleRate) / (bpm * (double)juce::jmax(1, tpq));
+    double cullTickLo = -std::numeric_limits<double>::infinity();
+    double cullTickHi = std::numeric_limits<double>::infinity();
+    if (samplesPerTick > 0.0 && std::isfinite(samplesPerTick))
+    {
+        const double padSamples = (kMinNoteBarPx + 4.0) * ctx.samplesPerPixel;
+        const double sLo = (double)ctx.visibleStartSamples
+                           + ((double)ctx.cullX0 - (double)ctx.originX) * ctx.samplesPerPixel
+                           - padSamples;
+        const double sHi = (double)ctx.visibleStartSamples
+                           + ((double)ctx.cullX1 - (double)ctx.originX) * ctx.samplesPerPixel
+                           + padSamples;
+        cullTickLo = (sLo - (double)anchor) / samplesPerTick;
+        cullTickHi = (sHi - (double)anchor) / samplesPerTick;
+    }
+
     for (const auto& n : timelineNotes)
     {
+        if ((double)(n.startTick + n.durationTicks) < cullTickLo || (double)n.startTick > cullTickHi)
+        {
+            continue;
+        }
+        MINIDAW_UI_PAINT_ADD(midiLaneNoteIterations, 1);
         const std::int64_t s = anchor + ticksToSignedSamples(n.startTick, bpm, tpq, ctx.sampleRate);
         const std::int64_t d = juce::jmax(
             std::int64_t{ 1 }, ticksToSignedSamples(n.durationTicks, bpm, tpq, ctx.sampleRate));
@@ -144,8 +197,7 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
 } // namespace
 
 struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Component,
-                                                                 private juce::ChangeListener,
-                                                                 private juce::Timer
+                                                                 private juce::ChangeListener
 {
     friend class InstrumentTimelineRowCoordinator;
 
@@ -160,7 +212,6 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
         , boundCtl_(ctl)
         , laneTimelineTrackId_(timelineInstrumentTrackId)
     {
-        startTimerHz(20);
         setOpaque(false);
         if (boundCtl_ != nullptr)
         {
@@ -171,7 +222,6 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
     ~MidiEventLane() override
     {
         restoreNormalCursorAfterInvalidMidiDrop();
-        stopTimer();
         if (boundCtl_ != nullptr)
         {
             boundCtl_->removeChangeListener(this);
@@ -224,20 +274,41 @@ struct InstrumentTimelineRowCoordinator::MidiEventLane final : public juce::Comp
 private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override
     {
+        // Any controller-side change (note edits, clip add/remove/rename, imports) may alter note
+        // pitch content — drop the preview pitch-range cache before the repaint repopulates it.
+        notePitchRangeCache_.clear();
         owner_.repaintInstrumentTrackRow();
         owner_.refreshMidiEditorInstrumentUiIfOpen();
     }
 
-    void timerCallback() override
+    /// Cached per-clip note pitch range for the preview row scaling (min > max = clip has no
+    /// notes). Keyed by clip id, guarded by note count, cleared on controller change broadcasts —
+    /// so 60 Hz playhead-stripe repaints don't rescan every note of every clip.
+    [[nodiscard]] std::pair<int, int> cachedNotePitchRangeForClip(const InstrumentMidiClip& clip)
     {
-        if (owner_.transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+        const auto it = notePitchRangeCache_.find(clip.id);
+        if (it != notePitchRangeCache_.end()
+            && std::get<0>(it->second) == clip.pattern.timelineNotes.size())
         {
-            repaint();
+            return { std::get<1>(it->second), std::get<2>(it->second) };
         }
+        MINIDAW_UI_PAINT_ADD(midiLaneNoteIterations, clip.pattern.timelineNotes.size());
+        const auto range = scanClipNotePitchRange(clip);
+        notePitchRangeCache_[clip.id]
+            = std::make_tuple(clip.pattern.timelineNotes.size(), range.first, range.second);
+        return range;
     }
+
+    // Note: this lane used to run a 20 Hz timer that repainted the whole lane while the transport
+    // was playing. The lane's own content is static during playback (clip changes arrive via the
+    // controller change listener), but each full-lane repaint forced the transparent
+    // `PlayheadOverlay` above to redraw its line segment over this lane on a different cadence than
+    // the rest of the line — the intermittent lead/lag over MIDI tracks. Removed; the overlay owns
+    // all playhead drawing.
 
     void paint(juce::Graphics& g) override
     {
+        MINIDAW_UI_PAINT_COUNT(midiLanePaints);
         using namespace mini_daw::timeline_clip_chrome;
 
         const auto laneContent = getLaneContentBounds();
@@ -245,6 +316,11 @@ private:
         {
             return;
         }
+
+        // Dirty-region cull window (zoom-freeze fix): playhead stripe underpaints hit this lane
+        // ~60×/s during playback with a clip region a few px wide; clips and notes fully outside
+        // it are skipped. Full repaints pass the whole lane and paint everything as before.
+        const juce::Rectangle<float> dirtyPx = g.getClipBounds().toFloat().expanded(2.0f, 0.0f);
 
         if (!crossTrackDropGhostSpans_.empty())
         {
@@ -300,6 +376,10 @@ private:
             {
                 continue;
             }
+            if (!eb.toFloat().intersects(dirtyPx))
+            {
+                continue;
+            }
             if (kLogInstrumentLane)
             {
                 juce::Logger::writeToLog(
@@ -308,6 +388,11 @@ private:
             }
 
             noteCtx.previewMoveDeltaSamples = previewDelta;
+            noteCtx.cullX0 = dirtyPx.getX();
+            noteCtx.cullX1 = dirtyPx.getRight();
+            const auto pitchRange = cachedNotePitchRangeForClip(*c);
+            noteCtx.cachedMinPitch = pitchRange.first;
+            noteCtx.cachedMaxPitch = pitchRange.second;
             paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name, c, noteCtx);
 
             const bool hideTrimCues = trimLaneGestureActive_ && trimLaneClipId_ == c->id;
@@ -1331,6 +1416,8 @@ private:
 
     InstrumentTimelineRowCoordinator& owner_;
     InstrumentTrackController* boundCtl_ = nullptr;
+    /// See `cachedNotePitchRangeForClip`: clip id → (note count, min pitch, max pitch).
+    std::unordered_map<InstrumentMidiClipId, std::tuple<std::size_t, int, int>> notePitchRangeCache_;
     TrackId laneTimelineTrackId_ = kInvalidTrackId;
 
     bool dragCouldMove_ = false;

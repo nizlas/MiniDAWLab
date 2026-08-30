@@ -23,6 +23,8 @@ namespace
         std::int64_t endTick = 0;
         int midiNote = 60;
         int velocity = 100;
+        /// Release velocity written on the note's true Note Off event.
+        int offVelocity = kDefaultMidiNoteOffVelocity;
         int channel = 1;
     };
 
@@ -58,6 +60,7 @@ namespace
             ExportNoteTick e;
             e.midiNote = juce::jlimit(0, 127, tn.midiNote);
             e.velocity = juce::jlimit(1, 127, tn.velocity);
+            e.offVelocity = sanitizeMidiNoteOffVelocity(tn.offVelocity);
             e.channel = juce::jlimit(1, 16, (int)tn.channel);
             e.startTick = tn.startTick;
             std::int64_t offTick = e.startTick + juce::jmax<std::int64_t>(1, tn.durationTicks);
@@ -152,7 +155,10 @@ InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const Instrume
                 juce::MidiMessage::noteOn(ch, n.midiNote, (juce::uint8)n.velocity).withTimeStamp(
                     (double)n.startTick);
             noteTrack.addEvent(on);
-            auto off = juce::MidiMessage::noteOff(ch, n.midiNote, 0.0f).withTimeStamp((double)n.endTick);
+            // True Note Off (status 0x8n) with the stored release velocity — never the
+            // "Note On velocity 0" shorthand, which cannot carry off velocity.
+            auto off = juce::MidiMessage::noteOff(ch, n.midiNote, (juce::uint8)n.offVelocity)
+                           .withTimeStamp((double)n.endTick);
             noteTrack.addEvent(off);
         }
     }

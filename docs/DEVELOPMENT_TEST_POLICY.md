@@ -110,6 +110,19 @@ Run **only** when preparing a tester/release build. See `docs/RELEASE_CERTIFICAT
 
 ---
 
+## Known accepted visual tradeoffs (do not file as regressions)
+
+- **Arrangement waveforms are approximate during active zoom/pan.** Audio lanes blit the previous
+  wave raster scaled while the viewport is moving, so waveforms may look blurry/soft and a rapid
+  zoom-out can briefly show a clipped waveform. Each lane rebuilds once after ~200 ms of viewport
+  idle and then renders correctly. This is a deliberate part of the main-window playback/zoom
+  responsiveness fix (see `docs/CURRENT_ARCHITECTURE.md`, current-time/playhead rendering).
+  Report as a bug only if the waveform is still wrong **after** the viewport has been idle, or if
+  chrome/labels/selection are missing. Higher-fidelity rendering during the gesture is future
+  polish, not a correctness blocker.
+
+---
+
 ## Default test discipline for implementation agents
 
 - **Do not run the full stability matrix** unless the task explicitly asks for it or the change is

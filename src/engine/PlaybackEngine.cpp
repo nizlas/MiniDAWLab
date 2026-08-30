@@ -405,6 +405,7 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         const double sr = device->getCurrentSampleRate();
         const int bs = device->getCurrentBufferSizeSamples();
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
+        deviceSampleRateForDiagnostics_.store(sr, std::memory_order_relaxed);
         ensureMasterScratchCapacity(juce::jmax(bs, kOfflineMixdownBlockCapSamples));
         if (pluginHost_ != nullptr)
         {
@@ -428,6 +429,76 @@ void PlaybackEngine::audioDeviceStopped()
     {
         experimentalReleaseAllHosts_();
     }
+}
+
+void PlaybackEngine::audioThread_accumulateCallbackLoad(const int numSamples,
+                                                        const std::int64_t startTicks) noexcept
+{
+    const double ticksPerSecond = (double)juce::Time::getHighResolutionTicksPerSecond();
+    if (!(ticksPerSecond > 0.0))
+    {
+        return;
+    }
+    const double elapsedMs
+        = (double)(juce::Time::getHighResolutionTicks() - startTicks) * 1000.0 / ticksPerSecond;
+    const double sr = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+    const double budgetMs
+        = (sr > 0.0 && numSamples > 0) ? ((double)numSamples / sr) * 1000.0 : 0.0;
+    const double budgetPercent = budgetMs > 0.0 ? (elapsedMs / budgetMs) * 100.0 : 0.0;
+
+    const std::uint64_t previousBlocks = loadWindowBlocks_.fetch_add(1, std::memory_order_relaxed);
+    loadWindowSumMs_.store(loadWindowSumMs_.load(std::memory_order_relaxed) + elapsedMs,
+                           std::memory_order_relaxed);
+    loadWindowSumBudgetPercent_.store(
+        loadWindowSumBudgetPercent_.load(std::memory_order_relaxed) + budgetPercent,
+        std::memory_order_relaxed);
+    if (previousBlocks == 0)
+    {
+        loadWindowMinMs_.store(elapsedMs, std::memory_order_relaxed);
+        loadWindowMaxMs_.store(elapsedMs, std::memory_order_relaxed);
+        loadWindowMaxBudgetPercent_.store(budgetPercent, std::memory_order_relaxed);
+    }
+    else
+    {
+        loadWindowMinMs_.store(
+            juce::jmin(loadWindowMinMs_.load(std::memory_order_relaxed), elapsedMs),
+            std::memory_order_relaxed);
+        loadWindowMaxMs_.store(
+            juce::jmax(loadWindowMaxMs_.load(std::memory_order_relaxed), elapsedMs),
+            std::memory_order_relaxed);
+        loadWindowMaxBudgetPercent_.store(
+            juce::jmax(loadWindowMaxBudgetPercent_.load(std::memory_order_relaxed), budgetPercent),
+            std::memory_order_relaxed);
+    }
+    if (budgetPercent >= 100.0)
+    {
+        loadWindowOverruns_.fetch_add(1, std::memory_order_relaxed);
+    }
+    else if (budgetPercent >= 70.0)
+    {
+        loadWindowNearOverruns_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+PlaybackEngine::AudioCallbackLoadSnapshot PlaybackEngine::snapshotAudioCallbackLoadAndReset() noexcept
+{
+    AudioCallbackLoadSnapshot s;
+    s.blocks = loadWindowBlocks_.exchange(0, std::memory_order_relaxed);
+    const double sumMs = loadWindowSumMs_.exchange(0.0, std::memory_order_relaxed);
+    const double sumBudget = loadWindowSumBudgetPercent_.exchange(0.0, std::memory_order_relaxed);
+    s.minMs = loadWindowMinMs_.exchange(0.0, std::memory_order_relaxed);
+    s.maxMs = loadWindowMaxMs_.exchange(0.0, std::memory_order_relaxed);
+    s.maxBudgetPercent = loadWindowMaxBudgetPercent_.exchange(0.0, std::memory_order_relaxed);
+    s.nearOverruns = loadWindowNearOverruns_.exchange(0, std::memory_order_relaxed);
+    s.overruns = loadWindowOverruns_.exchange(0, std::memory_order_relaxed);
+    s.lastBlockSamples = audioCallbackLastBlockSamples_.load(std::memory_order_relaxed);
+    s.sampleRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+    if (s.blocks > 0)
+    {
+        s.meanMs = sumMs / (double)s.blocks;
+        s.meanBudgetPercent = sumBudget / (double)s.blocks;
+    }
+    return s;
 }
 
 void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -456,6 +527,20 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     };
     const AudioCallbackSectionClear callbackSectionClear { audioCallbackInProcessingSection_,
                                                            audioCallbackPhase_ };
+
+    // Load diagnostics: two clock reads per block, folded into relaxed counters on the way out
+    // (covers the early-return offline-gate path as well). Never read for synchronization.
+    struct AudioCallbackLoadScope
+    {
+        PlaybackEngine& engine_;
+        const int blockSamples_;
+        const std::int64_t startTicks_;
+        ~AudioCallbackLoadScope() noexcept
+        {
+            engine_.audioThread_accumulateCallbackLoad(blockSamples_, startTicks_);
+        }
+    };
+    const AudioCallbackLoadScope loadScope { *this, numSamples, juce::Time::getHighResolutionTicks() };
 
     // Stability C2B diagnostics: coarse phase marker (relaxed; never used for synchronization).
     const auto setCallbackPhase = [this](const AudioCallbackPhase p) noexcept {

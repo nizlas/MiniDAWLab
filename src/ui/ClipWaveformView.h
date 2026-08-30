@@ -111,7 +111,7 @@ struct ClipWaveformLaneHost
 //
 // Not responsible for: file decode, clip ordering *rules*, or transport ownership.
 // ---------------------------------------------------------------------------
-class ClipWaveformView : public juce::Component
+class ClipWaveformView : public juce::Component, private juce::Timer
 {
 public:
     // [Message thread] session/transport/timelineViewport/`waveformCache` outlive the view.
@@ -234,6 +234,25 @@ private:
     std::uint64_t waveRasterPyramidFp_ = 0;
     int waveRasterMarginPx_ = 0;
     WaveformRasterRebuildReason waveRasterLastRebuildReason_ = WaveformRasterRebuildReason::None;
+
+    // --- Deferred raster rebuild (zoom-freeze fix, slice 2) -------------------------------------
+    // `paint` must never synchronously rebuild the wave raster for *geometry* staleness (zoom, pan
+    // beyond overscan, resize): it blits the old raster scaled onto the new mapping
+    // (`blitWaveRasterApproximate`) and arms this one-shot timer instead. The timer restarts on
+    // every further stale paint, so an active wheel gesture produces zero rebuilds; one rebuild per
+    // lane runs after the viewport has been idle for `deferredRasterRebuildDelayMs_` (per-lane
+    // staggered so many audio lanes never rebuild in the same message-loop turn). Rebuilding for
+    // *content* changes (strips/pyramid fingerprint) stays synchronous — rare and correctness-first.
+    void timerCallback() override;
+    void scheduleDeferredRasterRebuild();
+    /// Maps the current visible range onto the cached raster's coverage; degenerates to the exact
+    /// 1:1 blit when geometry matches, otherwise draws a clamped scaled approximation (uncovered
+    /// regions stay unpainted). Used by both the narrow-stripe fast path and stale full paints.
+    void blitWaveRasterApproximate(juce::Graphics& g,
+                                   std::int64_t visStart,
+                                   std::int64_t visLen,
+                                   double spp) const;
+    int deferredRasterRebuildDelayMs_ = 200;
 
     [[nodiscard]] bool shouldBypassWaveformRasterCache() const noexcept;
     [[nodiscard]] bool visibleFitsWaveRaster(std::int64_t visStart, std::int64_t visLen) const noexcept;

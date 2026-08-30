@@ -32,10 +32,15 @@
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "app/InstrumentTimelineRowCoordinator.h"
 #include "app/AudioMixdownExporter.h"
+#include "diagnostics/DiagnosticBuildFlags.h"
+#include "diagnostics/PlaybackUiLoadLog.h"
+#include "diagnostics/UiPaintLoadCounters.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
 #include "diagnostics/StabilityScenarioRunner.h"
+#include "diagnostics/TransportShortcutDiagLog.h"
+#include "diagnostics/UiHangWatchdogDiag.h"
 
 #include "domain/Session.h"
 #include "domain/ProjectMusicalTime.h"
@@ -53,7 +58,10 @@
 #include "plugins/InsertSlotId.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
+#include "ui/CoalescedRepaintFlusher.h"
+#include "ui/FollowAutoscrollGovernor.h"
 #include "ui/PlayheadOverlay.h"
+#include "ui/UiPlayheadClock.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
@@ -271,6 +279,7 @@ public:
               transportIn,
               deviceManagerIn,
               timelineViewport_,
+              uiPlayheadClock_,
               [this]() {
                   return recorder_.isRecording()
                          || (recordingCoordinator_ != nullptr
@@ -716,9 +725,27 @@ public:
         setWantsKeyboardFocus(true);
         audioWaveformCache_.setOnPyramidReady([this](const AudioClip*) { trackLanesView.repaint(); });
         timelineViewport_.setOnVisibleRangeChanged([this] {
-            rulerView.repaint();
-            trackLanesView.repaint();
-            instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+            ++statsViewportChanges_;
+            // Any viewport change that is not a follow page is user/system driven (wheel zoom/pan,
+            // middle-drag, extent clamp): remember it locally *and* globally so follow in this and
+            // other windows briefly yields (anti-fight/anti-loop, cross-window coordination).
+            if (!followPanInProgress_)
+            {
+                const double nowMs = juce::Time::getMillisecondCounterHiRes();
+                mainFollowGovernor_.noteUserViewportChange(nowMs);
+                GlobalFollowWorkCoordinator::instance().noteUserViewportGesture(this, nowMs);
+                ui_hang_watchdog::noteUserViewportChange();
+            }
+            // Repaint-storm fix: mark dirty once per message batch, not once per wheel event —
+            // otherwise a fast zoom gesture pays one full arrangement recomposition per event.
+            // A follow page flushes synchronously: it happens inside the overlay frame tick whose
+            // structural invalidation already paints this turn, so deferring would split the page
+            // into two full paint passes.
+            coalescedViewportRepaint_.requestFlush();
+            if (followPanInProgress_)
+            {
+                coalescedViewportRepaint_.flushNowIfPending();
+            }
         });
         addTrackCornerPlusButton_.onClick = [this] {
             juce::PopupMenu menu;
@@ -917,11 +944,25 @@ public:
                 [this]() -> std::optional<ProjectFileMainWindowBoundsV1> {
                     if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
                     {
-                        return captureProjectMainWindowBoundsForProjectSave(*dw);
+                        auto b = captureProjectMainWindowBoundsForProjectSave(*dw);
+                        if (b.has_value())
+                        {
+                            b->followPlayhead = mainFollowPlayhead_;
+                        }
+                        return b;
                     }
                     return std::nullopt;
                 },
                 [this](const ProjectFileV1& loaded) {
+                    // Main-arrangement Follow: saved in the `mainWindow` object; old projects
+                    // without the object (or field) load with Follow ON.
+                    mainFollowPlayhead_
+                        = !loaded.hasMainWindowBounds || loaded.mainWindowBounds.followPlayhead;
+                    mainFollowPlayheadToggle_.setToggleState(mainFollowPlayhead_,
+                                                             juce::dontSendNotification);
+                    appendProjectLoadDiagnosticLine(
+                        juce::String("load: main follow=") + (mainFollowPlayhead_ ? "on" : "off")
+                        + (loaded.hasMainWindowBounds ? "" : " (default, no mainWindow object)"));
                     if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
                     {
                         if (loaded.hasMainWindowBounds)
@@ -1017,6 +1058,22 @@ public:
         countInStatusLabel_.setFont(juce::FontOptions(12.0f));
         countInStatusLabel_.setJustificationType(juce::Justification::centredLeft);
         addAndMakeVisible(countInStatusLabel_);
+        addAndMakeVisible(mainFollowPlayheadToggle_);
+        mainFollowPlayheadToggle_.setButtonText("Follow");
+        mainFollowPlayheadToggle_.setClickingTogglesState(true);
+        mainFollowPlayheadToggle_.setToggleState(mainFollowPlayhead_, juce::dontSendNotification);
+        mainFollowPlayheadToggle_.setTooltip("Follow playhead during playback (main arrangement)");
+        // Never take keyboard focus: a focused button would consume Space (play/pause) after a click.
+        mainFollowPlayheadToggle_.setWantsKeyboardFocus(false);
+        mainFollowPlayheadToggle_.onClick = [this] {
+            mainFollowPlayhead_ = mainFollowPlayheadToggle_.getToggleState();
+            if (mainFollowPlayhead_)
+            {
+                // Bring the playhead into view right away instead of waiting for the edge trigger.
+                maybeFollowMainArrangementPlayhead(
+                    (double)transport.readPlayheadSamplesForUi(), false);
+            }
+        };
         savingProjectToastLabel_.setText("Saving project", juce::dontSendNotification);
         savingProjectToastLabel_.setJustificationType(juce::Justification::centred);
         savingProjectToastLabel_.setFont(juce::FontOptions(14.0f));
@@ -1031,7 +1088,25 @@ public:
         addAndMakeVisible(rulerView);
         addAndMakeVisible(trackLanesView);
         instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
-        lanePlayheadOverlay_ = std::make_unique<PlayheadOverlay>(session, transport, timelineViewport_);
+        lanePlayheadOverlay_ = std::make_unique<PlayheadOverlay>(
+            session, transport, timelineViewport_, deviceManager, uiPlayheadClock_);
+        // Single playhead frame per tick: the overlay samples the shared clock once and pushes the
+        // same display sample to the ruler, so every main-window indicator draws one position.
+        // Follow-autoscroll runs first so the ruler maps this frame with the panned viewport.
+        lanePlayheadOverlay_->setOnPlayheadFrameAdvanced(
+            [this](const double displaySamples) {
+                ui_hang_watchdog::heartbeat();
+                ui_hang_watchdog::notePlayheadFrame(
+                    (long long)timelineViewport_.getVisibleStartSamples(),
+                    timelineViewport_.getSamplesPerPixel(),
+                    displaySamples);
+                // Frame-interval bookkeeping for the follow governor: the interval of the tick
+                // *after* a follow pan includes that pan's repaint cost, which is exactly the
+                // capacity signal the clean-frame rule needs.
+                mainFollowGovernor_.noteFrameTick(juce::Time::getMillisecondCounterHiRes());
+                maybeFollowMainArrangementPlayhead(displaySamples, true);
+                // No ruler push: the overlay covers the ruler band and draws the marker itself.
+            });
         addAndMakeVisible(*lanePlayheadOverlay_);
         refreshInstrumentUi();
         addAndMakeVisible(inspectorCollapsedKnob_);
@@ -1117,6 +1192,7 @@ public:
 
         deviceManager.addChangeListener(this);
         transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
+        ui_hang_watchdog::install();
         startTimerHz(10);
         syncViewportFromSession();
         if (midiEditorPresenter_ != nullptr)
@@ -1160,13 +1236,39 @@ public:
         if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
         {
             juce::Logger::writeToLog("[Shortcut] numpad1 ignored (recording or count-in)");
+            if constexpr (transport_shortcut_diag::kEnabled)
+            {
+                transport_shortcut_diag::appendLine("jumpL ignored reason=recording-or-count-in");
+            }
             return;
         }
         const std::int64_t L = session.getLeftLocatorSamples();
         const std::int64_t R = session.getRightLocatorSamples();
         if (R > L && R > 0)
         {
+            if constexpr (transport_shortcut_diag::kEnabled)
+            {
+                transport_shortcut_diag::appendLine(
+                    "jumpL seek L=" + juce::String(L) + " R=" + juce::String(R)
+                    + " playheadBefore=" + juce::String(transport.readPlayheadSamplesForUi())
+                    + " playing="
+                    + juce::String(
+                        transport.readPlaybackIntentForUi() == PlaybackIntent::Playing ? "Y" : "n"));
+            }
             transport.requestSeek(L);
+            // Snap every main-window current-time indicator to L in this same frame. Without the
+            // re-anchor, a backwards jump smaller than the clock's hard-resync threshold
+            // (~0.17 s) is filtered out by its monotonic smoothing, so a press landing near L
+            // looks like it did nothing even though the transport did seek.
+            uiPlayheadClock_.reanchorTo(L);
+            // With Follow ON the view pans so L is visible even when stopped (the frame callback
+            // below only auto-follows while playing).
+            maybeFollowMainArrangementPlayhead((double)L, false);
+            if (lanePlayheadOverlay_ != nullptr)
+            {
+                // The overlay draws both the lane line and the ruler marker segment.
+                lanePlayheadOverlay_->snapFrameDisplaySamplesForSeek((double)L);
+            }
             if (midiEditorPresenter_ != nullptr)
             {
                 midiEditorPresenter_->notifyMidiEditorExternalTransportSeekIfOpen(L);
@@ -1174,6 +1276,12 @@ public:
             return;
         }
         juce::Logger::writeToLog("[Shortcut] numpad1 ignored: no valid locator range");
+        if constexpr (transport_shortcut_diag::kEnabled)
+        {
+            transport_shortcut_diag::appendLine(
+                "jumpL ignored reason=no-valid-locator-range L=" + juce::String(L)
+                + " R=" + juce::String(R));
+        }
     }
 
     void invokeDeleteSelectedPlacedClipFromWindowShortcut() override;
@@ -1469,6 +1577,7 @@ public:
             arrangementTimelineFormatCombo_,
             arrangementSnapToggle_,
             arrangementSnapResolutionCombo_,
+            mainFollowPlayheadToggle_,
             countInStatusLabel_,
             keyDiagLabel_,
             shortcutDiagLabel_.get(),
@@ -1548,6 +1657,9 @@ private:
 
     void timerCallback() override
     {
+        // Secondary watchdog heartbeat: keeps the stall detector alive when playback (and thereby
+        // the 60 Hz overlay frame callback) is stopped.
+        ui_hang_watchdog::heartbeat();
         if (instrumentTimelineRowCoordinator_ != nullptr)
         {
             instrumentTimelineRowCoordinator_->tickStructuralEditBlockedHeaderStripRepaint(
@@ -1556,7 +1668,109 @@ private:
         transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
         inspectorView_.refreshFromSession();
         updateMainWindowTitleWithDirtyState();
+        tickPlaybackUiLoadDiagnostics();
     }
+
+    /// Part E: one aggregated `playback-ui-load.log` line per second (audio callback cost + UI
+    /// playhead timer/invalidation), so UI render jitter can be separated from audio load. Compiled
+    /// out unless `MINIDAW_DIAG_PLAYBACK_UI_LOAD` is 1.
+    void tickPlaybackUiLoadDiagnostics()
+    {
+#if MINIDAW_DIAG_PLAYBACK_UI_LOAD
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        if (lastPlaybackUiLoadLogMs_ > 0.0 && nowMs - lastPlaybackUiLoadLogMs_ < 1000.0)
+        {
+            return;
+        }
+        lastPlaybackUiLoadLogMs_ = nowMs;
+
+        const auto audio = playbackEngine_.snapshotAudioCallbackLoadAndReset();
+        PlayheadOverlay::UiRenderStats ui;
+        if (lanePlayheadOverlay_ != nullptr)
+        {
+            ui = lanePlayheadOverlay_->snapshotUiRenderStatsAndReset();
+        }
+        if (audio.blocks == 0 && ui.timerTicks == 0)
+        {
+            return;
+        }
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int trackCount = snap != nullptr ? snap->getNumTracks() : 0;
+        const bool playing = transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+        appendPlaybackUiLoadDiagnosticLine(
+            juce::String("playing=") + (playing ? "1" : "0")
+            + " tracks=" + juce::String(trackCount)
+            + " audio.blocks=" + juce::String((int)audio.blocks)
+            + " audio.ms(min/mean/max)=" + juce::String(audio.minMs, 3) + "/"
+            + juce::String(audio.meanMs, 3) + "/" + juce::String(audio.maxMs, 3)
+            + " audio.budget%(mean/max)=" + juce::String(audio.meanBudgetPercent, 1) + "/"
+            + juce::String(audio.maxBudgetPercent, 1)
+            + " audio.nearOverruns=" + juce::String((int)audio.nearOverruns)
+            + " audio.overruns=" + juce::String((int)audio.overruns)
+            + " audio.block=" + juce::String(audio.lastBlockSamples)
+            + " audio.sr=" + juce::String(audio.sampleRate, 0)
+            + " ui.ticks=" + juce::String(ui.timerTicks)
+            + " ui.repaints=" + juce::String(ui.repaintRequests)
+            + " ui.repaintAreaPx=" + juce::String(ui.repaintAreaPx, 0)
+            + " ui.tickMs(min/mean/max)=" + juce::String(ui.timerIntervalMinMs, 1) + "/"
+            + juce::String(ui.timerIntervalMeanMs, 1) + "/"
+            + juce::String(ui.timerIntervalMaxMs, 1)
+            + " ui.frameSample=" + juce::String(ui.lastFrameDisplaySamples, 0)
+            + " ui.frameX=" + juce::String(ui.lastFrameCentreX, 1)
+            + " follow.on=" + (mainFollowPlayhead_ ? "1" : "0")
+            + " follow.pages=" + juce::String((int)statsFollowPans_)
+            + " follow.skip.gesture=" + juce::String((int)statsFollowSkipsGesture_)
+            + " follow.skip.late=" + juce::String((int)statsFollowSkipsLateFrame_)
+            + " follow.skip.clean=" + juce::String((int)statsFollowSkipsAwaitClean_)
+            + " follow.skip.boundary=" + juce::String((int)statsFollowSkipsBoundary_)
+            + " follow.skip.pace=" + juce::String((int)statsFollowSkipsPacing_)
+            + " follow.skip.xwin=" + juce::String((int)statsFollowSkipsCrossWindow_)
+            + " follow.skip.budget=" + juce::String((int)statsFollowSkipsGlobalBudget_)
+            + " viewport.changes=" + juce::String((int)statsViewportChanges_)
+            + " viewport.flushes=" + juce::String((int)statsViewportRepaintFlushes_)
+            + " follow.global.pages=" + juce::String(
+                (int)(GlobalFollowWorkCoordinator::instance().totalPagesApplied()
+                      - lastGlobalFollowPagesSnapshot_))
+            + " follow.span=" + juce::String(
+                (double)rulerView.getWidth() * timelineViewport_.getSamplesPerPixel(), 0)
+            + " follow.frameMs=" + juce::String(mainFollowGovernor_.lastFrameIntervalMs(), 1)
+            + " vp.spp=" + juce::String(timelineViewport_.getSamplesPerPixel(), 2)
+            + " vp.visStart=" + juce::String(timelineViewport_.getVisibleStartSamples())
+            + paintLoadCountersDiagSuffix());
+        statsFollowPans_ = 0;
+        statsFollowSkipsGesture_ = 0;
+        statsFollowSkipsLateFrame_ = 0;
+        statsFollowSkipsAwaitClean_ = 0;
+        statsFollowSkipsPacing_ = 0;
+        statsFollowSkipsBoundary_ = 0;
+        statsFollowSkipsCrossWindow_ = 0;
+        statsFollowSkipsGlobalBudget_ = 0;
+        statsViewportChanges_ = 0;
+        statsViewportRepaintFlushes_ = 0;
+        lastGlobalFollowPagesSnapshot_ = GlobalFollowWorkCoordinator::instance().totalPagesApplied();
+#endif
+    }
+
+#if MINIDAW_DIAG_PLAYBACK_UI_LOAD
+    /// Zoom-freeze forensic audit: per-second paint counters per main-window component (see
+    /// `UiPaintLoadCounters.h`) appended to the 1 Hz ui-load line to prove which paint path
+    /// saturates during playback + zoom.
+    [[nodiscard]] static juce::String paintLoadCountersDiagSuffix()
+    {
+        const auto p = ui_paint_load::snapshotAndReset();
+        return juce::String(" paint.clipLane=") + juce::String((int)p.clipLanePaints)
+               + " paint.raster=" + juce::String((int)p.clipLaneRasterRebuilds)
+               + " paint.rasterUs=" + juce::String((juce::int64)p.clipLaneRasterRebuildUs)
+               + " paint.uncached=" + juce::String((int)p.clipLaneUncachedPaints)
+               + " paint.staleBlit=" + juce::String((int)p.clipLaneStaleBlits)
+               + " paint.deferBuild=" + juce::String((int)p.clipLaneDeferredBuilds)
+               + " paint.midiLane=" + juce::String((int)p.midiLanePaints)
+               + " paint.midiNotes=" + juce::String((juce::int64)p.midiLaneNoteIterations)
+               + " paint.lanes=" + juce::String((int)p.lanesViewPaints)
+               + " paint.ruler=" + juce::String((int)p.rulerPaints)
+               + " paint.overlay=" + juce::String((int)p.overlayPaints);
+    }
+#endif
 
     /// Stability Slice 5 (Part E): "<ProjectName>[*] - <AppName>" window title; the asterisk marks
     /// unsaved changes. Polled from the 10 Hz UI timer; setName only runs when the text changes.
@@ -1619,6 +1833,122 @@ private:
             }
         }
         playbackEngine_.rebuildRoutingPlanFromSession();
+    }
+
+    // [Message thread] Conny follow-playhead: edge-style follow for the main arrangement — same
+    // convention as the MIDI editor's piano roll (only pan when the playhead nears the right or
+    // left edge; reset it to 20 % / 25 % from the left). Called once per playhead UI frame from
+    // the `PlayheadOverlay` frame callback (`fromPlayheadFrame = true`), and explicitly on
+    // jump-to-left-locator / Follow toggled ON (`fromPlayheadFrame = false`). `panBySamples`
+    // clamps to the arrangement extent and its change callback repaints ruler + lanes.
+    //
+    // Freeze hardening (page-follow slice): follow is **page/event-driven**, never frame-driven.
+    // Each follow page forces a full repaint of the whole arrangement column, so page admission is
+    // delegated to `FollowAutoscrollGovernor` (boundary trigger + re-arm, capacity gates, local
+    // gesture holdoff) plus `GlobalFollowWorkCoordinator` (one page across *all* DAL windows per
+    // 250 ms; yield while the user pans/zooms another window). A page that cannot capture the
+    // playhead (extent clamp, fine zoom) switches the governor to a sparse re-arm interval instead
+    // of re-firing every opportunity — the edge condition alone must never be a standing pan
+    // permission (see MAIN_FOLLOW_ZOOM_UI_FREEZE_FORENSIC_AUDIT.md). At most one page can occur
+    // per frame tick (single call site in the overlay frame callback), and `followPanInProgress_`
+    // keeps the viewport listener from mistaking follow pages for user gestures. Explicit calls
+    // (seek, Follow toggled ON) bypass the gates — single user-initiated adjustments — but still
+    // register via `notePageApplied` on both objects so frame-driven paging pauses right after.
+    void maybeFollowMainArrangementPlayhead(const double displaySamples, const bool fromPlayheadFrame)
+    {
+        constexpr double kFollowRightThreshold = 0.92;
+        constexpr double kFollowLeftThreshold = 0.08;
+        constexpr double kFollowForwardResetPosition = 0.20;
+        constexpr double kFollowBackwardResetPosition = 0.25;
+
+        if (!mainFollowPlayhead_ || followPanInProgress_)
+        {
+            return;
+        }
+        if (fromPlayheadFrame && transport.readPlaybackIntentForUi() != PlaybackIntent::Playing)
+        {
+            return;
+        }
+        const double w = (double)rulerView.getWidth();
+        const double spp = timelineViewport_.getSamplesPerPixel();
+        const std::int64_t arr = session.getArrangementExtentSamples();
+        if (w <= 0.0 || spp <= 0.0 || !std::isfinite(spp) || arr <= 0)
+        {
+            return;
+        }
+        const double span = w * spp;
+        const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+        const double rel = span > 1e-9 ? (displaySamples - (double)visStart) / span : 0.5;
+
+        double target = 0.0;
+        if (rel >= kFollowRightThreshold)
+        {
+            target = displaySamples - kFollowForwardResetPosition * span;
+        }
+        else if (rel <= kFollowLeftThreshold)
+        {
+            target = displaySamples - kFollowBackwardResetPosition * span;
+        }
+        else
+        {
+            return;
+        }
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        if (fromPlayheadFrame)
+        {
+            switch (mainFollowGovernor_.decidePage(nowMs, displaySamples, (double)visStart, span))
+            {
+                case FollowAutoscrollGovernor::Decision::apply:
+                    break;
+                case FollowAutoscrollGovernor::Decision::skipNotNeeded:
+                    return;
+                case FollowAutoscrollGovernor::Decision::skipUserGestureHoldoff:
+                    ++statsFollowSkipsGesture_;
+                    return;
+                case FollowAutoscrollGovernor::Decision::skipLateFrame:
+                    ++statsFollowSkipsLateFrame_;
+                    return;
+                case FollowAutoscrollGovernor::Decision::skipAwaitCleanFrame:
+                    ++statsFollowSkipsAwaitClean_;
+                    return;
+                case FollowAutoscrollGovernor::Decision::skipBoundaryWait:
+                    ++statsFollowSkipsBoundary_;
+                    return;
+                case FollowAutoscrollGovernor::Decision::skipMinInterval:
+                    ++statsFollowSkipsPacing_;
+                    return;
+            }
+            auto& global = GlobalFollowWorkCoordinator::instance();
+            if (global.otherWindowGestureActive(this, nowMs))
+            {
+                ++statsFollowSkipsCrossWindow_;
+                return;
+            }
+            if (!global.pageSlotAvailable(nowMs))
+            {
+                ++statsFollowSkipsGlobalBudget_;
+                return;
+            }
+        }
+        const std::int64_t delta
+            = (std::int64_t)std::llround(juce::jmax(0.0, target)) - visStart;
+        if (delta != 0)
+        {
+            const juce::ScopedValueSetter<bool> reentrancyGuard(followPanInProgress_, true);
+            timelineViewport_.panBySamples(delta, w, arr);
+            mainFollowGovernor_.notePageApplied(
+                nowMs, displaySamples, (double)timelineViewport_.getVisibleStartSamples(), span);
+            GlobalFollowWorkCoordinator::instance().notePageApplied(nowMs);
+            ++statsFollowPans_;
+            ui_hang_watchdog::noteFollowPan();
+        }
+        else if (fromPlayheadFrame)
+        {
+            // Page attempted but the viewport could not move (fully clamped, e.g. arrangement
+            // end): record it so the governor drops to the sparse re-arm cadence instead of
+            // re-deciding every minimum interval for as long as the playhead stays outside.
+            mainFollowGovernor_.notePageApplied(nowMs, displaySamples, (double)visStart, span);
+        }
     }
 
     // Stability C3: live-context getters for `stability_invariants::verifyStableState`. Each
@@ -1752,6 +2082,27 @@ private:
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
     /// Count-in / recording line (no always-visible audio device debug; use Audio menu).
     juce::Label countInStatusLabel_;
+    /// Conny follow-playhead: main-arrangement Follow toggle (far right of the toolbar row).
+    /// Independent of the MIDI editor's per-clip Follow. Persisted in the project `mainWindow`
+    /// object; default ON for new projects and old projects without the field.
+    juce::TextButton mainFollowPlayheadToggle_;
+    bool mainFollowPlayhead_ = true;
+    /// Freeze hardening: reentrancy guard + page/event-driven follow governor (see
+    /// `maybeFollowMainArrangementPlayhead`). Counters feed `playback-ui-load.log`.
+    bool followPanInProgress_ = false;
+    FollowAutoscrollGovernor mainFollowGovernor_;
+    // Unsigned: only reset when the ui-load diag flag is on; wraparound is harmless when it is off.
+    unsigned int statsFollowPans_ = 0;
+    unsigned int statsFollowSkipsGesture_ = 0;
+    unsigned int statsFollowSkipsLateFrame_ = 0;
+    unsigned int statsFollowSkipsAwaitClean_ = 0;
+    unsigned int statsFollowSkipsPacing_ = 0;
+    unsigned int statsFollowSkipsBoundary_ = 0;
+    unsigned int statsFollowSkipsCrossWindow_ = 0;
+    unsigned int statsFollowSkipsGlobalBudget_ = 0;
+    unsigned int statsViewportChanges_ = 0;
+    unsigned int statsViewportRepaintFlushes_ = 0;
+    unsigned int lastGlobalFollowPagesSnapshot_ = 0;
     /// Transient "Saving project" indicator (see `showSavingProjectToast`).
     juce::Label savingProjectToastLabel_;
     std::unique_ptr<RecordingCoordinator> recordingCoordinator_;
@@ -1793,8 +2144,26 @@ private:
     /// UI-only: shared x–span for ruler and lanes; never stored in `Session` (see `PHASE_PLAN`).
     TimelineViewportModel timelineViewport_;
     AudioWaveformCache audioWaveformCache_;
+#if MINIDAW_DIAG_PLAYBACK_UI_LOAD
+    double lastPlaybackUiLoadLogMs_ = 0.0;
+#endif
+    /// One shared current-time source for this window's ruler stroke and lane playhead line.
+    /// Declared before `rulerView` so it is alive when the ruler is constructed.
+    UiPlayheadClock uiPlayheadClock_;
     TimelineRulerView rulerView;
     TrackLanesView trackLanesView;
+    /// Repaint-storm fix: viewport-change repaints (ruler + lanes + instrument row) are marked once
+    /// per message batch instead of once per wheel/drag event. Declared after the views it flushes
+    /// so it is destroyed (and its pending update cancelled) before they are.
+    CoalescedRepaintFlusher coalescedViewportRepaint_ { [this] {
+        ++statsViewportRepaintFlushes_;
+        rulerView.repaint();
+        trackLanesView.repaint();
+        if (instrumentTimelineRowCoordinator_ != nullptr)
+        {
+            instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+        }
+    } };
     std::unique_ptr<PlayheadOverlay> lanePlayheadOverlay_;
     InspectorView inspectorView_;
     collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
@@ -1847,7 +2216,13 @@ void mini_daw_app_transport::TransportControlsContent::configureArrangementMusic
     arrangementBpmEditor_.setInputRestrictions(16, "0123456789.");
     arrangementBpmEditor_.setTooltip("Project tempo (arrangement ruler)");
     arrangementBpmEditor_.setFont(juce::FontOptions(11.0f));
-    arrangementBpmEditor_.onReturnKey = [this] { commitArrangementBpmFromEditorIfNeeded(); };
+    // Enter commits and *releases focus*: a TextEditor that keeps focus consumes every later
+    // digit/space keypress as text input, silently killing transport shortcuts (numpad 1, Space)
+    // until the user happens to click elsewhere.
+    arrangementBpmEditor_.onReturnKey = [this] {
+        commitArrangementBpmFromEditorIfNeeded();
+        arrangementBpmEditor_.giveAwayKeyboardFocus();
+    };
     arrangementBpmEditor_.onFocusLost = [this] { commitArrangementBpmFromEditorIfNeeded(); };
 
     arrangementTimeSignatureCombo_.setTooltip("Project time signature");

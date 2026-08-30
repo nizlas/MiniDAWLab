@@ -825,6 +825,13 @@ namespace
                                     {
                                         tnn.velocity = (int)static_cast<double>(vv);
                                     }
+                                    // Absent in projects saved before off-velocity support: keep 64.
+                                    const juce::var& ovv = tvn.getProperty("offVelocity", {});
+                                    if (ovv.isInt() || ovv.isInt64() || ovv.isDouble())
+                                    {
+                                        tnn.offVelocity = juce::jlimit(
+                                            0, 127, (int)static_cast<double>(ovv));
+                                    }
                                     const juce::var& chv = tvn.getProperty("channel", {});
                                     if (chv.isInt() || chv.isInt64() || chv.isDouble())
                                     {
@@ -943,7 +950,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     // Window sizes are persisted exactly as captured; the only write guard is against junk.
     if (data.hasMainWindowBounds && data.mainWindowBounds.width >= 1 && data.mainWindowBounds.height >= 1)
     {
-        root->setProperty("mainWindow", makeWindowBoundsVar(data.mainWindowBounds));
+        juce::var mw = makeWindowBoundsVar(data.mainWindowBounds);
+        // Always written (true and false) so Follow OFF survives a reload; absent → ON on load.
+        mw.getDynamicObject()->setProperty("followPlayhead", data.mainWindowBounds.followPlayhead);
+        root->setProperty("mainWindow", mw);
     }
     if (data.hasMidiEditorWindowBounds && data.midiEditorWindowBounds.width >= 1
         && data.midiEditorWindowBounds.height >= 1)
@@ -1092,6 +1102,7 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                         juce::DynamicObject::Ptr tnO = new juce::DynamicObject();
                         tnO->setProperty("midiNote", tn.midiNote);
                         tnO->setProperty("velocity", tn.velocity);
+                        tnO->setProperty("offVelocity", juce::jlimit(0, 127, tn.offVelocity));
                         tnO->setProperty("channel", tn.channel);
                         tnO->setProperty("startTick", static_cast<juce::int64>(tn.startTick));
                         tnO->setProperty("durationTicks", static_cast<juce::int64>(tn.durationTicks));
@@ -1104,11 +1115,11 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     co->setProperty(
                         "midiRollVisibleStartSamples", static_cast<juce::int64>(cl.midiRollVisibleStartSamples));
                     co->setProperty("midiRollSamplesPerPixel", cl.midiRollSamplesPerPixel);
-                    if (cl.midiRollFollowEnabled)
-                    {
-                        co->setProperty("midiRollFollowEnabled", true);
-                    }
                 }
+                // Always written (true and false, independent of the viewport fields): Follow
+                // defaults ON, so an omitted field can no longer double as "false" — absence now
+                // means "older file → ON".
+                co->setProperty("midiRollFollowEnabled", cl.midiRollFollowEnabled);
                 clipVars.add(juce::var(co.get()));
             }
             eo->setProperty("clips", juce::var(clipVars));
@@ -1405,6 +1416,15 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         };
         out.hasMainWindowBounds
             = readWindowBoundsObject(root.getProperty("mainWindow", {}), out.mainWindowBounds);
+        if (out.hasMainWindowBounds)
+        {
+            const juce::var& fp = root.getProperty("mainWindow", {}).getProperty("followPlayhead", {});
+            // Absent / non-bool → keep struct default (true): older projects load with Follow ON.
+            if (fp.isBool())
+            {
+                out.mainWindowBounds.followPlayhead = (bool)fp;
+            }
+        }
         out.hasMidiEditorWindowBounds
             = readWindowBoundsObject(root.getProperty("midiEditorWindow", {}), out.midiEditorWindowBounds);
     }
@@ -1756,7 +1776,8 @@ namespace
         {
             const auto& p = a.timelineNotes[i];
             const auto& q = b.timelineNotes[i];
-            if (p.midiNote != q.midiNote || p.velocity != q.velocity || p.channel != q.channel
+            if (p.midiNote != q.midiNote || p.velocity != q.velocity
+                || p.offVelocity != q.offVelocity || p.channel != q.channel
                 || p.startTick != q.startTick || p.durationTicks != q.durationTicks)
             {
                 return false;

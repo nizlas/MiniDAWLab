@@ -51,7 +51,7 @@ struct InstrumentMidiClip
     /// MIDI piano-roll UI viewport (message thread). `midiRollSamplesPerPixel <= 0` = never set / use default seed.
     std::int64_t midiRollVisibleStartSamples = 0;
     double midiRollSamplesPerPixel = 0.0;
-    bool midiRollFollowEnabled = false;
+    bool midiRollFollowEnabled = true;
 };
 
 /// I3e: immutable copy of all experimental-clip MIDI for the audio thread (no raw `clips_` access).
@@ -64,6 +64,8 @@ struct InstrumentNoteRenderEvent
     std::int64_t noteOffAbsSample = 0;
     std::uint8_t midiNote = 60;
     std::uint8_t velocity = 100;
+    /// Release velocity sent with the scheduled note-off (0 … 127; default 64).
+    std::uint8_t offVelocity = 64;
     std::uint8_t midiChannel = 1;
 };
 
@@ -434,6 +436,9 @@ private:
         std::int64_t dueAbsSample = 0;
         int midiNote = 0;
         int midiChannel = 1;
+        /// Release velocity from the originating note (carried so a note-off deferred across block
+        /// boundaries still sends the note's own value).
+        int offVelocity = 64;
     };
 
     static constexpr int kMaxPendingTransportOffs = 256;

@@ -38,8 +38,10 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 
 class Transport;
+class UiPlayheadClock;
 
 // ---------------------------------------------------------------------------
 // TimelineRulerView — thin strip above the event lane
@@ -54,10 +56,14 @@ class TimelineRulerView : public juce::Component, private juce::Timer
 public:
     // [Message thread] Optional: when set, upper-half cycle toggle is suppressed (e.g. recording
     // or count-in). Must be safe to call synchronously from ruler mouse handlers.
+    // `uiPlayheadClock` is only used to re-anchor the shared clock on seek; the ruler never samples
+    // it. The ruler paints **no** playhead marker: `PlayheadOverlay` covers the ruler band and
+    // draws the marker segment there, so playhead frames never invalidate this (buffered) view.
     TimelineRulerView(Session& session,
                       Transport& transport,
                       juce::AudioDeviceManager& deviceManager,
                       TimelineViewportModel& timelineViewport,
+                      UiPlayheadClock& uiPlayheadClock,
                       std::function<bool()> isUiInputBlockedByRecording = {});
 
     ~TimelineRulerView() override;
@@ -94,8 +100,8 @@ public:
         std::int64_t spanSamples) noexcept;
 
 private:
-    // [Message thread] Low-rate `repaint` so the ruler playhead matches the lane’s animated line
-    // without a cached playhead value on the view.
+    // [Message thread] Low-rate structural watcher: repaints on viewport/locator/tempo/meter/mode
+    // changes only — never at playhead cadence.
     void timerCallback() override;
 
     // [Message thread] Shared by mouse down/drag: map local x to sample and `requestSeek`.
@@ -108,7 +114,21 @@ private:
     Transport& transport_;
     juce::AudioDeviceManager& deviceManager_;
     TimelineViewportModel& timelineViewport_;
+    UiPlayheadClock& uiPlayheadClock_;
     std::function<bool()> isUiInputBlockedByRecording_;
+
+    /// Structural snapshot: the watcher timer repaints only when one of these changed.
+    bool structuralSnapshotValid_ = false;
+    std::int64_t lastArrangementExtentUi_ = 0;
+    std::int64_t lastVisibleStartUi_ = 0;
+    double lastSamplesPerPixelUi_ = 0.0;
+    std::int64_t lastLeftLocatorUi_ = 0;
+    std::int64_t lastRightLocatorUi_ = 0;
+    bool lastCycleEnabledUi_ = false;
+    Session::TimelineRulerTimeDisplay lastTimeDisplayUi_ {};
+    double lastMusicalBpmUi_ = 0.0;
+    int lastMusicalNumeratorUi_ = 0;
+    int lastMusicalDenominatorUi_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimelineRulerView)
 };

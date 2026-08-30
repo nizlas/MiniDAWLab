@@ -19,8 +19,11 @@
 
 #include "ui/TimelineRulerView.h"
 
+#include "diagnostics/UiPaintLoadCounters.h"
 #include "domain/ArrangementMusicalSnap.h"
 #include "ui/TimelineLocatorPainter.h"
+#include "ui/PlayheadPixelMapping.h"
+#include "ui/UiPlayheadClock.h"
 #include "transport/Transport.h"
 
 #include <cmath>
@@ -29,8 +32,9 @@
 
 namespace
 {
-    // Match `ClipWaveformView` so ruler playhead and lane playhead move on the same cadence.
-    constexpr int kPlayheadUpdateHz = 20;
+    // Structural watcher cadence (viewport/locator/tempo changes); the playhead marker is drawn by
+    // `PlayheadOverlay` above this view and never drives ruler repaints.
+    constexpr int kStructuralWatchHz = 30;
 
     [[nodiscard]] double effectiveDisplaySampleRate(juce::AudioDeviceManager& dm) noexcept
     {
@@ -53,15 +57,26 @@ TimelineRulerView::TimelineRulerView(Session& session,
                                      Transport& transport,
                                      juce::AudioDeviceManager& deviceManager,
                                      TimelineViewportModel& timelineViewport,
+                                     UiPlayheadClock& uiPlayheadClock,
                                      std::function<bool()> isUiInputBlockedByRecording)
     : session_(session)
     , transport_(transport)
     , deviceManager_(deviceManager)
     , timelineViewport_(timelineViewport)
+    , uiPlayheadClock_(uiPlayheadClock)
     , isUiInputBlockedByRecording_(std::move(isUiInputBlockedByRecording))
 {
     setInterceptsMouseClicks(true, false);
-    startTimerHz(kPlayheadUpdateHz);
+    // NOT a decorative optimization — do not remove. The transparent `PlayheadOverlay` above
+    // invalidates a narrow stripe over this view ~60×/s during playback; without buffering each of
+    // those redraws re-runs the full tick/label/locator paint, which was part of the playback
+    // repaint tax behind the main-window zoom freeze (see
+    // MAIN_WINDOW_ZOOM_UI_FREEZE_FORENSIC_AUDIT.md §20). Buffering makes them image blits; our own
+    // `repaint()` calls (structural watcher, locator edits) invalidate the buffer as usual. This is
+    // also why the playhead marker is drawn by the overlay and not here: a marker baked into this
+    // buffer would go stale.
+    setBufferedToImage(true);
+    startTimerHz(kStructuralWatchHz);
 }
 
 TimelineRulerView::~TimelineRulerView()
@@ -80,7 +95,47 @@ void TimelineRulerView::resized()
 
 void TimelineRulerView::timerCallback()
 {
-    repaint();
+    // Structural watcher only: ticks, labels, locator/cycle band, viewport, tempo/meter. The
+    // playhead marker is drawn by `PlayheadOverlay` (which covers the ruler band) and never
+    // repaints this view.
+    const std::int64_t arrLen = session_.getArrangementExtentSamples();
+    const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    const std::int64_t locL = session_.getLeftLocatorSamples();
+    const std::int64_t locR = session_.getRightLocatorSamples();
+    const bool cycleOn = transport_.readCycleEnabledForUi();
+    const auto timeDisplay = session_.getTimelineRulerTimeDisplay();
+    const ProjectMusicalTime musicalTime = session_.getProjectMusicalTime();
+
+    const bool structuralChanged
+        = !structuralSnapshotValid_
+          || arrLen != lastArrangementExtentUi_
+          || visStart != lastVisibleStartUi_
+          || spp != lastSamplesPerPixelUi_
+          || locL != lastLeftLocatorUi_
+          || locR != lastRightLocatorUi_
+          || cycleOn != lastCycleEnabledUi_
+          || timeDisplay != lastTimeDisplayUi_
+          || musicalTime.bpm != lastMusicalBpmUi_
+          || musicalTime.numerator != lastMusicalNumeratorUi_
+          || musicalTime.denominator != lastMusicalDenominatorUi_;
+
+    lastArrangementExtentUi_ = arrLen;
+    lastVisibleStartUi_ = visStart;
+    lastSamplesPerPixelUi_ = spp;
+    lastLeftLocatorUi_ = locL;
+    lastRightLocatorUi_ = locR;
+    lastCycleEnabledUi_ = cycleOn;
+    lastTimeDisplayUi_ = timeDisplay;
+    lastMusicalBpmUi_ = musicalTime.bpm;
+    lastMusicalNumeratorUi_ = musicalTime.numerator;
+    lastMusicalDenominatorUi_ = musicalTime.denominator;
+    structuralSnapshotValid_ = true;
+
+    if (structuralChanged)
+    {
+        repaint();
+    }
 }
 
 std::int64_t TimelineRulerView::xToSessionSampleClamped(
@@ -153,7 +208,11 @@ void TimelineRulerView::applySeekForLocalX(const float x) noexcept
     const std::int64_t seekTarget
         = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arr), s);
     transport_.requestSeek(seekTarget);
-    repaint();
+    // The audio thread commits the seek a block later; anchoring the shared clock keeps every
+    // current-time indicator on the requested sample in the meantime. The `PlayheadOverlay`
+    // (which draws the marker over the ruler band) picks the value up on its next 60 Hz tick,
+    // so scrub-dragging tracks the pointer without any ruler repaint.
+    uiPlayheadClock_.reanchorTo(seekTarget);
 }
 
 void TimelineRulerView::applyLeftLocatorForLocalX(const float x) noexcept
@@ -322,6 +381,7 @@ void TimelineRulerView::mouseUp(const juce::MouseEvent& e)
 
 void TimelineRulerView::paint(juce::Graphics& g)
 {
+    MINIDAW_UI_PAINT_COUNT(rulerPaints);
     const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
     g.fillAll(findColour(juce::ResizableWindow::backgroundColourId).darker(0.1f));
     g.setColour(juce::Colours::white.withAlpha(0.10f));
@@ -360,6 +420,21 @@ void TimelineRulerView::paint(juce::Graphics& g)
 
     using namespace timeline_locator_paint;
 
+    // Dirty-region cull window (zoom-freeze fix): playhead stripe repaints during playback arrive
+    // ~60×/s with a clip region a few px wide — tick/label loops then only cover that window
+    // instead of the whole visible span. Padding: 2 px for tick stroke antialiasing; labels are
+    // centre-anchored so their (loop-culled) window gets an extra half-max-label-width margin.
+    const juce::Rectangle<int> dirtyPx = g.getClipBounds();
+    constexpr double kTickCullPadPx = 2.0;
+    constexpr double kLabelCullPadPx = 60.0;
+    const auto cullSampleAtX = [&](const double xPx) {
+        return visStart + (std::int64_t)std::llround((xPx - (double)bounds.getX()) * spp);
+    };
+    const std::int64_t cullTickStart = cullSampleAtX((double)dirtyPx.getX() - kTickCullPadPx);
+    const std::int64_t cullTickEnd = cullSampleAtX((double)dirtyPx.getRight() + kTickCullPadPx);
+    const std::int64_t cullLabelStart = cullSampleAtX((double)dirtyPx.getX() - kLabelCullPadPx);
+    const std::int64_t cullLabelEnd = cullSampleAtX((double)dirtyPx.getRight() + kLabelCullPadPx);
+
     paintLocatorCycleBandAndStripe(
         g, bounds, sessionSampleToX, visStart, visLen, locL, locR, cycleOn);
 
@@ -374,7 +449,9 @@ void TimelineRulerView::paint(juce::Graphics& g)
             visLen,
             sampleRate,
             spp,
-            musicalTime);
+            musicalTime,
+            cullTickStart,
+            cullTickEnd);
     }
     else
     {
@@ -385,7 +462,9 @@ void TimelineRulerView::paint(juce::Graphics& g)
             arrLen,
             visStart,
             visLen,
-            sampleRate);
+            sampleRate,
+            cullTickStart,
+            cullTickEnd);
     }
     paintLocatorTriangleHandles(
         g, bounds, sessionSampleToX, visStart, visLen, locL, locR, cycleOn);
@@ -402,7 +481,9 @@ void TimelineRulerView::paint(juce::Graphics& g)
             spp,
             musicalTime,
             locL,
-            locR);
+            locR,
+            cullLabelStart,
+            cullLabelEnd);
     }
     else
     {
@@ -415,25 +496,13 @@ void TimelineRulerView::paint(juce::Graphics& g)
             visLen,
             sampleRate,
             locL,
-            locR);
+            locR,
+            cullLabelStart,
+            cullLabelEnd);
     }
 
-    // --- Playhead: only when in the visible [visStart, visStart+visLen) window
-    const std::int64_t ph = transport_.readPlayheadSamplesForUi();
-    const std::int64_t phClamped
-        = juce::jlimit(
-            std::int64_t{0}, juce::jmax(std::int64_t{0}, arrLen), ph);
-    if (phClamped >= visStart && phClamped < visStart + visLen)
-    {
-        const float xLine = sessionSampleToX(phClamped);
-        g.setColour(juce::Colours::white.withAlpha(0.92f));
-        g.drawLine(
-            xLine,
-            bounds.getY(),
-            xLine,
-            bounds.getY() + kRulerPlayheadMarkerLengthPx,
-            1.5f);
-    }
+    // No playhead marker here: `PlayheadOverlay` covers the ruler band and draws the marker
+    // segment, so playhead frames never invalidate this buffered view.
 }
 
 void TimelineRulerView::mouseWheelMove(
@@ -464,9 +533,10 @@ void TimelineRulerView::mouseWheelMove(
         const double x = (double)e.position.x;
         const double factor = std::pow(0.85, d);
         const double sppMax = juce::jmax(1.0, (double)juce::jmax(std::int64_t{1}, arr) / w);
+        // No direct repaint: the owner's viewport listener repaints ruler+lanes via a coalesced
+        // flush (one dirty-marking per message batch — repaint-storm fix).
         timelineViewport_.zoomAroundSample(
             factor, x, w, arr, kSppMin, sppMax);
-        repaint();
         return;
     }
     if (!e.mods.isShiftDown())
@@ -481,6 +551,6 @@ void TimelineRulerView::mouseWheelMove(
     {
         return;
     }
+    // No direct repaint: coalesced via the owner's viewport listener (repaint-storm fix).
     timelineViewport_.panBySamples(step, w, arr);
-    repaint();
 }

@@ -198,6 +198,10 @@ ExperimentalMidiImportResult experimentalImportMidiFile(const juce::File& file, 
         TimelineMidiNote tn;
         tn.midiNote = from.midiNote;
         tn.velocity = juce::jlimit(1, 127, from.velocity);
+        // A real Note Off (status 0x8n) carries a release velocity; the "Note On velocity 0" form
+        // does not, so those notes keep the default. `isNoteOff(false)` excludes the vel-0 form.
+        tn.offVelocity = mm.isNoteOff(false) ? sanitizeMidiNoteOffVelocity((int)mm.getVelocity())
+                                             : kDefaultMidiNoteOffVelocity;
         tn.channel = from.channel == 0 ? chMidi : from.channel;
         tn.startTick = from.internalTick;
         const std::int64_t len = juce::jmax<std::int64_t>(1, itick - from.internalTick);

@@ -1,10 +1,13 @@
 #pragma once
 
 #include "ui/experimental/ExperimentalMidiPattern.h"
+#include "ui/CoalescedRepaintFlusher.h"
 #include "ui/CollapsibleSideStrip.h"
+#include "ui/FollowAutoscrollGovernor.h"
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -159,6 +162,23 @@ public:
     /// MIDI editor window (`Body`) owns strip width; the roll only mirrors it for layout/paint.
     void setSideStripTotalWidthForUiOnly(int totalIncludingSplitter) noexcept;
 
+    /// What the MIDI editor's compact Vel / Off toolbar fields should show for the current selection.
+    struct SelectedNotesVelocitySummary
+    {
+        int selectedCount = 0;
+        /// Shared note-on velocity; empty when the selection mixes values.
+        std::optional<int> velocity;
+        /// Shared note-off velocity; empty when the selection mixes values.
+        std::optional<int> offVelocity;
+    };
+    [[nodiscard]] SelectedNotesVelocitySummary summarizeSelectedNotesVelocities() const noexcept;
+
+    /// Set note-on velocity (clamped 1…127) on every selected note as **one** undoable edit.
+    /// Timing, pitch, channel, selection and viewport are untouched. False = nothing to change.
+    bool applyVelocityToSelectedNotes(int velocity);
+    /// Same for note-off velocity (clamped 0…127).
+    bool applyOffVelocityToSelectedNotes(int offVelocity);
+
     /// Slice E: copy/paste selected `timelineNotes` within the bound clip (internal clipboard only).
     [[nodiscard]] bool handleTimelineNotesCopyShortcut() noexcept;
     [[nodiscard]] bool handleTimelineNotesPasteShortcut();
@@ -184,6 +204,9 @@ private:
     /// commit=true applies the typed value (clamped 1..127) as one undoable edit and auditions the
     /// targets (chord only when they share one startTick). commit=false cancels without changes.
     void dismissVelocityValueEditor(bool commit);
+
+    /// Shared implementation of the two batch velocity setters (`offField` picks which byte).
+    bool applyVelocityFieldToSelectedNotes(bool offField, int value);
 
     [[nodiscard]] bool useAbsoluteTimeline() const noexcept;
     void seedViewportFromMainTimelineOrFallback();
@@ -346,6 +369,7 @@ private:
         std::int64_t deltaStartTicks = 0;
         int midiNote = 60;
         int velocity = 100;
+        int offVelocity = kDefaultMidiNoteOffVelocity;
         std::uint8_t channel = 1;
         std::int64_t durationTicks = 240;
     };
@@ -402,6 +426,15 @@ private:
     /// Sub-sample horizontal mapping for UI-smoothed playhead (same linear map as integer path).
     [[nodiscard]] float xForSessionSampleD(double s) const noexcept;
 
+    /// The **one** display position every current-time indicator in this window paints from (ruler
+    /// stroke and long grid line), clamped to the arrangement extent. Smoothed, not block-quantized.
+    [[nodiscard]] double currentPlayheadDisplaySampleForPaint() const noexcept;
+    /// Playhead-only frame: invalidate just the previous and new playhead columns (ruler + grid
+    /// rows) instead of the whole roll, so notes/grid/velocity lane are not re-rasterized at 60 Hz.
+    void repaintPlayheadColumnsOnly(float newCentreX);
+    /// Playhead column last committed by `paint` (NaN = unknown -> next move repaints in full).
+    float lastPaintedPlayheadCentreX_ = std::numeric_limits<float>::quiet_NaN();
+
 
     ExperimentalMidiPattern& pattern_;
     ExperimentalMidiPatternPlayer* player_;
@@ -419,7 +452,36 @@ private:
 
     std::int64_t visibleStartSamples_ = 0;
     double samplesPerPixel_ = 0.0;
-    bool followPlayhead_ = false;
+    bool followPlayhead_ = true;
+
+    /// Follow hardening (same policy as the main arrangement, independent instance): follow is
+    /// page/event-driven — a page fires only on a comfort-band boundary crossing, re-arms only
+    /// once the playhead was seen inside the band again (sparse re-arm interval otherwise),
+    /// is capacity-gated (late-frame + clean-frame-after-page), and yields after user wheel/drag
+    /// viewport gestures. Cross-window budget/yield goes through `GlobalFollowWorkCoordinator`
+    /// at the call sites. Each page full-repaints the roll, so page admission — not repaint
+    /// mechanics — bounds message-thread load.
+    FollowAutoscrollGovernor followGovernor_;
+    /// True when follow pages are worth doing at all: component showing and window not minimised.
+    [[nodiscard]] bool followUiWorthUpdating() const noexcept;
+    /// Record a user viewport gesture (wheel zoom/pan, middle-drag, pitch scroll) locally in the
+    /// governor *and* globally so main-window follow yields to interaction here, and vice versa.
+    void noteUserRollViewportGesture() noexcept;
+    /// Repaint-storm fix: user viewport gestures mark the roll dirty once per message batch
+    /// instead of once per wheel/drag event (see `CoalescedRepaintFlusher`).
+    CoalescedRepaintFlusher rollViewportRepaintFlush_ { [this] { repaint(); } };
+    // Follow diagnostics (reset when logged; wraparound harmless with the diag flag off).
+    unsigned int statsFollowPans_ = 0;
+    unsigned int statsFollowSkipsGesture_ = 0;
+    unsigned int statsFollowSkipsLateFrame_ = 0;
+    unsigned int statsFollowSkipsAwaitClean_ = 0;
+    unsigned int statsFollowSkipsBoundary_ = 0;
+    unsigned int statsFollowSkipsPacing_ = 0;
+    unsigned int statsFollowSkipsCrossWindow_ = 0;
+    unsigned int statsFollowSkipsGlobalBudget_ = 0;
+    unsigned int statsFollowSkipsHidden_ = 0;
+    double lastFollowDiagLogMs_ = 0.0;
+    void maybeLogFollowDiagnostics(double nowMs, bool transportPlaying) noexcept;
 
     /// Invalidate when rebinding so the next `timerCallback` repaints (locators/cycle/playhead).
     bool sessionTransportSnapshotValid_ = false;

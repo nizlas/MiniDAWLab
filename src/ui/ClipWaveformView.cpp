@@ -34,6 +34,7 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "io/AudioWaveformCache.h"
+#include "diagnostics/UiPaintLoadCounters.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 #include "domain/AudioClip.h"
@@ -646,6 +647,13 @@ ClipWaveformView::ClipWaveformView(
     // JUCE: selection/drag; seek is on the timeline ruler, not the empty lane.
     setInterceptsMouseClicks(true, false);
     setOpaque(false);
+
+    // Deferred raster rebuilds are staggered per lane so several audio lanes never run their
+    // (few-ms) rebuilds in the same message-loop turn after a zoom gesture settles.
+    {
+        static int s_laneStaggerSlot = 0;
+        deferredRasterRebuildDelayMs_ = 200 + 35 * (s_laneStaggerSlot++ % 5);
+    }
 }
 
 void ClipWaveformView::setDragGhost(const std::int64_t startSampleOnTimeline, const std::int64_t lengthSamples)
@@ -1647,6 +1655,91 @@ bool ClipWaveformView::visibleFitsWaveRaster(const std::int64_t visStart, const 
     return visStart >= waveRasterCoveredStart_ && visStart + visLen <= waveRasterCoveredEnd_;
 }
 
+void ClipWaveformView::blitWaveRasterApproximate(juce::Graphics& g,
+                                                 const std::int64_t visStart,
+                                                 const std::int64_t visLen,
+                                                 const double spp) const
+{
+    if (waveRaster_.isNull() || waveRasterSpp_ <= 0.0 || waveRasterImageW_ <= 0
+        || waveRasterImageH_ <= 0 || visLen <= 0)
+    {
+        return;
+    }
+    const int vw = juce::jmax(1, getWidth());
+    const int vh = juce::jmax(1, getHeight());
+
+    // Exact-geometry fast case: pixel-true 1:1 blit (no resampling blur in steady state).
+    if (waveRasterSpp_ == spp && waveRasterImageH_ == vh && visibleFitsWaveRaster(visStart, visLen))
+    {
+        int srcX = juce::roundToInt((double)(visStart - waveRasterCoveredStart_) / waveRasterSpp_);
+        srcX = juce::jmax(0, juce::jmin(srcX, juce::jmax(0, waveRasterImageW_ - vw)));
+        g.drawImage(waveRaster_, 0, 0, vw, vh, srcX, 0, vw, vh);
+        return;
+    }
+
+    // Geometry-stale case (zoom/pan/resize before the deferred rebuild lands): map the current
+    // visible sample range onto the old raster's coverage and draw the covered part scaled.
+    // Uncovered regions stay unpainted (lane background) rather than showing stretched garbage.
+    const double srcX0 = (double)(visStart - waveRasterCoveredStart_) / waveRasterSpp_;
+    const double srcX1 = (double)(visStart + visLen - waveRasterCoveredStart_) / waveRasterSpp_;
+    if (srcX1 <= srcX0)
+    {
+        return;
+    }
+    const double clampedS0 = juce::jmax(0.0, srcX0);
+    const double clampedS1 = juce::jmin((double)waveRasterImageW_, srcX1);
+    if (clampedS1 <= clampedS0)
+    {
+        return;
+    }
+    const double destPerSrc = (double)vw / (srcX1 - srcX0);
+    const int dx0 = (int)std::floor((clampedS0 - srcX0) * destPerSrc);
+    const int dx1 = (int)std::ceil((clampedS1 - srcX0) * destPerSrc);
+    const int sx0 = (int)std::floor(clampedS0);
+    const int sx1 = (int)std::ceil(clampedS1);
+    g.drawImage(waveRaster_,
+                dx0,
+                0,
+                juce::jmax(1, dx1 - dx0),
+                vh,
+                sx0,
+                0,
+                juce::jmax(1, juce::jmin(waveRasterImageW_, sx1) - sx0),
+                waveRasterImageH_);
+}
+
+void ClipWaveformView::scheduleDeferredRasterRebuild()
+{
+    // Restarting the countdown on every geometry-stale paint is the generation token: an active
+    // zoom/pan gesture keeps pushing the rebuild out, and the timer always rebuilds for whatever
+    // the viewport says *when it fires* — obsolete intermediate spp values are never rasterized.
+    startTimer(deferredRasterRebuildDelayMs_);
+}
+
+void ClipWaveformView::timerCallback()
+{
+    stopTimer();
+    if (shouldBypassWaveformRasterCache())
+    {
+        // Gesture/recording previews bypass the raster; the next normal paint reschedules if needed.
+        return;
+    }
+    const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    const std::int64_t arrLen = session_.getArrangementExtentSamples();
+    if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f || spp <= 0.0 || arrLen <= 0)
+    {
+        return;
+    }
+    const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+    const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples((double)bounds.getWidth());
+
+    syncClipStripsFromSnapshotIfNeeded();
+    MINIDAW_UI_PAINT_COUNT(clipLaneDeferredBuilds);
+    (void)ensureWaveRasterForViewState(bounds, visStart, visLen, spp, arrLen);
+    repaint();
+}
+
 std::uint64_t ClipWaveformView::computePyramidReadyFingerprint() const
 {
     std::uint64_t fp = 0;
@@ -1750,12 +1843,31 @@ bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>
 
     waveRasterLastRebuildReason_ = reason;
 
-    waveRaster_ = juce::Image(juce::Image::PixelFormat::ARGB, imageW, vh, true);
+#if MINIDAW_DIAG_PLAYBACK_UI_LOAD
+    const std::int64_t rebuildT0 = juce::Time::getHighResolutionTicks();
+#endif
+    // Reuse the existing allocation when the size is unchanged (typical zoom-only rebuild):
+    // repeated multi-MB image reallocation was part of the zoom spike.
+    if (waveRaster_.isValid() && waveRaster_.getWidth() == imageW && waveRaster_.getHeight() == vh)
+    {
+        waveRaster_.clear(waveRaster_.getBounds());
+    }
+    else
+    {
+        waveRaster_ = juce::Image(juce::Image::PixelFormat::ARGB, imageW, vh, true);
+    }
     {
         juce::Graphics gr(waveRaster_);
         const juce::Rectangle<float> imgBounds(0.0f, 0.0f, (float)imageW, (float)vh);
         paintStableCommittedLayer(gr, imgBounds, coveredStart, visLen, spp);
     }
+#if MINIDAW_DIAG_PLAYBACK_UI_LOAD
+    MINIDAW_UI_PAINT_COUNT(clipLaneRasterRebuilds);
+    MINIDAW_UI_PAINT_ADD(clipLaneRasterRebuildUs,
+                         juce::Time::highResolutionTicksToSeconds(
+                             juce::Time::getHighResolutionTicks() - rebuildT0)
+                             * 1.0e6);
+#endif
 
     waveRasterCoveredStart_ = coveredStart;
     waveRasterCoveredEnd_ = coveredEnd;
@@ -2088,10 +2200,10 @@ void ClipWaveformView::computeLocalOverlapShadeHalfOpenIntervalsForRow(
 // uncached paint while editing/recording previews bypass the cache. Playhead draws in `PlayheadOverlay`.
 void ClipWaveformView::paint(juce::Graphics& g)
 {
+    MINIDAW_UI_PAINT_COUNT(clipLanePaints);
     const std::int64_t diagT0 = kClipWaveformPaintDiagnostics
                                     ? static_cast<std::int64_t>(juce::Time::getHighResolutionTicks())
                                     : static_cast<std::int64_t>(0);
-    syncClipStripsFromSnapshotIfNeeded();
 
     const juce::Rectangle<float> bounds = getLocalBounds().toFloat();
     if (bounds.getWidth() <= 0.0f || bounds.getHeight() <= 0.0f)
@@ -2112,6 +2224,27 @@ void ClipWaveformView::paint(juce::Graphics& g)
         return;
     }
     const std::int64_t visLen = timelineViewport_.getVisibleLengthSamples(wPx);
+
+    // Narrow-stripe fast path (zoom-freeze fix): playhead stripe underpaints hit this lane ~60×/s
+    // during playback with a clip region a few px wide. Those paints must never sync strips,
+    // fingerprint the pyramid cache (mutex per strip), or rebuild the wave raster — they blit the
+    // existing raster (possibly one message-batch stale after a zoom: the viewport mutation that
+    // changed spp always queues a coalesced full repaint that rebuilds and corrects it) and draw
+    // dirty-culled chrome only. Gesture modes (drag/trim/recording) bypass the raster entirely and
+    // keep their existing full path so live previews stay correct.
+    {
+        const juce::Rectangle<int> dirtyPx = g.getClipBounds();
+        const bool narrowStripePaint = dirtyPx.getWidth() < juce::jmax(32, getWidth() / 4);
+        if (narrowStripePaint && !waveRaster_.isNull() && waveRasterSpp_ > 0.0
+            && !shouldBypassWaveformRasterCache())
+        {
+            blitWaveRasterApproximate(g, visStart, visLen, spp);
+            paintDynamicChrome(g, bounds, visStart, visLen, spp);
+            return;
+        }
+    }
+
+    syncClipStripsFromSnapshotIfNeeded();
 
     auto reasonToStr = [](const WaveformRasterRebuildReason r) -> const char* {
         switch (r)
@@ -2137,6 +2270,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
 
     if (shouldBypassWaveformRasterCache())
     {
+        MINIDAW_UI_PAINT_COUNT(clipLaneUncachedPaints);
         paintUncachedFull(g, bounds, visStart, visLen, spp);
         if (kClipWaveformPaintDiagnostics)
         {
@@ -2147,6 +2281,26 @@ void ClipWaveformView::paint(juce::Graphics& g)
                                       + juce::String((int)trackId_) + " µs=" + juce::String(us, 1));
         }
         return;
+    }
+
+    // Geometry-stale raster (zoom / pan beyond overscan / resize): never rebuild inside paint
+    // (zoom-freeze fix, slice 2 — the synchronous multi-lane rebuild in the coalesced full repaint
+    // after each wheel step was the remaining freeze spike). Blit the old raster scaled onto the
+    // new mapping, draw chrome, and arm the deferred one-shot rebuild. Content changes
+    // (strips/pyramid fingerprints) still rebuild synchronously below — rare and correctness-first.
+    if (!waveRaster_.isNull() && waveRasterStripFp_ == lastPeaksFingerprint_
+        && waveRasterPyramidFp_ == computePyramidReadyFingerprint())
+    {
+        const bool geometryExact = waveRasterSpp_ == spp && waveRasterImageH_ == getHeight()
+                                   && visibleFitsWaveRaster(visStart, visLen);
+        if (!geometryExact)
+        {
+            MINIDAW_UI_PAINT_COUNT(clipLaneStaleBlits);
+            blitWaveRasterApproximate(g, visStart, visLen, spp);
+            paintDynamicChrome(g, bounds, visStart, visLen, spp);
+            scheduleDeferredRasterRebuild();
+            return;
+        }
     }
 
     const bool hadRasterBefore = !waveRaster_.isNull();
@@ -2175,6 +2329,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
 
     if (!ok || waveRaster_.isNull())
     {
+        MINIDAW_UI_PAINT_COUNT(clipLaneUncachedPaints);
         paintUncachedFull(g, bounds, visStart, visLen, spp);
         if (kClipWaveformPaintDiagnostics)
         {
@@ -2252,6 +2407,10 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
     const auto sessionSampleToX = [&](const std::int64_t s) {
         return TimelineRulerView::sessionSampleToLocalX(s, bounds.getX(), visStart, spp);
     };
+
+    // Dirty-region cull (zoom-freeze fix): strips fully outside the dirty clip region are skipped —
+    // matters when playhead-stripe underpaints arrive during a gesture (bypass) while playing.
+    const juce::Rectangle<float> dirtyPx = g.getClipBounds().toFloat().expanded(2.0f, 0.0f);
 
     const int numRows = (int)clipStrips_.size();
     // Vertical event stack: a bit of margin from the view edge; silent audio still has the same rect.
@@ -2342,6 +2501,10 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
         juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0), eventTrackY.getHeight() };
 
         if (eventRect.getRight() < bounds.getX() || eventRect.getX() > bounds.getRight())
+        {
+            continue;
+        }
+        if (!eventRect.intersects(dirtyPx))
         {
             continue;
         }
@@ -2597,6 +2760,10 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
 
+    // Dirty-region cull (zoom-freeze fix): chrome for strips fully outside the dirty clip region
+    // (playhead-stripe underpaints during playback) is skipped; full repaints cover everything.
+    const juce::Rectangle<float> dirtyPx = g.getClipBounds().toFloat().expanded(2.0f, 0.0f);
+
     if (hasDragGhost_ && dragGhostLengthSamples_ > 0)
     {
         const float gs0 = TimelineRulerView::sessionSampleToLocalX(
@@ -2632,6 +2799,11 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
         const float x1 = juce::jmax(ex0, ex1);
         juce::Rectangle<float> eventRect{ x0, eventTrackY.getY(), juce::jmax(1.0f, x1 - x0),
                                           eventTrackY.getHeight() };
+
+        if (!eventRect.intersects(dirtyPx))
+        {
+            continue;
+        }
 
         if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
         {

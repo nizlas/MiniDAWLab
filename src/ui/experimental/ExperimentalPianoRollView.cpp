@@ -3,7 +3,10 @@
 #include "instruments/InstrumentTrackController.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineLocatorPainter.h"
+#include "ui/PlayheadPixelMapping.h"
 
+#include "diagnostics/DiagnosticBuildFlags.h"
+#include "diagnostics/PlaybackUiLoadLog.h"
 #include "domain/Session.h"
 #include "domain/ProjectMusicalTime.h"
 #include "domain/ArrangementMusicalSnap.h"
@@ -439,6 +442,116 @@ void ExperimentalPianoRollView::dismissVelocityValueEditor(const bool commit)
     }
 }
 
+ExperimentalPianoRollView::SelectedNotesVelocitySummary
+ExperimentalPianoRollView::summarizeSelectedNotesVelocities() const noexcept
+{
+    SelectedNotesVelocitySummary s;
+    bool velMixed = false;
+    bool offMixed = false;
+    for (const int idx : selectedTimelineNoteIndices_)
+    {
+        if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        const auto& n = pattern_.timelineNotes[(size_t)idx];
+        const int off = sanitizeMidiNoteOffVelocity(n.offVelocity);
+        ++s.selectedCount;
+        if (s.selectedCount == 1)
+        {
+            s.velocity = n.velocity;
+            s.offVelocity = off;
+            continue;
+        }
+        velMixed = velMixed || (s.velocity.has_value() && *s.velocity != n.velocity);
+        offMixed = offMixed || (s.offVelocity.has_value() && *s.offVelocity != off);
+    }
+    if (velMixed)
+    {
+        s.velocity.reset();
+    }
+    if (offMixed)
+    {
+        s.offVelocity.reset();
+    }
+    return s;
+}
+
+bool ExperimentalPianoRollView::applyVelocityToSelectedNotes(const int velocity)
+{
+    return applyVelocityFieldToSelectedNotes(false, velocity);
+}
+
+bool ExperimentalPianoRollView::applyOffVelocityToSelectedNotes(const int offVelocity)
+{
+    return applyVelocityFieldToSelectedNotes(true, offVelocity);
+}
+
+bool ExperimentalPianoRollView::applyVelocityFieldToSelectedNotes(const bool offField, const int value)
+{
+    normalizeTimelineNoteSelection();
+    if (selectedTimelineNoteIndices_.empty())
+    {
+        return false;
+    }
+    const int newValue = offField ? sanitizeMidiNoteOffVelocity(value) : juce::jlimit(1, 127, value);
+
+    std::vector<int> targets(selectedTimelineNoteIndices_.begin(), selectedTimelineNoteIndices_.end());
+    std::sort(targets.begin(), targets.end());
+    bool anyChange = false;
+    for (const int idx : targets)
+    {
+        const auto& n = pattern_.timelineNotes[(size_t)idx];
+        anyChange = anyChange || ((offField ? sanitizeMidiNoteOffVelocity(n.offVelocity) : n.velocity)
+                                  != newValue);
+    }
+    if (!anyChange)
+    {
+        return false;
+    }
+
+    auto applyValues = [this, targets, newValue, offField]() -> bool {
+        for (const int idx : targets)
+        {
+            if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+            auto& n = pattern_.timelineNotes[(size_t)idx];
+            if (offField)
+            {
+                n.offVelocity = newValue;
+            }
+            else
+            {
+                n.velocity = newValue;
+            }
+        }
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+
+    const char* undoLabel = offField
+                                ? (targets.size() > 1 ? "Set MIDI note-off velocities"
+                                                      : "Set MIDI note-off velocity")
+                                : (targets.size() > 1 ? "Set MIDI note velocities"
+                                                      : "Set MIDI note velocity");
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr
+        && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_(undoLabel, std::move(applyValues));
+    }
+    else
+    {
+        applyValues();
+    }
+    return true;
+}
+
 int ExperimentalPianoRollView::timelineRulerHeight() const noexcept
 {
     return useAbsoluteTimeline() ? kRulerHeight : 0;
@@ -701,7 +814,7 @@ void ExperimentalPianoRollView::seedOrResetViewport()
         {
             timelineClip_->midiRollVisibleStartSamples = 0;
             timelineClip_->midiRollSamplesPerPixel = 0.0;
-            timelineClip_->midiRollFollowEnabled = false;
+            timelineClip_->midiRollFollowEnabled = true;
         }
     }
     if (useAbsoluteTimeline())
@@ -880,6 +993,50 @@ float ExperimentalPianoRollView::xForSessionSampleD(const double s) const noexce
            + (float)(((s - (double)visibleStartSamples_) / samplesPerPixel_));
 }
 
+double ExperimentalPianoRollView::currentPlayheadDisplaySampleForPaint() const noexcept
+{
+    double s = uiPlayheadDisplaySamples_;
+    if (!std::isfinite(s))
+    {
+        return 0.0;
+    }
+    if (session_ != nullptr)
+    {
+        const double arrLen = (double)juce::jmax(std::int64_t{0}, session_->getArrangementExtentSamples());
+        s = juce::jlimit(0.0, juce::jmax(0.0, arrLen), s);
+    }
+    return juce::jmax(0.0, s);
+}
+
+void ExperimentalPianoRollView::repaintPlayheadColumnsOnly(const float newCentreX)
+{
+    const auto gr = gridBounds();
+    const int top = 0;
+    const int bottom = juce::jmax(gr.getBottom(), timelineRulerHeight());
+    if (bottom <= top)
+    {
+        return;
+    }
+    constexpr float kStrokeThicknessPx = 1.5f;
+    const float prev = lastPaintedPlayheadCentreX_;
+    if (std::isfinite(prev) && (int)std::floor(prev) == (int)std::floor(newCentreX))
+    {
+        // Same pixel column: nothing would change on screen. Skipping the repaint is what removes
+        // the per-tick full-surface redraw that read as flicker.
+        return;
+    }
+    if (std::isfinite(prev))
+    {
+        repaint(playhead_pixel::dirtyStripe(prev, top, bottom, kStrokeThicknessPx));
+    }
+    else
+    {
+        repaint();
+        return;
+    }
+    repaint(playhead_pixel::dirtyStripe(newCentreX, top, bottom, kStrokeThicknessPx));
+}
+
 void ExperimentalPianoRollView::timerCallback()
 {
     if (forbiddenCursorFlashUntilMs_ > 0.0
@@ -900,6 +1057,12 @@ void ExperimentalPianoRollView::timerCallback()
     const bool transportPlaying = absTime && transport_ != nullptr
                                   && transport_->readPlaybackIntentForUi() == PlaybackIntent::Playing;
     const bool wasTransportPlaying = wasTransportPlayingUi_;
+    if (transportPlaying)
+    {
+        // Follow-governor capacity signal: the tick interval after a follow pan includes that
+        // pan's full-roll repaint cost. Only sampled while animating (idle rate is 6 Hz by design).
+        followGovernor_.noteFrameTick(nowSec * 1000.0);
+    }
 
     bool structuralRepaint = false;
     bool viewportMoved = false;
@@ -1034,6 +1197,63 @@ void ExperimentalPianoRollView::timerCallback()
                     targetStart = (std::int64_t)std::llround(ph - kFollowBackwardResetPosition * spanSamples);
                 }
 
+                // Follow hardening: follow is page/event-driven — every page full-repaints the
+                // roll, so admission goes through the governor (boundary trigger + re-arm,
+                // capacity gates, gesture holdoff) *and* the cross-window coordinator (one page
+                // across all DAL windows per interval; yield while the user pans/zooms the main
+                // window). A hidden or minimised editor skips pages entirely.
+                if (needScroll && !followUiWorthUpdating())
+                {
+                    needScroll = false;
+                    ++statsFollowSkipsHidden_;
+                }
+                const double nowMs = nowSec * 1000.0;
+                if (needScroll)
+                {
+                    switch (followGovernor_.decidePage(
+                        nowMs, ph, (double)visibleStartSamples_, spanSamples))
+                    {
+                        case FollowAutoscrollGovernor::Decision::apply:
+                            break;
+                        case FollowAutoscrollGovernor::Decision::skipNotNeeded:
+                            needScroll = false;
+                            break;
+                        case FollowAutoscrollGovernor::Decision::skipUserGestureHoldoff:
+                            needScroll = false;
+                            ++statsFollowSkipsGesture_;
+                            break;
+                        case FollowAutoscrollGovernor::Decision::skipLateFrame:
+                            needScroll = false;
+                            ++statsFollowSkipsLateFrame_;
+                            break;
+                        case FollowAutoscrollGovernor::Decision::skipAwaitCleanFrame:
+                            needScroll = false;
+                            ++statsFollowSkipsAwaitClean_;
+                            break;
+                        case FollowAutoscrollGovernor::Decision::skipBoundaryWait:
+                            needScroll = false;
+                            ++statsFollowSkipsBoundary_;
+                            break;
+                        case FollowAutoscrollGovernor::Decision::skipMinInterval:
+                            needScroll = false;
+                            ++statsFollowSkipsPacing_;
+                            break;
+                    }
+                }
+                if (needScroll)
+                {
+                    auto& global = GlobalFollowWorkCoordinator::instance();
+                    if (global.otherWindowGestureActive(this, nowMs))
+                    {
+                        needScroll = false;
+                        ++statsFollowSkipsCrossWindow_;
+                    }
+                    else if (!global.pageSlotAvailable(nowMs))
+                    {
+                        needScroll = false;
+                        ++statsFollowSkipsGlobalBudget_;
+                    }
+                }
                 if (needScroll)
                 {
                     const std::int64_t clamped = juce::jmax(std::int64_t{0}, targetStart);
@@ -1042,11 +1262,22 @@ void ExperimentalPianoRollView::timerCallback()
                         visibleStartSamples_ = clamped;
                         viewportMoved = true;
                         structuralRepaint = true;
+                        followGovernor_.notePageApplied(nowMs, ph, (double)clamped, spanSamples);
+                        GlobalFollowWorkCoordinator::instance().notePageApplied(nowMs);
+                        ++statsFollowPans_;
+                    }
+                    else
+                    {
+                        // Page could not move the viewport (clamp): drop to the sparse re-arm
+                        // cadence instead of re-deciding every minimum interval.
+                        followGovernor_.notePageApplied(
+                            nowMs, ph, (double)visibleStartSamples_, spanSamples);
                     }
                 }
             }
         }
     }
+    maybeLogFollowDiagnostics(nowSec * 1000.0, transportPlaying);
 
     if (absTime && timelineClip_ != nullptr && isTimelineClipBindingFresh()
         && (!clipGeometrySnapshotValid_
@@ -1087,7 +1318,8 @@ void ExperimentalPianoRollView::timerCallback()
     {
         const auto gr = gridBounds();
         constexpr float kMarginPx = 24.0f;
-        const float x = xForSessionSampleD(uiPlayheadDisplaySamples_);
+        const float x = playhead_pixel::snapToPixelCentre(
+            xForSessionSampleD(currentPlayheadDisplaySampleForPaint()));
         const bool nowNear = x >= (float)gr.getX() - kMarginPx && x <= (float)gr.getRight() + kMarginPx;
         const bool wasNear = lastOffscreenGatePlayheadInView_;
         if (!nowNear && !wasNear)
@@ -1096,7 +1328,8 @@ void ExperimentalPianoRollView::timerCallback()
         }
         else
         {
-            repaint();
+            // Playhead-only frame: two narrow columns, not the whole roll.
+            repaintPlayheadColumnsOnly(x);
             lastOffscreenGatePlayheadInView_ = nowNear;
         }
     }
@@ -1775,6 +2008,7 @@ bool ExperimentalPianoRollView::handleTimelineNotesCopyShortcut() noexcept
         row.deltaStartTicks = n.startTick - minStart;
         row.midiNote = n.midiNote;
         row.velocity = n.velocity;
+        row.offVelocity = sanitizeMidiNoteOffVelocity(n.offVelocity);
         row.channel = n.channel;
         row.durationTicks = n.durationTicks;
         timelineInternalClipboard_.push_back(row);
@@ -1809,6 +2043,7 @@ bool ExperimentalPianoRollView::handleTimelineNotesPasteShortcut()
         TimelineMidiNote n;
         n.midiNote = it.midiNote;
         n.velocity = it.velocity;
+        n.offVelocity = sanitizeMidiNoteOffVelocity(it.offVelocity);
         n.channel = it.channel;
         n.durationTicks = it.durationTicks;
         n.startTick = pasteTick + it.deltaStartTicks;
@@ -3506,8 +3741,78 @@ void ExperimentalPianoRollView::maybeFollowViewportToAnchorSample(const double a
         visibleStartSamples_ = clamped;
         syncViewportToBoundClip();
         sessionTransportSnapshotValid_ = false;
+        // Explicit single-shot move (seek/toggle/hard resync) bypasses the gates by design, but
+        // still registers locally and globally so frame-driven paging pauses right afterwards.
+        const double nowMs = juce::Time::getMillisecondCounterHiRes();
+        followGovernor_.notePageApplied(nowMs, anchorSamples, (double)clamped, spanSamples);
+        GlobalFollowWorkCoordinator::instance().notePageApplied(nowMs);
         repaint();
     }
+}
+
+void ExperimentalPianoRollView::noteUserRollViewportGesture() noexcept
+{
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    followGovernor_.noteUserViewportChange(nowMs);
+    GlobalFollowWorkCoordinator::instance().noteUserViewportGesture(this, nowMs);
+}
+
+bool ExperimentalPianoRollView::followUiWorthUpdating() const noexcept
+{
+    if (!isShowing())
+    {
+        return false;
+    }
+    if (const juce::ComponentPeer* const peer = getPeer(); peer != nullptr && peer->isMinimised())
+    {
+        return false;
+    }
+    return true;
+}
+
+/// One `playback-ui-load.log` line per ~2 s while playing (compiled out unless
+/// `MINIDAW_DIAG_PLAYBACK_UI_LOAD` is 1): roll follow pages + per-reason skips, span, frame lateness.
+void ExperimentalPianoRollView::maybeLogFollowDiagnostics(const double nowMs, const bool transportPlaying) noexcept
+{
+#if MINIDAW_DIAG_PLAYBACK_UI_LOAD
+    if (!transportPlaying)
+    {
+        return;
+    }
+    if (lastFollowDiagLogMs_ > 0.0 && nowMs - lastFollowDiagLogMs_ < 2000.0)
+    {
+        return;
+    }
+    lastFollowDiagLogMs_ = nowMs;
+    const auto gr = gridBounds();
+    const double span = juce::jmax(1.0, (double)juce::jmax(1, gr.getWidth())) * samplesPerPixel_;
+    const juce::ComponentPeer* const peer = getPeer();
+    appendPlaybackUiLoadDiagnosticLine(
+        juce::String("roll follow.on=") + (followPlayhead_ ? "1" : "0")
+        + " follow.pages=" + juce::String((int)statsFollowPans_)
+        + " follow.skip.gesture=" + juce::String((int)statsFollowSkipsGesture_)
+        + " follow.skip.late=" + juce::String((int)statsFollowSkipsLateFrame_)
+        + " follow.skip.clean=" + juce::String((int)statsFollowSkipsAwaitClean_)
+        + " follow.skip.boundary=" + juce::String((int)statsFollowSkipsBoundary_)
+        + " follow.skip.pace=" + juce::String((int)statsFollowSkipsPacing_)
+        + " follow.skip.xwin=" + juce::String((int)statsFollowSkipsCrossWindow_)
+        + " follow.skip.budget=" + juce::String((int)statsFollowSkipsGlobalBudget_)
+        + " follow.skip.hidden=" + juce::String((int)statsFollowSkipsHidden_)
+        + " follow.span=" + juce::String(span, 0)
+        + " follow.frameMs=" + juce::String(followGovernor_.lastFrameIntervalMs(), 1)
+        + " roll.focused=" + ((peer != nullptr && peer->isFocused()) ? "1" : "0"));
+    statsFollowPans_ = 0;
+    statsFollowSkipsGesture_ = 0;
+    statsFollowSkipsLateFrame_ = 0;
+    statsFollowSkipsAwaitClean_ = 0;
+    statsFollowSkipsBoundary_ = 0;
+    statsFollowSkipsPacing_ = 0;
+    statsFollowSkipsCrossWindow_ = 0;
+    statsFollowSkipsGlobalBudget_ = 0;
+    statsFollowSkipsHidden_ = 0;
+#else
+    juce::ignoreUnused(nowMs, transportPlaying);
+#endif
 }
 
 void ExperimentalPianoRollView::syncUiPlayheadAfterRulerSeek(const std::int64_t seekTargetSamples) noexcept
@@ -3727,8 +4032,9 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
                 middlePanLastX_ = e.position.x;
                 visibleStartSamples_ = juce::jmax(std::int64_t{0}, visibleStartSamples_ - step);
                 sessionTransportSnapshotValid_ = false;
+                noteUserRollViewportGesture();
                 syncViewportToBoundClip();
-                repaint();
+                rollViewportRepaintFlush_.requestFlush();
             }
         }
         return;
@@ -4021,8 +4327,9 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
             visibleStartSamples_ = juce::jmax(std::int64_t{0}, visibleStartSamples_);
             samplesPerPixel_ = spp1;
             sessionTransportSnapshotValid_ = false;
+            noteUserRollViewportGesture();
             syncViewportToBoundClip();
-            repaint();
+            rollViewportRepaintFlush_.requestFlush();
         }
         return;
     }
@@ -4044,8 +4351,9 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
                 std::int64_t{0},
                 visibleStartSamples_ + (std::int64_t)std::llround(panPx * samplesPerPixel_));
             sessionTransportSnapshotValid_ = false;
+            noteUserRollViewportGesture();
             syncViewportToBoundClip();
-            repaint();
+            rollViewportRepaintFlush_.requestFlush();
         }
         return;
     }
@@ -4058,7 +4366,8 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
         pitchScrollOffsetRows_ -= rowSteps;
         clampPitchScrollOffset();
         resized();
-        repaint();
+        // Coalesced: one full-roll dirty-marking per message batch (repaint-storm fix).
+        rollViewportRepaintFlush_.requestFlush();
         return;
     }
 
@@ -4089,8 +4398,9 @@ void ExperimentalPianoRollView::mouseWheelMove(const juce::MouseEvent& e, const 
     visibleStartSamples_ = juce::jmax(std::int64_t{0}, visibleStartSamples_);
     samplesPerPixel_ = spp1;
     sessionTransportSnapshotValid_ = false;
+    noteUserRollViewportGesture();
     syncViewportToBoundClip();
-    repaint();
+    rollViewportRepaintFlush_.requestFlush();
 }
 
 void ExperimentalPianoRollView::paint(juce::Graphics& g)
@@ -4284,14 +4594,14 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
 
         if (transport_ != nullptr && arrLen > 0)
         {
-            const std::int64_t ph = transport_->readPlayheadSamplesForUi();
-            const std::int64_t phClamped
-                = juce::jlimit(std::int64_t{0}, juce::jmax(std::int64_t{0}, arrLen), ph);
-            const double phDrawD = uiRulerSeekDisplayHold_.has_value() ? uiPlayheadDisplaySamples_
-                                                                      : (double)phClamped;
+            // One display position for both indicators in this window: the ruler stroke used to read
+            // the **raw** block-quantized transport playhead while the grid line below used the
+            // smoothed value, which put them a few pixels apart and made the ruler stroke step while
+            // the grid line glided.
+            const double phDrawD = currentPlayheadDisplaySampleForPaint();
             if (phDrawD >= (double)visStart && phDrawD < (double)(visStart + visLen))
             {
-                const float xLine = xForSessionSampleD(phDrawD);
+                const float xLine = playhead_pixel::snapToPixelCentre(xForSessionSampleD(phDrawD));
                 g.setColour(juce::Colours::white.withAlpha(0.92f));
                 g.drawLine(xLine,
                            rb.getY(),
@@ -4533,10 +4843,12 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
         }
     }
 
-    // --- drawGlobalPlayhead (grid)
+    // --- drawGlobalPlayhead (grid) — same display sample + rounding as the ruler stroke above.
     if (absTime && transport_ != nullptr && samplesPerPixel_ > 0.0)
     {
-        const float px = xForSessionSampleD(uiPlayheadDisplaySamples_);
+        const float px = playhead_pixel::snapToPixelCentre(
+            xForSessionSampleD(currentPlayheadDisplaySampleForPaint()));
+        lastPaintedPlayheadCentreX_ = px;
         if (px >= (float)gr.getX() - 2.0f && px <= (float)gr.getRight() + 2.0f)
         {
             g.setColour(juce::Colour(0xff66ddff));
