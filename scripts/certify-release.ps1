@@ -48,8 +48,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
-if (-not (Test-Path -LiteralPath $Project)) {
-    Write-Error "Reference project not found: $Project"
+if (-not (Test-Path -LiteralPath $Project -PathType Leaf)) {
+    # Fail before the ~100 s build+matrix work: a folder passes a bare Test-Path but makes
+    # every stability scenario abort in-app with "project file not found".
+    Write-Error "Reference project must be an existing .dalproj file, not a folder: $Project"
+}
+if ([System.IO.Path]::GetExtension($Project) -ne '.dalproj') {
+    Write-Error "Reference project must be a .dalproj file: $Project"
 }
 $Project = (Resolve-Path -LiteralPath $Project).Path
 

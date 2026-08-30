@@ -53,8 +53,13 @@ if ([string]::IsNullOrWhiteSpace($Exe)) {
 if (-not (Test-Path -LiteralPath $Exe)) {
     Write-Error "Executable not found: $Exe (build with .\scripts\build-windows.ps1 -Config Debug)"
 }
-if (-not (Test-Path -LiteralPath $Project)) {
-    Write-Error "Project file not found: $Project"
+if (-not (Test-Path -LiteralPath $Project -PathType Leaf)) {
+    # A directory passes a bare Test-Path but every scenario then aborts in-app with
+    # "project file not found", failing the whole matrix in a few seconds.
+    Write-Error "Project must be an existing .dalproj file, not a folder: $Project"
+}
+if ([System.IO.Path]::GetExtension($Project) -ne '.dalproj') {
+    Write-Error "Project must be a .dalproj file: $Project"
 }
 $Project = (Resolve-Path -LiteralPath $Project).Path
 
