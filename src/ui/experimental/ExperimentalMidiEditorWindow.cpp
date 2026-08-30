@@ -90,6 +90,7 @@ public:
                                    "Off",
                                    "Note-off velocity; many instruments ignore this.",
                                    /*offField=*/true);
+        configureSelectedNoteLengthField();
 
         addAndMakeVisible(transportPlayButton_);
         transportPlayButton_.setButtonText("Play");
@@ -234,6 +235,7 @@ public:
         // Selection lives in the piano roll and changes from many gestures; poll it here instead of
         // threading a change callback through every selection mutation.
         refreshSelectedNoteVelocityFields();
+        refreshSelectedNoteLengthField();
         startTimerHz(10);
     }
 
@@ -625,6 +627,10 @@ public:
         selectedNoteVelField_.setBounds(toolbar.removeFromLeft(kSelectedNoteFieldW).reduced(0, 3));
         selectedNoteOffLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
         selectedNoteOffField_.setBounds(toolbar.removeFromLeft(kSelectedNoteFieldW).reduced(0, 3));
+        // Len holds `n.p.q.r`, so it needs more room than the two byte fields.
+        constexpr int kSelectedNoteLengthFieldW = 78;
+        selectedNoteLenLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
+        selectedNoteLenField_.setBounds(toolbar.removeFromLeft(kSelectedNoteLengthFieldW).reduced(0, 3));
         transportPlayButton_.setBounds(toolbar.removeFromLeft(58).reduced(0, 2));
         transportStopButton_.setBounds(toolbar.removeFromLeft(52).reduced(0, 2));
         cycleToggleButton_.setBounds(toolbar.removeFromLeft(56).reduced(0, 2));
@@ -749,6 +755,17 @@ private:
     /// Applies the typed value to every selected note as one undoable edit.
     void commitSelectedNoteVelocityField(bool offField);
 
+    /// Same wiring as `configureSelectedNoteField` for the musical **Len** field, which accepts
+    /// `n.p.q.r` text instead of a single MIDI byte (see `ExperimentalMidiNoteLengthFormat.h`).
+    void configureSelectedNoteLengthField();
+    /// Pushes the selection's shared length into the Len field as normalized `n.p.q.r` (blank when
+    /// nothing is selected or lengths differ). Never touches the field while the user types in it.
+    void refreshSelectedNoteLengthField();
+    /// Parses the typed length and applies it to every selected note as one undoable edit. Invalid
+    /// text, an unchanged length, or an overlap rejection all leave the notes alone and restore the
+    /// displayed value, so the field can never write a partial batch.
+    void commitSelectedNoteLengthField();
+
     /// Useful drum rows = min..max of pitches with non-empty effective drum labels (cached data only).
     /// Pitches used by clip notes are a fallback when no names exist; they never widen a named range,
     /// since stray notes outside the kit would otherwise defeat the fit (Conny feedback).
@@ -835,6 +852,8 @@ private:
     juce::TextEditor selectedNoteVelField_;
     juce::Label selectedNoteOffLabel_;
     juce::TextEditor selectedNoteOffField_;
+    juce::Label selectedNoteLenLabel_;
+    juce::TextEditor selectedNoteLenField_;
     juce::ToggleButton arrangementSnapToggle_;
     juce::ComboBox arrangementSnapResolutionCombo_;
     bool arrangementSnapUiApplyingFromSession_{false};
@@ -1037,9 +1056,85 @@ void ExperimentalMidiEditorWindow::Body::commitSelectedNoteVelocityField(const b
     refreshSelectedNoteVelocityFields();
 }
 
+void ExperimentalMidiEditorWindow::Body::configureSelectedNoteLengthField()
+{
+    addAndMakeVisible(selectedNoteLenLabel_);
+    selectedNoteLenLabel_.setText("Len", juce::dontSendNotification);
+    selectedNoteLenLabel_.setJustificationType(juce::Justification::centredRight);
+    selectedNoteLenLabel_.setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
+    selectedNoteLenLabel_.setTooltip("Note length as bars.quarters.sixteenths.120ths");
+
+    addAndMakeVisible(selectedNoteLenField_);
+    selectedNoteLenField_.setMultiLine(false);
+    selectedNoteLenField_.setReturnKeyStartsNewLine(false);
+    // Digits and the field separator only; the parser still validates the shape.
+    selectedNoteLenField_.setInputRestrictions(16, "0123456789.");
+    selectedNoteLenField_.setJustification(juce::Justification::centred);
+    selectedNoteLenField_.setFont(juce::Font(juce::FontOptions().withHeight(12.0f)));
+    selectedNoteLenField_.setSelectAllWhenFocused(true);
+    selectedNoteLenField_.setTooltip("Note length as bars.quarters.sixteenths.120ths");
+    // Same focus-release policy as Vel / Off: a TextEditor that keeps focus swallows later
+    // keypresses as text and silently kills transport shortcuts (Space, numpad 1).
+    selectedNoteLenField_.onReturnKey = [this] {
+        commitSelectedNoteLengthField();
+        selectedNoteLenField_.giveAwayKeyboardFocus();
+    };
+    selectedNoteLenField_.onEscapeKey = [this] {
+        refreshSelectedNoteLengthField();
+        selectedNoteLenField_.giveAwayKeyboardFocus();
+    };
+    selectedNoteLenField_.onFocusLost = [this] { refreshSelectedNoteLengthField(); };
+}
+
+void ExperimentalMidiEditorWindow::Body::refreshSelectedNoteLengthField()
+{
+    auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    const auto summary = rv != nullptr ? rv->summarizeSelectedNotesDurations()
+                                       : ExperimentalPianoRollView::SelectedNotesDurationSummary{};
+    const bool haveSelection = summary.selectedCount > 0;
+    selectedNoteLenField_.setEnabled(haveSelection);
+    if (selectedNoteLenField_.hasKeyboardFocus(true))
+    {
+        return;
+    }
+    juce::String want;
+    if (rv != nullptr && summary.durationTicks.has_value())
+    {
+        want = midi_note_length::formatNoteLength(*summary.durationTicks, rv->noteLengthBarGrid());
+    }
+    if (selectedNoteLenField_.getText() != want)
+    {
+        selectedNoteLenField_.setText(want, false);
+    }
+}
+
+void ExperimentalMidiEditorWindow::Body::commitSelectedNoteLengthField()
+{
+    auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    if (rv == nullptr)
+    {
+        refreshSelectedNoteLengthField();
+        return;
+    }
+    const auto parsed
+        = midi_note_length::parseNoteLength(selectedNoteLenField_.getText(), rv->noteLengthBarGrid());
+    if (!parsed.ok)
+    {
+        // Malformed text never reaches the notes; revert to what the selection actually is.
+        refreshSelectedNoteLengthField();
+        return;
+    }
+    rv->applyLengthTicksToSelectedNotes(parsed.ticks);
+    // Always re-read from the model: this normalizes the text (0.0.0.120 -> 0.0.1.0), shows the
+    // clamped value when the entry was below the minimum, and restores the old value when the batch
+    // was rejected for overlap (the roll flashes the forbidden cursor in that case).
+    refreshSelectedNoteLengthField();
+}
+
 void ExperimentalMidiEditorWindow::Body::timerCallback()
 {
     refreshSelectedNoteVelocityFields();
+    refreshSelectedNoteLengthField();
     if (transportCommands_.transport == nullptr)
     {
         return;

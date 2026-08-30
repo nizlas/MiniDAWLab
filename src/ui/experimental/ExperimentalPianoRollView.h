@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/experimental/ExperimentalMidiNoteLengthFormat.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 #include "ui/CoalescedRepaintFlusher.h"
 #include "ui/CollapsibleSideStrip.h"
@@ -178,6 +179,37 @@ public:
     bool applyVelocityToSelectedNotes(int velocity);
     /// Same for note-off velocity (clamped 0…127).
     bool applyOffVelocityToSelectedNotes(int offVelocity);
+
+    /// What the MIDI editor's compact **Len** toolbar field should show for the current selection.
+    struct SelectedNotesDurationSummary
+    {
+        int selectedCount = 0;
+        /// Shared exact `durationTicks`; empty when the selection mixes lengths.
+        std::optional<std::int64_t> durationTicks;
+    };
+    [[nodiscard]] SelectedNotesDurationSummary summarizeSelectedNotesDurations() const noexcept;
+
+    /// Grid the **Len** field's `n.p.q.r` text is parsed/formatted against: clip PPQ + project meter.
+    [[nodiscard]] midi_note_length::BarGrid noteLengthBarGrid() const noexcept;
+
+    /// Smallest length any editor path may produce right now (snap-aware; see
+    /// `minTimelineNoteDurationTicks`). The **Len** field clamps typed values to this so numeric
+    /// entry can never undercut what mouse create/resize enforce.
+    [[nodiscard]] std::int64_t minimumNoteLengthTicks() const noexcept;
+
+    enum class NoteLengthApplyResult
+    {
+        NoSelection,   ///< Nothing selected (field should be blank/disabled anyway).
+        NoChange,      ///< Every selected note already has the clamped length.
+        RejectedOverlap, ///< Batch would overlap on some pitch/channel: nothing changed, no undo step.
+        Applied        ///< All selected notes now have the clamped length (one undo step).
+    };
+
+    /// Set `durationTicks` on **every** selected note to `requestedTicks` as one undoable edit,
+    /// clamped up to `minimumNoteLengthTicks()`. Start, pitch, channel, velocity and off-velocity
+    /// are untouched. All-or-nothing: if the resulting batch would overlap an existing note (or
+    /// another selected note that did not already overlap it), nothing is written.
+    NoteLengthApplyResult applyLengthTicksToSelectedNotes(std::int64_t requestedTicks);
 
     /// Slice E: copy/paste selected `timelineNotes` within the bound clip (internal clipboard only).
     [[nodiscard]] bool handleTimelineNotesCopyShortcut() noexcept;

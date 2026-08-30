@@ -8,6 +8,7 @@
 #include "diagnostics/DiagnosticBuildFlags.h"
 #include "diagnostics/PlaybackUiLoadLog.h"
 #include "domain/Session.h"
+#include "domain/MusicalTimeConversions.h"
 #include "domain/ProjectMusicalTime.h"
 #include "domain/ArrangementMusicalSnap.h"
 #include "transport/Transport.h"
@@ -550,6 +551,124 @@ bool ExperimentalPianoRollView::applyVelocityFieldToSelectedNotes(const bool off
         applyValues();
     }
     return true;
+}
+
+ExperimentalPianoRollView::SelectedNotesDurationSummary
+ExperimentalPianoRollView::summarizeSelectedNotesDurations() const noexcept
+{
+    SelectedNotesDurationSummary s;
+    bool mixed = false;
+    for (const int idx : selectedTimelineNoteIndices_)
+    {
+        if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        const std::int64_t dur
+            = juce::jmax<std::int64_t>(1, pattern_.timelineNotes[(size_t)idx].durationTicks);
+        ++s.selectedCount;
+        if (s.selectedCount == 1)
+        {
+            s.durationTicks = dur;
+            continue;
+        }
+        // Exact tick comparison: two notes that only *display* as the same `n.p.q.r` (rounded to the
+        // nearest r unit) are still mixed, so committing the field can never silently requantize the
+        // note the user did not mean to touch.
+        mixed = mixed || (s.durationTicks.has_value() && *s.durationTicks != dur);
+    }
+    if (mixed)
+    {
+        s.durationTicks.reset();
+    }
+    return s;
+}
+
+midi_note_length::BarGrid ExperimentalPianoRollView::noteLengthBarGrid() const noexcept
+{
+    midi_note_length::BarGrid g;
+    g.ticksPerQuarter = experimentalEffectiveTicksPerQuarter(pattern_);
+    g.quartersPerBar = session_ != nullptr ? beatsPerBar(session_->getProjectMusicalTime()) : 4.0;
+    return g;
+}
+
+std::int64_t ExperimentalPianoRollView::minimumNoteLengthTicks() const noexcept
+{
+    return minTimelineNoteDurationTicks();
+}
+
+ExperimentalPianoRollView::NoteLengthApplyResult
+ExperimentalPianoRollView::applyLengthTicksToSelectedNotes(const std::int64_t requestedTicks)
+{
+    normalizeTimelineNoteSelection();
+    if (selectedTimelineNoteIndices_.empty())
+    {
+        return NoteLengthApplyResult::NoSelection;
+    }
+    // Same floor as mouse create/resize: numeric entry must not be a back door around the
+    // (snap-aware) minimum, and a zero/short entry becomes the minimum rather than a dead note.
+    const std::int64_t newDuration
+        = juce::jmax<std::int64_t>(minTimelineNoteDurationTicks(), requestedTicks);
+
+    std::vector<int> targets(selectedTimelineNoteIndices_.begin(), selectedTimelineNoteIndices_.end());
+    std::sort(targets.begin(), targets.end());
+
+    std::vector<TimelineMidiNote> originals;
+    std::vector<TimelineMidiNote> candidates;
+    originals.reserve(targets.size());
+    candidates.reserve(targets.size());
+    bool anyChange = false;
+    for (const int idx : targets)
+    {
+        const auto& n = pattern_.timelineNotes[(size_t)idx];
+        originals.push_back(n);
+        TimelineMidiNote cand = n;
+        cand.durationTicks = newDuration;
+        candidates.push_back(cand);
+        anyChange = anyChange || n.durationTicks != newDuration;
+    }
+    if (!anyChange)
+    {
+        return NoteLengthApplyResult::NoChange;
+    }
+
+    // All-or-nothing, and grandfathered: a pair of selected notes that already overlapped in an old
+    // project must not block the edit, but no *new* overlap may be introduced.
+    if (currentEditCandidatesOverlap(targets, candidates, &originals))
+    {
+        flashForbiddenNoDropCursor();
+        return NoteLengthApplyResult::RejectedOverlap;
+    }
+
+    auto applyLengths = [this, targets, candidates]() -> bool {
+        for (size_t k = 0; k < targets.size(); ++k)
+        {
+            const int idx = targets[k];
+            if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+            {
+                return false;
+            }
+            pattern_.timelineNotes[(size_t)idx].durationTicks = candidates[k].durationTicks;
+        }
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+
+    const char* undoLabel = targets.size() > 1 ? "Set MIDI note lengths" : "Set MIDI note length";
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr
+        && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_(undoLabel, std::move(applyLengths));
+    }
+    else
+    {
+        applyLengths();
+    }
+    return NoteLengthApplyResult::Applied;
 }
 
 int ExperimentalPianoRollView::timelineRulerHeight() const noexcept
