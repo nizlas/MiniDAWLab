@@ -21,6 +21,8 @@
 // Threading: message thread unless stated otherwise — not realtime.
 // =============================================================================
 
+#include "ui/experimental/ExperimentalMidiCcAutomation.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -67,6 +69,13 @@ struct ExperimentalMidiPattern
     std::vector<TimelineMidiNote> timelineNotes;
     /// Ticks per quarter for `timelineNotes` (normally 960; saved with clip).
     int ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+
+    /// Stage D: sparse MIDI CC automation points, **owned by the clip's pattern** exactly like
+    /// notes — the controller performance moves/duplicates/deletes with its clip and shares the
+    /// tick domain. Kept normalized (sorted, unique (tick, controller, channel) identities) by
+    /// `midi_cc::normalizePoints` on load and after every edit. v18 and older projects simply
+    /// have an empty vector.
+    std::vector<MidiCcPoint> ccPoints;
 };
 
 [[nodiscard]] inline int experimentalEffectiveTicksPerQuarter(const ExperimentalMidiPattern& p) noexcept

@@ -376,7 +376,7 @@ public:
                         *snap,
                         InstrumentMusicalUndoSnapshotCallbacks{
                             [this](TrackId tid) {
-                                return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                                return instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
                             } });
                 },
                 [](std::vector<ProjectFileExperimentalInstrumentTrackV1>& v) {
@@ -596,7 +596,7 @@ public:
             midiEditorWindow_,
             MidiEditorPresenter::Callbacks{
                 [this](TrackId tid) {
-                    return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                    return instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
                 },
                 [this](TrackId tid) { return instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid); },
                 [this](const juce::String& lab, std::function<bool()> m) {
@@ -665,7 +665,7 @@ public:
                   }
               };
         clipPasteCallbacks.getInstrumentControllerForTrack = [this](const TrackId tid) {
-            return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+            return instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
         };
         clipPasteCallbacks.syncViewportFromSession = [this] { syncViewportFromSession(); };
         clipPasteCallbacks.refreshInstrumentArrangementUi = [this] { refreshInstrumentUi(); };
@@ -751,6 +751,7 @@ public:
             juce::PopupMenu menu;
             menu.addItem(1, "Add Audio Track");
             menu.addItem(3, "Add Group Track");
+            menu.addItem(4, "Add MIDI Track");
             juce::PopupMenu instrMenu;
             instrMenu.addItem(99, "Rescan instrument plugins...");
             instrMenu.addItem(98, "Import plugin cache...");
@@ -795,6 +796,23 @@ public:
                         safeThis->session.addGroupTrack();
                         safeThis->syncViewportFromSession();
                         safeThis->trackLanesView.syncTracksFromSession();
+                        safeThis->inspectorView_.refreshFromSession();
+                        return;
+                    }
+                    if (result == 4)
+                    {
+                        const auto newMidiId = safeThis->session.addMidiTrack();
+                        if (newMidiId.has_value()
+                            && safeThis->instrumentRuntimeCoordinator_ != nullptr)
+                        {
+                            // The controller is what gives the row its MIDI event lane and lets
+                            // the engine publish it as a MIDI source.
+                            (void)safeThis->instrumentRuntimeCoordinator_
+                                ->getOrCreateMidiContentControllerForTrack(*newMidiId);
+                        }
+                        safeThis->syncViewportFromSession();
+                        safeThis->trackLanesView.syncTracksFromSession();
+                        safeThis->refreshInstrumentUi();
                         safeThis->inspectorView_.refreshFromSession();
                         return;
                     }
@@ -895,7 +913,7 @@ public:
             playbackEngine_,
             ProjectIoCoordinator::Callbacks{
                 [this](TrackId tid) {
-                    return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                    return instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
                 },
                 [this] {
                     if (midiEditorPresenter_ != nullptr)
@@ -905,6 +923,9 @@ public:
                 },
                 [this] { clearExperimentalInstrumentRuntimesPreserveBridgeOnly(); },
                 [this](TrackId tid) { return instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(tid); },
+                [this](TrackId tid) {
+                    return instrumentRuntimeCoordinator_->getOrCreateMidiContentControllerForTrack(tid);
+                },
                 [this] {
                     if (midiEditorPresenter_ != nullptr)
                     {
@@ -1149,7 +1170,7 @@ public:
                 [this] { syncViewportFromSession(); },
                 [this](TrackId tid) { return instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid); },
                 [this](TrackId tid) {
-                    return instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                    return instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
                 },
                 [this](TrackId tid) {
                     if (midiEditorPresenter_ != nullptr)
@@ -1162,6 +1183,7 @@ public:
                 },
                 [this](TrackId tid) {
                     instrumentRuntimeCoordinator_->removeInstrumentRuntimeForTrack(tid);
+                    instrumentRuntimeCoordinator_->removeMidiContentControllerForTrack(tid);
                 },
                 [this] { refreshInstrumentUi(); },
                 [this](TrackId tid) {
@@ -1181,6 +1203,9 @@ public:
                     {
                         recorder_.disarm();
                     }
+                },
+                [this](TrackId tid) {
+                    return instrumentRuntimeCoordinator_->getOrCreateMidiContentControllerForTrack(tid);
                 },
             });
         trackLanesEditCoordinator_->install();
@@ -1378,6 +1403,7 @@ public:
                     case TrackKind::Instrument: info.kindName = "instrument"; break;
                     case TrackKind::Group: info.kindName = "group"; break;
                     case TrackKind::Master: info.kindName = "master"; break;
+                    case TrackKind::Midi: info.kindName = "midi"; break;
                 }
                 out.push_back(std::move(info));
             }
@@ -1405,7 +1431,7 @@ public:
                 return false;
             }
             InstrumentTrackController* const ctl
-                = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
             if (ctl == nullptr || ctl->getClips().empty() || ctl->getClips().front() == nullptr)
             {
                 return false;
@@ -1491,6 +1517,326 @@ public:
             return session.hasKnownProjectFile()
                        ? session.getCurrentProjectFile().getFullPathName()
                        : juce::String{};
+        };
+
+        // --- Phase B: MIDI-track routing scenario (capture seam; no real VST3 needed) ---
+        hooks.midiRoutingFixtureSetup = [this](juce::String& failReason) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                failReason = "no instrument runtime coordinator";
+                return false;
+            }
+            // Destination: plugin-less GrooveAgent shell; the capture sink makes it accept
+            // transport MIDI without any plugin (Level-1 deterministic path).
+            const auto instIdOpt = session.appendExperimentalInstrumentShellTrack("MidiRouteDest");
+            if (!instIdOpt.has_value())
+            {
+                failReason = "could not append instrument shell row";
+                return false;
+            }
+            stabilityMidiRoutingInstTid_ = *instIdOpt;
+            const auto pr = instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(
+                stabilityMidiRoutingInstTid_);
+            if (pr.first == nullptr || pr.second == nullptr)
+            {
+                failReason = "could not create destination runtime";
+                return false;
+            }
+            stabilityMidiRoutingCaptureSink_.reset();
+            pr.first->installMidiDeliveryCaptureSinkForTests(&stabilityMidiRoutingCaptureSink_);
+            stabilityMidiRoutingDestHost_ = pr.first;
+            if (!pr.second->bootstrapGrooveAgentShellForSessionTrack(stabilityMidiRoutingInstTid_))
+            {
+                failReason = "could not bootstrap destination shell";
+                return false;
+            }
+
+            const auto makeNotes = [](const std::vector<int>& pitches, const int nativeChannel) {
+                constexpr int kTpq = kDefaultExperimentalTicksPerQuarter;
+                std::vector<TimelineMidiNote> notes;
+                int q = 0;
+                for (const int pitch : pitches)
+                {
+                    TimelineMidiNote n;
+                    n.midiNote = pitch;
+                    n.velocity = 100;
+                    n.channel = static_cast<std::uint8_t>(nativeChannel);
+                    n.startTick = static_cast<std::int64_t>(q++) * kTpq;
+                    n.durationTicks = kTpq / 2;
+                    notes.push_back(n);
+                }
+                return notes;
+            };
+
+            const auto makeCcPair = [](const int nativeChannel, const int secondValue) {
+                // Two CC11 Hold points: baseline 127 at tick 0, `secondValue` exactly on the
+                // second note's start tick — same-offset CC-before-Note-On is exercised for real.
+                MidiCcPoint a;
+                a.startTick = 0;
+                a.controller = 11;
+                a.value = 127;
+                a.channel = static_cast<std::uint8_t>(nativeChannel);
+                a.interpolationToNext = MidiCcInterpolation::hold;
+                MidiCcPoint b = a;
+                b.startTick = kDefaultExperimentalTicksPerQuarter;
+                b.value = static_cast<std::uint8_t>(secondValue);
+                return std::vector<MidiCcPoint>{ a, b };
+            };
+
+            // Destination's OWN MIDI content: four quarter notes, native channel 1 (the
+            // instrument track's default fixed output channel is 1, so they stay on channel 1).
+            // Stage D: plus CC11 automation on the same native channel.
+            {
+                const std::vector<int> ownPitches{ 60, 62, 64, 65 };
+                stabilityMidiRoutingExpectedOwnNotes_ = static_cast<int>(ownPitches.size());
+                const InstrumentMidiClipId cid = pr.second->appendImportedTimelineMidiClipAtSamples(
+                    makeNotes(ownPitches, 1), 0, "RouteOwn");
+                if (cid == 0)
+                {
+                    failReason = "could not create the destination's own MIDI clip";
+                    return false;
+                }
+                if (auto* c = pr.second->getClipById(cid))
+                {
+                    c->pattern.ccPoints = makeCcPair(1, 90);
+                    pr.second->notifyClipPatternMutated(cid);
+                }
+                stabilityMidiRoutingExpectedOwnCc_ = 2;
+            }
+
+            // Two TrackKind::Midi sources routed to the SAME destination with distinct FIXED
+            // output channels (2 and 3). Their stored native channels (5 and 6) differ from the
+            // output channels on purpose: capture must see the effective channels while save/load
+            // must preserve the native ones. Pitches include the range boundaries 0 and 127.
+            const auto addSource = [this, &failReason, &makeNotes](
+                                       const char* label,
+                                       const int outputChannel,
+                                       const int nativeChannel,
+                                       const std::vector<int>& pitches,
+                                       TrackId& outTid,
+                                       const std::vector<MidiCcPoint>& ccPoints) -> bool {
+                const auto midiIdOpt = session.addMidiTrack();
+                if (!midiIdOpt.has_value())
+                {
+                    failReason = juce::String(label) + ": could not add Midi track row";
+                    return false;
+                }
+                outTid = *midiIdOpt;
+                InstrumentTrackController* const midiCtl
+                    = instrumentRuntimeCoordinator_->getOrCreateMidiContentControllerForTrack(outTid);
+                if (midiCtl == nullptr)
+                {
+                    failReason = juce::String(label) + ": could not create midi content controller";
+                    return false;
+                }
+                if (!session.setTrackMidiDestination(outTid, stabilityMidiRoutingInstTid_))
+                {
+                    failReason = juce::String(label) + ": setTrackMidiDestination refused";
+                    return false;
+                }
+                if (!session.setTrackMidiOutputChannel(outTid, outputChannel))
+                {
+                    failReason = juce::String(label) + ": setTrackMidiOutputChannel refused";
+                    return false;
+                }
+                midiCtl->refreshMidiOutputChannelFromSession();
+                const InstrumentMidiClipId cid = midiCtl->appendImportedTimelineMidiClipAtSamples(
+                    makeNotes(pitches, nativeChannel), 0, label);
+                if (cid == 0)
+                {
+                    failReason = juce::String(label) + ": could not create MIDI clip";
+                    return false;
+                }
+                if (!ccPoints.empty())
+                {
+                    if (auto* c = midiCtl->getClipById(cid))
+                    {
+                        c->pattern.ccPoints = ccPoints;
+                        midiCtl->notifyClipPatternMutated(cid);
+                    }
+                }
+                return true;
+            };
+            // Lower additionally carries CC11 stored on native channel 5: delivery must arrive on
+            // the EFFECTIVE fixed channel 2 (routed MIDI-only source; Pedal stays CC-free so
+            // channel 3 proves streams do not leak).
+            if (!addSource("Lower", 2, 5, { 0, 48, 50, 52 }, stabilityMidiRoutingMidiLowerTid_,
+                           makeCcPair(5, 80)))
+            {
+                return false;
+            }
+            stabilityMidiRoutingExpectedLowerNotes_ = 4;
+            stabilityMidiRoutingExpectedLowerCc_ = 2;
+            if (!addSource("Pedal", 3, 6, { 127, 36, 38 }, stabilityMidiRoutingMidiPedalTid_, {}))
+            {
+                return false;
+            }
+            stabilityMidiRoutingExpectedPedalNotes_ = 3;
+
+            // Same post-add sync as the UI add-track menu: rebuilds the routing plan (track
+            // indices shifted) and attaches the new timeline rows.
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            refreshInstrumentUi();
+            inspectorView_.refreshFromSession();
+            transport.requestSeek(0);
+            appendStabilityRunLine(
+                "  fixture: instTid=" + juce::String((juce::int64)stabilityMidiRoutingInstTid_)
+                + " lowerTid=" + juce::String((juce::int64)stabilityMidiRoutingMidiLowerTid_)
+                + " pedalTid=" + juce::String((juce::int64)stabilityMidiRoutingMidiPedalTid_)
+                + " expected ch1/ch2/ch3=" + juce::String(stabilityMidiRoutingExpectedOwnNotes_)
+                + "/" + juce::String(stabilityMidiRoutingExpectedLowerNotes_) + "/"
+                + juce::String(stabilityMidiRoutingExpectedPedalNotes_));
+            return true;
+        };
+        // Shared Phase B.1 assertion set: exact per-channel counts prove three distinct streams
+        // reach ONE destination with channels 1/2/3 kept apart, and that no per-source duplicate
+        // processing happens (a double-invoked boundary would double the counts). Used for both
+        // the realtime playback pass and the offline mixdown parity pass.
+        hooks.midiRoutingVerifyDelivery = [this](juce::String& failReason) -> bool {
+            return stabilityVerifyMidiRoutingCapture("realtime", failReason,
+                                                     /*requireStopFlushOffs=*/true);
+        };
+        // Copy (not reference) of the mixdown hook: `hooks` is moved into the runner below.
+        hooks.midiRoutingRunOfflineParity = [this, runMixdown = hooks.runMixdownBlocking](
+                                                juce::String& failReason) -> bool {
+            if (runMixdown == nullptr)
+            {
+                failReason = "no mixdown hook";
+                return false;
+            }
+            // Active loop range over the fixture notes (mixdown renders the loop span only).
+            const double sr = [this] {
+                juce::AudioIODevice* const d = deviceManager.getCurrentAudioDevice();
+                return d != nullptr && d->getCurrentSampleRate() > 0.0 ? d->getCurrentSampleRate()
+                                                                       : 48000.0;
+            }();
+            session.setLeftLocatorAtSample(0);
+            session.setRightLocatorAtSample((std::int64_t)(sr * 4.0));
+            transport.requestCycleEnabled(true);
+            stabilityMidiRoutingCaptureSink_.reset();
+            const juce::File out = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                       .getChildFile("minidaw-midirouting-offline.wav");
+            const juce::Result r = runMixdown(out, /*mp3=*/false);
+            (void)out.deleteFile();
+            transport.requestCycleEnabled(false);
+            if (r.failed())
+            {
+                failReason = "offline mixdown failed: " + r.getErrorMessage();
+                return false;
+            }
+            // Offline stop is implicit (bounded render), so scheduled note-offs inside the span
+            // must balance; the equivalence claim is the per-channel note-on counts.
+            return stabilityVerifyMidiRoutingCapture("offline", failReason,
+                                                     /*requireStopFlushOffs=*/true);
+        };
+        hooks.midiRoutingVerifyAfterReload = [this](juce::String& failReason) -> bool {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                failReason = "no session snapshot after reload";
+                return false;
+            }
+            // Ids are stable across save/load (v18 writes track ids). Verify BOTH MIDI sources:
+            // destination id, fixed output channel, note count, exact stored pitches and native
+            // channels — the full-range editor must never rewrite persisted MIDI pitches, incl.
+            // the boundary pitches 0 (C-2) and 127 (G8).
+            struct ExpectedSource
+            {
+                TrackId tid;
+                int outputChannel;
+                std::vector<int> pitches;
+                int nativeChannel;
+                const char* label;
+            };
+            const ExpectedSource expected[] = {
+                { stabilityMidiRoutingMidiLowerTid_, 2, { 0, 48, 50, 52 }, 5, "Lower" },
+                { stabilityMidiRoutingMidiPedalTid_, 3, { 127, 36, 38 }, 6, "Pedal" },
+            };
+            for (const auto& exp : expected)
+            {
+                const int mix = snap->findTrackIndexById(exp.tid);
+                if (mix < 0 || snap->getTrack(mix).getKind() != TrackKind::Midi)
+                {
+                    failReason = juce::String(exp.label) + ": Midi row missing or wrong kind after reload";
+                    return false;
+                }
+                if (snap->getTrack(mix).getMidiDestinationTrackId() != stabilityMidiRoutingInstTid_)
+                {
+                    failReason = juce::String(exp.label) + ": Midi destination not restored after reload";
+                    return false;
+                }
+                if (snap->getTrack(mix).getMidiOutputChannel() != exp.outputChannel)
+                {
+                    failReason = juce::String(exp.label) + ": output channel not restored (expected "
+                                 + juce::String(exp.outputChannel) + ", got "
+                                 + juce::String(snap->getTrack(mix).getMidiOutputChannel()) + ")";
+                    return false;
+                }
+                InstrumentTrackController* const midiCtl
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(exp.tid)
+                          : nullptr;
+                if (midiCtl == nullptr)
+                {
+                    failReason = juce::String(exp.label) + ": midi content controller missing after reload";
+                    return false;
+                }
+                std::vector<int> pitches;
+                for (const auto& cp : midiCtl->getClips())
+                {
+                    if (cp == nullptr)
+                    {
+                        continue;
+                    }
+                    for (const auto& n : cp->pattern.timelineNotes)
+                    {
+                        pitches.push_back(n.midiNote);
+                        if ((int)n.channel != exp.nativeChannel)
+                        {
+                            failReason = juce::String(exp.label) + ": native channel rewritten (expected "
+                                         + juce::String(exp.nativeChannel) + ", found "
+                                         + juce::String((int)n.channel) + ")";
+                            return false;
+                        }
+                    }
+                }
+                std::vector<int> want = exp.pitches;
+                std::sort(pitches.begin(), pitches.end());
+                std::sort(want.begin(), want.end());
+                if (pitches != want)
+                {
+                    failReason = juce::String(exp.label)
+                                 + ": stored pitches changed across save/load (full-range editor must "
+                                   "be non-destructive)";
+                    return false;
+                }
+            }
+            // The destination's own clip survives too (its controller path predates Phase B).
+            InstrumentTrackController* const destCtl
+                = instrumentRuntimeCoordinator_ != nullptr
+                      ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(
+                            stabilityMidiRoutingInstTid_)
+                      : nullptr;
+            int ownNotes = 0;
+            if (destCtl != nullptr)
+            {
+                for (const auto& cp : destCtl->getClips())
+                {
+                    if (cp != nullptr)
+                    {
+                        ownNotes += (int)cp->pattern.timelineNotes.size();
+                    }
+                }
+            }
+            if (ownNotes != stabilityMidiRoutingExpectedOwnNotes_)
+            {
+                failReason = "destination's own clip notes not restored (expected "
+                             + juce::String(stabilityMidiRoutingExpectedOwnNotes_) + ", found "
+                             + juce::String(ownNotes) + ")";
+                return false;
+            }
+            return true;
         };
 
         stabilityScenarioRunner_ = std::make_unique<StabilityScenarioRunner>(std::move(hooks));
@@ -1650,9 +1996,11 @@ private:
 
     void showHelpMenuPopup()
     {
-        mini_daw_app_dialogs::showHelpMenuPopup(*menuBar_, this, []() {
-            mini_daw_app_dialogs::showUndoBehaviorDialog();
-        });
+        mini_daw_app_dialogs::showHelpMenuPopup(
+            *menuBar_,
+            this,
+            []() { mini_daw_app_dialogs::showUndoBehaviorDialog(); },
+            [this]() { mini_daw_app_dialogs::showMidiChannelsHelpDialog(*this); });
     }
 
     void timerCallback() override
@@ -2177,6 +2525,225 @@ private:
     /// so it is destroyed FIRST in reverse-declaration order, while every UI object it borrows
     /// is still alive. See `TrackLanesEditCoordinator` ctor — it stores `&` to those views.
     std::unique_ptr<TrackLanesEditCoordinator> trackLanesEditCoordinator_;
+
+    /// Shared Phase B.1 many-to-one capture assertions, run after the realtime playback pass and
+    /// again after the offline mixdown pass: all three source streams reach the ONE destination,
+    /// channels 1/2/3 stay distinct with exact per-channel counts (a per-source double-processed
+    /// boundary would double them), the channel mask is 0x07, and stop/end-of-render leaves no
+    /// dangling note-ons.
+    [[nodiscard]] bool stabilityVerifyMidiRoutingCapture(const char* passName,
+                                                         juce::String& failReason,
+                                                         const bool requireStopFlushOffs)
+    {
+        const int ons = stabilityMidiRoutingCaptureSink_.noteOns.load(std::memory_order_relaxed);
+        const int offs = stabilityMidiRoutingCaptureSink_.noteOffs.load(std::memory_order_relaxed);
+        const std::uint32_t chMask
+            = stabilityMidiRoutingCaptureSink_.noteOnChannelMask.load(std::memory_order_relaxed);
+        const int ch1 = stabilityMidiRoutingCaptureSink_.noteOnsPerChannel[0].load(std::memory_order_relaxed);
+        const int ch2 = stabilityMidiRoutingCaptureSink_.noteOnsPerChannel[1].load(std::memory_order_relaxed);
+        const int ch3 = stabilityMidiRoutingCaptureSink_.noteOnsPerChannel[2].load(std::memory_order_relaxed);
+        const std::uint64_t blocks
+            = stabilityMidiRoutingCaptureSink_.blocksDelivered.load(std::memory_order_relaxed);
+        const std::uint64_t boundaryTotal
+            = stabilityMidiRoutingDestHost_ != nullptr
+                  ? stabilityMidiRoutingDestHost_->getMidiDeliveryBoundaryBlockCountRelaxed()
+                  : 0;
+        appendStabilityRunLine("  capture(" + juce::String(passName) + "): noteOns=" + juce::String(ons)
+                               + " noteOffs=" + juce::String(offs) + " ch1/ch2/ch3="
+                               + juce::String(ch1) + "/" + juce::String(ch2) + "/" + juce::String(ch3)
+                               + " channelMask=0x" + juce::String::toHexString((int)chMask)
+                               + " blocksDelivered=" + juce::String((juce::int64)blocks)
+                               + " hostBoundaryTotal=" + juce::String((juce::int64)boundaryTotal));
+        if (ch1 != stabilityMidiRoutingExpectedOwnNotes_
+            || ch2 != stabilityMidiRoutingExpectedLowerNotes_
+            || ch3 != stabilityMidiRoutingExpectedPedalNotes_)
+        {
+            failReason = juce::String(passName) + ": per-channel note-ons "
+                         + juce::String(ch1) + "/" + juce::String(ch2) + "/" + juce::String(ch3)
+                         + " != expected " + juce::String(stabilityMidiRoutingExpectedOwnNotes_) + "/"
+                         + juce::String(stabilityMidiRoutingExpectedLowerNotes_) + "/"
+                         + juce::String(stabilityMidiRoutingExpectedPedalNotes_)
+                         + " (channels 1/2/3 must stay distinct; boundary once per block)";
+            return false;
+        }
+        const int expectedTotal = stabilityMidiRoutingExpectedOwnNotes_
+                                  + stabilityMidiRoutingExpectedLowerNotes_
+                                  + stabilityMidiRoutingExpectedPedalNotes_;
+        if (ons != expectedTotal)
+        {
+            failReason = juce::String(passName) + ": expected " + juce::String(expectedTotal)
+                         + " note-ons at the destination, captured " + juce::String(ons);
+            return false;
+        }
+        constexpr std::uint32_t kExpectedMask = 0x07; // channels 1, 2, 3 (bit = channel - 1)
+        if (chMask != kExpectedMask)
+        {
+            failReason = juce::String(passName) + ": note-on channel mask 0x"
+                         + juce::String::toHexString((int)chMask) + " != expected 0x07";
+            return false;
+        }
+        if (requireStopFlushOffs && offs < ons)
+        {
+            failReason = juce::String(passName) + ": captured fewer note-offs (" + juce::String(offs)
+                         + ") than note-ons (" + juce::String(ons) + ") after stop flush";
+            return false;
+        }
+        if (blocks == 0)
+        {
+            failReason = juce::String(passName) + ": capture sink saw no delivered blocks";
+            return false;
+        }
+        if (blocks > boundaryTotal)
+        {
+            failReason = juce::String(passName) + ": sink deliveries ("
+                         + juce::String((juce::int64)blocks) + ") exceed the host boundary count ("
+                         + juce::String((juce::int64)boundaryTotal)
+                         + ") — boundary must run once per block";
+            return false;
+        }
+
+        // Stage D: CC automation must reach the destination on the EFFECTIVE channels, with no
+        // repeats-flood, no leakage onto the CC-free source's channel, and never after a Note On
+        // at the same sample offset.
+        {
+            const int cc = stabilityMidiRoutingCaptureSink_.ccEvents.load(std::memory_order_relaxed);
+            const int cc1 = stabilityMidiRoutingCaptureSink_.ccEventsPerChannel[0].load(std::memory_order_relaxed);
+            const int cc2 = stabilityMidiRoutingCaptureSink_.ccEventsPerChannel[1].load(std::memory_order_relaxed);
+            const int cc3 = stabilityMidiRoutingCaptureSink_.ccEventsPerChannel[2].load(std::memory_order_relaxed);
+            const int ccOrderViolations = stabilityMidiRoutingCaptureSink_.ccAfterNoteOnAtSameOffset
+                                              .load(std::memory_order_relaxed);
+            appendStabilityRunLine("  capture(" + juce::String(passName) + "): ccEvents="
+                                   + juce::String(cc) + " cc1/cc2/cc3=" + juce::String(cc1) + "/"
+                                   + juce::String(cc2) + "/" + juce::String(cc3)
+                                   + " ccAfterNoteOnAtSameOffset=" + juce::String(ccOrderViolations));
+            if (cc1 != stabilityMidiRoutingExpectedOwnCc_
+                || cc2 != stabilityMidiRoutingExpectedLowerCc_ || cc3 != 0)
+            {
+                failReason = juce::String(passName) + ": per-channel CC events " + juce::String(cc1)
+                             + "/" + juce::String(cc2) + "/" + juce::String(cc3) + " != expected "
+                             + juce::String(stabilityMidiRoutingExpectedOwnCc_) + "/"
+                             + juce::String(stabilityMidiRoutingExpectedLowerCc_)
+                             + "/0 (effective channels; no flood; no leak onto Pedal's channel)";
+                return false;
+            }
+            if (cc != cc1 + cc2 + cc3)
+            {
+                failReason = juce::String(passName) + ": CC events on unexpected channels (total "
+                             + juce::String(cc) + " != ch1+ch2+ch3 " + juce::String(cc1 + cc2 + cc3)
+                             + ")";
+                return false;
+            }
+            if (ccOrderViolations != 0)
+            {
+                failReason = juce::String(passName) + ": " + juce::String(ccOrderViolations)
+                             + " CC event(s) arrived AFTER a Note On at the same sample offset";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // --- Phase B/B.1 stability scenario (`--stability-midi-routing`) fixture state ---
+    /// RT-safe MIDI delivery observer for the destination host (counters only; no locks/alloc).
+    /// Phase B.1 adds per-channel note-on counts (many-to-one: channels 1/2/3 must stay distinct)
+    /// and a delivered-block counter (destination boundary invoked once per block, not per source).
+    struct StabilityMidiRoutingCaptureSink final : ExperimentalInstrumentHost::MidiDeliveryCaptureSink
+    {
+        std::atomic<int> noteOns{ 0 };
+        std::atomic<int> noteOffs{ 0 };
+        /// Bit (channel - 1) set for every captured note-on channel.
+        std::atomic<std::uint32_t> noteOnChannelMask{ 0 };
+        /// Note-ons per MIDI channel (index = channel - 1).
+        std::atomic<int> noteOnsPerChannel[16]{};
+        /// Stage D: Control Change events per MIDI channel (index = channel - 1) + total.
+        std::atomic<int> ccEvents{ 0 };
+        std::atomic<int> ccEventsPerChannel[16]{};
+        /// Stage D ordering invariant: a CC found at the SAME sample offset AFTER a Note On in the
+        /// merged buffer would reach the plugin after the attack — must stay 0.
+        std::atomic<int> ccAfterNoteOnAtSameOffset{ 0 };
+        /// `onMidiBlockDelivered` invocations (== destination processing-boundary deliveries).
+        std::atomic<std::uint64_t> blocksDelivered{ 0 };
+
+        void reset() noexcept
+        {
+            noteOns.store(0, std::memory_order_relaxed);
+            noteOffs.store(0, std::memory_order_relaxed);
+            noteOnChannelMask.store(0, std::memory_order_relaxed);
+            for (auto& c : noteOnsPerChannel)
+            {
+                c.store(0, std::memory_order_relaxed);
+            }
+            ccEvents.store(0, std::memory_order_relaxed);
+            for (auto& c : ccEventsPerChannel)
+            {
+                c.store(0, std::memory_order_relaxed);
+            }
+            ccAfterNoteOnAtSameOffset.store(0, std::memory_order_relaxed);
+            blocksDelivered.store(0, std::memory_order_relaxed);
+        }
+        void onMidiBlockDelivered(const juce::MidiBuffer& merged, int) override
+        {
+            blocksDelivered.fetch_add(1, std::memory_order_relaxed);
+            int lastPos = -1;
+            std::uint32_t noteOnChannelsAtPos = 0;
+            for (const auto meta : merged)
+            {
+                const juce::MidiMessage m = meta.getMessage();
+                if (meta.samplePosition != lastPos)
+                {
+                    lastPos = meta.samplePosition;
+                    noteOnChannelsAtPos = 0;
+                }
+                const int ch = m.getChannel();
+                if (m.isNoteOn())
+                {
+                    noteOns.fetch_add(1, std::memory_order_relaxed);
+                    if (ch >= 1 && ch <= 16)
+                    {
+                        noteOnChannelsAtPos |= 1u << (ch - 1);
+                        noteOnChannelMask.fetch_or(1u << (ch - 1), std::memory_order_relaxed);
+                        noteOnsPerChannel[ch - 1].fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                else if (m.isNoteOff())
+                {
+                    noteOffs.fetch_add(1, std::memory_order_relaxed);
+                }
+                else if (m.isController() && m.getControllerNumber() < 120)
+                {
+                    // Channel-voice controllers only: the stop flush legitimately sends channel
+                    // MODE messages (All Notes Off = CC 123) on every channel — not automation.
+                    ccEvents.fetch_add(1, std::memory_order_relaxed);
+                    if (ch >= 1 && ch <= 16)
+                    {
+                        ccEventsPerChannel[ch - 1].fetch_add(1, std::memory_order_relaxed);
+                        // Ordering is per channel: a controller value only "arrives late" for a
+                        // note attack on ITS OWN channel; interleaving with other sources'
+                        // channels at the same offset is fine.
+                        if ((noteOnChannelsAtPos & (1u << (ch - 1))) != 0)
+                        {
+                            ccAfterNoteOnAtSameOffset.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    StabilityMidiRoutingCaptureSink stabilityMidiRoutingCaptureSink_;
+    TrackId stabilityMidiRoutingInstTid_ = kInvalidTrackId;
+    /// Phase B.1 many-to-one sources: "Lower" (fixed output channel 2), "Pedal" (fixed 3).
+    TrackId stabilityMidiRoutingMidiLowerTid_ = kInvalidTrackId;
+    TrackId stabilityMidiRoutingMidiPedalTid_ = kInvalidTrackId;
+    /// Expected note-ons per stream: destination's own clip (ch 1), Lower (ch 2), Pedal (ch 3).
+    int stabilityMidiRoutingExpectedOwnNotes_ = 0;
+    int stabilityMidiRoutingExpectedLowerNotes_ = 0;
+    int stabilityMidiRoutingExpectedPedalNotes_ = 0;
+    /// Stage D: expected CC11 deliveries — destination's own stream (effective ch 1) and the
+    /// Lower source (native 5 → effective ch 2). Pedal carries none (ch 3 must stay CC-free).
+    int stabilityMidiRoutingExpectedOwnCc_ = 0;
+    int stabilityMidiRoutingExpectedLowerCc_ = 0;
+    /// Destination host (installed sink) for boundary-count comparison in the verify hooks.
+    ExperimentalInstrumentHost* stabilityMidiRoutingDestHost_ = nullptr;
 
     /// Stability C2 only (`--stability-*` command line); null in normal use. Declared last:
     /// its hooks capture `this` and touch most members above, so it must be destroyed first.

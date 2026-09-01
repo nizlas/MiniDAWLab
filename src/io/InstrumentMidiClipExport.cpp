@@ -5,6 +5,7 @@
 #include "io/InstrumentMidiClipExport.h"
 
 #include "instruments/InstrumentTrackController.h"
+#include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <algorithm>
@@ -29,7 +30,11 @@ namespace
     };
 
     /// Collect timeline notes with transport-matched inclusion and minimum one-tick length.
+    /// Stage C: the exported channel is the **effective** channel of the source track — the note's
+    /// native channel under `Any (Preserve)`, the fixed 1…16 otherwise — so the file represents
+    /// what the user heard. The stored notes are never touched (this builds copies).
     void collectNotesForExport(const InstrumentMidiClip& clip,
+                               const int trackOutputChannel,
                                const int tpq,
                                const double bpm,
                                const double sampleRate,
@@ -61,7 +66,7 @@ namespace
             e.midiNote = juce::jlimit(0, 127, tn.midiNote);
             e.velocity = juce::jlimit(1, 127, tn.velocity);
             e.offVelocity = sanitizeMidiNoteOffVelocity(tn.offVelocity);
-            e.channel = juce::jlimit(1, 16, (int)tn.channel);
+            e.channel = midi_channel_diag::effectiveChannel((int)tn.channel, trackOutputChannel);
             e.startTick = tn.startTick;
             std::int64_t offTick = e.startTick + juce::jmax<std::int64_t>(1, tn.durationTicks);
             if (offTick <= e.startTick)
@@ -86,24 +91,12 @@ namespace
     }
 } // namespace
 
-InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const InstrumentMidiClip& clip,
-                                                                   const juce::File& outputFile,
-                                                                   const double deviceSampleRate)
+InstrumentMidiClipExportResult buildInstrumentMidiClipMidiFile(const InstrumentMidiClip& clip,
+                                                                const int sourceTrackMidiOutputChannel,
+                                                                const double deviceSampleRate,
+                                                                juce::MidiFile& outMidiFile)
 {
     InstrumentMidiClipExportResult result;
-
-    juce::File dest = outputFile;
-    if (dest.getFileExtension().isEmpty())
-    {
-        dest = dest.withFileExtension("mid");
-    }
-
-    juce::File parent = dest.getParentDirectory();
-    if (!parent.exists())
-    {
-        result.errorMessage = "The save folder does not exist.";
-        return result;
-    }
 
     double sr = deviceSampleRate;
     if (sr <= 0.0 || !std::isfinite(sr))
@@ -116,9 +109,10 @@ InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const Instrume
     const double bpm = pat.bpm > 0.0 && std::isfinite(pat.bpm) ? pat.bpm : 120.0;
 
     std::vector<ExportNoteTick> notes;
-    collectNotesForExport(clip, tpq, bpm, sr, notes);
+    collectNotesForExport(clip, sourceTrackMidiOutputChannel, tpq, bpm, sr, notes);
 
-    juce::MidiFile midiFile;
+    juce::MidiFile& midiFile = outMidiFile;
+    midiFile.clear();
     midiFile.setTicksPerQuarterNote(tpq);
 
     // Track 0: conductor — tempo + simple 4/4 for DAWs that expect a time signature.
@@ -148,6 +142,40 @@ InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const Instrume
         trackNameMeta.setTimeStamp(0);
         noteTrack.addEvent(trackNameMeta);
 
+        // Stage D: CC automation as standard Control Change events. The evaluator emits the
+        // bounded discrete set (sparse endpoints exact; Linear ramps produce at most one event
+        // per crossed integer value). Channel contract matches notes: native under
+        // `Any (Preserve)`, the effective fixed channel otherwise. CC events are added BEFORE
+        // the notes so `MidiMessageSequence::sort` (stable) keeps a CC at a note's start tick
+        // ahead of that Note On. The stored points are read-only here.
+        {
+            std::vector<MidiCcPoint> pts = clip.pattern.ccPoints;
+            (void)midi_cc::normalizePoints(pts);
+            std::int64_t lastTick = 0;
+            for (const auto& p : pts)
+            {
+                lastTick = juce::jmax(lastTick, p.startTick);
+            }
+            int ccCount = 0;
+            for (const auto& key : midi_cc::distinctStreams(pts))
+            {
+                std::vector<midi_cc::MidiCcEvent> evs;
+                midi_cc::collectCcEventsInTickRange(pts, key.controller, key.channel, 0,
+                                                    lastTick + 1, std::nullopt, evs);
+                const int effCh = midi_channel_diag::effectiveChannel(
+                    key.channel, sourceTrackMidiOutputChannel);
+                for (const auto& e : evs)
+                {
+                    auto cc = juce::MidiMessage::controllerEvent(effCh, (int)e.controller,
+                                                                 (int)e.value)
+                                  .withTimeStamp((double)e.tick);
+                    noteTrack.addEvent(cc);
+                    ++ccCount;
+                }
+            }
+            result.ccEventsExported = ccCount;
+        }
+
         for (const auto& n : notes)
         {
             const int ch = juce::jlimit(1, 16, n.channel);
@@ -166,6 +194,39 @@ InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const Instrume
     noteTrack.sort();
     midiFile.addTrack(noteTrack);
 
+    result.ok = true;
+    result.notesExported = (int)notes.size();
+    return result;
+}
+
+InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const InstrumentMidiClip& clip,
+                                                                   const int sourceTrackMidiOutputChannel,
+                                                                   const juce::File& outputFile,
+                                                                   const double deviceSampleRate)
+{
+    InstrumentMidiClipExportResult result;
+
+    juce::File dest = outputFile;
+    if (dest.getFileExtension().isEmpty())
+    {
+        dest = dest.withFileExtension("mid");
+    }
+
+    juce::File parent = dest.getParentDirectory();
+    if (!parent.exists())
+    {
+        result.errorMessage = "The save folder does not exist.";
+        return result;
+    }
+
+    juce::MidiFile midiFile;
+    result = buildInstrumentMidiClipMidiFile(clip, sourceTrackMidiOutputChannel, deviceSampleRate, midiFile);
+    if (!result.ok)
+    {
+        return result;
+    }
+    result.ok = false; // proven again below once the bytes are on disk
+
     const std::unique_ptr<juce::OutputStream> stream(dest.createOutputStream());
     // `File::createOutputStream` returns null when the path cannot be opened for write (permissions,
     // bad path, etc.). The base `OutputStream` type has no `openedOk()` — that lives on `FileOutputStream`.
@@ -183,6 +244,5 @@ InstrumentMidiClipExportResult exportInstrumentMidiClipToMidiFile(const Instrume
 
     stream->flush();
     result.ok = true;
-    result.notesExported = (int)notes.size();
     return result;
 }

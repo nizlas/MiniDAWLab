@@ -196,6 +196,22 @@ public:
         TrackId trackId,
         bool trackMuted) noexcept;
 
+    /// [Message thread] Sets which MIDI channel one row's own timeline MIDI is sent on:
+    /// `kTrackMidiOutputChannelAny` to preserve each event's stored channel, or a fixed 1 … 16.
+    /// Out-of-range values are repaired via `sanitizeTrackMidiOutputChannel`.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackMidiOutputChannel(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        int midiOutputChannel) noexcept;
+
+    /// [Message thread] Sets a `Midi` row's **MIDI To** destination: `kInvalidTrackId` = None
+    /// (silent, still editable) or the id of an existing `Instrument` row. Rejected (no-op copy)
+    /// when `trackId` is not a `Midi` row or the destination is not an existing Instrument row.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackMidiDestination(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        TrackId destinationTrackId) noexcept;
+
     /// [Message thread] Rename one track row only (trimmed name). Unknown id or empty name after trim:
     /// no-op copy of `previous`. Same name after trim: no-op copy.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRenamed(

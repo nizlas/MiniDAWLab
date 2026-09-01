@@ -166,6 +166,18 @@ namespace
         {
             to->setProperty("muted", true);
         }
+        if (fileVersion >= 17 && t.midiOutputChannel != kTrackMidiOutputChannelAny)
+        {
+            // Any/preserve is the absent-key meaning, so omitting it keeps files small and makes a
+            // v17 writer produce byte-identical routing semantics for migrated pre-v17 projects.
+            to->setProperty("midiChannel", t.midiOutputChannel);
+        }
+        if (fileVersion >= 18 && t.kind.equalsIgnoreCase("midi")
+            && t.midiDestinationTrackId != kInvalidTrackId)
+        {
+            // Absent key = None; identity-based (never a list index or name).
+            to->setProperty("midiTo", static_cast<std::int64_t>(t.midiDestinationTrackId));
+        }
         if (fileVersion >= 14 && !t.kind.equalsIgnoreCase("master") && t.routedOutputTrackId != kInvalidTrackId)
         {
             juce::DynamicObject::Ptr outObj = new juce::DynamicObject();
@@ -858,6 +870,52 @@ namespace
                                 }
                             }
                         }
+                        // v19: optional sparse MIDI CC automation. Absent (all v18-and-older
+                        // files) → empty vector, identical sound. Malformed entries are skipped
+                        // here; range clamps + duplicate resolution happen in the controller's
+                        // normalize step, which also emits the load diagnostic. Note data above
+                        // is never affected by CC repair.
+                        const juce::var& ccv = cv.getProperty("ccPoints", {});
+                        if (ccv.isArray())
+                        {
+                            if (const juce::Array<juce::var>* ccarr = ccv.getArray())
+                            {
+                                for (const juce::var& pv : *ccarr)
+                                {
+                                    if (!pv.isObject())
+                                    {
+                                        continue;
+                                    }
+                                    ProjectFileExperimentalMidiCcPointV19 cp;
+                                    bool tickOk = false;
+                                    const std::int64_t tick
+                                        = int64FromVarId(pv.getProperty("startTick", {}), tickOk);
+                                    if (tickOk)
+                                    {
+                                        cp.startTick = tick;
+                                    }
+                                    const juce::var& ctrl = pv.getProperty("controller", {});
+                                    if (ctrl.isInt() || ctrl.isInt64() || ctrl.isDouble())
+                                    {
+                                        cp.controller = (int)static_cast<double>(ctrl);
+                                    }
+                                    const juce::var& val = pv.getProperty("value", {});
+                                    if (val.isInt() || val.isInt64() || val.isDouble())
+                                    {
+                                        cp.value = (int)static_cast<double>(val);
+                                    }
+                                    const juce::var& chp = pv.getProperty("channel", {});
+                                    if (chp.isInt() || chp.isInt64() || chp.isDouble())
+                                    {
+                                        cp.channel = (int)static_cast<double>(chp);
+                                    }
+                                    const juce::String interp
+                                        = pv.getProperty("interp", juce::String("hold")).toString();
+                                    cp.interpolationToNext = interp == "linear" ? 1 : 0;
+                                    c.ccPoints.push_back(cp);
+                                }
+                            }
+                        }
                         const juce::var& mrvs = cv.getProperty("midiRollVisibleStartSamples", {});
                         if (mrvs.isInt() || mrvs.isInt64() || mrvs.isDouble())
                         {
@@ -1109,6 +1167,25 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                         tnoteVars.add(juce::var(tnO.get()));
                     }
                     co->setProperty("timelineNotes", juce::var(tnoteVars));
+                }
+                // v19: sparse MIDI CC automation points. Written only when present; older
+                // readers never see the key and newer readers treat absence as "no CC".
+                if (!cl.ccPoints.empty())
+                {
+                    juce::Array<juce::var> ccVars;
+                    for (const auto& cp : cl.ccPoints)
+                    {
+                        juce::DynamicObject::Ptr cpO = new juce::DynamicObject();
+                        cpO->setProperty("startTick", static_cast<juce::int64>(cp.startTick));
+                        cpO->setProperty("controller", juce::jlimit(0, 127, cp.controller));
+                        cpO->setProperty("value", juce::jlimit(0, 127, cp.value));
+                        cpO->setProperty("channel", juce::jlimit(1, 16, cp.channel));
+                        cpO->setProperty("interp",
+                                         cp.interpolationToNext == 1 ? juce::String("linear")
+                                                                     : juce::String("hold"));
+                        ccVars.add(juce::var(cpO.get()));
+                    }
+                    co->setProperty("ccPoints", juce::var(ccVars));
                 }
                 if (cl.midiRollSamplesPerPixel > 0.0 && std::isfinite(cl.midiRollSamplesPerPixel))
                 {
@@ -1586,6 +1663,27 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         {
             trk.off = false;
         }
+        if (ver >= 17)
+        {
+            // Absent key (and every pre-v17 file) stays at the DTO default `Any`, which is exactly
+            // the pre-v17 behavior: each note played on the channel stored in the note itself.
+            const juce::var& chV = tv.getProperty("midiChannel", {});
+            if (chV.isInt() || chV.isInt64() || chV.isDouble())
+            {
+                trk.midiOutputChannel
+                    = sanitizeTrackMidiOutputChannel(static_cast<int>(static_cast<double>(chV) + 0.5));
+            }
+        }
+        if (ver >= 18)
+        {
+            // Absent key = None. Existence/kind validation happens after all tracks are built
+            // (`session_routing::repairMidiDestinationsInPlace`), not here.
+            const juce::var& mtV = tv.getProperty("midiTo", {});
+            if (mtV.isInt() || mtV.isInt64() || mtV.isDouble() || mtV.isString())
+            {
+                trk.midiDestinationTrackId = toId(mtV);
+            }
+        }
         if (ver >= 14)
         {
             const juce::var& outV = tv.getProperty("output", {});
@@ -1779,6 +1877,21 @@ namespace
             if (p.midiNote != q.midiNote || p.velocity != q.velocity
                 || p.offVelocity != q.offVelocity || p.channel != q.channel
                 || p.startTick != q.startTick || p.durationTicks != q.durationTicks)
+            {
+                return false;
+            }
+        }
+        // v19: CC automation is musical state — CC-only edits must produce undo steps.
+        if (a.ccPoints.size() != b.ccPoints.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.ccPoints.size(); ++i)
+        {
+            const auto& p = a.ccPoints[i];
+            const auto& q = b.ccPoints[i];
+            if (p.startTick != q.startTick || p.controller != q.controller || p.value != q.value
+                || p.channel != q.channel || p.interpolationToNext != q.interpolationToNext)
             {
                 return false;
             }

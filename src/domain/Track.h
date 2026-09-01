@@ -56,10 +56,51 @@ enum class TrackKind : std::uint8_t
     Group,
     /// Final stereo output bus (exactly one row per session). No timeline clips.
     Master,
+    /// MIDI-only source lane: owns MIDI clips and feeds them to one Instrument row
+    /// (`getMidiDestinationTrackId()`). Produces **no** audio: it is not an audio-routing node, has
+    /// no inserts/sends/audio output, allocates no audio scratch, and never appears in the audio
+    /// `RoutingPlan`. Safe and silent when its destination is `None`/invalid.
+    Midi,
 };
 
 /// System-owned display name for `TrackKind::Master` (not user-renamable).
 inline constexpr const char kMasterTrackDisplayName[] = "Stereo Out";
+
+// ---------------------------------------------------------------------------
+// MIDI output channel — which channel a track's own timeline MIDI is sent on
+// ---------------------------------------------------------------------------
+//
+// This is the **MIDI** destination channel, entirely unrelated to `routedOutputTrackId_` (the
+// **audio** bus this track feeds) and to `channelFaderGain_` (a mixer gain, not a MIDI channel).
+//
+// Two modes, because instruments disagree about who owns the channel:
+//   * **Fixed 1 … 16** — every outgoing event from this track is remapped to that channel. This is
+//     what multi-timbral instruments need: GSi VB3-II listens for its Upper manual on channel 1,
+//     Lower on 2, Pedal on 3, and a track that sends everything on channel 10 is simply inaudible
+//     to it. New tracks default to channel 1; channel 10 is the drum convention and is chosen only
+//     by an explicit drum-instrument creation path, never inferred from a track or plugin name.
+//   * **Any / preserve** — events keep the channel stored per event (`TimelineMidiNote::channel`).
+//     Required for multi-channel MIDI imports, where the file's own channel assignment is the
+//     musical content, and used to migrate pre-v17 projects so their playback is bit-identical.
+inline constexpr int kTrackMidiOutputChannelAny = 0;
+inline constexpr int kTrackMidiOutputChannelMin = 1;
+inline constexpr int kTrackMidiOutputChannelMax = 16;
+/// Melodic default for newly created tracks (see the block above for why not 10).
+inline constexpr int kTrackMidiOutputChannelDefault = 1;
+/// General MIDI drum channel; only an explicit drum-instrument creation path may select it.
+inline constexpr int kTrackMidiOutputChannelDrums = 10;
+
+/// Repairs any stored/serialized value to `Any` or a legal 1 … 16 channel.
+[[nodiscard]] inline constexpr int sanitizeTrackMidiOutputChannel(const int channel) noexcept
+{
+    if (channel == kTrackMidiOutputChannelAny)
+    {
+        return kTrackMidiOutputChannelAny;
+    }
+    return (channel < kTrackMidiOutputChannelMin || channel > kTrackMidiOutputChannelMax)
+               ? kTrackMidiOutputChannelDefault
+               : channel;
+}
 
 /// One additive send tap (post-channel-strip in V1; engine/UI in later slices).
 struct TrackSend
@@ -123,6 +164,19 @@ inline constexpr float kSendAmountMaxLinear = 2.0f;
     return kind == TrackKind::Audio;
 }
 
+/// Rows that own timeline MIDI clips and are edited in the MIDI editor.
+[[nodiscard]] inline constexpr bool trackKindOwnsTimelineMidiClips(const TrackKind kind) noexcept
+{
+    return kind == TrackKind::Instrument || kind == TrackKind::Midi;
+}
+
+/// Rows that participate in the **audio** routing graph as a source (feed a Group/Master bus).
+/// `Midi` rows are deliberately excluded: they produce no audio at all.
+[[nodiscard]] inline constexpr bool trackKindIsAudioRoutingSource(const TrackKind kind) noexcept
+{
+    return kind == TrackKind::Audio || kind == TrackKind::Instrument || kind == TrackKind::Group;
+}
+
 // ---------------------------------------------------------------------------
 // Track — one lane’s clips (session timeline samples; front-most at index 0 within this track)
 // ---------------------------------------------------------------------------
@@ -145,12 +199,28 @@ public:
                    TrackKind kind = TrackKind::Audio,
                    float stereoPan = kTrackStereoPanCenter,
                    TrackId routedOutputTrackId = kInvalidTrackId,
-                   std::vector<TrackSend> sends = {}) noexcept;
+                   std::vector<TrackSend> sends = {},
+                   int midiOutputChannel = kTrackMidiOutputChannelDefault,
+                   TrackId midiDestinationTrackId = kInvalidTrackId) noexcept;
 
     [[nodiscard]] TrackKind getKind() const noexcept { return kind_; }
 
-    /// Main output destination (`Group` or `Master` row id). Unused on `Master` rows.
+    /// Main **audio** output destination (`Group` or `Master` row id). Unused on `Master` rows.
+    /// Not a MIDI destination — see `getMidiOutputChannel()`.
     [[nodiscard]] TrackId getRoutedOutputTrackId() const noexcept { return routedOutputTrackId_; }
+
+    /// `kTrackMidiOutputChannelAny` (preserve per-event channel) or a fixed 1 … 16 channel that all
+    /// of this track's outgoing timeline MIDI is remapped to. Meaningless on rows that emit no MIDI.
+    [[nodiscard]] int getMidiOutputChannel() const noexcept { return midiOutputChannel_; }
+
+    /// **MIDI To** — which `Instrument` row this `Midi` track feeds (`kInvalidTrackId` = None:
+    /// silent, but fully editable). Only Instrument rows are legal destinations; validity is
+    /// enforced by `Session`/`SessionSnapshot` repair, never by name or list position. Meaningless
+    /// on every other kind. Not related to `getRoutedOutputTrackId()`, which is **audio** routing.
+    [[nodiscard]] TrackId getMidiDestinationTrackId() const noexcept
+    {
+        return midiDestinationTrackId_;
+    }
 
     [[nodiscard]] TrackId getId() const noexcept { return id_; }
     [[nodiscard]] const juce::String& getName() const noexcept { return name_; }
@@ -177,6 +247,28 @@ public:
     /// [Message thread] Same clips/gain/mute/off/kind/pan; new display name (immutable snapshot pattern).
     [[nodiscard]] Track renamed(juce::String newName) const noexcept;
 
+    // -----------------------------------------------------------------------
+    // Field-preserving copy-on-write helpers
+    // -----------------------------------------------------------------------
+    // Every mutation starts from a complete copy of `*this` and changes exactly one field. This is
+    // the required mutation shape for snapshot rebuilds: positional re-construction (calling the
+    // full constructor and listing every field by hand) has already silently dropped a new field
+    // once (`midiOutputChannel` in three SessionRouting repair paths), and each new persistent
+    // field multiplies that risk. The full constructor remains only for building *fresh* rows
+    // (track add, project load, Master factory), where every field is deliberately explicit.
+    // Values are sanitized exactly like the constructor sanitizes them.
+    [[nodiscard]] Track withName(juce::String name) const noexcept;
+    [[nodiscard]] Track withPlacedClips(std::vector<PlacedClip> clips) const noexcept;
+    [[nodiscard]] Track withChannelFaderGain(float gain) const noexcept;
+    [[nodiscard]] Track withTrackOff(bool off) const noexcept;
+    [[nodiscard]] Track withMuted(bool muted) const noexcept;
+    [[nodiscard]] Track withKind(TrackKind kind) const noexcept;
+    [[nodiscard]] Track withStereoPan(float pan) const noexcept;
+    [[nodiscard]] Track withRoutedOutputTrackId(TrackId dest) const noexcept;
+    [[nodiscard]] Track withSends(std::vector<TrackSend> sends) const noexcept;
+    [[nodiscard]] Track withMidiOutputChannel(int channel) const noexcept;
+    [[nodiscard]] Track withMidiDestinationTrackId(TrackId dest) const noexcept;
+
 private:
     TrackId id_ = kInvalidTrackId;
     juce::String name_;
@@ -188,4 +280,6 @@ private:
     float stereoPan_ = kTrackStereoPanCenter;
     TrackId routedOutputTrackId_ = kInvalidTrackId;
     std::vector<TrackSend> sends_;
+    int midiOutputChannel_ = kTrackMidiOutputChannelDefault;
+    TrackId midiDestinationTrackId_ = kInvalidTrackId;
 };

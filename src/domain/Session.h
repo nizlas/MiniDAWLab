@@ -118,6 +118,10 @@ public:
     /// [Message thread] Append an empty `TrackKind::Group` bus row (routes to Master by default).
     void addGroupTrack() noexcept;
 
+    /// [Message thread] Append an empty `TrackKind::Midi` lane (MIDI destination = None, no audio
+    /// routing). Returns the new stable `TrackId` when published, else `nullopt`.
+    [[nodiscard]] std::optional<TrackId> addMidiTrack() noexcept;
+
     /// [Message thread] Set main output routing (`destTrackId` must be a legal Group or Master target).
     /// Returns false when the route is illegal or repair rejected the target (no session change).
     [[nodiscard]] bool setTrackRoutedOutput(TrackId trackId, TrackId destTrackId) noexcept;
@@ -214,6 +218,17 @@ public:
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.
     void setTrackMuted(TrackId trackId, bool muted) noexcept;
+
+    /// [Message thread] MIDI output channel for this row's own timeline MIDI:
+    /// `kTrackMidiOutputChannelAny` preserves each event's stored channel, 1 … 16 remaps every
+    /// event to that channel. Unrelated to `setTrackRoutedOutput` (audio bus). Returns false when
+    /// the row is unknown or already on that channel, in which case nothing is published.
+    [[nodiscard]] bool setTrackMidiOutputChannel(TrackId trackId, int midiOutputChannel) noexcept;
+
+    /// [Message thread] **MIDI To** for a `Midi` row: `kInvalidTrackId` = None, or the id of an
+    /// existing `Instrument` row. Returns false (nothing published) when the row is not a Midi
+    /// track, the destination is illegal, or the destination is unchanged.
+    [[nodiscard]] bool setTrackMidiDestination(TrackId trackId, TrackId destinationTrackId) noexcept;
 
     // [Message thread] Rename one lane (`Track::getName()`). Trim-only no-op / empty after trim / unknown id: no publish.
     void setTrackName(TrackId trackId, juce::String newName) noexcept;

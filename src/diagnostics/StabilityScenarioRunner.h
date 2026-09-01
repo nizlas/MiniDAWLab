@@ -34,6 +34,7 @@ enum class StabilityScenarioKind
     Mixdown,
     Autosave,        // C5: load, dirty edit, forced autosave, verify file/pointer/original.
     RecoverAutosave, // C5: as Autosave, then in-process recovery and post-recovery verification.
+    MidiRouting,     // Phase B: MIDI track -> instrument routing, capture-seam delivery + v18 roundtrip.
 };
 
 struct StabilityScenarioRequest
@@ -104,6 +105,22 @@ struct StabilityRunnerHooks
     std::function<bool()> isProjectDirty;
     /// Full path of the session's current save target; empty when never saved / after recovery.
     std::function<juce::String()> getCurrentProjectPath;
+
+    // --- Phase B/B.1: MIDI-track routing scenario hooks ---------------------
+    /// Builds the many-to-one fixture in the loaded project: one plugin-less instrument shell
+    /// (capture sink installed) with its OWN channel-1 clip, plus two `TrackKind::Midi` sources
+    /// ("Lower" fixed output channel 2, "Pedal" fixed 3) routed to it. Boundary pitches 0 and 127
+    /// ride along for the full-range persistence check.
+    std::function<bool(juce::String& failReason)> midiRoutingFixtureSetup;
+    /// After a playback window: asserts exact per-channel note-ons (1/2/3 distinct, mask 0x07),
+    /// stop-flushed note-offs and a once-per-block destination boundary.
+    std::function<bool(juce::String& failReason)> midiRoutingVerifyDelivery;
+    /// Phase B.1: re-renders the fixture span offline (mixdown path) and asserts the capture sink
+    /// saw the same routed MIDI — realtime and offline paths must be equivalent.
+    std::function<bool(juce::String& failReason)> midiRoutingRunOfflineParity;
+    /// After save + reload: asserts both Midi rows, destinations, fixed channels, native channels
+    /// and exact stored pitches survived (v18; pitches must be untouched by the full-range editor).
+    std::function<bool(juce::String& failReason)> midiRoutingVerifyAfterReload;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -134,6 +151,8 @@ private:
     void appendMixdownSteps(const juce::File& project, bool mp3);
     /// C5. `withRecovery` selects the recover-autosave variant.
     void appendAutosaveSteps(const juce::File& project, bool withRecovery);
+    /// Phase B: MIDI routing fixture + capture-seam playback verification + v18 roundtrip.
+    void appendMidiRoutingSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

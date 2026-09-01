@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 #include "ui/experimental/ExperimentalMidiNoteLengthFormat.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 #include "ui/CoalescedRepaintFlusher.h"
@@ -11,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <unordered_set>
 #include <vector>
 
@@ -44,12 +46,12 @@ class ExperimentalPianoRollView final : public juce::Component,
                                           private juce::ScrollBar::Listener
 {
 public:
-    /// Default drum-oriented editor span (Groove Agent–class lanes).
-    static constexpr int kDrumPitchLow = 24;
-    static constexpr int kDrumPitchHigh = 72;
-    /// Melodic span (~8 octaves C0–C8) for HALion Sonic–class lanes.
-    static constexpr int kMelodicPitchLow = 12;
-    static constexpr int kMelodicPitchHigh = 108;
+    /// Phase B.1: every row mode exposes the full MIDI range (Cubase octave labels C-2 … G8).
+    /// Piano/Drum views are *display* modes, not different legal pitch ranges.
+    static constexpr int kFullPitchLow = 0;
+    static constexpr int kFullPitchHigh = 127;
+    /// Empty editors start centred around middle C (MIDI 60 = C3) instead of an extreme register.
+    static constexpr int kDefaultVerticalCenterPitch = 60;
     static constexpr int kRowHeight = 14;
 
     /// Legacy maximum piano strip width (also the resizable upper bound in Piano row mode).
@@ -69,8 +71,12 @@ public:
 
     ExperimentalPianoRollView(ExperimentalMidiPattern& pattern, ExperimentalMidiPatternPlayer* player);
 
-    /// Inclusive MIDI note bounds for visible piano rows (clamped 0–127). Default: drum range.
+    /// Inclusive MIDI note bounds for visible piano rows (clamped 0–127). Default (and, since
+    /// Phase B.1, the only production value): the full 0–127 range.
     void setEditablePitchRange(int lowInclusive, int highInclusive) noexcept;
+    /// Initial vertical view: centres on the bound clip's note range when it has notes, else on
+    /// `fallbackCenterPitch`. Called once per roll rebuild; a later workspace restore overrides.
+    void seedDefaultVerticalScroll(int fallbackCenterPitch) noexcept;
     [[nodiscard]] int pitchLow() const noexcept { return pitchLow_; }
     [[nodiscard]] int pitchHigh() const noexcept { return pitchHigh_; }
     /// Topmost visible MIDI pitch at the grid (row 0); encodes vertical pitch scroll (`pitchScrollOffsetRows_`).
@@ -137,6 +143,18 @@ public:
     /// Commits renamed row; pass empty string to clear user override (reset).
     void setOnCommitRowLabelEdit(std::function<void(int midiNote, juce::String newName)> fn) noexcept;
 
+    /// Phase B.1 (spec E): key-strip / drum-row audition uses the editor's *current* Vel and Off
+    /// toolbar values, supplied by the owner as (noteOnVelocity, noteOffVelocity). Defaults
+    /// (100, 64) apply when unset or when the fields are blank.
+    void setKeyStripAuditionVelocityProvider(std::function<std::pair<int, int>()> fn) noexcept
+    {
+        keyStripAuditionVelocityProvider_ = std::move(fn);
+    }
+
+    /// Mouse Up for the active audition gesture (also the owner's focus-loss safety hook, after
+    /// it has released held previews on the player). Safe when no gesture is active.
+    void endActiveAuditionGestureOnMouseUp() noexcept;
+
     [[nodiscard]] int rowLabelMode() const noexcept { return rowLabelMode_; }
 
     /// I3i: when set, note/step mutations are wrapped for global instrument undo (clip-bound editor only).
@@ -197,6 +215,10 @@ public:
     /// entry can never undercut what mouse create/resize enforce.
     [[nodiscard]] std::int64_t minimumNoteLengthTicks() const noexcept;
 
+    /// MIDI channel stamped on notes created here: the track's fixed output channel when it has
+    /// one, otherwise 10 (what the editor always used, kept for `Any` tracks from pre-v17 projects).
+    [[nodiscard]] int channelForNewlyCreatedNotes() const noexcept;
+
     enum class NoteLengthApplyResult
     {
         NoSelection,   ///< Nothing selected (field should be blank/disabled anyway).
@@ -211,12 +233,58 @@ public:
     /// another selected note that did not already overlap it), nothing is written.
     NoteLengthApplyResult applyLengthTicksToSelectedNotes(std::int64_t requestedTicks);
 
+    /// The bound track's MIDI output channel: `kTrackMidiOutputChannelAny` (preserve each note's
+    /// stored channel) or a fixed 1…16. `Any` when there is no track/session binding, since an
+    /// unbound scratch roll cannot claim a track setting.
+    [[nodiscard]] int trackMidiOutputChannel() const noexcept;
+
+    /// Native (stored) channels of the current selection, for the editor's channel readout. Read
+    /// from the note data, never from the track selector — telling those apart is the point.
+    [[nodiscard]] midi_channel_diag::NativeChannelSummary
+    summarizeSelectedNotesNativeChannels() const noexcept;
+
+    /// How much a channel remap is allowed to touch.
+    enum class ChannelRemapScope
+    {
+        SelectedNotes,   ///< Only the current selection, in the open clip.
+        AllNotesOnTrack  ///< Every note in every clip of the bound instrument track.
+    };
+
+    enum class ChannelRemapResult
+    {
+        NoFixedTrackChannel, ///< Track is `Any`: no target to write, command should be disabled.
+        NothingInScope,      ///< Empty selection / no notes at all: nothing written.
+        NoChange,            ///< Every note in scope already stores the target channel.
+        RejectedOverlap,     ///< Would collapse two notes onto one pitch/channel: nothing written.
+        Applied              ///< Native channels rewritten as one undo step.
+    };
+
+    struct ChannelRemapOutcome
+    {
+        ChannelRemapResult result = ChannelRemapResult::NothingInScope;
+        int notesInScope = 0;
+        int notesChanged = 0;
+        /// The channel that was (or would be) written; 0 when the track has no fixed channel.
+        int targetChannel = 0;
+    };
+
+    /// **Destructive**: rewrites the *stored* channel of the notes in scope to the track's fixed
+    /// output channel, as one undoable edit. Time, duration, pitch, velocity, off-velocity, clip
+    /// ownership and the selection are untouched, and the track's output selector is left alone —
+    /// this only bakes the data so it survives switching back to `Any (Preserve)`.
+    ChannelRemapOutcome remapNativeChannelsToTrackChannel(ChannelRemapScope scope);
+
     /// Slice E: copy/paste selected `timelineNotes` within the bound clip (internal clipboard only).
     [[nodiscard]] bool handleTimelineNotesCopyShortcut() noexcept;
     [[nodiscard]] bool handleTimelineNotesPasteShortcut();
     /// Delete/Backspace: remove all selected timeline notes as one undoable edit ("Delete MIDI notes").
     /// Returns false (key not consumed) when nothing is selected or the clip binding is unavailable.
     [[nodiscard]] bool handleTimelineNotesDeleteSelectionShortcut();
+
+    /// Delete/Backspace with CC points selected: remove them as one undoable edit ("Delete CC
+    /// points"). Checked before the note shortcut so CC selections never delete notes. Returns
+    /// false when no CC point is selected.
+    [[nodiscard]] bool handleCcPointsDeleteSelectionShortcut();
 
 private:
     void timerCallback() override;
@@ -355,6 +423,67 @@ private:
     void finishVelocityLaneDragGesture();
     void paintVelocityLane(juce::Graphics& g);
 
+    // --- MIDI CC automation lane (Stage D; below the velocity lane, edits pattern ccPoints only) ---
+    /// Default expanded height when the collapsed knob is clicked.
+    static constexpr int kCcLaneHeight = 110;
+    static constexpr int kCcLaneResizeBandPx = 6;
+    static constexpr int kCcLaneMinUsableHeight = 24;
+    static constexpr int kCcPointHitRadiusPx = 6;
+    static constexpr int kCcLaneKnobWidth = 48;
+    static constexpr int kCcLaneKnobHeight = 7;
+
+    /// Effective CC lane height (0 = collapsed; clamped like the velocity lane).
+    [[nodiscard]] int ccLaneTotalHeight() const noexcept;
+    [[nodiscard]] int maxCcLaneHeightNow() const noexcept;
+    /// Bottom strip right of the side strip (below the velocity lane).
+    [[nodiscard]] juce::Rectangle<int> ccLaneBounds() const;
+    /// Bottom-left corner under the keyboard strip (controller selector chrome).
+    [[nodiscard]] juce::Rectangle<int> ccLaneHeaderBounds() const;
+    /// Lane minus vertical padding: CC value 0..127 maps into this rect.
+    [[nodiscard]] juce::Rectangle<int> ccLaneInnerBounds() const;
+    [[nodiscard]] juce::Rectangle<int> ccLaneResizeBandBounds() const;
+    /// Small labeled handle at the bottom edge while collapsed (discoverability).
+    [[nodiscard]] juce::Rectangle<int> ccLaneCollapsedKnobBounds() const;
+    [[nodiscard]] bool ccLaneEditingAvailable() const noexcept;
+    [[nodiscard]] int ccValueFromLaneY(int y) const noexcept;
+    [[nodiscard]] float ccLaneYForValue(int value) const noexcept;
+    /// Lane X of a CC point (index into `pattern_.ccPoints`); nullopt when not of the shown
+    /// controller or not mappable.
+    [[nodiscard]] std::optional<float> ccPointXForIndex(int idx) const;
+    [[nodiscard]] std::optional<int> findCcPointIndexNear(juce::Point<int> pos) const;
+    void handleCcLaneMouseDown(const juce::MouseEvent& e);
+    void updateCcLaneDrag(juce::Point<int> localPos);
+    void finishCcLaneDragGesture();
+    void paintCcLane(juce::Graphics& g);
+    void showCcControllerMenu();
+    void showCcPointContextMenu(int pointIndex);
+    /// Left-click on empty lane: insert a point at the snapped tick/value (undoable). New points
+    /// take the same native channel rule as new notes (`channelForNewNotes(track output)`).
+    void insertCcPointAt(juce::Point<int> pos);
+    void deleteSelectedCcPoints();
+    void normalizeCcSelection() noexcept;
+
+    struct CcDragCapture
+    {
+        int index = -1;
+        MidiCcPoint original;
+    };
+    /// Runtime-only lane height (0 = collapsed default; existing projects are not forced to show it).
+    int ccLaneHeightPref_ = 0;
+    /// Controller shown/edited in the lane. CC11 Expression is the default first view.
+    int ccLaneController_ = 11;
+    std::set<int> selectedCcPointIndices_;
+    bool ccLaneResizeActive_ = false;
+    bool ccLaneResizeFromCollapsedKnob_ = false;
+    int ccLaneResizeAnchorY_ = 0;
+    int ccLaneResizeAnchorHeight_ = 0;
+    bool ccPointDragActive_ = false;
+    bool ccDragMoved_ = false;
+    std::vector<CcDragCapture> ccDragCaptures_;
+    int ccDragPrimaryIndex_ = -1;
+    std::int64_t ccDragAnchorTick_ = 0;
+    int ccDragAnchorValue_ = 0;
+
     struct VelocityDragCapture
     {
         int index = -1;
@@ -375,22 +504,34 @@ private:
     int velocityLaneResizeAnchorY_ = 0;
     int velocityLaneResizeAnchorHeight_ = 0;
 
-    // --- Audition (one-shot preview through the pattern player; no transport/timeline side effects) ---
+    // --- Audition (gesture previews through the pattern player; no transport/timeline side effects) ---
     /// Min spacing between velocity-drag re-auditions (Cubase-style "rattle" without event spam).
     static constexpr double kVelocityDragAuditionThrottleMs = 45.0;
 
-    /// Safe no-op without a player / loaded instrument. Also the reuse point for the future
-    /// right-click exact-velocity popup slice.
-    void auditionNote(int midiNote, int velocity, int channel) noexcept;
+    /// Effective audition channel for an arranged note: the note's native channel under
+    /// `Any (Preserve)`, the track's fixed output channel otherwise (Phase B.1 spec C/D).
+    [[nodiscard]] int effectiveAuditionChannelForNote(const TimelineMidiNote& tn) const noexcept;
+    /// Arranged-note Mouse Down: Note On now; ≥ default audition duration, hold extends (spec D).
+    void beginArrangedNoteAuditionGesture(const TimelineMidiNote& tn) noexcept;
+    /// Piano-key / drum-row Mouse Down: exact Note On; Note Off exactly at Mouse Up (spec E).
+    void beginKeyStripAuditionGesture(int midiNote) noexcept;
+    /// Create-note feedback: one-shot preview with the default arranged duration.
+    void oneShotAuditionForCreatedNote(const TimelineMidiNote& tn) noexcept;
     /// Velocity-drag audition: primary note alone, or the whole capture set as a chord when all
     /// captured notes share one startTick. Throttled + velocity-change gated unless `force`.
     void maybeAuditionVelocityDrag(bool force) noexcept;
+
+    /// (channel, pitch) key of the preview begun by the current mouse gesture; released on Mouse Up.
+    std::optional<std::pair<int, int>> activeAuditionGestureKey_;
+    /// True when the active gesture is a key-strip (exact Mouse Down/Up) preview.
+    bool activeAuditionGestureIsKeyStrip_ = false;
 
     /// All captured notes share one startTick (single note trivially qualifies). Selections spanning
     /// several start times get no drag audition (no meaningful timing reference).
     bool velocityDragAuditionSameStart_ = false;
     double velocityDragLastAuditionMs_ = 0.0;
     int velocityDragLastAuditionVelocity_ = -1;
+    std::function<std::pair<int, int>()> keyStripAuditionVelocityProvider_;
 
     /// Middle-button drag = horizontal hand-pan (grab-style: content follows the mouse).
     bool middlePanActive_ = false;
@@ -587,8 +728,8 @@ private:
     std::unique_ptr<juce::TextEditor> velocityValueEditor_;
     std::vector<int> velocityEditorTargetIndices_;
 
-    int pitchLow_ = kDrumPitchLow;
-    int pitchHigh_ = kDrumPitchHigh;
+    int pitchLow_ = kFullPitchLow;
+    int pitchHigh_ = kFullPitchHigh;
 
     /// Vertical pitch window: row index 0 at the top of the grid maps to `pitchHigh_ - pitchScrollOffsetRows_`.
     int pitchScrollOffsetRows_ = 0;

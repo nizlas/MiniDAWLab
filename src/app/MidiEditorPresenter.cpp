@@ -13,9 +13,24 @@
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
+#include "ui/experimental/MidiEditorTitleStatus.h"
 
 namespace
 {
+/// Phase B.1 window title: the bound track's *current* name, TrackId-resolved (rename-safe).
+[[nodiscard]] juce::String trackNameForMidiEditorTitle(Session& session, const TrackId tid) noexcept
+{
+    if (const auto snap = session.loadSessionSnapshotForAudioThread())
+    {
+        const int ix = snap->findTrackIndexById(tid);
+        if (ix >= 0)
+        {
+            return snap->getTrack(ix).getName();
+        }
+    }
+    return {};
+}
+
 void alignInstrumentClipSelectionForMidiEditor(InstrumentTrackController& ctl,
                                                InstrumentMidiClipId clipId) noexcept
 {
@@ -107,7 +122,12 @@ void MidiEditorPresenter::wireMidiEditorForOpenClip(const TrackId timelineInstru
                           &transport_,
                           &deviceManager_,
                           &timelineViewport_,
-                          clip->name);
+                          trackNameForMidiEditorTitle(session_, timelineInstrumentTrackId));
+    // Keep the title current across track renames while the editor stays open.
+    w.setWindowTitleProvider([this, timelineInstrumentTrackId]() -> juce::String {
+        return midi_editor_text::buildWindowTitle(
+            trackNameForMidiEditorTitle(session_, timelineInstrumentTrackId));
+    });
     w.bindTransportCommands(makeMidiEditorTransportCommands());
     w.setInstrumentMusicalUndoUi(
         [this](const juce::String& lab, std::function<bool()> m) {
@@ -237,6 +257,28 @@ void MidiEditorPresenter::openMidiEditorForInstrumentClip(const TrackId timeline
     ExperimentalInstrumentHost* mh = callbacks_.getInstrumentHostForTrack(timelineInstrumentTrackId);
     if (mh == nullptr)
     {
+        // Phase B: a TrackKind::Midi row has no host of its own — the editor borrows the routed
+        // destination's host (audition and drum names then match what playback will sound like).
+        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+        {
+            const int ix = snap->findTrackIndexById(timelineInstrumentTrackId);
+            if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Midi)
+            {
+                const TrackId destId = snap->getTrack(ix).getMidiDestinationTrackId();
+                if (destId != kInvalidTrackId)
+                {
+                    mh = callbacks_.getInstrumentHostForTrack(destId);
+                }
+            }
+        }
+    }
+    if (mh == nullptr)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "MIDI editor",
+            "This MIDI track has no destination instrument.\n\nChoose an instrument track under "
+            "\"MIDI To\" in the Inspector first, then open the editor.");
         return;
     }
 
@@ -495,8 +537,23 @@ void MidiEditorPresenter::tryRestoreMidiEditorWorkspaceAfterProjectLoad(
 
 void MidiEditorPresenter::resetWindowAndBookingIfOpenOnTrack(const TrackId tid) noexcept
 {
-    if (midiEditorOpenedForInstrumentTrackId_.has_value()
-        && midiEditorOpenedForInstrumentTrackId_.value() == tid)
+    bool mustClose = midiEditorOpenedForInstrumentTrackId_.has_value()
+                     && midiEditorOpenedForInstrumentTrackId_.value() == tid;
+    // Phase B: an editor open on a TrackKind::Midi row borrows the *destination* instrument's
+    // host, so deleting that instrument track must also close this editor (dangling host ref).
+    if (!mustClose && midiEditorOpenedForInstrumentTrackId_.has_value())
+    {
+        if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+        {
+            const int ix = snap->findTrackIndexById(midiEditorOpenedForInstrumentTrackId_.value());
+            if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Midi
+                && snap->getTrack(ix).getMidiDestinationTrackId() == tid)
+            {
+                mustClose = true;
+            }
+        }
+    }
+    if (mustClose)
     {
         rememberMidiEditorWindowBoundsIfWindowExists();
         midiEditorWindow_.reset();

@@ -143,6 +143,42 @@ public:
     [[nodiscard]] bool hasInstrument() const noexcept;
     [[nodiscard]] juce::String getInstrumentNameForUi() const;
 
+    // -----------------------------------------------------------------------
+    // MIDI delivery capture seam (deterministic Level-1 tests; Phase B)
+    // -----------------------------------------------------------------------
+    /// Observes the exact merged `juce::MidiBuffer` handed to this host's instrument-processing
+    /// boundary, once per processed block, so automated MIDI-routing tests can assert what a
+    /// destination would receive **without loading a real VST3**. Implementations must be
+    /// RT-safe for the duration of a gated offline test run (no locks/alloc in the callback).
+    struct MidiDeliveryCaptureSink
+    {
+        virtual ~MidiDeliveryCaptureSink() = default;
+        /// [Audio/offline render thread] `merged` is the finalized buffer (UI + transport MIDI).
+        virtual void onMidiBlockDelivered(const juce::MidiBuffer& merged, int numSamples) = 0;
+    };
+
+    /// [Message thread, engine stopped/gated] Install (or clear with `nullptr`) the capture sink.
+    /// While installed, the process boundary assembles and delivers the merged MIDI buffer even
+    /// when no plugin instance is loaded (audio output is produced only by a real instrument).
+    void installMidiDeliveryCaptureSinkForTests(MidiDeliveryCaptureSink* sinkOrNull) noexcept
+    {
+        midiCaptureSink_.store(sinkOrNull, std::memory_order_release);
+    }
+
+    /// True when transport MIDI scheduled into this host is consumed this block: a loaded
+    /// instrument, or an installed capture sink (tests without a real VST3).
+    [[nodiscard]] bool acceptsTransportMidi() const noexcept
+    {
+        return hasInstrument() || midiCaptureSink_.load(std::memory_order_acquire) != nullptr;
+    }
+
+    /// Cumulative count of blocks whose merged MIDI reached the processing boundary (plugin
+    /// process or capture-only). Relaxed; diagnostics/tests.
+    [[nodiscard]] std::uint64_t getMidiDeliveryBoundaryBlockCountRelaxed() const noexcept
+    {
+        return rtMidiDeliveryBoundaryBlocks_.load(std::memory_order_relaxed);
+    }
+
     /// Bundle / file path last passed to a successful `loadInstrumentFromVst3File` or
     /// `loadInstrumentFromDescription` (empty after unload). Used for advisory project save only.
     [[nodiscard]] juce::String getLastLoadedVst3OriginalPath() const noexcept;
@@ -233,6 +269,10 @@ private:
     juce::MidiBuffer rtBlockMidi_;
     std::atomic<std::uint64_t> rtTransportMidiAddEventDiscarded_{ 0 };
     int audioCallbackBlockSamples_ = 0;
+
+    /// Test-only capture sink for the MIDI delivery boundary (null in production).
+    std::atomic<MidiDeliveryCaptureSink*> midiCaptureSink_{ nullptr };
+    std::atomic<std::uint64_t> rtMidiDeliveryBoundaryBlocks_{ 0 };
 
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
 

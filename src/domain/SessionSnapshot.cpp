@@ -75,20 +75,28 @@ namespace
                      kTrackChannelVolumeUnityGain,
                      false,
                      false,
-                     TrackKind::Master);
+                     TrackKind::Master,
+                     kTrackStereoPanCenter,
+                     kInvalidTrackId,
+                     {},
+                     // Master emits no MIDI; `Any` keeps the key out of saved projects rather than
+                     // implying this row sends on channel 1.
+                     kTrackMidiOutputChannelAny);
     }
 
     [[nodiscard]] Track normalizedCanonicalMasterRow(const Track& source) noexcept
     {
-        return Track(source.getId(),
-                     juce::String(kMasterTrackDisplayName),
-                     std::vector<PlacedClip>{},
-                     source.getChannelFaderGain(),
-                     false,
-                     source.isMuted(),
-                     TrackKind::Master,
-                     source.getStereoPan(),
-                     {});
+        // Copy-then-override: unknown/future fields ride along instead of silently resetting.
+        return source.withName(juce::String(kMasterTrackDisplayName))
+            .withPlacedClips({})
+            .withTrackOff(false)
+            .withKind(TrackKind::Master)
+            .withRoutedOutputTrackId(kInvalidTrackId)
+            .withSends({})
+            // Master emits no MIDI; `Any` keeps the key out of saved projects rather than implying
+            // this row sends on channel 1.
+            .withMidiOutputChannel(kTrackMidiOutputChannelAny)
+            .withMidiDestinationTrackId(kInvalidTrackId);
     }
 
     [[nodiscard]] bool trackNameIsCanonicalMaster(const juce::String& name) noexcept
@@ -183,47 +191,23 @@ namespace
         return clips;
     }
 
+    // All three duplicate helpers are now full-copy based: the compiler-generated copy constructor
+    // copies every Track field, including fields added after this code was written. The old
+    // positional re-construction dropped `midiOutputChannel` in three repair paths when Phase A
+    // added it; this shape makes that whole failure class impossible.
     [[nodiscard]] Track duplicateTrackSameClips(const Track& t)
     {
-        return Track(t.getId(),
-                     t.getName(),
-                     t.getPlacedClips(),
-                     t.getChannelFaderGain(),
-                     t.isTrackOff(),
-                     t.isMuted(),
-                     t.getKind(),
-                     t.getStereoPan(),
-                     t.getRoutedOutputTrackId(),
-                     t.getSends());
+        return t;
     }
 
     [[nodiscard]] Track duplicateTrackWithMovedClips(const Track& t, std::vector<PlacedClip>&& clips)
     {
-        return Track(t.getId(),
-                     t.getName(),
-                     std::move(clips),
-                     t.getChannelFaderGain(),
-                     t.isTrackOff(),
-                     t.isMuted(),
-                     t.getKind(),
-                     t.getStereoPan(),
-                     t.getRoutedOutputTrackId(),
-                     t.getSends());
+        return t.withPlacedClips(std::move(clips));
     }
 
     [[nodiscard]] Track duplicateTrackSameClipsWithGain(const Track& t, const float linearGain)
     {
-        const float g = juce::jlimit(0.0f, kTrackChannelFaderGainMax, linearGain);
-        return Track(t.getId(),
-                     t.getName(),
-                     t.getPlacedClips(),
-                     g,
-                     t.isTrackOff(),
-                     t.isMuted(),
-                     t.getKind(),
-                     t.getStereoPan(),
-                     t.getRoutedOutputTrackId(),
-                     t.getSends());
+        return t.withChannelFaderGain(linearGain);
     }
 
     [[nodiscard]] TrackId findLastMasterTrackId(const std::vector<Track>& tracks) noexcept
@@ -282,18 +266,7 @@ void SessionSnapshot::ensureMasterTrackInvariant(
         const Track& only = tracks[(size_t)onlyIdx];
         if (instrumentLaneIds != nullptr && instrumentLaneIds->count(only.getId()) > 0)
         {
-            const Track& o = only;
-            tracks[(size_t)onlyIdx]
-                = Track(o.getId(),
-                        o.getName(),
-                        o.getPlacedClips(),
-                        o.getChannelFaderGain(),
-                        o.isTrackOff(),
-                        o.isMuted(),
-                        TrackKind::Instrument,
-                        o.getStereoPan(),
-                        o.getRoutedOutputTrackId(),
-                        o.getSends());
+            tracks[(size_t)onlyIdx] = only.withKind(TrackKind::Instrument);
             const TrackId mid = (allocateMasterId != kInvalidTrackId)
                                     ? allocateMasterId
                                     : (maxTrackIdInList(tracks) + 1);
@@ -314,16 +287,8 @@ void SessionSnapshot::ensureMasterTrackInvariant(
         }
         const Track& dropped = tracks[(size_t)idx];
         const TrackKind demoted = demotedKindForFormerMaster(dropped.getId(), instrumentLaneIds);
-        tracks[(size_t)idx] = Track(dropped.getId(),
-                                    dropped.getName(),
-                                    dropped.getPlacedClips(),
-                                    dropped.getChannelFaderGain(),
-                                    dropped.isTrackOff(),
-                                    dropped.isMuted(),
-                                    demoted,
-                                    dropped.getStereoPan(),
-                                    keptMasterId,
-                                    dropped.getSends());
+        tracks[(size_t)idx]
+            = dropped.withKind(demoted).withRoutedOutputTrackId(keptMasterId);
     }
 
     Track master = normalizedCanonicalMasterRow(tracks[(size_t)keepIdx]);
@@ -334,7 +299,11 @@ void SessionSnapshot::ensureMasterTrackInvariant(
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::ensuringMasterInvariant(
     const SessionSnapshot& previous) noexcept
 {
-    if (previous.isEmpty())
+    // Guard on the TRACK list, not on isEmpty(): isEmpty() means "no placed audio clips
+    // anywhere", which is normal for MIDI-only projects (their notes live in instrument
+    // controllers). Treating those as "empty" here used to replace the whole restored track
+    // layout with the default two-track session on every undo/redo.
+    if (previous.getNumTracks() <= 0)
     {
         return withSingleEmptyTrack(TrackId{1}, juce::String("Track 1"));
     }
@@ -412,6 +381,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTracks(
         session_routing::repairRoutingInPlace(tracks, masterForRepair);
         session_routing::repairSendsInPlace(tracks, masterForRepair);
     }
+    session_routing::repairMidiDestinationsInPlace(tracks);
     const std::int64_t derived = derivedTimelineEndFromTracks(tracks);
     const std::int64_t extentEffective
         = juce::jmax(arrangementExtentSamples, derived);
@@ -706,6 +676,9 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         out.push_back(duplicateTrackSameClips(t));
     }
     const TrackId masterId = previous.findCanonicalMasterTrackId();
+    // Midi rows are not audio-routing nodes: no audio output at all (repairRoutingInPlace keeps it
+    // pinned to none). Their MIDI destination starts at None until the user picks an instrument.
+    const TrackId newRowAudioDest = (kind == TrackKind::Midi) ? kInvalidTrackId : masterId;
     const Track newRow(newTrackId,
                        std::move(newTrackName),
                        std::vector<PlacedClip>{},
@@ -714,7 +687,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
                        false,
                        kind,
                        kTrackStereoPanCenter,
-                       masterId);
+                       newRowAudioDest);
     out.push_back(newRow);
     for (int i = 0; i < previous.getNumTracks(); ++i)
     {
@@ -732,6 +705,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
         session_routing::repairRoutingInPlace(out, masterIdAfterAdd);
         session_routing::repairSendsInPlace(out, masterIdAfterAdd);
     }
+    session_routing::repairMidiDestinationsInPlace(out);
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out), previous.arrangementExtentSamples_,
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
@@ -767,23 +741,18 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
             found = true;
             continue;
         }
-        if (masterId != kInvalidTrackId && t.getRoutedOutputTrackId() == removedTrackId)
+        Track kept = t;
+        if (masterId != kInvalidTrackId && kept.getRoutedOutputTrackId() == removedTrackId)
         {
-            out.push_back(Track(t.getId(),
-                                t.getName(),
-                                t.getPlacedClips(),
-                                t.getChannelFaderGain(),
-                                t.isTrackOff(),
-                                t.isMuted(),
-                                t.getKind(),
-                                t.getStereoPan(),
-                                masterId,
-                                t.getSends()));
+            kept = kept.withRoutedOutputTrackId(masterId);
         }
-        else
+        // Deleting an instrument repairs dependent MIDI rows to **None** (disconnected but fully
+        // editable) — never a silent retarget by index or name.
+        if (kept.getMidiDestinationTrackId() == removedTrackId)
         {
-            out.push_back(duplicateTrackSameClips(t));
+            kept = kept.withMidiDestinationTrackId(kInvalidTrackId);
         }
+        out.push_back(std::move(kept));
     }
     if (!found)
     {
@@ -802,6 +771,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
         session_routing::repairRoutingInPlace(out, masterAfterRemove);
         session_routing::repairSendsInPlace(out, masterAfterRemove);
     }
+    session_routing::repairMidiDestinationsInPlace(out);
     return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
         std::move(out),
         previous.arrangementExtentSamples_,
@@ -1320,16 +1290,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackStereoPan(
         }
         else
         {
-            out.push_back(Track(t.getId(),
-                                t.getName(),
-                                t.getPlacedClips(),
-                                t.getChannelFaderGain(),
-                                t.isTrackOff(),
-                                t.isMuted(),
-                                t.getKind(),
-                                p,
-                                t.getRoutedOutputTrackId(),
-                                t.getSends()));
+            out.push_back(t.withStereoPan(p));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(
@@ -1390,16 +1351,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRoutedOutputTo(
         }
         else
         {
-            out.push_back(Track(t.getId(),
-                                t.getName(),
-                                t.getPlacedClips(),
-                                t.getChannelFaderGain(),
-                                t.isTrackOff(),
-                                t.isMuted(),
-                                t.getKind(),
-                                t.getStereoPan(),
-                                destTrackId,
-                                t.getSends()));
+            out.push_back(t.withRoutedOutputTrackId(destTrackId));
         }
     }
     return withTracks(std::move(out),
@@ -1476,16 +1428,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendInserted(
         inserted.enabled = true;
         inserted.uiSlotIndex = uiSlotIndex;
         sends.push_back(inserted);
-        out.push_back(Track(t.getId(),
-                            t.getName(),
-                            t.getPlacedClips(),
-                            t.getChannelFaderGain(),
-                            t.isTrackOff(),
-                            t.isMuted(),
-                            t.getKind(),
-                            t.getStereoPan(),
-                            t.getRoutedOutputTrackId(),
-                            std::move(sends)));
+        out.push_back(t.withSends(std::move(sends)));
     }
     return withTracks(std::move(out),
                       previous.getStoredArrangementExtentSamples(),
@@ -1534,16 +1477,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendRemoved(
         }
         std::vector<TrackSend> sends = t.getSends();
         sends.erase(sends.begin() + sendIndex);
-        out.push_back(Track(t.getId(),
-                            t.getName(),
-                            t.getPlacedClips(),
-                            t.getChannelFaderGain(),
-                            t.isTrackOff(),
-                            t.isMuted(),
-                            t.getKind(),
-                            t.getStereoPan(),
-                            t.getRoutedOutputTrackId(),
-                            std::move(sends)));
+        out.push_back(t.withSends(std::move(sends)));
     }
     return withTracks(std::move(out),
                       previous.getStoredArrangementExtentSamples(),
@@ -1612,16 +1546,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendDestination
         }
         std::vector<TrackSend> sends = t.getSends();
         sends[(size_t)sendIndex].destTrackId = destTrackId;
-        out.push_back(Track(t.getId(),
-                            t.getName(),
-                            t.getPlacedClips(),
-                            t.getChannelFaderGain(),
-                            t.isTrackOff(),
-                            t.isMuted(),
-                            t.getKind(),
-                            t.getStereoPan(),
-                            t.getRoutedOutputTrackId(),
-                            std::move(sends)));
+        out.push_back(t.withSends(std::move(sends)));
     }
     if (!session_routing::isLegalSendDestinationForTrackList(out, trackId, destTrackId))
     {
@@ -1691,16 +1616,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendAmount(
         }
         std::vector<TrackSend> sends = t.getSends();
         sends[(size_t)sendIndex].amountLinear = clamped;
-        out.push_back(Track(t.getId(),
-                            t.getName(),
-                            t.getPlacedClips(),
-                            t.getChannelFaderGain(),
-                            t.isTrackOff(),
-                            t.isMuted(),
-                            t.getKind(),
-                            t.getStereoPan(),
-                            t.getRoutedOutputTrackId(),
-                            std::move(sends)));
+        out.push_back(t.withSends(std::move(sends)));
     }
     return withTracks(std::move(out),
                       previous.getStoredArrangementExtentSamples(),
@@ -1759,16 +1675,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackSendEnabled(
         }
         std::vector<TrackSend> sends = t.getSends();
         sends[(size_t)sendIndex].enabled = enabled;
-        out.push_back(Track(t.getId(),
-                            t.getName(),
-                            t.getPlacedClips(),
-                            t.getChannelFaderGain(),
-                            t.isTrackOff(),
-                            t.isMuted(),
-                            t.getKind(),
-                            t.getStereoPan(),
-                            t.getRoutedOutputTrackId(),
-                            std::move(sends)));
+        out.push_back(t.withSends(std::move(sends)));
     }
     if (enabled
         && !session_routing::isLegalSendDestinationForTrackList(
@@ -1828,17 +1735,95 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackOff(
         }
         else
         {
-            out.push_back(Track(t.getId(),
-                                t.getName(),
-                                t.getPlacedClips(),
-                                t.getChannelFaderGain(),
-                                effectiveOff,
-                                t.isMuted(),
-                                t.getKind(),
-                                t.getStereoPan(),
-                                t.getRoutedOutputTrackId(),
-                                t.getSends()));
+            out.push_back(t.withTrackOff(effectiveOff));
         }
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMidiOutputChannel(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const int midiOutputChannel) noexcept
+{
+    const int wanted = sanitizeTrackMidiOutputChannel(midiOutputChannel);
+    const int tIdx = (trackId == kInvalidTrackId) ? -1 : previous.findTrackIndexById(trackId);
+    if (tIdx < 0 || previous.getTrack(tIdx).getMidiOutputChannel() == wanted)
+    {
+        // Unknown row, or already on that channel: hand back the same tracks so callers that
+        // republish render snapshots on every edit do not churn for a no-op.
+        jassert(tIdx >= 0);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        if (i != tIdx)
+        {
+            out.push_back(duplicateTrackSameClips(t));
+        }
+        else
+        {
+            out.push_back(t.withMidiOutputChannel(wanted));
+        }
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
+}
+
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMidiDestination(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const TrackId destinationTrackId) noexcept
+{
+    const auto noopCopy = [&previous]
+    {
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(),
+            previous.getProjectMusicalTime()});
+    };
+    const int tIdx = (trackId == kInvalidTrackId) ? -1 : previous.findTrackIndexById(trackId);
+    if (tIdx < 0 || previous.getTrack(tIdx).getKind() != TrackKind::Midi)
+    {
+        jassert(false);
+        return noopCopy();
+    }
+    if (destinationTrackId != kInvalidTrackId)
+    {
+        const int dIdx = previous.findTrackIndexById(destinationTrackId);
+        if (dIdx < 0 || previous.getTrack(dIdx).getKind() != TrackKind::Instrument)
+        {
+            // Only existing Instrument rows are legal MIDI destinations; illegal requests are
+            // rejected rather than repaired so the caller's UI state stays honest.
+            jassert(false);
+            return noopCopy();
+        }
+    }
+    if (previous.getTrack(tIdx).getMidiDestinationTrackId() == destinationTrackId)
+    {
+        return noopCopy();
+    }
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        out.push_back(i == tIdx ? t.withMidiDestinationTrackId(destinationTrackId) : t);
     }
     return std::shared_ptr<const SessionSnapshot>(
         new SessionSnapshot(std::move(out),
@@ -1879,16 +1864,7 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackMuted(
         }
         else
         {
-            out.push_back(Track(t.getId(),
-                                t.getName(),
-                                t.getPlacedClips(),
-                                t.getChannelFaderGain(),
-                                t.isTrackOff(),
-                                trackMuted,
-                                t.getKind(),
-                                t.getStereoPan(),
-                                t.getRoutedOutputTrackId(),
-                                t.getSends()));
+            out.push_back(t.withMuted(trackMuted));
         }
     }
     return std::shared_ptr<const SessionSnapshot>(

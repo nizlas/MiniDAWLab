@@ -744,7 +744,7 @@ private:
                 {
                     execute(juce::String("Trim MIDI clip"), [this, laneTid, cid, ns, nl]() mutable -> bool {
                         InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
-                        InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+                        InstrumentTrackController* ctl = rc.getMidiClipControllerForTrack(laneTid);
                         if (ctl == nullptr || !ctl->hasInstrumentTrack())
                         {
                             return false;
@@ -844,7 +844,7 @@ private:
                     TrackId laneTid = laneTimelineTrackId_;
                     execute(juce::String("Move MIDI clip"), [this, laneTid, dCommit]() mutable -> bool {
                         InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
-                        InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+                        InstrumentTrackController* ctl = rc.getMidiClipControllerForTrack(laneTid);
                         if (ctl == nullptr || !ctl->hasInstrumentTrack())
                         {
                             return false;
@@ -976,7 +976,7 @@ private:
             {
                 execute(juce::String("Rename MIDI clip"), [this, laneTid, cid, text]() -> bool {
                     InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
-                    InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+                    InstrumentTrackController* ctl = rc.getMidiClipControllerForTrack(laneTid);
                     if (ctl == nullptr || !ctl->hasInstrumentTrack())
                     {
                         return false;
@@ -1113,7 +1113,7 @@ private:
         auto createdId = std::make_shared<InstrumentMidiClipId>(0);
         auto createClip = [this, laneTid, startSample, createdId]() -> bool {
             InstrumentRuntimeCoordinator& rc = owner_.instrumentRuntime_;
-            InstrumentTrackController* ctl = rc.getInstrumentControllerForTrack(laneTid);
+            InstrumentTrackController* ctl = rc.getMidiClipControllerForTrack(laneTid);
             if (ctl == nullptr || !ctl->hasInstrumentTrack())
             {
                 return false;
@@ -1653,12 +1653,14 @@ void InstrumentTimelineRowCoordinator::syncInstrumentTimelineRowAttachmentToSess
         for (int ti = 0; ti < snap->getNumTracks(); ++ti)
         {
             const Track& tr = snap->getTrack(ti);
-            if (tr.getKind() != TrackKind::Instrument)
+            // TrackKind::Midi rows reuse the instrument timeline row UI (header + MIDI event
+            // lane); their controller is the plugin-less MIDI content controller.
+            if (tr.getKind() != TrackKind::Instrument && tr.getKind() != TrackKind::Midi)
             {
                 continue;
             }
             const TrackId laneTid = tr.getId();
-            InstrumentTrackController* ctl = instrumentRuntime_.getInstrumentControllerForTrack(laneTid);
+            InstrumentTrackController* ctl = instrumentRuntime_.getMidiClipControllerForTrack(laneTid);
             if (ctl == nullptr || !ctl->hasInstrumentTrack()
                 || ctl->getExperimentalInstrumentDomainTrackId() != laneTid)
             {
@@ -1686,7 +1688,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
     {
         return;
     }
-    InstrumentTrackController* ctl = instrumentRuntime_.getInstrumentControllerForTrack(tid);
+    InstrumentTrackController* ctl = instrumentRuntime_.getMidiClipControllerForTrack(tid);
     if (ctl == nullptr || !ctl->hasInstrumentTrack())
     {
         return;

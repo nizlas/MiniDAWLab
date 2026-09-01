@@ -589,7 +589,9 @@ InspectorView::InspectorView(Session& session)
     };
     addAndMakeVisible(panField_);
 
-    outputCaptionLabel_.setText("Output", juce::dontSendNotification);
+    // "Audio Output", not "Output": instrument rows now also show a MIDI destination channel, and a
+    // user must be able to tell the two apart at a glance.
+    outputCaptionLabel_.setText("Audio Output", juce::dontSendNotification);
     outputCaptionLabel_.setFont(juce::FontOptions(11.0f));
     addAndMakeVisible(outputCaptionLabel_);
 
@@ -612,6 +614,71 @@ InspectorView::InspectorView(Session& session)
         routedOutputHandler_(active, outputComboDestIds_[ix]);
     };
     addAndMakeVisible(outputComboBox_);
+
+    midiChannelCaptionLabel_.setText("MIDI Channel", juce::dontSendNotification);
+    midiChannelCaptionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(midiChannelCaptionLabel_);
+
+    midiChannelComboBox_.onChange = [this] {
+        if (midiChannelComboGuard_ || midiOutputChannelHandler_ == nullptr)
+        {
+            return;
+        }
+        const TrackId active = session_.getActiveTrackId();
+        const int pick = midiChannelComboBox_.getSelectedId();
+        if (active == kInvalidTrackId || pick <= 0)
+        {
+            return;
+        }
+        const size_t ix = static_cast<size_t>(pick - 1);
+        if (ix >= midiChannelComboValues_.size())
+        {
+            return;
+        }
+        midiOutputChannelHandler_(active, midiChannelComboValues_[ix]);
+    };
+    addAndMakeVisible(midiChannelComboBox_);
+    {
+        const juce::String midiChannelTip
+            = "Which MIDI channel this track sends to its instrument.\n\n"
+              "Any (Preserve): each note plays on the channel stored in the note itself.\n"
+              "1-16: every note from this track plays on that channel, without rewriting the "
+              "stored notes.\n\nSee Help > MIDI Channels for details.";
+        midiChannelCaptionLabel_.setTooltip(midiChannelTip);
+        midiChannelComboBox_.setTooltip(midiChannelTip);
+    }
+
+    midiDestCaptionLabel_.setText("MIDI To", juce::dontSendNotification);
+    midiDestCaptionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(midiDestCaptionLabel_);
+
+    midiDestComboBox_.onChange = [this] {
+        if (midiDestComboGuard_ || midiDestinationHandler_ == nullptr)
+        {
+            return;
+        }
+        const TrackId active = session_.getActiveTrackId();
+        const int pick = midiDestComboBox_.getSelectedId();
+        if (active == kInvalidTrackId || pick <= 0)
+        {
+            return;
+        }
+        const size_t ix = static_cast<size_t>(pick - 1);
+        if (ix >= midiDestComboValues_.size())
+        {
+            return;
+        }
+        midiDestinationHandler_(active, midiDestComboValues_[ix]);
+    };
+    addAndMakeVisible(midiDestComboBox_);
+    {
+        const juce::String midiDestTip
+            = "Which instrument track this MIDI track plays through.\n\n"
+              "Several MIDI tracks can point at the same instrument. With no destination the "
+              "track is silent.\n\nSee Help > MIDI Channels for details.";
+        midiDestCaptionLabel_.setTooltip(midiDestTip);
+        midiDestComboBox_.setTooltip(midiDestTip);
+    }
 
     insertsSectionLabel_.setText("Inserts", juce::dontSendNotification);
     insertsSectionLabel_.setFont(juce::FontOptions(11.0f));
@@ -1595,7 +1662,93 @@ void InspectorView::refreshFromSession()
         panField_.setPan(tr.getStereoPan(), juce::dontSendNotification);
     }
 
-    const bool showOutputRouting = (tr.getKind() != TrackKind::Master);
+    // MIDI channel only concerns rows that emit MIDI. Audio, Group and Master rows have none.
+    const bool showMidiChannel
+        = (tr.getKind() == TrackKind::Instrument || tr.getKind() == TrackKind::Midi);
+    const bool showMidiDest = (tr.getKind() == TrackKind::Midi);
+    const bool midiChannelVisibilityChanged = (midiChannelComboBox_.isVisible() != showMidiChannel)
+                                              || (midiDestComboBox_.isVisible() != showMidiDest);
+    midiChannelCaptionLabel_.setVisible(showMidiChannel);
+    midiChannelComboBox_.setVisible(showMidiChannel);
+    midiDestCaptionLabel_.setVisible(showMidiDest);
+    midiDestComboBox_.setVisible(showMidiDest);
+    if (midiChannelVisibilityChanged)
+    {
+        // `resized()` only reserves a row for this control while it is visible, so the rest of the
+        // panel has to be re-flowed when the selected row changes kind.
+        resized();
+    }
+    if (showMidiChannel)
+    {
+        midiChannelComboGuard_ = true;
+        midiChannelComboBox_.clear(juce::dontSendNotification);
+        midiChannelComboValues_.clear();
+        const int current = tr.getMidiOutputChannel();
+        int selectId = 0;
+        const auto addChannelItem = [this, current, &selectId](const int value,
+                                                              const juce::String& label) {
+            midiChannelComboValues_.push_back(value);
+            const int itemId = static_cast<int>(midiChannelComboValues_.size());
+            midiChannelComboBox_.addItem(label, itemId);
+            if (value == current)
+            {
+                selectId = itemId;
+            }
+        };
+        // "Preserve" is the wording used by the MIDI help page and the editor's channel readout:
+        // the setting preserves each event's stored channel rather than choosing one.
+        addChannelItem(kTrackMidiOutputChannelAny, "Any (Preserve)");
+        for (int ch = kTrackMidiOutputChannelMin; ch <= kTrackMidiOutputChannelMax; ++ch)
+        {
+            addChannelItem(ch,
+                           ch == kTrackMidiOutputChannelDrums ? juce::String("10 (drums)")
+                                                              : juce::String(ch));
+        }
+        if (selectId > 0)
+        {
+            midiChannelComboBox_.setSelectedId(selectId, juce::dontSendNotification);
+        }
+        midiChannelComboGuard_ = false;
+    }
+
+    if (showMidiDest)
+    {
+        midiDestComboGuard_ = true;
+        midiDestComboBox_.clear(juce::dontSendNotification);
+        midiDestComboValues_.clear();
+        const TrackId currentDest = tr.getMidiDestinationTrackId();
+        int selectId = 0;
+        const auto addDestItem = [this, currentDest, &selectId](const TrackId destId,
+                                                                const juce::String& label) {
+            midiDestComboValues_.push_back(destId);
+            const int itemId = static_cast<int>(midiDestComboValues_.size());
+            midiDestComboBox_.addItem(label, itemId);
+            if (destId == currentDest)
+            {
+                selectId = itemId;
+            }
+        };
+        addDestItem(kInvalidTrackId, "No destination (silent)");
+        if (const auto destSnap = session_.loadSessionSnapshotForAudioThread())
+        {
+            for (int di = 0; di < destSnap->getNumTracks(); ++di)
+            {
+                const Track& cand = destSnap->getTrack(di);
+                if (cand.getKind() != TrackKind::Instrument)
+                {
+                    continue;
+                }
+                addDestItem(cand.getId(), cand.getName());
+            }
+        }
+        // A stale destination (row deleted/re-kinded) falls back to the "No destination" item.
+        midiDestComboBox_.setSelectedId(selectId > 0 ? selectId : 1, juce::dontSendNotification);
+        midiDestComboGuard_ = false;
+    }
+
+    // Midi rows are not audio-routing sources, so the Audio Output row is hidden for them.
+    const bool showOutputRouting
+        = (tr.getKind() != TrackKind::Master && tr.getKind() != TrackKind::Midi);
     outputCaptionLabel_.setVisible(showOutputRouting);
     outputComboBox_.setVisible(showOutputRouting);
     if (showOutputRouting)
@@ -1692,6 +1845,24 @@ void InspectorView::resized()
         auto panRow = area.removeFromTop(36);
         panField_.setBounds(panRow);
         panField_.toFront(false);
+    }
+
+    // MIDI Channel sits directly above Audio Output, and only claims vertical space on the rows that
+    // actually show it (instrument rows) so audio/group/master inspectors keep their old layout.
+    if (midiChannelComboBox_.isVisible())
+    {
+        area.removeFromTop(8);
+        midiChannelCaptionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        midiChannelComboBox_.setBounds(area.removeFromTop(24));
+    }
+
+    if (midiDestComboBox_.isVisible())
+    {
+        area.removeFromTop(8);
+        midiDestCaptionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        midiDestComboBox_.setBounds(area.removeFromTop(24));
     }
 
     area.removeFromTop(8);

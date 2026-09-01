@@ -44,6 +44,11 @@ void repairRoutingInPlace(std::vector<Track>& tracks, TrackId masterTrackId) noe
 /// Sanitize sends (Master cleared, invalid destinations dropped, amounts clamped, cycles broken by disable).
 void repairSendsInPlace(std::vector<Track>& tracks, TrackId masterTrackId) noexcept;
 
+/// Repair every `Midi` row's **MIDI To**: destinations that are missing or not `Instrument` rows
+/// become `kInvalidTrackId` (None). Non-`Midi` rows are forced to None. Identity-based only —
+/// never retargets by list position or name.
+void repairMidiDestinationsInPlace(std::vector<Track>& tracks) noexcept;
+
 /// Assign/repair `TrackSend::uiSlotIndex` (unique 0..3; drops overflow when no free slot).
 void repairTrackSendUiSlotsInPlace(std::vector<TrackSend>& sends) noexcept;
 

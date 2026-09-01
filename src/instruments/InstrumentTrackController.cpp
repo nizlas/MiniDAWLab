@@ -8,6 +8,7 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/InstrumentCatalog.h"
 #include "plugins/Vst3ChildProcessScan.h"
+#include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +18,45 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
+
+/// v19: DTO → in-memory CC points, clamped before the narrowing casts (a negative JSON value
+/// must not wrap through uint8) and normalized (sorted, duplicate identities resolved
+/// deterministically). Repairs touch ONLY the CC vector — notes are never affected — and are
+/// reported to the project-load diagnostic log.
+static void copyAndNormalizeCcPointsFromDto(const ProjectFileExperimentalInstrumentClipV1& cdto,
+                                            InstrumentMidiClip& clip)
+{
+    clip.pattern.ccPoints.clear();
+    for (const auto& cp : cdto.ccPoints)
+    {
+        MidiCcPoint p;
+        p.startTick = cp.startTick;
+        p.controller = (std::uint8_t)midi_cc::sanitizeController(cp.controller);
+        p.value = (std::uint8_t)midi_cc::sanitizeValue(cp.value);
+        p.channel = (std::uint8_t)midi_cc::sanitizeChannel(cp.channel);
+        p.interpolationToNext = midi_cc::sanitizeInterpolation(cp.interpolationToNext);
+        // Range flags feed the repair count via normalizePoints' clamp detection; the clamped
+        // copy also keeps out-of-range source values from surviving as-is.
+        if (cp.controller != (int)p.controller || cp.value != (int)p.value
+            || cp.channel != (int)p.channel)
+        {
+            appendProjectLoadDiagnosticLine(
+                juce::String("cc-load: clamped out-of-range CC point (clip id=")
+                + juce::String((juce::int64)cdto.id) + ", controller=" + juce::String(cp.controller)
+                + ", value=" + juce::String(cp.value) + ", channel=" + juce::String(cp.channel)
+                + ")");
+        }
+        clip.pattern.ccPoints.push_back(p);
+    }
+    const int repaired = midi_cc::normalizePoints(clip.pattern.ccPoints);
+    if (repaired > 0)
+    {
+        appendProjectLoadDiagnosticLine(
+            juce::String("cc-load: normalized ") + juce::String(repaired)
+            + " CC point(s) (dropped negative ticks / resolved duplicate identities) on clip id="
+            + juce::String((juce::int64)cdto.id) + "; notes untouched");
+    }
+}
 
 [[nodiscard]] static const ProjectFileExperimentalInstrumentTrackV1*
     selectedFirstEnabledSupportedExperimentalInstrumentPayload(
@@ -117,15 +157,16 @@ TrackId InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjec
     return resolveExperimentalInstrumentBindLaneId(sessionNullable, dtoTrackField, persistedSerializedTracksMaybe);
 }
 
-InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept
-    : host_(host)
+InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost* hostOrNull) noexcept
+    : host_(hostOrNull)
 {
+    rtCcLastSentValue_.fill(-1); // -1 = "nothing delivered yet" (0 is a valid CC value)
     publishRenderSnapshot();
 }
 
 bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
 {
-    if (!host_.hasInstrument())
+    if (host_ == nullptr || !host_->hasInstrument())
     {
         return false;
     }
@@ -133,7 +174,7 @@ bool InstrumentTrackController::computeInstrumentLoadedFromHost() const noexcept
     {
         return true;
     }
-    const juce::String n = host_.getInstrumentNameForUi();
+    const juce::String n = host_->getInstrumentNameForUi();
     return n.containsIgnoreCase("Groove Agent") || n.containsIgnoreCase("GrooveAgent")
            || mini_daw::instrumentDisplayNameLooksLikeHalionSonic(n);
 }
@@ -284,6 +325,57 @@ bool InstrumentTrackController::bootstrapGenericCatalogInstrumentShellForSession
         pendingInstrumentKind_.clear();
     }
     instrumentLoaded_ = computeInstrumentLoadedFromHost();
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return true;
+}
+
+bool InstrumentTrackController::bootstrapMidiContentShellForSessionTrack(
+    const TrackId sessionMidiTrackId) noexcept
+{
+    if (sessionMidiTrackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    if (host_ != nullptr)
+    {
+        // MIDI content lanes must be plugin-less by construction; a hosted controller belongs to
+        // exactly one Instrument row.
+        jassert(false);
+        return false;
+    }
+    if (trackActive_ && experimentalDomainTrackId_ != sessionMidiTrackId)
+    {
+        return false;
+    }
+    if (session_ == nullptr)
+    {
+        return false;
+    }
+    if (const auto snap = session_->loadSessionSnapshotForAudioThread())
+    {
+        const int ix = snap->findTrackIndexById(sessionMidiTrackId);
+        if (ix < 0 || snap->getTrack(ix).getKind() != TrackKind::Midi)
+        {
+            return false;
+        }
+    }
+
+    experimentalDomainTrackId_ = sessionMidiTrackId;
+
+    trackActive_ = true;
+    powerOn_ = true;
+    muted_ = false;
+    isActive_ = false;
+    requiredKitName_.clear();
+    experimentalInstrumentKind_ = "MidiContent";
+    pendingProjectGrooveAutoload_ = false;
+    pendingProjectHalionSonicAutoload_ = false;
+    pendingProjectGenericVst3Autoload_ = false;
+    pendingAdvisoryPluginBundlePath_.clear();
+    pendingInstrumentKind_.clear();
+    instrumentLoaded_ = false;
 
     publishRenderSnapshot();
     sendChangeMessage();
@@ -490,6 +582,14 @@ void InstrumentTrackController::setPowerOn(const bool on) noexcept
     sendChangeMessage();
 }
 
+void InstrumentTrackController::refreshMidiOutputChannelFromSession()
+{
+    // Notes already sounding keep the channel they started on; their note-offs are queued with that
+    // same channel in `rtPendingOffs_`, so a channel change mid-note cannot strand them.
+    publishRenderSnapshot();
+    sendChangeMessage();
+}
+
 void InstrumentTrackController::setMuted(const bool muted) noexcept
 {
     if (muted_ == muted)
@@ -682,7 +782,7 @@ bool InstrumentTrackController::hasAnyEffectiveDrumLabels() const noexcept
 
 void InstrumentTrackController::requestPluginDrumNameProbeIfUnlabeled() noexcept
 {
-    if (hasAnyEffectiveDrumLabels() || !host_.hasInstrument())
+    if (host_ == nullptr || hasAnyEffectiveDrumLabels() || !host_->hasInstrument())
     {
         return;
     }
@@ -692,7 +792,7 @@ void InstrumentTrackController::requestPluginDrumNameProbeIfUnlabeled() noexcept
         return;
     }
     lastDrumNameProbeRequestMs_ = now;
-    host_.requestDeferredPluginDrumNameHarvest();
+    host_->requestDeferredPluginDrumNameHarvest();
 }
 
 void InstrumentTrackController::pruneDrumLabelLayersIfUnused(const int midiNote) noexcept
@@ -745,14 +845,14 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     juce::String kind = experimentalInstrumentKind_;
     if (kind.isEmpty())
     {
-        kind = "GrooveAgentSE";
+        kind = (host_ == nullptr) ? "MidiContent" : "GrooveAgentSE";
     }
     dto.instrumentKind = kind;
-    if (kind == "GenericVst3")
+    if (kind == "GenericVst3" && host_ != nullptr)
     {
         dto.requiredKitName.clear();
-        dto.pluginBundlePath = host_.getLastLoadedVst3OriginalPath();
-        dto.pluginWasLoadedOnSave = host_.hasInstrument();
+        dto.pluginBundlePath = host_->getLastLoadedVst3OriginalPath();
+        dto.pluginWasLoadedOnSave = host_->hasInstrument();
         dto.hasGenericVst3Descriptor = false;
         dto.genericVst3Descriptor = {};
         if (session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
@@ -766,12 +866,12 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
                 }
             }
         }
-        if (dto.name.isEmpty() && host_.hasInstrument())
+        if (dto.name.isEmpty() && host_->hasInstrument())
         {
-            dto.name = host_.getInstrumentNameForUi();
+            dto.name = host_->getInstrumentNameForUi();
         }
         juce::PluginDescription pd;
-        if (host_.getLastLoadedPluginDescription(pd))
+        if (host_->getLastLoadedPluginDescription(pd))
         {
             dto.hasGenericVst3Descriptor = true;
             mini_daw::fillProjectGenericVst3DescriptorFromPluginDescription(dto.genericVst3Descriptor, pd);
@@ -780,7 +880,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         juce::String stateCaptureFailure;
         if (stateCaptureAttempted)
         {
-            dto.pluginStateBase64 = host_.getCurrentInstrumentStateBase64();
+            dto.pluginStateBase64 = host_->getCurrentInstrumentStateBase64();
             if (dto.pluginStateBase64.isEmpty())
             {
                 stateCaptureFailure = "getStateInformation returned empty or zero bytes";
@@ -788,7 +888,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         }
         appendProjectSaveDiagnosticLine(
             "save: GenericVst3 controller trackId=" + juce::String((juce::int64)dto.trackId) + " name=\""
-            + dto.name + "\" hostHasInstrument=" + juce::String(host_.hasInstrument() ? "yes" : "no")
+            + dto.name + "\" hostHasInstrument=" + juce::String(host_->hasInstrument() ? "yes" : "no")
             + " instrumentLoaded=" + juce::String(instrumentLoaded_ ? "yes" : "no") + " pluginWasLoadedOnSave="
             + juce::String(dto.pluginWasLoadedOnSave ? "yes" : "no") + " hasDescriptor="
             + juce::String(dto.hasGenericVst3Descriptor ? "yes" : "no") + " bundlePath=\""
@@ -827,17 +927,26 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         dto.name.clear();
         dto.requiredKitName = requiredKitName_;
     }
+    else if (kind == "MidiContent")
+    {
+        // Plugin-less MIDI content lane: clips + power/mute only; every plugin field stays empty.
+        dto.name.clear();
+        dto.requiredKitName.clear();
+    }
     else
     {
         dto.name = "Groove Agent SE";
         dto.requiredKitName
             = requiredKitName_.isNotEmpty() ? requiredKitName_ : juce::String("FiftySixDegreesModified");
     }
-    dto.pluginBundlePath = host_.getLastLoadedVst3OriginalPath();
-    dto.pluginWasLoadedOnSave = host_.hasInstrument();
-    if (kind != "GenericVst3" && dto.pluginWasLoadedOnSave)
+    if (host_ != nullptr)
     {
-        dto.pluginStateBase64 = host_.getCurrentInstrumentStateBase64();
+        dto.pluginBundlePath = host_->getLastLoadedVst3OriginalPath();
+        dto.pluginWasLoadedOnSave = host_->hasInstrument();
+        if (kind != "GenericVst3" && dto.pluginWasLoadedOnSave)
+        {
+            dto.pluginStateBase64 = host_->getCurrentInstrumentStateBase64();
+        }
     }
     dto.powerOn = powerOn_;
     dto.muted = muted_;
@@ -881,6 +990,16 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
             t.startTick = nn.startTick;
             t.durationTicks = nn.durationTicks;
             c.timelineNotes.push_back(std::move(t));
+        }
+        for (const auto& cp : cptr->pattern.ccPoints)
+        {
+            ProjectFileExperimentalMidiCcPointV19 p;
+            p.startTick = cp.startTick;
+            p.controller = (int)cp.controller;
+            p.value = (int)cp.value;
+            p.channel = (int)cp.channel;
+            p.interpolationToNext = cp.interpolationToNext == MidiCcInterpolation::linear ? 1 : 0;
+            c.ccPoints.push_back(p);
         }
         dto.clips.push_back(std::move(c));
     }
@@ -1001,6 +1120,7 @@ void InstrumentTrackController::applyExperimentalInstrumentMusicalUndoBlock(
             n.durationTicks = juce::jmax<std::int64_t>(1, tn.durationTicks);
             clip->pattern.timelineNotes.push_back(n);
         }
+        copyAndNormalizeCcPointsFromDto(cdto, *clip);
         clips_.push_back(std::move(clip));
     }
     for (auto& cp : clips_)
@@ -1047,8 +1167,30 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
 {
     clearExperimentalInstrumentStateForProjectLoad();
 
-    experimentalDomainTrackId_
-        = resolveExperimentalInstrumentBindLaneId(session_, chosen.trackId, persistedSerializedTrackRows);
+    if (chosen.instrumentKind == "MidiContent")
+    {
+        // Phase B: MidiContent rows bind strictly by id to a TrackKind::Midi session row — the
+        // instrument resolver below would otherwise fall back to the first Instrument lane and
+        // misdeliver these clips.
+        experimentalDomainTrackId_ = kInvalidTrackId;
+        if (session_ != nullptr && chosen.trackId != kInvalidTrackId
+            && chosen.trackId != static_cast<TrackId>(0))
+        {
+            if (const auto snapMidi = session_->loadSessionSnapshotForAudioThread())
+            {
+                const int ix = snapMidi->findTrackIndexById(chosen.trackId);
+                if (ix >= 0 && snapMidi->getTrack(ix).getKind() == TrackKind::Midi)
+                {
+                    experimentalDomainTrackId_ = chosen.trackId;
+                }
+            }
+        }
+    }
+    else
+    {
+        experimentalDomainTrackId_
+            = resolveExperimentalInstrumentBindLaneId(session_, chosen.trackId, persistedSerializedTrackRows);
+    }
 
     std::shared_ptr<const SessionSnapshot> snap;
     if (session_ != nullptr)
@@ -1142,6 +1284,7 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
             n.durationTicks = juce::jmax<std::int64_t>(1, tn.durationTicks);
             clip->pattern.timelineNotes.push_back(n);
         }
+        copyAndNormalizeCcPointsFromDto(cdto, *clip);
         clips_.push_back(std::move(clip));
     }
     // Clips always play at the project tempo: per-clip bpm stored by older project files is overridden
@@ -2125,7 +2268,23 @@ void InstrumentTrackController::publishRenderSnapshot()
 {
     auto snap = std::make_shared<InstrumentTrackRenderSnapshot>();
     snap->revision = nextSnapshotRevision_++;
-    snap->midiChannel = 1;
+    // MIDI output channel is resolved here, once per publish, and baked into every event below.
+    // Doing it on the [Message thread] rather than at dispatch means the audio thread needs no
+    // session lookup, and note-offs, the pending-off queue and offline mixdown all inherit the
+    // remap for free because they consume these same events.
+    snap->midiChannel = kTrackMidiOutputChannelAny;
+    if (session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
+    {
+        if (const auto sessionSnap = session_->loadSessionSnapshotForAudioThread())
+        {
+            const int tIdx = sessionSnap->findTrackIndexById(experimentalDomainTrackId_);
+            if (tIdx >= 0)
+            {
+                snap->midiChannel = sessionSnap->getTrack(tIdx).getMidiOutputChannel();
+            }
+        }
+    }
+    const int forcedMidiChannel = snap->midiChannel;
     double sr = timelineSampleRate_;
     if (sr <= 0.0 || !std::isfinite(sr))
     {
@@ -2135,7 +2294,10 @@ void InstrumentTrackController::publishRenderSnapshot()
     // Transport MIDI must follow **host readiness** (`layoutOk` instrument). `instrumentLoaded_` mirrored
     // that via a Groove-shaped name heuristic and could stay false while the plug-in actually processed
     // audio — starving `audioThread_scheduleTransportMidiForSegment` even though clips paint from `clips_`.
-    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_ && host_.hasInstrument();
+    // Plugin-less MIDI content lanes have no host readiness of their own: whether their events are
+    // audible is decided by the **destination** instrument, which the engine resolves per block.
+    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_
+                            && (host_ == nullptr || host_->acceptsTransportMidi());
 
     for (const auto& cptr : clips_)
     {
@@ -2169,7 +2331,9 @@ void InstrumentTrackController::publishRenderSnapshot()
                 ev.midiNote = (std::uint8_t)juce::jlimit(0, 127, tn.midiNote);
                 ev.velocity = (std::uint8_t)juce::jlimit(1, 127, tn.velocity);
                 ev.offVelocity = (std::uint8_t)sanitizeMidiNoteOffVelocity(tn.offVelocity);
-                ev.midiChannel = (std::uint8_t)juce::jlimit(1, 16, (int)tn.channel);
+                ev.midiChannel = (std::uint8_t)(forcedMidiChannel == kTrackMidiOutputChannelAny
+                                                    ? juce::jlimit(1, 16, (int)tn.channel)
+                                                    : forcedMidiChannel);
                 if (ev.absSample < plan.startSamples || ev.absSample >= plan.endSamplesExclusive)
                 {
                     continue;
@@ -2187,6 +2351,89 @@ void InstrumentTrackController::publishRenderSnapshot()
                                                          const InstrumentClipRenderPlan& b) {
         return a.startSamples < b.startSamples;
     });
+
+    // Stage D: bake CC automation into per-(controller, effective channel) streams. Unlike notes,
+    // CC events are NOT filtered to the clip's visible sample window: controller state is sticky,
+    // so a curve that ended before the playhead still defines the chased value. The evaluator
+    // (`midi_cc::collectCcEventsInTickRange`) emits a bounded set — endpoints plus one event per
+    // crossed integer inside Linear segments — so the audio thread only ever walks discrete,
+    // pre-sorted events. Clips are visited in ascending start order; equal-sample events keep
+    // that order and the last delivered value wins (deterministic).
+    {
+        struct ClipOrderRef
+        {
+            const InstrumentMidiClip* clip = nullptr;
+        };
+        std::vector<ClipOrderRef> orderedClips;
+        for (const auto& cptr : clips_)
+        {
+            if (cptr != nullptr && cptr->lengthSamples > 0 && !cptr->pattern.ccPoints.empty())
+            {
+                orderedClips.push_back({ cptr.get() });
+            }
+        }
+        std::stable_sort(orderedClips.begin(), orderedClips.end(),
+                         [](const ClipOrderRef& a, const ClipOrderRef& b) {
+                             return a.clip->startSamples < b.clip->startSamples;
+                         });
+        const auto findOrAddStream = [&snap](const int controller, const int effCh)
+            -> InstrumentCcRenderStream& {
+            for (auto& s : snap->ccStreams)
+            {
+                if ((int)s.controller == controller && (int)s.midiChannel == effCh)
+                {
+                    return s;
+                }
+            }
+            InstrumentCcRenderStream ns;
+            ns.controller = (std::uint8_t)controller;
+            ns.midiChannel = (std::uint8_t)effCh;
+            snap->ccStreams.push_back(std::move(ns));
+            return snap->ccStreams.back();
+        };
+        for (const auto& ref : orderedClips)
+        {
+            const InstrumentMidiClip& clip = *ref.clip;
+            const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
+            const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
+            std::vector<MidiCcPoint> pts = clip.pattern.ccPoints;
+            (void)midi_cc::normalizePoints(pts); // defensive: editors keep this normalized already
+            std::int64_t lastTick = 0;
+            for (const auto& p : pts)
+            {
+                lastTick = juce::jmax(lastTick, p.startTick);
+            }
+            for (const auto& key : midi_cc::distinctStreams(pts))
+            {
+                std::vector<midi_cc::MidiCcEvent> evs;
+                midi_cc::collectCcEventsInTickRange(pts, key.controller, key.channel, 0,
+                                                    lastTick + 1, std::nullopt, evs);
+                const int effCh = midi_channel_diag::effectiveChannel(key.channel, forcedMidiChannel);
+                auto& stream = findOrAddStream(key.controller, effCh);
+                for (const auto& e : evs)
+                {
+                    InstrumentCcRenderEvent rev;
+                    rev.absSample = clip.timelineAnchorSamples
+                                    + ticksToRelativeSamples(e.tick, bpm, tpq, sr);
+                    rev.controller = e.controller;
+                    rev.value = e.value;
+                    stream.events.push_back(rev);
+                }
+            }
+        }
+        for (auto& s : snap->ccStreams)
+        {
+            std::stable_sort(s.events.begin(), s.events.end(),
+                             [](const InstrumentCcRenderEvent& a, const InstrumentCcRenderEvent& b) {
+                                 return a.absSample < b.absSample;
+                             });
+        }
+        std::stable_sort(snap->ccStreams.begin(), snap->ccStreams.end(),
+                         [](const InstrumentCcRenderStream& a, const InstrumentCcRenderStream& b) {
+                             return a.controller != b.controller ? a.controller < b.controller
+                                                                 : a.midiChannel < b.midiChannel;
+                         });
+    }
 
     std::int64_t arrangeMinSample = 0;
     std::int64_t arrangeMaxExclusive = -1;
@@ -2207,7 +2454,7 @@ void InstrumentTrackController::publishRenderSnapshot()
     routingRenderFp << juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(experimentalDomainTrackId_)))
                     << '|' << juce::String(trackActive_ ? 1 : 0) << '|' << juce::String(powerOn_ ? 1 : 0)
                     << '|' << juce::String(muted_ ? 1 : 0) << '|' << juce::String(instrumentLoaded_ ? 1 : 0) << '|'
-                    << juce::String(host_.hasInstrument() ? 1 : 0) << '|'
+                    << juce::String((host_ != nullptr && host_->hasInstrument()) ? 1 : 0) << '|'
                     << juce::String(snap->playbackEnabled ? 1 : 0) << '|'
                     << juce::String(static_cast<int>(snap->clips.size()));
 
@@ -2251,7 +2498,8 @@ void InstrumentTrackController::publishRenderSnapshot()
             + juce::String(" powerOn=") + juce::String(powerOn_ ? "yes" : "no")
             + juce::String(" muted=") + juce::String(muted_ ? "yes" : "no")
             + juce::String(" instrumentLoaded=") + juce::String(instrumentLoaded_ ? "yes" : "no")
-            + juce::String(" hostHasInstrument=") + juce::String(host_.hasInstrument() ? "yes" : "no")
+            + juce::String(" hostHasInstrument=")
+            + juce::String((host_ != nullptr && host_->hasInstrument()) ? "yes" : "no")
             + juce::String(" playbackEnabled=") + juce::String(snap->playbackEnabled ? "yes" : "no")
             + juce::String(" clipPlans=") + juce::String(static_cast<int>(snap->clips.size()))
             + juce::String(" noteEventsTotal=") + juce::String(routedNoteRows)
@@ -2284,10 +2532,40 @@ void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstr
     }
     rtPendingOffCount_ = 0;
     rtLastSegEndTimeline_ = -1;
+    // Controllers are sticky and have no universal reset value, so no CC reset is sent — but the
+    // delivery memory is dropped so the next start/seek chases the curve fresh.
+    rtCcLastSentValue_.fill(-1);
     for (int c = 1; c <= 16; ++c)
     {
         host.audioThread_addMidiEventForCurrentBlock(off0, juce::MidiMessage::allNotesOff(c));
     }
+}
+
+void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(
+    ExperimentalInstrumentHost& host,
+    const int offsetInDevice,
+    const int deviceBlockNumSamples) noexcept
+{
+    if (deviceBlockNumSamples <= 0)
+    {
+        rtPendingOffCount_ = 0;
+        rtLastSegEndTimeline_ = -1;
+        return;
+    }
+    const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, offsetInDevice);
+    for (int i = 0; i < rtPendingOffCount_; ++i)
+    {
+        const auto& p = rtPendingOffs_[(size_t)i];
+        const int c = juce::jlimit(1, 16, p.midiChannel);
+        host.audioThread_addMidiEventForCurrentBlock(
+            off0, juce::MidiMessage::noteOff(c, p.midiNote, (juce::uint8)juce::jlimit(0, 127, p.offVelocity)));
+    }
+    rtPendingOffCount_ = 0;
+    rtLastSegEndTimeline_ = -1;
+    // Called on stop and on MIDI-source reroute: the next destination has received none of this
+    // source's controller state, so forget delivery memory and let the next segment chase. No
+    // reset value is sent to the OLD destination (controllers are sticky; none exists generically).
+    rtCcLastSentValue_.fill(-1);
 }
 
 void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
@@ -2325,6 +2603,9 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     if (revBump)
     {
         rtLastSnapshotRevision_ = snap->revision;
+        // Stream slots are parallel to the (new) snapshot's stream list: forget delivery state so
+        // every stream re-chases against the republished curve.
+        rtCcLastSentValue_.fill(-1);
     }
 
     const bool gap = (rtLastSegEndTimeline_ >= 0 && timelineSegStart != rtLastSegEndTimeline_);
@@ -2373,6 +2654,14 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     {
         return;
     }
+
+    // Stage D ordering rule: CC events are inserted BEFORE the note scan below, and the host block
+    // buffer preserves insertion order at equal offsets — so a controller value at a note's start
+    // sample is active before that Note On's attack. Pending note-offs (cleanup) were emitted
+    // above, giving the documented "Note Off / cleanup → CC → Note On" priority.
+    audioThread_scheduleCcForSegment(host, *snap, timelineSegStart, segEnd, discontinuity,
+                                     bufferOffsetInDevice, deviceBlockNumSamples,
+                                     outMidiEventsEmitted);
 
     const int gate = juce::jmax(1, snap->gateSamples);
 
@@ -2427,6 +2716,79 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
                                 juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
                 }
             }
+        }
+    }
+}
+
+void InstrumentTrackController::audioThread_scheduleCcForSegment(
+    ExperimentalInstrumentHost& host,
+    const InstrumentTrackRenderSnapshot& snap,
+    const std::int64_t timelineSegStart,
+    const std::int64_t segEnd,
+    const bool discontinuity,
+    const int bufferOffsetInDevice,
+    const int deviceBlockNumSamples,
+    int* outMidiEventsEmitted) noexcept
+{
+    if (snap.ccStreams.empty())
+    {
+        return;
+    }
+    const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, bufferOffsetInDevice);
+
+    for (int si = 0; si < (int)snap.ccStreams.size(); ++si)
+    {
+        const InstrumentCcRenderStream& s = snap.ccStreams[(size_t)si];
+        const bool trackedSlot = si < kMaxRtCcStreams;
+        const int lastSent = trackedSlot ? rtCcLastSentValue_[(size_t)si] : -1;
+
+        const auto emitCc = [&](const int offset, const int value) noexcept {
+            if (trackedSlot && rtCcLastSentValue_[(size_t)si] == value)
+            {
+                return; // unchanged: repeated blocks / chases never flood the plugin
+            }
+            host.audioThread_addMidiEventForCurrentBlock(
+                offset,
+                juce::MidiMessage::controllerEvent(juce::jlimit(1, 16, (int)s.midiChannel),
+                                                   (int)s.controller, value));
+            if (trackedSlot)
+            {
+                rtCcLastSentValue_[(size_t)si] = value;
+            }
+            if (outMidiEventsEmitted != nullptr)
+            {
+                ++(*outMidiEventsEmitted);
+            }
+        };
+
+        // Chase (playback start, seek, loop wrap, offline start, or nothing delivered yet):
+        // the latest event STRICTLY before the segment start is the curve's value here — the
+        // evaluator emitted one event per integer step, so this equals the interpolated value
+        // inside Linear segments and the held value after the final point. No event before the
+        // stream's first point ⇒ nothing is sent (no invented default).
+        if (discontinuity || lastSent < 0)
+        {
+            auto it = std::lower_bound(s.events.begin(), s.events.end(), timelineSegStart,
+                                       [](const InstrumentCcRenderEvent& e, const std::int64_t v) {
+                                           return e.absSample < v;
+                                       });
+            if (it != s.events.begin())
+            {
+                emitCc(off0, (int)(it - 1)->value);
+            }
+        }
+
+        // Due events inside [segStart, segEnd), in ascending order (equal-offset CC precede the
+        // note-ons the caller schedules afterwards).
+        auto it = std::lower_bound(s.events.begin(), s.events.end(), timelineSegStart,
+                                   [](const InstrumentCcRenderEvent& e, const std::int64_t v) {
+                                       return e.absSample < v;
+                                   });
+        for (; it != s.events.end() && it->absSample < segEnd; ++it)
+        {
+            const int rel = static_cast<int>(it->absSample - timelineSegStart);
+            const int o = juce::jlimit(0, deviceBlockNumSamples - 1, rel + bufferOffsetInDevice);
+            emitCc(o, (int)it->value);
         }
     }
 }

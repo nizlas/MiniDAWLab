@@ -29,6 +29,7 @@ namespace
             case TrackKind::Instrument: return "Instrument";
             case TrackKind::Group: return "Group";
             case TrackKind::Master: return "Master";
+            case TrackKind::Midi: return "Midi";
         }
         return "?";
     }
@@ -358,8 +359,11 @@ namespace
                                     + juce::String((juce::int64)(std::int64_t) tid)
                                     + " has no session track (stale attachment)");
                 }
-                else if (snap.getTrack(ti).getKind() != TrackKind::Instrument)
+                else if (snap.getTrack(ti).getKind() != TrackKind::Instrument
+                         && snap.getTrack(ti).getKind() != TrackKind::Midi)
                 {
+                    // Phase B: plugin-less MIDI content controllers own timeline lanes on
+                    // `TrackKind::Midi` rows, so both kinds are legal attachment targets.
                     report.fail("ui-attachments",
                                 "instrument timeline attachment trackId="
                                     + juce::String((juce::int64)(std::int64_t) tid)

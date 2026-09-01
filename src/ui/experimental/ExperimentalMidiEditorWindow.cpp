@@ -3,6 +3,8 @@
 #include "ExperimentalMidiPattern.h"
 #include "ExperimentalMidiPatternPlayer.h"
 #include "ExperimentalPianoRollView.h"
+#include "MidiEditorTitleStatus.h"
+#include "MidiEditorToolbarLayout.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 
@@ -26,7 +28,6 @@
 
 namespace
 {
-    constexpr int kToolbarH = 40;
     constexpr int kInitialEditorWidth = 1100;
     constexpr int kInitialEditorHeight = 760;
 
@@ -38,22 +39,12 @@ namespace
     void applyPianoRollPitchRangeForInstrument(ExperimentalPianoRollView& roll,
                                                const InstrumentTrackController* track) noexcept
     {
-        if (track == nullptr)
-        {
-            roll.setEditablePitchRange(ExperimentalPianoRollView::kDrumPitchLow,
-                                       ExperimentalPianoRollView::kDrumPitchHigh);
-            return;
-        }
-        if (track->getExperimentalInstrumentKind() == "HALionSonic")
-        {
-            roll.setEditablePitchRange(ExperimentalPianoRollView::kMelodicPitchLow,
-                                       ExperimentalPianoRollView::kMelodicPitchHigh);
-        }
-        else
-        {
-            roll.setEditablePitchRange(ExperimentalPianoRollView::kDrumPitchLow,
-                                       ExperimentalPianoRollView::kDrumPitchHigh);
-        }
+        // Phase B.1: all row modes and all instruments expose the full MIDI range 0–127
+        // (C-2 … G8). Piano/Drum are display modes, not different legal pitch ranges; the old
+        // per-instrument-kind spans (drums 24–72, melodic 12–108) hid VB3-II's upper notes.
+        juce::ignoreUnused(track);
+        roll.setEditablePitchRange(ExperimentalPianoRollView::kFullPitchLow,
+                                   ExperimentalPianoRollView::kFullPitchHigh);
     }
 } // namespace
 
@@ -110,15 +101,9 @@ public:
             }
         };
 
-        addAndMakeVisible(cycleToggleButton_);
-        cycleToggleButton_.setButtonText("Cycle: Off");
-        cycleToggleButton_.setTooltip("Toggle loop/cycle (upper half of MIDI roll ruler also toggles).");
-        cycleToggleButton_.onClick = [this] {
-            if (transportCommands_.onToggleCycle)
-            {
-                transportCommands_.onToggleCycle();
-            }
-        };
+        // No Cycle toolbar button: the blue cycle-range field in the roll's ruler is the
+        // authoritative editor interaction for toggling Cycle (clicking it toggles; its
+        // enabled/disabled visual state and the loop playback behavior are unchanged).
 
         addAndMakeVisible(recordButton_);
         recordButton_.setButtonText("Record");
@@ -133,7 +118,6 @@ public:
 
         transportPlayButton_.setEnabled(false);
         transportStopButton_.setEnabled(false);
-        cycleToggleButton_.setEnabled(false);
 
         addAndMakeVisible(exportButton_);
         exportButton_.setButtonText("Export MIDI...");
@@ -215,6 +199,19 @@ public:
         fitDrumsButton_.onClick = [this] { applyFitDrums(); };
         updateFitDrumsButtonState();
 
+        // Channel diagnostics: a read-only readout of what the selected notes *store* versus what the
+        // track *sends*, plus the two explicit commands that bake the track channel into the notes.
+        addAndMakeVisible(midiChannelReadoutLabel_);
+        midiChannelReadoutLabel_.setFont(juce::FontOptions(11.0f));
+        midiChannelReadoutLabel_.setJustificationType(juce::Justification::centredLeft);
+        midiChannelReadoutLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffa8b4c8));
+
+        addAndMakeVisible(midiChannelMenuButton_);
+        midiChannelMenuButton_.setButtonText("Remap");
+        midiChannelMenuButton_.setTooltip(
+            "Remap note MIDI channels to the track's fixed channel (selected or all notes).");
+        midiChannelMenuButton_.onClick = [this] { showMidiChannelMenu(); };
+
         addAndMakeVisible(modeLabel_);
         modeLabel_.setFont(juce::FontOptions(11.0f));
         modeLabel_.setJustificationType(juce::Justification::centredLeft);
@@ -236,6 +233,7 @@ public:
         // threading a change callback through every selection mutation.
         refreshSelectedNoteVelocityFields();
         refreshSelectedNoteLengthField();
+        refreshMidiChannelDiagnostics();
         startTimerHz(10);
     }
 
@@ -514,10 +512,59 @@ public:
     {
         if (externalPattern_ != nullptr && instrumentTrackForClipBind_ != nullptr)
         {
+            // Plugin state comes from the window's bound host: for an Instrument row that is the
+            // row's own host; for a `TrackKind::Midi` row it is the routed `MIDI To` destination's
+            // host (Phase B.1) — the source row must never be asked for a plugin it cannot own.
+            // Power/mute stay per-source, so muting a MIDI track also silences its audition.
             const auto* tr = instrumentTrackForClipBind_;
-            return tr->isInstrumentLoaded() && tr->isPowerOn() && !tr->isMuted();
+            return host_.hasInstrument() && tr->isPowerOn() && !tr->isMuted();
         }
         return host_.hasInstrument();
+    }
+
+    /// Resolves what the status line describes (TrackId-backed, message thread only): the bound
+    /// row's kind and, for `TrackKind::Midi`, its `MIDI To` destination row. Plugin state is the
+    /// window's bound host — the destination's host for MIDI rows (see `editorInstrumentGate`).
+    [[nodiscard]] midi_editor_text::BoundTrackStatus resolveBoundTrackStatus() const
+    {
+        midi_editor_text::BoundTrackStatus s;
+        s.instrumentLoaded = host_.hasInstrument();
+        s.instrumentName = host_.getInstrumentNameForUi();
+        if (sessionForRoll_ == nullptr || instrumentTrackForClipBind_ == nullptr)
+        {
+            return s;
+        }
+        const TrackId tid = instrumentTrackForClipBind_->getExperimentalInstrumentDomainTrackId();
+        if (tid == kInvalidTrackId)
+        {
+            return s;
+        }
+        const auto snap = sessionForRoll_->loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            return s;
+        }
+        const int ix = snap->findTrackIndexById(tid);
+        if (ix < 0 || snap->getTrack(ix).getKind() != TrackKind::Midi)
+        {
+            return s;
+        }
+        s.isMidiTrack = true;
+        const TrackId destId = snap->getTrack(ix).getMidiDestinationTrackId();
+        const int dix = destId != kInvalidTrackId ? snap->findTrackIndexById(destId) : -1;
+        if (dix >= 0 && snap->getTrack(dix).getKind() == TrackKind::Instrument)
+        {
+            s.hasDestination = true;
+            s.destinationTrackName = snap->getTrack(dix).getName();
+        }
+        else
+        {
+            // Deleted/invalid destination: repaired-disconnected semantics — never show a plugin
+            // that is no longer reachable from this source.
+            s.instrumentLoaded = false;
+            s.instrumentName.clear();
+        }
+        return s;
     }
 
     void applyInstrumentUiState()
@@ -551,23 +598,30 @@ public:
         }
         else
         {
+            // Phase B.1: destination-aware wording (`midi_editor_text`); power/mute overrides
+            // keep their old phrasing and stay per-source.
             const auto* tr = instrumentTrackForClipBind_;
-            if (tr == nullptr || !tr->isInstrumentLoaded())
+            const midi_editor_text::BoundTrackStatus status = resolveBoundTrackStatus();
+            const bool playable = status.isMidiTrack
+                                      ? (status.hasDestination && status.instrumentLoaded)
+                                      : status.instrumentLoaded;
+            if (!playable || tr == nullptr)
             {
-                instPart = juce::String("No instrument loaded");
+                instPart = midi_editor_text::buildInstrumentStatusLine(status);
             }
             else if (!tr->isPowerOn())
             {
-                instPart = juce::String("Instrument track powered off (playback disabled)");
+                instPart = status.isMidiTrack ? juce::String("MIDI track powered off (playback disabled)")
+                                              : juce::String("Instrument track powered off (playback disabled)");
             }
             else if (tr->isMuted())
             {
-                instPart = juce::String("Instrument track muted (playback disabled)");
+                instPart = status.isMidiTrack ? juce::String("MIDI track muted (playback disabled)")
+                                              : juce::String("Instrument track muted (playback disabled)");
             }
             else
             {
-                instPart = instrumentName.isNotEmpty() ? (juce::String("Instrument: ") + instrumentName)
-                                                        : juce::String("Instrument: (loaded)");
+                instPart = midi_editor_text::buildInstrumentStatusLine(status);
             }
         }
 
@@ -616,77 +670,186 @@ public:
         }
     }
 
+    // --- Responsive toolbar (decisions in MidiEditorToolbarLayout.h) -----------------------
+    // Fixed control widths shared by the width plan and the actual layout.
+    static constexpr int kSelectedNoteLabelW = 26;
+    static constexpr int kSelectedNoteFieldW = 34;
+    // Len holds `n.p.q.r`, so it needs more room than the two byte fields.
+    static constexpr int kSelectedNoteLengthFieldW = 78;
+    static constexpr int kSnapToggleW = 52;
+    static constexpr int kSnapGapPx = 4;
+    static constexpr int kSnapComboW = 118;
+    static constexpr int kToolbarSideInsetPx = 6;
+
+    /// Preferred `Remap` button width from its rendered label + padding, so the complete word
+    /// is always visible regardless of font/scaling.
+    [[nodiscard]] int remapButtonPreferredWidth() const
+    {
+        auto& lf = midiChannelMenuButton_.getLookAndFeel();
+        const juce::Font f = lf.getTextButtonFont(
+            const_cast<juce::TextButton&>(midiChannelMenuButton_),
+            midi_editor_toolbar::kRowHeightPx - 8);
+        const int textW =
+            juce::GlyphArrangement::getStringWidthInt(f, midiChannelMenuButton_.getButtonText());
+        return midi_editor_toolbar::textButtonPreferredWidth(textW, 56);
+    }
+
+    /// Larger spacing between conceptual groups (metadata only: it travels with the control that
+    /// follows it and is dropped at a row start — a group is never an indivisible layout unit).
+    static constexpr int kGroupGapPx = 12;
+
+    /// One toolbar control in the stable logical order: its component, complete preferred width,
+    /// group spacing before it, and the per-kind vertical inset the old single-row layout used.
+    struct ToolbarControl
+    {
+        juce::Component* comp = nullptr;
+        int width = 0;
+        int gapBefore = 0;
+        bool visible = true;
+        int verticalInset = 2;
+    };
+
+    /// All fixed-width toolbar controls in their stable logical order. The two flexible status
+    /// labels (channel readout + mode/status) are not flow items: they absorb the remainder of
+    /// the last row and may shrink; buttons never do. A hidden `Fit Drums` contributes neither
+    /// width nor spacing.
+    [[nodiscard]] std::vector<ToolbarControl> toolbarControls()
+    {
+        return {
+            { &selectedNoteVelLabel_, kSelectedNoteLabelW, 0, true, 4 },
+            { &selectedNoteVelField_, kSelectedNoteFieldW, 0, true, 3 },
+            { &selectedNoteOffLabel_, kSelectedNoteLabelW, 0, true, 4 },
+            { &selectedNoteOffField_, kSelectedNoteFieldW, 0, true, 3 },
+            { &selectedNoteLenLabel_, kSelectedNoteLabelW, 0, true, 4 },
+            { &selectedNoteLenField_, kSelectedNoteLengthFieldW, 0, true, 3 },
+            { &transportPlayButton_, 58, 0, true, 2 },
+            { &transportStopButton_, 52, 0, true, 2 },
+            { &recordButton_, 72, 0, true, 2 },
+            { &arrangementSnapToggle_, kSnapToggleW, kGroupGapPx, true, 2 },
+            { &arrangementSnapResolutionCombo_, kSnapComboW, kSnapGapPx, true, 2 },
+            { &displayLabel_, 52, 0, true, 4 },
+            { &displayBox_, 72, 0, true, 2 },
+            { &rowsLabel_, 40, 0, true, 4 },
+            { &rowsBox_, 104, 0, true, 2 },
+            { &timelineRulerFormatCombo_, 128, 0, true, 2 },
+            { &followPlayheadToggle_, 72, 0, true, 2 },
+            { &fitDrumsButton_, 78, 0, fitDrumsButton_.isVisible(), 2 },
+            { &exportButton_, 96, kGroupGapPx, true, 2 },
+            { &midiChannelMenuButton_, remapButtonPreferredWidth(), 0, true, 2 },
+        };
+    }
+
+    [[nodiscard]] static std::vector<midi_editor_toolbar::ToolbarItem>
+    toToolbarItems(const std::vector<ToolbarControl>& controls)
+    {
+        std::vector<midi_editor_toolbar::ToolbarItem> items(controls.size());
+        for (size_t i = 0; i < controls.size(); ++i)
+        {
+            items[i] = { controls[i].width, controls[i].gapBefore, controls[i].visible };
+        }
+        return items;
+    }
+
+    /// Rows the toolbar occupies at `clientWidth` (pure function of width — cannot oscillate).
+    [[nodiscard]] int toolbarRowsForWidth(const int clientWidth)
+    {
+        const int availableW = juce::jmax(0, clientWidth - 2 * kToolbarSideInsetPx);
+        return midi_editor_toolbar::rowCountOf(
+            midi_editor_toolbar::flowLayout(availableW, toToolbarItems(toolbarControls())));
+    }
+
+    [[nodiscard]] int currentToolbarHeight()
+    {
+        return midi_editor_toolbar::toolbarHeightForRows(toolbarRowsForWidth(getWidth()));
+    }
+
     void resized() override
     {
         auto a = getLocalBounds();
-        auto toolbar = a.removeFromTop(kToolbarH);
-        toolbar.reduce(6, 4);
-        constexpr int kSelectedNoteLabelW = 26;
-        constexpr int kSelectedNoteFieldW = 34;
-        selectedNoteVelLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
-        selectedNoteVelField_.setBounds(toolbar.removeFromLeft(kSelectedNoteFieldW).reduced(0, 3));
-        selectedNoteOffLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
-        selectedNoteOffField_.setBounds(toolbar.removeFromLeft(kSelectedNoteFieldW).reduced(0, 3));
-        // Len holds `n.p.q.r`, so it needs more room than the two byte fields.
-        constexpr int kSelectedNoteLengthFieldW = 78;
-        selectedNoteLenLabel_.setBounds(toolbar.removeFromLeft(kSelectedNoteLabelW).reduced(0, 4));
-        selectedNoteLenField_.setBounds(toolbar.removeFromLeft(kSelectedNoteLengthFieldW).reduced(0, 3));
-        transportPlayButton_.setBounds(toolbar.removeFromLeft(58).reduced(0, 2));
-        transportStopButton_.setBounds(toolbar.removeFromLeft(52).reduced(0, 2));
-        cycleToggleButton_.setBounds(toolbar.removeFromLeft(56).reduced(0, 2));
-        recordButton_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        exportButton_.setBounds(toolbar.removeFromLeft(96).reduced(0, 2));
-        constexpr int kSnapToggleW = 52;
-        constexpr int kSnapGapPx = 4;
-        constexpr int kSnapComboW = 118;
-        arrangementSnapToggle_.setBounds(toolbar.removeFromLeft(kSnapToggleW).reduced(0, 2));
-        toolbar.removeFromLeft(kSnapGapPx);
-        arrangementSnapResolutionCombo_.setBounds(toolbar.removeFromLeft(kSnapComboW).reduced(0, 2));
-        displayLabel_.setBounds(toolbar.removeFromLeft(52).reduced(0, 4));
-        displayBox_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        rowsLabel_.setBounds(toolbar.removeFromLeft(40).reduced(0, 4));
-        rowsBox_.setBounds(toolbar.removeFromLeft(104).reduced(0, 2));
-        timelineRulerFormatCombo_.setBounds(toolbar.removeFromLeft(128).reduced(0, 2));
-        followPlayheadToggle_.setBounds(toolbar.removeFromLeft(72).reduced(0, 2));
-        fitDrumsButton_.setBounds(toolbar.removeFromLeft(78).reduced(0, 2));
-        modeLabel_.setBounds(toolbar.reduced(8, 0));
 
-        // Lay out the viewport first, then size the roll to match the viewport's *content budget*.
-        //
-        // JUCE note: `Viewport::getViewWidth/Height()` return `lastVisibleArea` — the intersection of
-        // what you can see with the *current* child size. If the piano roll is still narrow, that value
-        // stays pegged to the child (e.g. 400px), so `jmax(400, getViewWidth())` never grows and the
-        // editor leaves a grey gutter. `getMaximumVisibleWidth/Height()` is the client area minus
-        // scrollbar chrome; use that to size the viewed component so it fills the window.
+        // Per-control flow (MidiEditorToolbarLayout.h): every visible control keeps its complete
+        // preferred width; a control that no longer fits starts the next row individually.
+        const auto controls = toolbarControls();
+        const auto items = toToolbarItems(controls);
+        const int availableW = juce::jmax(0, a.getWidth() - 2 * kToolbarSideInsetPx);
+        const auto placements = midi_editor_toolbar::flowLayout(availableW, items);
+        const int rows = midi_editor_toolbar::rowCountOf(placements);
+
+        // Two rows is the supported narrow layout: keep the window from shrinking below the
+        // computed two-row minimum (derived from the visible control widths and spacing) so the
+        // second row wraps instead of clipping. Height minimum stays free (shrink-wrap steer).
+        {
+            const int minClientW =
+                midi_editor_toolbar::minimumWidthForRows(items, midi_editor_toolbar::kMaxRows)
+                + 2 * kToolbarSideInsetPx;
+            if (auto* win = dynamic_cast<juce::ResizableWindow*>(getTopLevelComponent()))
+            {
+                if (auto* c = win->getConstrainer(); c != nullptr && c->getMinimumWidth() != minClientW)
+                {
+                    win->setResizeLimits(minClientW, 1, 10000, 10000);
+                }
+            }
+        }
+
+        auto toolbarAll = a.removeFromTop(midi_editor_toolbar::toolbarHeightForRows(rows));
+        int lastRowEndX = 0;
+        for (size_t i = 0; i < controls.size(); ++i)
+        {
+            const auto& p = placements[i];
+            if (!p.placed)
+            {
+                continue;
+            }
+            const juce::Rectangle<int> cell(kToolbarSideInsetPx + p.x,
+                                            toolbarAll.getY() + p.row * midi_editor_toolbar::kRowHeightPx + 4,
+                                            p.width,
+                                            midi_editor_toolbar::kRowHeightPx - 8);
+            controls[i].comp->setBounds(cell.reduced(0, controls[i].verticalInset));
+            if (p.row == rows - 1)
+            {
+                lastRowEndX = juce::jmax(lastRowEndX, p.x + p.width);
+            }
+        }
+
+        // Flexible status labels take the remainder of the last row: the channel readout is
+        // capped so the mode/status text keeps a usable strip; at narrow widths the readout
+        // shrinks to nothing rather than pushing anything off the bar.
+        {
+            juce::Rectangle<int> rest(kToolbarSideInsetPx + lastRowEndX,
+                                      toolbarAll.getY() + (rows - 1) * midi_editor_toolbar::kRowHeightPx + 4,
+                                      juce::jmax(0, availableW - lastRowEndX),
+                                      midi_editor_toolbar::kRowHeightPx - 8);
+            midiChannelReadoutLabel_.setBounds(
+                rest.removeFromLeft(juce::jlimit(0, 320, rest.getWidth() - 150)).reduced(4, 0));
+            modeLabel_.setBounds(rest.reduced(8, 0));
+        }
+
+        // Final authoritative content rectangle: `a` is exactly the editor bounds minus the FINAL
+        // toolbar height (rows × fixed row height) — a pure height partition with no remainder
+        // (`midi_editor_toolbar::editorContentHeight`). The roll is sized to the viewport's OUTER
+        // bounds, never to `getMaximumVisibleWidth/Height()`: those are scrollbar-state-dependent,
+        // and during a width-only shrink the transient horizontal scrollbar (computed against the
+        // roll's stale, wider size) used to leak its thickness into the roll's height — the roll
+        // came up short, leaving a grey strip and lifting the bottom-anchored velocity/CC lanes.
+        // The roll always fills the viewport exactly (pitch and time scrolling are internal), so
+        // no scrollbar is ever legitimately needed and vertical geometry stays a function of
+        // height + row count alone.
         viewport_.setBounds(a);
 
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
-            const int outerW = juce::jmax(1, viewport_.getWidth());
-            const int outerH = juce::jmax(1, viewport_.getHeight());
-
-            int budgetW = viewport_.getMaximumVisibleWidth();
-            int budgetH = viewport_.getMaximumVisibleHeight();
-            if (budgetW < 1)
-            {
-                budgetW = outerW;
-            }
-            if (budgetH < 1)
-            {
-                budgetH = outerH;
-            }
-
-            const int rw = juce::jmax(1, budgetW);
-            const int rh = juce::jmax(1, budgetH);
+            const int rw = juce::jmax(1, viewport_.getWidth());
+            const int rh = juce::jmax(
+                1, midi_editor_toolbar::editorContentHeight(getLocalBounds().getHeight(), rows));
             rv->setSize(rw, rh);
             viewport_.setViewPosition(viewport_.getViewPositionX(), 0);
 
             ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-                "midi-editor: resized viewportBounds=" + viewport_.getBounds().toString() + " maxVisible="
-                + juce::String(budgetW) + "x" + juce::String(budgetH) + " viewArea="
+                "midi-editor: resized viewportBounds=" + viewport_.getBounds().toString()
+                + " toolbarRows=" + juce::String(rows) + " viewArea="
                 + juce::String(viewport_.getViewWidth()) + "x" + juce::String(viewport_.getViewHeight())
-                + " viewPos=" + viewport_.getViewPosition().toString() + " outer=" + juce::String(outerW) + "x"
-                + juce::String(outerH) + " rollBounds=" + rv->getBounds().toString() + " boundExternal="
+                + " viewPos=" + viewport_.getViewPosition().toString()
+                + " rollBounds=" + rv->getBounds().toString() + " boundExternal="
                 + juce::String(externalPattern_ != nullptr ? "true" : "false") + " patternPtr="
                 + ptrToLog(&activePattern()) + " externalPatternPtr=" + ptrToLog(externalPattern_)
                 + " noteCount=" + juce::String((int)activePattern().timelineNotes.size()) + " visibleStart="
@@ -761,6 +924,16 @@ private:
     /// Pushes the selection's shared length into the Len field as normalized `n.p.q.r` (blank when
     /// nothing is selected or lengths differ). Never touches the field while the user types in it.
     void refreshSelectedNoteLengthField();
+    /// Pushes the selection's *stored* (native) channels, the track's output channel and the
+    /// resulting effective channel into the read-only toolbar readout, and re-evaluates whether the
+    /// remap commands are available. Read-only: never writes note data.
+    void refreshMidiChannelDiagnostics();
+    /// The `Ch...` toolbar menu: the two explicit native-channel remap commands, greyed out with an
+    /// explanation while the track is `Any (Preserve)` (no single target channel exists).
+    void showMidiChannelMenu();
+    /// Runs one remap command and reports the outcome in the status label / an alert.
+    void performMidiChannelRemap(ExperimentalPianoRollView::ChannelRemapScope scope);
+
     /// Parses the typed length and applies it to every selected note as one undoable edit. Invalid
     /// text, an unchanged length, or an overlap rejection all leave the notes alone and restore the
     /// displayed value, so the field can never write a partial batch.
@@ -783,6 +956,8 @@ private:
 
     void rebuildPlayerAndRoll(std::optional<int> preserveVerticalPitchScrollTopMidi = std::nullopt)
     {
+        // Replacing the player releases any active audition previews through the old instance's
+        // destructor (Note Offs at the destination/channel captured at Note On).
         player_ = std::make_unique<ExperimentalMidiPatternPlayer>(host_);
         player_->setPlaybackAllowed([this] { return editorInstrumentGate(); });
         rebuildRollViewOnly();
@@ -800,6 +975,21 @@ private:
                 }
             }
         }
+        else if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
+        {
+            // Fresh binding: reveal clip content, or start an empty editor at a useful register
+            // (middle C; an empty Drum view centres its named rows). Workspace restore may still
+            // override this via `applyWorkspaceUiStateToBody`.
+            int fallbackCenter = ExperimentalPianoRollView::kDefaultVerticalCenterPitch;
+            if (midiRollRowLabelMode_ == 2)
+            {
+                if (const auto named = computeUsefulDrumPitchRange())
+                {
+                    fallbackCenter = (named->first + named->second) / 2;
+                }
+            }
+            rv->seedDefaultVerticalScroll(fallbackCenter);
+        }
     }
 
     void rebuildRollViewOnly()
@@ -812,6 +1002,19 @@ private:
 
         auto* roll = new ExperimentalPianoRollView(ap, player_.get());
         applyPianoRollPitchRangeForInstrument(*roll, instrumentTrackForClipBind_);
+        // Key-strip / drum-row audition velocities follow the toolbar's current Vel / Off values
+        // (spec E); blank fields fall back to the editor defaults.
+        roll->setKeyStripAuditionVelocityProvider([this]() -> std::pair<int, int> {
+            const juce::String velText = selectedNoteVelField_.getText().trim();
+            const juce::String offText = selectedNoteOffField_.getText().trim();
+            const int vel = velText.containsOnly("0123456789") && velText.isNotEmpty()
+                                ? juce::jlimit(1, 127, velText.getIntValue())
+                                : 100;
+            const int off = offText.containsOnly("0123456789") && offText.isNotEmpty()
+                                ? juce::jlimit(0, 127, offText.getIntValue())
+                                : kDefaultMidiNoteOffVelocity;
+            return { vel, off };
+        });
         roll->setSessionTimelineContext(boundTimelineClip_,
                                         sessionForRoll_,
                                         transportForRoll_,
@@ -845,7 +1048,6 @@ private:
 
     juce::TextButton transportPlayButton_;
     juce::TextButton transportStopButton_;
-    juce::TextButton cycleToggleButton_;
     juce::TextButton recordButton_;
     juce::TextButton exportButton_;
     juce::Label selectedNoteVelLabel_;
@@ -865,6 +1067,8 @@ private:
     juce::ComboBox timelineRulerFormatCombo_;
     juce::TextButton followPlayheadToggle_;
     juce::TextButton fitDrumsButton_;
+    juce::TextButton midiChannelMenuButton_;
+    juce::Label midiChannelReadoutLabel_;
     juce::Label modeLabel_;
     collapsible_side_strip::ResizeSplitter midiRollResizeSplitter_;
     collapsible_side_strip::CollapsedKnob midiRollCollapsedKnob_;
@@ -891,6 +1095,9 @@ private:
     bool userRowsModeOverride_ = false;
 
     ExperimentalMidiTransportCommands transportCommands_{};
+
+    /// Phase B.1: current window title (polled at 10 Hz so a track rename retitles a live window).
+    std::function<juce::String()> windowTitleProvider_;
 
     /// Transient "Saving project" indicator (configured lazily in `showSavingProjectToast`).
     juce::Label savingProjectToastLabel_;
@@ -1131,10 +1338,148 @@ void ExperimentalMidiEditorWindow::Body::commitSelectedNoteLengthField()
     refreshSelectedNoteLengthField();
 }
 
+void ExperimentalMidiEditorWindow::Body::refreshMidiChannelDiagnostics()
+{
+    const auto* rv = dynamic_cast<const ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    const int trackChannel = rv != nullptr ? rv->trackMidiOutputChannel() : kTrackMidiOutputChannelAny;
+    const auto summary = rv != nullptr ? rv->summarizeSelectedNotesNativeChannels()
+                                       : midi_channel_diag::NativeChannelSummary{};
+    const auto text = midi_channel_diag::buildReadoutText(summary, trackChannel);
+    if (midiChannelReadoutLabel_.getText() != text.compact)
+    {
+        midiChannelReadoutLabel_.setText(text.compact, juce::dontSendNotification);
+    }
+    midiChannelReadoutLabel_.setTooltip(text.tooltip);
+
+    const bool canRemap = rv != nullptr && midi_channel_diag::canRemapToTrackChannel(trackChannel);
+    midiChannelMenuButton_.setEnabled(rv != nullptr);
+    midiChannelMenuButton_.setTooltip(
+        canRemap ? juce::String("Bake the track's MIDI channel (")
+                       + juce::String(trackChannel) + ") into the stored notes."
+                 : midi_channel_diag::remapUnavailableReason());
+}
+
+void ExperimentalMidiEditorWindow::Body::showMidiChannelMenu()
+{
+    auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    if (rv == nullptr)
+    {
+        return;
+    }
+    const int trackChannel = rv->trackMidiOutputChannel();
+    const bool canRemap = midi_channel_diag::canRemapToTrackChannel(trackChannel);
+    const bool haveSelection = rv->summarizeSelectedNotesNativeChannels().selectedCount > 0;
+
+    constexpr int kRemapSelectedId = 1;
+    constexpr int kRemapAllId = 2;
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader(juce::String("Track MIDI Channel: ")
+                          + midi_channel_diag::trackOutputChannelText(trackChannel));
+    if (!canRemap)
+    {
+        // Explain rather than silently offering two dead items.
+        menu.addItem(-1, "Set a fixed channel 1-16 in the Inspector to enable remapping", false, false);
+    }
+    menu.addItem(kRemapSelectedId,
+                 "Remap Selected Notes to Track Channel",
+                 canRemap && haveSelection,
+                 false);
+    menu.addItem(kRemapAllId, "Remap All Notes to Track Channel...", canRemap, false);
+
+    juce::Component::SafePointer<Body> self(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&midiChannelMenuButton_),
+                       [self](const int result) {
+                           if (self == nullptr)
+                           {
+                               return;
+                           }
+                           if (result == kRemapSelectedId)
+                           {
+                               self->performMidiChannelRemap(
+                                   ExperimentalPianoRollView::ChannelRemapScope::SelectedNotes);
+                           }
+                           else if (result == kRemapAllId)
+                           {
+                               self->performMidiChannelRemap(
+                                   ExperimentalPianoRollView::ChannelRemapScope::AllNotesOnTrack);
+                           }
+                       });
+}
+
+void ExperimentalMidiEditorWindow::Body::performMidiChannelRemap(
+    const ExperimentalPianoRollView::ChannelRemapScope scope)
+{
+    auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
+    if (rv == nullptr)
+    {
+        return;
+    }
+    const bool allScope = scope == ExperimentalPianoRollView::ChannelRemapScope::AllNotesOnTrack;
+    const auto outcome = rv->remapNativeChannelsToTrackChannel(scope);
+    refreshMidiChannelDiagnostics();
+
+    using R = ExperimentalPianoRollView::ChannelRemapResult;
+    switch (outcome.result)
+    {
+    case R::Applied: {
+        const juce::String what = allScope ? "all notes on the track" : "the selected notes";
+        ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
+            juce::String("midi-editor: remapped native MIDI channel scope=")
+            + (allScope ? "all" : "selected") + " target=" + juce::String(outcome.targetChannel)
+            + " changed=" + juce::String(outcome.notesChanged) + "/"
+            + juce::String(outcome.notesInScope));
+        modeLabel_.setText(juce::String("Remapped ") + juce::String(outcome.notesChanged) + " of "
+                               + juce::String(outcome.notesInScope) + " notes in " + what
+                               + " to channel " + juce::String(outcome.targetChannel)
+                               + " (Ctrl+Z to undo)",
+                           juce::dontSendNotification);
+        return;
+    }
+    case R::NoChange:
+        modeLabel_.setText(juce::String("Already on channel ") + juce::String(outcome.targetChannel)
+                               + ": nothing to remap",
+                           juce::dontSendNotification);
+        return;
+    case R::NothingInScope:
+        modeLabel_.setText(allScope ? "No MIDI notes on this track" : "No notes selected",
+                           juce::dontSendNotification);
+        return;
+    case R::NoFixedTrackChannel:
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                               "Remap MIDI channel",
+                                               midi_channel_diag::remapUnavailableReason());
+        return;
+    case R::RejectedOverlap:
+        // Two notes would land on the same pitch *and* channel and overlap in time, which the editor
+        // treats as one note. Refuse the whole batch instead of silently merging musical content.
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon,
+            "Remap MIDI channel",
+            juce::String("Nothing was changed.\n\nRemapping to channel ")
+                + juce::String(outcome.targetChannel)
+                + " would put two overlapping notes on the same pitch and channel, which this editor "
+                  "treats as a single note. Move or shorten the stacked notes first.");
+        return;
+    }
+}
+
 void ExperimentalMidiEditorWindow::Body::timerCallback()
 {
     refreshSelectedNoteVelocityFields();
     refreshSelectedNoteLengthField();
+    refreshMidiChannelDiagnostics();
+    if (windowTitleProvider_)
+    {
+        if (auto* win = dynamic_cast<juce::DocumentWindow*>(getTopLevelComponent()))
+        {
+            const juce::String want = windowTitleProvider_();
+            if (want.isNotEmpty() && win->getName() != want)
+            {
+                win->setName(want);
+            }
+        }
+    }
     if (transportCommands_.transport == nullptr)
     {
         return;
@@ -1146,8 +1491,6 @@ void ExperimentalMidiEditorWindow::Body::timerCallback()
     {
         transportPlayButton_.setButtonText(want);
     }
-    const bool cyc = transportCommands_.transport->readCycleEnabledForUi();
-    cycleToggleButton_.setButtonText(cyc ? "Cycle: On" : "Cycle: Off");
 }
 
 void ExperimentalMidiEditorWindow::Body::changeListenerCallback(juce::ChangeBroadcaster* source)
@@ -1171,6 +1514,9 @@ void ExperimentalMidiEditorWindow::Body::changeListenerCallback(juce::ChangeBroa
                 instrumentTrackForClipBind_->requestPluginDrumNameProbeIfUnlabeled();
             }
         }
+        // Drum labels arriving also flip the Fit Drums context even when a pinned rows mode
+        // suppresses the Drum Names auto-switch above.
+        updateFitDrumsButtonState();
         return;
     }
     pushRowsModeToRoll();
@@ -1182,7 +1528,6 @@ void ExperimentalMidiEditorWindow::Body::setTransportCommands(ExperimentalMidiTr
     const bool ok = transportCommands_.transport != nullptr;
     transportPlayButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onTogglePlayPause));
     transportStopButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onStop));
-    cycleToggleButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onToggleCycle));
     recordButton_.setEnabled(ok && static_cast<bool>(transportCommands_.onToggleRecord));
     pushTransportGestureBlockToRoll();
     // The timer also drives the selected-note Vel / Off fields, so it stays on without transport.
@@ -1307,6 +1652,11 @@ bool ExperimentalMidiEditorWindow::Body::handleTopLevelShortcut(const juce::KeyP
     {
         if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
+            // CC selection wins so deleting lane points can never delete notes.
+            if (rv->handleCcPointsDeleteSelectionShortcut())
+            {
+                return true;
+            }
             if (rv->handleTimelineNotesDeleteSelectionShortcut())
             {
                 return true;
@@ -1490,8 +1840,8 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
     }
     if (rowsBox_.getSelectedId() == 2)
     {
-        int pitchLow = ExperimentalPianoRollView::kDrumPitchLow;
-        int pitchHigh = ExperimentalPianoRollView::kDrumPitchHigh;
+        int pitchLow = ExperimentalPianoRollView::kFullPitchLow;
+        int pitchHigh = ExperimentalPianoRollView::kFullPitchHigh;
         if (auto* rvPitch = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent()))
         {
             pitchLow = rvPitch->pitchLow();
@@ -1537,10 +1887,27 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
 
 void ExperimentalMidiEditorWindow::Body::updateFitDrumsButtonState()
 {
-    const bool drumMode = midiRollRowLabelMode_ == 2;
-    fitDrumsButton_.setEnabled(drumMode);
-    fitDrumsButton_.setTooltip(drumMode ? juce::String("Fit editor to populated drum rows")
-                                        : juce::String("Available in drum mode"));
+    // Context gate (MidiEditorToolbarLayout.h): `Fit Drums` exists only in an explicit
+    // drum-instrument editor context — the bound track carries DAL's drum classification
+    // (effective drum labels, manual or plugin-discovered). Melodic instrument tracks and
+    // MIDI-only tracks hide it entirely (no layout gap). The old gate keyed on the *rows
+    // display mode* (`midiRollRowLabelMode_ == 2`), which disabled the button on a real drum
+    // kit whenever the editor sat in Piano rows (e.g. a restored workspace rows mode pinning
+    // `userRowsModeOverride_`, or first open before the async drum-name probe).
+    const bool isMidiOnly = resolveBoundTrackStatus().isMidiTrack;
+    const bool drumClassified = instrumentTrackForClipBind_ != nullptr
+                                && instrumentTrackForClipBind_->hasAnyEffectiveDrumLabels();
+    const bool visible = midi_editor_toolbar::fitDrumsVisible(isMidiOnly, drumClassified);
+    const bool enabled = midi_editor_toolbar::fitDrumsEnabled(
+        visible, visible && computeUsefulDrumPitchRange().has_value());
+    fitDrumsButton_.setEnabled(enabled);
+    fitDrumsButton_.setTooltip(enabled ? juce::String("Fit editor to populated drum rows")
+                                       : juce::String("No labeled or used drum rows to fit"));
+    if (fitDrumsButton_.isVisible() != visible)
+    {
+        fitDrumsButton_.setVisible(visible);
+        resized(); // visibility changes the group widths (hidden leaves no gap)
+    }
 }
 
 std::optional<std::pair<int, int>> ExperimentalMidiEditorWindow::Body::computeUsefulDrumPitchRange() const
@@ -1593,10 +1960,13 @@ std::optional<std::pair<int, int>> ExperimentalMidiEditorWindow::Body::computeUs
 void ExperimentalMidiEditorWindow::Body::applyFitDrums()
 {
     auto* rv = dynamic_cast<ExperimentalPianoRollView*>(viewport_.getViewedComponent());
-    if (rv == nullptr || midiRollRowLabelMode_ != 2)
+    const bool drumContext = !resolveBoundTrackStatus().isMidiTrack
+                             && instrumentTrackForClipBind_ != nullptr
+                             && instrumentTrackForClipBind_->hasAnyEffectiveDrumLabels();
+    if (rv == nullptr || !drumContext)
     {
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
-            "midi-editor: fit drum range unavailable reason=not-drum-mode");
+            "midi-editor: fit drum range unavailable reason=not-drum-instrument-context");
         return;
     }
     const auto range = computeUsefulDrumPitchRange();
@@ -1610,8 +1980,10 @@ void ExperimentalMidiEditorWindow::Body::applyFitDrums()
     const int hi = range->second;
     const int rows = hi - lo + 1;
 
-    // Target editor-window height so the grid shows exactly the useful rows (exact fit, no padding).
-    const int targetBodyH = kToolbarH + rv->preferredComponentHeightForPitchRows(rows);
+    // Target editor-window height so the grid shows exactly the useful rows (exact fit, no
+    // padding). Uses the responsive toolbar's current height (one or two rows at this width).
+    const int toolbarH = currentToolbarHeight();
+    const int targetBodyH = toolbarH + rv->preferredComponentHeightForPitchRows(rows);
     int appliedHeight = -1;
     if (auto* win = dynamic_cast<juce::ResizableWindow*>(getTopLevelComponent()))
     {
@@ -1621,7 +1993,7 @@ void ExperimentalMidiEditorWindow::Body::applyFitDrums()
         const auto userArea = display != nullptr
                                   ? display->userArea
                                   : juce::Rectangle<int>(0, 0, 1920, 1080);
-        auto nb = wb.withHeight(juce::jlimit(kToolbarH, juce::jmax(kToolbarH, userArea.getHeight()),
+        auto nb = wb.withHeight(juce::jlimit(toolbarH, juce::jmax(toolbarH, userArea.getHeight()),
                                              wb.getHeight() + deltaH));
         // Keep x/y where possible; if the bottom would leave the work area, slide the window up.
         if (nb.getBottom() > userArea.getBottom())
@@ -1714,8 +2086,19 @@ void ExperimentalMidiEditorWindow::Body::launchMidiExportFileChooser()
             return;
         }
 
-        const InstrumentMidiClipExportResult exportResult =
-            exportInstrumentMidiClipToMidiFile(*safeThis->boundTimelineClip_, file, sr);
+        // Export channel contract (Stage C): the SOURCE track's MIDI Channel decides the written
+        // channels — `Any (Preserve)` keeps native event channels, a fixed 1…16 writes the
+        // effective channel the user hears. The roll resolves the bound (source) track by TrackId,
+        // so a routed Midi row exports its own setting, never its destination's.
+        int sourceTrackChannel = kTrackMidiOutputChannelAny;
+        if (const auto* rv = dynamic_cast<const ExperimentalPianoRollView*>(
+                safeThis->viewport_.getViewedComponent()))
+        {
+            sourceTrackChannel = rv->trackMidiOutputChannel();
+        }
+
+        const InstrumentMidiClipExportResult exportResult = exportInstrumentMidiClipToMidiFile(
+            *safeThis->boundTimelineClip_, sourceTrackChannel, file, sr);
         if (!exportResult.ok)
         {
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
@@ -1726,12 +2109,14 @@ void ExperimentalMidiEditorWindow::Body::launchMidiExportFileChooser()
 
         ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
             "midi-editor: export wrote path=\"" + file.getFullPathName() + "\" notes="
-            + juce::String(exportResult.notesExported));
+            + juce::String(exportResult.notesExported) + " ccEvents="
+            + juce::String(exportResult.ccEventsExported) + " sourceTrackChannel="
+            + midi_channel_diag::trackOutputChannelText(sourceTrackChannel));
     });
 }
 
 ExperimentalMidiEditorWindow::ExperimentalMidiEditorWindow(ExperimentalInstrumentHost& host)
-    : DocumentWindow("I2 MIDI editor (Drum hits)",
+    : DocumentWindow(midi_editor_text::buildWindowTitle({}),
                      juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                          juce::ResizableWindow::backgroundColourId),
                      DocumentWindow::allButtons)
@@ -1766,12 +2151,40 @@ void ExperimentalMidiEditorWindow::closeButtonPressed()
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->snapshotOpenClipViewportFromRoll();
+        // Closing must never leave audition notes sounding (a held preview's Mouse Up may have
+        // been consumed by the close button itself).
+        if (b->player_ != nullptr)
+        {
+            b->player_->releaseAllActivePreviews();
+        }
     }
     setVisible(false);
 }
 
 void ExperimentalMidiEditorWindow::prepareInstrumentUnloadFromHost()
 {
+}
+
+void ExperimentalMidiEditorWindow::activeWindowStatusChanged()
+{
+    DocumentWindow::activeWindowStatusChanged();
+    if (isActiveWindow())
+    {
+        return;
+    }
+    // A deactivation can eat the Mouse Up of a held preview (Alt-Tab, popup steal). Release only
+    // held previews; quick-click tails keep their scheduled Note Off.
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
+    {
+        if (b->player_ != nullptr)
+        {
+            b->player_->releaseHeldPreviewsForFocusLoss();
+        }
+        if (auto* rv = dynamic_cast<ExperimentalPianoRollView*>(b->viewport_.getViewedComponent()))
+        {
+            rv->endActiveAuditionGestureOnMouseUp();
+        }
+    }
 }
 
 void ExperimentalMidiEditorWindow::syncInstrumentStateFromHost()
@@ -1813,7 +2226,7 @@ void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* 
                                                        Transport* transport,
                                                        juce::AudioDeviceManager* deviceManager,
                                                        const TimelineViewportModel* mainTimelineViewport,
-                                                       const juce::String& titleSuffix)
+                                                       const juce::String& boundTrackName)
 {
     ExperimentalMidiPatternPlayer::writeMidiEditorLogLine(
         "midi-editor: bindExternalPattern begin patternPtr=" + ptrToLog(pattern) + " noteCount="
@@ -1825,12 +2238,15 @@ void ExperimentalMidiEditorWindow::bindExternalPattern(ExperimentalMidiPattern* 
             pattern, timelineClip, instrumentTrackForClip, session, transport, deviceManager, mainTimelineViewport);
     }
 
-    juce::String winName { "I2 MIDI editor (Drum hits)" };
-    if (pattern != nullptr && titleSuffix.isNotEmpty())
+    setName(midi_editor_text::buildWindowTitle(pattern != nullptr ? boundTrackName : juce::String()));
+}
+
+void ExperimentalMidiEditorWindow::setWindowTitleProvider(std::function<juce::String()> provider)
+{
+    if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
-        winName << " - " << titleSuffix;
+        b->windowTitleProvider_ = std::move(provider);
     }
-    setName(winName);
 }
 
 void ExperimentalMidiEditorWindow::unbindExternalPattern()
@@ -1838,8 +2254,9 @@ void ExperimentalMidiEditorWindow::unbindExternalPattern()
     if (auto* b = dynamic_cast<Body*>(getContentComponent()))
     {
         b->unbindExternal();
+        b->windowTitleProvider_ = {};
     }
-    setName("I2 MIDI editor (Drum hits)");
+    setName(midi_editor_text::buildWindowTitle({}));
 }
 
 void ExperimentalMidiEditorWindow::bindTransportCommands(ExperimentalMidiTransportCommands commands)

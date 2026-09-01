@@ -94,16 +94,9 @@ namespace
 
     [[nodiscard]] Track rebuildTrackPreservingFields(const Track& t, std::vector<TrackSend> sends) noexcept
     {
-        return Track(t.getId(),
-                     t.getName(),
-                     t.getPlacedClips(),
-                     t.getChannelFaderGain(),
-                     t.isTrackOff(),
-                     t.isMuted(),
-                     t.getKind(),
-                     t.getStereoPan(),
-                     t.getRoutedOutputTrackId(),
-                     std::move(sends));
+        // Full-copy + single-field override; positional reconstruction here once dropped
+        // `midiOutputChannel` when that field was added.
+        return t.withSends(std::move(sends));
     }
 
     void appendCombinedOutgoing(const std::vector<Track>& tracks,
@@ -260,6 +253,16 @@ void repairRoutingInPlace(std::vector<Track>& tracks, const TrackId masterTrackI
         {
             continue;
         }
+        if (t.getKind() == TrackKind::Midi)
+        {
+            // Midi rows are not audio-routing nodes: they never feed a bus, so their audio output
+            // is pinned to "none" instead of being repaired toward Master.
+            if (t.getRoutedOutputTrackId() != kInvalidTrackId)
+            {
+                t = t.withRoutedOutputTrackId(kInvalidTrackId);
+            }
+            continue;
+        }
         TrackId dest = t.getRoutedOutputTrackId();
         if (dest == kInvalidTrackId || dest == t.getId() || !trackIdIsGroupOrMaster(tracks, dest))
         {
@@ -272,16 +275,7 @@ void repairRoutingInPlace(std::vector<Track>& tracks, const TrackId masterTrackI
         }
         if (dest != t.getRoutedOutputTrackId())
         {
-            t = Track(t.getId(),
-                      t.getName(),
-                      t.getPlacedClips(),
-                      t.getChannelFaderGain(),
-                      t.isTrackOff(),
-                      t.isMuted(),
-                      t.getKind(),
-                      t.getStereoPan(),
-                      dest,
-                      t.getSends());
+            t = t.withRoutedOutputTrackId(dest);
         }
     }
 }
@@ -315,6 +309,33 @@ void repairTrackSendUiSlotsInPlace(std::vector<TrackSend>& sends) noexcept
         out.push_back(s);
     }
     sends.swap(out);
+}
+
+void repairMidiDestinationsInPlace(std::vector<Track>& tracks) noexcept
+{
+    for (Track& t : tracks)
+    {
+        if (t.getKind() != TrackKind::Midi)
+        {
+            if (t.getMidiDestinationTrackId() != kInvalidTrackId)
+            {
+                t = t.withMidiDestinationTrackId(kInvalidTrackId);
+            }
+            continue;
+        }
+        const TrackId dest = t.getMidiDestinationTrackId();
+        if (dest == kInvalidTrackId)
+        {
+            continue;
+        }
+        const int destIx = findTrackIndexById(tracks, dest);
+        const bool destIsInstrument
+            = destIx >= 0 && tracks[(size_t)destIx].getKind() == TrackKind::Instrument;
+        if (!destIsInstrument || dest == t.getId())
+        {
+            t = t.withMidiDestinationTrackId(kInvalidTrackId);
+        }
+    }
 }
 
 void repairSendsInPlace(std::vector<Track>& tracks, const TrackId masterTrackId) noexcept
@@ -408,7 +429,8 @@ std::vector<TrackId> legalOutputDestinations(const SessionSnapshot& snap, const 
     {
         return out;
     }
-    if (snap.getTrack(fromIx).getKind() == TrackKind::Master)
+    if (snap.getTrack(fromIx).getKind() == TrackKind::Master
+        || snap.getTrack(fromIx).getKind() == TrackKind::Midi)
     {
         return out;
     }
@@ -460,6 +482,11 @@ bool wouldCreateRoutingCycle(const SessionSnapshot& snap,
     {
         return true;
     }
+    // Midi rows produce no audio and are never legal audio-routing sources.
+    if (fromTr.getKind() == TrackKind::Midi)
+    {
+        return true;
+    }
     if (!isOutputBusKind(destTr.getKind()))
     {
         return true;
@@ -480,16 +507,7 @@ bool wouldCreateRoutingCycle(const SessionSnapshot& snap,
     {
         if (t.getId() == fromTrackId)
         {
-            t = Track(t.getId(),
-                      t.getName(),
-                      t.getPlacedClips(),
-                      t.getChannelFaderGain(),
-                      t.isTrackOff(),
-                      t.isMuted(),
-                      t.getKind(),
-                      t.getStereoPan(),
-                      proposedDestId,
-                      t.getSends());
+            t = t.withRoutedOutputTrackId(proposedDestId);
             break;
         }
     }

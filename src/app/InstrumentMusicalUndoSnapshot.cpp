@@ -14,7 +14,8 @@ mini_daw_app_transport::buildSortedInstrumentMusicalUndoSnapshot(
     for (int ti = 0; ti < snapshot.getNumTracks(); ++ti)
     {
         const Track& tr = snapshot.getTrack(ti);
-        if (tr.getKind() != TrackKind::Instrument)
+        // TrackKind::Midi rows join musical undo: their clips live in the same controller model.
+        if (tr.getKind() != TrackKind::Instrument && tr.getKind() != TrackKind::Midi)
         {
             continue;
         }

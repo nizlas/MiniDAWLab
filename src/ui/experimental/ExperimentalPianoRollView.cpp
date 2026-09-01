@@ -436,7 +436,8 @@ void ExperimentalPianoRollView::dismissVelocityValueEditor(const bool commit)
             for (const int idx : validTargets)
             {
                 const auto& tn = pattern_.timelineNotes[(size_t)idx];
-                chord.push_back({ tn.midiNote, tn.velocity, (int)tn.channel });
+                chord.push_back(
+                    { tn.midiNote, tn.velocity, effectiveAuditionChannelForNote(tn), tn.offVelocity });
             }
             player_->previewNotesChord(chord);
         }
@@ -597,6 +598,169 @@ std::int64_t ExperimentalPianoRollView::minimumNoteLengthTicks() const noexcept
     return minTimelineNoteDurationTicks();
 }
 
+int ExperimentalPianoRollView::trackMidiOutputChannel() const noexcept
+{
+    if (instrumentTrackController_ == nullptr || session_ == nullptr)
+    {
+        return kTrackMidiOutputChannelAny;
+    }
+    const TrackId tid = instrumentTrackController_->getExperimentalInstrumentDomainTrackId();
+    if (tid == kInvalidTrackId)
+    {
+        return kTrackMidiOutputChannelAny;
+    }
+    const auto snap = session_->loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return kTrackMidiOutputChannelAny;
+    }
+    const int idx = snap->findTrackIndexById(tid);
+    return idx >= 0 ? snap->getTrack(idx).getMidiOutputChannel() : kTrackMidiOutputChannelAny;
+}
+
+midi_channel_diag::NativeChannelSummary
+ExperimentalPianoRollView::summarizeSelectedNotesNativeChannels() const noexcept
+{
+    midi_channel_diag::NativeChannelSummary s;
+    for (const int idx : selectedTimelineNoteIndices_)
+    {
+        if (idx < 0 || idx >= (int)pattern_.timelineNotes.size())
+        {
+            continue;
+        }
+        midi_channel_diag::addNativeChannel(s, (int)pattern_.timelineNotes[(size_t)idx].channel);
+    }
+    return s;
+}
+
+ExperimentalPianoRollView::ChannelRemapOutcome
+ExperimentalPianoRollView::remapNativeChannelsToTrackChannel(const ChannelRemapScope scope)
+{
+    ChannelRemapOutcome out;
+    const int target = trackMidiOutputChannel();
+    if (!midi_channel_diag::canRemapToTrackChannel(target))
+    {
+        out.result = ChannelRemapResult::NoFixedTrackChannel;
+        return out;
+    }
+    out.targetChannel = target;
+
+    struct ClipPlan
+    {
+        ExperimentalMidiPattern* pattern = nullptr;
+        std::vector<int> indices;
+    };
+    const auto planForClip = [target](ExperimentalMidiPattern& pat,
+                                      const std::vector<int>* restrictToIndices) {
+        ClipPlan plan;
+        plan.pattern = &pat;
+        plan.indices
+            = midi_channel_diag::planNativeChannelRemap(pat.timelineNotes, target, restrictToIndices);
+        return plan;
+    };
+
+    std::vector<ClipPlan> plans;
+    if (scope == ChannelRemapScope::SelectedNotes)
+    {
+        normalizeTimelineNoteSelection();
+        out.notesInScope = (int)selectedTimelineNoteIndices_.size();
+        if (out.notesInScope == 0)
+        {
+            out.result = ChannelRemapResult::NothingInScope;
+            return out;
+        }
+        std::vector<int> sel(selectedTimelineNoteIndices_.begin(), selectedTimelineNoteIndices_.end());
+        plans.push_back(planForClip(pattern_, &sel));
+    }
+    else
+    {
+        // Track-wide: every clip, including the open one. The musical undo snapshot already covers
+        // the whole track, so this stays a single undo step.
+        if (instrumentTrackController_ == nullptr)
+        {
+            out.result = ChannelRemapResult::NothingInScope;
+            return out;
+        }
+        for (const auto& clip : instrumentTrackController_->getClips())
+        {
+            if (clip == nullptr)
+            {
+                continue;
+            }
+            out.notesInScope += (int)clip->pattern.timelineNotes.size();
+            plans.push_back(planForClip(clip->pattern, nullptr));
+        }
+        if (out.notesInScope == 0)
+        {
+            out.result = ChannelRemapResult::NothingInScope;
+            return out;
+        }
+    }
+
+    for (const auto& plan : plans)
+    {
+        out.notesChanged += (int)plan.indices.size();
+    }
+    if (out.notesChanged == 0)
+    {
+        out.result = ChannelRemapResult::NoChange;
+        return out;
+    }
+
+    // All-or-nothing across every clip in scope: channel is part of note identity here, so the
+    // rewrite must not collapse two stacked notes into one.
+    const std::int64_t minDur = minTimelineNoteDurationTicks();
+    for (const auto& plan : plans)
+    {
+        if (midi_channel_diag::nativeChannelRemapWouldOverlap(
+                plan.pattern->timelineNotes, plan.indices, target, minDur))
+        {
+            out.result = ChannelRemapResult::RejectedOverlap;
+            out.notesChanged = 0;
+            flashForbiddenNoDropCursor();
+            return out;
+        }
+    }
+
+    auto applyRemap = [this, plans, target]() -> bool {
+        for (const auto& plan : plans)
+        {
+            if (plan.pattern == nullptr
+                || !midi_channel_diag::applyNativeChannelRemap(
+                    plan.pattern->timelineNotes, plan.indices, target))
+            {
+                return false;
+            }
+        }
+        if (instrumentTrackController_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
+        }
+        repaint();
+        return true;
+    };
+
+    const char* undoLabel = scope == ChannelRemapScope::SelectedNotes
+                                ? "Remap selected MIDI notes to track channel"
+                                : "Remap all MIDI notes to track channel";
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr
+        && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_(undoLabel, std::move(applyRemap));
+    }
+    else
+    {
+        applyRemap();
+    }
+    out.result = ChannelRemapResult::Applied;
+    return out;
+}
+
+int ExperimentalPianoRollView::channelForNewlyCreatedNotes() const noexcept
+{
+    return midi_channel_diag::channelForNewNotes(trackMidiOutputChannel());
+}
+
 ExperimentalPianoRollView::NoteLengthApplyResult
 ExperimentalPianoRollView::applyLengthTicksToSelectedNotes(const std::int64_t requestedTicks)
 {
@@ -745,7 +909,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::keyboardBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
-    r.removeFromBottom(velocityLaneTotalHeight());
+    r.removeFromBottom(velocityLaneTotalHeight() + ccLaneTotalHeight());
     return r.removeFromLeft(keyboardColumnWidth());
 }
 
@@ -753,7 +917,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::gridBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
-    r.removeFromBottom(velocityLaneTotalHeight());
+    r.removeFromBottom(velocityLaneTotalHeight() + ccLaneTotalHeight());
     r.removeFromLeft(sideStripTotalNow());
     r.removeFromRight(kPitchScrollbarWidthPx);
     return r;
@@ -764,7 +928,7 @@ int ExperimentalPianoRollView::maxVelocityLaneHeightNow() const noexcept
     // Never let the lane swallow the grid: always keep at least a few pitch rows visible,
     // and cap at ~50% of the component so tiny windows stay usable.
     const int minGridPx = kRowHeight * 3;
-    const int available = getHeight() - timelineRulerHeight() - minGridPx;
+    const int available = getHeight() - timelineRulerHeight() - ccLaneTotalHeight() - minGridPx;
     return juce::jlimit(0, getHeight() / 2, available);
 }
 
@@ -782,6 +946,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneResizeBandBounds() c
     }
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
+    r.removeFromBottom(ccLaneTotalHeight());
     auto lane = r.removeFromBottom(laneH);
     return lane.removeFromTop(kVelocityLaneResizeBandPx);
 }
@@ -798,7 +963,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneCollapsedKnobBounds(
         return {};
     }
     return { gr.getCentreX() - kVelocityLaneKnobWidth / 2,
-             getHeight() - kVelocityLaneKnobHeight,
+             getHeight() - ccLaneTotalHeight() - kVelocityLaneKnobHeight,
              kVelocityLaneKnobWidth,
              kVelocityLaneKnobHeight };
 }
@@ -807,6 +972,7 @@ juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
+    r.removeFromBottom(ccLaneTotalHeight());
     auto lane = r.removeFromBottom(velocityLaneTotalHeight());
     lane.removeFromLeft(sideStripTotalNow());
     return lane;
@@ -816,8 +982,782 @@ juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneHeaderBounds() const
 {
     auto r = getLocalBounds();
     r.removeFromTop(timelineRulerHeight());
+    r.removeFromBottom(ccLaneTotalHeight());
     auto lane = r.removeFromBottom(velocityLaneTotalHeight());
     return lane.removeFromLeft(sideStripTotalNow());
+}
+
+// --- MIDI CC automation lane (Stage D) --------------------------------------------------------
+
+int ExperimentalPianoRollView::maxCcLaneHeightNow() const noexcept
+{
+    const int minGridPx = kRowHeight * 3;
+    const int available
+        = getHeight() - timelineRulerHeight() - velocityLaneTotalHeight() - minGridPx;
+    return juce::jlimit(0, getHeight() / 2, available);
+}
+
+int ExperimentalPianoRollView::ccLaneTotalHeight() const noexcept
+{
+    // NOTE: deliberately not defined via maxCcLaneHeightNow() (which subtracts the velocity lane,
+    // which subtracts this) — clamp against the raw available space to avoid recursion.
+    const int minGridPx = kRowHeight * 3;
+    const int available = getHeight() - timelineRulerHeight() - minGridPx;
+    return juce::jlimit(0, juce::jmax(0, juce::jmin(available, getHeight() / 2)), ccLaneHeightPref_);
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::ccLaneBounds() const
+{
+    auto r = getLocalBounds();
+    r.removeFromTop(timelineRulerHeight());
+    auto lane = r.removeFromBottom(ccLaneTotalHeight());
+    lane.removeFromLeft(sideStripTotalNow());
+    return lane;
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::ccLaneHeaderBounds() const
+{
+    auto r = getLocalBounds();
+    r.removeFromTop(timelineRulerHeight());
+    auto lane = r.removeFromBottom(ccLaneTotalHeight());
+    return lane.removeFromLeft(sideStripTotalNow());
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::ccLaneInnerBounds() const
+{
+    auto inner = ccLaneBounds();
+    inner.removeFromTop(kCcLaneResizeBandPx + 2);
+    inner.removeFromBottom(4);
+    return inner;
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::ccLaneResizeBandBounds() const
+{
+    const int laneH = ccLaneTotalHeight();
+    if (laneH <= 0)
+    {
+        return {};
+    }
+    auto r = getLocalBounds();
+    auto lane = r.removeFromBottom(laneH);
+    return lane.removeFromTop(kCcLaneResizeBandPx);
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::ccLaneCollapsedKnobBounds() const
+{
+    if (ccLaneTotalHeight() > 0 || maxCcLaneHeightNow() <= 0)
+    {
+        return {};
+    }
+    const auto gr = gridBounds();
+    if (gr.isEmpty())
+    {
+        return {};
+    }
+    // Offset right of the velocity knob position so the two collapsed handles never overlap.
+    return { gr.getCentreX() - kCcLaneKnobWidth / 2 + kVelocityLaneKnobWidth + 24,
+             getHeight() - kCcLaneKnobHeight,
+             kCcLaneKnobWidth,
+             kCcLaneKnobHeight };
+}
+
+bool ExperimentalPianoRollView::ccLaneEditingAvailable() const noexcept
+{
+    return velocityLaneEditingAvailable();
+}
+
+int ExperimentalPianoRollView::ccValueFromLaneY(const int y) const noexcept
+{
+    const auto inner = ccLaneInnerBounds();
+    if (inner.getHeight() <= 0)
+    {
+        return 0;
+    }
+    const double t = (double)(inner.getBottom() - y) / (double)inner.getHeight();
+    return juce::jlimit(0, 127, (int)std::llround(t * 127.0));
+}
+
+float ExperimentalPianoRollView::ccLaneYForValue(const int value) const noexcept
+{
+    const auto inner = ccLaneInnerBounds();
+    return (float)inner.getBottom()
+           - (float)juce::jlimit(0, 127, value) / 127.0f * (float)inner.getHeight();
+}
+
+std::optional<float> ExperimentalPianoRollView::ccPointXForIndex(const int idx) const
+{
+    if (timelineClip_ == nullptr || idx < 0 || idx >= (int)pattern_.ccPoints.size())
+    {
+        return std::nullopt;
+    }
+    const auto& p = pattern_.ccPoints[(size_t)idx];
+    if ((int)p.controller != ccLaneController_)
+    {
+        return std::nullopt;
+    }
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t absS
+        = timelineClip_->timelineAnchorSamples + ticksToSignedSamples(p.startTick, bpm, tpq, sr);
+    return xForSessionSample(absS);
+}
+
+std::optional<int> ExperimentalPianoRollView::findCcPointIndexNear(const juce::Point<int> pos) const
+{
+    std::optional<int> best;
+    double bestDist = 1.0e9;
+    for (int i = 0; i < (int)pattern_.ccPoints.size(); ++i)
+    {
+        const auto xOpt = ccPointXForIndex(i);
+        if (!xOpt)
+        {
+            continue;
+        }
+        const float py = ccLaneYForValue((int)pattern_.ccPoints[(size_t)i].value);
+        const double dx = (double)pos.getX() - (double)*xOpt;
+        const double dy = (double)pos.getY() - (double)py;
+        const double d = std::sqrt(dx * dx + dy * dy);
+        if (d <= (double)kCcPointHitRadiusPx + 2.0 && d < bestDist)
+        {
+            best = i;
+            bestDist = d;
+        }
+    }
+    return best;
+}
+
+void ExperimentalPianoRollView::normalizeCcSelection() noexcept
+{
+    for (auto it = selectedCcPointIndices_.begin(); it != selectedCcPointIndices_.end();)
+    {
+        if (*it < 0 || *it >= (int)pattern_.ccPoints.size()
+            || (int)pattern_.ccPoints[(size_t)*it].controller != ccLaneController_)
+        {
+            it = selectedCcPointIndices_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void ExperimentalPianoRollView::handleCcLaneMouseDown(const juce::MouseEvent& e)
+{
+    if (!ccLaneEditingAvailable())
+    {
+        return;
+    }
+    normalizeCcSelection();
+    const auto pos = e.getPosition();
+
+    if (e.mods.isPopupMenu())
+    {
+        if (const auto hit = findCcPointIndexNear(pos))
+        {
+            if (selectedCcPointIndices_.count(*hit) == 0)
+            {
+                selectedCcPointIndices_.clear();
+                selectedCcPointIndices_.insert(*hit);
+            }
+            showCcPointContextMenu(*hit);
+        }
+        else
+        {
+            showCcControllerMenu();
+        }
+        repaint();
+        return;
+    }
+    if (!e.mods.isLeftButtonDown())
+    {
+        return;
+    }
+
+    if (const auto hit = findCcPointIndexNear(pos))
+    {
+        if (e.mods.isShiftDown() || e.mods.isCommandDown())
+        {
+            if (selectedCcPointIndices_.count(*hit) > 0)
+            {
+                selectedCcPointIndices_.erase(*hit);
+                repaint();
+                return;
+            }
+            selectedCcPointIndices_.insert(*hit);
+        }
+        else if (selectedCcPointIndices_.count(*hit) == 0)
+        {
+            selectedCcPointIndices_.clear();
+            selectedCcPointIndices_.insert(*hit);
+        }
+
+        ccDragCaptures_.clear();
+        for (const int i : selectedCcPointIndices_)
+        {
+            if (i >= 0 && i < (int)pattern_.ccPoints.size())
+            {
+                ccDragCaptures_.push_back({ i, pattern_.ccPoints[(size_t)i] });
+            }
+        }
+        if (ccDragCaptures_.empty())
+        {
+            repaint();
+            return;
+        }
+        ccPointDragActive_ = true;
+        ccDragMoved_ = false;
+        ccDragPrimaryIndex_ = *hit;
+        ccDragAnchorTick_ = pattern_.ccPoints[(size_t)*hit].startTick;
+        ccDragAnchorValue_ = ccValueFromLaneY(pos.getY());
+        repaint();
+        return;
+    }
+
+    // Empty lane: insert a new point at the snapped position/value (one undoable edit).
+    insertCcPointAt(pos);
+}
+
+void ExperimentalPianoRollView::updateCcLaneDrag(const juce::Point<int> localPos)
+{
+    if (!ccPointDragActive_ || !ccLaneEditingAvailable() || ccDragCaptures_.empty()
+        || timelineClip_ == nullptr)
+    {
+        return;
+    }
+    ccDragMoved_ = true;
+
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t cursorAbs = sampleAtGridX((float)localPos.getX());
+    const std::int64_t cursorTickRaw
+        = relativeSamplesToTicks(cursorAbs - timelineClip_->timelineAnchorSamples, bpm, tpq, sr);
+    const std::int64_t cursorTick = snapTimelineTickForEdit(cursorTickRaw);
+    const std::int64_t tickDelta = cursorTick - ccDragAnchorTick_;
+
+    const int cursorValue = ccValueFromLaneY(localPos.getY());
+    const int valueDelta = cursorValue - ccDragAnchorValue_;
+
+    for (const auto& cap : ccDragCaptures_)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.ccPoints.size())
+        {
+            continue;
+        }
+        auto& p = pattern_.ccPoints[(size_t)cap.index];
+        p.startTick = juce::jmax<std::int64_t>(0, cap.original.startTick + tickDelta);
+        if (ccDragCaptures_.size() == 1)
+        {
+            p.value = (std::uint8_t)juce::jlimit(0, 127, cursorValue);
+        }
+        else
+        {
+            p.value = (std::uint8_t)juce::jlimit(0, 127, (int)cap.original.value + valueDelta);
+        }
+    }
+}
+
+void ExperimentalPianoRollView::finishCcLaneDragGesture()
+{
+    if (!ccPointDragActive_)
+    {
+        return;
+    }
+    ccPointDragActive_ = false;
+    ccDragPrimaryIndex_ = -1;
+    const auto captures = std::move(ccDragCaptures_);
+    ccDragCaptures_.clear();
+    if (captures.empty() || !ccDragMoved_)
+    {
+        repaint();
+        return;
+    }
+
+    // Capture the drag results, rewind the live preview, then commit as ONE undoable edit so
+    // undo/redo sees exactly one step (same pattern as velocity drags). Notes and note selection
+    // are never touched.
+    std::vector<MidiCcPoint> finals;
+    finals.reserve(captures.size());
+    bool anyChange = false;
+    for (const auto& cap : captures)
+    {
+        if (cap.index < 0 || cap.index >= (int)pattern_.ccPoints.size())
+        {
+            finals.push_back(cap.original);
+            continue;
+        }
+        finals.push_back(pattern_.ccPoints[(size_t)cap.index]);
+        pattern_.ccPoints[(size_t)cap.index] = cap.original;
+        anyChange = anyChange
+                    || finals.back().startTick != cap.original.startTick
+                    || finals.back().value != cap.original.value;
+    }
+    if (!anyChange)
+    {
+        repaint();
+        return;
+    }
+
+    const auto applyEdit = [this, captures, finals]() -> bool {
+        for (size_t i = 0; i < captures.size(); ++i)
+        {
+            const int idx = captures[i].index;
+            if (idx >= 0 && idx < (int)pattern_.ccPoints.size())
+            {
+                pattern_.ccPoints[(size_t)idx] = finals[i];
+            }
+        }
+        (void)midi_cc::normalizePoints(pattern_.ccPoints);
+        if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+        }
+        repaint();
+        return true;
+    };
+
+    selectedCcPointIndices_.clear();
+    const std::vector<MidiCcPoint> reselect = finals;
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr
+        && timelineClip_ != nullptr)
+    {
+        undoablePatternEditHandler_("Edit CC points", applyEdit);
+    }
+    else
+    {
+        applyEdit();
+    }
+    // Re-select by identity: normalizePoints re-sorted the vector, so indices moved.
+    for (const auto& f : reselect)
+    {
+        for (int i = 0; i < (int)pattern_.ccPoints.size(); ++i)
+        {
+            if (midi_cc::pointsShareIdentity(pattern_.ccPoints[(size_t)i], f))
+            {
+                selectedCcPointIndices_.insert(i);
+                break;
+            }
+        }
+    }
+    repaint();
+}
+
+void ExperimentalPianoRollView::insertCcPointAt(const juce::Point<int> pos)
+{
+    if (!ccLaneEditingAvailable() || timelineClip_ == nullptr)
+    {
+        return;
+    }
+    const double sr = effectiveDeviceSampleRate(deviceManager_);
+    const double bpm = pattern_.bpm > 0.0 ? pattern_.bpm : 120.0;
+    const int tpq = experimentalEffectiveTicksPerQuarter(pattern_);
+    const std::int64_t rawTick = relativeSamplesToTicks(
+        sampleAtGridX((float)pos.getX()) - timelineClip_->timelineAnchorSamples, bpm, tpq, sr);
+
+    MidiCcPoint p;
+    p.startTick = juce::jmax<std::int64_t>(0, snapTimelineTickForCreate(rawTick));
+    p.controller = (std::uint8_t)midi_cc::sanitizeController(ccLaneController_);
+    p.value = (std::uint8_t)ccValueFromLaneY(pos.getY());
+    // Same new-event channel rule as notes: the fixed track channel when set, else the legacy
+    // default. Changing the track output later never rewrites this stored native channel.
+    p.channel
+        = (std::uint8_t)midi_channel_diag::channelForNewNotes(trackMidiOutputChannel());
+    p.interpolationToNext = MidiCcInterpolation::linear;
+
+    const auto applyInsert = [this, p]() -> bool {
+        pattern_.ccPoints.push_back(p);
+        (void)midi_cc::normalizePoints(pattern_.ccPoints);
+        if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+        }
+        repaint();
+        return true;
+    };
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr)
+    {
+        undoablePatternEditHandler_("Insert CC point", applyInsert);
+    }
+    else
+    {
+        applyInsert();
+    }
+    selectedCcPointIndices_.clear();
+    for (int i = 0; i < (int)pattern_.ccPoints.size(); ++i)
+    {
+        if (midi_cc::pointsShareIdentity(pattern_.ccPoints[(size_t)i], p))
+        {
+            selectedCcPointIndices_.insert(i);
+            break;
+        }
+    }
+    repaint();
+}
+
+void ExperimentalPianoRollView::deleteSelectedCcPoints()
+{
+    normalizeCcSelection();
+    if (selectedCcPointIndices_.empty() || !ccLaneEditingAvailable())
+    {
+        return;
+    }
+    std::vector<int> indices(selectedCcPointIndices_.begin(), selectedCcPointIndices_.end());
+    std::sort(indices.begin(), indices.end(), std::greater<int>());
+    selectedCcPointIndices_.clear();
+
+    const auto applyDelete = [this, indices]() -> bool {
+        for (const int i : indices)
+        {
+            if (i >= 0 && i < (int)pattern_.ccPoints.size())
+            {
+                pattern_.ccPoints.erase(pattern_.ccPoints.begin() + i);
+            }
+        }
+        if (instrumentTrackController_ != nullptr && timelineClip_ != nullptr)
+        {
+            instrumentTrackController_->notifyClipPatternMutated(timelineClip_->id);
+        }
+        repaint();
+        return true;
+    };
+    if (undoablePatternEditHandler_ != nullptr && instrumentTrackController_ != nullptr)
+    {
+        undoablePatternEditHandler_("Delete CC points", applyDelete);
+    }
+    else
+    {
+        applyDelete();
+    }
+    repaint();
+}
+
+bool ExperimentalPianoRollView::handleCcPointsDeleteSelectionShortcut()
+{
+    normalizeCcSelection();
+    if (selectedCcPointIndices_.empty() || !ccLaneEditingAvailable())
+    {
+        return false;
+    }
+    deleteSelectedCcPoints();
+    return true;
+}
+
+void ExperimentalPianoRollView::showCcPointContextMenu(const int pointIndex)
+{
+    if (pointIndex < 0 || pointIndex >= (int)pattern_.ccPoints.size())
+    {
+        return;
+    }
+    const auto& p = pattern_.ccPoints[(size_t)pointIndex];
+    juce::PopupMenu menu;
+    menu.addSectionHeader(midi_cc::controllerDisplayName((int)p.controller) + "  value "
+                          + juce::String((int)p.value) + "  ch " + juce::String((int)p.channel));
+    menu.addItem(1, "Delete point(s)");
+    menu.addSeparator();
+    menu.addItem(2, "Segment to next: Hold (step)", true,
+                 p.interpolationToNext == MidiCcInterpolation::hold);
+    menu.addItem(3, "Segment to next: Linear (ramp)", true,
+                 p.interpolationToNext == MidiCcInterpolation::linear);
+
+    juce::Component::SafePointer<ExperimentalPianoRollView> st(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                       [st, pointIndex](const int r) {
+                           if (st == nullptr || r == 0)
+                           {
+                               return;
+                           }
+                           if (r == 1)
+                           {
+                               st->deleteSelectedCcPoints();
+                               return;
+                           }
+                           const MidiCcInterpolation shape
+                               = r == 2 ? MidiCcInterpolation::hold : MidiCcInterpolation::linear;
+                           // Interpolation applies to every selected point (one undoable edit).
+                           std::vector<int> indices(st->selectedCcPointIndices_.begin(),
+                                                    st->selectedCcPointIndices_.end());
+                           if (indices.empty())
+                           {
+                               indices.push_back(pointIndex);
+                           }
+                           const auto apply = [st, indices, shape]() -> bool {
+                               if (st == nullptr)
+                               {
+                                   return false;
+                               }
+                               for (const int i : indices)
+                               {
+                                   if (i >= 0 && i < (int)st->pattern_.ccPoints.size())
+                                   {
+                                       st->pattern_.ccPoints[(size_t)i].interpolationToNext = shape;
+                                   }
+                               }
+                               if (st->instrumentTrackController_ != nullptr
+                                   && st->timelineClip_ != nullptr)
+                               {
+                                   st->instrumentTrackController_->notifyClipPatternMutated(
+                                       st->timelineClip_->id);
+                               }
+                               st->repaint();
+                               return true;
+                           };
+                           if (st->undoablePatternEditHandler_ != nullptr
+                               && st->instrumentTrackController_ != nullptr)
+                           {
+                               st->undoablePatternEditHandler_("Set CC segment shape", apply);
+                           }
+                           else
+                           {
+                               apply();
+                           }
+                       });
+}
+
+void ExperimentalPianoRollView::showCcControllerMenu()
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader("Controller lane");
+
+    // Controllers already present in this clip first — the user's own data is one click away.
+    {
+        std::vector<int> present;
+        for (const auto& p : pattern_.ccPoints)
+        {
+            if (std::find(present.begin(), present.end(), (int)p.controller) == present.end())
+            {
+                present.push_back((int)p.controller);
+            }
+        }
+        std::sort(present.begin(), present.end());
+        for (const int c : present)
+        {
+            menu.addItem(1000 + c, "In clip: " + midi_cc::controllerDisplayName(c), true,
+                         c == ccLaneController_);
+        }
+        if (!present.empty())
+        {
+            menu.addSeparator();
+        }
+    }
+
+    for (const int c : { 1, 2, 4, 7, 10, 11, 64, 65, 66, 67, 91, 93 })
+    {
+        menu.addItem(1000 + c, midi_cc::controllerDisplayName(c), true, c == ccLaneController_);
+    }
+    menu.addSeparator();
+    for (int base = 0; base < 128; base += 32)
+    {
+        juce::PopupMenu sub;
+        for (int c = base; c < base + 32; ++c)
+        {
+            sub.addItem(1000 + c, midi_cc::controllerDisplayName(c), true, c == ccLaneController_);
+        }
+        menu.addSubMenu("CC" + juce::String(base) + " - CC" + juce::String(base + 31), sub);
+    }
+
+    juce::Component::SafePointer<ExperimentalPianoRollView> st(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this), [st](const int r) {
+        if (st == nullptr || r < 1000 || r > 1127)
+        {
+            return;
+        }
+        st->ccLaneController_ = r - 1000;
+        st->selectedCcPointIndices_.clear();
+        st->repaint();
+    });
+}
+
+void ExperimentalPianoRollView::paintCcLane(juce::Graphics& g)
+{
+    // Collapsed: labeled restore knob (discoverability; mirrors the velocity lane's knob).
+    {
+        const auto knob = ccLaneCollapsedKnobBounds();
+        if (!knob.isEmpty())
+        {
+            g.setColour(juce::Colour(0xff3a4048));
+            g.fillRoundedRectangle(knob.toFloat(), 3.0f);
+            g.setColour(juce::Colours::white.withAlpha(0.55f));
+            g.drawRoundedRectangle(knob.toFloat(), 3.0f, 1.0f);
+            g.setFont(juce::Font(juce::FontOptions().withHeight(7.0f)));
+            g.drawText("CC", knob, juce::Justification::centred, false);
+        }
+    }
+
+    const auto lane = ccLaneBounds();
+    const auto header = ccLaneHeaderBounds();
+    if (ccLaneTotalHeight() <= 0)
+    {
+        return;
+    }
+
+    g.setColour(juce::Colour(0xff20242a));
+    g.fillRect(header);
+    g.fillRect(lane);
+    g.setColour(juce::Colours::white.withAlpha(0.16f));
+    g.drawHorizontalLine(lane.getY(), (float)header.getX(), (float)lane.getRight());
+
+    // Header: current controller (click = selector) + selected point value readout.
+    if (header.getWidth() >= 46)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.75f));
+        g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
+        g.drawText(midi_cc::controllerDisplayName(ccLaneController_) + juce::String::fromUTF8(" \xe2\x96\xbe"),
+                   header.reduced(5, 4), juce::Justification::topLeft, true);
+        normalizeCcSelection();
+        if (selectedCcPointIndices_.size() == 1)
+        {
+            const int idx = *selectedCcPointIndices_.begin();
+            const auto& p = pattern_.ccPoints[(size_t)idx];
+            g.setColour(juce::Colours::white.withAlpha(0.55f));
+            g.drawText("value " + juce::String((int)p.value) + "  ch " + juce::String((int)p.channel),
+                       header.reduced(5, 4).withTrimmedTop(14), juce::Justification::topLeft, true);
+        }
+        else if (selectedCcPointIndices_.size() > 1)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.55f));
+            g.drawText(juce::String((int)selectedCcPointIndices_.size()) + " points",
+                       header.reduced(5, 4).withTrimmedTop(14), juce::Justification::topLeft, true);
+        }
+    }
+
+    if (lane.isEmpty())
+    {
+        return;
+    }
+    if (!ccLaneEditingAvailable())
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.3f));
+        g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
+        g.drawText("CC editing is available for timeline MIDI clips", lane,
+                   juce::Justification::centred, true);
+        return;
+    }
+
+    // Clip-span shading, matching the velocity lane / grid trim hint.
+    {
+        const std::int64_t vis0 = timelineClip_->startSamples;
+        const std::int64_t vis1 = vis0 + juce::jmax(std::int64_t{ 1 }, timelineClip_->lengthSamples);
+        float xL = xForSessionSample(vis0);
+        float xR = xForSessionSample(vis1);
+        if (xR < xL)
+        {
+            std::swap(xL, xR);
+        }
+        const float gx0 = (float)lane.getX();
+        const float gx1 = (float)lane.getRight();
+        const float bandL = juce::jlimit(gx0, gx1, xL);
+        const float bandR = juce::jlimit(gx0, gx1, xR);
+        g.setColour(juce::Colours::black.withAlpha(0.36f));
+        if (bandL > gx0 + 0.5f)
+        {
+            g.fillRect(gx0, (float)lane.getY(), bandL - gx0, (float)lane.getHeight());
+        }
+        if (gx1 > bandR + 0.5f)
+        {
+            g.fillRect(bandR, (float)lane.getY(), gx1 - bandR, (float)lane.getHeight());
+        }
+    }
+
+    const auto inner = ccLaneInnerBounds();
+    if (inner.getHeight() <= 0)
+    {
+        return;
+    }
+
+    // Value reference lines 0 / 64 / 127.
+    g.setColour(juce::Colours::white.withAlpha(0.10f));
+    for (const int v : { 0, 64, 127 })
+    {
+        const float y = ccLaneYForValue(v);
+        g.drawHorizontalLine((int)y, (float)inner.getX(), (float)inner.getRight());
+    }
+
+    // Segments + points of the shown controller, drawn per native-channel stream. A distinct
+    // accent color separates automation from note-velocity bars.
+    const juce::Colour ccColour(0xff4fc3f7);
+    for (const auto& key : midi_cc::distinctStreams(pattern_.ccPoints))
+    {
+        if (key.controller != ccLaneController_)
+        {
+            continue;
+        }
+        const MidiCcPoint* prev = nullptr;
+        float prevX = 0.0f;
+        float prevY = 0.0f;
+        for (int i = 0; i < (int)pattern_.ccPoints.size(); ++i)
+        {
+            const auto& p = pattern_.ccPoints[(size_t)i];
+            if ((int)p.controller != key.controller || (int)p.channel != key.channel)
+            {
+                continue;
+            }
+            const auto xOpt = ccPointXForIndex(i);
+            if (!xOpt)
+            {
+                continue;
+            }
+            const float x = *xOpt;
+            const float y = ccLaneYForValue((int)p.value);
+            if (prev != nullptr)
+            {
+                g.setColour(ccColour.withAlpha(0.8f));
+                if (prev->interpolationToNext == MidiCcInterpolation::linear)
+                {
+                    g.drawLine(prevX, prevY, x, y, 1.6f);
+                }
+                else
+                {
+                    g.drawLine(prevX, prevY, x, prevY, 1.6f); // hold: flat …
+                    g.drawLine(x, prevY, x, y, 1.6f);         // … then step at the next point
+                }
+            }
+            prev = &p;
+            prevX = x;
+            prevY = y;
+        }
+        // Held value after the final point: draw the tail to the lane's right edge.
+        if (prev != nullptr && prevX < (float)inner.getRight())
+        {
+            g.setColour(ccColour.withAlpha(0.45f));
+            g.drawLine(prevX, prevY, (float)inner.getRight(), prevY, 1.2f);
+        }
+    }
+
+    for (int i = 0; i < (int)pattern_.ccPoints.size(); ++i)
+    {
+        const auto xOpt = ccPointXForIndex(i);
+        if (!xOpt)
+        {
+            continue;
+        }
+        const float x = *xOpt;
+        const float y = ccLaneYForValue((int)pattern_.ccPoints[(size_t)i].value);
+        const bool sel = selectedCcPointIndices_.count(i) > 0;
+        const float r = sel ? 5.0f : 3.5f;
+        g.setColour(sel ? juce::Colours::white : ccColour);
+        g.fillEllipse(x - r, y - r, r * 2.0f, r * 2.0f);
+        if (sel)
+        {
+            g.setColour(ccColour);
+            g.drawEllipse(x - r, y - r, r * 2.0f, r * 2.0f, 1.4f);
+        }
+    }
+
+    // Numeric readout for the grabbed point while dragging.
+    if (ccPointDragActive_ && ccDragPrimaryIndex_ >= 0
+        && ccDragPrimaryIndex_ < (int)pattern_.ccPoints.size())
+    {
+        if (const auto xOpt = ccPointXForIndex(ccDragPrimaryIndex_))
+        {
+            const int v = (int)pattern_.ccPoints[(size_t)ccDragPrimaryIndex_].value;
+            const juce::Rectangle<float> textR(*xOpt - 16.0f, (float)lane.getY() + 1.0f, 32.0f, 12.0f);
+            g.setColour(juce::Colours::white.withAlpha(0.92f));
+            g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
+            g.drawText(juce::String(v), textR, juce::Justification::centred, false);
+        }
+    }
 }
 
 juce::Rectangle<int> ExperimentalPianoRollView::velocityLaneInnerBounds() const
@@ -867,6 +1807,12 @@ void ExperimentalPianoRollView::setSessionTimelineContext(InstrumentMidiClip* ti
         velocityLaneResizeActive_ = false;
         velocityLaneResizeFromCollapsedKnob_ = false;
         velocityDragAuditionSameStart_ = false;
+        ccPointDragActive_ = false;
+        ccDragCaptures_.clear();
+        ccDragPrimaryIndex_ = -1;
+        ccLaneResizeActive_ = false;
+        ccLaneResizeFromCollapsedKnob_ = false;
+        selectedCcPointIndices_.clear();
         middlePanActive_ = false;
     }
     timelineClip_ = timelineClip;
@@ -1583,9 +2529,33 @@ void ExperimentalPianoRollView::restoreVerticalPitchScrollToPriorTopPitch(const 
     repaint();
 }
 
+void ExperimentalPianoRollView::seedDefaultVerticalScroll(const int fallbackCenterPitch) noexcept
+{
+    // Reveal existing content (centre of the clip's pitch span); an empty editor starts at a
+    // musically useful register instead of pinned to G8 (spec B, "scrolling and initial view").
+    int centerPitch = juce::jlimit(pitchLow_, pitchHigh_, fallbackCenterPitch);
+    if (!pattern_.timelineNotes.empty())
+    {
+        int lo = 127;
+        int hi = 0;
+        for (const auto& tn : pattern_.timelineNotes)
+        {
+            lo = juce::jmin(lo, tn.midiNote);
+            hi = juce::jmax(hi, tn.midiNote);
+        }
+        centerPitch = juce::jlimit(pitchLow_, pitchHigh_, (lo + hi) / 2);
+    }
+    const int topPitch = centerPitch + countVisiblePitchRows() / 2;
+    pitchScrollOffsetRows_ = pitchHigh_ - topPitch;
+    clampPitchScrollOffset();
+    syncPitchScrollbarFromState();
+    repaint();
+}
+
 int ExperimentalPianoRollView::preferredComponentHeightForPitchRows(const int rows) const noexcept
 {
-    return timelineRulerHeight() + juce::jmax(1, rows) * kRowHeight + juce::jmax(0, velocityLaneHeightPref_);
+    return timelineRulerHeight() + juce::jmax(1, rows) * kRowHeight + juce::jmax(0, velocityLaneHeightPref_)
+           + juce::jmax(0, ccLaneHeightPref_);
 }
 
 void ExperimentalPianoRollView::setVelocityLaneHeightPreference(const int heightPx) noexcept
@@ -3109,11 +4079,84 @@ void ExperimentalPianoRollView::finishVelocityLaneDragGesture()
     }
 }
 
-void ExperimentalPianoRollView::auditionNote(const int midiNote, const int velocity, const int channel) noexcept
+int ExperimentalPianoRollView::effectiveAuditionChannelForNote(const TimelineMidiNote& tn) const noexcept
+{
+    return midi_channel_diag::effectiveChannel((int)tn.channel, trackMidiOutputChannel());
+}
+
+void ExperimentalPianoRollView::beginArrangedNoteAuditionGesture(const TimelineMidiNote& tn) noexcept
+{
+    if (player_ == nullptr)
+    {
+        return;
+    }
+    // Event audition, not playback: stored pitch/velocities + effective channel; the arranged
+    // duration is deliberately ignored (spec D).
+    const int channel = effectiveAuditionChannelForNote(tn);
+    // Stage D: chase the clip's own CC automation at the note's position and deliver it BEFORE
+    // the preview Note On (FIFO message-thread queue), with the same source-channel semantics as
+    // transport playback. Before a stream's first point no value exists and nothing is sent.
+    {
+        const int trackOut = trackMidiOutputChannel();
+        for (const auto& key : midi_cc::distinctStreams(pattern_.ccPoints))
+        {
+            if (const auto v =
+                    midi_cc::valueAtTick(pattern_.ccPoints, key.controller, key.channel, tn.startTick))
+            {
+                player_->sendControllerChangeNow(
+                    midi_channel_diag::effectiveChannel(key.channel, trackOut), key.controller, *v);
+            }
+        }
+    }
+    player_->beginArrangedNotePreview(tn.midiNote, tn.velocity, channel, tn.offVelocity);
+    activeAuditionGestureKey_ = std::make_pair(channel, tn.midiNote);
+    activeAuditionGestureIsKeyStrip_ = false;
+}
+
+void ExperimentalPianoRollView::beginKeyStripAuditionGesture(const int midiNote) noexcept
+{
+    if (player_ == nullptr)
+    {
+        return;
+    }
+    // Exact Mouse Down/Mouse Up manual test instrument (spec E): current toolbar Vel/Off values,
+    // and the channel a newly created note on this source would get, under normal track output
+    // semantics (`effectiveChannel(channelForNewNotes(out), out) == channelForNewNotes(out)`).
+    int velocity = 100;
+    int offVelocity = kDefaultMidiNoteOffVelocity;
+    if (keyStripAuditionVelocityProvider_)
+    {
+        const auto [vel, off] = keyStripAuditionVelocityProvider_();
+        velocity = vel;
+        offVelocity = off;
+    }
+    const int channel = channelForNewlyCreatedNotes();
+    player_->beginHeldKeyPreview(midiNote, velocity, channel, offVelocity);
+    activeAuditionGestureKey_ = std::make_pair(channel, midiNote);
+    activeAuditionGestureIsKeyStrip_ = true;
+}
+
+void ExperimentalPianoRollView::endActiveAuditionGestureOnMouseUp() noexcept
+{
+    if (!activeAuditionGestureKey_.has_value())
+    {
+        return;
+    }
+    const auto [channel, pitch] = *activeAuditionGestureKey_;
+    activeAuditionGestureKey_.reset();
+    activeAuditionGestureIsKeyStrip_ = false;
+    if (player_ != nullptr)
+    {
+        player_->endNotePreview(pitch, channel);
+    }
+}
+
+void ExperimentalPianoRollView::oneShotAuditionForCreatedNote(const TimelineMidiNote& tn) noexcept
 {
     if (player_ != nullptr)
     {
-        player_->previewSingleNote(midiNote, velocity, channel);
+        player_->oneShotArrangedPreview(
+            tn.midiNote, tn.velocity, effectiveAuditionChannelForNote(tn), tn.offVelocity);
     }
 }
 
@@ -3150,7 +4193,7 @@ void ExperimentalPianoRollView::maybeAuditionVelocityDrag(const bool force) noex
             continue;
         }
         const auto& tn = pattern_.timelineNotes[(size_t)cap.index];
-        chord.push_back({ tn.midiNote, tn.velocity, (int)tn.channel });
+        chord.push_back({ tn.midiNote, tn.velocity, effectiveAuditionChannelForNote(tn), tn.offVelocity });
     }
     if (!chord.empty())
     {
@@ -3466,8 +4509,7 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
             }
             if (auditionThisClick && ni >= 0 && ni < (int)pattern_.timelineNotes.size())
             {
-                const auto& tn = pattern_.timelineNotes[(size_t)ni];
-                auditionNote(tn.midiNote, tn.velocity, (int)tn.channel);
+                beginArrangedNoteAuditionGesture(pattern_.timelineNotes[(size_t)ni]);
             }
             beginTimelineNoteResizeGesture(ni, edgeHit->second);
             repaint();
@@ -3479,8 +4521,7 @@ void ExperimentalPianoRollView::handleTimelineNotesMouseDown(const juce::MouseEv
     {
         if (auditionThisClick && *hit >= 0 && *hit < (int)pattern_.timelineNotes.size())
         {
-            const auto& tn = pattern_.timelineNotes[(size_t)*hit];
-            auditionNote(tn.midiNote, tn.velocity, (int)tn.channel);
+            beginArrangedNoteAuditionGesture(pattern_.timelineNotes[(size_t)*hit]);
         }
         if (multiNoteSelectModifier)
         {
@@ -3545,7 +4586,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
     // Toggle guard: a note already sitting exactly on the create target (tick + pitch + channel)
     // is deleted instead of stacked. This makes double-click in the same cell create/delete
     // consistently even when the painted glyph (narrow Hits diamond) misses the raw hit-test.
-    constexpr int kCreateNoteChannel = 10;
+    const auto kCreateNoteChannel = (std::uint8_t)channelForNewlyCreatedNotes();
     for (int i = (int)pattern_.timelineNotes.size() - 1; i >= 0; --i)
     {
         const auto& tn = pattern_.timelineNotes[(size_t)i];
@@ -3617,7 +4658,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
             {
                 instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
             }
-            auditionNote(nn.midiNote, nn.velocity, nn.channel);
+            oneShotAuditionForCreatedNote(nn);
             repaint();
             return true;
         };
@@ -3683,7 +4724,7 @@ void ExperimentalPianoRollView::tryAddTimelineNoteAtGridClick(const juce::Point<
         {
             instrumentTrackController_->notifyClipExperimentalMusicalTimingChanged();
         }
-        auditionNote(nn.midiNote, nn.velocity, nn.channel);
+        oneShotAuditionForCreatedNote(nn);
         repaint();
         return true;
     };
@@ -4067,15 +5108,12 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
 
     if (!kb.isEmpty() && kb.contains(pos) && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
     {
-        // Piano-key / drum-name row click: audition the pitch at velocity 100. No note is created and
-        // timeline events are untouched. Bound clips use channel 10; unbound uses the player default.
+        // Piano-key / drum-name row press: exact Mouse Down/Mouse Up audition with the toolbar's
+        // current Vel/Off values (spec E). No note is created and timeline events are untouched.
         const int pitch = pitchAtY(pos.getY());
         if (pitch >= pitchLow_ && pitch <= pitchHigh_)
         {
-            const int channel = (useAbsoluteTimeline())
-                                    ? 10
-                                    : ExperimentalMidiPatternPlayer::kMidiChannel;
-            auditionNote(pitch, 100, channel);
+            beginKeyStripAuditionGesture(pitch);
         }
         return;
     }
@@ -4085,6 +5123,37 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
     {
         timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
         handleTimelineRulerMouseDown(e, rt);
+        return;
+    }
+
+    // CC lane first: it sits at the very bottom, below the velocity lane.
+    const auto ccResizeBand = ccLaneResizeBandBounds();
+    const auto ccKnob = ccLaneCollapsedKnobBounds();
+    if ((!ccResizeBand.isEmpty() && ccResizeBand.contains(pos))
+        || (!ccKnob.isEmpty() && ccKnob.contains(pos)))
+    {
+        if (!e.mods.isPopupMenu())
+        {
+            timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+            ccLaneResizeActive_ = true;
+            ccLaneResizeFromCollapsedKnob_ = ccLaneTotalHeight() <= 0;
+            ccLaneResizeAnchorY_ = pos.getY();
+            ccLaneResizeAnchorHeight_ = ccLaneTotalHeight();
+        }
+        return;
+    }
+    const auto ccHeader = ccLaneHeaderBounds();
+    if (!ccHeader.isEmpty() && ccHeader.contains(pos))
+    {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+        showCcControllerMenu();
+        return;
+    }
+    const auto ccLane = ccLaneBounds();
+    if (!ccLane.isEmpty() && ccLane.contains(pos))
+    {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+        handleCcLaneMouseDown(e);
         return;
     }
 
@@ -4173,6 +5242,27 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
+    if (ccLaneResizeActive_)
+    {
+        int newHeight = ccLaneResizeAnchorHeight_ + (ccLaneResizeAnchorY_ - e.getPosition().getY());
+        if (newHeight < kCcLaneMinUsableHeight)
+        {
+            newHeight = 0;
+        }
+        ccLaneHeightPref_ = juce::jlimit(0, maxCcLaneHeightNow(), newHeight);
+        clampPitchScrollOffset();
+        resized();
+        repaint();
+        return;
+    }
+
+    if (ccPointDragActive_)
+    {
+        updateCcLaneDrag(e.getPosition());
+        repaint();
+        return;
+    }
+
     if (velocityLaneDragActive_)
     {
         updateVelocityLaneDrag(e.getPosition());
@@ -4238,6 +5328,13 @@ void ExperimentalPianoRollView::mouseDrag(const juce::MouseEvent& e)
 
 void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
 {
+    // FIRST, before any early return: Mouse Up ends the active audition gesture. This is what
+    // schedules the arranged-note Note Off at max(Note On + 850 ms, now) and releases piano-key /
+    // drum-row previews exactly on Mouse Up. Missing this call was the Phase B.1 integration
+    // regression: previews stayed "held" forever (drainDue skips held notes by design), so only
+    // the focus-loss cleanup ever sent Note Off. No-op when no gesture is active.
+    endActiveAuditionGestureOnMouseUp();
+
     if (middlePanActive_)
     {
         middlePanActive_ = false;
@@ -4261,6 +5358,23 @@ void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
         return;
     }
 
+    if (ccLaneResizeActive_)
+    {
+        const bool restoreDefault = ccLaneResizeFromCollapsedKnob_
+                                    && e.getDistanceFromDragStart() < 4 && ccLaneTotalHeight() <= 0;
+        ccLaneResizeActive_ = false;
+        ccLaneResizeFromCollapsedKnob_ = false;
+        if (restoreDefault)
+        {
+            ccLaneHeightPref_ = kCcLaneHeight;
+            clampPitchScrollOffset();
+            resized();
+        }
+        repaint();
+        return;
+    }
+
+    finishCcLaneDragGesture();
     finishVelocityLaneDragGesture();
     finishTimelineNoteMoveGesture();
     finishTimelineNoteResizeGesture();
@@ -4373,20 +5487,27 @@ void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
         }
     }
 
-    if (rowLabelMode_ == 2 && rowLabelTooltipProvider_)
     {
         const auto kb = keyboardBounds();
-        if (kb.contains(e.getPosition()))
+        if (!kb.isEmpty() && kb.contains(e.getPosition()))
         {
             const int pitch = pitchAtY(e.getPosition().getY());
             if (pitch >= pitchLow_ && pitch <= pitchHigh_)
             {
-                const juce::String tip = rowLabelTooltipProvider_(pitch);
-                if (tip.isNotEmpty())
+                if (rowLabelMode_ == 2 && rowLabelTooltipProvider_)
                 {
-                    setTooltip(tip);
-                    return;
+                    const juce::String tip = rowLabelTooltipProvider_(pitch);
+                    if (tip.isNotEmpty())
+                    {
+                        setTooltip(tip);
+                        return;
+                    }
                 }
+                // Note name + raw MIDI number, e.g. `C3 (60)` — Cubase octave convention
+                // (middle C = C3), useful when checking boundary rows C-2 / G8.
+                setTooltip(juce::MidiMessage::getMidiNoteName(pitch, true, true, 3) + " ("
+                           + juce::String(pitch) + ")");
+                return;
             }
         }
     }
@@ -5031,4 +6152,5 @@ void ExperimentalPianoRollView::paint(juce::Graphics& g)
 
     // --- Velocity controller lane (bottom strip; spatially disjoint from grid/keyboard)
     paintVelocityLane(g);
+    paintCcLane(g);
 }

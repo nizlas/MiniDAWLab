@@ -30,6 +30,8 @@ public:
 
         std::function<void()> clearExperimentalInstrumentRuntimesPreserveBridgeOnly;
         std::function<std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>(TrackId)> getOrCreateInstrumentRuntimeForTrack;
+        /// Phase B: plugin-less controller factory for `TrackKind::Midi` rows ("MidiContent" blocks).
+        std::function<InstrumentTrackController*(TrackId)> getOrCreateMidiContentControllerForTrack;
         std::function<void()> syncMidiEditorInstrumentStateFromHost;
         std::function<void()> clearSessionHistory;
         std::function<void()> refreshAllUiAfterLoadedProject;

@@ -80,13 +80,33 @@ struct ExperimentalInstrumentPlaybackEntry
     InstrumentTrackController* midiController = nullptr;
 };
 
+/// One plugin-less `TrackKind::Midi` source lane (Phase B). Deliberately carries **no destination**:
+/// the audio callback reads `Track::getMidiDestinationTrackId()` from the SessionSnapshot each block
+/// and resolves it against `entries` by TrackId, so an Inspector "MIDI To" edit is picked up on the
+/// next block without republishing this snapshot, and a deleted/illegal destination simply fails to
+/// resolve (silent, never dangling).
+struct ExperimentalMidiSourcePlaybackEntry
+{
+    TrackId trackId = kInvalidTrackId;
+    InstrumentTrackController* midiController = nullptr;
+};
+
 struct ExperimentalInstrumentPlaybackSnapshot
 {
     std::vector<ExperimentalInstrumentPlaybackEntry> entries;
+    /// `TrackKind::Midi` sources in **session track order** — the deterministic many-to-one merge
+    /// order (a destination's own events first, then MIDI sources in ascending track-list order).
+    std::vector<ExperimentalMidiSourcePlaybackEntry> midiSources;
 
     ExperimentalInstrumentPlaybackSnapshot() = default;
     explicit ExperimentalInstrumentPlaybackSnapshot(std::vector<ExperimentalInstrumentPlaybackEntry>&& e)
         : entries(std::move(e))
+    {
+    }
+    ExperimentalInstrumentPlaybackSnapshot(std::vector<ExperimentalInstrumentPlaybackEntry>&& e,
+                                           std::vector<ExperimentalMidiSourcePlaybackEntry>&& m)
+        : entries(std::move(e))
+        , midiSources(std::move(m))
     {
     }
 };

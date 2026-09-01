@@ -138,6 +138,74 @@ InstrumentTrackController* InstrumentRuntimeCoordinator::getInstrumentController
     return (it == instrumentControllersByTrackId_.end()) ? nullptr : it->second.get();
 }
 
+InstrumentTrackController*
+    InstrumentRuntimeCoordinator::getMidiContentControllerForTrack(const TrackId tid) const noexcept
+{
+    auto it = midiContentControllersByTrackId_.find(tid);
+    return (it == midiContentControllersByTrackId_.end()) ? nullptr : it->second.get();
+}
+
+InstrumentTrackController*
+    InstrumentRuntimeCoordinator::getOrCreateMidiContentControllerForTrack(const TrackId tid)
+{
+    if (tid == kInvalidTrackId)
+    {
+        return nullptr;
+    }
+    if (InstrumentTrackController* const existing = getMidiContentControllerForTrack(tid))
+    {
+        return existing;
+    }
+    auto ctl = std::make_unique<InstrumentTrackController>(nullptr);
+    ctl->setSession(&session_);
+    if (lastPreparedDeviceSampleRate_ > 0.0)
+    {
+        ctl->setTimelineSampleRate(lastPreparedDeviceSampleRate_);
+    }
+    InstrumentTrackController* const ctlPtr = ctl.get();
+    if (!ctlPtr->bootstrapMidiContentShellForSessionTrack(tid))
+    {
+        // Session row missing or not TrackKind::Midi — never key a controller to an unknown row.
+        return nullptr;
+    }
+    midiContentControllersByTrackId_.emplace(tid, std::move(ctl));
+    updateExperimentalPlaybackBridgeAfterRegistryChange();
+    runSyncInstrumentTimelineRowAttachmentCallback();
+    return ctlPtr;
+}
+
+void InstrumentRuntimeCoordinator::removeMidiContentControllerForTrack(const TrackId tid) noexcept
+{
+    const auto it = midiContentControllersByTrackId_.find(tid);
+    if (it == midiContentControllersByTrackId_.end())
+    {
+        return;
+    }
+    // Same publish-before-destroy protocol as instrument runtimes: republish the bridge without
+    // this source, drain the in-flight callback (its snapshot may hold the raw pointer), destroy.
+    std::unique_ptr<InstrumentTrackController> retired = std::move(it->second);
+    midiContentControllersByTrackId_.erase(it);
+    updateExperimentalPlaybackBridgeAfterRegistryChange();
+    double waitedMs = 0.0;
+    const bool drained = playbackEngine_.waitForAudioCallbackExit(250.0, &waitedMs);
+    appendTrackDeleteDiagnosticLine(
+        "midi content controller retire trackId=" + juce::String((juce::int64)tid)
+        + ": bridge republished; callback drain waitedMs=" + juce::String(waitedMs, 2)
+        + " timeout=" + (drained ? "no" : "YES (proceeding anyway)"));
+    retired.reset();
+    runSyncInstrumentTimelineRowAttachmentCallback();
+}
+
+InstrumentTrackController*
+    InstrumentRuntimeCoordinator::getMidiClipControllerForTrack(const TrackId tid) const noexcept
+{
+    if (InstrumentTrackController* const inst = getInstrumentControllerForTrack(tid))
+    {
+        return inst;
+    }
+    return getMidiContentControllerForTrack(tid);
+}
+
 void InstrumentRuntimeCoordinator::forEachInstrumentController(
     const std::function<void(TrackId, InstrumentTrackController&)>& fn)
 {
@@ -146,6 +214,13 @@ void InstrumentRuntimeCoordinator::forEachInstrumentController(
         return;
     }
     for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            fn(kv.first, *kv.second);
+        }
+    }
+    for (auto& kv : midiContentControllersByTrackId_)
     {
         if (kv.second != nullptr)
         {
@@ -208,7 +283,7 @@ std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
     }
 
     auto host = std::make_unique<ExperimentalInstrumentHost>();
-    auto ctl = std::make_unique<InstrumentTrackController>(*host);
+    auto ctl = std::make_unique<InstrumentTrackController>(host.get());
     ctl->setSession(&session_);
     wireExperimentalInstrumentHost(*host, *ctl);
     ExperimentalInstrumentHost* const hostPtr = host.get();
@@ -230,7 +305,8 @@ std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
     if (instrumentStagingHost_ == nullptr || instrumentStagingController_ == nullptr)
     {
         instrumentStagingHost_ = std::make_unique<ExperimentalInstrumentHost>();
-        instrumentStagingController_ = std::make_unique<InstrumentTrackController>(*instrumentStagingHost_);
+        instrumentStagingController_
+            = std::make_unique<InstrumentTrackController>(instrumentStagingHost_.get());
         instrumentStagingController_->setSession(&session_);
         wireExperimentalInstrumentHost(*instrumentStagingHost_, *instrumentStagingController_);
         if (lastPreparedDeviceSampleRate_ > 0.0 && lastPreparedDeviceBlockSize_ > 0)
@@ -418,6 +494,7 @@ void InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly() noexcept
     instrumentStagingHost_.reset();
     instrumentControllersByTrackId_.clear();
     instrumentHostsByTrackId_.clear();
+    midiContentControllersByTrackId_.clear();
 }
 
 void InstrumentRuntimeCoordinator::experimentalBeginAudioBlockAllHosts(const std::int64_t numSamples) noexcept
@@ -553,6 +630,13 @@ void InstrumentRuntimeCoordinator::applyTimelineSampleRateToKeyedAndStaging(cons
             kv.second->setTimelineSampleRate(sr);
         }
     }
+    for (auto& kv : midiContentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->setTimelineSampleRate(sr);
+        }
+    }
 }
 
 void InstrumentRuntimeCoordinator::alignAllInstrumentClipTemposToProjectTempo() noexcept
@@ -562,6 +646,13 @@ void InstrumentRuntimeCoordinator::alignAllInstrumentClipTemposToProjectTempo() 
         instrumentStagingController_->alignClipTemposToProjectTempo();
     }
     for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->alignClipTemposToProjectTempo();
+        }
+    }
+    for (auto& kv : midiContentControllersByTrackId_)
     {
         if (kv.second != nullptr)
         {
@@ -642,6 +733,13 @@ void InstrumentRuntimeCoordinator::applyInstrumentMusicalUndoVectorToAllKeyedAnd
     const std::vector<ProjectFileExperimentalInstrumentTrackV1>& tracks) noexcept
 {
     for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->applyExperimentalInstrumentMusicalUndoBlock(tracks);
+        }
+    }
+    for (auto& kv : midiContentControllersByTrackId_)
     {
         if (kv.second != nullptr)
         {
@@ -741,6 +839,30 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
         entries = std::move(reordered);
     }
 
+    // TrackKind::Midi sources, in session track order: this ordering *is* the deterministic
+    // many-to-one merge policy (destination's own events first, then sources top-to-bottom).
+    std::vector<ExperimentalMidiSourcePlaybackEntry> midiSources;
+    {
+        const std::shared_ptr<const SessionSnapshot> ordSnap = session_.loadSessionSnapshotForAudioThread();
+        if (ordSnap != nullptr)
+        {
+            for (int ti = 0; ti < ordSnap->getNumTracks(); ++ti)
+            {
+                const Track& tr = ordSnap->getTrack(ti);
+                if (tr.getKind() != TrackKind::Midi)
+                {
+                    continue;
+                }
+                auto it = midiContentControllersByTrackId_.find(tr.getId());
+                if (it != midiContentControllersByTrackId_.end() && it->second != nullptr)
+                {
+                    midiSources.push_back(
+                        ExperimentalMidiSourcePlaybackEntry{ tr.getId(), it->second.get() });
+                }
+            }
+        }
+    }
+
     const TrackId canonLaneIdForLog = canonicalInstrumentLaneTrackIdFromSession();
 
     juce::String routingPlaybackPublishFp = "playback-publish: firstInstTid=";
@@ -748,6 +870,14 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
         += juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(canonLaneIdForLog)));
     routingPlaybackPublishFp += juce::String(" entries=");
     routingPlaybackPublishFp += juce::String(static_cast<int>(entries.size()));
+    routingPlaybackPublishFp += juce::String(" midiSources=");
+    routingPlaybackPublishFp += juce::String(static_cast<int>(midiSources.size()));
+    for (const auto& ms : midiSources)
+    {
+        routingPlaybackPublishFp
+            += " {midiTid=" + juce::String(static_cast<juce::int64>(static_cast<std::int64_t>(ms.trackId)))
+               + "}";
+    }
 
     if (!entries.empty())
     {
@@ -816,11 +946,13 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
 
     if (entries.empty())
     {
+        // No instrument destinations exist, so MIDI sources have nowhere to deliver; publishing
+        // null keeps the audio path on its cheap early-out.
         playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(nullptr);
         return;
     }
 
     playbackEngine_.publishExperimentalInstrumentPlaybackSnapshot(
         std::make_shared<const ExperimentalInstrumentPlaybackSnapshot>(
-            ExperimentalInstrumentPlaybackSnapshot{ std::move(entries) }));
+            ExperimentalInstrumentPlaybackSnapshot{ std::move(entries), std::move(midiSources) }));
 }

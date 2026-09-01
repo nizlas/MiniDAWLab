@@ -146,6 +146,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-midi-routing")
+        {
+            if (!setKind(StabilityScenarioKind::MidiRouting)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-midi-routing requires a project path";
+                return {};
+            }
+        }
         else if (a == "--iterations")
         {
             if (i + 1 >= args.size())
@@ -216,6 +225,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::Autosave: scenarioName_ = "autosave"; break;
         case StabilityScenarioKind::RecoverAutosave: scenarioName_ = "recover-autosave"; break;
+        case StabilityScenarioKind::MidiRouting: scenarioName_ = "midi-routing"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -265,6 +275,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::RecoverAutosave:
             appendAutosaveSteps(request.projectA, /*withRecovery*/ true);
+            break;
+        case StabilityScenarioKind::MidiRouting:
+            appendMidiRoutingSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -1047,4 +1060,104 @@ void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, cons
             return true;
         },
         kSettleDefaultMs });
+}
+
+void StabilityScenarioRunner::appendMidiRoutingSteps(const juce::File& project)
+{
+    if (hooks_.midiRoutingFixtureSetup == nullptr || hooks_.midiRoutingVerifyDelivery == nullptr
+        || hooks_.midiRoutingVerifyAfterReload == nullptr)
+    {
+        steps_.push_back(Step{ "midi-routing: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "midi-routing hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    // Sibling copy, same reasoning as open-save-close: the user's project is never modified and
+    // project-relative paths keep resolving.
+    steps_.push_back(Step{
+        "midi-routing: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(
+                project.getFileNameWithoutExtension() + "-midiroutingtest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "midi-routing: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    steps_.push_back(Step{ "midi-routing: build fixture (instrument shell + routed MIDI track)",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiRoutingFixtureSetup(failReason);
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "midi-routing: start playback",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           3000 });
+
+    steps_.push_back(Step{ "midi-routing: stop playback",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "midi-routing: verify capture-seam delivery",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiRoutingVerifyDelivery(failReason);
+                           },
+                           kSettleDefaultMs });
+
+    // Phase B.1: same fixture, offline mixdown path — the capture sink must see equivalent
+    // routed MIDI (per-channel counts identical to the realtime pass).
+    steps_.push_back(Step{ "midi-routing: offline mixdown parity (same routed MIDI)",
+                           [this](juce::String& failReason) -> bool {
+                               if (hooks_.midiRoutingRunOfflineParity == nullptr)
+                               {
+                                   failReason = "offline parity hook not installed";
+                                   return false;
+                               }
+                               return hooks_.midiRoutingRunOfflineParity(failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "midi-routing: save (direct save to test copy)",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "midi-routing: reload test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    steps_.push_back(Step{ "midi-routing: verify v18 roundtrip (Midi row + destination + clip)",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiRoutingVerifyAfterReload(failReason);
+                           },
+                           kSettleDefaultMs });
 }

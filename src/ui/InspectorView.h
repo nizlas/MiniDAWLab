@@ -63,10 +63,23 @@ public:
         renameTrackHandler_ = std::move(fn);
     }
 
-    /// [Message thread] Undoable output routing (`TrackLanesEditCoordinator`).
+    /// [Message thread] Undoable **audio** output routing (`TrackLanesEditCoordinator`).
     void setRoutedOutputHandler(std::function<void(TrackId, TrackId)> fn) noexcept
     {
         routedOutputHandler_ = std::move(fn);
+    }
+
+    /// [Message thread] Undoable **MIDI** output channel (`kTrackMidiOutputChannelAny` or 1 … 16).
+    void setMidiOutputChannelHandler(std::function<void(TrackId, int)> fn) noexcept
+    {
+        midiOutputChannelHandler_ = std::move(fn);
+    }
+
+    /// [Message thread] Undoable MIDI destination for `TrackKind::Midi` rows
+    /// (`kInvalidTrackId` = no destination / silent).
+    void setMidiDestinationHandler(std::function<void(TrackId, TrackId)> fn) noexcept
+    {
+        midiDestinationHandler_ = std::move(fn);
     }
 
     /// [Message thread] Undoable send edits (`TrackLanesEditCoordinator`). `sendUiSlotIndex` is 0..3; `destTrackId` = `kInvalidTrackId` clears slot.
@@ -145,6 +158,13 @@ private:
     InspectorPanControl panField_;
     juce::Label outputCaptionLabel_;
     juce::ComboBox outputComboBox_;
+    /// MIDI output channel (instrument rows only). Deliberately captioned "MIDI Channel" next to
+    /// "Audio Output" so the two routing concepts are never both just called "Output".
+    juce::Label midiChannelCaptionLabel_;
+    juce::ComboBox midiChannelComboBox_;
+    /// MIDI destination ("MIDI To") — `TrackKind::Midi` rows only.
+    juce::Label midiDestCaptionLabel_;
+    juce::ComboBox midiDestComboBox_;
     juce::Label insertsSectionLabel_;
     juce::Label preSectionLabel_;
     juce::Label preEmptyLabel_;
@@ -191,12 +211,20 @@ private:
 
     std::function<bool(TrackId, juce::String)> renameTrackHandler_;
     std::function<void(TrackId, TrackId)> routedOutputHandler_;
+    std::function<void(TrackId, int)> midiOutputChannelHandler_;
+    std::function<void(TrackId, TrackId)> midiDestinationHandler_;
     std::function<void(TrackId, int, TrackId)> trackSendDestinationHandler_;
     std::function<void(TrackId, int, float)> trackSendAmountHandler_;
     std::function<void(TrackId, int, bool)> trackSendEnabledHandler_;
     bool inspectorNameEditorGuard_ = false;
     bool outputComboGuard_ = false;
     std::vector<TrackId> outputComboDestIds_;
+    bool midiChannelComboGuard_ = false;
+    /// Parallel to the combo's item ids (1-based): `kTrackMidiOutputChannelAny` then 1 … 16.
+    std::vector<int> midiChannelComboValues_;
+    bool midiDestComboGuard_ = false;
+    /// Parallel to the combo's item ids (1-based): `kInvalidTrackId` first ("No destination").
+    std::vector<TrackId> midiDestComboValues_;
 
     TrackId lastShownInsertRowsTrackId_ = kInvalidTrackId;
     TrackId lastShownTrackId_ = kInvalidTrackId;

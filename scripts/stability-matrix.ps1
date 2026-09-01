@@ -124,6 +124,7 @@ try {
     $results += Invoke-StabilityScenario -Name 'load-loop' -Arguments @('--stability-load-loop', "`"$Project`"", '--iterations', "$Iterations")
     $results += Invoke-StabilityScenario -Name 'delete-loop' -Arguments @('--stability-delete-loop', "`"$Project`"", '--iterations', "$Iterations")
     $results += Invoke-StabilityScenario -Name 'smoke' -Arguments @('--stability-smoke', "`"$Project`"")
+    $results += Invoke-StabilityScenario -Name 'midi-routing' -Arguments @('--stability-midi-routing', "`"$Project`"")
     if ($IncludeMixdown) {
         $results += Invoke-StabilityScenario -Name 'mixdown-wav' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'wav')
         $results += Invoke-StabilityScenario -Name 'mixdown-mp3' -Arguments @('--stability-mixdown', "`"$Project`"", '--format', 'mp3')

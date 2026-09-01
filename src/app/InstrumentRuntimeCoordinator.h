@@ -52,7 +52,18 @@ public:
     [[nodiscard]] ExperimentalInstrumentHost* getInstrumentHostForTrack(TrackId tid) const noexcept;
     [[nodiscard]] InstrumentTrackController* getInstrumentControllerForTrack(TrackId tid) const noexcept;
 
-    /// Message thread: keyed instrument controllers only (staging excluded). Null `fn` is ignored.
+    // --- Plugin-less MIDI content controllers (`TrackKind::Midi` rows, Phase B) ---
+    // Keyed separately from instrument runtimes: no host, never a playback-bridge instrument entry,
+    // published to the engine as `midiSources` instead.
+    [[nodiscard]] InstrumentTrackController* getMidiContentControllerForTrack(TrackId tid) const noexcept;
+    [[nodiscard]] InstrumentTrackController* getOrCreateMidiContentControllerForTrack(TrackId tid);
+    void removeMidiContentControllerForTrack(TrackId tid) noexcept;
+    /// The MIDI-clip-owning controller for `tid`, whichever kind of row it is: the keyed instrument
+    /// controller, or the plugin-less MIDI content controller. Null when neither exists.
+    [[nodiscard]] InstrumentTrackController* getMidiClipControllerForTrack(TrackId tid) const noexcept;
+
+    /// Message thread: keyed instrument controllers plus MIDI content controllers (staging
+    /// excluded). Null `fn` is ignored.
     void forEachInstrumentController(const std::function<void(TrackId, InstrumentTrackController&)>& fn);
 
     [[nodiscard]] std::pair<ExperimentalInstrumentHost*, InstrumentTrackController*>
@@ -117,6 +128,8 @@ private:
 
     std::unordered_map<TrackId, std::unique_ptr<ExperimentalInstrumentHost>> instrumentHostsByTrackId_;
     std::unordered_map<TrackId, std::unique_ptr<InstrumentTrackController>> instrumentControllersByTrackId_;
+    /// Plugin-less controllers for `TrackKind::Midi` rows (no host entry ever exists for these ids).
+    std::unordered_map<TrackId, std::unique_ptr<InstrumentTrackController>> midiContentControllersByTrackId_;
     std::unique_ptr<ExperimentalInstrumentHost> instrumentStagingHost_;
     std::unique_ptr<InstrumentTrackController> instrumentStagingController_;
     juce::String lastExperimentalPlaybackRoutingPublishFingerprint_;

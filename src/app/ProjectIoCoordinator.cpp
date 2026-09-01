@@ -898,6 +898,40 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
                 const bool isGroove = etRow.instrumentKind == "GrooveAgentSE";
                 const bool isHalion = etRow.instrumentKind == "HALionSonic";
                 const bool isGeneric = etRow.instrumentKind == "GenericVst3";
+                const bool isMidiContent = etRow.instrumentKind == "MidiContent";
+                if (isMidiContent)
+                {
+                    // Phase B: plugin-less MIDI content row — restore clips onto a MIDI content
+                    // controller bound to the TrackKind::Midi session row. No plugin autoload.
+                    const TrackId midiTid = etRow.trackId;
+                    const std::shared_ptr<const SessionSnapshot> midiSnap
+                        = session_.loadSessionSnapshotForAudioThread();
+                    const int midiTix = (midiSnap != nullptr && midiTid != kInvalidTrackId)
+                                            ? midiSnap->findTrackIndexById(midiTid)
+                                            : -1;
+                    if (midiTix < 0 || midiSnap->getTrack(midiTix).getKind() != TrackKind::Midi
+                        || callbacks_.getOrCreateMidiContentControllerForTrack == nullptr)
+                    {
+                        appendProjectLoadDiagnosticLine(
+                            "load: skip MidiContent restore (row missing or not Midi) trackId="
+                            + juce::String((juce::int64)midiTid));
+                        continue;
+                    }
+                    InstrumentTrackController* const midiCtl
+                        = callbacks_.getOrCreateMidiContentControllerForTrack(midiTid);
+                    if (midiCtl == nullptr)
+                    {
+                        appendProjectLoadDiagnosticLine(
+                            "load: skip MidiContent restore (controller create failed) trackId="
+                            + juce::String((juce::int64)midiTid));
+                        continue;
+                    }
+                    midiCtl->setTimelineSampleRate(sampleRate);
+                    midiCtl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
+                    appendProjectLoadDiagnosticLine("load: after MidiContent restore trackId="
+                                                    + juce::String((juce::int64)midiTid));
+                    continue;
+                }
                 if (!isGroove && !isHalion && !isGeneric)
                 {
                     appendProjectLoadDiagnosticLine(
@@ -983,6 +1017,29 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         restoreOrphanInstrumentLanesWithoutRuntime(
             session_, parsedLoad, callbacks_, sampleRate, instrumentAutoloadNoteAcc);
         appendProjectLoadDiagnosticLine("load: after orphan instrument lane restore");
+        // Phase B: every TrackKind::Midi row needs its plugin-less controller, including rows
+        // whose project block was missing (e.g. hand-edited files) — otherwise the lane would
+        // have no MIDI clip owner until restart.
+        if (callbacks_.getOrCreateMidiContentControllerForTrack != nullptr)
+        {
+            if (const auto midiRowsSnap = session_.loadSessionSnapshotForAudioThread())
+            {
+                for (int ti = 0; ti < midiRowsSnap->getNumTracks(); ++ti)
+                {
+                    const Track& tr = midiRowsSnap->getTrack(ti);
+                    if (tr.getKind() != TrackKind::Midi)
+                    {
+                        continue;
+                    }
+                    if (callbacks_.getOrCreateMidiContentControllerForTrack(tr.getId()) == nullptr)
+                    {
+                        appendProjectLoadDiagnosticLine(
+                            "load: midi content controller create FAILED trackId="
+                            + juce::String((juce::int64)tr.getId()));
+                    }
+                }
+            }
+        }
         appendProjectLoadDiagnosticLine("load: instrument restore complete");
         appendProjectLoadDiagnosticLine("load: before syncMidiEditorInstrumentStateFromHost");
         callbacks_.syncMidiEditorInstrumentStateFromHost();

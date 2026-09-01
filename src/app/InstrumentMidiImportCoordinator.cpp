@@ -51,7 +51,7 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
         return;
     }
 
-    InstrumentTrackController* ctl = instrumentRuntime_.getInstrumentControllerForTrack(tid);
+    InstrumentTrackController* ctl = instrumentRuntime_.getMidiClipControllerForTrack(tid);
     if (ctl == nullptr || !ctl->hasInstrumentTrack())
     {
         juce::AlertWindow::showMessageBoxAsync(
@@ -136,7 +136,7 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
                                      notes = std::move(notes),
                                      syncVp,
                                      refreshInstr]() mutable -> bool {
-            InstrumentTrackController* c = instrumentRuntime_.getInstrumentControllerForTrack(tid);
+            InstrumentTrackController* c = instrumentRuntime_.getMidiClipControllerForTrack(tid);
             if (c == nullptr || !c->hasInstrumentTrack())
             {
                 return false;

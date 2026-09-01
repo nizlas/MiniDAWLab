@@ -37,8 +37,13 @@ void showAudioMixdownDialog(juce::Component& parent,
 
 void showHelpMenuPopup(juce::Component& helpButtonAnchor,
                        juce::Component::SafePointer<juce::Component> menuOwnerLifetime,
-                       std::function<void()> showUndoBehaviorDialog);
+                       std::function<void()> showUndoBehaviorDialog,
+                       std::function<void()> showMidiChannelsDialog);
 
 void showUndoBehaviorDialog();
+
+/// Help > MIDI Channels: native vs. effective channel, per-track output channel, note creation,
+/// multi-timbral use, channel 10, legacy projects and the destructive remap commands.
+void showMidiChannelsHelpDialog(juce::Component& parent);
 
 } // namespace mini_daw_app_dialogs

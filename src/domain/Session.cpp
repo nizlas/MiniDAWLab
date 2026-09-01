@@ -15,6 +15,8 @@
 #include "domain/Session.h"
 
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
+#include "diagnostics/UndoDiagnosticConfig.h"
+#include "diagnostics/UndoDiagnosticFileLog.h"
 #include "domain/AudioClip.h"
 #include "domain/SessionRouting.h"
 #include "domain/MixdownWavProbe.h"
@@ -450,6 +452,76 @@ void Session::addGroupTrack() noexcept
     }
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
     activeTrackId_ = newId;
+}
+
+std::optional<TrackId> Session::addMidiTrack() noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return std::nullopt;
+    }
+    int midiCount = 0;
+    for (int i = 0; i < current->getNumTracks(); ++i)
+    {
+        if (current->getTrack(i).getKind() == TrackKind::Midi)
+        {
+            ++midiCount;
+        }
+    }
+    const TrackId newId = nextTrackId_++;
+    jassert(newId != kInvalidTrackId);
+    const juce::String newName = juce::String("MIDI ") + juce::String(midiCount + 1);
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackAdded(*current, newId, newName, TrackKind::Midi);
+    if (next == nullptr)
+    {
+        jassert(false);
+        return std::nullopt;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    activeTrackId_ = newId;
+    return newId;
+}
+
+bool Session::setTrackMidiDestination(const TrackId trackId,
+                                      const TrackId destinationTrackId) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int tIdx = current->findTrackIndexById(trackId);
+    if (tIdx < 0 || current->getTrack(tIdx).getKind() != TrackKind::Midi)
+    {
+        return false;
+    }
+    if (current->getTrack(tIdx).getMidiDestinationTrackId() == destinationTrackId)
+    {
+        return false;
+    }
+    if (destinationTrackId != kInvalidTrackId)
+    {
+        const int dIdx = current->findTrackIndexById(destinationTrackId);
+        if (dIdx < 0 || current->getTrack(dIdx).getKind() != TrackKind::Instrument)
+        {
+            return false;
+        }
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackMidiDestination(*current, trackId, destinationTrackId);
+    if (next == nullptr)
+    {
+        jassert(false);
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
 }
 
 bool Session::setTrackRoutedOutput(const TrackId trackId, const TrackId destTrackId) noexcept
@@ -1098,6 +1170,13 @@ void Session::restoreSessionSnapshotForUndo(std::shared_ptr<const SessionSnapsho
     {
         return;
     }
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine(
+            "[UndoDiag] Session::restoreSessionSnapshotForUndo restoredTracks="
+            + juce::String(restored->getNumTracks())
+            + " repairedTracks=" + juce::String(repaired->getNumTracks()));
+    }
     std::atomic_store_explicit(&sessionSnapshot_, repaired, std::memory_order_release);
 
     const int n = repaired->getNumTracks();
@@ -1197,6 +1276,38 @@ void Session::setTrackMuted(const TrackId trackId, const bool muted) noexcept
         = SessionSnapshot::withTrackMuted(*current, trackId, muted);
     jassert(next != nullptr);
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+bool Session::setTrackMidiOutputChannel(const TrackId trackId, const int midiOutputChannel) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const int wanted = sanitizeTrackMidiOutputChannel(midiOutputChannel);
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int tIdx = current->findTrackIndexById(trackId);
+    if (tIdx < 0 || current->getTrack(tIdx).getMidiOutputChannel() == wanted)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackMidiOutputChannel(*current, trackId, wanted);
+    if (next == nullptr)
+    {
+        return false;
+    }
+    const int afterIdx = next->findTrackIndexById(trackId);
+    if (afterIdx < 0 || next->getTrack(afterIdx).getMidiOutputChannel() != wanted)
+    {
+        return false;
+    }
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
 }
 
 void Session::setTrackName(const TrackId trackId, juce::String newName) noexcept
@@ -1496,6 +1607,9 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.stereoPan = t.getStereoPan();
         tr.off = (t.getKind() == TrackKind::Master) ? false : t.isTrackOff();
         tr.muted = t.isMuted();
+        tr.midiOutputChannel = t.getMidiOutputChannel();
+        tr.midiDestinationTrackId
+            = (t.getKind() == TrackKind::Midi) ? t.getMidiDestinationTrackId() : kInvalidTrackId;
         switch (t.getKind())
         {
         case TrackKind::Instrument:
@@ -1506,6 +1620,9 @@ juce::Result Session::saveProjectToFile(Transport& transport,
             break;
         case TrackKind::Group:
             tr.kind = "group";
+            break;
+        case TrackKind::Midi:
+            tr.kind = "midi";
             break;
         case TrackKind::Audio:
         default:
@@ -1625,7 +1742,9 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         for (int ti = 0; ti < s->getNumTracks(); ++ti)
         {
             const Track& tr = s->getTrack(ti);
-            if (tr.getKind() != TrackKind::Instrument)
+            // TrackKind::Midi rows persist their clips through the same block format; their
+            // controller is the plugin-less MIDI content controller (kind "MidiContent").
+            if (tr.getKind() != TrackKind::Instrument && tr.getKind() != TrackKind::Midi)
             {
                 continue;
             }
@@ -1794,6 +1913,10 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         {
             tk = instrumentLaneIds.count(trDto.id) > 0 ? TrackKind::Instrument : TrackKind::Master;
         }
+        else if (trDto.kind.equalsIgnoreCase("midi"))
+        {
+            tk = TrackKind::Midi;
+        }
 
         std::vector<PlacedClip> placed;
 
@@ -1876,7 +1999,7 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         const juce::String trackName = (tk == TrackKind::Master) ? juce::String(kMasterTrackDisplayName)
                                                                  : trDto.name;
         TrackId routeOut = kInvalidTrackId;
-        if (tk != TrackKind::Master)
+        if (tk != TrackKind::Master && tk != TrackKind::Midi)
         {
             routeOut = (trDto.routedOutputTrackId != kInvalidTrackId) ? trDto.routedOutputTrackId
                                                                       : masterIdFromFile;
@@ -1909,7 +2032,9 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             tk,
             sanitizeTrackStereoPan(trDto.stereoPan),
             routeOut,
-            std::move(sends));
+            std::move(sends),
+            trDto.midiOutputChannel,
+            (tk == TrackKind::Midi) ? trDto.midiDestinationTrackId : kInvalidTrackId);
         appendProjectLoadDiagnosticLine(
             "apply: built track id=" + juce::String((juce::int64)trDto.id) + " kind="
             + trDto.kind + " name=\"" + trackName + "\" clips=" + juce::String((int)trDto.clips.size())

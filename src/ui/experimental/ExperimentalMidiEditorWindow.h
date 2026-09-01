@@ -79,6 +79,8 @@ public:
     /// Bind editor to a clip's pattern (address stable for clip lifetime). Pass session/transport/
     /// deviceManager for absolute-timeline roll + shared playhead/locators; `timelineClip` may be null
     /// only when the editor is unbound. `mainTimelineViewport` is reserved for future sync; default roll zoom uses ~5 bars from session tempo/meter when the clip has no saved viewport.
+    /// `boundTrackName` is the bound track's current name — the window titles itself
+    /// `MIDI Editor — <name>` (Phase B.1; same convention for Instrument and MIDI tracks).
     void bindExternalPattern(ExperimentalMidiPattern* pattern,
                              InstrumentMidiClip* timelineClip,
                              InstrumentTrackController* instrumentTrackForClip,
@@ -86,7 +88,11 @@ public:
                              Transport* transport,
                              juce::AudioDeviceManager* deviceManager,
                              const TimelineViewportModel* mainTimelineViewport,
-                             const juce::String& titleSuffix);
+                             const juce::String& boundTrackName);
+
+    /// Phase B.1: live title refresh — when set, the editor polls this (10 Hz UI timer) and renames
+    /// the window when the bound track's name changes (e.g. Inspector rename while open).
+    void setWindowTitleProvider(std::function<juce::String()> provider);
 
     void unbindExternalPattern();
 
@@ -121,6 +127,9 @@ public:
     void showSavingProjectToast();
 
     bool keyPressed(const juce::KeyPress& key, juce::Component* originating) override;
+
+    /// Phase B.1 focus-loss safety: deactivation releases previews still waiting for Mouse Up.
+    void activeWindowStatusChanged() override;
 
 private:
     class Body;

@@ -119,6 +119,7 @@ namespace
         case TrackKind::Instrument: return "Instrument";
         case TrackKind::Group: return "Group";
         case TrackKind::Master: return "Master";
+        case TrackKind::Midi: return "Midi";
         }
         return "Unknown";
     }
@@ -204,7 +205,8 @@ void TrackLanesEditCoordinator::install()
                         + juce::String(static_cast<int>(sides.before.slots.size())));
                     outPluginSides = std::move(sides);
                 }
-                if (delTrack.getKind() == TrackKind::Instrument
+                if ((delTrack.getKind() == TrackKind::Instrument
+                     || delTrack.getKind() == TrackKind::Midi)
                     && callbacks_.getInstrumentControllerForTrack)
                 {
                     InstrumentTrackController* const ctl = callbacks_.getInstrumentControllerForTrack(tid);
@@ -252,7 +254,9 @@ void TrackLanesEditCoordinator::install()
                 // transaction (editor closes, insert eviction, session mutation, runtime removal).
                 const ScopedTrackDeleteRealtimeGate realtimeGate(playbackEngine_);
 
-                if (ix >= 0 && snap->getTrack(ix).getKind() == TrackKind::Instrument)
+                if (ix >= 0
+                    && (snap->getTrack(ix).getKind() == TrackKind::Instrument
+                        || snap->getTrack(ix).getKind() == TrackKind::Midi))
                 {
                     if (ExperimentalInstrumentHost* mh = callbacks_.getInstrumentHostForTrack(tid))
                     {
@@ -676,6 +680,58 @@ void TrackLanesEditCoordinator::install()
             });
     });
 
+    inspectorView_.setMidiOutputChannelHandler([this](const TrackId trackId, const int channel) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return;
+        }
+        callbacks_.executeUndoableSessionEdit(
+            "Set MIDI channel",
+            [this, trackId, channel]() -> bool {
+                if (!session_.setTrackMidiOutputChannel(trackId, channel))
+                {
+                    return false;
+                }
+                // The channel lives on the session row, but the events are baked in the controller's
+                // render snapshot, so that snapshot has to be rebuilt or already-placed notes would
+                // keep playing on the old channel until the next unrelated edit.
+                if (callbacks_.getInstrumentControllerForTrack != nullptr)
+                {
+                    if (InstrumentTrackController* ctl
+                        = callbacks_.getInstrumentControllerForTrack(trackId))
+                    {
+                        ctl->refreshMidiOutputChannelFromSession();
+                    }
+                }
+                inspectorView_.refreshFromSession();
+                return true;
+            });
+    });
+
+    inspectorView_.setMidiDestinationHandler([this](const TrackId trackId, const TrackId destTrackId) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return;
+        }
+        callbacks_.executeUndoableSessionEdit(
+            "Set MIDI destination",
+            [this, trackId, destTrackId]() -> bool {
+                if (!session_.setTrackMidiDestination(trackId, destTrackId))
+                {
+                    return false;
+                }
+                // No render-snapshot rebuild needed: the audio thread resolves the destination
+                // from the session snapshot per block. But an open MIDI editor on this track
+                // borrowed the *old* destination's host for audition, so close it.
+                if (callbacks_.resetMidiEditorBookingIfOpenOnTrack)
+                {
+                    callbacks_.resetMidiEditorBookingIfOpenOnTrack(trackId);
+                }
+                inspectorView_.refreshFromSession();
+                return true;
+            });
+    });
+
     inspectorView_.setTrackSendHandlers(
         [this](const TrackId trackId, const int sendRowIndex, const TrackId destTrackId) {
             if (callbacks_.isRecording() || callbacks_.isCountInActive())
@@ -787,6 +843,42 @@ void TrackLanesEditCoordinator::restoreDeletedInstrumentTrackForUndo(
             + juce::String((juce::int64)tid));
         return;
     }
+
+    if (sides.row.instrumentKind == "MidiContent")
+    {
+        // Phase B: plugin-less path — recreate the MIDI content controller and reapply the clips.
+        if (!callbacks_.getOrCreateMidiContentControllerForTrack)
+        {
+            appendTrackDeleteDiagnosticLine("undo restore abort (no midi content factory callback)");
+            return;
+        }
+        const ScopedTrackDeleteRealtimeGate realtimeGateMidi(playbackEngine_);
+        InstrumentTrackController* const midiCtl = callbacks_.getOrCreateMidiContentControllerForTrack(tid);
+        if (midiCtl == nullptr)
+        {
+            appendTrackDeleteDiagnosticLine("undo restore abort (midi content create failed) trackId="
+                                            + juce::String((juce::int64)tid));
+            return;
+        }
+        if (callbacks_.getDeviceSampleRate)
+        {
+            const double sr = callbacks_.getDeviceSampleRate();
+            if (sr > 0.0)
+            {
+                midiCtl->setTimelineSampleRate(sr);
+            }
+        }
+        midiCtl->restoreExperimentalInstrumentSingleProjectRow(sides.row, nullptr);
+        appendTrackDeleteDiagnosticLine("undo restore end (midi content) trackId="
+                                        + juce::String((juce::int64)tid));
+        writeLastOperationBreadcrumb("track delete undo restore end id=" + juce::String((juce::int64)tid));
+        if (callbacks_.refreshInstrumentUi)
+        {
+            callbacks_.refreshInstrumentUi();
+        }
+        return;
+    }
+
     if (!callbacks_.getOrCreateInstrumentRuntimeForTrack)
     {
         appendTrackDeleteDiagnosticLine("undo restore abort (no runtime factory callback)");

@@ -283,6 +283,11 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
     }
 
     const TrackId tid = *newIdOpt;
+    // Groove Agent is a drum instrument and maps its kit to the General MIDI drum channel, so this
+    // one creation path opts into channel 10 while every other new track keeps the melodic default
+    // of 1. This is a property of the menu entry the user picked, never inferred from a track or
+    // plugin name. Set before the shell bootstraps so the first render snapshot already carries it.
+    (void)session.setTrackMidiOutputChannel(tid, kTrackMidiOutputChannelDrums);
     const bool registryWasEmpty = instrumentRuntimeCoordinator.isKeyedRuntimeRegistryEmpty();
     ExperimentalInstrumentHost* mh = nullptr;
     InstrumentTrackController* ctl = nullptr;

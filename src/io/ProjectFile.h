@@ -82,6 +82,14 @@ struct ProjectFileTrackV1
     std::vector<ProjectFileInsertV1> inserts;
     /// v15: ordered send list; omitted in JSON when empty.
     std::vector<ProjectFileSendV1> sends;
+    /// v17: MIDI output channel (`midiChannel`) — `0` = Any/preserve each event's own channel,
+    /// `1 … 16` = remap all outgoing events. Pre-v17 files have no key and load as `0`, which
+    /// reproduces their old playback exactly (notes then carried their own channel, in practice 10).
+    int midiOutputChannel = kTrackMidiOutputChannelAny;
+    /// v18: **MIDI To** (`midiTo`) — id of the Instrument row this `"midi"` track feeds.
+    /// Absent key = None (disconnected). Only meaningful when `kind == "midi"`; identity-based
+    /// (a missing/non-instrument id is repaired to None on load, never retargeted).
+    TrackId midiDestinationTrackId = kInvalidTrackId;
 };
 
 /// v12: editable tick-domain notes (I3f).
@@ -96,6 +104,22 @@ struct ProjectFileExperimentalTimelineNoteV12
     int channel = 1;
     std::int64_t startTick = 0;
     std::int64_t durationTicks = 240;
+};
+
+/// v19: one sparse MIDI CC automation point (clip-owned, tick domain of `timelineNotes`).
+/// The JSON array key is `ccPoints`; omitted when empty, absent in v18-and-older files → clips
+/// load with no CC automation and identical sound (no migration function needed).
+struct ProjectFileExperimentalMidiCcPointV19
+{
+    std::int64_t startTick = 0;
+    /// Controller number 0 … 127.
+    int controller = 11;
+    /// Controller value 0 … 127.
+    int value = 0;
+    /// Native MIDI channel 1 … 16 (same convention as note `channel`).
+    int channel = 1;
+    /// `"hold"` or `"linear"` in JSON (`interp`); anything else repairs to hold on load.
+    int interpolationToNext = 1;
 };
 
 struct ProjectFileExperimentalInstrumentClipV1
@@ -114,6 +138,8 @@ struct ProjectFileExperimentalInstrumentClipV1
     /// v12: internal PPQ domain (default 960).
     int ticksPerQuarter = 960;
     std::vector<ProjectFileExperimentalTimelineNoteV12> timelineNotes;
+    /// v19+ optional: sparse MIDI CC automation points; omitted when empty.
+    std::vector<ProjectFileExperimentalMidiCcPointV19> ccPoints;
     /// v12+ optional: MIDI roll horizontal scroll (samples). Omitted when no saved roll viewport.
     std::int64_t midiRollVisibleStartSamples = 0;
     /// v12+ optional: MIDI roll zoom; absence or 0 = no per-clip roll viewport in file.
@@ -217,9 +243,11 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`).
+    /// Current JSON writer version (**19** adds `experimentalInstrumentTracks[].clips[].ccPoints`
+    /// — sparse MIDI CC automation). **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
+    /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 16;
+    static constexpr int kCurrentVersion = 19;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

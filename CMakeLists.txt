@@ -121,6 +121,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/TrackLanesView.cpp
     src/ui/TrackHeaderView.cpp
     src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayerHostBinding.cpp
     src/ui/experimental/ExperimentalMidiImport.cpp
     src/ui/experimental/ExperimentalPianoRollView.cpp
     src/ui/experimental/ExperimentalMidiEditorWindow.cpp
@@ -146,6 +147,28 @@ target_link_libraries(MiniDAWLab
         juce::juce_cryptography
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags
+)
+
+# -----------------------------------------------------------------------------
+# MiniDAWSelftests (Phase B.1): deterministic Level-1 unit tests for the pure MIDI-editor logic
+# headers (audition timing with a fake clock, title/status wording, octave labels, channel
+# semantics). Console app; no audio device, no UI, no VST3. Run the exe: exit 0 = all green.
+# -----------------------------------------------------------------------------
+juce_add_console_app(MiniDAWSelftests PRODUCT_NAME "MiniDAWSelftests")
+target_sources(MiniDAWSelftests PRIVATE
+    tests/selftest/MiniDAWSelftestsMain.cpp
+    src/io/InstrumentMidiClipExport.cpp
+    src/io/ProjectFile.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp)
+target_include_directories(MiniDAWSelftests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(MiniDAWSelftests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(MiniDAWSelftests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_events
+        juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
 

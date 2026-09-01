@@ -1686,7 +1686,9 @@ void ExperimentalInstrumentHost::enqueueMidiMessageFromMessageThread(const juce:
     {
         return;
     }
-    if (!hasInstrument())
+    // Same consumer rule as transport MIDI: a loaded instrument, or an installed capture sink
+    // (Phase B.1 — lets stability scenarios observe editor audition without a real VST3).
+    if (!acceptsTransportMidi())
     {
         return;
     }
@@ -3479,9 +3481,45 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     }
 
     auto owner = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
-    if (owner == nullptr || owner->inst == nullptr || !owner->layoutOk)
+    MidiDeliveryCaptureSink* const captureSink = midiCaptureSink_.load(std::memory_order_acquire);
+    const bool haveProcessableInstrument
+        = owner != nullptr && owner->inst != nullptr && owner->layoutOk;
+    if (!haveProcessableInstrument && captureSink == nullptr)
     {
         rtDiag_skipNoOwnerBadLayout_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    if (midiIo_ == nullptr && captureSink == nullptr)
+    {
+        rtDiag_skipNoMidiIo_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // Merge UI-enqueued MIDI and transport MIDI into the single per-block buffer the instrument
+    // consumes. This is the many-to-one MIDI delivery boundary: everything routed at this host —
+    // its own lane's clips, `TrackKind::Midi` sources, live preview — has already been appended to
+    // `rtBlockMidi_` in deterministic schedule order, and the instrument is processed exactly once.
+    juce::MidiBuffer blockMidi;
+    if (midiIo_ != nullptr)
+    {
+        const juce::ScopedLock sl(midiIo_->midiLock);
+        blockMidi.addEvents(midiIo_->uiPendingMidi, 0, numSamples, 0);
+        midiIo_->uiPendingMidi.clear();
+    }
+    blockMidi.addEvents(rtBlockMidi_, 0, numSamples, 0);
+    rtBlockMidi_.clear();
+
+    rtMidiDeliveryBoundaryBlocks_.fetch_add(1, std::memory_order_relaxed);
+    if (captureSink != nullptr)
+    {
+        captureSink->onMidiBlockDelivered(blockMidi, numSamples);
+    }
+
+    if (!haveProcessableInstrument)
+    {
+        // Capture-only mode (Level-1 tests without a real VST3): MIDI is fully consumed above;
+        // there is no plugin to render audio.
         return;
     }
 
@@ -3499,21 +3537,6 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
             rtDiag_skipScratchLayout_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-
-    if (midiIo_ == nullptr)
-    {
-        rtDiag_skipNoMidiIo_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-    juce::MidiBuffer blockMidi;
-    {
-        const juce::ScopedLock sl(midiIo_->midiLock);
-        blockMidi.addEvents(midiIo_->uiPendingMidi, 0, numSamples, 0);
-        midiIo_->uiPendingMidi.clear();
-    }
-    blockMidi.addEvents(rtBlockMidi_, 0, numSamples, 0);
-    rtBlockMidi_.clear();
 
     const int scratchCh = juce::jmin(scratchAllocatedChans, juce::jmax(kStereoChannels, totalCh));
     const int n = numSamples;

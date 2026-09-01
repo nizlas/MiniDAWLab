@@ -643,6 +643,30 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     {
         if (instrumentSnap != nullptr)
         {
+            // MIDI sources first: emit their pending note-offs into their last destination and
+            // clear their queues, then the destination flush below finishes with allNotesOff.
+            for (const auto& src : instrumentSnap->midiSources)
+            {
+                if (src.midiController == nullptr)
+                {
+                    continue;
+                }
+                const TrackId lastDest = src.midiController->audioThread_getLastRoutedDestTrackId();
+                const ExperimentalInstrumentPlaybackEntry* const destEntry =
+                    (lastDest != kInvalidTrackId)
+                        ? playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap,
+                                                                                        lastDest)
+                        : nullptr;
+                if (destEntry != nullptr && destEntry->host != nullptr)
+                {
+                    src.midiController->audioThread_flushPendingTransportOffsInto(
+                        *destEntry->host, 0, deviceBlockSizeInFrames);
+                }
+                else
+                {
+                    src.midiController->audioThread_dropPendingTransportOffs();
+                }
+            }
             for (const auto& e : instrumentSnap->entries)
             {
                 if (e.midiController != nullptr && e.host != nullptr)
@@ -1377,6 +1401,64 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     routingInstSlots[sx].firstSegDiagCaptured = true;
                 }
             }
+
+            // TrackKind::Midi sources (Phase B), in snapshot order = deterministic merge order:
+            // resolve each source's destination from the *current* session snapshot and schedule
+            // into the destination's host after that destination's own events. Unresolvable
+            // destinations are silent; a reroute first releases this source's sounding notes in
+            // the old destination (never allNotesOff — the destination may sustain other sources).
+            for (const auto& src : instrumentSnap->midiSources)
+            {
+                if (src.midiController == nullptr)
+                {
+                    continue;
+                }
+                TrackId destId = kInvalidTrackId;
+                {
+                    const int srcIdx = sessionSnap->findTrackIndexById(src.trackId);
+                    if (srcIdx >= 0)
+                    {
+                        destId = sessionSnap->getTrack(srcIdx).getMidiDestinationTrackId();
+                    }
+                }
+                const ExperimentalInstrumentPlaybackEntry* const destEntry =
+                    (destId != kInvalidTrackId)
+                        ? playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap,
+                                                                                        destId)
+                        : nullptr;
+
+                const TrackId lastDest = src.midiController->audioThread_getLastRoutedDestTrackId();
+                if (lastDest != kInvalidTrackId
+                    && (destEntry == nullptr || lastDest != destEntry->trackId))
+                {
+                    const ExperimentalInstrumentPlaybackEntry* const oldEntry =
+                        playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap,
+                                                                                      lastDest);
+                    if (oldEntry != nullptr && oldEntry->host != nullptr)
+                    {
+                        src.midiController->audioThread_flushPendingTransportOffsInto(
+                            *oldEntry->host, outFrame0 + silencePrefix, deviceBlockSizeInFrames);
+                    }
+                    else
+                    {
+                        src.midiController->audioThread_dropPendingTransportOffs();
+                    }
+                    src.midiController->audioThread_setLastRoutedDestTrackId(kInvalidTrackId);
+                }
+
+                if (destEntry == nullptr || destEntry->host == nullptr)
+                {
+                    continue;
+                }
+                src.midiController->audioThread_scheduleTransportMidiForSegment(*destEntry->host,
+                                                                                timelineStartAudible,
+                                                                                audibleRun,
+                                                                                outFrame0 + silencePrefix,
+                                                                                segDisc,
+                                                                                deviceBlockSizeInFrames,
+                                                                                nullptr);
+                src.midiController->audioThread_setLastRoutedDestTrackId(destEntry->trackId);
+            }
         }
     };
 
@@ -1801,6 +1883,40 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                    instrumentForceDiscontinuity,
                                                                                    numSamples,
                                                                                    nullptr);
+            }
+
+            // TrackKind::Midi sources: same destination resolution and merge order as the
+            // realtime path, so offline mixdown renders routed MIDI identically.
+            for (const auto& src : instrumentSnap->midiSources)
+            {
+                if (src.midiController == nullptr)
+                {
+                    continue;
+                }
+                TrackId destId = kInvalidTrackId;
+                {
+                    const int srcIdx = sessionSnap.findTrackIndexById(src.trackId);
+                    if (srcIdx >= 0)
+                    {
+                        destId = sessionSnap.getTrack(srcIdx).getMidiDestinationTrackId();
+                    }
+                }
+                const ExperimentalInstrumentPlaybackEntry* const destEntry =
+                    (destId != kInvalidTrackId)
+                        ? playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap,
+                                                                                        destId)
+                        : nullptr;
+                if (destEntry == nullptr || destEntry->host == nullptr)
+                {
+                    continue;
+                }
+                src.midiController->audioThread_scheduleTransportMidiForSegment(*destEntry->host,
+                                                                                timelineStartAudible,
+                                                                                audibleRun,
+                                                                                silencePrefix,
+                                                                                instrumentForceDiscontinuity,
+                                                                                numSamples,
+                                                                                nullptr);
             }
         }
     }

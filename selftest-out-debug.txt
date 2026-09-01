@@ -1,0 +1,164 @@
+[ ok ] title contains the track name
+[ ok ] title has no internal 'I2' / '(Drum hits)' labels
+[ ok ] title format is 'MIDI Editor — <track>' (got "MIDI Editor — Organ Pedal", want "MIDI Editor — Organ Pedal")
+[ ok ] unbound title is generic (got "MIDI Editor", want "MIDI Editor")
+[ ok ] instrument-track status shows its own plugin (got "Instrument: VB3-II", want "Instrument: VB3-II")
+[ ok ] instrument track without plugin says 'No instrument loaded' (got "No instrument loaded", want "No instrument loaded")
+[ ok ] MIDI-track status shows its destination plugin (got "MIDI To: Organ — VB3-II", want "MIDI To: Organ — VB3-II")
+[ ok ] MIDI To: None shows 'No MIDI destination' (got "No MIDI destination", want "No MIDI destination")
+[ ok ] destination without plugin is named (distinct from source without plugin) (got "Organ: No instrument loaded", want "Organ: No instrument loaded")
+[ ok ] MIDI 0 labels as C-2 (got "C-2", want "C-2")
+[ ok ] MIDI 12 labels as C-1 (got "C-1", want "C-1")
+[ ok ] MIDI 24 labels as C0 (got "C0", want "C0")
+[ ok ] MIDI 36 labels as C1 (got "C1", want "C1")
+[ ok ] MIDI 48 labels as C2 (got "C2", want "C2")
+[ ok ] MIDI 60 labels as C3 (middle C, Cubase convention) (got "C3", want "C3")
+[ ok ] MIDI 72 labels as C4 (got "C4", want "C4")
+[ ok ] MIDI 84 labels as C5 (got "C5", want "C5")
+[ ok ] MIDI 96 labels as C6 (got "C6", want "C6")
+[ ok ] MIDI 108 labels as C7 (got "C7", want "C7")
+[ ok ] MIDI 120 labels as C8 (got "C8", want "C8")
+[ ok ] MIDI 127 labels as G8 (got "G8", want "G8")
+[ ok ] Any (Preserve) auditions on the note's native channel
+[ ok ] fixed output channel auditions on the effective (remapped) channel
+[ ok ] key-strip audition on a fixed-2 track uses channel 2 (Organ Lower case)
+[ ok ] key-strip audition on a fixed-3 track uses channel 3 (Organ Pedal case)
+[ ok ] key-strip audition on an Any track uses the new-note default channel
+[ ok ] default arranged audition duration is in the 700-900 ms band
+[ ok ] quick click: Note On at Mouse Down
+[ ok ] quick click: no Note Off before the default deadline
+[ ok ] quick click: Note Off exactly at the default deadline, on the captured channel
+[ ok ] long hold: scheduled deadline never fires while held
+[ ok ] long hold: Note Off immediately at Mouse Up
+[ ok ] Note Off carries the off-velocity captured at Note On
+[ ok ] audition duration is max(default, hold); arranged length is irrelevant
+[ ok ] retrigger emits Note Off + Note On to restart the attack
+[ ok ] stale scheduled Note Off cannot cut the newer preview
+[ ok ] newer preview keeps its own full default duration
+[ ok ] newer preview releases at its own deadline
+[ ok ] key strip: Note On at Mouse Down with the editor's current Vel
+[ ok ] key strip: Note Off exactly at Mouse Up (5 ms click)
+[ ok ] key strip: Note Off uses the editor's current Off value
+[ ok ] key strip: held note keeps sounding (drum-row semantics too)
+[ ok ] key strip: Note Off at Mouse Up after a long hold, on the captured channel
+[ ok ] teardown releases every active preview (close / reroute / channel change)
+[ ok ] releases return to the channels captured at Note On
+[ ok ] focus loss releases only the held preview
+[ ok ] quick-click tail still ends via its scheduled Note Off (not stuck)
+[ ok ] preview Note Off is keyed to its own (channel, pitch) identity
+[ ok ] the matching key still releases normally
+[ ok ] Any (Preserve): 3 notes export as 3 on + 3 off events
+[ ok ] Any (Preserve) exports each note's native channel (2/5/10 mixture kept)
+[ ok ] fixed channel 1 exports every Note On/Off on channel 1
+[ ok ] fixed channel 3 exports every Note On/Off on channel 3
+[ ok ] each Note On has a matching Note Off on the same effective channel
+[ ok ] exporter uses the given source-track channel (instrument and MIDI-only rows share the path; no destination parameter exists)
+[ ok ] fixed-channel export does not mutate stored native channels
+[ ok ] pitch 0 exports with exact tick 0 and velocity 100
+[ ok ] pitch 127 exports with exact tick 1920 and velocity 127
+[ ok ] note timing survives exactly (on tick 960, off tick 960+240)
+[ ok ] stored off-velocity is written on the true Note Off event
+[ ok ] export result reports 3 notes
+[ ok ] meta events (tempo, time signature, track name) are present and never remapped
+[ ok ] normalize reports dropped/duplicate repairs
+[ ok ] negative tick dropped; duplicate identity collapsed to one point
+[ ok ] points sorted canonically by tick
+[ ok ] duplicate identity resolved deterministically: the LAST point wins
+[ ok ] controller 127 / channel 16 / value 0 boundaries survive unclamped
+[ ok ] out-of-range channel clamps to 16 (load repair)
+[ ok ] before the first point no value exists (no invented default)
+[ ok ] exact value at a point's own tick
+[ ok ] Hold retains the previous value until the next point
+[ ok ] Linear interpolates between adjacent points (midpoint)
+[ ok ] Linear segment reaches its exact endpoint value
+[ ok ] the final point's value holds forever
+[ ok ] streams are keyed by (controller, channel); other streams see nothing
+[ ok ] monotonic 0->127 ramp emits exactly one event per crossed integer (128), independent of segment length (got 128)
+[ ok ] ramp endpoints are exact and never overshoot
+[ ok ] ramp events are strictly ascending in tick and value
+[ ok ] linear event generation is deterministic across runs
+[ ok ] Hold emits value changes only; an unchanged repeat point is not resent
+[ ok ] adjacent-range rescans with unchanged chase state do not flood repeats
+[ ok ] 3 CC points export as 3 Control Change events
+[ ok ] CC controller/value/tick are exact; Any (Preserve) keeps native channel 5
+[ ok ] CC at a note's start tick is written before that Note On
+[ ok ] fixed track channel 2 exports every CC event on channel 2
+[ ok ] export leaves stored CC points byte-identical (native channel 5 kept)
+[ ok ] v19 project with CC points writes ok
+[ ok ] v19 project reads back at current version
+[ ok ] v19 round-trip preserves CC tick/controller/value/channel/interpolation and leaves notes (native ch 10) untouched
+[ ok ] v19 JSON actually carries the ccPoints key
+[ ok ] synthesized v18 file has no CC data and an authentic version stamp
+[ ok ] v18 project still loads (no migration error)
+[ ok ] v18 loads with empty CC automation and identical notes/channels
+[ ok ] integration: arranged Mouse Down dispatches Note On ch2 p60 immediately
+[ ok ] integration: no Note Off dispatched before 850 ms is due
+[ ok ] integration: exactly one Note Off (ch2 p60) dispatched when 850 ms is due
+[ ok ] integration: quick click never dispatches a second off
+[ ok ] integration: held arranged note has no off at/after 850 ms
+[ ok ] integration: held arranged note dispatches Note Off at Mouse Up (max rule)
+[ ok ] integration: key/drum Mouse Down dispatches only the Note On
+[ ok ] integration: key/drum Note Off dispatched immediately on Mouse Up (30 ms note)
+[ ok ] integration: key/drum click has no 850 ms tail event
+[ ok ] integration: Note On/Off pair matches on the resolved channel (7)
+[ ok ] integration: channel-change teardown releases on the captured ch5
+[ ok ] integration: destroying the old-destination player releases its note there
+[ ok ] integration: retrigger dispatches immediate off + new on (attack restart)
+[ ok ] integration: stale scheduled off cannot cut the retriggered preview
+[ ok ] integration: retriggered preview releases at its own Mouse Up
+[ ok ] integration: focus loss dispatches Note Off for the held preview
+[ ok ] integration: normal off delivered before cleanup test
+[ ok ] integration: finished preview gets no duplicate cleanup Note Off
+[ ok ] integration: releasing one preview leaves the other sounding
+[ ok ] integration: remaining preview is released independently on its own channel
+[ ok ] integration: chased CC11 is dispatched before the audition Note On
+[ ok ] toolbar: wide width lays out one complete row
+[ ok ] toolbar: one row keeps the original toolbar height
+[ ok ] toolbar: wide layout keeps the logical order across rows
+[ ok ] toolbar: wide layout keeps every right edge inside the width
+[ ok ] toolbar: wide layout has no overlapping controls
+[ ok ] toolbar: exact fit stays on one row
+[ ok ] toolbar: one pixel narrower uses two rows
+[ ok ] toolbar: only the last control moves down at the first wrap boundary
+[ ok ] toolbar: first-wrap layout keeps the logical order across rows
+[ ok ] toolbar: first-wrap layout keeps every right edge inside the width
+[ ok ] toolbar: first-wrap layout has no overlapping controls
+[ ok ] toolbar: a further reduction moves exactly the next control down
+[ ok ] toolbar: lower-row controls retain their mutual order
+[ ok ] toolbar: two-moved layout keeps the logical order across rows
+[ ok ] toolbar: two-moved layout keeps every right edge inside the width
+[ ok ] toolbar: two-moved layout has no overlapping controls
+[ ok ] toolbar: widening returns controls one at a time
+[ ok ] toolbar: full width returns everything to one row
+[ ok ] toolbar: 1280 px layout keeps the logical order across rows
+[ ok ] toolbar: 1280 px layout keeps every right edge inside the width
+[ ok ] toolbar: 1280 px layout has no overlapping controls
+[ ok ] toolbar: 900 px layout keeps the logical order across rows
+[ ok ] toolbar: 900 px layout keeps every right edge inside the width
+[ ok ] toolbar: 900 px layout has no overlapping controls
+[ ok ] toolbar: hiding Fit Drums removes exactly its width (no gap left behind)
+[ ok ] toolbar: the reclaimed width can restore a one-row layout
+[ ok ] toolbar: computed minimum width fits two rows
+[ ok ] toolbar: one pixel below the computed minimum would need a third row
+[ ok ] toolbar: the minimum stays reasonable for low-resolution displays
+[ ok ] toolbar: second row doubles the toolbar height (grid moves down)
+[ ok ] toolbar: Remap width covers its full label plus padding
+[ ok ] toolbar: a very short label still gets the minimum button width
+[ ok ] vertical: both test widths keep the toolbar on one row
+[ ok ] vertical: two one-row widths yield identical content height (lanes cannot move)
+[ ok ] vertical: toolbar + content exactly partition height 760 at 1 row(s)
+[ ok ] vertical: toolbar + content exactly partition height 760 at 2 row(s)
+[ ok ] vertical: toolbar + content exactly partition height 543 at 1 row(s)
+[ ok ] vertical: toolbar + content exactly partition height 543 at 2 row(s)
+[ ok ] vertical: toolbar + content exactly partition height 81 at 1 row(s)
+[ ok ] vertical: toolbar + content exactly partition height 81 at 2 row(s)
+[ ok ] vertical: crossing the wrap boundary yields two rows
+[ ok ] vertical: the transition moves the grid down by exactly one toolbar row
+[ ok ] vertical: widening again restores the original content height
+[ ok ] vertical: tiny editor heights clamp the content budget to 1 px
+[ ok ] fit drums: visible on the explicit drum instrument editor
+[ ok ] fit drums: hidden on a melodic instrument track
+[ ok ] fit drums: hidden on a MIDI-only track regardless of labels
+[ ok ] fit drums: enabled only when visible and a useful row range exists
+
+162 checks, 0 failures

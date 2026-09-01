@@ -68,6 +68,10 @@ public:
 
         /// Clears record-arm when the armed lane is removed (Group/Master cannot be armed from UI).
         std::function<void(TrackId)> disarmRecorderIfTrack;
+
+        /// Phase B: Delete-Track undo restore for `TrackKind::Midi` rows — recreates the
+        /// plugin-less MIDI content controller (never an instrument host).
+        std::function<InstrumentTrackController*(TrackId)> getOrCreateMidiContentControllerForTrack;
     };
 
     TrackLanesEditCoordinator(Session& session,

@@ -135,9 +135,14 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
         }
         if constexpr (undo_diagnostic::kUndoDiag)
         {
+            const auto liveAfter = session_.loadSessionSnapshotForAudioThread();
             writeUndoDiagnosticLogLine("[UndoDiag] invokeUndo restored timeline="
-                                       + undoDiagSnapPtr(bundle->timelineSnapshot.get()) + " liveBeforeRestore="
-                                       + undoDiagSnapPtr(live.get()));
+                                       + undoDiagSnapPtr(bundle->timelineSnapshot.get()) + " (tracks="
+                                       + juce::String(bundle->timelineSnapshot->getNumTracks())
+                                       + ") liveBeforeRestore=" + undoDiagSnapPtr(live.get())
+                                       + " (tracks=" + juce::String(live ? live->getNumTracks() : -1)
+                                       + ") liveAfterRestore tracks="
+                                       + juce::String(liveAfter ? liveAfter->getNumTracks() : -1));
         }
     }
     if (bundle->pluginSides.has_value())

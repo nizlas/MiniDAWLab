@@ -76,14 +76,41 @@ struct InstrumentClipRenderPlan
     std::vector<InstrumentNoteRenderEvent> notes;
 };
 
+/// Stage D: one baked, discrete controller change. Like notes, the **effective** channel is
+/// already applied at publish time, so the audio thread never consults the session.
+struct InstrumentCcRenderEvent
+{
+    std::int64_t absSample = 0;
+    std::uint8_t controller = 0;
+    std::uint8_t value = 0;
+};
+
+/// All controller changes of one (controller, effective channel) stream, merged across every
+/// clip of the track and sorted by `absSample` (same-sample events keep publish order; the last
+/// delivered value wins — documented deterministic rule). Streams live at snapshot scope, not
+/// clip scope, because MIDI CC state is sticky: a clip that ended long before the playhead still
+/// defines the current chased value.
+struct InstrumentCcRenderStream
+{
+    std::uint8_t controller = 0;
+    std::uint8_t midiChannel = 1;
+    std::vector<InstrumentCcRenderEvent> events;
+};
+
 struct InstrumentTrackRenderSnapshot
 {
     std::uint32_t revision = 0;
     bool playbackEnabled = false;
-    int midiChannel = 1;
+    /// Resolved copy of the owning row's `Track::getMidiOutputChannel()`, for diagnostics only:
+    /// the remap it describes is already applied to every `InstrumentNoteRenderEvent::midiChannel`
+    /// below, so the audio thread never has to consult it.
+    int midiChannel = kTrackMidiOutputChannelAny;
     int gateSamples = 4800;
     /// Sorted by `startSamples`. Notes sorted by `absSample` within each clip.
     std::vector<InstrumentClipRenderPlan> clips;
+    /// Stage D: precomputed CC automation, one stream per (controller, effective channel).
+    /// Bounded event lists (one event per crossed integer value inside Linear segments).
+    std::vector<InstrumentCcRenderStream> ccStreams;
 };
 
 /// Tracks whether a MIDI editor drum-row label came from the user vs plugin discovery (`mergeAutoPluginDrumLabels`).
@@ -104,7 +131,15 @@ struct InstrumentTrackDrumLabel
 class InstrumentTrackController : public juce::ChangeBroadcaster
 {
 public:
-    explicit InstrumentTrackController(ExperimentalInstrumentHost& host) noexcept;
+    /// `hostOrNull == nullptr` builds a **plugin-less MIDI content controller** (Phase B
+    /// `TrackKind::Midi` lanes): clips, selection, musical undo, render snapshots and RT MIDI
+    /// scheduling all work; every plugin/host-dependent member is a safe no-op. A non-null host
+    /// pairs the controller with one instrument lane exactly as before.
+    explicit InstrumentTrackController(ExperimentalInstrumentHost* hostOrNull) noexcept;
+
+    /// True when this controller is paired with an `ExperimentalInstrumentHost` (instrument lane).
+    /// False for plugin-less `TrackKind::Midi` content controllers.
+    [[nodiscard]] bool hasPairedInstrumentHost() const noexcept { return host_ != nullptr; }
 
     void setSession(Session* session) noexcept { session_ = session; }
 
@@ -135,6 +170,10 @@ public:
     [[nodiscard]] bool bootstrapGenericCatalogInstrumentShellForSessionTrack(
         TrackId sessionInstrumentTrackId) noexcept;
 
+    /// Plugin-less `TrackKind::Midi` content lane (`instrumentKind` MidiContent). Requires a
+    /// controller constructed **without** a host and an existing `Midi` session row.
+    [[nodiscard]] bool bootstrapMidiContentShellForSessionTrack(TrackId sessionMidiTrackId) noexcept;
+
     [[nodiscard]] bool isGenericCatalogInstrument() const noexcept
     {
         return experimentalInstrumentKind_ == "GenericVst3";
@@ -161,6 +200,11 @@ public:
     /// Experimental lane header **Mute**; default off when the track shell exists.
     [[nodiscard]] bool isMuted() const noexcept { return muted_; }
     void setMuted(bool muted) noexcept;
+
+    /// [Message thread] Re-reads this row's MIDI output channel from the session and republishes the
+    /// render snapshot, so already-placed notes move to the new channel. Call after
+    /// `Session::setTrackMidiOutputChannel` (the channel itself lives on `Track`, not here).
+    void refreshMidiOutputChannelFromSession();
 
     /// UI-only "active row" highlight (mutex with audio header selection in `TransportControlsContent`).
     /// `TrackHeaderView` reads this to render the slate-blue active variant.
@@ -373,12 +417,41 @@ public:
                                         int offsetInDevice,
                                         int deviceBlockNumSamples) noexcept;
 
+    /// [Audio thread] Source-specific cleanup for `TrackKind::Midi` reroute/disconnect: emits only
+    /// **this source's** pending note-offs into `host` — deliberately **no** `allNotesOff`, because
+    /// the destination may be sustaining notes from its own clips or other MIDI sources.
+    void audioThread_flushPendingTransportOffsInto(ExperimentalInstrumentHost& host,
+                                                   int offsetInDevice,
+                                                   int deviceBlockNumSamples) noexcept;
+
+    // --- [Audio thread] MIDI-track routing state (Phase B) -------------------
+    // A `TrackKind::Midi` source schedules into whichever destination host the engine resolves per
+    // block. The engine records the destination it last delivered to, so that on reroute it can
+    // flush this source's pending note-offs into the **old** destination (releasing only this
+    // source's sounding notes) before scheduling into the new one. Instrument lanes never use this.
+    [[nodiscard]] TrackId audioThread_getLastRoutedDestTrackId() const noexcept
+    {
+        return rtLastRoutedDestTrackId_;
+    }
+    void audioThread_setLastRoutedDestTrackId(const TrackId destTrackId) noexcept
+    {
+        rtLastRoutedDestTrackId_ = destTrackId;
+    }
+    /// [Audio thread] Drop pending note-offs without emitting them (old destination no longer
+    /// exists — its plugin teardown already silenced everything it was playing).
+    void audioThread_dropPendingTransportOffs() noexcept
+    {
+        rtPendingOffCount_ = 0;
+        rtLastSegEndTimeline_ = -1;
+    }
+
 private:
     void pruneInstrumentMidiClipSelectionToExistingClips() noexcept;
 
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
-    ExperimentalInstrumentHost& host_;
+    /// Null on plugin-less MIDI content controllers; see the constructor doc.
+    ExperimentalInstrumentHost* host_ = nullptr;
     Session* session_ = nullptr;
     TrackId experimentalDomainTrackId_ = kInvalidTrackId;
     bool trackActive_ = false;
@@ -446,4 +519,24 @@ private:
     int rtPendingOffCount_ = 0;
     std::int64_t rtLastSegEndTimeline_ = -1;
     std::uint32_t rtLastSnapshotRevision_ = 0;
+
+    /// [Audio thread] Last CC value delivered per snapshot `ccStreams` slot (−1 = nothing sent
+    /// yet → the next discontinuity chases). Indexed parallel to the snapshot's stream list and
+    /// invalidated on every snapshot revision bump. Fixed size: streams beyond the cap simply
+    /// lose the resend-suppression (still correct, just less deduplication).
+    static constexpr int kMaxRtCcStreams = 64;
+    std::array<int, (size_t)kMaxRtCcStreams> rtCcLastSentValue_{};
+    /// Chases every stream at `timelineSegStart` and emits due in-segment CC events, keeping
+    /// per-stream dedup state. Runs before note-ons so a CC at a note's start precedes its
+    /// Note On in the block buffer (insertion order is preserved at equal offsets).
+    void audioThread_scheduleCcForSegment(ExperimentalInstrumentHost& host,
+                                          const InstrumentTrackRenderSnapshot& snap,
+                                          std::int64_t timelineSegStart,
+                                          std::int64_t segEnd,
+                                          bool discontinuity,
+                                          int bufferOffsetInDevice,
+                                          int deviceBlockNumSamples,
+                                          int* outMidiEventsEmitted) noexcept;
+    /// [Audio thread] Destination the engine last delivered this Midi source's events to.
+    TrackId rtLastRoutedDestTrackId_ = kInvalidTrackId;
 };
