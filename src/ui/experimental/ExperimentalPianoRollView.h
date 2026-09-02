@@ -444,6 +444,12 @@ private:
     [[nodiscard]] juce::Rectangle<int> ccLaneResizeBandBounds() const;
     /// Small labeled handle at the bottom edge while collapsed (discoverability).
     [[nodiscard]] juce::Rectangle<int> ccLaneCollapsedKnobBounds() const;
+    /// Chevron in the expanded lane's header that collapses the lane (view-only; empty while
+    /// collapsed). Tooltip: "Collapse CC lane".
+    [[nodiscard]] juce::Rectangle<int> ccLaneCollapseChevronBounds() const;
+    /// View-only collapse: remembers the runtime lane height for reopen and returns the space to
+    /// the note grid. Never touches `pattern_.ccPoints`, undo history, dirty state or playback.
+    void collapseCcLane() noexcept;
     [[nodiscard]] bool ccLaneEditingAvailable() const noexcept;
     [[nodiscard]] int ccValueFromLaneY(int y) const noexcept;
     [[nodiscard]] float ccLaneYForValue(int value) const noexcept;
@@ -470,6 +476,8 @@ private:
     };
     /// Runtime-only lane height (0 = collapsed default; existing projects are not forced to show it).
     int ccLaneHeightPref_ = 0;
+    /// Runtime memo of the last expanded height so reopening restores the user's lane size.
+    int ccLaneExpandedHeightMemo_ = 0;
     /// Controller shown/edited in the lane. CC11 Expression is the default first view.
     int ccLaneController_ = 11;
     std::set<int> selectedCcPointIndices_;

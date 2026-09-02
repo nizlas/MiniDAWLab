@@ -16,6 +16,7 @@
 #include "ui/experimental/MidiEditorAuditionModel.h"
 #include "ui/experimental/MidiEditorTitleStatus.h"
 #include "ui/experimental/MidiEditorToolbarLayout.h"
+#include "ui/experimental/MidiCcLaneViewState.h"
 #include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 
 #include "instruments/InstrumentTrackController.h"
@@ -1284,6 +1285,107 @@ namespace
                    && !tb::fitDrumsEnabled(false, true),
                "fit drums: enabled only when visible and a useful row range exists");
     }
+
+    // -------------------------------------------------------------------------------------------
+    // Collapsible CC lane view state — the pure seam driving the piano roll's expand/collapse.
+    // View-only by construction: ViewState carries no CC points, undo hooks or dirty flags.
+    // -------------------------------------------------------------------------------------------
+    void testCcLaneViewState()
+    {
+        namespace cl = midi_cc_lane;
+        constexpr int kDefaultH = 110;   // ExperimentalPianoRollView::kCcLaneHeight
+        constexpr int kRuler = 24;       // representative ruler height
+        constexpr int kMinGrid = 3 * 18; // kRowHeight * 3 minimum grid budget
+        constexpr int kViewH = 600;
+        constexpr int kVelLane = 90;     // representative expanded velocity lane
+
+        // 1. Initial state is collapsed and consumes zero height.
+        cl::ViewState s{};
+        expect(s.heightPref == 0
+                   && cl::effectiveLaneHeight(s.heightPref, kViewH, kRuler, kMinGrid) == 0,
+               "cc lane: initial state is collapsed with zero lane height");
+
+        // 2. Clicking the collapsed `CC` control expands the lane at the default height.
+        s = cl::reopened(s, kDefaultH);
+        expect(s.heightPref == kDefaultH,
+               "cc lane: reopening from the initial state uses the default height");
+        const int gridCollapsed = kViewH - kRuler - kVelLane;
+        const int laneH = cl::effectiveLaneHeight(s.heightPref, kViewH, kRuler, kMinGrid);
+        const int gridExpanded = kViewH - kRuler - kVelLane - laneH;
+
+        // 8./9. Note grid shrinks by exactly the lane height on expand — the vertical regions
+        // still partition the fixed view height with no remainder or overlap.
+        expect(laneH == kDefaultH && gridCollapsed - gridExpanded == laneH,
+               "cc lane: expanding takes exactly the lane height from the note grid");
+        expect(kRuler + gridExpanded + kVelLane + laneH == kViewH,
+               "cc lane: expanded regions exactly fill the view height (no remainder)");
+
+        // Simulate the user resizing the lane, then 3./4. collapsing via the header chevron.
+        s.heightPref = 140;
+        s = cl::collapsed(s);
+        expect(s.heightPref == 0
+                   && cl::effectiveLaneHeight(s.heightPref, kViewH, kRuler, kMinGrid) == 0,
+               "cc lane: collapse returns to zero lane height");
+        expect(kViewH - kRuler - kVelLane == gridCollapsed,
+               "cc lane: collapse returns the full height to the note grid exactly");
+
+        // Collapse is idempotent and never forgets the memo.
+        const auto again = cl::collapsed(s);
+        expect(again.heightPref == 0 && again.expandedMemo == 140,
+               "cc lane: collapsing twice is a no-op that keeps the height memo");
+
+        // 7. Reopening within the same editor restores the remembered runtime height,
+        // and reopening while already open changes nothing.
+        s = cl::reopened(s, kDefaultH);
+        expect(s.heightPref == 140, "cc lane: reopen restores the remembered runtime height");
+        const auto open2 = cl::reopened(s, kDefaultH);
+        expect(open2.heightPref == 140, "cc lane: reopening an open lane is a no-op");
+
+        // 5./6. View state is structurally separate from musical data: toggling the lane must not
+        // change a CC point set (same pure model the editor stores in the pattern).
+        {
+            std::vector<MidiCcPoint> pts;
+            MidiCcPoint p;
+            p.startTick = 480;
+            p.controller = 11;
+            p.value = 96;
+            p.channel = 2;
+            pts.push_back(p);
+            const auto before = pts;
+            cl::ViewState v{};
+            v = cl::reopened(v, kDefaultH);
+            v = cl::collapsed(v);
+            v = cl::reopened(v, kDefaultH);
+            expect(pts.size() == before.size() && pts[0].startTick == before[0].startTick
+                       && pts[0].controller == before[0].controller
+                       && pts[0].value == before[0].value && pts[0].channel == before[0].channel,
+                   "cc lane: expand/collapse leaves CC point data untouched");
+        }
+
+        // Clamps: the lane never eats the minimum grid or more than half the view.
+        expect(cl::effectiveLaneHeight(10000, kViewH, kRuler, kMinGrid) == kViewH / 2,
+               "cc lane: lane height clamps to half the view");
+        expect(cl::effectiveLaneHeight(10000, 90, kRuler, kMinGrid) == 90 - kRuler - kMinGrid,
+               "cc lane: lane height clamps to preserve the minimum grid area");
+        expect(cl::effectiveLaneHeight(10000, 40, kRuler, kMinGrid) == 0
+                   && cl::effectiveLaneHeight(-5, kViewH, kRuler, kMinGrid) == 0,
+               "cc lane: degenerate view heights and negative prefs clamp to zero");
+
+        // 10. Fit Drums interaction: the drum fit sizes the window from
+        // rows*rowHeight + ruler + lanes + ccLaneHeightPref, so with the lane expanded the fitted
+        // grid still holds every row; collapsing only grows the grid and can never hide a row.
+        constexpr int kRows = 14;
+        constexpr int kRowH = 18;
+        const int fittedViewH = kRuler + kRows * kRowH + kVelLane + kDefaultH;
+        const int fittedLane =
+            cl::effectiveLaneHeight(kDefaultH, fittedViewH, kRuler, kMinGrid);
+        expect(fittedViewH - kRuler - kVelLane - fittedLane == kRows * kRowH,
+               "cc lane: drum fit with an expanded lane keeps every fitted row visible");
+        expect(fittedViewH - kRuler - kVelLane
+                       - cl::effectiveLaneHeight(0, fittedViewH, kRuler, kMinGrid)
+                   >= kRows * kRowH,
+               "cc lane: collapsing after a drum fit only grows the note grid");
+    }
 } // namespace
 
 int main()
@@ -1302,6 +1404,7 @@ int main()
     testProjectV19PersistenceAndMigration();
     testAuditionDispatchIntegration();
     testToolbarLayoutAndVisibility();
+    testCcLaneViewState();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

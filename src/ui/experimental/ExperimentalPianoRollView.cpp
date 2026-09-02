@@ -1,5 +1,6 @@
 #include "ExperimentalPianoRollView.h"
 #include "ExperimentalMidiPatternPlayer.h"
+#include "MidiCcLaneViewState.h"
 #include "instruments/InstrumentTrackController.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineLocatorPainter.h"
@@ -1001,9 +1002,8 @@ int ExperimentalPianoRollView::ccLaneTotalHeight() const noexcept
 {
     // NOTE: deliberately not defined via maxCcLaneHeightNow() (which subtracts the velocity lane,
     // which subtracts this) — clamp against the raw available space to avoid recursion.
-    const int minGridPx = kRowHeight * 3;
-    const int available = getHeight() - timelineRulerHeight() - minGridPx;
-    return juce::jlimit(0, juce::jmax(0, juce::jmin(available, getHeight() / 2)), ccLaneHeightPref_);
+    return midi_cc_lane::effectiveLaneHeight(ccLaneHeightPref_, getHeight(), timelineRulerHeight(),
+                                             kRowHeight * 3);
 }
 
 juce::Rectangle<int> ExperimentalPianoRollView::ccLaneBounds() const
@@ -1059,6 +1059,39 @@ juce::Rectangle<int> ExperimentalPianoRollView::ccLaneCollapsedKnobBounds() cons
              getHeight() - kCcLaneKnobHeight,
              kCcLaneKnobWidth,
              kCcLaneKnobHeight };
+}
+
+juce::Rectangle<int> ExperimentalPianoRollView::ccLaneCollapseChevronBounds() const
+{
+    const auto header = ccLaneHeaderBounds();
+    if (header.isEmpty() || ccLaneTotalHeight() <= 0 || header.getWidth() < 46)
+    {
+        return {};
+    }
+    // Top-right corner of the lane header (DAL's chevron collapse language; deliberately not an
+    // "X", which could read as deleting the automation).
+    return { header.getRight() - 20, header.getY() + kCcLaneResizeBandPx + 3, 16, 13 };
+}
+
+void ExperimentalPianoRollView::collapseCcLane() noexcept
+{
+    if (ccLaneHeightPref_ <= 0)
+    {
+        return;
+    }
+    // View-only state change: the selected controller (`ccLaneController_`) and the CC points are
+    // untouched; no undo step, no dirty marking, playback/chase unaffected. The height memo lets
+    // the collapsed knob reopen at the same runtime size.
+    const auto next = midi_cc_lane::collapsed({ ccLaneHeightPref_, ccLaneExpandedHeightMemo_ });
+    ccLaneHeightPref_ = next.heightPref;
+    ccLaneExpandedHeightMemo_ = next.expandedMemo;
+    ccLaneResizeActive_ = false;
+    ccLaneResizeFromCollapsedKnob_ = false;
+    ccPointDragActive_ = false;
+    ccDragCaptures_.clear();
+    clampPitchScrollOffset();
+    resized();
+    repaint();
 }
 
 bool ExperimentalPianoRollView::ccLaneEditingAvailable() const noexcept
@@ -1598,13 +1631,30 @@ void ExperimentalPianoRollView::paintCcLane(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.16f));
     g.drawHorizontalLine(lane.getY(), (float)header.getX(), (float)lane.getRight());
 
-    // Header: current controller (click = selector) + selected point value readout.
+    // Header: current controller (click = selector) + selected point value readout, plus the
+    // collapse chevron in the top-right corner ("Collapse CC lane").
+    {
+        const auto chevron = ccLaneCollapseChevronBounds();
+        if (!chevron.isEmpty())
+        {
+            g.setColour(juce::Colour(0xff3a4048));
+            g.fillRoundedRectangle(chevron.toFloat(), 3.0f);
+            g.setColour(juce::Colours::white.withAlpha(0.55f));
+            g.drawRoundedRectangle(chevron.toFloat(), 3.0f, 1.0f);
+            const auto c = chevron.toFloat();
+            juce::Path p;
+            p.startNewSubPath(c.getX() + 4.0f, c.getCentreY() - 2.0f);
+            p.lineTo(c.getCentreX(), c.getCentreY() + 2.5f);
+            p.lineTo(c.getRight() - 4.0f, c.getCentreY() - 2.0f);
+            g.strokePath(p, juce::PathStrokeType(1.6f));
+        }
+    }
     if (header.getWidth() >= 46)
     {
         g.setColour(juce::Colours::white.withAlpha(0.75f));
         g.setFont(juce::Font(juce::FontOptions().withHeight(11.0f)));
         g.drawText(midi_cc::controllerDisplayName(ccLaneController_) + juce::String::fromUTF8(" \xe2\x96\xbe"),
-                   header.reduced(5, 4), juce::Justification::topLeft, true);
+                   header.reduced(5, 4).withTrimmedRight(18), juce::Justification::topLeft, true);
         normalizeCcSelection();
         if (selectedCcPointIndices_.size() == 1)
         {
@@ -5142,6 +5192,13 @@ void ExperimentalPianoRollView::mouseDown(const juce::MouseEvent& e)
         }
         return;
     }
+    const auto ccChevron = ccLaneCollapseChevronBounds();
+    if (!ccChevron.isEmpty() && ccChevron.contains(pos) && !e.mods.isPopupMenu())
+    {
+        timelineMarqueeInteraction_ = TimelineMarqueeInteraction::None;
+        collapseCcLane();
+        return;
+    }
     const auto ccHeader = ccLaneHeaderBounds();
     if (!ccHeader.isEmpty() && ccHeader.contains(pos))
     {
@@ -5366,7 +5423,11 @@ void ExperimentalPianoRollView::mouseUp(const juce::MouseEvent& e)
         ccLaneResizeFromCollapsedKnob_ = false;
         if (restoreDefault)
         {
-            ccLaneHeightPref_ = kCcLaneHeight;
+            // Reopen at the remembered runtime height (view-only memo), else the default.
+            ccLaneHeightPref_ =
+                midi_cc_lane::reopened({ ccLaneHeightPref_, ccLaneExpandedHeightMemo_ },
+                                       kCcLaneHeight)
+                    .heightPref;
             clampPitchScrollOffset();
             resized();
         }
@@ -5469,6 +5530,26 @@ void ExperimentalPianoRollView::mouseMove(const juce::MouseEvent& e)
         {
             setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
             setTooltip(juce::String{});
+            return;
+        }
+    }
+
+    {
+        const auto ccChevron = ccLaneCollapseChevronBounds();
+        if (!ccChevron.isEmpty() && ccChevron.contains(e.getPosition()))
+        {
+            setMouseCursor(juce::MouseCursor::PointingHandCursor);
+            setTooltip("Collapse CC lane");
+            return;
+        }
+        const auto ccResizeBand = ccLaneResizeBandBounds();
+        const auto ccKnob = ccLaneCollapsedKnobBounds();
+        if ((!ccResizeBand.isEmpty() && ccResizeBand.contains(e.getPosition()))
+            || (!ccKnob.isEmpty() && ccKnob.contains(e.getPosition())))
+        {
+            setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
+            setTooltip(!ccKnob.isEmpty() && ccKnob.contains(e.getPosition()) ? "Show CC lane"
+                                                                             : juce::String{});
             return;
         }
     }
