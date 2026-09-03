@@ -1,7 +1,11 @@
 # Portable Instruments and Proxy Rendering — Technical Steering Document
 
 **Status:** `Draft for design review`
-**Date:** 2026-09-03 (revision 2 — incorporates the human design review of the same date)
+**Date:** 2026-09-03 (revision 3 — revision 2 incorporated the human design review of the same
+date; revision 3 applies the final consistency corrections from the follow-up review: §4.3
+determinism qualification, sample-rate-never-stale in T-06, precise previous-generation status
+after failure, acceptance criterion 4 / T-13 two-case split, strengthened TLD-1 contract, §25.3
+re-check)
 **Authority when canonical:** normative for all Portable Instruments / Proxy implementation slices.
 
 > **This document is not yet canonical.** It becomes DAL's canonical steering document for
@@ -168,15 +172,34 @@ release-store on the message thread, acquire-load in the callback: `SessionSnaps
 `RoutingPlan`, `PluginAudioThreadMap` (Audit §3.3). A published "current proxy + source mode" per
 instrument track would be the sixth instance of an established pattern.
 
-### 4.3 Deterministic MIDI merge
+### 4.3 Verified MIDI merge structure and unresolved equal-time ordering
 
-Per block: the destination's own controller schedules first, then each `TrackKind::Midi` source in
-session order resolves `midiTo` from the current `SessionSnapshot` and schedules into the
-destination's host; emission order is pending Note Offs → CC (chase + in-segment) → Note Ons, with
-the re-verified nuance that a Note Off belonging to a Note On from the *same* segment is emitted
-during the note scan, i.e. after the CC pass at that offset (§8.3); `juce::MidiBuffer` preserves
-insertion order at equal offsets (Audit §3.1). The stability fixture already builds the Organ
-Upper/Lower/Pedal shape (Audit §5.5).
+The current merge is deterministic in structure but **not** fully deterministic at equal-time
+boundaries. The complete current event stream MUST NOT be described as deterministic before ORD-1
+lands. Precisely:
+
+* **Verified deterministic destination/source merge order:** per block, the destination's own
+  controller schedules first, then each `TrackKind::Midi` source in session order resolves
+  `midiTo` from the current `SessionSnapshot` and schedules into the destination's host;
+  `juce::MidiBuffer` preserves insertion order at equal offsets (Audit §3.1). Per-segment emission
+  is pending Note Offs → CC (chase + in-segment) → note scan, with the re-verified nuance that a
+  Note Off belonging to a Note On from the *same* segment is emitted during the note scan, i.e.
+  after the CC pass at that offset (§8.3).
+* **Verified deterministic CC normalization/insertion:** CC points live in repository-canonical
+  normalized order (`normalizePoints`: `std::stable_sort`, duplicates collapsed last-wins), and
+  the bake stable-sorts each per-`(controller, channel)` stream with append-order ties — so
+  equal-time CC last-wins is deterministic given session track order (§8.3).
+* **Unresolved equal-time note/clip ordering (Verified gap, HR-10):** the bake sorts notes by
+  `absSample` and clip plans by `startSamples` with **unstable `std::sort` and no tie-break**
+  (`InstrumentTrackController.cpp` ~2344–2353), so equal-time note order and equal-start clip
+  order are implementation-defined today, and equal-time Note Off/Note On interleaving across
+  clips can audibly differ.
+* **ORD-1 (Proposed, not yet implemented):** replace both sorts with `std::stable_sort`, making
+  stored order the documented equal-key tie-break (§8.3). Stored-order tie-break semantics in this
+  document are post-ORD-1 target semantics, not current guarantees.
+
+The stability fixture already builds the Organ Upper/Lower/Pedal shape (Audit §5.5). The detailed
+scheduling description in §8.3 is authoritative and consistent with this summary.
 
 ### 4.4 Persistence and media
 
@@ -226,8 +249,8 @@ footnote.
 | HR-7 | No reusable tail policy exists (Audit §6.1) | §15.2, PI-016, PID-005, T-16 |
 | HR-8 | No cancellation/generation mechanism prevents stale publication (Audit §6.1, §7.4) | §13, PI-028, PID-004, slice P1E, T-11/T-12 |
 | HR-9 | Sample-rate portability requires an explicit policy (Audit U5, H6) | §15.3 (Locked cross-rate playback, PI-030), OI-002/SPIKE-03, T-17, T-25 |
-| HR-10 | Bake sorts for notes and clip plans are unstable `std::sort` without tie-breakers — equal-time delivered order is implementation-defined, and equal-time Off/On interleaving can audibly differ (revision-2 source re-verification: `InstrumentTrackController.cpp` ~2344–2353) | §8.3 (ORD-1 blocking P1C prerequisite), §11.4, T-03 |
-| HR-11 | Sample-domain timeline fields (clip anchors/windows, locators, extent, playhead) are integers referenced to `deviceSampleRateAtSave`, which is re-stamped on every save **without rescaling** the integers; load performs no rescale and the bake uses the current device rate — so cross-rate machines drift and persistence alone cannot pin wall-clock meaning (revision-2 source re-verification: `Session.cpp` ~1569–1570, ~1856–1982; `InstrumentTrackController.h` ~337–338) | §10.1 (TLD-1 blocking P1B prerequisite), §11.1 F3/F11, §15.3 |
+| HR-10 | Bake sorts for notes and clip plans are unstable `std::sort` without tie-breakers — equal-time delivered order is implementation-defined, and equal-time Off/On interleaving can audibly differ (source re-verified for revisions 2 and 3: `InstrumentTrackController.cpp` ~2344–2353) | §4.3, §8.3 (ORD-1 blocking P1C prerequisite), §11.4, T-03 |
+| HR-11 | Sample-domain timeline fields (clip anchors/windows, locators, extent, playhead) are integers referenced to `deviceSampleRateAtSave`, which is re-stamped on every save **without rescaling** the integers; load performs no rescale and the bake uses the current device rate — so cross-rate machines drift and persistence alone cannot pin wall-clock meaning (source re-verified for revisions 2 and 3: `Session.cpp` ~1569–1570, ~1856–1982; `InstrumentTrackController.h` ~337–338; every runtime consumer receives the device rate, `ProjectIoCoordinator.cpp` ~782, `InstrumentRuntimeCoordinator.cpp` ~163) | §10.1 (TLD-1 blocking P1B prerequisite), §11.1 F3/F11, §15.3 |
 
 ## 5. Normative invariants
 
@@ -435,11 +458,15 @@ Per-responsibility contract:
   diagnosed tail-limit failure when the max-tail cap is reached with materially non-silent output
   (§15.2 — never published). Failure: any processing exception → Failed. Cancellation: checked
   each block. Shutdown: via R7.
-* **R9 — asset store (Proposed).** Mutable state: on-disk generations + per-destination current
-  pointer. Inputs: validated temp files + fingerprint identity. Outputs: atomically published
-  generation files, retirement of superseded generations (§16). Failure: publication failure keeps
-  the previous generation current (PI-024). Cancellation: obsolete temp files deleted safely.
-  Shutdown: temp cleanup on next launch (crash recovery §16.4).
+* **R9 — asset store (Proposed).** Mutable state: on-disk generations + a per-destination pointer
+  to the most recently published generation (the pointer never implies status: Current vs Stale is
+  always a fingerprint verdict, §12.3). Inputs: validated temp files + fingerprint identity.
+  Outputs: atomically published generation files, retirement of superseded generations (§16).
+  Failure: publication failure never deletes or overwrites the previous published generation — its
+  metadata and asset are retained; it remains Current (and playable) only if its fingerprint still
+  matches current musical content, otherwise it is retained as Stale and never selected for
+  playback in P1 (PI-007, PI-024). Cancellation: obsolete temp files deleted safely. Shutdown:
+  temp cleanup on next launch (crash recovery §16.4).
 * **R10 — source selection (Proposed).** Mutable state: per-host atomic
   `shared_ptr<ProxyPlaybackView>` (Proposed: immutable {mode, playback-source handle, latency
   metadata}) following the `activeOwner_` swap pattern (§4.2). The view exposes the *derived
@@ -558,8 +585,9 @@ more precise than, the draft's earlier summary):
   one plan per non-empty clip, then sorts plans by `startSamples` (~2350–2353).
 * Notes inside a clip are stored in vector order (no per-note stable ID exists,
   `ExperimentalMidiPattern.h` ~45–59); the bake emits them in stored order and then sorts by
-  `absSample` only (~2344–2347). **Stored vector order is therefore the semantic tie-break for
-  equal-time notes.**
+  `absSample` only (~2344–2347). **Stored vector order is the *intended* semantic tie-break for
+  equal-time notes — guaranteed only once ORD-1 lands**, because the current sort is unstable
+  (see ORD-1 below); today equal-time order is implementation-defined.
 * CC points are kept in a repository-canonical normalized order — `startTick` → `controller` →
   `channel`, duplicates collapsed last-wins (`ExperimentalMidiCcAutomation.h` ~90–157,
   `normalizePoints` with `std::stable_sort`). The bake visits CC clips stable-sorted by
@@ -757,17 +785,53 @@ integers** (`Session.cpp` ~1569–1570). Mismatched-rate audio files are skipped
   stable across save/load and machines); the timeline reference rate lives in F11 (render
   configuration), not in the content fields.
 
+**Timeline reference-rate contract (Locked target; the persisted field and every conversion seam
+are Proposed — they do not exist today):**
+
+* The persisted timeline reference rate and the current engine/device sample rate are **separate
+  coordinate domains**. They MUST NOT be conflated: one defines what the stored integers *mean*,
+  the other defines what the running engine *needs*.
+* On v20 load, the persisted timeline reference rate is authoritative for interpreting **all**
+  persisted sample-domain timeline fields (MIDI clip anchors/windows, audio-clip placement,
+  locators, arrangement extent, playhead).
+* Changing the audio device/engine rate MUST NOT overwrite that reference rate and MUST NOT
+  reinterpret the stored integers.
+* Every boundary that needs engine-rate sample positions MUST convert from the persisted timeline
+  domain to the current engine domain
+  (`engineSamples = round(storedSamples · engineRate / timelineReferenceRate)`). The proxy
+  snapshot conversion above is **one** such boundary. Merely persisting the field fixes nothing by
+  itself: **today every runtime timeline consumer interprets the stored integers at the current
+  device rate** (Verified: project load passes `device->getCurrentSampleRate()` into
+  `setTimelineSampleRate` at every load site — `ProjectIoCoordinator.cpp` ~782 feeding
+  ~212/~276/~929/~992; device prepare re-stamps the timeline rate,
+  `InstrumentRuntimeCoordinator.cpp` ~163/~624–637; plus edit-coordinator and MIDI-editor call
+  sites). These consumers remain unconverted until a slice migrates them.
+* Any explicit change of the timeline reference rate is a deliberate migration operation that MUST
+  rescale all affected sample-domain fields **atomically** in the same operation. Fingerprints MAY
+  change only as part of that defined atomic conversion — never merely because the audio device
+  rate changed.
+* v19→v20 migration initializes the new field from the stored `deviceSampleRateAtSave`, because it
+  is the best available historical reference.
+* **Legacy migration limitation (Locked honesty):** migration cannot reconstruct the original
+  timing of a v19 project that was previously re-saved at another device rate after its integers
+  had already been misinterpreted (the re-stamp destroyed the original reference). v20 pins the
+  interpretation from migration onward; it does not repair lost historical information, and this
+  document MUST NOT claim otherwise.
+
 **TLD-1 — blocking P1B prerequisite (Verified gap, HR-11).** Because save re-stamps
 `deviceSampleRateAtSave` without rescaling, the persisted pair {sample integers, recorded rate}
 silently changes meaning when a project is saved on a machine with a different device rate —
 current persistence therefore lacks a stable machine-independent reference for sample-domain
 placement, which the portable promise (§2.1) requires. **Smallest fix (proposed, not implemented
 here):** persist an explicit project `timelineSampleRate` that is initialized once (from
-`deviceSampleRateAtSave` on first migration) and never silently re-stamped — any future change of
-it must rescale the sample-domain integers in the same operation. P1B MUST include TLD-1 (or an
-explicitly reviewed equivalent) before P1C fingerprints sample-domain fields; this is recorded
-here as its own prerequisite and deliberately **not** concealed behind the sample-rate playback
-policy (§15.3).
+`deviceSampleRateAtSave` on v19→v20 migration) and never silently re-stamped — any future change of
+it must rescale the sample-domain integers in the same operation, per the contract above. P1B MUST
+include TLD-1 (or an explicitly reviewed equivalent) before P1C fingerprints sample-domain fields;
+its completion gate additionally verifies that the persisted domain is actually consumed by the
+relevant runtime and proxy-snapshot boundaries and that remaining unconverted sample-domain
+consumers are enumerated and assigned to a blocking slice before P1J cross-rate acceptance (§22
+P1B, T-21). This prerequisite is recorded here on its own and deliberately **not** concealed
+behind the sample-rate playback policy (§15.3).
 
 ## 11. Canonical fingerprint specification
 
@@ -822,8 +886,8 @@ The fingerprint is a hash over a canonical byte serialization of the snapshot:
     never consults it. Reordering equal-start clips changes delivery and therefore the
     fingerprint; reordering different-start clips does not change either.
   * **Notes** serialize in **stored vector order** within their clip (positional order is
-    persisted and round-trips, `ProjectFile.cpp` ~1869–1892). Stored order is the semantic
-    tie-break for equal-time delivery (§8.3), so it is fingerprint data. Deliberately
+    persisted and round-trips, `ProjectFile.cpp` ~1869–1892). Stored order is the equal-time
+    delivery tie-break once ORD-1 holds (§8.3), so it is fingerprint data. Deliberately
     conservative consequence: a stored-order permutation of *different*-time notes changes the
     fingerprint without changing delivery — accepted for v1 (unnecessary re-render, never a
     missed staleness).
@@ -930,7 +994,7 @@ Two distinct machines (Proposed). The destination's *proxy status* is derived, u
 | Current / published | Published generation's `generationId` equals the expected fingerprint built under that generation's recorded render configuration (§12.3). A generation whose recorded render rate differs from the current engine rate is still **Current** — it plays through the derived playback representation (PI-030); the mismatch never demotes the status. |
 | Stale | A retained generation exists but the *musical* content no longer matches (PI-007). Never caused by an engine-rate difference alone. |
 | Rendering | A job for the current fingerprint is queued/preparing/rendering/finalizing. |
-| Failed | The most recent job for the current fingerprint failed (including a diagnosed incomplete render at the tail cap, §15.2); previous generation (if any) is retained and reported as Stale+Failed detail. |
+| Failed | The most recent job for the current fingerprint failed (including a diagnosed incomplete render at the tail cap, §15.2). The previous published generation (if any) is retained — never deleted or overwritten — and its own status remains a pure fingerprint verdict: typically Stale (the edit that triggered the job made it non-matching, so it is never selected for playback in P1), but still Current and playable if the fingerprint still matches (e.g. a failed native-rate quality refresh, or the triggering edit was undone). The failure is surfaced as detail alongside that verdict. |
 
 ### 13.2 Render-job execution states
 
@@ -957,11 +1021,11 @@ states: Published, Cancelled, Obsolete, Failed.
 | Track deletion | Jobs for that destination cancelled; assets retired per cleanup policy (§16.5); engine-side removal follows existing publish-before-destroy + callback-drain discipline (Verified, Audit §3.2). |
 | Primary removal (descriptor cleared) | Jobs cancelled; existing generations retained (they still represent the last authoritative sound — status Stale); no new renders until a Primary exists. |
 | Routing change (`midiTo` edit) | Fingerprint changes for old and new destinations ⇒ both stale per PI-009. |
-| Engine sample-rate change | Per §15.3 (PI-030): existing generations remain valid and Current; only their derived playback representations are invalidated and rebuilt off the audio thread. Jobs in flight continue — their generation identity is their own recorded render configuration. When Primary is available, Auto mode MAY queue a native-rate quality refresh; it is never required for playback. |
+| Engine sample-rate change | Per §15.3 (PI-030): the rate change alone never makes a generation Stale — an existing generation remains Current as long as its musical fingerprint still matches under its own recorded render configuration; only its derived playback representation is invalidated and rebuilt off the audio thread. Jobs in flight continue — their generation identity is their own recorded render configuration. When Primary is available, Auto mode MAY queue a native-rate quality refresh; it is never required for playback. |
 | Save As / project move | Assets copied/relocated with the project (§16.6) before the new location is considered complete; fingerprints are path-independent so validity is preserved. |
 | Project close | Cancel-all, bounded worker join, temp cleanup; never blocks on rendering completion (PI-023 spirit); queued work is re-derivable from fingerprints on reopen. |
 | Application shutdown | Same as close plus instance destruction on the message thread (§6 R6/R7). |
-| Publication failure | Previous generation retained and remains current-on-disk; job Failed; status surfaces per §20 (PI-024). |
+| Publication failure | The previous published generation is never deleted or overwritten; its metadata and asset are retained. It remains Current and playable only if its fingerprint still matches current musical content; otherwise it is retained as Stale and never selected for playback in P1 (PI-007). Job Failed; status surfaces per §20 (PI-024). "Current" is never a synonym for "latest file on disk". |
 | Application crash | On next launch: temp files swept, metadata validated against on-disk assets; missing/corrupt ⇒ PI-025 degradation (§16.4). |
 
 ## 14. Threading and plugin lifecycle
@@ -993,7 +1057,7 @@ the create-on-message / process-on-worker handoff before P1D relies on it.
 7. Write a temporary proxy asset.
 8. Validate the rendered asset (readable, expected length, format).
 9. Verify that the destination's current fingerprint still matches the job.
-10. Publish only if the job remains current (PI-028).
+10. Publish only if the job remains fingerprint-current (PI-028).
 11. Discard obsolete or failed temporary output safely.
 
 ### 14.3 Execution policy (Locked capabilities, Recommended parameters)
@@ -1141,8 +1205,11 @@ discipline), never in-place replacement.
 4. Publish the new `ProxyPlaybackView` (R10) and update metadata (R1).
 5. Retire the superseded generation: remove it only after no acquired view can reference it
    (retirement follows the snapshot-retain discipline of §4.2).
-6. Failure at any step: temp deleted (or swept later), previous generation remains current
-   (PI-024).
+6. Failure at any step: temp deleted (or swept later); the previous published generation is never
+   deleted or overwritten — its metadata and asset are retained, and whether it is Current or
+   Stale remains a pure fingerprint verdict (§12.3): Current and playable only while it still
+   matches current musical content, otherwise a Stale retained asset that is never selected for
+   playback in P1 (PI-007, PI-024).
 
 ### 16.4 Recovery (Locked behaviors)
 
@@ -1151,9 +1218,9 @@ discipline), never in-place replacement.
   media policy (Verified §4.4).
 * **Crash recovery:** on launch, sweep `tmp_*.wav`; validate metadata against on-disk files;
   orphaned generations (no metadata reference) are removable by cleanup.
-* **Cleanup:** keep at most the current generation plus the retained previous valid generation per
-  destination (Recommended); orphan sweep at load/save. No general media GC exists to reuse
-  (Verified §4.6) — this is new, scoped code.
+* **Cleanup:** keep at most the most recently published generation plus the retained previous
+  valid generation per destination (Recommended); orphan sweep at load/save. No general media GC
+  exists to reuse (Verified §4.6) — this is new, scoped code.
 
 ### 16.5 Track deletion
 
@@ -1315,7 +1382,13 @@ Trust rules:
 
 * The proxy system is advisory infrastructure: **no proxy failure may damage musical data**.
   Failures degrade status, never project content.
-* Failed render ⇒ previous valid proxy retained and clearly reported (PI-007, PI-024).
+* Failed render (renderer error, publication failure, tail-limit failure, or an obsolete job) ⇒
+  the previous published generation is retained — never deleted or overwritten — and the failure
+  is clearly reported (PI-007, PI-024). The retained generation remains Current and playable only
+  while its fingerprint still matches current musical content; otherwise it is a Stale retained
+  asset and is never selected for playback in P1. "Current" always means fingerprint-current under
+  the generation's recorded render configuration — never merely "latest file on disk" or
+  "previously published".
 * Stale is honest: the user always hears Primary, a current proxy (rate-adapted when needed),
   Secondary, or silence — never a stale proxy. A stale proxy is retained as an asset only; P1
   provides no manual "play stale proxy as current" override, and if Primary is missing with no
@@ -1370,8 +1443,9 @@ implementation details remain Proposed until the APIs exist.
 *Audit evidence:* §8.3/§8.4 (Audio/ has clip semantics; two atomic-publication variants; Windows
 replace hazard H10; no media GC exists). *Recommended decision:* separate project-relative
 `InstrumentProxies/` folder; immutable content-addressed generations
-`track_<TrackId>_<hash>.wav`; publish-new-name + retire; keep current + previous generation;
-orphan sweep (§16). Retention-on-failure is Locked (PI-007/PI-024). *Alternatives:* store in
+`track_<TrackId>_<hash>.wav`; publish-new-name + retire; keep the most recently published +
+retained previous generation; orphan sweep (§16). Retention-on-failure is Locked (PI-007/PI-024):
+the retained generation's Current-vs-Stale status is always a fingerprint verdict (§13.1). *Alternatives:* store in
 `Audio/` (rejected: save-validation entanglement); mutable single file per track (rejected:
 Windows replace hazard + PI-028). *Consequences:* small disk overhead (≤2 generations); new
 cleanup code. *Required validation:* T-13, T-14, T-18. *Blocking slice:* P1F. *Status:*
@@ -1591,8 +1665,9 @@ integration gates marked below.
   backward-compatible.
 * **Included:** v20 fields of §12.2 (defaulted absent), `pluginVersion` persistence, undo
   blob-stripping extension (§12.3), Secondary naming discipline (§12.4 — **no placeholder
-  fields**), and **TLD-1** (§10.1): a stable persisted timeline reference rate whose integers
-  cannot silently change meaning at save. No asset I/O, no rendering.
+  fields**), and **TLD-1** (§10.1): a stable persisted timeline reference rate that is
+  authoritative at load, is never re-stamped by device/engine-rate changes, and whose explicit
+  change rescales all affected sample-domain fields atomically. No asset I/O, no rendering.
 * **Excluded:** fingerprinting, rendering, playback, UI beyond nothing-visible defaults.
 * **Expected files/components:** `src/io/ProjectFile.h/.cpp`, `src/domain/Session.*` DTO plumbing,
   `src/instruments/InstrumentTrackController.cpp` (descriptor version capture at save).
@@ -1601,11 +1676,23 @@ integration gates marked below.
 * **Prerequisite decisions:** PID-001 storage (Recommended — confirmed at design review), PID-003
   naming vocabulary (paths stored, folder may not exist yet); TLD-1 approach reviewed (§10.1).
 * **Automated tests:** T-05, T-21 (v19 round-trip; v20 defaults; unknown-field tolerance per
-  existing migration conventions; timeline-reference-rate migration).
+  existing migration conventions; timeline-reference-rate migration and domain integrity).
 * **Plugin-dependent/manual:** none.
 * **Rollback:** revert version bump; v19 files never contained the fields.
-* **Completion gate:** load/save round-trip of v19 and v20 fixtures passes; schema review incl.
-  TLD-1.
+* **Completion gate:** load/save round-trip of v19 and v20 fixtures passes, and the TLD-1 gate
+  verifies at minimum (§10.1, T-21):
+  1. a migrated v19 file receives the stored `deviceSampleRateAtSave` as its initial timeline
+     reference rate;
+  2. saving a v20 project while the engine runs at another rate neither re-stamps the timeline
+     reference nor changes the stored sample-domain integers;
+  3. conversions from the persisted timeline domain to engine/render samples preserve wall-clock
+     positions;
+  4. the persisted timeline domain is actually consumed by the relevant runtime and proxy-snapshot
+     boundaries (not merely stored as unused metadata);
+  5. any remaining sample-domain consumers outside P1B (§10.1 lists today's device-rate
+     interpretation sites) are explicitly enumerated and assigned to a blocking slice before
+     P1J's cross-rate acceptance.
+  Schema review incl. TLD-1 concludes the slice.
 
 ### P1C — Centralized MIDI dependency snapshot and canonical fingerprint
 
@@ -1800,14 +1887,14 @@ stability regression runs only at the P1E/P1G/P1I/P1J integration gates (per
 | T-03 | Deterministic equal-time MIDI/CC ordering per §8.3: track-order last-wins; stored-order tie-break for equal-time notes (post-ORD-1); same-segment CC→Off→On vs pending Off→CC→On emission structure; reorder ⇒ fingerprint change | deterministic | P1C |
 | T-04 | VB3-II Upper/Lower/Pedal snapshot correctness: renderer's delivered MIDI stream ≡ live delivery at the capture sink for the fixture | deterministic (capture-only) + plugin-dependent audio | P1C, P1D |
 | T-05 | Fingerprint repeatability: same content ⇒ identical hash across runs/processes; v19/v20 load parity | deterministic | P1B, P1C |
-| T-06 | All required stale triggers: note/CC/channel edits, source add/remove/reroute, source mute/off, track reorder, clip bpm, destination output channel, plugin state change, plugin version change, sample-rate change, policy-version bumps | deterministic | P1C |
+| T-06 | All required stale triggers: note/CC/channel edits, source add/remove/reroute, source mute/off, track reorder, clip bpm, destination output channel, plugin state change, plugin version change, policy-version bumps. Plus the negative assertions: an engine/device sample-rate change alone triggers **no** staleness (it rebuilds only the derived playback representation — T-17/T-25; a native-rate quality refresh MAY be queued when Primary exists while the generation remains Current), and a timeline-reference-rate migration changes fingerprints only as part of its defined atomic rescale conversion (§10.1), never merely because the device rate changed | deterministic | P1C |
 | T-07 | Post-boundary changes cause **no** staleness: fader, pan, inserts, sends, bus routing, master, destination mute/off | deterministic | P1C |
 | T-08 | Post-boundary changes cause no re-render at playback level | deterministic | P1G |
 | T-09 | Live instance never used by rendering: instrumented proof that render jobs touch only their own instance (live host untouched during render) | deterministic harness + plugin-dependent | P1D |
 | T-10 | Audio thread never blocked by render activity (stability-invariant style measurement during renders) | deterministic + stability scenario | P1E |
 | T-11 | Edit-during-render ⇒ job obsolete at next boundary; new job queued (Auto) | deterministic | P1E |
 | T-12 | Obsolete job publication rejection: stale-fingerprint job cannot publish (PI-028) | deterministic | P1E, P1F |
-| T-13 | Retention of previous proxy on render/publication failure (PI-007/PI-024) | deterministic | P1F |
+| T-13 | Retention of the previous published generation on render/publication failure (PI-007/PI-024), covering **both** status cases: (1) failure while the previous generation still matches current musical content (e.g. a failed native-rate quality refresh, or the triggering edit was undone) ⇒ it remains Current and playable; (2) failure after a render-relevant edit ⇒ it is retained as Stale and never selected for playback in P1 | deterministic | P1F |
 | T-14 | Windows-safe publication: publish-new-name with an open handle on the old generation; retire without in-place replace | deterministic (Windows semantics) | P1F |
 | T-15 | Latency equivalence: live Primary vs proxy v1 playback timing identical for a latency-reporting plugin (no jump on source switch) | plugin-dependent | P1D, P1G |
 | T-16 | Tail completion (silence-detected end); reaching the max-tail cap with materially non-silent output ⇒ job Failed with tail-limit reason, **no publication**, previous generation retained, user-visible needs-attention status (§15.2) | plugin-dependent | P1D |
@@ -1815,7 +1902,7 @@ stability regression runs only at the P1E/P1G/P1I/P1J integration gates (per
 | T-18 | Missing/corrupt proxy recovery: project loads, status degrades, no crash (PI-025) | deterministic | P1F |
 | T-19 | Source-selection matrix of §17 (v1 rows; Secondary rows added in P2) | deterministic | P1G, P1I |
 | T-20 | Save and autosave: fresh state captured, eligible work queued, Save never waits (latency assertion) | deterministic | P1H |
-| T-21 | Backward-compatible loading: v19 projects load with proxy fields defaulted; v20 round-trip | deterministic | P1B, P1H |
+| T-21 | Backward-compatible loading and timeline-domain integrity: v19 projects load with proxy fields defaulted and the timeline reference rate initialized from stored `deviceSampleRateAtSave`; v20 round-trip; saving under a different engine rate neither re-stamps the timeline reference nor changes stored sample-domain integers; persisted-domain → engine/render conversions preserve wall-clock positions; the persisted domain is consumed by the relevant runtime/proxy-snapshot boundaries (not stored-but-unused); remaining unconverted sample-domain consumers are enumerated and assigned to a blocking slice before P1J cross-rate acceptance (§10.1) | deterministic | P1B, P1H |
 | T-22 | Offline mixdown renders through the selected source (Primary or proxy) with identical downstream processing | deterministic + plugin-dependent | P1G |
 | T-23 | Portable-project validation verdicts: current/stale/failed/mode-Off combinations | deterministic | P1H |
 | T-24 | Shutdown and track-deletion races: close/shutdown/delete during queued and running jobs; no leaks, no publications after removal | deterministic + stability scenario | P1E, P1H |
@@ -1834,7 +1921,9 @@ Proxy v1 (P1 complete) is accepted when all of the following hold:
    sources marks that destination's proxy stale; nothing else does (T-06/T-07 matrix).
 3. With Primary installed, Auto mode re-renders in the background without audio-thread impact,
    and an edit mid-render supersedes the job without a stale publication (T-10/T-11/T-12).
-4. A failed render leaves the previous proxy playable and reports the failure (T-13).
+4. A failed render retains the previous published generation and reports the failure. The retained
+   generation remains playable only when it is still Current; otherwise it remains a Stale
+   retained asset and is never selected for playback in P1 (T-13, both cases).
 5. Live Primary ↔ proxy switching produces no latency-policy timing jump (T-15).
 6. Tails are captured to deterministic silence; a render reaching the maximum-tail limit with
    materially non-silent output terminates Failed with a tail-limit reason, publishes nothing,
@@ -1895,13 +1984,28 @@ and PID-002/003/004/006/007/010 (→ Locked v1 behavior).
 | PI-030 | P1G, P1J | T-17, T-25, T-27 |
 | PI-031 | SPIKE-03, P1G | T-26 |
 
-### 25.3 Quality-gate cross-check (performed for this draft, re-performed for revision 2)
+### 25.3 Quality-gate cross-check (performed for this draft, re-performed for revisions 2 and 3)
 
 * All eleven audit decisions appear in the register (§21 cross-check line), plus OI-001
   (resolved → Locked) and OI-002 (Open, SPIKE-03-gated). ✔
+* No current-code section claims fully deterministic equal-time scheduling before ORD-1: §4.3
+  presents the verified merge structure together with the unresolved unstable-sort gap, and every
+  stored-order tie-break statement is marked as post-ORD-1 target semantics (§4.3, §8.3, §11.4,
+  T-03). ✔
 * No section still claims that a sample-rate mismatch makes a proxy stale or silent; validity is
   evaluated under the generation's recorded render configuration everywhere (§3, §12.3, §13,
-  §15.3, §17). ✔
+  §15.3, §17), and no engine/device-rate change appears as a proxy-staleness trigger — T-06
+  asserts the negative explicitly; §13.3's rate row is adaptation-only. ✔
+* No failure path calls a retained stale generation Current or playable: renderer failure,
+  publication failure, tail-limit failure, and obsolete jobs all retain the previous published
+  generation with its status as a pure fingerprint verdict, and "Current" is used exclusively for
+  fingerprint-currency under the generation's recorded render configuration — never for "latest
+  file on disk" or "previously published" (R9, §13.1, §13.3, §16.3, §20, criterion 4, T-13). ✔
+* TLD-1 distinguishes the persisted timeline coordinate domain from the current engine domain,
+  requires conversion at every consuming boundary (the proxy snapshot is only one of them; today's
+  device-rate interpretation sites are enumerated), requires atomic rescale on any explicit
+  reference-rate change, and documents the v19 legacy migration limitation (§10.1, P1B gate,
+  T-21). ✔
 * No section still accepts unbounded full proxy preload; playback I/O is budget-bounded and
   SPIKE-03-gated (§7.3, PI-031, OI-002). ✔
 * No section still allows a tail-truncated render to publish as Current; the tail-cap path is a
@@ -1913,7 +2017,9 @@ and PID-002/003/004/006/007/010 (→ Locked v1 behavior).
 * P1B adds no Secondary placeholder schema; PID-009 is reviewed-deferred (§12.4). ✔
 * The canonical serialization's collection ordering mirrors verified live scheduling (§8.3
   re-verification) — clips by (startSamples, stored order), notes in stored order, CC in
-  normalized order, sources in session order; no invented sort key remains (§11.4). ✔
+  normalized order, sources in session order; no invented sort key remains (§11.4). The
+  stored-order equal-key tie-breaks become delivery guarantees only once ORD-1 lands, which is
+  exactly why ORD-1 blocks P1C. ✔
 * The two source-verified gaps are recorded as blocking prerequisites with proposed smallest
   fixes, not concealed: ORD-1 (unstable bake sorts → P1C) and TLD-1 (re-stamped timeline
   reference rate → P1B) (§8.3, §10.1, HR-10/HR-11). ✔
