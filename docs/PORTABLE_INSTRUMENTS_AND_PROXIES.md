@@ -1,17 +1,16 @@
 # Portable Instruments and Proxy Rendering — Technical Steering Document
 
-**Status:** `Draft for design review`
-**Date:** 2026-09-03 (revision 3 — revision 2 incorporated the human design review of the same
-date; revision 3 applies the final consistency corrections from the follow-up review: §4.3
-determinism qualification, sample-rate-never-stale in T-06, precise previous-generation status
-after failure, acceptance criterion 4 / T-13 two-case split, strengthened TLD-1 contract, §25.3
-re-check)
-**Authority when canonical:** normative for all Portable Instruments / Proxy implementation slices.
+**Status:** `Canonical`
+**Date:** 2026-09-04 (revision 3 canonicalized through explicit human review; revision 2
+incorporated the 2026-09-03 design review, and revision 3 applied the approved final consistency
+corrections)
+**Authority:** normative for all Portable Instruments / Proxy implementation slices.
 
-> **This document is not yet canonical.** It becomes DAL's canonical steering document for
-> Portable Instruments and Proxy Rendering **only after explicit human review** of the open
-> decisions listed immediately below. Until then it is a design-review draft: implementation
-> prompts MUST NOT treat Recommended or Open items as settled.
+> **This document is DAL's canonical steering authority for Portable Instruments and Proxy
+> Rendering.** Implementation prompts MUST reference the applicable roadmap slice and invariant
+> IDs. Evidence-gated mechanisms remain intentionally unresolved behind their named spikes:
+> Canonical document status does not automatically make an Open or Recommended implementation
+> mechanism Locked.
 
 **Evidence base:** the forensic audit
 [`docs/audits/PORTABLE_INSTRUMENTS_ARCHITECTURE_AUDIT.md`](audits/PORTABLE_INSTRUMENTS_ARCHITECTURE_AUDIT.md)
@@ -26,8 +25,8 @@ re-check)
 |---|---|
 | **Verified** | Demonstrated by repository evidence (Audit citation or direct source read). |
 | **Locked** | Locked product decision — already decided and normative. |
-| **Recommended** | Technically preferred, awaiting human review before becoming Locked. |
-| **Open** | Requires a human product or architecture decision. |
+| **Recommended** | The canonical preferred direction, but not a Locked invariant; changing it requires documented evidence and review. |
+| **Open** | Intentionally unresolved behind a named validation gate or deferred design phase; dependent implementation MUST NOT pass that gate before review. |
 | **Proposed** | A type, API, component, folder, or seam that **does not exist yet**. |
 
 **Normative language:** MUST / MUST NOT mark locked requirements and correctness invariants.
@@ -36,12 +35,20 @@ No Proposed type or API is ever described as though it already exists.
 
 ---
 
-## Decisions requiring human review
+## Evidence-gated decisions and deliberately deferred design
 
-Human design review (2026-09-03) resolved the previous Open product questions. The remaining
-genuinely Open items are all **evidence-gated technical mechanisms** (or explicitly deferred P2
-design); no product-behavior decision remains open. Full context for each lives in the decision
-register (§21).
+Explicit human review approved this document and its Locked product behavior for canonicalization
+on 2026-09-04. The same review approved retaining these controlled implementation gates inside the
+Canonical document:
+
+* PID-001's state-capture mechanism remains evidence-gated behind SPIKE-01.
+* PID-005's numeric tail values remain evidence-gated behind SPIKE-02.
+* OI-002's bounded playback I/O and sample-rate-adaptation mechanism remains evidence-gated behind
+  SPIKE-03.
+* PID-009's Secondary persistence shape remains deliberately deferred to P2.
+
+These items do not leave the document itself in Draft status. No product-behavior decision remains
+open; full context for every controlled gate lives in the decision register (§21).
 
 | ID | Question | Status after review | Gate |
 |---|---|---|---|
@@ -70,8 +77,9 @@ Review outcomes incorporated throughout this revision (details in §21):
 
 ## 1. Document authority, status, and change protocol
 
-1. **Status ladder.** `Draft for design review` → (explicit human review of §Decisions-requiring-human-review) → `Canonical`. Only a human reviewer moves the status.
-2. **Precedence when canonical.** For Portable Instruments / Proxy work this document takes
+1. **Status transition.** `Draft for design review` → `Canonical` was completed by explicit human
+   review on 2026-09-04. Only a human reviewer may change the document's authority status.
+2. **Canonical precedence.** For Portable Instruments / Proxy work this document takes
    precedence over phase narratives and chat history; `docs/CURRENT_ARCHITECTURE.md` remains the
    authority for how the codebase is wired *today* (this document describes verified anchors plus a
    Proposed target).
@@ -1423,7 +1431,7 @@ evidence-gated** for the state-capture mechanism (reconfirmed by human review �
 listener-hint-plus-fresh-capture preference is a hypothesis, not a selected architecture; SPIKE-01
 delivers evidence and a proposed steering amendment for human review); field set and serialization
 **Recommended**; field-set completeness relative to the boundary follows from Locked PI-019.
-SPIKE-01 is the recommended next task after this document is approved.
+SPIKE-01 is the recommended next task now that this document is Canonical.
 
 **PID-002 (Audit D2) — Staleness signalling.**
 *Question:* Where fingerprints are compared (edit-time vs save-time vs render-enqueue-time) and the
@@ -1867,8 +1875,8 @@ integration gates marked below.
 **P0/P1A — specifically SPIKE-01 (authoritative state capture).** It is the earliest blocking gate
 (PID-001 Open item) on which fingerprint correctness (P1C) and everything downstream depend, it
 changes no production behavior, and its evidence lets the human review lock the largest remaining
-architectural unknown. SPIKE-01 remains the recommended next Cloud Agent task after this
-documentation PR is approved. (SPIKE-03 is the other evidence gate, but it blocks only P1G and can
+architectural unknown. SPIKE-01 remains the recommended next Cloud Agent task after
+canonicalization. (SPIKE-03 is the other evidence gate, but it blocks only P1G and can
 run later, in parallel with P1B–P1F.) Per the task boundary, neither spike's implementation prompt
 is written here and implementation has **not** started.
 
@@ -1944,7 +1952,7 @@ Proxy v1 (P1 complete) is accepted when all of the following hold:
     report; cancellation/failure leaves no partial package; the package plays cross-machine and
     cross-rate without Primary (PID-011; T-27).
 
-## 25. Decisions requiring human review (register view) and traceability
+## 25. Evidence-gated decisions, deferred design, and traceability
 
 ### 25.1 Open decisions (authoritative list)
 
@@ -1984,7 +1992,7 @@ and PID-002/003/004/006/007/010 (→ Locked v1 behavior).
 | PI-030 | P1G, P1J | T-17, T-25, T-27 |
 | PI-031 | SPIKE-03, P1G | T-26 |
 
-### 25.3 Quality-gate cross-check (performed for this draft, re-performed for revisions 2 and 3)
+### 25.3 Quality-gate cross-check (performed for the Canonical revision 3)
 
 * All eleven audit decisions appear in the register (§21 cross-check line), plus OI-001
   (resolved → Locked) and OI-002 (Open, SPIKE-03-gated). ✔
