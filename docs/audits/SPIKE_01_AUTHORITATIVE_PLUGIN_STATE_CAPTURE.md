@@ -15,20 +15,49 @@ or **Proposed** (a recommendation, not implemented).
 
 ## 1. Executive verdict
 
-> ## `INCOMPLETE — awaiting local VB3-II measurements`
+> ## `PASS (measured) — checkpoint fresh-capture + generation-counter mechanism confirmed`
 
 The diagnostic harness is implemented, compiled, and its pure logic is verified by 17 new
 deterministic selftest checks (**Measured**, §16 below: 194 checks total, 0 failures). All
 repository-level SPIKE-01 questions (call chains, editor-close behavior, notification
 infrastructure, Save/autosave agreement, dirty/undo semantics, threading constraints) are answered
-with **Verified** evidence in this report.
+with **Verified** evidence, and the runtime questions are now answered with **Measured** evidence
+from the local run of 2026-09-05 (three app sessions, 167 timed captures, 230 parameter
+notifications, two plugins — appendix §21):
 
-The runtime questions — capture cost (A), byte stability (B), notification coverage (C, E) —
-require a real VB3-II-class VST3 instrument, a GUI, and an operator. They have **not** been
-measured. The exact ~10–15-minute local procedure for Niclas is in §20.2.
+* **A (cost):** raw `getStateInformation` on VB3-II costs **≈0.47 ms median / 1.13 ms max**
+  (Debug build, ~10.4 KB blob) — negligible at checkpoint frequency. An accidental but valuable
+  second plugin, Groove Agent SE (~148 KB blob), costs ≈4.6 ms median / 6.5 ms max — still
+  affordable per checkpoint, clearly unjustifiable for continuous polling. **100 % of captures
+  ran on the message thread**; no audio/UI anomalies were reported.
+* **B (byte stability):** VB3-II is byte-stable at rest in every §9.2 case — repeated capture,
+  editor close/reopen, parameter-returned-to-original (exact baseline hash restored), after
+  transport activity, and **across save → full app restart → project reload** (hash
+  `875dc964caa6…` identical before save and after reload). It is **not** byte-stable while
+  playback actively drives it with MIDI/CC. **Groove Agent SE is not byte-stable even idle**
+  (10 consecutive untouched captures → 10 distinct hashes, monotonically growing size). Byte
+  equality is therefore usable only as a *positive* "unchanged" proof; inequality proves
+  nothing (§7).
+* **C (notifications):** VB3-II delivers `audioProcessorParameterChanged` for GUI drawbar moves
+  (dense ~3–7 ms streams with correct index/name/value) — **all on the message thread**. Zero
+  gesture callbacks and zero `audioProcessorChanged` callbacks were observed from either plugin.
+  Listeners are usable as cheap hints, nothing more — the canonical assumption is confirmed.
+* **E (non-parameter state):** a VB3-II preset change produced no `programChanged` /
+  `nonParameterStateChanged` callback; it *was* visible as a 146-event full-parameter burst and
+  as a changed blob on fresh capture. Groove Agent SE's idle state churn produced zero
+  notifications — non-parameter state changes can be completely silent. Conservative
+  generation-bump hints remain mandatory.
+* **F (agreement):** the F1 checkpoint measured **identical hashes** for the raw capture and the
+  production Save path (both 10 393 bytes; 0.56 vs 0.55 ms).
 
-**PID-001 must NOT be marked resolved on the basis of this report alone** (Open until the local
-measurement run is attached and reviewed).
+The recommended mechanism (§17) — authoritative fresh capture at checkpoints, listeners and
+editor transitions only as generation-counter hints, hash equality only as a positive
+short-circuit — is confirmed with **high confidence** for the measured plugins.
+
+**PID-001:** the §9.2 evidence gate is now satisfied for a first VB3-II-class instrument.
+Resolving PID-001 and applying the §19 steering amendment remain a **human review decision**;
+this branch does not modify the canonical document. Known residual gaps: E2 (MIDI-learn) was not
+performed, and generalization beyond the two measured plugins is unsupported (§18).
 
 ---
 
@@ -154,32 +183,82 @@ not answer F (Save agreement) at all.
 * Harness build environment (Measured): Windows 11, MSVC 2022 x64, Ninja, CMake preset
   `windows-ninja-debug`, JUCE via FetchContent; app + selftests built from this branch,
   exit code 0 (2026-09-05).
-* Measurement environment (Open — to be filled by the local run): Niclas's studio machine,
-  VB3-II VST3 (identity/version recorded automatically in the sanitized report header from
-  `PluginDescription`), plus the active audio device/sample rate as an operator note.
-* Note: capture-cost numbers from a **Debug** build overstate production cost (Inference); the
-  report should state the build config used. If Debug numbers are borderline, repeat with
-  `windows-ninja-release`.
+* Measurement environment (**Measured**, 2026-09-05 21:53–22:35 CEST): Niclas's Windows 11
+  studio machine (win32 10.0.26200), **Debug** build (`windows-ninja-debug`) from this branch,
+  app version 0.2.0, real project with 5 instrument runtimes. Plugins measured:
+  * **VB3-II VST3 2.3.1** (`C:\Program Files\Common Files\VST3\VB3-II.vst3`) — the intended
+    target; 157 captures.
+  * **Groove Agent SE VST3 5.2.20** (Steinberg) — measured accidentally in phase B3 of the
+    second app session (the track selector defaulted to a Groove Agent track after restart) and
+    retained as a valuable second data point; 10 captures.
+* Audio device/sample rate were not recorded (the operator-note step was skipped) — see §18.
+* Debug-build caveat stands: Release captures should be faster; even the Debug numbers are far
+  below any concerning threshold for checkpoint-frequency capture (Inference).
 
 ## 6. Capture-cost measurements (requirement A)
 
-**Open — awaiting local VB3-II run.** The harness records, per capture: duration (hi-res ms),
-blob size, SHA-256, message-thread flag, editor-open flag, transport flag; per phase it reports
-n/min/median/p95/max and size range. Required phases A1 (editor closed, stopped), A2 (editor
-open, stopped), A3 (editor open, playing), A4 (repeated unchanged), A5 (immediately after a
-plugin-GUI parameter change) are preset in the panel. UI/audio impact is judged by the operator
-during A3 and recorded as an operator note. No universal acceptable-duration threshold is
-asserted (task rule); consequences are assessed in §17 once numbers exist.
+**Measured (Debug build, 2026-09-05; per-phase tables in §21).** 167 timed captures, 167/167 on
+the message thread.
+
+| Plugin | Blob size | n | min | median | p95 | max |
+|---|---|---|---|---|---|---|
+| VB3-II 2.3.1 | 10 393–10 455 B | 157 | 0.43 ms | ≈0.47 ms | ≈0.8 ms | 1.13 ms |
+| Groove Agent SE 5.2.20 | 148 591–148 791 B | 10 | 4.41 ms | 4.62 ms | 6.47 ms | 6.47 ms |
+
+* Cost scales roughly with blob size (~14× bytes ⇒ ~10× time). Both are trivially affordable at
+  checkpoint frequency (Save, autosave, render enqueue, editor close). The Groove Agent figure
+  (≈5 ms of message-thread time per capture) confirms that **continuous polling would be
+  unjustifiable** for large-state plugins — supporting the no-polling design in §17.
+* Editor open vs closed: no measurable cost difference (medians 0.46–0.50 ms in both states).
+* Transport playing vs stopped: no measurable cost difference (30 captures while playing:
+  0.43–0.98 ms).
+* The production-Save-path capture (F1) cost the same as raw (0.55 vs 0.56 ms); Base64 encoding
+  is negligible at this blob size.
+* Operator-reported audio/UI impact: no anomalies reported for the measured run; the operator
+  verbally reported "no audio anomalies" during the earlier (data-lost) first attempt. A formal
+  A3 operator note was not recorded (§18).
+* No universal acceptable-duration threshold is asserted (task rule); §17 assesses consequences.
 
 ## 7. Byte-stability results (requirement B)
 
-**Open — awaiting local VB3-II run.** The harness computes SHA-256 per capture and reports
-distinct-hash counts per phase plus a cross-phase hash inventory. Phases B2 (editor
-reopened/closed, no intentional change), B3 (save+reload of unchanged state), B4 (parameter
-returned to original value), B5 (after transport activity) map §9.2's stability cases.
-Interpretation rules committed in advance: byte-identical ⇒ stable; byte-different is only
-"apparently audibly equivalent" if the operator attests no audible change — **byte comparison
-alone never proves audible equivalence** (task rule). Raw blobs are never persisted or printed.
+**Measured (VB3-II + bonus Groove Agent SE; hash inventory in §21).** The pre-committed
+interpretation rules apply: byte-identical ⇒ unchanged; byte-different is **never**, by itself,
+evidence of audible change. Raw blobs were never persisted or printed.
+
+**VB3-II is byte-stable at rest, in every §9.2 stability case:**
+
+* **A4 (repeated unchanged):** 10 + 10 captures ~10 s apart — one hash.
+* **B2 (editor closed → reopened, nothing touched):** 20 captures across the cycle — one hash.
+  Merely opening/closing the editor does not change serialized bytes (closes §9's runtime
+  question).
+* **B4 (parameter moved away, then returned to original):** 20 captures — restored the **exact
+  pre-change baseline hash** (`a58813…`). A round-tripped GUI gesture is byte-reversible.
+* **B5 (after transport activity, stopped):** 11 captures — one hash, identical to the pre-play
+  baseline; playback transients did not permanently perturb serialized state.
+* **B3 (save → full app restart → project reload):** 10 captures after reload — one hash,
+  `875dc964caa6…` (10 393 B), **byte-identical to the F1 hash captured at save time in the
+  previous app session.** The persist/restore round trip is byte-stable for VB3-II.
+
+**VB3-II is not byte-stable during active playback:** one 10-capture burst taken while the
+project was actively driving the plugin (transport playing; the project sends CC11 swell data
+and `Swell Pedal` is an exposed parameter) produced 4 distinct hashes with sizes 10 452–10 453 B
+against the 10 433 B resting baseline. A separate 30-capture playing burst without concurrent CC
+traffic was fully stable, and captures returned to the resting baseline hash after stop
+(Measured; the CC11 attribution is Inference). Consequence: **hash comparisons are only
+meaningful between captures taken at quiescent checkpoints**, never mid-performance.
+
+**Groove Agent SE is not byte-stable at all, even idle:** 10 consecutive captures (editor
+closed, transport stopped, zero interaction, ~10 ms apart) produced **10 distinct hashes** with
+monotonically growing size (148 591 → 148 791 B, +17…+37 B per capture) — the plugin embeds
+some counter/clock in its serialized state. This is the worst case §9.2 anticipated, observed in
+practice.
+
+**Conclusion (drives requirement G):** byte-hash equality **may** serve as a positive
+short-circuit ("equal bytes ⇒ unchanged ⇒ proxy still valid") and does work for VB3-II-class
+plugins at quiescent checkpoints; byte-hash inequality **must not** be interpreted as change of
+audible state and, for Groove-Agent-class plugins, occurs on every capture. The general
+mechanism must therefore be the §17 generation counter with conservative re-rendering, with hash
+equality only as an opportunistic optimization.
 
 ## 8. Parameter-notification coverage (requirement C)
 
@@ -189,11 +268,23 @@ attachments — for instruments *and* inserts (exhaustive search; insert "parame
 opaque-blob diff at editor open/close, not a listener). Today, DAL is structurally blind to live
 plugin-GUI parameter changes.
 
-**Open (runtime):** whether VB3-II's VST3 wrapper delivers `audioProcessorParameterChanged` /
-gesture callbacks / `audioProcessorChanged{programChanged, nonParameterStateChanged}` for GUI
-drawbar moves, preset changes, and editor-closed changes — and on which thread. The harness
-records kind, parameter index, name (resolved only when the callback arrives on the message
-thread), normalized value, thread, and timestamp for every event while attached.
+**Measured (VB3-II 2.3.1 VST3, `juce::AudioProcessorListener` attached):**
+
+* GUI drawbar drags deliver dense `audioProcessorParameterChanged` streams: two gestures on
+  `Drawbar Upper A 16'` (index 28) produced 84 events at ~3–7 ms spacing with correct index,
+  name, and normalized value.
+* **230 of 230 observed events arrived on the message thread.**
+* **Zero gesture callbacks** (`…GestureBegin/End`) were observed for any interaction.
+* **Zero `audioProcessorChanged` callbacks** (no `programChanged`, `nonParameterStateChanged`,
+  or `parameterInfoChanged`) were observed from either plugin — including at a preset change.
+* A VB3-II preset change instead surfaced as a **full-parameter burst**: 146 `paramChanged`
+  events (indices 0–146, index 56 absent) within ~300 ms.
+* Groove Agent SE with the listener attached and no GUI interaction: 0 events — its idle state
+  churn (§7) is invisible to listeners, confirming listeners cannot be authoritative.
+
+Conclusion: for VB3-II, listeners are excellent *hints* — low latency, message-thread delivery,
+no thread-safety complications observed — but provide no gesture bracketing and no non-parameter
+signal. Canonical §9.2's "hints, never authority" stance is now measured, not assumed.
 
 ## 9. Editor-open and editor-close findings (requirement D)
 
@@ -208,8 +299,10 @@ thread), normalized value, thread, and timestamp for every event while attached.
   an `AsyncCallbackGuard` staleness check, and the live instance is still loaded (`activeOwner_`
   untouched by editor close) — so `getStateInformation` remains available immediately before and
   after close (Verified from code structure; runtime confirmation is phase B2 in the local run).
-* Whether merely opening/closing the editor changes serialized bytes without a sound change is
-  **Open** (phase B2/A2-vs-A1 hash comparison).
+* Whether merely opening/closing the editor changes serialized bytes without a sound change:
+  **Measured — it does not** (VB3-II, phase B2: 20 captures across a close/reopen cycle, one
+  hash; B3 additionally matched an editor-open save-time hash from a capture with the editor
+  closed after restart).
 * Plugin destruction/unload (`unloadInstrument`, editor closed first, then atomic clear + drain +
   `releaseResources`) is a final safe capture opportunity on the message thread **before** the
   atomic clear (Verified structure; **Proposed** as a future hook — not implemented).
@@ -217,14 +310,21 @@ thread), normalized value, thread, and timestamp for every event while attached.
 
 ## 10. Non-parameter-state findings (requirement E)
 
-**Open — plugin-dependent.** The harness observes `audioProcessorChanged` with JUCE
-`ChangeDetails` flags (`latencyChanged`, `parameterInfoChanged`, `programChanged`,
-`nonParameterStateChanged`) and pairs E1 (preset/program change) and E2 (MIDI-learn/mode switch)
-phases with immediate hash captures, so each non-parameter action is classified as:
-notified + blob changed / not notified but blob changed (visible only on fresh capture) /
-not observable. Documented limit: the spike can only test what VB3-II exposes; MIDI-learn and
-routing switches beyond VB3-II's feature set stay Open for other plugins (explicitly recorded in
-§18).
+**Measured (E1); E2 not performed.**
+
+* **E1 (preset/program change in VB3-II's GUI):** no `audioProcessorChanged` callback of any
+  kind arrived. The change **was** observable two ways: a 146-event full-parameter notification
+  burst (§8), and a changed blob on the next fresh capture (new hash `875dc9…`, size
+  10 433 → 10 393 B). Preset changes are thus detectable via hints for this plugin — but only
+  because VB3-II republishes every parameter on preset load; a plugin that neither notifies nor
+  republishes would stay invisible until the next checkpoint, so the conservative
+  editor-open/close generation bump in §17 remains mandatory.
+* **E2 (MIDI-learn / mode switch):** not performed — the E2 capture is hash-identical to E1 and
+  no operator note describes an E2 action. E2 stays **Open** for VB3-II and all other plugins
+  (§18).
+* **Bonus negative evidence:** Groove Agent SE's idle state churn (§7) is itself non-parameter
+  state changing with **zero** notifications — direct proof that non-parameter state changes can
+  be completely silent.
 
 ## 11. Save/autosave/conceptual-enqueue agreement (requirement F)
 
@@ -235,8 +335,9 @@ routing switches beyond VB3-II's feature set stay Open for other plugins (explic
   measuring it (A3) validates existing behavior as much as the future enqueue.
 * The panel's **F1 snapshot checkpoint** performs a raw capture and a production-Save-path capture
   back to back and compares hashes — the conceptual render-enqueue equivalent required by the
-  task. Agreement result: **Open** (expected identical; Inference based on both paths calling the
-  same `getStateInformation` on the same instance on the same thread).
+  task. Agreement result: **Measured — MATCH** (2026-09-05 22:17:49: identical SHA-256
+  `875dc9…`, identical size 10 393 B, 0.56 ms raw vs 0.55 ms Save path, both message thread,
+  editor open, transport stopped).
 * No production enqueue implementation was created (task rule).
 
 ## 12. Threading and lifecycle findings
@@ -252,8 +353,8 @@ routing switches beyond VB3-II's feature set stay Open for other plugins (explic
 * Lifecycle safety: the panel resolves the host fresh through
   `InstrumentRuntimeCoordinator::getInstrumentHostForTrack` on every action and guards listener
   detach with the host's `asyncAliveGuard()` (repo Stability-Slice-4 pattern, Verified).
-* Capture thread per sample is recorded in the report; expected: 100 % message thread (Measured
-  once the local run exists).
+* Capture thread per sample is recorded in the report; **Measured: 167 of 167 captures and 230
+  of 230 listener events on the message thread — 100 %, as required by PI-020 rule 5.**
 
 ## 13. Dirty and undo findings (requirement H)
 
@@ -271,8 +372,9 @@ routing switches beyond VB3-II's feature set stay Open for other plugins (explic
   cannot create musical undo steps (Verified, consistent with PI-020/§18.3).
 * Diagnostic capture/hashing mutates nothing: `getStateInformation` is a read; the harness
   performs no `setStateInformation`, no session edits, no undo pushes, no dirty marking (Verified
-  by construction). Runtime cross-check: run undo (Ctrl+Z) after captures — nothing to undo from
-  capture alone (operator step in §20.2).
+  by construction). Runtime cross-check: the operator did not record the Ctrl+Z observation
+  (§18); no undo- or dirty-related anomaly was reported across 167 captures, and the structural
+  guarantee is unaffected (capture performs no undo pushes or dirty marking by construction).
 * A future state authority can therefore satisfy §9.2 rule 6 (capture never dirties/undoes;
   the *user's edit* should dirty per existing rules) — but making the user's plugin-GUI edit
   dirty at all requires the very change-detection mechanism this spike evaluates (Inference).
@@ -296,14 +398,14 @@ routing switches beyond VB3-II's feature set stay Open for other plugins (explic
 
 | # | §9.2 requirement | Repository evidence | Runtime evidence | Status |
 |---|---|---|---|---|
-| A | `getStateInformation` cost / message-thread impact | call chain + thread guards (Verified) | phases A1–A5 | **Open — local run** |
-| B | Byte stability of unchanged state | none possible statically | phases A4, B2–B5 | **Open — local run** |
-| C | Parameter-notification coverage | no listeners exist today (Verified) | listener instrumentation | **Open — local run** |
-| D | Editor open/close behavior | close captures nothing; safe hook exists; insert precedent (Verified) | B2 + operator steps | **Partially answered (Verified); runtime part Open** |
-| E | Non-parameter state | `ChangeDetails.nonParameterStateChanged` observable (Verified API) | phases E1–E2 | **Open — local run** |
-| F | Save/autosave/enqueue agreement | one shared fresh-capture path (Verified) | F1 checkpoint hash comparison | **Largely answered (Verified); confirmation Open** |
-| G | Fallback for non-byte-stable blobs | design evaluated §17 (Proposed) | depends on B results | **Proposed — gated on B** |
-| H | Dirty/undo semantics | GUI edits never dirty; undo strips blobs; capture mutates nothing (Verified) | undo cross-check step | **Answered (Verified)** |
+| A | `getStateInformation` cost / message-thread impact | call chain + thread guards (Verified) | 167 timed captures, 2 plugins, 100 % message thread (§6) | **Answered (Measured)** |
+| B | Byte stability of unchanged state | none possible statically | A4, B2–B5 + B3 restart round trip; Groove Agent counterexample (§7) | **Answered (Measured, 2 plugins)** |
+| C | Parameter-notification coverage | no listeners exist today (Verified) | 230 events: dense message-thread `paramChanged`; zero gesture/`audioProcessorChanged` (§8) | **Answered (Measured, VB3-II)** |
+| D | Editor open/close behavior | close captures nothing; safe hook exists; insert precedent (Verified) | B2: open/close changes no bytes (§9) | **Answered (Verified + Measured)** |
+| E | Non-parameter state | `ChangeDetails.nonParameterStateChanged` observable (Verified API) | E1 measured (silent callback-wise, visible via burst + blob); E2 not performed (§10) | **E1 answered (Measured); E2 Open** |
+| F | Save/autosave/enqueue agreement | one shared fresh-capture path (Verified) | F1 checkpoint: hashes MATCH (§11) | **Answered (Verified + Measured)** |
+| G | Fallback for non-byte-stable blobs | design evaluated §17 | Groove Agent SE proves the fallback is required in general; VB3-II shows equality short-circuit works (§7) | **Answered — mechanism Proposed with measured gating data** |
+| H | Dirty/undo semantics | GUI edits never dirty; undo strips blobs; capture mutates nothing (Verified) | no anomalies observed; formal Ctrl+Z note skipped (§13) | **Answered (Verified)** |
 
 ## 16. Checks run (Measured)
 
@@ -316,6 +418,9 @@ routing switches beyond VB3-II's feature set stay Open for other plugins (explic
 * Normal startup unchanged without the flag: the only product-path reference is one
   `commandLine.contains("--spike01-state-capture")` branch in `Main.cpp` (Verified by diff
   inspection); no timers, listeners, or captures exist unless the panel is opened and used.
+* Local measurement run executed (Measured, 2026-09-05): three app sessions with
+  `--spike01-state-capture`, operator-driven phase matrix, 167 captures + 230 notifications;
+  sanitized reports committed under `docs/audits/spike01-measurements/` and condensed in §21.
 * Not run (out of spike scope, per task): release certification, stability matrix, endurance
   tests.
 
@@ -329,35 +434,41 @@ routing switches beyond VB3-II's feature set stay Open for other plugins (explic
    sees all changes. At best listeners are hints.
 2. **Periodic background polling of `getStateInformation`.** Rejected: canonical PI-020 requires
    message-thread capture; polling burns message-thread time proportional to capture cost
-   (unknown until A), risks plugin-side effects, and the task forbids polling in the product
-   path. Could only be revisited if A shows sub-millisecond captures *and* hints prove unusable.
+   (Measured: ≈0.5 ms for VB3-II but ≈5 ms for Groove Agent SE — Debug), risks plugin-side
+   effects, and the task forbids polling in the product path. The Groove Agent numbers close the
+   revisit clause: polling is not viable as a general mechanism.
 3. **Editor-close capture only.** Insufficient alone: changes while the editor stays open (or via
    MIDI-learn with the editor closed) would never be seen until Save (Verified gap pattern).
 4. **Checkpoint-based fresh capture + cheap hints + generation counter** (the canonical
-   hypothesis). **Proposed** — pending confirmation by measurements; not selected merely because
-   it was the prior preference: §3–§13 evidence already establishes that fresh capture at
-   checkpoints is the only path that exists and works today, and options 1–3 are each
-   independently insufficient. What the measurements decide is whether *hints* (listeners,
-   editor-close) can shorten staleness-detection delay, and whether *hashing* can cheaply prove
-   "unchanged" (byte stability).
+   hypothesis). **Proposed and now measurement-confirmed** — not selected merely because it was
+   the prior preference: §3–§13 evidence establishes that fresh capture at checkpoints is the
+   only path that exists and works today, and options 1–3 are each independently insufficient.
+   The measurements answered the two open sub-questions: *hints* do shorten detection delay to
+   milliseconds where the plugin cooperates (VB3-II, §8), and *hashing* can cheaply prove
+   "unchanged" only as a positive equality check on byte-stable plugins at quiescent checkpoints
+   (§7) — never in general (Groove Agent SE).
 
-### Recommended mechanism (Proposed; confidence: medium pending A/B/C measurements)
+### Recommended mechanism (Proposed; confidence: **high** — A/B/C/E1/F measured on VB3-II, and
+the byte-instability worst case measured on Groove Agent SE)
 
 Answers to the required recommendation questions:
 
 * **What is authoritative?** The latest successful **fresh capture** (`getStateInformation` on
   the message thread), performed at defined checkpoints. Never a listener event, never a cached
   blob, never a hash by itself.
-* **What is only a cheap change hint?** Parameter/gesture/`audioProcessorChanged` callbacks (if
-  C shows they arrive) and instrument-editor open→close transitions. Hints only bump a
-  **monotonic change-generation counter** on the Primary; they never carry state.
+* **What is only a cheap change hint?** Parameter callbacks (Measured: they arrive densely and
+  on the message thread for VB3-II GUI edits and preset changes; gesture and
+  `audioProcessorChanged` callbacks never arrived and must not be relied on) and
+  instrument-editor open→close transitions. Hints only bump a **monotonic change-generation
+  counter** on the Primary; they never carry state.
 * **When must fresh capture occur?** At explicit Save and autosave (already true today —
   Verified); at render enqueue (future, per PI-020 rule 1); and at proxy-staleness evaluation
   when `capturedGeneration < currentGeneration`.
 * **While the editor is open:** no continuous capture. Hints accumulate; Auto-mode staleness
-  evaluation applies the §18.1 debounce. If C shows zero notifications from VB3-II, the editor-
-  open period itself must conservatively count as "possibly changed" (generation bumped at
-  editor open — Proposed conservative default).
+  evaluation applies the §18.1 debounce. Measured: VB3-II *does* notify GUI edits, so hints work
+  there; but because notification coverage is plugin-specific and non-parameter changes can be
+  silent (§10), the editor-open period should still conservatively bump the generation at editor
+  open (Proposed conservative default, now supported by the Groove Agent silence evidence).
 * **When the editor closes:** bump the generation (cheap hint; insert-host precedent exists) and
   optionally schedule one fresh capture on the message thread. Not implemented in this spike.
 * **Changes without parameter callbacks:** detected conservatively — any editor-open/close cycle
@@ -368,6 +479,10 @@ Answers to the required recommendation questions:
 * **If unchanged blobs are not byte-stable:** hashing cannot prove "unchanged"; equality
   optimizations are disabled and staleness relies purely on the generation counter + mandatory
   fresh capture at Save/enqueue. Blobs are never normalized or reinterpreted (task rule).
+  **Measured: this fallback is required in general** — Groove Agent SE produces a new hash on
+  every idle capture (§7). For byte-stable plugins like VB3-II, hash equality at quiescent
+  checkpoints is a valid positive short-circuit ("equal ⇒ unchanged"); hash inequality is never
+  a change verdict, only "cannot prove unchanged".
 * **Save and autosave:** unchanged behavior — both already capture fresh (Verified). The shared
   future contract is "one capture function, called at every checkpoint", which they already
   satisfy.
@@ -375,23 +490,43 @@ Answers to the required recommendation questions:
   dirty the project once a hint mechanism exists (fixing the Verified gap in §13); it must not
   create musical undo steps (blob-stripping stays).
 * **Maximum bounded detection delay:** without hints — until the next checkpoint (Save/enqueue);
-  with hints — the §18.1 debounce window. A hard number is deliberately not asserted before C
-  measurements (Open).
+  with hints — the §18.1 debounce window (Measured: VB3-II hint latency is milliseconds; the
+  binding delay is therefore the chosen debounce policy, not plugin behavior). A hard product
+  number remains a steering decision, not a spike result.
 * **Thread ownership:** capture, hashing, hint bookkeeping, generation counter: message thread.
   Audio thread: never involved. Render workers: receive an immutable copied blob only.
-* **Plugin-specific evidence:** everything in A/B/C/E is VB3-II-specific until repeated with a
-  second instrument; the mechanism above is deliberately safe even under the worst measured
-  outcome (no callbacks, unstable bytes).
+* **Plugin-specific evidence:** A/B/C/E are measured for VB3-II 2.3.1, plus B (negative) and C
+  (silent) data points for Groove Agent SE 5.2.20. Both ends of the spectrum are now observed —
+  byte-stable-with-notifications and byte-unstable-without-notifications — and the mechanism is
+  safe under both. Broader generalization stays unsupported (§18).
 
 ## 18. Known limitations and unsupported claims
 
-* No real-plugin numbers exist yet; §6, §7, §8, §10 are Open (this is why the verdict is
-  INCOMPLETE).
+* **E2 (MIDI-learn / mode switch) was not performed** — hash-identical to E1, no operator note.
+  Open for all plugins.
+* **Operator notes were not recorded**: no formal A3 audio-impact note (only a verbal "no audio
+  anomalies" from the first, data-lost attempt), no Ctrl+Z observation note, no audio
+  device/sample-rate note. No anomaly of any kind was reported, but these attestations are
+  informal.
+* **Phase labels in session 1 were partially misapplied** (the A1 group contains rows with the
+  editor open and with transport playing). No data was lost: every sample records its *actual*
+  editor/transport/thread flags, and the analysis in §6–§7 classifies by those flags, not by the
+  phase label. Unattributed cross-burst hash transitions (e.g. the A2 group's distinct hash)
+  are excluded from conclusions; only within-burst stability and explicitly paired comparisons
+  (B3-vs-F1, B4-vs-baseline) are used.
+* **The third sanitized report mixes two plugins under phase B3** (the app session continued
+  from the Groove Agent mistake; the report format does not print per-row plugin identity). The
+  session log (`spike01-capture-log.txt`) records `plugin="…"` per sample and was used to
+  disentangle them; §21 presents the split tables. Noted as a harness improvement for any future
+  spike (include plugin identity per sample row).
 * Audible equivalence is attested by the operator, never inferred from bytes (task rule).
-* All runtime findings will be VB3-II-specific; generalization to other VST3 instruments is
-  explicitly unsupported until a second plugin is measured.
-* Debug-build timings overstate production cost; a Release re-run is recommended if numbers are
-  borderline.
+* Runtime findings cover exactly two plugins (VB3-II 2.3.1, Groove Agent SE 5.2.20);
+  generalization to other VST3 instruments is explicitly unsupported.
+* Debug-build timings overstate production cost; a Release re-run is only warranted if numbers
+  ever look borderline (they are ~3 orders of magnitude below checkpoint budgets).
+* The CC11/swell attribution for VB3-II's playback-time byte instability is Inference (the
+  project sends CC11 and `Swell Pedal` is an exposed parameter); the instability itself is
+  Measured.
 * The harness cannot observe changes the plugin neither notifies nor serializes; such state is
   untestable from the host by definition (documented limit).
 * `spike01LiveInstanceForDiagnostics` intentionally trusts the operator not to unload/replace the
@@ -401,22 +536,40 @@ Answers to the required recommendation questions:
 
 > **Amendment to §9.2 (after the SPIKE-01 requirement list), proposed by SPIKE-01:**
 >
-> *SPIKE-01 repository findings (2026-09-05, branch `cursor/spike-01-plugin-state-capture`):*
+> *SPIKE-01 findings (2026-09-05, branch `cursor/spike-01-plugin-state-capture`; repository
+> evidence + local measurements: 167 message-thread captures, 230 notifications, VB3-II 2.3.1
+> and Groove Agent SE 5.2.20, Debug build; evidence report
+> `docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`):*
 > 1. *DAL contains no plugin parameter/processor listeners anywhere (instruments or inserts);
 >    live plugin-GUI edits are structurally invisible today and do not dirty the project. The
 >    §13 dirty gap means tweak-only sessions may never autosave.*
-> 2. *Save and autosave already share one fresh-capture path
->    (`buildExperimentalInstrumentProjectBlock` → `getCurrentInstrumentStateBase64`); §9.2 rule 4's
->    "Save MUST capture fresh state" is Verified for autosave as well.*
+> 2. *Save and autosave share one fresh-capture path
+>    (`buildExperimentalInstrumentProjectBlock` → `getCurrentInstrumentStateBase64`); §9.2 rule 4
+>    is Verified for autosave and now Measured at runtime (F1 raw-vs-Save hash MATCH).*
 > 3. *The instrument editor-close handler (`editorWindowClosing`, message thread, staleness-
 >    guarded) is a safe hint hook; the insert host already implements an editor-close state diff
->    as precedent.*
-> 4. *The authoritative mechanism remains as hypothesized — fresh capture at checkpoints +
->    generation counter + hints — now supported by repository evidence for D/F/H; final selection
->    stays gated on the VB3-II measurements for A/B/C/E (PID-001 remains Open until then).*
+>    as precedent. Measured: editor open/close alone changes no serialized bytes on VB3-II.*
+> 4. *Capture cost is checkpoint-affordable and message-thread-clean (VB3-II ≈0.5 ms / 10 KB;
+>    Groove Agent SE ≈5 ms / 148 KB; 100 % message thread, Debug build). Continuous polling
+>    stays forbidden.*
+> 5. *VB3-II state blobs are byte-stable at rest in all §9.2 cases including
+>    save → restart → reload, and revert to baseline bytes when a parameter returns to its
+>    original value; they are not stable while playback drives the plugin. Groove Agent SE blobs
+>    are never byte-stable (idle counter/clock churn, zero notifications). Therefore: hash
+>    equality at quiescent checkpoints is a valid positive "unchanged" proof; hash inequality
+>    proves nothing and MUST take the conservative stale path (re-render over silent staleness).*
+> 6. *VST3 parameter notifications (VB3-II) arrive densely and on the message thread for GUI
+>    edits, and preset changes surface as a full-parameter burst — but no gesture and no
+>    `audioProcessorChanged` callbacks were ever observed. Listeners are confirmed as hints
+>    only; non-parameter changes can be completely silent.*
+> 7. *The authoritative mechanism is measurement-confirmed: fresh capture at checkpoints +
+>    monotonic generation counter bumped by hints (notifications, editor open/close) + hash
+>    equality only as an opportunistic short-circuit. Capture failure ⇒ keep previous blob,
+>    mark proxy stale/unknown.*
 >
-> **Status change:** none. PID-001 stays Open / evidence-gated until the local measurement
-> appendix is attached to this report and reviewed.
+> **Status change (subject to human review):** PID-001 may be marked **Resolved (VB3-II-class
+> evidence)** citing this report, with explicit residual Opens: E2 (MIDI-learn) and
+> generalization beyond the two measured plugins.
 
 ## 20. Completion status and remaining local actions
 
@@ -424,14 +577,15 @@ Answers to the required recommendation questions:
 
 * Harness: complete, compiled, selftested (Measured).
 * Repository questions (D, F, H + all call chains): answered (Verified).
-* Runtime questions (A, B, C, E, F-confirmation, G-gating): **awaiting Niclas's local VB3-II
-  run** (~10–15 min once built).
-* PID-001: **not resolved**.
+* Runtime questions (A, B, C, E1, F-confirmation, G-gating): **answered (Measured,
+  2026-09-05)** — see §6–§11 and appendix §21. E2 remains Open (§18).
+* PID-001: resolution **recommended** (VB3-II-class evidence) — human review decides (§19).
 
-### 20.2 Exact local procedure (Windows PowerShell, from the spike worktree)
+### 20.2 Local procedure, as executed (Windows PowerShell, from the spike worktree)
 
-The spike worktree `C:\Users\nicla\development\MiniDAWLab-spike01` already contains a built
-Debug app. If starting fresh instead: `git fetch origin` and check out
+This is the procedure that was executed on 2026-09-05 (kept for reproducibility; deviations that
+occurred are listed in §18). The spike worktree `C:\Users\nicla\development\MiniDAWLab-spike01`
+contains the built Debug app. If starting fresh instead: `git fetch origin` and check out
 `cursor/spike-01-plugin-state-capture`, then step 1 builds everything needed.
 
 ```powershell
@@ -480,6 +634,73 @@ dumps. (The format cannot contain them by construction, but verify visually.)
 
 ### 20.3 After the run
 
-Attach the sanitized report (or its tables) to this document as a measurement appendix on this
-branch; then §1's verdict, §6–§8, §10, §15 and §17's confidence are updated and the PR leaves
-draft after human review.
+Done: the measurement appendix is §21, the raw sanitized reports are committed under
+`docs/audits/spike01-measurements/`, and §1/§6–§13/§15/§17 have been updated with the Measured
+findings. The PR leaves draft after human review of this report and the §19 amendment.
+
+---
+
+## 21. Measurement appendix (2026-09-05, Debug build)
+
+Raw sanitized reports (committed, generated by the panel, hash/size/timing only):
+
+* `docs/audits/spike01-measurements/2026-09-05-session1-vb3ii-main-run.md` — 147 captures,
+  230 notifications (VB3-II).
+* `docs/audits/spike01-measurements/2026-09-05-session2-groove-agent-b3.md` — 10 captures
+  (Groove Agent SE, wrong-track accident; the report header's "Plugin: Groove Agent SE" is
+  correct for these rows).
+* `docs/audits/spike01-measurements/2026-09-05-session3-vb3ii-b3-after-reload.md` — cumulative
+  20-row B3 table mixing both plugins (see §18); the 10 rows of 10 393 B / hash `875dc9…` are
+  the VB3-II B3 measurement.
+
+Full per-action trace: `%APPDATA%\MiniDAWLab\spike01-capture-log.txt` on the operator machine
+(records `plugin="…"` per sample; not committed — it contains local absolute paths, no state
+bytes).
+
+### 21.1 Per-phase results, disentangled by plugin (from per-sample flags)
+
+| Phase | Plugin | Actual condition (recorded flags) | n | median ms | max ms | bytes | distinct hashes |
+|---|---|---|---|---|---|---|---|
+| A1 | VB3-II | editor open+closed, stopped (30) / **playing burst (10)** | 41* | 0.48 | 0.97 | 10 433–10 453 | 5* |
+| A2 | VB3-II | editor open, stopped | 10 | 0.47 | 0.77 | 10 455 | 1 |
+| A3 | VB3-II | editor open, playing | 30 | 0.46 | 0.98 | 10 433 | 1 |
+| A4 | VB3-II | repeated unchanged, ~10 s apart | 10 | 0.47 | 0.99 | 10 433 | 1 |
+| A5 | VB3-II | immediately after GUI drawbar change | 1 | 0.56 | 0.56 | 10 453 | 1 (new: `33a537…`) |
+| B2 | VB3-II | across editor close → reopen | 20 | 0.50 | 0.97 | 10 433 | 1 (= baseline `a58813…`) |
+| B4 | VB3-II | drawbar returned to original | 20 | 0.46 | 1.01 | 10 433 | 1 (= baseline `a58813…`) |
+| B5 | VB3-II | after transport activity, stopped | 11 | 0.50 | 0.84 | 10 433 | 1 (= baseline `a58813…`) |
+| E1 | VB3-II | after preset change | 1 | 0.54 | 0.54 | 10 393 | 1 (new: `875dc9…`) |
+| E2 | VB3-II | (no action performed — §18) | 1 | 0.56 | 0.56 | 10 393 | 1 (= E1) |
+| F1 | VB3-II | raw + production Save path, back to back | 1+1 | 0.55–0.56 | 0.56 | 10 393 | **1 — MATCH** |
+| B3 | Groove Agent SE | idle, editor closed, stopped (accident) | 10 | 4.62 | 6.47 | 148 591–148 791 | **10 — every capture differs** |
+| B3 | VB3-II | after save → app restart → project reload | 10 | 0.46 | 1.13 | 10 393 | **1 (= F1 save-time hash `875dc9…`)** |
+
+\* The A1 label was applied across mixed conditions (§18): 31 stopped-state captures were all
+hash `a58813…` (stable, editor open and closed alike); the 10-capture burst with
+transport=playing during active MIDI/CC produced 4 distinct transient hashes (10 452–10 453 B).
+Classification uses the per-sample recorded flags, not the label.
+
+### 21.2 Hash timeline (VB3-II, 12-hex prefixes)
+
+* `a58813…` (10 433 B) — resting baseline; identical across A1-stopped, A3, A4, B2, B4, B5.
+* `eb1c91…`/`f36254…`/`f329ab…`/`10d39d…` (10 452–10 453 B) — transient hashes during the
+  playing/MIDI burst only; state returned to `a58813…` after stop.
+* `5aa0db…` (10 455 B) — A2 group (editor newly opened; transition unattributed, excluded from
+  conclusions per §18).
+* `33a537…` (10 453 B) — after the A5 drawbar change; reverted to `a58813…` when the drawbar
+  was returned (B4).
+* `875dc9…` (10 393 B) — after the E1 preset change; confirmed identical at F1 (raw and Save
+  path) **and** after full app restart + project reload (B3).
+
+### 21.3 Notification summary (all on message thread)
+
+| Event group | Kind | Count | Detail |
+|---|---|---|---|
+| Drawbar drag out (22:15:38) | `paramChanged` | ~57 | index 28 `Drawbar Upper A 16'`, 0.01 → 0.76, ~3–7 ms spacing |
+| Drawbar drag back (22:16:06) | `paramChanged` | ~27 | 0.75 → 0.00 |
+| Preset change (22:17:12–13) | `paramChanged` | 146 | full burst, indices 0–146 (56 absent), ~300 ms |
+| Gesture begin/end | — | **0** | never observed |
+| `audioProcessorChanged` (any flag) | — | **0** | never observed, incl. at preset change |
+| Groove Agent SE (listener attached, idle) | — | 0 | state churn (§7) invisible to listener |
+
+Threading totals: captures 167/167 message thread; notifications 230/230 message thread.

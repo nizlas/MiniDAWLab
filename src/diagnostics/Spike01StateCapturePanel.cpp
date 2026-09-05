@@ -23,6 +23,21 @@ namespace
         auto* mm = juce::MessageManager::getInstanceWithoutCreating();
         return mm != nullptr && mm->isThisTheMessageThread();
     }
+
+    /// Incremental sanitized session log so an app restart mid-procedure can never lose
+    /// measurements (the panel's in-memory samples die with the process). Same privacy rules
+    /// as the report: sizes/hashes/timings/metadata only — never raw state bytes.
+    /// Appends are message-thread-only (callers ensure this); the lock is belt-and-braces.
+    void appendSessionLog(const juce::String& line)
+    {
+        static juce::CriticalSection logLock;
+        const juce::ScopedLock sl(logLock);
+        const juce::File f = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                 .getChildFile("MiniDAWLab")
+                                 .getChildFile("spike01-capture-log.txt");
+        f.getParentDirectory().createDirectory();
+        f.appendText(nowIso() + "  " + line + "\n", false, false, "\n");
+    }
 } // namespace
 
 //==============================================================================
@@ -93,6 +108,8 @@ public:
             {
                 notes_.push_back((nowIso() + "  " + t).toStdString());
                 noteEditor_.clear();
+                reportWrittenSinceLastData_ = false;
+                appendSessionLog("note: " + t);
                 setStatus("Note recorded (" + juce::String((int)notes_.size()) + " total).");
             }
         };
@@ -108,6 +125,11 @@ public:
         initLabel(listenerLabel_, "Listener: detached.");
         listenerLabel_.setJustificationType(juce::Justification::topLeft);
 
+        appendSessionLog("=== SPIKE-01 session start; appVersion="
+                         + (juce::JUCEApplication::getInstance() != nullptr
+                                ? juce::JUCEApplication::getInstance()->getApplicationVersion()
+                                : juce::String("unknown"))
+                         + " ===");
         refreshTrackList();
         setSize(640, 470);
     }
@@ -115,6 +137,14 @@ public:
     ~Content() override
     {
         detachListenerIfPossible();
+        // Loss-proofing: if measurements exist that were never (or not last) written to a
+        // report, write one automatically before the window/app goes away.
+        if (!reportWrittenSinceLastData_ && (!samples_.empty() || hasAnyEvents()))
+        {
+            appendSessionLog("session ending with unwritten data -> auto-writing report");
+            writeReport();
+        }
+        appendSessionLog("=== SPIKE-01 session end ===");
     }
 
     void resized() override
@@ -254,6 +284,15 @@ private:
             s.blobBytes = (std::uint64_t)mb.getSize();
             s.sha256Hex = spike01::Sha256::hashHex(mb.getData(), mb.getSize());
             samples_.push_back(s);
+            reportWrittenSinceLastData_ = false;
+            appendSessionLog("sample: phase=" + phase + " path=raw plugin=\""
+                             + host->getInstrumentNameForUi() + "\" ms="
+                             + juce::String(s.durationMs, 3) + " bytes="
+                             + juce::String((juce::int64)s.blobBytes) + " sha256="
+                             + juce::String(s.sha256Hex)
+                             + (s.editorOpen ? " editor=open" : " editor=closed")
+                             + (s.transportPlaying ? " transport=playing" : " transport=stopped")
+                             + (s.onMessageThread ? " thread=message" : " thread=OTHER"));
             last = describeSample(s);
         }
         setStatus("Captured x" + juce::String(repeats) + " [" + phase + "] raw. Last: " + last
@@ -290,6 +329,15 @@ private:
         s.blobBytes = (std::uint64_t)decoded.getDataSize();
         s.sha256Hex = spike01::Sha256::hashHex(decoded.getData(), decoded.getDataSize());
         samples_.push_back(s);
+        reportWrittenSinceLastData_ = false;
+        appendSessionLog("sample: phase=" + phase + " path=save-b64 plugin=\""
+                         + host->getInstrumentNameForUi() + "\" ms="
+                         + juce::String(s.durationMs, 3) + " bytes="
+                         + juce::String((juce::int64)s.blobBytes) + " sha256="
+                         + juce::String(s.sha256Hex)
+                         + (s.editorOpen ? " editor=open" : " editor=closed")
+                         + (s.transportPlaying ? " transport=playing" : " transport=stopped")
+                         + (s.onMessageThread ? " thread=message" : " thread=OTHER"));
 
         setStatus("Captured [" + phase + "] via production Save path. " + describeSample(s)
                   + "\nTotal samples: " + juce::String((int)samples_.size()));
@@ -445,19 +493,29 @@ private:
                 e.parameterName = params[parameterIndex]->getName(64).toStdString();
             }
         }
+        const juce::String logLine = "event: kind=" + juce::String(e.kind) + " idx="
+                                     + juce::String(e.parameterIndex) + " name=\""
+                                     + juce::String(e.parameterName) + "\" value="
+                                     + juce::String(e.newValue, 4)
+                                     + (e.onMessageThread ? " thread=message" : " thread=other")
+                                     + (e.detail.empty() ? juce::String()
+                                                         : " detail=" + juce::String(e.detail));
         {
             const juce::ScopedLock sl(eventsLock_);
             events_.push_back(std::move(e));
         }
-        // UI refresh must happen on the message thread.
+        reportWrittenSinceLastData_ = false;
+        // UI refresh and disk logging happen on the message thread only.
         if (onMessageThreadNow())
         {
+            appendSessionLog(logLine);
             updateListenerLabel();
         }
         else
         {
             juce::Component::SafePointer<Content> safe(this);
-            juce::MessageManager::callAsync([safe] {
+            juce::MessageManager::callAsync([safe, logLine] {
+                appendSessionLog(logLine);
                 if (safe != nullptr)
                 {
                     safe->updateListenerLabel();
@@ -533,6 +591,7 @@ private:
                               + juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S") + ".md");
         if (out.replaceWithText(juce::String(md)))
         {
+            reportWrittenSinceLastData_ = true;
             setStatus("Sanitized report written:\n" + out.getFullPathName()
                       + "\nContains sizes/hashes/timings only — no raw state bytes.");
         }
@@ -545,6 +604,13 @@ private:
     void setStatus(const juce::String& s)
     {
         statusLabel_.setText(s, juce::dontSendNotification);
+        appendSessionLog("status: " + s.replace("\n", " | "));
+    }
+
+    [[nodiscard]] bool hasAnyEvents()
+    {
+        const juce::ScopedLock sl(eventsLock_);
+        return !events_.empty();
     }
 
     //==========================================================================
@@ -559,6 +625,11 @@ private:
     juce::AudioPluginInstance* attachedInstance_ = nullptr;
     TrackId attachedTrackId_ = kInvalidTrackId;
     mini_daw::AsyncCallbackGuard attachedHostGuard_;
+
+    /// False whenever samples/events/notes exist that are newer than the last written report;
+    /// the destructor then auto-writes one (loss-proofing). Atomic: cleared from recordEvent,
+    /// which may run on a non-message thread.
+    std::atomic<bool> reportWrittenSinceLastData_{ true };
 
     juce::Label headerLabel_, statusLabel_, listenerLabel_;
     juce::ComboBox trackBox_, phaseBox_;
