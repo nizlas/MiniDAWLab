@@ -1,9 +1,10 @@
 # Portable Instruments and Proxy Rendering — Technical Steering Document
 
 **Status:** `Canonical`
-**Date:** 2026-09-04 (revision 3 canonicalized through explicit human review; revision 2
-incorporated the 2026-09-03 design review, and revision 3 applied the approved final consistency
-corrections)
+**Date:** 2026-09-05 (revision 4 applied the SPIKE-01 amendment approved by explicit human
+review 2026-09-05 — PID-001 state-capture mechanism resolved, §9.2 SPIKE-01 findings; revision 3
+canonicalized through explicit human review 2026-09-04; revision 2 incorporated the 2026-09-03
+design review)
 **Authority:** normative for all Portable Instruments / Proxy implementation slices.
 
 > **This document is DAL's canonical steering authority for Portable Instruments and Proxy
@@ -41,7 +42,9 @@ Explicit human review approved this document and its Locked product behavior for
 on 2026-09-04. The same review approved retaining these controlled implementation gates inside the
 Canonical document:
 
-* PID-001's state-capture mechanism remains evidence-gated behind SPIKE-01.
+* PID-001's state-capture mechanism was evidence-gated behind SPIKE-01; **resolved by human
+  review 2026-09-05** on SPIKE-01's measured evidence (§9.2 amendment; residual Opens: E2
+  MIDI-learn case, plugins beyond the two measured).
 * PID-005's numeric tail values remain evidence-gated behind SPIKE-02.
 * OI-002's bounded playback I/O and sample-rate-adaptation mechanism remains evidence-gated behind
   SPIKE-03.
@@ -52,7 +55,7 @@ open; full context for every controlled gate lives in the decision register (§2
 
 | ID | Question | Status after review | Gate |
 |---|---|---|---|
-| **PID-001** (part) | Authoritative plugin-state capture mechanism: how does DAL observe "the user tweaked VB3-II drawbars" so the proxy goes stale and renders from *current* state? (Audit U2, H2) | **Open / evidence-gated.** The preference for listener/editor-close hints plus fresh capture at enqueue remains a **hypothesis**, not a selected architecture. | **SPIKE-01** (§9.2, §22 P0/P1A) — the recommended next task. Blocks P1C. |
+| **PID-001** (part) | Authoritative plugin-state capture mechanism: how does DAL observe "the user tweaked VB3-II drawbars" so the proxy goes stale and renders from *current* state? (Audit U2, H2) | **Resolved (VB3-II-class evidence) — human review 2026-09-05.** Selected mechanism: fresh capture at checkpoints + generation counter bumped by hints + hash equality only as positive "unchanged" proof (§9.2 SPIKE-01 findings; evidence: `docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`). Residual Opens: E2 (MIDI-learn), generalization beyond the two measured plugins. | SPIKE-01 **completed** (PASS, measured). P1C unblocked. |
 | **PID-005** (part) | Tail-policy numeric values: silence threshold, continuous-silence window, maximum tail duration. | **Open / evidence-gated.** Structure is Locked (§15.2); −60 dBFS / 1 s / 30 s are experimental starting points only, not canonical defaults. | **SPIKE-02** measurements with VB3-II-class tails. Blocks P1D numeric confirmation. |
 | **OI-002** | Bounded proxy playback I/O and sample-rate adaptation: the audio-thread-safe playback-source mechanism (bounded memory, read-ahead vs budgeted preload vs cached conversion, resampler placement). | **Open / evidence-gated.** The *requirements* are Locked (§7.3, §15.3, PI-030/PI-031); only the technical mechanism is open. Unbounded full preload is rejected. | **SPIKE-03** (§22) — blocks P1G. |
 | **PID-009** (part) | Secondary persistence/registry shape (second descriptor+state home per instrument track). | **Reviewed and deliberately deferred to P2.** Non-blocking for P1; technically unresolved until P2 design. P1B adds no placeholder schema (§12.4). | P2 design, using then-current architecture evidence. |
@@ -677,11 +680,11 @@ The contract (PI-020) requires, whatever the mechanism:
 6. Undo/dirty: state capture for proxy purposes MUST NOT by itself create undo entries or dirty
    the project (§18.3); the *user's* parameter edit dirties per existing rules.
 
-**Open (PID-001 part) + blocking gate (reconfirmed by human review):** the detection mechanism
-(polling vs editor-close capture vs parameter listeners vs combination) is NOT selected here — the
-repository provides no evidence about listener reliability or `getStateInformation` cost for
-VB3-II-class plugins. The current preference for listener/editor-close *hints* plus fresh capture
-at enqueue remains a **hypothesis**, not a selected architecture.
+**Resolved (PID-001 part) — human review 2026-09-05, on SPIKE-01's measured evidence:** the
+selected detection mechanism is **fresh capture at checkpoints (authoritative) + a monotonic
+change-generation counter bumped by hints (parameter notifications, editor open/close) + hash
+equality only as a positive "unchanged" short-circuit at quiescent checkpoints**. Polling is
+rejected. See the SPIKE-01 findings block below and the full evidence report.
 
 **SPIKE-01 (named validation spike, blocking P0/P1A gate)** must establish:
 
@@ -699,6 +702,43 @@ at enqueue remains a **hypothesis**, not a selected architecture.
 SPIKE-01 delivers an **evidence report and a proposed steering amendment** for human review; it
 MUST NOT implement product behavior. No fingerprint slice (P1C) may complete before SPIKE-01's
 outcome is reviewed.
+
+**SPIKE-01 findings (2026-09-05, executed; amendment approved by human review 2026-09-05).**
+Repository evidence + local measurements: 167 message-thread captures, 230 notifications,
+VB3-II 2.3.1 and Groove Agent SE 5.2.20, Debug build; evidence report
+`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md` (verdict PASS):
+
+1. DAL contains no plugin parameter/processor listeners anywhere (instruments or inserts);
+   live plugin-GUI edits are structurally invisible today and do not dirty the project. This
+   dirty gap means tweak-only sessions may never autosave.
+2. Save and autosave share one fresh-capture path
+   (`buildExperimentalInstrumentProjectBlock` → `getCurrentInstrumentStateBase64`); rule 4 above
+   is Verified for autosave and Measured at runtime (raw-vs-Save-path hash MATCH).
+3. The instrument editor-close handler (`editorWindowClosing`, message thread,
+   staleness-guarded) is a safe hint hook; the insert host already implements an editor-close
+   state diff as precedent. Measured: editor open/close alone changes no serialized bytes on
+   VB3-II.
+4. Capture cost is checkpoint-affordable and message-thread-clean (VB3-II ≈0.5 ms / 10 KB;
+   Groove Agent SE ≈5 ms / 148 KB; 100 % message thread, Debug build). Continuous polling stays
+   forbidden.
+5. VB3-II state blobs are byte-stable at rest in all §9.2 cases including
+   save → restart → reload, and revert to baseline bytes when a parameter returns to its
+   original value; they are not stable while playback drives the plugin. Groove Agent SE blobs
+   are never byte-stable (idle counter/clock churn, zero notifications). Therefore: hash
+   equality at quiescent checkpoints is a valid positive "unchanged" proof; hash inequality
+   proves nothing and MUST take the conservative stale path (re-render over silent staleness).
+6. VST3 parameter notifications (VB3-II) arrive densely and on the message thread for GUI
+   edits, and preset changes surface as a full-parameter burst — but no gesture and no
+   `audioProcessorChanged` callbacks were ever observed. Listeners are confirmed as hints only;
+   non-parameter changes can be completely silent.
+7. The authoritative mechanism is measurement-confirmed: fresh capture at checkpoints +
+   monotonic generation counter bumped by hints (notifications, editor open/close) + hash
+   equality only as an opportunistic short-circuit. Capture failure ⇒ keep previous blob, mark
+   proxy stale/unknown.
+
+**Status change (approved):** PID-001's state-capture mechanism part is **Resolved (VB3-II-class
+evidence)**, with explicit residual Opens: E2 (MIDI-learn) and generalization beyond the two
+measured plugins. P1C's SPIKE-01 gate is satisfied.
 
 ### 9.3 Plugin identity and version (Verified gap HR-2; Recommended resolution)
 
@@ -923,7 +963,7 @@ The fingerprint is a hash over a canonical byte serialization of the snapshot:
 | Audit # | Question | Disposition in this document |
 |---|---|---|
 | U1 | Plugin version not persisted | Recommended: persist at v20, fingerprint as F1v (§9.3, PID-001) |
-| U2 | State-capture cadence/mechanism | **Open** — SPIKE-01, blocking gate (§9.2, PID-001) |
+| U2 | State-capture cadence/mechanism | **Resolved** — SPIKE-01 completed; mechanism selected by human review 2026-09-05 (§9.2 SPIKE-01 findings, PID-001) |
 | U3 | Destination mute/off during render | Locked (reviewed): render independent of mute/off (§8.4, PID-006) |
 | U4 | Clip bpm vs project bpm | Recommended: fingerprint per-clip bpm (source of truth for baking); project-bpm sync edits are content changes (F3) |
 | U5 | Proxy render sample rate | Locked (reviewed): render rate is generation identity; validity evaluated under the generation's recorded configuration; cross-rate playback required (§15.3, PI-030). Adaptation mechanism **Open** (OI-002/SPIKE-03) |
@@ -1426,12 +1466,13 @@ staleness (§12.3); persist plugin version at v20 (U1). *Alternatives:* sidecar 
 (rejected: second source of truth); live-version-only check (rejected: portable projects can't
 verify); binary hashing of plugin files (deferred). *Consequences:* schema bump to v20; fingerprint
 schema versioning forever. *Required validation:* SPIKE-01 (state blob stability/cost); T-05, T-06.
-*Blocking slice:* P1C (fields/serialization), P0/P1A (capture mechanism). *Status:* **Open /
-evidence-gated** for the state-capture mechanism (reconfirmed by human review — the
-listener-hint-plus-fresh-capture preference is a hypothesis, not a selected architecture; SPIKE-01
-delivers evidence and a proposed steering amendment for human review); field set and serialization
-**Recommended**; field-set completeness relative to the boundary follows from Locked PI-019.
-SPIKE-01 is the recommended next task now that this document is Canonical.
+*Blocking slice:* P1C (fields/serialization), P0/P1A (capture mechanism). *Status:* state-capture
+mechanism **Resolved (VB3-II-class evidence)** by human review 2026-09-05 on SPIKE-01's measured
+evidence (§9.2 SPIKE-01 findings; `docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`):
+fresh capture at checkpoints + generation counter bumped by hints + hash equality only as a
+positive "unchanged" proof; residual Opens: E2 (MIDI-learn), plugins beyond the two measured.
+Field set and serialization remain **Recommended**; field-set completeness relative to the
+boundary follows from Locked PI-019.
 
 **PID-002 (Audit D2) — Staleness signalling.**
 *Question:* Where fingerprints are compared (edit-time vs save-time vs render-enqueue-time) and the
@@ -1649,6 +1690,8 @@ integration gates marked below.
 * **Rollback:** delete scaffolding; zero product risk.
 * **Completion gate:** human review of SPIKE-01 outcome selects the state-capture mechanism
   (PID-001 Open item resolved or explicitly re-scoped). **P1C MUST NOT complete before this gate.**
+  **Gate status: SPIKE-01 satisfied 2026-09-05** (PASS; mechanism selected, §9.2 SPIKE-01
+  findings). SPIKE-02 remains open and still gates P1D.
 
 ### SPIKE-03 — Proxy playback I/O, memory budget, seeking, and resampling (blocks P1G)
 
@@ -1957,13 +2000,15 @@ Proxy v1 (P1 complete) is accepted when all of the following hold:
 ### 25.1 Open decisions (authoritative list)
 
 Exactly the items in the top-of-document table, all evidence-gated or deliberately deferred —
-no product-behavior decision remains open: **PID-001** (state-capture mechanism — blocking,
-SPIKE-01-gated; the next recommended task), **PID-005** (tail numeric values — SPIKE-02-gated),
+no product-behavior decision remains open: **PID-005** (tail numeric values — SPIKE-02-gated),
 **OI-002** (bounded playback I/O and rate-adaptation mechanism — SPIKE-03-gated, blocks P1G),
 **PID-009** (Secondary persistence shape — reviewed, deliberately deferred to P2, non-blocking
-for P1). Resolved by the 2026-09-03 human review: OI-001 (→ Locked cross-rate playback
-requirement), PID-008 (→ Locked first-P2 audition split), PID-011 (→ Locked P1 packaging, P1J),
-and PID-002/003/004/006/007/010 (→ Locked v1 behavior).
+for P1). Residual PID-001 Opens (non-blocking, documented in §9.2 SPIKE-01 findings): E2
+(MIDI-learn) and plugins beyond the two measured. Resolved by the 2026-09-03 human review: OI-001
+(→ Locked cross-rate playback requirement), PID-008 (→ Locked first-P2 audition split), PID-011
+(→ Locked P1 packaging, P1J), and PID-002/003/004/006/007/010 (→ Locked v1 behavior). Resolved by
+the 2026-09-05 human review: **PID-001** state-capture mechanism (→ SPIKE-01 PASS; fresh capture
+at checkpoints + generation counter + hash-equality-as-positive-proof; §9.2).
 
 ### 25.2 Traceability: invariants → slices → tests
 
