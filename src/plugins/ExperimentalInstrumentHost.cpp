@@ -2084,6 +2084,23 @@ juce::String ExperimentalInstrumentHost::getCurrentInstrumentStateBase64() const
     return b64;
 }
 
+juce::AudioPluginInstance* ExperimentalInstrumentHost::spike01LiveInstanceForDiagnostics() const noexcept
+{
+    // SPIKE-01 (P0/P1A validation spike) only — same thread guard as getCurrentInstrumentStateBase64.
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        jassertfalse; // diagnostic misuse: the probe must run on the message thread
+        return nullptr;
+    }
+    auto o = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    if (o == nullptr || o->inst == nullptr || !o->layoutOk)
+    {
+        return nullptr;
+    }
+    return o->inst.get();
+}
+
 juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juce::PluginDescription& descIn,
                                                                          const juce::File& originalPath,
                                                                          const char* sourceTag,

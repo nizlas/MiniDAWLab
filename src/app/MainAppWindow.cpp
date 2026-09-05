@@ -39,6 +39,7 @@
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
 #include "diagnostics/StabilityScenarioRunner.h"
+#include "diagnostics/Spike01StateCapturePanel.h"
 #include "diagnostics/TransportShortcutDiagLog.h"
 #include "diagnostics/UiHangWatchdogDiag.h"
 
@@ -1362,6 +1363,59 @@ public:
         }
     }
 
+    // SPIKE-01 (P0/P1A validation spike; removable): opens the hidden diagnostic panel. Reached
+    // only from the `--spike01-state-capture` command line (Main.cpp); no product path calls it.
+    void invokeStartSpike01StateCaptureProbeFromStartup() override
+    {
+        if (spike01StateCapturePanel_ != nullptr)
+        {
+            spike01StateCapturePanel_->setVisible(true);
+            spike01StateCapturePanel_->toFront(true);
+            return;
+        }
+        Spike01PanelCallbacks cb;
+        cb.appVersion = juce::JUCEApplication::getInstance() != nullptr
+                            ? juce::JUCEApplication::getInstance()->getApplicationVersion()
+                            : juce::String("unknown");
+        cb.listInstrumentRuntimes = [this]() -> std::vector<Spike01RuntimeChoice> {
+            std::vector<Spike01RuntimeChoice> out;
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return out;
+            }
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return out;
+            }
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                if (tr.getKind() != TrackKind::Instrument)
+                {
+                    continue;
+                }
+                auto* host = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tr.getId());
+                Spike01RuntimeChoice c;
+                c.trackId = tr.getId();
+                c.label = tr.getName() + " — "
+                          + (host != nullptr && host->hasInstrument() ? host->getInstrumentNameForUi()
+                                                                      : juce::String("(no instrument)"));
+                out.push_back(std::move(c));
+            }
+            return out;
+        };
+        cb.resolveHostForTrack = [this](const TrackId tid) -> ExperimentalInstrumentHost* {
+            return instrumentRuntimeCoordinator_ != nullptr
+                       ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                       : nullptr;
+        };
+        cb.isTransportPlaying = [this] {
+            return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+        };
+        spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb));
+    }
+
     // Stability C2: build hooks over the real coordinators/views and start the scenario runner.
     // Every hook goes through the same entry point the UI uses (delete = header context-menu path,
     // undo/redo = window shortcut path, save = Ctrl+S path, mixdown = the real blocking exporter).
@@ -2468,6 +2522,10 @@ private:
     /// order destruction). See `~TrackLanesView`.
     std::unique_ptr<InstrumentTimelineRowCoordinator> instrumentTimelineRowCoordinator_;
     std::unique_ptr<ProjectIoCoordinator> projectIoCoordinator_;
+    /// SPIKE-01 (P0/P1A validation spike; removable): hidden `--spike01-state-capture` panel.
+    /// Declared after `instrumentRuntimeCoordinator_` so it is destroyed first (its detach
+    /// logic resolves hosts through the coordinator).
+    std::unique_ptr<Spike01StateCapturePanel> spike01StateCapturePanel_;
 
     EditTool currentEditTool_ = EditTool::Pointer;
 
