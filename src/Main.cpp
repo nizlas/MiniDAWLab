@@ -272,6 +272,19 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         });
     }
 
+    // SPIKE-01 (P0/P1A validation spike; removable): hidden diagnostic panel for the
+    // authoritative plugin-state capture measurements. Normal startup is unchanged when the
+    // flag is absent — this is the only product-path reference to the spike scaffolding.
+    if (commandLine.contains("--spike01-state-capture"))
+    {
+        juce::MessageManager::callAsync([this] {
+            if (mainWindow != nullptr)
+            {
+                mainWindow->startSpike01StateCaptureProbe();
+            }
+        });
+    }
+
     writeLastOperationBreadcrumb("app startup complete");
 }
 

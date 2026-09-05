@@ -87,6 +87,8 @@ target_sources(MiniDAWLab PRIVATE
     src/diagnostics/StabilityDiagnosticLog.cpp
     src/diagnostics/CrashDumpHandler.cpp
     src/diagnostics/StabilityScenarioRunner.cpp
+    # SPIKE-01 (P0/P1A validation spike; removable): hidden --spike01-state-capture panel.
+    src/diagnostics/Spike01StateCapturePanel.cpp
     src/diagnostics/StabilityInvariants.cpp
     src/diagnostics/DrumNameDiagnosticFileLog.cpp
     src/domain/SessionSnapshot.cpp

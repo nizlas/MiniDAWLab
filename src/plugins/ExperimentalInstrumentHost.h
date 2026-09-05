@@ -244,6 +244,22 @@ public:
         return asyncLifetime_.guard();
     }
 
+    // -----------------------------------------------------------------------
+    // SPIKE-01 diagnostics (P0/P1A validation spike; removable with the spike)
+    // -----------------------------------------------------------------------
+    /// [Message thread] SPIKE-01 state-capture probe ONLY (see
+    /// docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md): the live plugin instance,
+    /// or nullptr when no instrument is loaded / layout failed / called off the message thread.
+    /// The caller must use the pointer synchronously inside the current message-thread callback
+    /// and must never hand it to another thread. Not for product code.
+    [[nodiscard]] juce::AudioPluginInstance* spike01LiveInstanceForDiagnostics() const noexcept;
+
+    /// [Message thread] SPIKE-01 ONLY: whether the native plugin editor window is currently open.
+    [[nodiscard]] bool spike01IsNativeEditorOpenForDiagnostics() const noexcept
+    {
+        return editorWindow_ != nullptr;
+    }
+
 private:
     mini_daw::AsyncLifetimeOwnerToken asyncLifetime_;
 

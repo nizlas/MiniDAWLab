@@ -113,6 +113,14 @@ void MainWindow::startStabilityScenario(const StabilityScenarioRequest& request)
     }
 }
 
+void MainWindow::startSpike01StateCaptureProbe()
+{
+    if (shortcutTargetFromContent_ != nullptr)
+    {
+        shortcutTargetFromContent_->invokeStartSpike01StateCaptureProbeFromStartup();
+    }
+}
+
 void MainWindow::activeWindowStatusChanged()
 {
     juce::DocumentWindow::activeWindowStatusChanged();

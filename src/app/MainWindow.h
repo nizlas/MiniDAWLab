@@ -47,6 +47,10 @@ public:
     /// [Message thread] Stability C2: start an in-process `--stability-*` scenario.
     void startStabilityScenario(const StabilityScenarioRequest& request);
 
+    /// [Message thread] SPIKE-01 (P0/P1A validation spike; removable): open the hidden
+    /// `--spike01-state-capture` diagnostic panel.
+    void startSpike01StateCaptureProbe();
+
 private:
     [[nodiscard]] bool routeShortcut(const juce::KeyPress& key);
 

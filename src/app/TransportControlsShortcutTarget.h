@@ -47,4 +47,9 @@ public:
 
     /// Stability C2: start an in-process `--stability-*` scenario (see StabilityScenarioRunner.h).
     virtual void invokeStartStabilityScenarioFromStartup(const StabilityScenarioRequest& request) = 0;
+
+    /// SPIKE-01 (P0/P1A validation spike; removable): open the hidden `--spike01-state-capture`
+    /// diagnostic panel (see src/diagnostics/Spike01StateCapturePanel.h). Never invoked without
+    /// the command-line flag.
+    virtual void invokeStartSpike01StateCaptureProbeFromStartup() = 0;
 };

@@ -24,6 +24,11 @@
 #include "io/ProjectFile.h"
 #include "ui/experimental/ExperimentalMidiCcAutomation.h"
 
+// SPIKE-01 (P0/P1A validation spike) pure diagnostic helpers — see
+// docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md. Removable with the spike.
+#include "diagnostics/Spike01ReportFormat.h"
+#include "diagnostics/Spike01Sha256.h"
+
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <cstdio>
@@ -1386,6 +1391,122 @@ namespace
                    >= kRows * kRowH,
                "cc lane: collapsing after a drum fit only grows the note grid");
     }
+    // --- SPIKE-01 (P0/P1A): capture-diagnostic helpers must be provably correct and
+    // provably sanitized before any real-plugin measurement is trusted. Removable with the spike.
+    void testSpike01CaptureDiagnostics()
+    {
+        // 1) SHA-256 against published FIPS 180-4 test vectors (single- and multi-block).
+        expect(spike01::Sha256::hashHex("", 0)
+                       == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+               "spike01: sha256(\"\") matches the FIPS vector");
+        expect(spike01::Sha256::hashHex("abc", 3)
+                       == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+               "spike01: sha256(\"abc\") matches the FIPS vector");
+        {
+            const std::string longMsg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+            expect(spike01::Sha256::hashHex(longMsg.data(), longMsg.size())
+                           == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+                   "spike01: sha256 multi-block FIPS vector matches");
+        }
+        {
+            // Incremental update() across block boundaries must equal one-shot hashing.
+            std::string bulk(200, 'x');
+            spike01::Sha256 h;
+            h.update(bulk.data(), 70);
+            h.update(bulk.data() + 70, 130);
+            expect(h.finishHex() == spike01::Sha256::hashHex(bulk.data(), bulk.size()),
+                   "spike01: incremental sha256 equals one-shot sha256");
+        }
+
+        // 2) Duration statistics (min / median / p95 nearest-rank / max).
+        {
+            const auto s = spike01::computeDurationStats({ 5.0, 1.0, 3.0 });
+            expect(s.count == 3 && s.minMs == 1.0 && s.medianMs == 3.0 && s.maxMs == 5.0,
+                   "spike01: stats odd-count min/median/max");
+            expect(s.p95Ms == 5.0, "spike01: stats n=3 p95 is the max (nearest rank ceil(2.85)=3)");
+        }
+        {
+            const auto s = spike01::computeDurationStats({ 4.0, 2.0, 8.0, 6.0 });
+            expect(s.count == 4 && s.medianMs == 5.0,
+                   "spike01: stats even-count median averages the middle pair");
+        }
+        {
+            std::vector<double> twenty;
+            for (int i = 1; i <= 20; ++i)
+                twenty.push_back((double)i);
+            const auto s = spike01::computeDurationStats(twenty);
+            expect(s.p95Ms == 19.0, "spike01: stats n=20 p95 nearest-rank picks the 19th value");
+            expect(s.minMs == 1.0 && s.maxMs == 20.0 && s.medianMs == 10.5,
+                   "spike01: stats n=20 min/median/max");
+        }
+        expect(spike01::computeDurationStats({}).count == 0, "spike01: stats empty input is safe");
+
+        // 3) Sanitization: the report is built from hash+size only and must never contain
+        //    anything derived from raw blob content except its SHA-256 hex.
+        {
+            const std::string secretBlob = "SECRET-LICENSE-XYZ-0042-PRIVATE-PATH-C:/Users/nn";
+            const std::string secretHash =
+                spike01::Sha256::hashHex(secretBlob.data(), secretBlob.size());
+
+            spike01::CaptureSample a;
+            a.phaseId = "A1";
+            a.capturePath = "raw-getStateInformation";
+            a.durationMs = 1.25;
+            a.blobBytes = (std::uint64_t)secretBlob.size();
+            a.sha256Hex = secretHash;
+            a.onMessageThread = true;
+            a.timestampIso = "2026-09-05T10:00:00";
+            spike01::CaptureSample b = a;
+            b.phaseId = "A4";
+            b.durationMs = 2.5;
+
+            spike01::ParamEvent ev;
+            ev.kind = "paramChanged";
+            ev.parameterIndex = 7;
+            ev.parameterName = "Drawbar 16'";
+            ev.newValue = 0.5f;
+            ev.onMessageThread = true;
+            ev.timestampIso = "2026-09-05T10:00:01";
+
+            spike01::ReportHeader hdr;
+            hdr.appVersion = "0.9.0";
+            hdr.pluginName = "VB3-II";
+            hdr.pluginFormat = "VST3";
+            hdr.generatedAtIso = "2026-09-05T10:00:02";
+
+            const std::string md =
+                spike01::buildReportMarkdown(hdr, { a, b }, { ev }, { "note-1" });
+
+            expect(md.find("SECRET-LICENSE") == std::string::npos,
+                   "spike01: report never contains raw blob content");
+            expect(md.find(secretHash) != std::string::npos,
+                   "spike01: report contains the full sha256 hex");
+            expect(md.find("1.25") != std::string::npos && md.find("2.50") != std::string::npos,
+                   "spike01: report contains capture timings");
+            expect(md.find("| A1 / raw-getStateInformation |") != std::string::npos,
+                   "spike01: report groups stats per phase/path");
+            expect(md.find("Drawbar 16'") != std::string::npos,
+                   "spike01: report lists parameter notifications");
+            expect(md.find("byte-stable") != std::string::npos,
+                   "spike01: report states byte-stability per phase");
+        }
+
+        // 4) Required phases: the panel's phase list covers the SPIKE-01 measurement matrix.
+        {
+            const auto& phases = spike01::requiredPhases();
+            const char* needed[] = { "A1", "A2", "A3", "A4", "A5", "B2",
+                                     "B3", "B4", "B5", "E1", "E2", "F1" };
+            bool all = true;
+            for (const char* id : needed)
+            {
+                bool found = false;
+                for (const auto& p : phases)
+                    found = found || (std::string(p.id) == id);
+                all = all && found;
+            }
+            expect(all, "spike01: required phase list covers A1..A5, B2..B5, E1, E2, F1");
+        }
+    }
 } // namespace
 
 int main()
@@ -1405,6 +1526,7 @@ int main()
     testAuditionDispatchIntegration();
     testToolbarLayoutAndVisibility();
     testCcLaneViewState();
+    testSpike01CaptureDiagnostics();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
