@@ -32,7 +32,12 @@ delivery proven, dense sampling shows the serialized blob **does vary transientl
 playback** (9/36 snapshots differed from the at-rest baseline) and, in this session, returned to
 the exact authored baseline by the first post-stop capture (no settling window observable at the
 ~100 ms capture granularity). **Playback capture is therefore unsafe for identity** — confirming
-the conservative direction on a proven-delivery basis, not the retracted "unchanged" claim.
+the conservative direction on a proven-delivery basis, not the retracted "unchanged" claim. For
+the *render-state* role: background rendering may run concurrently with playback (isolated
+instance), but a snapshot beginning a project-start render SHOULD be captured at a
+host-observable-quiescence boundary — capture during active MIDI/CC delivery is not yet proven
+to provide clean initial conditions, and no clone/restore/render equivalence test was performed
+for a playback-time blob (P1D validation obligation, §22.1/§28.7).
 M2P (§28.3B) is retained only as a parameter round-trip result and is **not** a substitute for
 MIDI/CC testing. PID-001: capture layer Resolved; identity layer remains **Open pending human
 review of §23-E/§26**, with the §28.7 corrections applied. M3/E2 (MIDI-learn) remains Open. The
@@ -779,9 +784,15 @@ artifact can safely serve all three:
 
 1. **Authoritative render state** — the exact bytes captured on the message thread at render
    enqueue and restored via `setStateInformation` into the isolated render instance. Volatility
-   is **harmless here**: whatever bytes the plugin serializes at enqueue are, by definition, the
-   current state; the render instance restores them and renders. This role is fully validated by
-   the measurements (cost §6, Save-path agreement §11) for both plugin classes.
+   does not threaten *identity* here (bytes are never compared in this role), and the capture
+   *mechanics* are fully validated (cost §6, Save-path agreement §11) for both plugin classes.
+   **What is NOT yet validated (corrected, SPIKE-01B-M):** no clone/restore/reset/render
+   equivalence test has been performed for a blob captured during playback; M2V (§28.3) shows
+   such a blob may contain transient MIDI/CC-dependent performance state. Whether the isolated
+   render instance's lifecycle (restore → prepare → reset/flush as supported → deterministic
+   MIDI/CC chase → render from project start) removes those transient initial conditions is a
+   **P1D validation obligation**, not a measured fact. See §22.1 for the corrected capture-
+   boundary rule.
 
 2. **Semantic validity identity** — the token compared to answer "is this proxy/completed job
    still current?" This is where the contradiction lives:
@@ -812,17 +823,35 @@ differ between adjacent captures (VB3-II: 4 distinct hashes in one 10-capture bu
 10 452–10 453 B vs the 10 433 B resting baseline), then settle back to the resting hash after
 stop. Two distinct consequences:
 
-* **For role 1 (render state):** capture during playback is *allowed* — it is the production
-  situation today (explicit Save during playback, §11) and the blob renders correctly. The
-  captured transients (e.g. a mid-swell CC value) act as initial conditions that the rendered
-  clip's own MIDI/CC events overwrite from the render's start; any residual initial-condition
-  sensitivity is a plugin property the host cannot remove (Inference, documented limit).
+* **For role 1 (render state; corrected by SPIKE-01B-M):** capture during playback is
+  *mechanically possible* — `getStateInformation` returns a blob in any transport state, and
+  explicit Save already does this in production (§11). But what the measurements prove stops
+  there: M2V (§28.3) shows a playback-time blob may contain transient MIDI/CC-dependent
+  performance state, and **no clone/restore/reset/render equivalence test was performed for a
+  playback-time blob** — it is *not* proven that such a blob provides clean initial conditions
+  for a project-start proxy render. The Save precedent does not transfer by itself: Save's blob
+  is restored into the *same* instance at load, which is a different contract from seeding an
+  isolated render instance. Corrected rules:
+  * **Background rendering MAY run concurrently with normal DAL playback** — it uses an
+    isolated plugin instance; the transport never needs to stop (or stay stopped) for the
+    render itself.
+  * **Snapshot capture and background rendering are separate operations.** A snapshot used to
+    begin a complete render from project start SHOULD normally be captured at a
+    host-observable-quiescence boundary (§28.5). Capturing while the destination is actively
+    receiving MIDI/CC is not yet proven to provide clean initial conditions.
+  * **P1D must validate the isolated-instance lifecycle:** restore state → prepare →
+    reset/flush as supported → deterministic MIDI/CC chase → render from project start. If that
+    lifecycle cannot remove performance-transient initial state for a plugin, snapshot capture
+    must be deferred until an eligible boundary, or the plugin receives an explicit
+    compatibility limitation.
 * **For role 2 (validity identity):** hashes of playback-time captures are **meaningless as
   identity evidence** even for byte-stable plugins (Measured). Any byte-equality evidence MUST
-  be taken at a **quiescent capture boundary**, defined as: message thread; transport stopped;
-  no parameter/processor notification received for the §18.1 debounce window (a policy value for
-  steering, not asserted here). Captures outside that boundary contribute rendering truth but
-  never identity truth.
+  be taken at a quiescent capture boundary — originally defined here as "message thread;
+  transport stopped; no parameter/processor notification for the §18.1 debounce window", and
+  **corrected by §28.5/§28.7 to `host-observable quiescence`** (no host-sent MIDI/CC + full
+  notification silence; transport state is not itself a criterion, and the boundary makes no
+  claim about internal plugin quiescence). Captures outside that boundary never contribute
+  identity truth.
 
 ### 22.2 What DAL/JUCE/plugin APIs actually provide (Verified, JUCE 8.0.4 vendored source)
 
@@ -924,9 +953,13 @@ acceptable, §9.2 rule G); "false-current" = stale sound presented as current (f
   quiescent moment, take k (2–3) captures a few ms apart (§6: 1–10 ms total even for a 148 KB
   blob). All equal ⇒ class **byte-stable** (positive-evidence features enabled). Any difference
   ⇒ class **volatile** (equality features disabled). Cache per plugin identity+version;
-  re-probe per session. Misclassification is benign in both directions: a volatile plugin
-  classified stable simply never produces an equality match (falls back to behaving volatile);
-  a stable plugin classified volatile only loses an optimization.
+  re-probe per session. Misclassification risk is **asymmetric, not universally harmless**
+  (corrected by SPIKE-01B-M, §28.6): false-volatile (a stable plugin classified volatile) loses
+  the equality rescue — unnecessary re-rendering or reduced availability — but never strengthens
+  a currency claim; false-stable (a volatile plugin classified stable) may temporarily expose
+  the hybrid policy's bounded false-current blind spot until detected. Repeated at-rest byte
+  inequality may safely demote stable → volatile; classification must **never** promote
+  volatile → stable without a new qualifying probe.
 * **User-visible semantics (Proposed):** volatile-class Primaries still render proxies (role 1
   is unaffected), but proxy currency is presented as **hint-based** ("Current (assumed — this
   plugin cannot confirm unchanged state)") rather than byte-verified; byte inequality is never
@@ -948,8 +981,14 @@ acceptable, §9.2 rule G); "false-current" = stale sound presented as current (f
 
 Combine the validated pieces, each in the only role it is fit for:
 
-1. **Render state (role 1):** always a fresh message-thread capture at enqueue (any transport
-   state) — unchanged from §17.
+1. **Render state (role 1; corrected by SPIKE-01B-M):** a fresh message-thread capture at
+   enqueue. A snapshot that begins a complete render from project start SHOULD normally be
+   captured at a host-observable-quiescence boundary (§22.1/§28.5): capture while the
+   destination is actively receiving MIDI/CC is not yet proven to provide clean initial
+   conditions, pending P1D's isolated-instance lifecycle validation (restore → prepare →
+   reset/flush as supported → deterministic MIDI/CC chase → render from start). Background
+   rendering itself may run concurrently with playback on the isolated instance; the transport
+   never needs to stop for the render.
 2. **Validity identity (role 2):** the host revision (B) + conservative lifecycle bumps (C) +
    persisted save-pairing for load. Never raw bytes.
 3. **Positive byte evidence (stable class only):** at quiescent boundaries (§22.1), if a fresh
@@ -967,7 +1006,10 @@ Combine the validated pieces, each in the only role it is fit for:
 * **False-stale risk:** bounded — worst case one unnecessary re-render per editor-open cycle for
   volatile plugins; rescued by equality for stable plugins.
 * **False-current risk:** only C's blind-spot residue; strictly smaller than B alone.
-* **During playback:** rendering allowed; identity untouched (no byte evidence collected).
+* **During playback:** background rendering explicitly allowed (isolated instance; the
+  transport need not stop or stay stopped); *snapshot capture* for a project-start render is
+  deferred to a host-observable-quiescence boundary unless P1D validates playback-time capture
+  for the plugin (§22.1); identity untouched (no byte evidence collected).
 * **After Save/load:** validity restored by pairing, both classes.
 * **Publication race:** revision compare, starvation-free; equality rescue is an optimization,
   never a requirement.
@@ -1037,7 +1079,15 @@ and the selftest block in `tests/selftest/MiniDAWSelftestsMain.cpp`.
 >    withdrawn. **PID-001's capture layer is Resolved; its identity layer is Open** pending
 >    review of the split identity contract below.*
 > 2. *Identity contract (three roles): (a) the authoritative render state is a fresh
->    message-thread capture at enqueue, in any transport state; (b) semantic validity identity
+>    message-thread capture at enqueue; a snapshot that begins a complete render from project
+>    start SHOULD normally be captured at a host-observable-quiescence boundary, because capture
+>    while the destination is actively receiving MIDI/CC is not yet proven to provide clean
+>    initial conditions — P1D must validate the isolated-instance lifecycle (restore → prepare →
+>    reset/flush as supported → deterministic MIDI/CC chase → render from project start), and a
+>    plugin for which that lifecycle cannot remove performance-transient initial state gets
+>    deferred capture or an explicit compatibility limitation. Background rendering may run
+>    concurrently with normal playback on the isolated instance — the transport never needs to
+>    stop for the render; (b) semantic validity identity
 >    is a host-managed monotonic revision per Primary — bumped by parameter/processor
 >    notifications, editor open and close, preset operations, plugin replace, load/restore —
 >    plus a persisted proxy↔saved-state pairing that restores validity at load by construction;
@@ -1046,7 +1096,11 @@ and the selftest block in `tests/selftest/MiniDAWSelftestsMain.cpp`.
 >    admissible only as positive "still current" evidence for plugins classified byte-stable;
 >    byte inequality has no semantic meaning anywhere.*
 > 3. *Plugin classification: at load/restore, a k-capture quiescent probe classifies each
->    instance byte-stable or volatile (misclassification is benign by construction). Volatile
+>    instance byte-stable or volatile. Misclassification risk is asymmetric, not universally
+>    harmless: false-volatile loses the equality rescue (unnecessary re-rendering or reduced
+>    availability) but never strengthens a currency claim; false-stable may temporarily expose
+>    the bounded false-current blind spot. Repeated at-rest inequality may safely demote
+>    stable → volatile; promotion volatile → stable requires a new qualifying probe. Volatile
 >    plugins render proxies normally but present hint-based currency; they are never blocked
 >    from publication by byte comparison.*
 > 4. *Publication/obsolete checks compare revisions, never bytes (equality may rescue
@@ -1259,9 +1313,11 @@ First-of-burst blob size against elapsed time and prior capture count:
 * **`getStateInformation` observably perturbs the plugin's own next serialized output**
   (self-perturbation / observation effect). Consequences: (a) capture is not idempotent for
   volatile plugins — even a Save changes the next byte image, so bytes can never be compared
-  across saves either; (b) the k-capture probe is *safe* (the perturbation lands only in state
-  the plugin itself refuses to keep stable, and bytes are never used as identity for the
-  volatile class); (c) no capture-frequency policy can make a volatile plugin byte-comparable.
+  across saves either; (b) the side effect is harmless **to the proposed validity-identity
+  algorithm** (volatile bytes are excluded from identity), but **sonic equivalence of the
+  successively growing blobs was not measured** — this result must not be generalized into an
+  audible-equivalence claim, and the number of diagnostic/production captures should therefore
+  remain minimal; (c) no capture-frequency policy can make a volatile plugin byte-comparable.
 
 ### 28.3 M2 — corrected, delivery-proven VB3-II playback probe (M2V, Measured)
 
@@ -1411,18 +1467,27 @@ quiescence, and we do not claim DAL can observe internal plugin activity.**
 
 ### 28.6 Effect on the required interpretation points and policies A–E
 
-* **k-capture probe safety/reliability:** validated. k=2 suffices for GA-class volatility;
-  the VB3-II bursts show no false-volatile flakiness *at rest*. Probe self-perturbation is
-  benign (28.2). Residual: a plugin volatile only *outside* the probe window would be
+* **k-capture probe safety/reliability:** validated for classification. k=2 sufficed for
+  GA-class volatility; the VB3-II bursts show no false-volatile flakiness *at rest*. Probe
+  self-perturbation is harmless to the proposed validity-identity algorithm (volatile bytes are
+  excluded from identity, §28.2), but its sonic equivalence was not measured, so capture counts
+  stay minimal. Residual: a plugin volatile only *outside* the probe window would be
   misclassified stable — detectable later as repeated at-rest inequality; §28.7 adds an optional
   demotion rule.
-* **Misclassification risk direction:** false-volatile degrades only availability (no equality
-  rescue; hint-based currency) — benign. False-stable enables bounded false-current — the same
-  bound as §23-C's blind spots, since equality is only ever *positive* evidence.
-* **Playback capture (corrected):** the render-state capture at enqueue may still occur in any
-  transport state, but a **during-playback capture must never be admitted as byte identity
+* **Misclassification risk direction (asymmetric — neither direction universally harmless):**
+  false-volatile loses the equality rescue and may cause unnecessary re-rendering or reduced
+  availability, but never strengthens a currency claim. False-stable may temporarily expose the
+  hybrid policy's bounded false-current blind spot — the same bound as §23-C's blind spots,
+  since equality is only ever *positive* evidence. Repeated at-rest inequality may safely
+  demote stable → volatile; promotion volatile → stable requires a new qualifying probe.
+* **Playback capture (corrected):** a `getStateInformation` call is mechanically possible in
+  any transport state, but a **during-playback capture must never be admitted as byte identity
   evidence** — M2V proves the blob differs from the authored baseline while MIDI/CC is live
-  (§28.3). Byte *equality* evidence is admissible only at a **host-observable quiescence**
+  (§28.3). For the *render-state* role, a snapshot beginning a project-start render SHOULD be
+  captured at a host-observable-quiescence boundary until P1D validates the isolated-instance
+  lifecycle (§22.1); no clone/restore/reset/render equivalence test was performed for a
+  playback-time blob. Background rendering itself remains allowed during playback (isolated
+  instance). Byte *equality* evidence is admissible only at a **host-observable quiescence**
   boundary, not merely "transport stopped."
 * **Quiescence definition (corrected):** must be expressed as host-observable quiescence
   (§28.5), i.e. no host-sent MIDI/CC **and** notification silence for the debounce window —
@@ -1448,20 +1513,37 @@ quiescence, and we do not claim DAL can observe internal plugin activity.**
    equality taken at such a boundary is admissible as positive "still current" evidence for
    byte-stable-classified plugins only; a capture taken while MIDI/CC is being delivered is never
    admissible as identity evidence (Measured: M2V, §28.3).
-2. **Probe note (amendment point 3):** add "the classification probe itself may perturb a
-   volatile plugin's subsequent bytes (Measured on Groove Agent SE); this is benign because
-   bytes never serve as identity for the volatile class. Optionally, repeated at-rest byte
-   inequality on a stable-classified instance may demote it to volatile (a safe direction)."
-3. **Debounce sizing:** the debounce window is a host-side safety margin, not a measured
+2. **Render-state snapshot boundary (amendment point 2a):** the amendment must state that
+   snapshot capture and background rendering are separate operations; that background rendering
+   may run concurrently with normal playback (isolated instance — the transport never needs to
+   stop for the render); that a snapshot beginning a complete render from project start SHOULD
+   normally be captured at a host-observable-quiescence boundary, because capture during active
+   MIDI/CC delivery to the destination is not yet proven to provide clean initial conditions
+   (no clone/restore/reset/render equivalence test was performed for a playback-time blob); and
+   that P1D must validate the isolated-instance lifecycle (restore → prepare → reset/flush as
+   supported → deterministic MIDI/CC chase → render from project start), deferring capture or
+   declaring an explicit compatibility limitation for plugins where the lifecycle cannot remove
+   performance-transient initial state. Save-time capture remains a distinct operation: Save may
+   capture during playback as today, but that precedent does not by itself prove suitability as
+   the initial state of a project-start proxy render.
+3. **Probe note (amendment point 3):** add "the classification probe itself may perturb a
+   volatile plugin's subsequent bytes (Measured on Groove Agent SE); this is harmless to the
+   validity-identity algorithm because bytes never serve as identity for the volatile class —
+   but sonic equivalence of the successively growing blobs was not measured, so the result must
+   not be generalized into an audible-equivalence claim and capture counts (diagnostic or
+   production) should remain minimal. Optionally, repeated at-rest byte inequality on a
+   stable-classified instance may demote it to volatile (a safe direction); promotion
+   volatile → stable requires a new qualifying probe."
+4. **Debounce sizing:** the debounce window is a host-side safety margin, not a measured
    internal-settling time. The ≤5 ms figure applies only to the M2P parameter round-trip and
    must not be cited for MIDI/CC or internal state; 250 ms is a reasonable default pending
    broader plugin coverage.
-4. **New explicit non-claims (must appear in the amendment):** the steering text must state that
+5. **New explicit non-claims (must appear in the amendment):** the steering text must state that
    DAL (a) cannot observe internal plugin quiescence, (b) does not treat notification silence as
    proof of quiescence, and (c) distinguishes host-observable quiescence from unknowable internal
    plugin activity. Currency for any plugin is therefore "current as far as the host can observe,"
    never an absolute guarantee.
-5. Otherwise the §26 text stands. **PID-001 status recommendation unchanged: capture layer
+6. Otherwise the §26 text stands. **PID-001 status recommendation unchanged: capture layer
    Resolved, identity layer Open until §23-E/§26 (with these corrections) passes human review.**
    SPIKE-01B-M removes the last *measurement* obstacles for the byte-stable and volatile classes;
    what remains is a steering decision (accepting the blind spots and the volatile-class
@@ -1484,7 +1566,9 @@ not a reason to extend further.
 The verdict **remains PARTIAL PASS**. The correction does not lower it: it *removes an
 over-claim* (the retracted "transport/MIDI leaves VB3-II unchanged") and *replaces it with a
 stronger, delivery-proven finding* (playback perturbs the blob; capture during playback is
-unsafe for identity; safe only at host-observable quiescence). The §9.2 capture-layer gate is
+unsafe for identity; byte-equality evidence is admissible only at host-observable quiescence,
+and a project-start render snapshot should be captured there pending P1D validation, §22.1/§28.7
+point 2). The §9.2 capture-layer gate is
 unaffected. What changed inside the PARTIAL PASS: the byte-stable class's safe-capture rule is
 now correctly conditioned on host-observable quiescence rather than "transport stopped," and the
 identity layer's Open status is unchanged pending human review of §23-E/§26 with the §28.7

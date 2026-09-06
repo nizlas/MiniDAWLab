@@ -276,7 +276,8 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // authoritative plugin-state capture measurements. Normal startup is unchanged when the
     // flag is absent — this is the only product-path reference to the spike scaffolding.
     // SPIKE-01B-M: `--spike01-auto=<plan>` additionally runs a scripted unattended
-    // measurement plan (M1X/M1Y/M2) inside the panel.
+    // measurement plan inside the panel (see Spike01StateCapturePanel::buildAutoPlan for the
+    // full set of supported plan ids).
     if (commandLine.contains("--spike01-state-capture"))
     {
         juce::String spike01AutoPlan;

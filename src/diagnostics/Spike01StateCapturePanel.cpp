@@ -322,8 +322,10 @@ private:
             });
         }
         else if (autoPlanId_ == "M2P") // VB3-II settling after a deterministic parameter
-        {                              // wiggle+revert (the project has no arranged MIDI, so
-                                       // transport playback alone cannot perturb the plugin).
+        {                              // wiggle+revert. Parameter-round-trip test, deliberately
+                                       // independent of arranged MIDI (the project DOES contain
+                                       // arranged MIDI for Organ — the MIDI/CC playback path is
+                                       // measured separately by the M2V plan).
             addWaitForTrackStep("VB3");
             add(1000, "attach listener", [this] {
                 if (attachedInstance_ == nullptr)
