@@ -1,11 +1,33 @@
 # Portable Instruments and Proxy Rendering — Technical Steering Document
 
 **Status:** `Canonical`
-**Date:** 2026-09-05 (revision 4 applied the SPIKE-01 amendment approved by explicit human
-review 2026-09-05 — PID-001 state-capture mechanism resolved, §9.2 SPIKE-01 findings; revision 3
-canonicalized through explicit human review 2026-09-04; revision 2 incorporated the 2026-09-03
-design review)
+**Date:** 2026-09-06 (revision 5, approved by explicit human review 2026-09-06 of the SPIKE-01B /
+SPIKE-01B-M evidence — see below; revision 4 applied the SPIKE-01 amendment approved 2026-09-05;
+revision 3 canonicalized through explicit human review 2026-09-04; revision 2 incorporated the
+2026-09-03 design review)
 **Authority:** normative for all Portable Instruments / Proxy implementation slices.
+
+> **Revision 5 (2026-09-06).** Based on the reviewed SPIKE-01B / SPIKE-01B-M evidence
+> (`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`, measurement verdict
+> **PARTIAL PASS**), this revision:
+>
+> * **corrects revision 4's premature PID-001 resolution** (the original SPIKE-01 PASS
+>   over-claimed; the corrected evidence separates the capture layer from the identity layer);
+> * **incorporates the reviewed PARTIAL PASS evidence** (byte-stable vs volatile serializers,
+>   proven MIDI/CC delivery effects, probe self-perturbation, the observability limit);
+> * **locks the hybrid state-identity contract** (§9.4): host-managed revision identity, raw
+>   bytes never as general validity identity, byte equality only as positive evidence for
+>   byte-stable-classified plugins at host-observable quiescence;
+> * **separates snapshot eligibility from concurrent background rendering** (§9.4.4): rendering
+>   may run during playback on an isolated instance; the project-start snapshot has its own
+>   eligibility boundary;
+> * **replaces the earlier short edit debounce with four selectable update modes** (§18.1),
+>   including Auto with a fixed five-minute P1 idle delay per destination.
+>
+> PID-001 is now **Locked (reviewed) — hybrid authoritative-state and host-observed identity
+> contract**: resolved by explicitly accepting the plugin API's fundamental observability
+> boundary, not by claiming DAL can detect unknowable internal plugin changes. E2/MIDI-learn and
+> broader plugin coverage remain documented compatibility limitations, not P1 blockers.
 
 > **This document is DAL's canonical steering authority for Portable Instruments and Proxy
 > Rendering.** Implementation prompts MUST reference the applicable roadmap slice and invariant
@@ -42,9 +64,12 @@ Explicit human review approved this document and its Locked product behavior for
 on 2026-09-04. The same review approved retaining these controlled implementation gates inside the
 Canonical document:
 
-* PID-001's state-capture mechanism was evidence-gated behind SPIKE-01; **resolved by human
-  review 2026-09-05** on SPIKE-01's measured evidence (§9.2 amendment; residual Opens: E2
-  MIDI-learn case, plugins beyond the two measured).
+* PID-001 was evidence-gated behind SPIKE-01; revision 4's resolution (2026-09-05) proved
+  premature and was corrected by SPIKE-01B/SPIKE-01B-M. **Final status (human review 2026-09-06,
+  revision 5): Locked (reviewed) — hybrid authoritative-state and host-observed identity
+  contract** (§9.4). Resolved by explicitly accepting the plugin API's observability boundary;
+  E2 (MIDI-learn-class silent state) and plugin coverage beyond the two measured remain
+  documented compatibility limitations, not P1 blockers.
 * PID-005's numeric tail values remain evidence-gated behind SPIKE-02.
 * OI-002's bounded playback I/O and sample-rate-adaptation mechanism remains evidence-gated behind
   SPIKE-03.
@@ -55,7 +80,7 @@ open; full context for every controlled gate lives in the decision register (§2
 
 | ID | Question | Status after review | Gate |
 |---|---|---|---|
-| **PID-001** (part) | Authoritative plugin-state capture mechanism: how does DAL observe "the user tweaked VB3-II drawbars" so the proxy goes stale and renders from *current* state? (Audit U2, H2) | **Resolved (VB3-II-class evidence) — human review 2026-09-05.** Selected mechanism: fresh capture at checkpoints + generation counter bumped by hints + hash equality only as positive "unchanged" proof (§9.2 SPIKE-01 findings; evidence: `docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`). Residual Opens: E2 (MIDI-learn), generalization beyond the two measured plugins. | SPIKE-01 **completed** (PASS, measured). P1C unblocked. |
+| **PID-001** (part) | Authoritative plugin-state capture mechanism: how does DAL observe "the user tweaked VB3-II drawbars" so the proxy goes stale and renders from *current* state? (Audit U2, H2) | **Locked (reviewed) — hybrid authoritative-state and host-observed identity contract, human review 2026-09-06 (revision 5).** Capture layer: fresh checkpoint capture (Resolved on measured evidence). Identity layer: host-managed revision + conservative lifecycle bumps + persisted save-pairing; raw bytes never as general validity identity; byte equality only as positive "unchanged" evidence for byte-stable-classified plugins at host-observable quiescence (§9.4). Resolved by explicitly accepting the observability boundary — not by claiming DAL detects unknowable internal changes. Documented compatibility limitations (non-blocking): E2 (MIDI-learn), plugins beyond the two measured. | SPIKE-01 + SPIKE-01B/01B-M **completed** (final measurement verdict PARTIAL PASS, reviewed). P1C unblocked. |
 | **PID-005** (part) | Tail-policy numeric values: silence threshold, continuous-silence window, maximum tail duration. | **Open / evidence-gated.** Structure is Locked (§15.2); −60 dBFS / 1 s / 30 s are experimental starting points only, not canonical defaults. | **SPIKE-02** measurements with VB3-II-class tails. Blocks P1D numeric confirmation. |
 | **OI-002** | Bounded proxy playback I/O and sample-rate adaptation: the audio-thread-safe playback-source mechanism (bounded memory, read-ahead vs budgeted preload vs cached conversion, resampler placement). | **Open / evidence-gated.** The *requirements* are Locked (§7.3, §15.3, PI-030/PI-031); only the technical mechanism is open. Unbounded full preload is rejected. | **SPIKE-03** (§22) — blocks P1G. |
 | **PID-009** (part) | Secondary persistence/registry shape (second descriptor+state home per instrument track). | **Reviewed and deliberately deferred to P2.** Non-blocking for P1; technically unresolved until P2 design. P1B adds no placeholder schema (§12.4). | P2 design, using then-current architecture evidence. |
@@ -121,8 +146,10 @@ Project` (P1J, §16.6) is part of P1, so a user can actually produce a validated
 * Proxy playback is transparent downstream: DAL inserts, fader, pan, sends, buses, master, and
   offline mixdown are shared, unchanged (PI-002, PI-008).
 * Deterministic staleness: proxies represent exactly the musical content they were rendered from,
-  proven by a canonical fingerprint (PI-018, PI-019). Staleness is a *musical-content* verdict:
-  an engine sample-rate mismatch alone is a playback-adaptation concern, never staleness (PI-030).
+  proven by a canonical fingerprint (PI-018, PI-019); the plugin-state component of validity is
+  host-observed per the §9.4 hybrid identity contract (revision 5). Staleness is a
+  *musical-content* verdict: an engine sample-rate mismatch alone is a playback-adaptation
+  concern, never staleness (PI-030).
 * Background rendering that never blocks or corrupts the realtime engine (PI-011, PI-012).
 * Proxy playback resource use is bounded: memory and I/O follow an explicit budget (PI-031,
   OI-002) — many long proxies must not require gigabytes of resident decoded audio.
@@ -153,7 +180,9 @@ Project` (P1J, §16.6) is part of P1, so a user can actually produce a validated
 | **Generation** | One published proxy asset identified by its fingerprint hash; immutable once published, together with the recorded render configuration (sample rate, policies) that produced it (Locked identity model; §16). |
 | **Derived playback representation** | A runtime-prepared, engine-rate-compatible view of a generation (e.g. resampled or read-ahead data), built outside the audio thread when the engine rate differs from the generation's recorded render rate. It is never the authoritative asset and is rebuilt on engine-rate change (Proposed mechanism, Locked requirement; §15.3, OI-002). |
 | **Stale proxy** | A retained, previously valid proxy whose fingerprint no longer matches current *musical* content (evaluated under the generation's own recorded render configuration — a sample-rate mismatch alone is not staleness). It remains an asset but is **never selected for playback** in P1; no explicit stale-playback feature exists (Locked; §17, §20). |
-| **Update mode** | Per-destination proxy maintenance mode: Auto / Paused(Manual) / Off (§18.1). |
+| **Update mode** | Per-destination proxy maintenance mode: Auto after idle / On Save / Manual / Off (§18.1, revision 5). |
+| **Host-observable quiescence** | The boundary at which DAL has sent no MIDI/CC to the instance and received no parameter/dirty/non-parameter notification for the defined debounce window. The only quiescence DAL can establish; never proof of internal plugin quiescence (§9.4.4). |
+| **Current (host-observed)** | Defined semantic concept for volatile-plugin currency: no render-relevant change observable by DAL since the accepted snapshot/revision — not an absolute claim about internal plugin activity (§9.4.5). Not required as the permanent main track label. |
 
 ## 4. Verified current-architecture anchors
 
@@ -251,7 +280,7 @@ footnote.
 
 | ID | Finding (Audit ref) | Addressed in |
 |---|---|---|
-| HR-1 | Plugin state is captured too late (save-only) for correct fingerprinting and rendering (Audit H2, U2) | §9, PID-001, SPIKE-01, slice P0/P1A, tests T-01 |
+| HR-1 | Plugin state is captured too late (save-only) for correct fingerprinting and rendering (Audit H2, U2) | §9 (contract Locked §9.4, revision 5), PID-001, SPIKE-01/01B, slice P0/P1A, tests T-01, T-30 |
 | HR-2 | Plugin version is not persisted in the project descriptor (Audit U1, H3) | §9.2, §11 (F1v), §12, PID-001, slice P1B, T-05 |
 | HR-3 | Reverse incoming-MIDI enumeration duplicated at ≥6 sites (Audit §5.2, H4) | §8.2, PID-010, slice P1C, T-02 |
 | HR-4 | Track order is semantic for same-time CC last-wins (Audit F9, H5) | §8.3, §11 (F9), T-03, T-06 |
@@ -352,10 +381,10 @@ roadmap slice and test.
   algorithm/schema version tags). Fingerprints MUST NOT depend on pointer identity,
   unordered-container iteration, display names, locale-sensitive formatting, or incidental JSON
   ordering.
-* **PI-020** The current audible Primary state MUST be included in a render snapshot; parameter
-  changes MUST make the proxy stale; rendering MUST NOT silently use an older Save-time state;
-  Save, autosave, proxy rendering, and plugin-editor close MUST agree about current state (§9;
-  mechanism gated by SPIKE-01).
+* **PI-020** The current audible Primary state MUST be included in a render snapshot (as far as
+  the host can observe — §9.4.5); DAL-observable parameter changes MUST make the proxy stale;
+  rendering MUST NOT silently use an older Save-time state; Save, autosave, proxy rendering, and
+  plugin-editor close MUST agree about current state (§9; mechanism Locked per §9.4, revision 5).
 
 ### Playback source
 
@@ -369,9 +398,11 @@ roadmap slice and test.
 
 ### Modes, save, media
 
-* **PI-023** Update modes Auto / Paused(Manual) / Off behave per §18.1. Normal Save MUST remain
-  responsive: capture required current state, save project data, ensure eligible stale work is
-  queued, and MUST NOT wait for rendering.
+* **PI-023** Update modes Auto after idle / On Save / Manual / Off behave per §18.1 (revision 5:
+  Auto uses a fixed five-minute per-destination idle delay in P1). Normal Save MUST remain
+  responsive: capture required current state, save project data, queue render work only per the
+  destination's update mode (§18.2 — never a forced render of every stale destination), and MUST
+  NOT wait for rendering. Autosave never starts proxy rendering.
 * **PI-024** Proxy audio is external binary media (never embedded in project JSON) with
   project-relative storage, stable `TrackId` ownership, render-hash generation identity,
   temp-file creation, validation before publication, and Windows-safe atomic publication. The
@@ -433,9 +464,10 @@ Per-responsibility contract:
   publication events, load. Outputs: v20 JSON fields. Failure: absent/invalid metadata degrades to
   "no proxy" (PI-025). Cancellation: n/a. Shutdown: persisted with normal Save.
 * **R2 — `PrimaryStateAuthority` (Proposed).** Mutable state: last-captured state blob + capture
-  timestamp + cheap change hint. Inputs: editor lifecycle events, capture requests (Save, enqueue),
-  mechanism per PID-001/SPIKE-01. Outputs: authoritative state blob for snapshots and Save;
-  staleness hint. Failure: capture failure → proxy render blocked with diagnosed status, Save
+  timestamp + the host-managed state revision + stable/volatile classification. Inputs: editor
+  lifecycle events, revision-bump sources, capture requests (Save, enqueue), mechanism per the
+  Locked §9.4 hybrid contract (PID-001). Outputs: authoritative state blob for snapshots and Save;
+  revision/staleness hint. Failure: capture failure → proxy render blocked with diagnosed status, Save
   falls back to last-known blob with diagnostic (never silent). Cancellation: n/a. Shutdown: no
   background work to stop (message-thread only).
 * **R3 — dependency enumerator (Proposed).** Pure function `SessionSnapshot × TrackId →
@@ -663,13 +695,16 @@ State is captured only at explicit project save; instrument-editor close does no
 (§4.5). Fingerprints based on the last-saved blob silently miss live tweaks; per-check fresh
 `getStateInformation` calls cost message-thread time (Audit H2/U2).
 
-### 9.2 Authoritative state-capture contract (Locked contract; mechanism Open)
+### 9.2 Authoritative state-capture contract (Locked contract; mechanism Locked per §9.4)
 
 The contract (PI-020) requires, whatever the mechanism:
 
-1. The state blob in a render snapshot equals the currently audible Primary state at enqueue time.
-2. A parameter change that alters audible output eventually makes the proxy stale (bounded
-   detection delay is acceptable in Auto mode; §18.1 debounce).
+1. The state blob in a render snapshot equals the currently audible Primary state at enqueue time
+   (as far as the host can observe — §9.4.5; snapshot eligibility per §9.4.4).
+2. A **DAL-observable** change that alters audible output makes the proxy stale (Stale is marked
+   immediately on the observed change; only the *start of rendering* is governed by the §18.1
+   update mode, e.g. the Auto five-minute idle timer). Changes the plugin never surfaces to the
+   host are the accepted E2/observability limitation (§9.4).
 3. Rendering can never silently use an older Save-time state.
 4. Save, autosave, proxy rendering, and plugin-editor close agree on what "current state" is:
    Save MUST capture fresh state (it already does at save time — Verified); editor close SHOULD
@@ -680,11 +715,17 @@ The contract (PI-020) requires, whatever the mechanism:
 6. Undo/dirty: state capture for proxy purposes MUST NOT by itself create undo entries or dirty
    the project (§18.3); the *user's* parameter edit dirties per existing rules.
 
-**Resolved (PID-001 part) — human review 2026-09-05, on SPIKE-01's measured evidence:** the
-selected detection mechanism is **fresh capture at checkpoints (authoritative) + a monotonic
-change-generation counter bumped by hints (parameter notifications, editor open/close) + hash
-equality only as a positive "unchanged" short-circuit at quiescent checkpoints**. Polling is
-rejected. See the SPIKE-01 findings block below and the full evidence report.
+**Final decision (PID-001, revision 5 — human review 2026-09-06): Locked (reviewed) — hybrid
+authoritative-state and host-observed identity contract (§9.4).** Revision 4's resolution
+("Resolved, PASS") was premature and is corrected: the SPIKE-01B/SPIKE-01B-M corrective
+measurements (final verdict **PARTIAL PASS**) separate the **capture layer** (fresh checkpoint
+capture — Resolved on measured evidence) from the **identity layer** (host-managed revision +
+lifecycle bumps + save-pairing; bytes never as general identity — now Locked as §9.4). Polling
+remains rejected. The decision is resolved by **explicitly accepting the plugin API's fundamental
+observability boundary** — if a plugin changes sound-relevant state internally without any
+observable parameter change, dirty notification, or other host-visible signal, DAL cannot detect
+that change with certainty — not by claiming DAL can detect unknowable internal plugin changes.
+See the findings blocks below, §9.4, and the full evidence report.
 
 **SPIKE-01 (named validation spike, blocking P0/P1A gate)** must establish:
 
@@ -703,10 +744,11 @@ SPIKE-01 delivers an **evidence report and a proposed steering amendment** for h
 MUST NOT implement product behavior. No fingerprint slice (P1C) may complete before SPIKE-01's
 outcome is reviewed.
 
-**SPIKE-01 findings (2026-09-05, executed; amendment approved by human review 2026-09-05).**
-Repository evidence + local measurements: 167 message-thread captures, 230 notifications,
-VB3-II 2.3.1 and Groove Agent SE 5.2.20, Debug build; evidence report
-`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md` (verdict PASS):
+**SPIKE-01 findings (2026-09-05, executed; historical — the original PASS verdict is superseded
+by the SPIKE-01B/01B-M PARTIAL PASS below; the measured facts stand except where the later block
+corrects them).** Repository evidence + local measurements: 167 message-thread captures, 230
+notifications, VB3-II 2.3.1 and Groove Agent SE 5.2.20, Debug build; evidence report
+`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`:
 
 1. DAL contains no plugin parameter/processor listeners anywhere (instruments or inserts);
    live plugin-GUI edits are structurally invisible today and do not dirty the project. This
@@ -736,9 +778,45 @@ VB3-II 2.3.1 and Groove Agent SE 5.2.20, Debug build; evidence report
    equality only as an opportunistic short-circuit. Capture failure ⇒ keep previous blob, mark
    proxy stale/unknown.
 
-**Status change (approved):** PID-001's state-capture mechanism part is **Resolved (VB3-II-class
-evidence)**, with explicit residual Opens: E2 (MIDI-learn) and generalization beyond the two
-measured plugins. P1C's SPIKE-01 gate is satisfied.
+**Historical status change (revision 4, superseded):** revision 4 marked PID-001's state-capture
+mechanism Resolved on the original PASS verdict. That resolution was premature; the final,
+reviewed status is in the revision-5 block below.
+
+**SPIKE-01B / SPIKE-01B-M findings (2026-09-05/06, corrective follow-up; measurement verdict
+PARTIAL PASS; reviewed and accepted 2026-09-06 — revision 5).** Full evidence: the same report,
+§22–§28, including delivery-proven measurements (M2V) and the correction record (§28.0):
+
+1. **One blob cannot serve three roles** (SPIKE01B-F1): authoritative render state, semantic
+   validity identity, and volatile/runtime bytes must be separated. Raw blob hashes as general
+   validity identity would make every volatile-plugin proxy permanently stale (Groove Agent SE:
+   10/10 distinct idle hashes); a bare counter alone leaves silent changes undetected. The hybrid
+   contract (§9.4) bounds both failure modes and is the only evaluated policy that does.
+2. **Groove Agent SE churns from the first post-restore capture**, and growth correlates with
+   capture count, not elapsed time: repeated `getStateInformation` observably perturbs the
+   plugin's own next serialized output. The side effect is harmless to the §9.4 validity-identity
+   algorithm (volatile bytes are excluded from identity), but **sonic equivalence of the
+   successively changing blobs was not measured and MUST NOT be claimed**; capture counts MUST
+   remain minimal (diagnostic and production).
+3. **Proven MIDI/CC delivery perturbs VB3-II's blob during playback** (M2V: 32 note-ons,
+   32 note-offs, 384 CC across three channels delivered to the measured instance; 9/36 in-play
+   captures differed from baseline; return to the authored baseline by the first post-stop
+   capture in that session). A during-playback capture is never admissible as byte identity
+   evidence; snapshot eligibility is defined in §9.4.4.
+4. **`host-observable quiescence`** (no host-sent MIDI/CC and no received parameter/dirty/
+   non-parameter notification for the debounce window) is the *only* quiescence DAL can
+   establish. It does **not** prove internal plugin quiescence; notification silence is never
+   treated as proof of plugin rest.
+5. **The k-capture classification probe is validated** (k=2 sufficed in every measured burst);
+   misclassification risk is asymmetric, not universally harmless (§9.4.3).
+6. **E2 stays a documented compatibility limitation:** silent non-parameter authored state
+   (MIDI-learn class) is unmeasurable without native-editor automation; DAL's currency claims are
+   therefore host-observed, never absolute.
+
+**Status change (approved 2026-09-06, revision 5):** PID-001 → **Locked (reviewed) — hybrid
+authoritative-state and host-observed identity contract** (§9.4). Capture layer Resolved;
+identity layer locked by accepting the observability boundary explicitly. E2 and broader plugin
+coverage remain documented compatibility limitations, non-blocking for P1. P1C's gate is
+satisfied.
 
 ### 9.3 Plugin identity and version (Verified gap HR-2; Recommended resolution)
 
@@ -747,6 +825,95 @@ The persisted descriptor has no version field (Verified, Audit §7.1/U1). **Reco
 change ⇒ fingerprint change ⇒ deterministic staleness. Same-version-different-binary upgrades are
 accepted as undetectable in v1 (documented limitation). Alternatives (live-version-only checks,
 binary hashing) are noted in PID-001.
+
+### 9.4 Hybrid authoritative-state and host-observed identity contract (Locked, revision 5)
+
+The reviewed SPIKE-01B contract. Evidence authority:
+`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md` (§22–§28).
+
+#### 9.4.1 Authoritative render state
+
+* A render snapshot contains the **exact opaque bytes** captured through `getStateInformation` on
+  the message thread. No normalization or reinterpretation, ever.
+* Those bytes are restored **only into an isolated render instance** (PI-011). The live audio
+  instance is never processed by the renderer.
+* State-capture cost is suitable for **checkpoints, not continuous polling** (Measured: VB3-II
+  ≈0.5 ms / 10 KB, Groove Agent SE ≈5 ms / 148 KB, Debug build).
+* **Save-time capture and proxy-render snapshot eligibility are related but not automatically
+  equivalent:** Save may capture during playback as today (its blob is restored into the *same*
+  instance at load); that precedent does not by itself prove suitability as the initial state of
+  a project-start proxy render (§9.4.4).
+
+#### 9.4.2 Semantic validity identity
+
+* **Raw plugin-state bytes MUST NOT be the general proxy-validity identity.**
+* The identity is a **monotonic host-managed revision per Primary**, bumped by every
+  render-relevant change DAL can observe, including:
+  * parameter and processor notifications;
+  * non-parameter dirty notifications when the plugin supplies them (`setDirty` →
+    `audioProcessorChanged`);
+  * plugin editor lifecycle (open/close) per the conservative policy;
+  * DAL-mediated preset/program changes;
+  * Primary replacement, reload, and state restoration;
+  * render-relevant MIDI, CC, and routing edits;
+  * applicable project/schema/configuration changes (fingerprint-schema or policy-version bumps).
+* **Publication and obsolete-job checks compare the captured revision with the current
+  revision — never a newly captured raw blob hash** (PI-028 is evaluated on revisions).
+* **Persisted proxy↔saved-state pairing restores load-time validity by construction:** load
+  restores the exact saved blob into the instance, so the saved pairing is valid without any byte
+  comparison.
+
+#### 9.4.3 Byte-stable and volatile classification
+
+* A small **quiescent k-capture probe** (k = 2–3, milliseconds apart, at host-observable
+  quiescence) MAY classify a plugin instance as **byte-stable** or **volatile**. Cached per
+  plugin identity+version; re-probed per session.
+* **Equal bytes for a byte-stable plugin are positive "unchanged" evidence only** — usable to
+  rescue a revision bump (cancel an unnecessary re-render). **Byte inequality never proves a
+  semantic sound change** and has no user-facing meaning.
+* **Volatile plugins never depend on byte equality** for publication or currency; they publish
+  via revision compare like everyone else.
+* A stable-classified plugin MAY be **safely demoted to volatile** after repeated qualifying
+  at-rest inequality. **Volatile → stable promotion requires a new qualifying probe.**
+* Misclassification risk is **asymmetric — neither direction universally harmless**:
+  false-volatile loses an optimization or causes extra work (never strengthens a currency claim);
+  false-stable can temporarily expose the accepted bounded false-current blind spot.
+* **Repeated capture may alter later serialized bytes** (Measured, Groove Agent SE). Capture
+  counts MUST remain minimal. **Sonic equivalence of successively changing volatile blobs was
+  not measured and MUST NOT be claimed.**
+
+#### 9.4.4 Snapshot eligibility versus concurrent background rendering
+
+* **Background proxy rendering MAY run concurrently with normal transport playback.** It runs
+  through an isolated plugin instance; the transport does not need to remain stopped during the
+  actual background render.
+* **Snapshot capture is a separate operation from rendering.**
+* A **project-start render snapshot SHOULD normally be captured at a host-observable-quiescence
+  boundary**: no host-sent MIDI/CC to the instance and no received parameter/dirty/non-parameter
+  notification for the defined debounce window. **This does not prove internal plugin
+  quiescence.**
+* **Capture while the destination actively receives MIDI/CC is not proven to provide clean
+  project-start initial conditions** (Measured: M2V; no clone/restore/reset/render equivalence
+  test was performed for a playback-time blob).
+* **P1D MUST validate** the isolated-instance lifecycle:
+  `restore → prepare → reset/flush where supported → deterministic MIDI/CC chase → complete
+  render from project start`. If that lifecycle cannot remove performance-transient initial
+  state for a plugin, snapshot capture MUST wait for an eligible boundary or DAL MUST expose a
+  compatibility limitation for that plugin.
+
+#### 9.4.5 Host-observed currency and UI honesty
+
+* For volatile plugins, **"Current" means: no render-relevant change observable by DAL has
+  occurred since the accepted snapshot/revision.** It is not an absolute claim about unknowable
+  internal plugin activity. `Current (host-observed)` is the **defined semantic concept** for
+  this — it is NOT required as the permanent main track label.
+* Normal compact UI MAY continue to show **"Proxy current"**. But a status detail, information
+  affordance, or tooltip MUST explain, for a volatile plugin, that currency is based on changes
+  detected by DAL and that the plugin cannot provide fully verifiable state-change information.
+* **Volatile plugins retain normal proxy support** (including Auto mode) and are not restricted
+  to Manual-only.
+* Currency for *any* plugin is "current as far as the host can observe", never an absolute
+  guarantee; DAL never claims to observe internal plugin quiescence.
 
 ## 10. Immutable render-snapshot schema (Proposed)
 
@@ -892,7 +1059,7 @@ format policies. Every field below is a fingerprint input.
 |---|---|---|---|
 | F1 | Primary plugin identity: `fileOrIdentifier`, `uniqueId`, `deprecatedUid`, format, `isInstrument` | `ProjectFileGenericVst3DescriptorV1` / live `lastLoadedPluginDescription_` | Verified |
 | F1v | Plugin version (explicitly defined version identity) | `PluginDescription::version`, persisted at v20 (Recommended §9.3) | resolves Audit U1 |
-| F2 | Primary plugin **state blob** (current, not last-saved) | authoritative capture via R2 (§9.2) | mechanism gated by SPIKE-01 (Audit U2) |
+| F2 | Primary plugin **state blob** (current, not last-saved) as snapshot content, with its **identity component represented by the host-managed state revision** (§9.4.2) — raw blob bytes/hashes are never the general validity identity; byte equality serves only as positive "unchanged" rescue for byte-stable-classified plugins at host-observable quiescence (§9.4.3) | authoritative capture via R2 (§9.2, §9.4) | mechanism **Locked** (revision 5, §9.4; Audit U2) |
 | F3 | Destination's own MIDI clips: per clip `id`, `startSamples`, `timelineAnchorSamples`, `lengthSamples` (sample-domain raw integers, §10.1), pattern `bpm`, `ticksPerQuarter` | `InstrumentMidiClip` | tempo & tick→sample conversion inputs; sample-domain integers serialize raw — their interpretation rate is F11's timeline reference rate, never re-baked into the content fields; Audit U4: per-clip bpm is fingerprinted (Recommended: confirmed), project-bpm sync edits surface as clip-bpm content changes |
 | F4 | Every note: `midiNote`, `velocity`, `offVelocity`, `channel`, `startTick`, `durationTicks` | `TimelineMidiNote` | note timing, length, velocity, channel, Note Off semantics |
 | F5 | Every CC point: `startTick`, `controller`, `value`, `channel`, `interpolationToNext` | `MidiCcPoint` | CC ordering/interpolation; chase-relevant state derives from these (§8.3) |
@@ -963,7 +1130,7 @@ The fingerprint is a hash over a canonical byte serialization of the snapshot:
 | Audit # | Question | Disposition in this document |
 |---|---|---|
 | U1 | Plugin version not persisted | Recommended: persist at v20, fingerprint as F1v (§9.3, PID-001) |
-| U2 | State-capture cadence/mechanism | **Resolved** — SPIKE-01 completed; mechanism selected by human review 2026-09-05 (§9.2 SPIKE-01 findings, PID-001) |
+| U2 | State-capture cadence/mechanism | **Locked (reviewed, revision 5)** — SPIKE-01 + corrective SPIKE-01B/01B-M completed (final measurement verdict PARTIAL PASS); hybrid authoritative-state and host-observed identity contract locked by human review 2026-09-06 (§9.4, PID-001). Revision 4's "Resolved (PASS)" was premature (historical) |
 | U3 | Destination mute/off during render | Locked (reviewed): render independent of mute/off (§8.4, PID-006) |
 | U4 | Clip bpm vs project bpm | Recommended: fingerprint per-clip bpm (source of truth for baking); project-bpm sync edits are content changes (F3) |
 | U5 | Proxy render sample rate | Locked (reviewed): render rate is generation identity; validity evaluated under the generation's recorded configuration; cross-rate playback required (§15.3, PI-030). Adaptation mechanism **Open** (OI-002/SPIKE-03) |
@@ -1002,7 +1169,11 @@ checks; v19 files load into v20 code with all proxy fields defaulted to "no prox
   // output remains materially non-silent is an incomplete render and is NEVER published as a
   // generation (§15.2); tail-limit diagnostics live on the failed job, not on published metadata.
 },
-"proxyUpdateMode": "auto"            // "auto" | "paused" | "off" (§18.1)
+"proxyUpdateMode": "auto"            // "auto" | "onSave" | "manual" | "off" (§18.1, revision 5)
+// Proposed additions per §9.4 (names not final): host-observed identity metadata required across
+// load (e.g. the accepted revision pairing for the published generation), and stable/volatile
+// classification info only where safe and version-qualified (plugin identity+version-keyed;
+// re-probed per session — never trusted blindly across plugin updates).
 ```
 
 ### 12.3 Rules
@@ -1016,6 +1187,12 @@ checks; v19 files load into v20 code with all proxy fields defaulted to "no prox
   current device rate (PI-030): the comparison asks "does this generation still represent the
   current musical content, under its own render configuration?" — an engine-rate difference alone
   therefore never produces Stale.
+* **Plugin-state component (revision 5, §9.4.2):** the expected fingerprint's state component is
+  the host-managed revision / persisted save-pairing — **never a freshly captured raw blob hash**.
+  At load, the persisted proxy↔saved-state pairing restores validity by construction; after edits,
+  currency follows the revision compare. Freshly captured bytes MAY only *rescue* an unnecessary
+  re-render for a byte-stable-classified plugin at host-observable quiescence (positive equality
+  evidence, §9.4.3); byte inequality never demotes or proves anything.
 * Missing/corrupt referenced file at load ⇒ status degradation, project loads (PI-025).
 * Musical undo continues to strip plugin blobs (Verified) and MUST also strip proxy metadata from
   undo comparison where it would create meaningless entries (§18.3).
@@ -1039,7 +1216,7 @@ Two distinct machines (Proposed). The destination's *proxy status* is derived, u
 | Status | Meaning |
 |---|---|
 | Absent / not requested | No proxy metadata/asset (or mode Off with none existing). |
-| Current / published | Published generation's `generationId` equals the expected fingerprint built under that generation's recorded render configuration (§12.3). A generation whose recorded render rate differs from the current engine rate is still **Current** — it plays through the derived playback representation (PI-030); the mismatch never demotes the status. |
+| Current / published | Published generation's `generationId` equals the expected fingerprint built under that generation's recorded render configuration (§12.3; plugin-state component via the host-managed revision, never a fresh blob hash — §9.4.2). "Current" is host-observed for the plugin-state part: no DAL-observable render-relevant change since the accepted snapshot/revision (§9.4.5; for volatile plugins the UI exposes this explanation). A generation whose recorded render rate differs from the current engine rate is still **Current** — it plays through the derived playback representation (PI-030); the mismatch never demotes the status. |
 | Stale | A retained generation exists but the *musical* content no longer matches (PI-007). Never caused by an engine-rate difference alone. |
 | Rendering | A job for the current fingerprint is queued/preparing/rendering/finalizing. |
 | Failed | The most recent job for the current fingerprint failed (including a diagnosed incomplete render at the tail cap, §15.2). The previous published generation (if any) is retained — never deleted or overwritten — and its own status remains a pure fingerprint verdict: typically Stale (the edit that triggered the job made it non-matching, so it is never selected for playback in P1), but still Current and playable if the fingerprint still matches (e.g. a failed native-rate quality refresh, or the triggering edit was undone). The failure is surfaced as detail alongside that verdict. |
@@ -1064,7 +1241,7 @@ states: Published, Cancelled, Obsolete, Failed.
 
 | Race | Required behavior |
 |---|---|
-| Edit during rendering | New fingerprint ⇒ running job becomes Obsolete at its next check; a new job is queued (Auto) or the track shows Stale (Paused). The obsolete job MUST NOT publish (PI-028). |
+| Edit during rendering | New fingerprint/revision ⇒ running job becomes Obsolete at its next check. In Auto mode the edit restarts the destination's five-minute idle interval before a new job may start; in On Save the next explicit Save queues it; in Manual/Off the track simply shows Stale (§18.1). The obsolete job MUST NOT publish (PI-028; the currency check compares revisions, never a fresh blob hash — §9.4.2). |
 | Newer job supersedes older | Older job cancelled cooperatively; only the job whose fingerprint matches current content may publish. |
 | Track deletion | Jobs for that destination cancelled; assets retired per cleanup policy (§16.5); engine-side removal follows existing publish-before-destroy + callback-drain discipline (Verified, Audit §3.2). |
 | Primary removal (descriptor cleared) | Jobs cancelled; existing generations retained (they still represent the last authoritative sound — status Stale); no new renders until a Primary exists. |
@@ -1116,7 +1293,10 @@ progress and speed reporting; cooperative cancellation/obsolescence checks at sa
 boundaries; pausing during recording; optional pausing during playback if required to avoid
 glitches; safe project close and application shutdown. Faster-than-realtime rendering is
 normal-case but **not guaranteed**. **Recommended:** one worker, concurrency 1 (PID-004);
-pause-during-playback defaults ON until SPIKE-02 measures contention.
+pause-during-playback MAY default ON until SPIKE-02 measures contention — but this is purely a
+**resource-contention safeguard**, never a correctness requirement: background rendering with an
+already eligible snapshot is architecturally allowed during transport playback (§9.4.4), and the
+transport never needs to remain stopped throughout a render.
 
 ### 14.4 What is reused vs rejected from existing offline code (Verified basis)
 
@@ -1351,26 +1531,80 @@ Notes:
 
 ## 18. Save, autosave, undo, and dirty semantics
 
-### 18.1 Update modes (Locked)
+### 18.1 Update modes (Locked, revision 5)
 
-* **Auto (default — portable collaboration):** mark stale immediately after a render-relevant
-  change; debounce repeated edits (Recommended default: ~2 s quiet window, value tunable); queue
-  rendering when eligible (Primary available, not recording, mode allows).
-* **Paused/Manual:** continue accurate stale detection; do not start automatic renders; allow
-  explicit "Render now".
-* **Off:** do not create or update proxies automatically; preserve existing metadata and assets
-  safely (they simply age to Stale).
-* Storage (Recommended): per-destination `proxyUpdateMode` persisted at v20 (§12.2).
+> **Historical (superseded by revision 5):** earlier revisions defined three modes
+> (Auto / Paused(Manual) / Off) with a short ~2 s edit debounce before automatic rendering. That
+> model is replaced by the four selectable modes below; the short debounce no longer exists —
+> automatic rendering never begins a few seconds after an edit.
+
+Four selectable per-destination modes. In **every** mode, staleness detection remains active and
+a render-relevant change marks the destination proxy **Stale immediately** (the status verdict is
+never delayed by the idle timer — only the start of rendering is).
+
+**Auto after idle (recommended default for portable-collaboration projects; selectable, not
+mandatory):**
+
+* A render-relevant change marks the destination proxy Stale immediately **and starts or resets a
+  per-destination five-minute idle timer**.
+* No render begins until that destination has received **no new render-relevant edit for five
+  continuous minutes**. The P1 delay is **fixed at five minutes**; future versions MAY make it
+  configurable.
+* Activity on unrelated tracks does **not** reset the destination's timer.
+* Recording pauses eligibility and render work per the existing scheduler policy (PI-013).
+* Playback does not prohibit background rendering once an eligible snapshot exists (§9.4.4).
+* A new relevant edit during rendering makes the running job obsolete (PI-028) and starts a new
+  five-minute interval.
+* Only one queued or running job may exist per destination; multiple destinations becoming
+  eligible are serialized through the single P1 render worker (PID-004).
+* An explicit Save does **not** force every stale Auto destination to render: it queues only work
+  already eligible under the Auto policy and creates no duplicate jobs.
+* Autosave **never** starts proxy rendering.
+
+**On Save:**
+
+* Render-relevant edits mark proxies Stale immediately; **no idle timer starts rendering**.
+* An explicit user Save queues the latest stale eligible destinations.
+* Autosave does not queue rendering.
+* Save remains non-blocking (PI-023); duplicate or superseded work is coalesced.
+
+**Manual:**
+
+* Rendering starts only from **Update Proxy**, **Retry**, or **Prepare Portable Project**.
+* Staleness detection remains active.
+
+**Off:**
+
+* No normal automatic or manual background proxy maintenance occurs.
+* Existing metadata and assets remain safe (they simply age to Stale).
+* `Prepare Portable Project` MAY offer an explicit one-shot render without changing the persisted
+  mode (§16.6).
+
+**Prepare Portable Project** overrides ordinary update modes after explicit user confirmation: it
+captures current eligible state, renders every required stale or missing proxy, waits responsively,
+reports blocking failures and cancellations, and never packages a project while pretending
+stale/missing proxies are current (§16.6).
+
+* Storage (Recommended): per-destination `proxyUpdateMode` persisted at v20 (§12.2), values
+  `"auto" | "onSave" | "manual" | "off"`.
 
 ### 18.2 Save and autosave (Locked)
 
 Normal Save MUST: safely capture required current project/plugin state (fresh state capture already
-happens at save — Verified §4.5 — and R2 keeps it authoritative); save project data; ensure
-eligible stale work is queued; and MUST NOT wait for rendering (PI-023). Autosave (Verified:
-message-thread timer, atomic writer) behaves identically and MUST NOT trigger renders by itself
-beyond queueing already-eligible work. The explicit `Prepare Portable Project` operation (P1J,
-§16.6) is the only flow that waits for proxies — and even it waits cancellably with responsive
-progress, never by blocking the message thread.
+happens at save — Verified §4.5 — and R2 keeps it authoritative); save project data; queue render
+work **per the destination's update mode** (§18.1); and MUST NOT wait for rendering (PI-023).
+Mode-specific Save behavior:
+
+* **Auto:** Save queues only work already eligible under the Auto idle policy — it does not force
+  every stale Auto destination to render and creates no duplicate jobs (no render storm on Save).
+* **On Save:** an explicit user Save queues the latest stale eligible destinations (this is the
+  mode's trigger).
+* **Manual / Off:** Save queues no proxy rendering.
+
+**Autosave never starts proxy rendering in any mode** (Verified mechanism: message-thread timer,
+atomic writer). The explicit `Prepare Portable Project` operation (P1J, §16.6) is the only flow
+that waits for proxies — and even it waits cancellably with responsive progress, never by blocking
+the message thread.
 
 ### 18.3 Undo and dirty (Locked classification; see §19 of task → §20 state classes)
 
@@ -1378,6 +1612,8 @@ progress, never by blocking the message thread.
   unchanged.
 * Proxy progress, queue state, job states, and automatic source selection are non-undoable
   background state and MUST NOT create undo entries (PI-027).
+* The remaining Auto idle countdown and render progress are runtime-only (§20) and MUST NOT dirty
+  the project or create undo steps.
 * Proxy metadata updates on publication (Recommended): dirty the project (the file references
   changed and should be saved) but are excluded from musical-undo comparison — consistent with the
   existing undo blob-stripping precedent (Verified §12.3).
@@ -1395,7 +1631,12 @@ progress, never by blocking the message thread.
   coordinator/controller runtime status — Verified locations, Audit §9).
 * Render progress and speed reporting for active jobs (PI-013 capabilities), plus queue length
   when multiple destinations are pending.
-* Explicit "Render now" (Paused mode) and mode selection Auto/Paused/Off per destination.
+* Explicit "Update Proxy"/"Retry" actions (Manual mode; Retry after failure in any maintaining
+  mode) and mode selection Auto after idle / On Save / Manual / Off per destination (§18.1).
+* For a volatile-classified plugin (§9.4.3), the compact status MAY read "Proxy current", but a
+  status detail, information affordance, or tooltip MUST explain that currency is based on
+  changes detected by DAL and that the plugin cannot provide fully verifiable state-change
+  information (§9.4.5). Volatile plugins are not restricted to Manual-only.
 * Source changes surface as a visible status change, never silently (PI-021).
 * Failure states (§20) present a reason (plugin failed to instantiate, tail limit reached —
   render incomplete, publication failed, state capture failed) and the action taken (previous
@@ -1416,15 +1657,16 @@ State classification (Locked, task §16):
 
 | Class | Contents |
 |---|---|
-| Project-persisted musical state | tracks, clips, notes, CC, routing, channels, descriptors, plugin state blobs, `pluginVersion`, `proxyUpdateMode` |
+| Project-persisted musical state | tracks, clips, notes, CC, routing, channels, descriptors, plugin state blobs, `pluginVersion` |
+| Project-persisted proxy state | selected update mode (`proxyUpdateMode`); proxy generation metadata (the v20 `proxy` object: references + policy versions); host-observed identity metadata required across load (accepted revision/save-pairing, §9.4.2); stable/volatile compatibility information **only where safe and version-qualified** (§9.4.3) |
 | External proxy media | generation WAV files under `InstrumentProxies/` |
-| Persisted proxy metadata | the v20 `proxy` object (references + policy versions) |
 | Runtime engine state | published playback views, source mode, render instances, worker queue |
+| Runtime-only proxy state | remaining Auto idle countdown; last-render-relevant-edit timestamps; queued/running job objects; render progress; temporary classification-probe state (§9.4.3) |
 | Runtime UI/view state | status model, progress display |
-| Derived/cache state | fingerprints (recomputable), staleness verdicts |
+| Derived/cache state | fingerprints (recomputable), Current/Stale/Failed verdicts, host-observed compatibility explanation (§9.4.5), queue eligibility |
 | Undoable | musical edits only |
-| Non-undoable background state | job states, progress, automatic source selection (PI-027) |
-| Project-dirty effects | musical edits (existing rules); publication metadata updates; mode changes — never job progress |
+| Non-undoable background state | job states, progress, automatic source selection, idle-timer state (PI-027) |
+| Project-dirty effects | musical edits (existing rules); publication metadata updates; mode changes — **never** job progress or the Auto idle countdown (§18.3: countdown and render progress MUST NOT dirty the project or create undo steps) |
 
 Trust rules:
 
@@ -1436,7 +1678,8 @@ Trust rules:
   while its fingerprint still matches current musical content; otherwise it is a Stale retained
   asset and is never selected for playback in P1. "Current" always means fingerprint-current under
   the generation's recorded render configuration — never merely "latest file on disk" or
-  "previously published".
+  "previously published" — and its plugin-state component is host-observed (§9.4.5), never an
+  absolute claim about unknowable internal plugin activity.
 * Stale is honest: the user always hears Primary, a current proxy (rate-adapted when needed),
   Secondary, or silence — never a stale proxy. A stale proxy is retained as an asset only; P1
   provides no manual "play stale proxy as current" override, and if Primary is missing with no
@@ -1466,24 +1709,36 @@ staleness (§12.3); persist plugin version at v20 (U1). *Alternatives:* sidecar 
 (rejected: second source of truth); live-version-only check (rejected: portable projects can't
 verify); binary hashing of plugin files (deferred). *Consequences:* schema bump to v20; fingerprint
 schema versioning forever. *Required validation:* SPIKE-01 (state blob stability/cost); T-05, T-06.
-*Blocking slice:* P1C (fields/serialization), P0/P1A (capture mechanism). *Status:* state-capture
-mechanism **Resolved (VB3-II-class evidence)** by human review 2026-09-05 on SPIKE-01's measured
-evidence (§9.2 SPIKE-01 findings; `docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`):
-fresh capture at checkpoints + generation counter bumped by hints + hash equality only as a
-positive "unchanged" proof; residual Opens: E2 (MIDI-learn), plugins beyond the two measured.
-Field set and serialization remain **Recommended**; field-set completeness relative to the
-boundary follows from Locked PI-019.
+*Blocking slice:* P1C (fields/serialization), P0/P1A (capture mechanism). *Status:*
+**Locked (reviewed) — hybrid authoritative-state and host-observed identity contract** (human
+review 2026-09-06, revision 5; contract text §9.4; evidence
+`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`, final measurement verdict PARTIAL
+PASS). Capture layer: fresh checkpoint capture on the message thread — Resolved on measured
+evidence. Identity layer: monotonic host-managed revision bumped by every DAL-observable
+render-relevant change + persisted save-pairing; raw blob bytes/hashes never as general validity
+identity; byte equality only as positive "unchanged" rescue for byte-stable-classified plugins at
+host-observable quiescence, with asymmetric misclassification risk and demote-only reclassification
+without a new probe (§9.4.3). The decision explicitly accepts the plugin API's fundamental
+observability boundary — DAL never claims to detect unknowable internal plugin changes.
+*Historical note:* revision 4 marked this "Resolved (PASS)" on 2026-09-05; that verdict was
+premature and is superseded. Documented compatibility limitations (non-blocking for P1): E2
+(MIDI-learn-class silent state), plugins beyond the two measured. Field set and serialization
+remain **Recommended**; field-set completeness relative to the boundary follows from Locked
+PI-019.
 
 **PID-002 (Audit D2) — Staleness signalling.**
 *Question:* Where fingerprints are compared (edit-time vs save-time vs render-enqueue-time) and the
 UI contract for "proxy stale". *Audit evidence:* §5.6 (only runtime revision counters +
 unsuitable dirty flag exist). *Recommended decision:* cheap runtime hints (controller
 `ChangeBroadcaster` / render-snapshot `revision`, R2 state hints) mark *candidate* staleness
-immediately; the authoritative verdict is a full fingerprint compare at debounce expiry and at
-enqueue; at load, one full compare per destination. UI shows Stale from the authoritative verdict
-(PI-022). *Alternatives:* full recompute on every edit (rejected: message-thread cost); save-time
-only (rejected: violates PI-020). *Consequences:* staleness may lag edits by the debounce window in
-Auto mode — accepted. *Required validation:* T-06, T-07, T-08. *Blocking slice:* P1C. *Status:*
+immediately; the authoritative verdict is a full fingerprint/revision compare promptly after the
+observed change (coalesced, message-thread-affordable) and at enqueue; at load, one full compare
+per destination (persisted save-pairing restores plugin-state validity by construction, §9.4.2).
+UI shows Stale from the authoritative verdict (PI-022); Stale is marked immediately in every
+update mode — the §18.1 Auto five-minute idle timer delays only the start of rendering, never the
+staleness verdict. *Alternatives:* full recompute on every edit (rejected: message-thread cost);
+save-time only (rejected: violates PI-020). *Consequences:* rendering (not staleness) lags edits
+by the Auto idle period — accepted by design (revision 5). *Required validation:* T-06, T-07, T-08. *Blocking slice:* P1C. *Status:*
 **Locked (reviewed)** — the signalling model defines required v1 behavior; hint-source
 implementation details remain Proposed until the APIs exist.
 
@@ -1690,8 +1945,10 @@ integration gates marked below.
 * **Rollback:** delete scaffolding; zero product risk.
 * **Completion gate:** human review of SPIKE-01 outcome selects the state-capture mechanism
   (PID-001 Open item resolved or explicitly re-scoped). **P1C MUST NOT complete before this gate.**
-  **Gate status: SPIKE-01 satisfied 2026-09-05** (PASS; mechanism selected, §9.2 SPIKE-01
-  findings). SPIKE-02 remains open and still gates P1D.
+  **Gate status: satisfied** — SPIKE-01 (2026-09-05) plus the corrective SPIKE-01B/SPIKE-01B-M
+  follow-up (final measurement verdict PARTIAL PASS) were reviewed 2026-09-06 and locked the §9.4
+  hybrid contract (the original 2026-09-05 PASS verdict is historical/superseded). SPIKE-02
+  remains open and still gates P1D.
 
 ### SPIKE-03 — Proxy playback I/O, memory budget, seeking, and resampling (blocks P1G)
 
@@ -1750,8 +2007,9 @@ integration gates marked below.
 * **Goal:** `midi_dependency::sourcesForDestination()` (R3), `ProxyRenderSnapshotBuilder` (R4),
   `ProxyFingerprintBuilder` (R5), staleness verdicts (PID-002) — all message-thread, no rendering.
 * **Included:** snapshot schema §10; fingerprint §11 incl. canonical serialization; state capture
-  per the SPIKE-01-selected mechanism (R2 first version); stale detection + debounce plumbing
-  (no queue yet — verdicts only).
+  and host-observed identity per the Locked §9.4 hybrid contract (R2 first version: revision
+  counter, bump sources, k-capture classification probe, save-pairing); stale detection plumbing
+  (no queue yet — verdicts only; the §18.1 idle timing belongs to P1H).
 * **Excluded:** render worker, assets, playback changes, UI beyond diagnostics.
 * **Expected files/components:** new `src/instruments/` or `src/app/` units for R2–R5; hooks in
   `InstrumentRuntimeCoordinator`.
@@ -1759,8 +2017,9 @@ integration gates marked below.
 * **Prerequisite decisions:** SPIKE-01 gate (P0/P1A); **ORD-1 landed** (§8.3 — separately reviewed
   stable-sort micro-change; the fingerprint cannot claim delivery parity before it); **TLD-1
   landed** (P1B); PID-002/PID-006/PID-007/PID-010 Locked (reviewed).
-* **Automated tests:** T-01, T-02, T-03, T-05, T-06, T-07, T-08 (deterministic selftests; Organ
-  Upper/Lower/Pedal fixture reused).
+* **Automated tests:** T-01, T-02, T-03, T-05, T-06, T-07, T-08, T-30 (deterministic selftests;
+  Organ Upper/Lower/Pedal fixture reused; T-30 covers the §9.4 revision/classification identity
+  behavior with synthetic state providers).
 * **Plugin-dependent/manual:** T-01 blob checks against a real VST3.
 * **Rollback:** feature is inert (no consumer yet); revert cleanly.
 * **Completion gate:** fingerprint repeatability + full stale-trigger matrix green; capture-sink
@@ -1772,17 +2031,21 @@ integration gates marked below.
   temp WAV, driven synchronously from a diagnostic/selftest entry point (no background queue).
 * **Included:** §14.2 steps 2–8 (foreground); latency metadata recording (§15.1); tail policy
   v1 (§15.2, provisional Open numbers under version tag); span rule (§15.6); render-config
-  policies (§15.3–15.5).
+  policies (§15.3–15.5); **the §9.4.4 isolated-instance lifecycle validation** (restore →
+  prepare → reset/flush where supported → deterministic MIDI/CC chase → complete render from
+  project start), including the fallback obligation: a plugin whose lifecycle cannot remove
+  performance-transient initial state gets deferred snapshot capture or an explicit compatibility
+  limitation.
 * **Excluded:** background thread, publication into the project, playback substitution, UI.
 * **Expected files/components:** new render units (likely `src/plugins/` or a new `src/render/`);
   diagnostics hook.
 * **Invariants protected:** PI-010, PI-011, PI-014, PI-016, PI-017.
 * **Prerequisite decisions:** SPIKE-02 results; PID-004 lifecycle; PID-005 latency (Locked) +
   provisional tail numbers.
-* **Automated tests:** T-04 (capture-sink MIDI equivalence), T-09 (live instance untouched);
-  Level-1 harness.
-* **Plugin-dependent/manual:** T-15 (latency equivalence), T-16 (tail completion) with VB3-II;
-  rendered-file listening check.
+* **Automated tests:** T-04 (capture-sink MIDI equivalence), T-09 (live instance untouched),
+  T-31 harness parts; Level-1 harness.
+* **Plugin-dependent/manual:** T-15 (latency equivalence), T-16 (tail completion), T-31
+  (§9.4.4 lifecycle validation) with VB3-II; rendered-file listening check.
 * **Rollback:** diagnostic-only entry point; remove hook.
 * **Completion gate:** rendered WAV of the Organ fixture is MIDI-equivalent at the capture sink
   and latency metadata matches the prepared instance's report.
@@ -1801,7 +2064,8 @@ integration gates marked below.
 * **Prerequisite decisions:** PID-004 (Recommended confirmed).
 * **Automated tests:** T-10 (audio thread never blocked — stability-invariant style), T-11
   (edit-during-render ⇒ obsolete), T-12 (obsolete publication rejection at the finalize step),
-  T-24 (shutdown/track-deletion races). **Integration gate:** relevant stability scenarios
+  T-24 (shutdown/track-deletion races), T-29 (single job per destination; serialization;
+  rendering during playback). **Integration gate:** relevant stability scenarios
   (Level 2: smoke + delete-loop) because a new thread touches engine-adjacent lifecycles.
 * **Plugin-dependent/manual:** long-render cancellation with a real plugin.
 * **Rollback:** queue is unconsumed by playback; disable enqueue.
@@ -1841,7 +2105,8 @@ integration gates marked below.
   SPIKE-03 gate** (blocking).
 * **Automated tests:** T-19 (source-selection matrix, non-Secondary rows), T-22 (offline mixdown
   through selected source), T-08 (post-boundary changes don't re-render), T-25 (cross-rate
-  playback), T-26 (bounded playback I/O). **Integration gate:** Level 2 stability (smoke,
+  playback), T-26 (bounded playback I/O), T-29 (rendering during playback with an eligible
+  snapshot — P1G part). **Integration gate:** Level 2 stability (smoke,
   delete-loop, mixdown) — audio-callback path touched.
 * **Plugin-dependent/manual:** unload Primary mid-project; verify proxy playback through
   inserts/fader/pan; T-15 timing parity live↔proxy; switch device sample rate with Primary missing
@@ -1856,16 +2121,21 @@ integration gates marked below.
 * **Goal:** update modes (§18.1), Save/autosave queue-not-wait (§18.2), undo/dirty classification
   (§18.3), Save As asset copy (§16.6), portable-validation verdict logic
   (`PortableProjectValidator` verdicts — consumed by the P1J packaging flow).
-* **Included:** debounce; mode persistence; close/shutdown ordering with the queue.
+* **Included:** the four §18.1 update modes incl. the per-destination five-minute Auto idle timer
+  (runtime-only countdown, §20); mode persistence; mode-specific Save queueing (§18.2);
+  close/shutdown ordering with the queue.
 * **Excluded:** the `Prepare Portable Project` packaging flow itself (P1J), Secondary.
 * **Expected files/components:** coordinator, `ProjectIoCoordinator`, autosave timer touchpoints.
 * **Invariants protected:** PI-023, PI-027, PI-029.
 * **Prerequisite decisions:** none open (modes are Locked).
-* **Automated tests:** T-20 (Save/autosave behavior), T-21 (backward-compat load), T-23 (portable
+* **Automated tests:** T-20 (mode-specific Save/autosave behavior incl. no-render-storm and
+  no-dirty/no-undo assertions), T-11 (Auto interval restart), T-28 (five-minute idle-timer
+  semantics, mock clock), T-29 (P1H parts), T-21 (backward-compat load), T-23 (portable
   validation verdicts), T-24 (close races). Level 2: autosave/recover scenarios.
-* **Plugin-dependent/manual:** mode-switch walkthrough.
+* **Plugin-dependent/manual:** mode-switch walkthrough across all four modes.
 * **Rollback:** modes default Auto; feature flags not used — revert slice.
-* **Completion gate:** Save latency unchanged (no waiting), mode semantics test-proven.
+* **Completion gate:** Save latency unchanged (no waiting), four-mode semantics incl. the fixed
+  five-minute Auto idle policy test-proven.
 
 ### P1I — Status UI, failure presentation, and end-to-end verification
 
@@ -1913,15 +2183,15 @@ integration gates marked below.
 * **Completion gate:** T-27 green; a real cross-machine (or cross-rate simulated) package
   walkthrough recorded; §24 packaging criteria checked.
 
-### Recommended first implementation slice
+### Recommended next implementation slice
 
-**P0/P1A — specifically SPIKE-01 (authoritative state capture).** It is the earliest blocking gate
-(PID-001 Open item) on which fingerprint correctness (P1C) and everything downstream depend, it
-changes no production behavior, and its evidence lets the human review lock the largest remaining
-architectural unknown. SPIKE-01 remains the recommended next Cloud Agent task after
-canonicalization. (SPIKE-03 is the other evidence gate, but it blocks only P1G and can
-run later, in parallel with P1B–P1F.) Per the task boundary, neither spike's implementation prompt
-is written here and implementation has **not** started.
+*Historical:* SPIKE-01 was the recommended first slice; it and its corrective SPIKE-01B/SPIKE-01B-M
+follow-up are now **completed and reviewed** (revision 5; PID-001 Locked, §9.4). The SPIKE-01
+diagnostic scaffolding remains in the tree pending the cleanup recorded in the evidence report
+(§28.8) and is not removed by this revision. **The recommended next slice is SPIKE-02** (isolated
+render instance; gates P1D and PID-005's tail numbers), with ORD-1 and TLD-1/P1B as the earliest
+production micro-changes on the P1C path. (SPIKE-03 blocks only P1G and can run later, in parallel
+with P1B–P1F.) Implementation of product proxy behavior has **not** started.
 
 ## 23. Verification strategy
 
@@ -1943,7 +2213,7 @@ stability regression runs only at the P1E/P1G/P1I/P1J integration gates (per
 | T-08 | Post-boundary changes cause no re-render at playback level | deterministic | P1G |
 | T-09 | Live instance never used by rendering: instrumented proof that render jobs touch only their own instance (live host untouched during render) | deterministic harness + plugin-dependent | P1D |
 | T-10 | Audio thread never blocked by render activity (stability-invariant style measurement during renders) | deterministic + stability scenario | P1E |
-| T-11 | Edit-during-render ⇒ job obsolete at next boundary; new job queued (Auto) | deterministic | P1E |
+| T-11 | Edit-during-render ⇒ job obsolete at next boundary; in Auto mode the edit restarts the destination's five-minute idle interval before any new job may start (§18.1) | deterministic | P1E, P1H |
 | T-12 | Obsolete job publication rejection: stale-fingerprint job cannot publish (PI-028) | deterministic | P1E, P1F |
 | T-13 | Retention of the previous published generation on render/publication failure (PI-007/PI-024), covering **both** status cases: (1) failure while the previous generation still matches current musical content (e.g. a failed native-rate quality refresh, or the triggering edit was undone) ⇒ it remains Current and playable; (2) failure after a render-relevant edit ⇒ it is retained as Stale and never selected for playback in P1 | deterministic | P1F |
 | T-14 | Windows-safe publication: publish-new-name with an open handle on the old generation; retire without in-place replace | deterministic (Windows semantics) | P1F |
@@ -1952,14 +2222,18 @@ stability regression runs only at the P1E/P1G/P1I/P1J integration gates (per
 | T-17 | Sample-rate identity: metadata records the render rate; generation validity is evaluated under the generation's recorded configuration; an engine-rate difference alone never produces Stale or silence (§15.3, PI-030) | deterministic + manual | P1C, P1G |
 | T-18 | Missing/corrupt proxy recovery: project loads, status degrades, no crash (PI-025) | deterministic | P1F |
 | T-19 | Source-selection matrix of §17 (v1 rows; Secondary rows added in P2) | deterministic | P1G, P1I |
-| T-20 | Save and autosave: fresh state captured, eligible work queued, Save never waits (latency assertion) | deterministic | P1H |
+| T-20 | Save and autosave per update mode (§18.1/§18.2): fresh state captured; Save never waits (latency assertion); explicit Save in Auto queues only already-eligible work — **no render storm** and no duplicate jobs; explicit Save in On Save queues the latest stale eligible destinations; Manual/Off queue nothing; **autosave never starts proxy rendering in any mode**; Auto idle countdown and render progress create **no** dirty state and **no** undo steps (PI-027, §18.3) | deterministic | P1H |
 | T-21 | Backward-compatible loading and timeline-domain integrity: v19 projects load with proxy fields defaulted and the timeline reference rate initialized from stored `deviceSampleRateAtSave`; v20 round-trip; saving under a different engine rate neither re-stamps the timeline reference nor changes stored sample-domain integers; persisted-domain → engine/render conversions preserve wall-clock positions; the persisted domain is consumed by the relevant runtime/proxy-snapshot boundaries (not stored-but-unused); remaining unconverted sample-domain consumers are enumerated and assigned to a blocking slice before P1J cross-rate acceptance (§10.1) | deterministic | P1B, P1H |
 | T-22 | Offline mixdown renders through the selected source (Primary or proxy) with identical downstream processing | deterministic + plugin-dependent | P1G |
 | T-23 | Portable-project validation verdicts: current/stale/failed/mode-Off combinations | deterministic | P1H |
 | T-24 | Shutdown and track-deletion races: close/shutdown/delete during queued and running jobs; no leaks, no publications after removal | deterministic + stability scenario | P1E, P1H |
 | T-25 | Cross-rate proxy playback: a current generation rendered at rate A plays at engine rate B (Primary missing), via a derived playback representation prepared off the audio thread; engine-rate change rebuilds only the derived representation; the authoritative asset is unmodified; timeline alignment correct (PI-030) | deterministic + plugin-dependent/manual | P1G |
 | T-26 | Bounded proxy playback I/O (per the SPIKE-03-selected mechanism): memory stays within the explicit budget with many simultaneous long proxies; seek/loop/source-switch discontinuities are glitch-defined and audio-thread-safe; missing/corrupt file mid-playback degrades without crash; generation retirement with open handles is Windows-safe (PI-031) | deterministic + stability scenario | P1G |
-| T-27 | `Prepare Portable Project` end-to-end: happy path packages project + media + required current generations only after validation; mode-Off/current acceptable; mode-Off/stale, missing-Primary, failed-render are reported blockers with no package published; cancellation/failure leaves no partial package; the produced package opens and plays on a different rate without Primary (§16.6) | deterministic + manual cross-machine | P1J |
+| T-27 | `Prepare Portable Project` end-to-end: happy path packages project + media + required current generations only after validation; mode-Off/current acceptable; mode-Off/stale, missing-Primary, failed-render are reported blockers with no package published; cancellation/failure leaves no partial package; the produced package opens and plays on a different rate without Primary (§16.6); **the operation correctly overrides all four §18.1 update modes** (renders required stale/missing proxies in Auto/On Save/Manual/Off after explicit confirmation) without changing any persisted mode | deterministic + manual cross-machine | P1J |
+| T-28 | Auto idle-timer semantics (§18.1): the five-minute timer starts on the first render-relevant edit; subsequent relevant edits reset **only that destination's** timer; unrelated-track edits do not reset it; no render starts before five continuous idle minutes; recording pauses eligibility and render work; timer state is runtime-only and survives nothing it shouldn't (no persistence, no dirty) | deterministic (mock clock) | P1H |
+| T-29 | Scheduler discipline: at most one queued-or-running job per destination; multiple eligible destinations serialize through the single P1 worker; background rendering proceeds during transport playback once an eligible snapshot exists (§9.4.4) with no audio-thread impact (extends T-10) | deterministic + stability scenario | P1E, P1G, P1H |
+| T-30 | Hybrid identity contract (§9.4): publication/obsolete checks compare host-managed revisions and **never a freshly captured raw blob hash** (volatile-classified plugin publishes with churning bytes); byte-equality rescue cancels an unnecessary re-render only for a byte-stable-classified plugin at host-observable quiescence; repeated qualifying at-rest inequality demotes stable → volatile; volatile → stable promotion requires a new qualifying probe; persisted proxy↔saved-state pairing restores load-time validity with no byte comparison | deterministic (synthetic state providers) | P1C |
+| T-31 | P1D isolated-instance lifecycle validation (§9.4.4): restore → prepare → reset/flush where supported → deterministic MIDI/CC chase → complete render from project start; renders from equivalent snapshots are deterministic per plugin-class evidence; a plugin whose lifecycle cannot remove performance-transient initial state is deferred to an eligible capture boundary or flagged with a compatibility limitation | plugin-dependent + deterministic harness parts | P1D |
 
 ## 24. First-version acceptance criteria
 
@@ -1970,8 +2244,11 @@ Proxy v1 (P1 complete) is accepted when all of the following hold:
    inserts/fader/pan/bus/master path — with no added tracks or mixer channels (PI-001/PI-002).
 2. Editing any note, CC, channel, routing, or plugin parameter of a destination or its routed
    sources marks that destination's proxy stale; nothing else does (T-06/T-07 matrix).
-3. With Primary installed, Auto mode re-renders in the background without audio-thread impact,
-   and an edit mid-render supersedes the job without a stale publication (T-10/T-11/T-12).
+3. With Primary installed, Auto mode re-renders in the background — after the destination's fixed
+   five-minute idle period (§18.1) — without audio-thread impact, including during transport
+   playback once an eligible snapshot exists (§9.4.4); an edit mid-render supersedes the job
+   without a stale publication and restarts the idle interval (T-10/T-11/T-12/T-28/T-29).
+   Explicit Save produces no render storm and autosave never starts rendering (T-20).
 4. A failed render retains the previous published generation and reports the failure. The retained
    generation remains playable only when it is still Current; otherwise it remains a Stale
    retained asset and is never selected for playback in P1 (T-13, both cases).
@@ -1993,7 +2270,11 @@ Proxy v1 (P1 complete) is accepted when all of the following hold:
     many simultaneous long proxies (PI-031; T-26).
 13. `Prepare Portable Project` produces a validated portable package or an explicit blocker
     report; cancellation/failure leaves no partial package; the package plays cross-machine and
-    cross-rate without Primary (PID-011; T-27).
+    cross-rate without Primary (PID-011; T-27), and it correctly overrides all four update modes
+    without changing any persisted mode (T-27).
+14. Proxy validity/publication never compares freshly captured raw plugin-state bytes; volatile
+    plugins publish through the same revision-based path with full proxy support, and the UI
+    exposes the host-observed currency explanation for them (§9.4; T-30).
 
 ## 25. Evidence-gated decisions, deferred design, and traceability
 
@@ -2003,12 +2284,14 @@ Exactly the items in the top-of-document table, all evidence-gated or deliberate
 no product-behavior decision remains open: **PID-005** (tail numeric values — SPIKE-02-gated),
 **OI-002** (bounded playback I/O and rate-adaptation mechanism — SPIKE-03-gated, blocks P1G),
 **PID-009** (Secondary persistence shape — reviewed, deliberately deferred to P2, non-blocking
-for P1). Residual PID-001 Opens (non-blocking, documented in §9.2 SPIKE-01 findings): E2
-(MIDI-learn) and plugins beyond the two measured. Resolved by the 2026-09-03 human review: OI-001
+for P1). PID-001 compatibility limitations (non-blocking, documented in §9.2/§9.4): E2
+(MIDI-learn-class silent state) and plugins beyond the two measured — these are accepted
+observability limitations, not open decisions. Resolved by the 2026-09-03 human review: OI-001
 (→ Locked cross-rate playback requirement), PID-008 (→ Locked first-P2 audition split), PID-011
-(→ Locked P1 packaging, P1J), and PID-002/003/004/006/007/010 (→ Locked v1 behavior). Resolved by
-the 2026-09-05 human review: **PID-001** state-capture mechanism (→ SPIKE-01 PASS; fresh capture
-at checkpoints + generation counter + hash-equality-as-positive-proof; §9.2).
+(→ Locked P1 packaging, P1J), and PID-002/003/004/006/007/010 (→ Locked v1 behavior). The
+2026-09-05 review's PID-001 resolution ("SPIKE-01 PASS") was premature (historical); the final
+status is set by the 2026-09-06 review (revision 5): **PID-001 → Locked (reviewed) — hybrid
+authoritative-state and host-observed identity contract** (§9.4; evidence verdict PARTIAL PASS).
 
 ### 25.2 Traceability: invariants → slices → tests
 
@@ -2021,18 +2304,18 @@ at checkpoints + generation counter + hash-equality-as-positive-proof; §9.2).
 | PI-008 | P1C, P1G | T-07, T-08 |
 | PI-009 | P1C | T-02, T-06 |
 | PI-010 | P1D | T-04, T-16 |
-| PI-011 | P0/P1A, P1D | T-09 |
-| PI-012, PI-013 | P1E | T-10, T-11, T-24 |
+| PI-011 | P0/P1A, P1D | T-09, T-31 |
+| PI-012, PI-013 | P1E | T-10, T-11, T-24, T-29 |
 | PI-014, PI-015 | P1D, P1G | T-15 |
 | PI-016 | P1D | T-16 |
 | PI-017 | P1D, P1E | T-09, T-10 |
 | PI-018, PI-019 | P1C | T-05, T-06, T-07 |
-| PI-020 | P0/P1A, P1C | T-01 |
+| PI-020 | P0/P1A, P1C | T-01, T-30 |
 | PI-021, PI-022 | P1G, P1I | T-19 |
-| PI-023 | P1H, P1J | T-20, T-27 |
+| PI-023 | P1H, P1J | T-20, T-27, T-28 |
 | PI-024, PI-025, PI-026 | P1F, P1H, P1J | T-13, T-14, T-18, T-23, T-27 |
 | PI-027 | P1H | T-20 (undo/dirty assertions) |
-| PI-028 | P1E, P1F | T-12 |
+| PI-028 | P1E, P1F | T-12, T-30 |
 | PI-029 | all (scope discipline) | slice exclusion lists (§22) |
 | PI-030 | P1G, P1J | T-17, T-25, T-27 |
 | PI-031 | SPIKE-03, P1G | T-26 |
@@ -2093,3 +2376,46 @@ at checkpoints + generation counter + hash-equality-as-positive-proof; §9.2).
 * All proposed types/APIs/folders are marked Proposed (§6, §7.3, §10, §12, §16). ✔
 * Current-code claims cite the Audit and/or re-verified sources (§4, §7, §8, §14, §16). ✔
 * No implementation was performed for this document. ✔
+
+### 25.4 Quality-gate cross-check (performed for revision 5, 2026-09-06)
+
+Contradiction searches performed against the revised text; every operative statement now agrees
+with the reviewed SPIKE-01B evidence, and superseded statements are explicitly marked historical:
+
+* No operative statement implies automatic rendering begins a few seconds after an edit, or that
+  every edit immediately starts a render: the short ~2 s debounce is marked historical in §18.1;
+  Auto rendering starts only after the fixed five-minute per-destination idle period, while
+  staleness is still marked immediately (§18.1, PID-002, T-28). ✔
+* No statement says Save always renders all stale proxies: in Auto, Save queues only
+  already-eligible work with no duplicate jobs (no render storm); On Save queues the latest stale
+  eligible destinations; Manual/Off queue nothing (§18.1, §18.2, T-20). ✔
+* No statement lets autosave start proxy rendering — autosave never renders, in any mode
+  (§18.1, §18.2, T-20). ✔
+* No statement restricts volatile plugins to Manual-only: volatile plugins retain normal proxy
+  support including Auto (§9.4.5, §19). ✔
+* No operative statement lets raw blob hashes determine currency or publication: publication and
+  obsolete-job checks compare host-managed revisions (§9.4.2, F2 note §11.1, §12.3, §13.3, T-30);
+  byte equality survives only as positive "unchanged" rescue for byte-stable-classified plugins at
+  host-observable quiescence, and byte inequality proves nothing. ✔
+* No statement requires the transport to stop throughout rendering: background rendering MAY run
+  concurrently with playback on an isolated instance (§9.4.4, §14.3, T-29); the SPIKE-02-gated
+  pause-during-playback default is explicitly a resource-contention safeguard, never a correctness
+  requirement (§14.3). ✔
+* No statement claims capture during active destination MIDI/CC is proven clean: it is explicitly
+  not proven to provide clean project-start initial conditions, and the P1D lifecycle validation
+  (restore → prepare → reset/flush → deterministic chase → render from start) is the gate, with a
+  compatibility-limitation fallback (§9.4.4, T-31). ✔
+* No statement treats host-observable quiescence or notification silence as proof of internal
+  plugin rest (§3 terminology, §9.2 findings item 4, §9.4.4, §9.4.5). ✔
+* PID-001 is neither wholly Open nor absolutely solved: it is **Locked (reviewed)** by explicitly
+  accepting the observability boundary, with E2/MIDI-learn and broader plugin coverage as
+  documented, non-blocking compatibility limitations (header, gate table, §9.2, §9.4, §21,
+  §25.1). Revision 4's premature "Resolved (PASS)" wording is retained only as explicitly marked
+  historical text. ✔
+* State classification: update mode and required host-observed identity metadata are
+  project-persisted; the Auto countdown, last-edit timestamps, job objects, progress, and probe
+  state are runtime-only; Current/Stale/Failed, the host-observed compatibility explanation, and
+  queue eligibility are derived; countdown and progress never dirty the project or create undo
+  steps (§18.3, §20, T-20, T-28). ✔
+* No Proposed API was promoted to Existing by this revision; new §9.4/§18.1 mechanisms remain
+  Proposed until repository evidence confirms them. ✔
