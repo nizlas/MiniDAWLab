@@ -41,13 +41,18 @@
 // docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md. Removable with the spike.
 #include "instruments/ProxyOfflineSequencer.h"
 #include "instruments/ProxyRenderExecutor.h"
+#include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderTypes.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include <atomic>
 #include <cstdio>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -3251,6 +3256,697 @@ namespace
     }
 } // namespace
 
+//==============================================================================
+// P1E — ProxyRenderScheduler (background queue, coalescing, generations,
+// currency, recording pause, lifecycle races). The tests ARE the message
+// thread: the scheduler's poster feeds a manual pump the test drains, so every
+// race is driven deterministically — no timing luck (fake renders block on
+// explicit events; the worker thread is the real one).
+//==============================================================================
+namespace
+{
+    using proxy_render::ProxyDestinationState;
+    using proxy_render::ProxyJobPhase;
+    using proxy_render::ProxyRenderScheduler;
+
+    /// Thread-safe manual message pump. post() may be called from the worker.
+    struct ManualPump
+    {
+        std::mutex m;
+        std::deque<std::function<void()>> q;
+
+        void post(std::function<void()> f)
+        {
+            const std::lock_guard<std::mutex> lock(m);
+            q.push_back(std::move(f));
+        }
+
+        bool drainOne()
+        {
+            std::function<void()> f;
+            {
+                const std::lock_guard<std::mutex> lock(m);
+                if (q.empty())
+                {
+                    return false;
+                }
+                f = std::move(q.front());
+                q.pop_front();
+            }
+            f();
+            return true;
+        }
+
+        /// Pump until `done()` or timeout. Returns done().
+        bool pumpUntil(const std::function<bool()>& done, const int timeoutMs = 5000)
+        {
+            const double deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
+            while (!done())
+            {
+                if (!drainOne())
+                {
+                    juce::Thread::sleep(2);
+                }
+                if (juce::Time::getMillisecondCounterHiRes() > deadline)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    /// Controllable fake engine: per-destination identity table, blocking render,
+    /// full call recording. All message-thread methods assert the calling thread.
+    struct FakeSchedulerEngine final : proxy_render::ProxyRenderJobEngine
+    {
+        struct Dest
+        {
+            bool exists = true;
+            juce::String fp;
+            std::uint64_t rev = 1;
+            juce::String published; ///< generationId of "persisted metadata"
+        };
+
+        std::mutex m;
+        std::map<TrackId, Dest> dests;
+
+        // Controls.
+        std::atomic<bool> holdRender{ false };   ///< render blocks until released/cancelled
+        juce::WaitableEvent releaseRender{ true }; ///< manual-reset: releases every held render
+        std::atomic<bool> renderShouldFail{ false };
+        std::atomic<bool> publishShouldFail{ false };
+        std::atomic<bool> makeTempFile{ true };  ///< successful renders produce a real temp file
+        std::atomic<bool> prepareShouldFail{ false };
+
+        // Records.
+        juce::Thread::ThreadID messageThreadId{};
+        std::vector<TrackId> renderOrder;        // guarded by m
+        std::atomic<int> captureCount{ 0 };
+        std::atomic<int> prepareCount{ 0 };
+        std::atomic<int> publishCount{ 0 };
+        std::atomic<int> preparedAlive{ 0 };
+        std::atomic<std::int64_t> renderProgress{ 0 }; ///< gate-loop iterations
+        juce::WaitableEvent renderStarted;
+        juce::Thread::ThreadID lastRenderThread{};
+        juce::Thread::ThreadID lastTeardownThread{};
+        std::vector<juce::String> publishedFingerprints; // guarded by m
+
+        void expectMessageThread(const char* what)
+        {
+            expect(juce::Thread::getCurrentThreadId() == messageThreadId,
+                   std::string("p1e: engine '") + what + "' runs on the message thread");
+        }
+
+        proxy_render::ProxyCurrentIdentity currentIdentity(TrackId t) override
+        {
+            expectMessageThread("currentIdentity");
+            const std::lock_guard<std::mutex> lock(m);
+            proxy_render::ProxyCurrentIdentity id;
+            if (const auto it = dests.find(t); it != dests.end() && it->second.exists)
+            {
+                id.destinationExists = true;
+                id.expectedFingerprint = it->second.fp;
+                id.primarySemanticRevision = it->second.rev;
+            }
+            return id;
+        }
+
+        struct Captured final : proxy_render::ProxyCapturedRequest
+        {
+            TrackId dest = kInvalidTrackId;
+        };
+
+        std::unique_ptr<proxy_render::ProxyCapturedRequest>
+            captureRequest(TrackId t, juce::String& err) override
+        {
+            expectMessageThread("captureRequest");
+            ++captureCount;
+            const std::lock_guard<std::mutex> lock(m);
+            const auto it = dests.find(t);
+            if (it == dests.end() || !it->second.exists)
+            {
+                err = "no destination";
+                return nullptr;
+            }
+            auto c = std::make_unique<Captured>();
+            c->dest = t;
+            c->expectedFingerprint = it->second.fp;
+            c->primarySemanticRevision = it->second.rev;
+            return c;
+        }
+
+        struct Prepared final : proxy_render::ProxyPreparedJob
+        {
+            FakeSchedulerEngine& e;
+            TrackId dest;
+            juce::String fp;
+            std::uint64_t rev;
+
+            Prepared(FakeSchedulerEngine& eng, TrackId d, juce::String f, std::uint64_t r)
+                : e(eng), dest(d), fp(std::move(f)), rev(r)
+            {
+                ++e.preparedAlive;
+            }
+            ~Prepared() override
+            {
+                --e.preparedAlive;
+                e.lastTeardownThread = juce::Thread::getCurrentThreadId();
+            }
+
+            proxy_render::ProxyRenderResult
+                render(const proxy_render::ProxyRenderCancellationToken& token,
+                       const std::function<void()>& waitWhilePaused) override
+            {
+                e.lastRenderThread = juce::Thread::getCurrentThreadId();
+                {
+                    const std::lock_guard<std::mutex> lock(e.m);
+                    e.renderOrder.push_back(dest);
+                }
+                e.renderStarted.signal();
+                proxy_render::ProxyRenderResult r;
+                r.expectedFingerprint = fp;
+                r.primarySemanticRevision = rev;
+                r.renderSampleRate = 48000.0;
+                r.blockSize = 512;
+                // Block-boundary loop: pause gate + cancellation checks, exactly
+                // like the production executor's per-block seam.
+                while (e.holdRender.load())
+                {
+                    waitWhilePaused();
+                    ++e.renderProgress;
+                    if (token.isCancelled())
+                    {
+                        r.status = proxy_render::ProxyRenderStatus::Cancelled;
+                        r.message = "cancelled at block boundary";
+                        return r;
+                    }
+                    if (e.releaseRender.wait(3))
+                    {
+                        break;
+                    }
+                }
+                if (token.isCancelled())
+                {
+                    r.status = proxy_render::ProxyRenderStatus::Cancelled;
+                    return r;
+                }
+                if (e.renderShouldFail.load())
+                {
+                    r.status = proxy_render::ProxyRenderStatus::Failed;
+                    r.failureReason = proxy_render::ProxyRenderFailureReason::TailLimitReached;
+                    r.message = "fake tail limit";
+                    return r;
+                }
+                r.status = proxy_render::ProxyRenderStatus::Succeeded;
+                r.tailCompleted = true;
+                r.renderedLengthSamples = 4096;
+                if (e.makeTempFile.load())
+                {
+                    const juce::File tmp
+                        = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                              .getChildFile("MiniDAWSelftests")
+                              .getChildFile("p1e-temp-" + juce::String((juce::int64)dest) + "-"
+                                            + juce::String(juce::Time::currentTimeMillis())
+                                            + ".wav");
+                    (void)tmp.getParentDirectory().createDirectory();
+                    (void)tmp.replaceWithText("fake");
+                    r.temporaryWavFile = tmp;
+                    r.wavBytes = tmp.getSize();
+                }
+                return r;
+            }
+        };
+
+        std::unique_ptr<proxy_render::ProxyPreparedJob>
+            prepare(const proxy_render::ProxyCapturedRequest& req,
+                    proxy_render::ProxyRenderResult& failureOut) override
+        {
+            expectMessageThread("prepare");
+            ++prepareCount;
+            if (prepareShouldFail.load())
+            {
+                failureOut.status = proxy_render::ProxyRenderStatus::Failed;
+                failureOut.failureReason
+                    = proxy_render::ProxyRenderFailureReason::PluginCreationFailed;
+                failureOut.message = "fake create failure";
+                return nullptr;
+            }
+            const auto& c = static_cast<const Captured&>(req);
+            return std::make_unique<Prepared>(*this, c.dest, c.expectedFingerprint,
+                                              c.primarySemanticRevision);
+        }
+
+        bool publish(TrackId t, const proxy_render::ProxyCapturedRequest& req,
+                     const proxy_render::ProxyRenderResult& result, juce::String& err) override
+        {
+            expectMessageThread("publish");
+            ++publishCount;
+            if (publishShouldFail.load())
+            {
+                err = "fake publication failure";
+                return false;
+            }
+            const std::lock_guard<std::mutex> lock(m);
+            dests[t].published = req.expectedFingerprint;
+            publishedFingerprints.push_back(req.expectedFingerprint);
+            if (result.temporaryWavFile != juce::File())
+            {
+                (void)result.temporaryWavFile.deleteFile(); // engine owns the temp on success
+            }
+            return true;
+        }
+
+        juce::String publishedGenerationId(TrackId t) override
+        {
+            expectMessageThread("publishedGenerationId");
+            const std::lock_guard<std::mutex> lock(m);
+            const auto it = dests.find(t);
+            return it != dests.end() ? it->second.published : juce::String();
+        }
+    };
+
+    struct SchedulerFixture
+    {
+        ManualPump pump;
+        FakeSchedulerEngine engine;
+        std::unique_ptr<ProxyRenderScheduler> sched;
+
+        SchedulerFixture()
+        {
+            engine.messageThreadId = juce::Thread::getCurrentThreadId();
+            sched = std::make_unique<ProxyRenderScheduler>(
+                [this](std::function<void()> f) { pump.post(std::move(f)); });
+            sched->attachEngine(&engine);
+        }
+        ~SchedulerFixture()
+        {
+            sched->shutdown();
+            while (pump.drainOne()) {} // run stragglers (idempotent latches)
+        }
+
+        [[nodiscard]] bool pumpUntilTerminal(const TrackId t, const int timeoutMs = 5000)
+        {
+            return pump.pumpUntil(
+                [this, t] {
+                    const auto s = sched->jobStatus(t);
+                    return s.exists
+                           && (s.phase == ProxyJobPhase::Published
+                               || s.phase == ProxyJobPhase::Obsolete
+                               || s.phase == ProxyJobPhase::Cancelled
+                               || s.phase == ProxyJobPhase::Failed);
+                },
+                timeoutMs);
+        }
+    };
+
+    void testProxySchedulerFifoSerializationAndThreads()
+    {
+        SchedulerFixture fx;
+        fx.engine.dests[TrackId{ 1 }] = { true, "fpA", 1, {} };
+        fx.engine.dests[TrackId{ 2 }] = { true, "fpB", 1, {} };
+        fx.engine.holdRender = true;
+
+        const auto s1 = fx.sched->requestRender(TrackId{ 1 });
+        const auto s2 = fx.sched->requestRender(TrackId{ 2 });
+        expect(s1.exists && s2.exists && s2.generation > s1.generation,
+               "p1e-fifo: both queued with monotonic generations");
+
+        // Worker serializes: destination 1 renders while destination 2 stays queued.
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+               "p1e-fifo: first job reaches Rendering");
+        expect(fx.sched->jobStatus(TrackId{ 2 }).phase == ProxyJobPhase::Queued,
+               "p1e-fifo: second destination waits (one worker, serial processing)");
+        expect(fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Rendering,
+               "p1e-state: active job derives Rendering");
+
+        fx.engine.releaseRender.signal();
+        expect(fx.pumpUntilTerminal(TrackId{ 1 }) && fx.pumpUntilTerminal(TrackId{ 2 }),
+               "p1e-fifo: both jobs terminalize");
+        expect(fx.sched->jobStatus(TrackId{ 1 }).phase == ProxyJobPhase::Published
+                   && fx.sched->jobStatus(TrackId{ 2 }).phase == ProxyJobPhase::Published,
+               "p1e-fifo: both published");
+        {
+            const std::lock_guard<std::mutex> lock(fx.engine.m);
+            expect(fx.engine.renderOrder == std::vector<TrackId>{ TrackId{ 1 }, TrackId{ 2 } },
+                   "p1e-fifo: FIFO order across destinations");
+        }
+        expect(fx.engine.lastRenderThread != fx.engine.messageThreadId,
+               "p1e-threads: render ran on the worker, never the message thread");
+        expect(fx.engine.lastTeardownThread == fx.engine.messageThreadId,
+               "p1e-threads: prepared-job teardown ran on the message thread");
+        expect(fx.engine.preparedAlive.load() == 0, "p1e-threads: no leaked prepared instances");
+
+        // Derived destination state: Current after publish; Stale after an edit;
+        // "most recently published" NEVER implies Current.
+        expect(fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current,
+               "p1e-state: published + matching identity = Current");
+        fx.engine.dests[TrackId{ 1 }].fp = "fpA-edited";
+        expect(fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Stale,
+               "p1e-state: latest published generation is NOT Current after an edit (Stale)");
+    }
+
+    void testProxySchedulerCoalescingAndSupersession()
+    {
+        SchedulerFixture fx;
+        fx.engine.dests[TrackId{ 7 }] = { true, "fpA", 3, {} };
+        fx.engine.holdRender = true;
+
+        const auto a = fx.sched->requestRender(TrackId{ 7 });
+        const auto b = fx.sched->requestRender(TrackId{ 7 }); // identical request
+        expect(a.exists && b.exists && a.generation == b.generation
+                   && fx.engine.captureCount.load() == 1,
+               "p1e-coalesce: equivalent request coalesces (same generation, one capture)");
+
+        // Render-relevant change: supersession creates a newer generation and
+        // obsoletes the running job.
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+               "p1e-supersede: first job rendering");
+        fx.engine.dests[TrackId{ 7 }].fp = "fpB";
+        fx.engine.dests[TrackId{ 7 }].rev = 4;
+        const auto c = fx.sched->requestRender(TrackId{ 7 });
+        expect(c.exists && c.generation > a.generation,
+               "p1e-supersede: newer request gets a newer generation");
+
+        fx.engine.releaseRender.signal();
+        expect(fx.pumpUntilTerminal(TrackId{ 7 }), "p1e-supersede: chain terminalizes");
+        {
+            const std::lock_guard<std::mutex> lock(fx.engine.m);
+            expect(fx.engine.publishedFingerprints == std::vector<juce::String>{ "fpB" },
+                   "p1e-supersede: only the current-identity job published (old one never)");
+        }
+        expect(fx.sched->jobStatus(TrackId{ 7 }).phase == ProxyJobPhase::Published
+                   && fx.sched->jobStatus(TrackId{ 7 }).generation == c.generation,
+               "p1e-supersede: terminal status is the newest generation, Published");
+    }
+
+    void testProxySchedulerEditDuringRenderAndFinalizing()
+    {
+        // Edit during RENDER: job becomes Obsolete at its next boundary and never publishes.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 5 }] = { true, "fp1", 1, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 5 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-editrender: rendering");
+            fx.engine.dests[TrackId{ 5 }].fp = "fp2"; // render-relevant edit
+            fx.sched->notifyDestinationIdentityChanged(TrackId{ 5 });
+            expect(fx.pumpUntilTerminal(TrackId{ 5 }), "p1e-editrender: terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 5 }).phase == ProxyJobPhase::Obsolete
+                       && fx.engine.publishCount.load() == 0,
+                   "p1e-editrender: edited-during-render job is Obsolete, never published");
+        }
+        // Edit during FINALIZING: currency re-check on the message thread blocks
+        // publication; the completed temp output is discarded.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 6 }] = { true, "fp1", 1, {} };
+            (void)fx.sched->requestRender(TrackId{ 6 });
+            // Drive to Finalizing: prepare (pump), render (fast), finalize posted.
+            expect(fx.pump.pumpUntil([&] {
+                       return fx.sched->jobStatus(TrackId{ 6 }).phase
+                              == ProxyJobPhase::Finalizing;
+                   }),
+                   "p1e-editfinal: reaches Finalizing with the finalize still queued");
+            juce::File temp;
+            {
+                // The completed result holds a real temp file on disk.
+                const auto s = fx.sched->jobStatus(TrackId{ 6 });
+                temp = s.result.temporaryWavFile;
+            }
+            expect(temp != juce::File() && temp.existsAsFile(),
+                   "p1e-editfinal: completed render left a temp artifact pre-finalize");
+            fx.engine.dests[TrackId{ 6 }].fp = "fp2"; // edit lands during Finalizing
+            expect(fx.pumpUntilTerminal(TrackId{ 6 }), "p1e-editfinal: terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 6 }).phase == ProxyJobPhase::Obsolete
+                       && fx.engine.publishCount.load() == 0,
+                   "p1e-editfinal: finalize currency check rejects publication (Obsolete)");
+            expect(!temp.existsAsFile(),
+                   "p1e-editfinal: obsolete result's temp output discarded");
+        }
+    }
+
+    void testProxySchedulerCancellationEveryPhase()
+    {
+        // QUEUED (held by recording pause) → Cancelled without any engine work.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 3 }] = { true, "fp", 1, {} };
+            fx.sched->notifyRecordingState(true);
+            (void)fx.sched->requestRender(TrackId{ 3 });
+            fx.sched->cancelDestination(TrackId{ 3 });
+            fx.sched->notifyRecordingState(false);
+            expect(fx.pumpUntilTerminal(TrackId{ 3 }), "p1e-cancel: queued job terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 3 }).phase == ProxyJobPhase::Cancelled
+                       && fx.engine.prepareCount.load() == 0
+                       && fx.engine.renderOrder.empty(),
+                   "p1e-cancel: cancel while Queued = Cancelled, no prepare, no render");
+        }
+        // RENDERING → prompt boundary stop, Cancelled (never Failed), temp cleaned.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 4 }] = { true, "fp", 1, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 4 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-cancel: rendering");
+            fx.sched->cancelDestination(TrackId{ 4 });
+            expect(fx.pumpUntilTerminal(TrackId{ 4 }), "p1e-cancel: terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 4 }).phase == ProxyJobPhase::Cancelled,
+                   "p1e-cancel: cancel while Rendering = Cancelled (not Failed)");
+        }
+        // FINALIZING → cancellation wins over publication; temp discarded.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 8 }] = { true, "fp", 1, {} };
+            (void)fx.sched->requestRender(TrackId{ 8 });
+            expect(fx.pump.pumpUntil([&] {
+                       return fx.sched->jobStatus(TrackId{ 8 }).phase
+                              == ProxyJobPhase::Finalizing;
+                   }),
+                   "p1e-cancel: reaches Finalizing");
+            const juce::File temp = fx.sched->jobStatus(TrackId{ 8 }).result.temporaryWavFile;
+            fx.sched->cancelDestination(TrackId{ 8 });
+            expect(fx.pumpUntilTerminal(TrackId{ 8 }), "p1e-cancel: terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 8 }).phase == ProxyJobPhase::Cancelled
+                       && fx.engine.publishCount.load() == 0 && !temp.existsAsFile(),
+                   "p1e-cancel: cancel during Finalizing = Cancelled, no publication, temp gone");
+        }
+        // Prepare FAILURE path (engine cannot create the isolated instance).
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 9 }] = { true, "fp", 1, {} };
+            fx.engine.prepareShouldFail = true;
+            (void)fx.sched->requestRender(TrackId{ 9 });
+            expect(fx.pumpUntilTerminal(TrackId{ 9 }), "p1e-fail: prepare failure terminalizes");
+            const auto s = fx.sched->jobStatus(TrackId{ 9 });
+            expect(s.phase == ProxyJobPhase::Failed && s.message.contains("create failure"),
+                   "p1e-fail: prepare failure = Failed with recorded reason");
+        }
+    }
+
+    void testProxySchedulerRecordingPauseAndResume()
+    {
+        SchedulerFixture fx;
+        fx.engine.dests[TrackId{ 2 }] = { true, "fp", 1, {} };
+
+        // Recording blocks STARTING work.
+        fx.sched->notifyRecordingState(true);
+        (void)fx.sched->requestRender(TrackId{ 2 });
+        for (int i = 0; i < 20; ++i)
+        {
+            (void)fx.pump.drainOne();
+            juce::Thread::sleep(2);
+        }
+        expect(fx.sched->jobStatus(TrackId{ 2 }).phase == ProxyJobPhase::Queued
+                   && fx.engine.renderOrder.empty(),
+               "p1e-record: recording pauses starting background work");
+
+        // …and PROGRESSING work at block boundaries.
+        fx.engine.holdRender = true;
+        fx.sched->notifyRecordingState(false);
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+               "p1e-record: resumes when recording stops");
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderProgress.load() > 3; }),
+               "p1e-record: unpaused render progresses");
+        fx.sched->notifyRecordingState(true);
+        juce::Thread::sleep(30); // let the gate engage
+        const auto frozen = fx.engine.renderProgress.load();
+        juce::Thread::sleep(60);
+        expect(fx.engine.renderProgress.load() == frozen,
+               "p1e-record: recording freezes render progress at the block boundary");
+        fx.sched->notifyRecordingState(false);
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderProgress.load() > frozen; }),
+               "p1e-record: progress resumes after recording ends");
+        fx.engine.releaseRender.signal();
+        expect(fx.pumpUntilTerminal(TrackId{ 2 }), "p1e-record: completes after resume");
+        expect(fx.sched->jobStatus(TrackId{ 2 }).phase == ProxyJobPhase::Published,
+               "p1e-record: paused-and-resumed job still publishes");
+    }
+
+    void testProxySchedulerLifecycleRaces()
+    {
+        // Track deletion mid-render.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 11 }] = { true, "fp", 1, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 11 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-delete: rendering");
+            fx.engine.dests[TrackId{ 11 }].exists = false; // Session removed the track
+            fx.sched->notifyTrackRemoved(TrackId{ 11 });
+            expect(fx.pumpUntilTerminal(TrackId{ 11 }), "p1e-delete: terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 11 }).phase == ProxyJobPhase::Obsolete
+                       && fx.engine.publishCount.load() == 0,
+                   "p1e-delete: deleted destination's job is Obsolete, never published");
+            expect(fx.sched->destinationState(TrackId{ 11 }) == ProxyDestinationState::Absent,
+                   "p1e-delete: removed destination derives Absent");
+        }
+        // Primary removal/replacement = identity change (revision bump / exists=false).
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 12 }] = { true, "fp", 5, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 12 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-primary: rendering");
+            fx.engine.dests[TrackId{ 12 }].rev = 6; // Primary replaced ⇒ revision bumped
+            fx.sched->notifyDestinationIdentityChanged(TrackId{ 12 });
+            expect(fx.pumpUntilTerminal(TrackId{ 12 }), "p1e-primary: terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 12 }).phase == ProxyJobPhase::Obsolete,
+                   "p1e-primary: Primary replacement obsoletes the in-flight job");
+        }
+        // Project close/replacement mid-render: worker completion after close is discarded.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 13 }] = { true, "fp", 1, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 13 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-close: rendering");
+            fx.sched->notifyProjectChanged(); // close/replace: epoch bump + cancel-all
+            fx.engine.releaseRender.signal();
+            expect(fx.pump.pumpUntil([&] { return fx.sched->isIdle(); }),
+                   "p1e-close: worker drains after project close");
+            expect(fx.engine.publishCount.load() == 0 && fx.engine.preparedAlive.load() == 0,
+                   "p1e-close: late completion discarded; instance torn down; nothing published");
+        }
+        // Publication failure: job Failed; previous published metadata retained.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 14 }] = { true, "fpOld", 1, {} };
+            (void)fx.sched->requestRender(TrackId{ 14 });
+            expect(fx.pumpUntilTerminal(TrackId{ 14 }), "p1e-pubfail: baseline publish");
+            fx.engine.dests[TrackId{ 14 }].fp = "fpNew";
+            fx.engine.publishShouldFail = true;
+            (void)fx.sched->requestRender(TrackId{ 14 });
+            expect(fx.pumpUntilTerminal(TrackId{ 14 }), "p1e-pubfail: failed publish terminalizes");
+            const auto s = fx.sched->jobStatus(TrackId{ 14 });
+            expect(s.phase == ProxyJobPhase::Failed && s.message.contains("publication failed"),
+                   "p1e-pubfail: publication failure = Failed with recorded error");
+            expect(fx.engine.publishedGenerationId(TrackId{ 14 }) == "fpOld",
+                   "p1e-pubfail: previous published generation metadata retained");
+            expect(fx.sched->destinationState(TrackId{ 14 }) == ProxyDestinationState::Failed,
+                   "p1e-pubfail: destination derives Failed for the current fingerprint");
+        }
+        // Failed refresh WITHOUT musical change: previous generation remains Current.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 15 }] = { true, "fpSame", 1, {} };
+            (void)fx.sched->requestRender(TrackId{ 15 });
+            expect(fx.pumpUntilTerminal(TrackId{ 15 }), "p1e-retain: baseline publish");
+            fx.engine.renderShouldFail = true;
+            (void)fx.sched->requestRender(TrackId{ 15 }); // coalesces? identity unchanged ⇒ no
+            // Same identity coalesces onto… nothing (job terminal) ⇒ new job for same fp.
+            expect(fx.pumpUntilTerminal(TrackId{ 15 }), "p1e-retain: refresh failure terminalizes");
+            expect(fx.sched->jobStatus(TrackId{ 15 }).phase == ProxyJobPhase::Failed,
+                   "p1e-retain: refresh render failed");
+            expect(fx.sched->destinationState(TrackId{ 15 }) == ProxyDestinationState::Current,
+                   "p1e-retain: failed refresh without musical change keeps previous Current");
+        }
+    }
+
+    void testProxySchedulerShutdownWhileActive()
+    {
+        SchedulerFixture fx;
+        fx.engine.dests[TrackId{ 21 }] = { true, "fp", 1, {} };
+        fx.engine.dests[TrackId{ 22 }] = { true, "fp2", 1, {} };
+        fx.engine.holdRender = true;
+        (void)fx.sched->requestRender(TrackId{ 21 });
+        (void)fx.sched->requestRender(TrackId{ 22 });
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+               "p1e-shutdown: first job rendering");
+
+        // Detach = clean shutdown of all jobs while one renders and one queues.
+        fx.sched->detachEngineAndShutdownJobs();
+        expect(fx.engine.preparedAlive.load() == 0,
+               "p1e-shutdown: prepared instance torn down (message thread) during detach");
+        expect(fx.engine.publishCount.load() == 0, "p1e-shutdown: nothing published");
+        const auto s21 = fx.sched->jobStatus(TrackId{ 21 });
+        const auto s22 = fx.sched->jobStatus(TrackId{ 22 });
+        expect(s21.phase == ProxyJobPhase::Cancelled && s22.phase == ProxyJobPhase::Cancelled,
+               "p1e-shutdown: in-flight and queued jobs terminalize as Cancelled");
+        expect(fx.engine.lastTeardownThread == fx.engine.messageThreadId,
+               "p1e-shutdown: teardown thread affinity preserved during shutdown");
+        fx.sched->shutdown(); // idempotent full stop
+        expect(fx.sched->isIdle(), "p1e-shutdown: scheduler idle after shutdown");
+    }
+
+    /// Status queries from a foreign thread while jobs churn (mutex-guarded copies).
+    void testProxySchedulerStatusRaceSafety()
+    {
+        SchedulerFixture fx;
+        fx.engine.dests[TrackId{ 31 }] = { true, "fp", 1, {} };
+        fx.engine.holdRender = true;
+        (void)fx.sched->requestRender(TrackId{ 31 });
+
+        std::atomic<bool> stop{ false };
+        std::atomic<int> queries{ 0 };
+        std::thread hammer([&] {
+            while (!stop.load())
+            {
+                (void)fx.sched->jobStatus(TrackId{ 31 });
+                ++queries;
+            }
+        });
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+               "p1e-race: rendering under status hammer");
+        fx.engine.releaseRender.signal();
+        expect(fx.pumpUntilTerminal(TrackId{ 31 }), "p1e-race: terminalizes under hammer");
+        stop = true;
+        hammer.join();
+        expect(queries.load() > 0
+                   && fx.sched->jobStatus(TrackId{ 31 }).phase == ProxyJobPhase::Published,
+               "p1e-race: concurrent status queries never corrupt the outcome");
+    }
+
+    /// Executor-side pause-gate seam: called once per block, before processing.
+    void testProxyExecutorPauseGateSeam()
+    {
+        proxy_snapshot::ProxyRenderSnapshot snap;
+        snap.destinationTrackId = TrackId{ 7 };
+        snap.renderConfig.timelineReferenceRate = 8000.0;
+        snap.spanAndSilence.hasHostScheduledEvents = false; // empty + unclassified ⇒ full render
+        proxy_render::ProxyRenderExecutionConfig cfg;
+        cfg.renderSampleRate = 8000.0;
+        cfg.blockSize = 512;
+        cfg.temporaryWavFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWSelftests")
+                                   .getChildFile("p1e-gate.wav");
+        std::int64_t gateCalls = 0;
+        cfg.blockBoundaryPauseGate = [&gateCalls] { ++gateCalls; };
+        FakeSilentProc proc;
+        proxy_render::ProxyRenderCancellationToken token;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+        expect(r.status == proxy_render::ProxyRenderStatus::Succeeded
+                   && gateCalls == (std::int64_t)r.blocksProcessed && gateCalls > 0,
+               "p1e-gate: executor calls the pause gate exactly once per block");
+        (void)r.temporaryWavFile.deleteFile();
+    }
+} // namespace
+
 int main()
 {
     testTitleAndStatus();
@@ -3288,6 +3984,16 @@ int main()
         testProxyRenderExecutorCancellation();
         testProxyRenderExecutorFailurePaths();
         testProxyRenderExecutorEmptyDestination();
+
+    testProxySchedulerFifoSerializationAndThreads();
+    testProxySchedulerCoalescingAndSupersession();
+    testProxySchedulerEditDuringRenderAndFinalizing();
+    testProxySchedulerCancellationEveryPhase();
+    testProxySchedulerRecordingPauseAndResume();
+    testProxySchedulerLifecycleRaces();
+    testProxySchedulerShutdownWhileActive();
+    testProxySchedulerStatusRaceSafety();
+    testProxyExecutorPauseGateSeam();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -148,6 +148,10 @@ struct ProxyRenderExecutionConfig
     juce::File temporaryWavFile;      ///< where the temp artifact is written
     juce::String expectedFingerprint; ///< echoed into the result (§8 pairing)
     std::uint64_t primarySemanticRevision = 0;
+    /// P1E recording-pause gate (§14.3 resource policy): called once per block, before
+    /// processing. Production blocks inside it while recording is active (and returns promptly
+    /// on cancellation); null = never pause. Never affects correctness, only pacing.
+    std::function<void()> blockBoundaryPauseGate;
     /// Diagnostic retention of a tail-limit-failed artifact (§15.2: MAY be retained for
     /// diagnostics, never published). Default false ⇒ failures always delete the temp file.
     bool retainFailedTailArtifactForDiagnostics = false;
@@ -251,6 +255,11 @@ template <typename Proc>
 
     while (!tailDone && !capReached)
     {
+        // P1E recording pause (resource policy): hold progress at the block boundary.
+        if (cfg.blockBoundaryPauseGate)
+        {
+            cfg.blockBoundaryPauseGate();
+        }
         // §9 cooperative cancellation at every block boundary (P1E seam): prompt stop,
         // Cancelled (never Failed), temp cleanup via the guard, live plugin untouched.
         if (cancel.isCancelled())
