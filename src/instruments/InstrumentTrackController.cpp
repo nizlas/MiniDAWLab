@@ -2382,14 +2382,20 @@ void InstrumentTrackController::publishRenderSnapshot()
                 plan.notes.push_back(ev);
             }
         }
-        std::sort(plan.notes.begin(), plan.notes.end(), [](const InstrumentNoteRenderEvent& a,
-                                                           const InstrumentNoteRenderEvent& b) {
+        // ORD-1 (steering §8.3, HR-10): stable sort so STORED ORDER is the documented tie-break
+        // for equal-time notes. `std::sort` left equal-key order implementation-defined, which
+        // made equal-time Note Off/Note On interleaving (same-pitch retrigger vs. kill) and the
+        // P1C fingerprint's stored-order serialization non-authoritative. No behavior change for
+        // non-equal keys.
+        std::stable_sort(plan.notes.begin(), plan.notes.end(), [](const InstrumentNoteRenderEvent& a,
+                                                                  const InstrumentNoteRenderEvent& b) {
             return a.absSample < b.absSample;
         });
         snap->clips.push_back(std::move(plan));
     }
-    std::sort(snap->clips.begin(), snap->clips.end(), [](const InstrumentClipRenderPlan& a,
-                                                         const InstrumentClipRenderPlan& b) {
+    // ORD-1: equal-start clip plans likewise keep stored (append/load) order deterministically.
+    std::stable_sort(snap->clips.begin(), snap->clips.end(), [](const InstrumentClipRenderPlan& a,
+                                                                const InstrumentClipRenderPlan& b) {
         return a.startSamples < b.startSamples;
     });
 

@@ -163,12 +163,21 @@ target_sources(MiniDAWSelftests PRIVATE
     src/io/InstrumentMidiClipExport.cpp
     src/io/ProjectFile.cpp
     src/diagnostics/ProjectLoadDiagnosticLog.cpp
-    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp)
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    # P1C (Portable Instruments): domain track/snapshot sources so the deterministic MIDI
+    # dependency / proxy fingerprint tests run against the real SessionSnapshot, not mocks.
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp)
 target_include_directories(MiniDAWSelftests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(MiniDAWSelftests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
 target_link_libraries(MiniDAWSelftests
     PRIVATE
         juce::juce_audio_basics
+        # P1C: proxy fingerprint hashing (juce::SHA256) in ProxyFingerprint.h tests.
+        juce::juce_cryptography
         juce::juce_events
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags

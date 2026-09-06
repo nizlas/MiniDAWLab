@@ -19,8 +19,13 @@
 #include "ui/experimental/MidiCcLaneViewState.h"
 #include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 
+#include "domain/SessionSnapshot.h"
 #include "domain/TimelineDomain.h"
+#include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
+#include "instruments/MidiDependencyEnumeration.h"
+#include "instruments/ProxyFingerprint.h"
+#include "instruments/ProxyRenderSnapshot.h"
 #include "io/InstrumentMidiClipExport.h"
 #include "io/ProjectFile.h"
 #include "ui/experimental/ExperimentalMidiCcAutomation.h"
@@ -38,8 +43,10 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -1132,6 +1139,540 @@ namespace
                "tld: sub-sample results round to nearest");
     }
 
+    // --- P1C: MIDI dependency enumeration, proxy snapshot, canonical fingerprint ------------
+    //
+    // Steering: docs/PORTABLE_INSTRUMENTS_AND_PROXIES.md §8 (dependency + ORD-1), §10 (snapshot),
+    // §11 (canonical fingerprint), §15.7 (silent generation); roadmap slice P1C; tests T-01/T-02/
+    // T-05/T-06/T-07 parts. Uses the REAL SessionSnapshot/Track domain and the required Organ /
+    // Organ Lower / Organ Pedal worked example (steering §8.2).
+
+    /// The Organ fixture: instrument destination (id 1) + two routed MIDI sources (Lower ch 2,
+    /// Pedal ch 3) + an unrelated instrument (id 4) with its own source (id 5) + Master (id 6).
+    struct ProxyFixture
+    {
+        std::vector<Track> tracks;
+        std::map<TrackId, std::vector<InstrumentMidiClip>> clipsByTrack;
+        proxy_snapshot::BuildInputs inputs;
+
+        [[nodiscard]] std::shared_ptr<const SessionSnapshot> session() const
+        {
+            std::vector<Track> copy = tracks;
+            return SessionSnapshot::withTracks(std::move(copy), 0, 0, 0, ProjectMusicalTime{});
+        }
+
+        [[nodiscard]] proxy_snapshot::ProxyRenderSnapshot build(const TrackId dest = TrackId{ 1 }) const
+        {
+            const auto snap = session();
+            return proxy_snapshot::buildProxyRenderSnapshot(
+                *snap,
+                dest,
+                [this](const TrackId tid) {
+                    std::vector<const InstrumentMidiClip*> out;
+                    const auto it = clipsByTrack.find(tid);
+                    if (it != clipsByTrack.end())
+                    {
+                        for (const auto& c : it->second)
+                        {
+                            out.push_back(&c);
+                        }
+                    }
+                    return out;
+                },
+                inputs);
+        }
+
+        [[nodiscard]] juce::String fp(const TrackId dest = TrackId{ 1 }) const
+        {
+            return proxy_fingerprint::computeFingerprint(build(dest));
+        }
+    };
+
+    [[nodiscard]] InstrumentMidiClip makeClip(const std::uint64_t id,
+                                              const std::int64_t startSamples,
+                                              std::vector<TimelineMidiNote> notes,
+                                              std::vector<MidiCcPoint> cc = {})
+    {
+        InstrumentMidiClip c;
+        c.id = id;
+        c.name = "clip";
+        c.startSamples = startSamples;
+        c.timelineAnchorSamples = startSamples;
+        c.lengthSamples = 48000;
+        c.pattern.bpm = 120.0;
+        c.pattern.ticksPerQuarter = 960;
+        c.pattern.timelineNotes = std::move(notes);
+        c.pattern.ccPoints = std::move(cc);
+        return c;
+    }
+
+    [[nodiscard]] TimelineMidiNote makeNote(const int pitch,
+                                            const std::int64_t startTick,
+                                            const std::int64_t durationTicks,
+                                            const int channel,
+                                            const int velocity = 100)
+    {
+        TimelineMidiNote n;
+        n.midiNote = pitch;
+        n.velocity = velocity;
+        n.offVelocity = 64;
+        n.channel = (std::uint8_t)channel;
+        n.startTick = startTick;
+        n.durationTicks = durationTicks;
+        return n;
+    }
+
+    [[nodiscard]] MidiCcPoint makeCc(const std::int64_t startTick, const int value, const int channel)
+    {
+        MidiCcPoint p;
+        p.startTick = startTick;
+        p.controller = 11;
+        p.value = (std::uint8_t)value;
+        p.channel = (std::uint8_t)channel;
+        p.interpolationToNext = MidiCcInterpolation::hold;
+        return p;
+    }
+
+    [[nodiscard]] ProxyFixture makeOrganFixture()
+    {
+        ProxyFixture f;
+        const auto addTrack = [&f](const TrackId id, const char* name, const TrackKind kind,
+                                   const int midiChannel, const TrackId midiTo) {
+            f.tracks.emplace_back(id, juce::String(name), std::vector<PlacedClip>{}, 1.0f,
+                                  /*off*/ false, /*muted*/ false, kind, kTrackStereoPanCenter,
+                                  kInvalidTrackId, std::vector<TrackSend>{}, midiChannel, midiTo);
+        };
+        addTrack(TrackId{ 1 }, "Organ", TrackKind::Instrument, kTrackMidiOutputChannelAny, kInvalidTrackId);
+        addTrack(TrackId{ 2 }, "Organ Lower", TrackKind::Midi, 2, TrackId{ 1 });
+        addTrack(TrackId{ 3 }, "Organ Pedal", TrackKind::Midi, 3, TrackId{ 1 });
+        addTrack(TrackId{ 4 }, "Other Synth", TrackKind::Instrument, kTrackMidiOutputChannelAny, kInvalidTrackId);
+        addTrack(TrackId{ 5 }, "Loose Midi", TrackKind::Midi, 4, TrackId{ 4 });
+        addTrack(TrackId{ 6 }, "Master", TrackKind::Master, kTrackMidiOutputChannelAny, kInvalidTrackId);
+
+        // Organ Upper (destination-local, channel 1): two equal-time notes (ORD-1 tie-break data)
+        // + CC11. Lower/Pedal sources: one note + CC each on their native channels.
+        f.clipsByTrack[TrackId{ 1 }] = { makeClip(
+            1, 0, { makeNote(60, 0, 960, 1), makeNote(64, 0, 960, 1) }, { makeCc(0, 127, 1) }) };
+        f.clipsByTrack[TrackId{ 2 }] = { makeClip(2, 0, { makeNote(48, 480, 960, 2) },
+                                                  { makeCc(480, 90, 2) }) };
+        f.clipsByTrack[TrackId{ 3 }] = { makeClip(3, 0, { makeNote(36, 960, 1920, 3) },
+                                                  { makeCc(960, 70, 3) }) };
+        f.clipsByTrack[TrackId{ 5 }] = { makeClip(9, 0, { makeNote(72, 0, 960, 4) }) };
+
+        f.inputs.pluginIdentity.fileOrIdentifier = "C:\\Plugins\\VB3-II.vst3";
+        f.inputs.pluginIdentity.uniqueId = 0x1234abcd;
+        f.inputs.pluginIdentity.deprecatedUid = 77;
+        f.inputs.pluginIdentity.format = "VST3";
+        f.inputs.pluginIdentity.isInstrument = true;
+        f.inputs.pluginIdentity.version = "2.3.1";
+        f.inputs.stateIdentity.primaryStateRevision = 7;
+        f.inputs.stateIdentity.pairedWithSavedState = true;
+        f.inputs.pluginStateBlob.append("state-bytes", 11);
+        f.inputs.renderConfig.renderSampleRate = 48000.0;
+        f.inputs.renderConfig.renderBlockSize = 512;
+        f.inputs.renderConfig.timelineReferenceRate = 48000.0;
+        f.inputs.policies = {};
+        f.inputs.instrumentClassifiedHostEventDriven = false;
+        return f;
+    }
+
+    void testMidiDependencyEnumeration()
+    {
+        const ProxyFixture f = makeOrganFixture();
+        const auto snap = f.session();
+
+        // The Organ worked example: exactly Lower + Pedal, in session order, with channels.
+        const auto organ = midi_dependency::sourcesForDestination(*snap, TrackId{ 1 });
+        expect(organ.size() == 2U && organ[0].trackId == TrackId{ 2 } && organ[1].trackId == TrackId{ 3 },
+               "p1c: Organ enumerates Organ Lower then Organ Pedal in session order");
+        expect(organ.size() == 2U && organ[0].midiOutputChannel == 2 && organ[1].midiOutputChannel == 3
+                   && !organ[0].trackOff && !organ[0].muted,
+               "p1c: enumeration carries source output channels and eligibility flags");
+
+        // The unrelated destination owns only its own source.
+        const auto other = midi_dependency::sourcesForDestination(*snap, TrackId{ 4 });
+        expect(other.size() == 1U && other[0].trackId == TrackId{ 5 },
+               "p1c: unrelated destination enumerates only its own source");
+
+        // Non-instrument and unknown destinations are refused (one-hop model; never partial).
+        expect(midi_dependency::sourcesForDestination(*snap, TrackId{ 2 }).empty(),
+               "p1c: a Midi row is not a legal destination (one-hop, no transitive chains)");
+        expect(midi_dependency::sourcesForDestination(*snap, TrackId{ 99 }).empty(),
+               "p1c: unknown destination id enumerates nothing");
+
+        // Cycle policy: cycles are structurally impossible (midiTo only targets Instrument rows);
+        // a degenerate self-pointing Midi row must never be followed as its own destination.
+        {
+            ProxyFixture cyc = makeOrganFixture();
+            cyc.tracks[1] = cyc.tracks[1].withMidiDestinationTrackId(TrackId{ 2 }); // self-loop row
+            const auto s2 = cyc.session();
+            expect(midi_dependency::sourcesForDestination(*s2, TrackId{ 2 }).empty(),
+                   "p1c: degenerate self-loop Midi row is refused, never followed");
+            expect(midi_dependency::sourcesForDestination(*s2, TrackId{ 1 }).size() == 1U,
+                   "p1c: Organ keeps its remaining valid source after the degenerate rewire");
+        }
+
+        // Session reorder changes enumeration order (F9 order is data).
+        {
+            ProxyFixture re = makeOrganFixture();
+            std::swap(re.tracks[1], re.tracks[2]); // Pedal now precedes Lower in session order
+            const auto s3 = re.session();
+            const auto reordered = midi_dependency::sourcesForDestination(*s3, TrackId{ 1 });
+            expect(reordered.size() == 2U && reordered[0].trackId == TrackId{ 3 }
+                       && reordered[1].trackId == TrackId{ 2 },
+                   "p1c: session track reorder changes enumeration order (merge order is semantic)");
+        }
+    }
+
+    void testProxySnapshotImmutabilityAndDeterminism()
+    {
+        const ProxyFixture f = makeOrganFixture();
+
+        // Repeated generation: identical canonical bytes and identical hash.
+        const auto snapA = f.build();
+        const auto snapB = f.build();
+        const juce::MemoryBlock bytesA = proxy_fingerprint::serializeCanonicalFingerprintBytes(snapA);
+        const juce::MemoryBlock bytesB = proxy_fingerprint::serializeCanonicalFingerprintBytes(snapB);
+        expect(bytesA == bytesB && bytesA.getSize() > 0,
+               "p1c: repeated snapshot builds serialize to identical canonical bytes");
+        const juce::String h1 = proxy_fingerprint::computeFingerprint(snapA);
+        const juce::String h2 = proxy_fingerprint::computeFingerprint(snapB);
+        expect(h1 == h2 && h1.startsWith("sha256:") && h1.length() == 7 + 64,
+               "p1c: repeated fingerprint generation produces the identical sha256 hash");
+
+        // Deep-copy isolation: mutating the live fixture after build never changes an existing
+        // snapshot (no references to live containers).
+        ProxyFixture mut = makeOrganFixture();
+        const auto frozen = mut.build();
+        const juce::String frozenFp = proxy_fingerprint::computeFingerprint(frozen);
+        mut.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes[0].midiNote = 61;
+        mut.tracks[0] = mut.tracks[0].withMuted(true);
+        expect(proxy_fingerprint::computeFingerprint(frozen) == frozenFp,
+               "p1c: an existing snapshot is immune to later live-model edits (deep copy)");
+        expect(mut.fp() != frozenFp, "p1c: a rebuilt snapshot naturally sees the edit");
+
+        // Snapshot structure sanity: destination first, sources in session order, contents copied.
+        expect(frozen.destinationClips.size() == 1U && frozen.sources.size() == 2U
+                   && frozen.sources[0].trackId == TrackId{ 2 } && frozen.sources[1].trackId == TrackId{ 3 }
+                   && frozen.sources[0].clips.size() == 1U
+                   && frozen.sources[0].clips[0].notes.size() == 1U,
+               "p1c: snapshot holds destination content plus both sources with copied clips");
+    }
+
+    void testFingerprintRenderRelevantEdits()
+    {
+        const juce::String base = makeOrganFixture().fp();
+        int changedCount = 0;
+        const auto expectChanges = [&base, &changedCount](const ProxyFixture& f, const std::string& what) {
+            const juce::String h = f.fp();
+            changedCount += (h != base) ? 1 : 0;
+            expect(h != base, "p1c: fingerprint changes when " + what);
+        };
+
+        // Destination-local note edits (F4).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes[0].midiNote = 62;
+            expectChanges(f, "a destination note pitch changes");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes[0].velocity = 40;
+            expectChanges(f, "a destination note velocity changes");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes[0].durationTicks = 480;
+            expectChanges(f, "a destination note duration changes");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes[0].channel = 5;
+            expectChanges(f, "a destination note NATIVE channel changes");
+        }
+        // ORD-1 tie-break data: swapping two equal-time stored notes changes delivery and hash.
+        {
+            ProxyFixture f = makeOrganFixture();
+            auto& notes = f.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes;
+            std::swap(notes[0], notes[1]);
+            expectChanges(f, "equal-time stored note order swaps (ORD-1 tie-break is data)");
+        }
+        // CC edits (F5).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.ccPoints[0].value = 10;
+            expectChanges(f, "a destination CC value changes");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 3 }][0].pattern.ccPoints[0].value = 71;
+            expectChanges(f, "an Organ Pedal CC value changes (source content, F7)");
+        }
+        // Clip conversion inputs and placement (F3).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.bpm = 90.0;
+            expectChanges(f, "the clip bpm changes");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.ticksPerQuarter = 480;
+            expectChanges(f, "the clip ticksPerQuarter changes");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].startSamples = 24000;
+            f.clipsByTrack[TrackId{ 1 }][0].timelineAnchorSamples = 24000;
+            expectChanges(f, "the clip moves on the timeline (sample-domain raw integers)");
+        }
+        // Source content and eligibility (F7/F8): Organ Lower edits make Organ stale.
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 2 }][0].pattern.timelineNotes[0].midiNote = 50;
+            expectChanges(f, "an Organ Lower note changes (routed source content)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[1] = f.tracks[1].withMuted(true);
+            expectChanges(f, "a source mute toggles (F8 eligibility)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[2] = f.tracks[2].withTrackOff(true);
+            expectChanges(f, "a source power-off toggles (F8 eligibility)");
+        }
+        // Merge order (F9) and channels (F6 / effective channel inputs).
+        {
+            ProxyFixture f = makeOrganFixture();
+            std::swap(f.tracks[1], f.tracks[2]);
+            expectChanges(f, "session source order swaps (F9 merge order)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[0] = f.tracks[0].withMidiOutputChannel(7);
+            expectChanges(f, "the destination midiOutputChannel changes (F6)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[1] = f.tracks[1].withMidiOutputChannel(kTrackMidiOutputChannelAny);
+            expectChanges(f, "a source effective-channel remap changes (native vs effective)");
+        }
+        // Plugin identity and version (F1/F1v).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.pluginIdentity.version = "2.4.0";
+            expectChanges(f, "the plugin version changes (F1v)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.pluginIdentity.uniqueId = 0x55;
+            expectChanges(f, "the plugin uniqueId changes (F1)");
+        }
+        // Hybrid state identity (F2): revision and pairing are identity; blob bytes are not.
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.stateIdentity.primaryStateRevision = 8;
+            expectChanges(f, "the host-managed state revision changes (F2 identity)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.stateIdentity.pairedWithSavedState = false;
+            expectChanges(f, "the save-pairing flag changes (F2 identity)");
+        }
+        // Render configuration and policies (F10–F13).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.renderConfig.renderSampleRate = 44100.0;
+            expectChanges(f, "the render sample rate changes (F11 generation identity)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.renderConfig.renderBlockSize = 256;
+            expectChanges(f, "the render block size changes (F11)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.renderConfig.timelineReferenceRate = 44100.0;
+            expectChanges(f, "the timeline reference rate changes (F11)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.policies.tailPolicyVersion = 2;
+            expectChanges(f, "the tail-policy version changes (F12)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.policies.proxyFormatVersion = 2;
+            expectChanges(f, "the proxy format version changes (F13)");
+        }
+        expect(changedCount >= 22, "p1c: every render-relevant edit class produced a distinct hash");
+
+        // Blob bytes are NOT identity: same revision + different bytes ⇒ same fingerprint (§9.4).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.pluginStateBlob.reset();
+            f.inputs.pluginStateBlob.append("other-bytes!", 12);
+            expect(f.fp() == base,
+                   "p1c: raw state-blob byte changes never alter the fingerprint (revision is identity)");
+        }
+        // Equal-start clip stored order is data; different-start stored order is not (plan order).
+        {
+            ProxyFixture f = makeOrganFixture();
+            auto& clips = f.clipsByTrack[TrackId{ 1 }];
+            clips.push_back(makeClip(11, 0, { makeNote(67, 0, 960, 1) })); // same startSamples
+            const juce::String ordered = f.fp();
+            std::swap(clips[0], clips[1]);
+            expect(f.fp() != ordered,
+                   "p1c: equal-start clip stored-order swap changes the fingerprint (delivery tie-break)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            auto& clips = f.clipsByTrack[TrackId{ 1 }];
+            clips.push_back(makeClip(11, 96000, { makeNote(67, 0, 960, 1) })); // later start
+            const juce::String ordered = f.fp();
+            std::swap(clips[0], clips[1]);
+            expect(f.fp() == ordered,
+                   "p1c: different-start clip stored-order swap does not change the fingerprint (plan order)");
+        }
+    }
+
+    void testFingerprintExclusions()
+    {
+        const juce::String base = makeOrganFixture().fp();
+
+        // After the process boundary (§11.2): fader, pan, sends, audio routing, dest mute/off.
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[0] = f.tracks[0].withChannelFaderGain(0.25f).withStereoPan(-0.7f);
+            expect(f.fp() == base, "p1c: destination fader/pan changes never alter the fingerprint");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[0] = f.tracks[0].withMuted(true).withTrackOff(true);
+            expect(f.fp() == base,
+                   "p1c: destination mute/off never alters the fingerprint (PID-006 playback gate)");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[0] = f.tracks[0].withRoutedOutputTrackId(TrackId{ 6 });
+            expect(f.fp() == base, "p1c: downstream audio routing never alters the fingerprint");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[1] = f.tracks[1].withChannelFaderGain(0.1f);
+            expect(f.fp() == base, "p1c: a source's audio fader never alters the fingerprint");
+        }
+        // Display names and view state (§11.3).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[0] = f.tracks[0].withName("Renamed Organ");
+            expect(f.fp() == base, "p1c: display names never alter the fingerprint");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].midiRollVisibleStartSamples = 12345;
+            f.clipsByTrack[TrackId{ 1 }][0].midiRollSamplesPerPixel = 99.0;
+            expect(f.fp() == base, "p1c: piano-roll viewport fields never alter the fingerprint");
+        }
+        // Unrelated tracks (the Organ example's boundary): edits there never touch Organ.
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 5 }][0].pattern.timelineNotes[0].midiNote = 40;
+            f.tracks[3] = f.tracks[3].withMuted(true);
+            expect(f.fp() == base, "p1c: unrelated-track edits never alter Organ's fingerprint");
+        }
+        // And symmetrically: Organ edits never alter the unrelated destination's fingerprint.
+        {
+            const juce::String otherBase = makeOrganFixture().fp(TrackId{ 4 });
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes[0].midiNote = 61;
+            expect(f.fp(TrackId{ 4 }) == otherBase,
+                   "p1c: Organ edits never alter the unrelated destination's fingerprint");
+        }
+    }
+
+    void testSilentGenerationAndSpan()
+    {
+        // Populated Organ: events exist, span ends after the Pedal note (tick 960 + 1920 at
+        // 120 bpm / tpq 960 → 1.5 s → 72000 reference samples from the clip anchor at 0).
+        {
+            const auto snap = makeOrganFixture().build();
+            expect(snap.spanAndSilence.hasHostScheduledEvents,
+                   "p1c: populated destination reports host-scheduled events");
+            expect(snap.spanAndSilence.lastRelevantEventReferenceSample == 72000,
+                   "p1c: span end lands on the last relevant event (Pedal note end, 72000 ref samples)");
+            expect(!snap.spanAndSilence.silentGenerationEligible,
+                   "p1c: a populated destination is never silent-generation eligible");
+        }
+        // A muted source no longer extends the relevant span (not delivered), but remains
+        // fingerprinted content.
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.tracks[2] = f.tracks[2].withMuted(true); // Pedal held the latest event
+            const auto snap = f.build();
+            expect(snap.spanAndSilence.lastRelevantEventReferenceSample < 72000
+                       && snap.spanAndSilence.lastRelevantEventReferenceSample > 0,
+                   "p1c: muting the last-event source shortens the relevant span");
+        }
+        // Empty destination: conservative classification — silent fast path stays FORBIDDEN
+        // while the instrument's output model is unknown (autonomous generators, §15.7).
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack.clear();
+            const auto snap = f.build();
+            expect(!snap.spanAndSilence.hasHostScheduledEvents
+                       && snap.spanAndSilence.lastRelevantEventReferenceSample == 0,
+                   "p1c: empty destination reports no host-scheduled events and zero span");
+            expect(!snap.spanAndSilence.silentGenerationEligible,
+                   "p1c: autonomous-output uncertainty forbids the silent fast path by default");
+        }
+        // Only an explicit host-event-driven classification unlocks the fast path — and only
+        // for an event-empty destination.
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.clipsByTrack.clear();
+            f.inputs.instrumentClassifiedHostEventDriven = true;
+            expect(f.build().spanAndSilence.silentGenerationEligible,
+                   "p1c: explicit host-event-driven classification + empty content allows silent generation");
+        }
+        {
+            ProxyFixture f = makeOrganFixture();
+            f.inputs.instrumentClassifiedHostEventDriven = true;
+            expect(!f.build().spanAndSilence.silentGenerationEligible,
+                   "p1c: events present forbid the silent fast path regardless of classification");
+        }
+        // The eligibility inputs are fingerprinted (span/silence are identity inputs).
+        {
+            ProxyFixture a = makeOrganFixture();
+            a.clipsByTrack.clear();
+            ProxyFixture b = makeOrganFixture();
+            b.clipsByTrack.clear();
+            b.inputs.instrumentClassifiedHostEventDriven = true;
+            expect(a.fp() != b.fp(),
+                   "p1c: silent-generation classification input changes the fingerprint");
+        }
+    }
+
+    void testCcNormalizationLastWins()
+    {
+        // Equal-(tick, controller, channel) duplicates collapse LAST-WINS in the repository-
+        // canonical order (steering §8.3; the fingerprint serializes this normalized order).
+        std::vector<MidiCcPoint> pts;
+        pts.push_back(makeCc(960, 30, 1));
+        pts.push_back(makeCc(0, 100, 1));
+        pts.push_back(makeCc(960, 80, 1)); // same key as the first — later entry must win
+        (void)midi_cc::normalizePoints(pts);
+        expect(pts.size() == 2U, "p1c: equal-key CC duplicates collapse to one point");
+        expect(pts.size() == 2U && pts[0].startTick == 0 && pts[1].startTick == 960
+                   && pts[1].value == 80,
+               "p1c: CC normalization is last-wins and orders by startTick");
+        // Different channels at the same tick both survive (separate streams).
+        std::vector<MidiCcPoint> two;
+        two.push_back(makeCc(960, 30, 1));
+        two.push_back(makeCc(960, 90, 2));
+        (void)midi_cc::normalizePoints(two);
+        expect(two.size() == 2U, "p1c: same-tick CC on different channels are distinct streams");
+    }
+
     // --- Audition dispatch integration (Note Off regression fix) ---------------------------
     //
     // These tests drive the REAL `ExperimentalMidiPatternPlayer` — the same scheduling/dispatch
@@ -1964,6 +2505,12 @@ int main()
     testProjectV19PersistenceAndMigration();
     testProjectV20SchemaRoundTripAndV19Migration();
     testTimelineDomainConversion();
+    testMidiDependencyEnumeration();
+    testProxySnapshotImmutabilityAndDeterminism();
+    testFingerprintRenderRelevantEdits();
+    testFingerprintExclusions();
+    testSilentGenerationAndSpan();
+    testCcNormalizationLastWins();
     testAuditionDispatchIntegration();
     testToolbarLayoutAndVisibility();
     testCcLaneViewState();
