@@ -830,6 +830,10 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     pendingPluginStateBase64_.clear();
     drumLabels_.clear();
     experimentalDomainTrackId_ = kInvalidTrackId;
+    persistedPluginVersion_.clear();
+    hasProxyMetadata_ = false;
+    proxyMetadata_ = {};
+    proxyUpdateMode_ = "auto";
     publishRenderSnapshot();
 }
 
@@ -875,6 +879,12 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         {
             dto.hasGenericVst3Descriptor = true;
             mini_daw::fillProjectGenericVst3DescriptorFromPluginDescription(dto.genericVst3Descriptor, pd);
+            // v20 (F1v, steering §9.3): fresh version identity from the live loaded plugin. When
+            // the plugin is not loaded at save, the loaded-from-project value below survives.
+            if (pd.version.isNotEmpty())
+            {
+                dto.pluginVersion = pd.version;
+            }
         }
         const bool stateCaptureAttempted = dto.pluginWasLoadedOnSave;
         juce::String stateCaptureFailure;
@@ -950,6 +960,18 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     }
     dto.powerOn = powerOn_;
     dto.muted = muted_;
+    // v20 proxy/identity round-trip (P1B): loaded values persist unchanged; the live plugin
+    // version above (GenericVst3 with a loaded instrument) already took precedence when present.
+    if (dto.pluginVersion.isEmpty())
+    {
+        dto.pluginVersion = persistedPluginVersion_;
+    }
+    dto.hasProxy = hasProxyMetadata_;
+    if (hasProxyMetadata_)
+    {
+        dto.proxy = proxyMetadata_;
+    }
+    dto.proxyUpdateMode = proxyUpdateMode_;
     for (const auto& kv : drumLabels_)
     {
         if (kv.second.manual.isNotEmpty())
@@ -1225,6 +1247,12 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
     pendingInstrumentKind_ = chosen.instrumentKind;
     experimentalInstrumentKind_ = chosen.instrumentKind;
     pendingPluginStateBase64_ = chosen.pluginStateBase64;
+    // v20 proxy/identity round-trip (P1B): reader-validated values; malformed proxy metadata
+    // already degraded to "no proxy" in ProjectFile (never a load failure, PI-025).
+    persistedPluginVersion_ = chosen.pluginVersion;
+    hasProxyMetadata_ = chosen.hasProxy;
+    proxyMetadata_ = chosen.hasProxy ? chosen.proxy : ProjectFileProxyMetadataV20{};
+    proxyUpdateMode_ = chosen.proxyUpdateMode.isNotEmpty() ? chosen.proxyUpdateMode : juce::String("auto");
     if (chosen.instrumentKind == "GenericVst3")
     {
         pendingProjectGrooveAutoload_ = false;
@@ -1882,15 +1910,28 @@ void InstrumentTrackController::runPendingGenericVst3ProjectAutoload(Experimenta
 
 void InstrumentTrackController::setTimelineSampleRate(const double sampleRate) noexcept
 {
-    if (sampleRate <= 0.0 || !std::isfinite(sampleRate))
+    // TLD-1 (steering §10.1): the session's persisted timeline reference rate is authoritative for
+    // interpreting timeline content (tick→sample baking, clip anchors/windows, derived lengths).
+    // Every historical caller passes the current *device* rate; that now only serves as the
+    // fallback while the session has no reference yet (fresh session before first load/save).
+    // Consequence: an audio-device-rate change no longer reinterprets the stored timeline — the
+    // bake stays in the reference domain. The audio callback still consumes baked positions as
+    // engine samples 1:1 (the documented, enumerated engine-boundary conversion assigned to a
+    // later slice before P1J cross-rate acceptance).
+    double effective = sampleRate;
+    if (session_ != nullptr)
+    {
+        effective = session_->timelineSampleRateOr(sampleRate);
+    }
+    if (effective <= 0.0 || !std::isfinite(effective))
     {
         return;
     }
-    if (timelineSampleRate_ == sampleRate)
+    if (timelineSampleRate_ == effective)
     {
         return;
     }
-    timelineSampleRate_ = sampleRate;
+    timelineSampleRate_ = effective;
     publishRenderSnapshot();
 }
 

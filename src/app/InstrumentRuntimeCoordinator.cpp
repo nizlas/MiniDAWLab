@@ -519,6 +519,10 @@ void InstrumentRuntimeCoordinator::prepareExperimentalInstrumentHostsForDevice(c
     {
         lastPreparedDeviceSampleRate_ = sampleRate;
         lastPreparedDeviceBlockSize_ = blockSamples;
+        // TLD-1: a fresh session (no project loaded/saved yet) adopts the first prepared device
+        // rate as its timeline reference; a later device-rate change never re-stamps it, and
+        // loading a project overwrites it with the file's authoritative reference (§10.1).
+        session_.initializeTimelineSampleRateIfUnset(sampleRate);
     }
 
     for (auto& kv : instrumentHostsByTrackId_)

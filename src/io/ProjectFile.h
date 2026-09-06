@@ -164,6 +164,34 @@ struct ProjectFileGenericVst3DescriptorV1
     bool isInstrument = true;
 };
 
+/// v20: persisted Primary proxy metadata for one instrument destination (steering §12.2).
+/// The whole object is **optional** (absent key `proxy` ⇒ no proxy). Proxy audio itself is never
+/// embedded in JSON (PI-024): this is metadata plus a project-relative path only. A missing or
+/// malformed object never fails project load — the reader degrades it to "no proxy" (PI-025).
+struct ProjectFileProxyMetadataV20
+{
+    /// Content-addressed generation identity == the canonical fingerprint hash of the published
+    /// render ("sha256:…"). Empty ⇒ invalid ⇒ whole object treated as absent on load.
+    juce::String generationId;
+    int fingerprintSchemaVersion = 1;
+    /// Project-relative path under `InstrumentProxies/` (forward slashes). Empty ⇒ invalid.
+    juce::String relativePath;
+    /// Recorded RENDER sample rate — generation identity (PI-030). Playback at another engine
+    /// rate adapts (derived representation); the mismatch never invalidates the generation.
+    double sampleRate = 0.0;
+    /// Asset length at the recorded render rate. The asset ends when the accepted tail completes
+    /// (§15.6) — it is never zero-padded to the project end.
+    std::int64_t lengthSamples = 0;
+    /// PI-014: `getLatencySamples` of the prepared render instance; recorded, never pre-trimmed.
+    int pluginLatencySamples = 0;
+    int latencyPolicyVersion = 1;
+    int tailPolicyVersion = 1;
+    int renderPolicyVersion = 1;
+    int proxyFormatVersion = 1;
+    /// ISO-8601 UTC render timestamp (informational only; never part of validity identity).
+    juce::String renderedUtc;
+};
+
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).
 /// Optional `pluginStateBase64`: Base64 `AudioPluginInstance::getStateInformation` when saved with plug-in loaded.
 struct ProjectFileExperimentalInstrumentTrackV1
@@ -190,6 +218,17 @@ struct ProjectFileExperimentalInstrumentTrackV1
     /// v16+: present when JSON carries `genericVst3Descriptor` for catalog instrument restore.
     bool hasGenericVst3Descriptor = false;
     ProjectFileGenericVst3DescriptorV1 genericVst3Descriptor;
+    /// v20+ optional (`pluginVersion`): `PluginDescription::version` captured at save while the
+    /// plugin was loaded (fingerprint input F1v, steering §9.3). Empty = unknown/absent — older
+    /// files and saves without a loaded plugin carry no version. Same-version-different-binary
+    /// upgrades are accepted as undetectable in v1 (documented limitation).
+    juce::String pluginVersion;
+    /// v20+ optional (`proxy` object): present only when `hasProxy`. Absent/malformed ⇒ no proxy.
+    bool hasProxy = false;
+    ProjectFileProxyMetadataV20 proxy;
+    /// v20+ optional (`proxyUpdateMode`): "auto" | "onSave" | "manual" | "off" (steering §18.1).
+    /// Absent or unrecognized loads as "auto"; the key is omitted on save when it equals "auto".
+    juce::String proxyUpdateMode { "auto" };
 };
 
 /// Optional main application window placement (root `mainWindow` object); omitted in older projects.
@@ -243,11 +282,14 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**19** adds `experimentalInstrumentTracks[].clips[].ccPoints`
-    /// — sparse MIDI CC automation). **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
+    /// Current JSON writer version (**20** adds the root `timelineSampleRate` timeline reference
+    /// rate — TLD-1, steering §10.1 — plus `experimentalInstrumentTracks[].pluginVersion`,
+    /// optional `.proxy` metadata, and `.proxyUpdateMode`; all additive with absent-key defaults).
+    /// **19** adds `experimentalInstrumentTracks[].clips[].ccPoints`
+    /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 19;
+    static constexpr int kCurrentVersion = 20;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -255,6 +297,16 @@ struct ProjectFileV1
     TrackId activeTrackId = 1;
     std::int64_t playheadSamples = 0;
     double deviceSampleRateAtSave = 0.0;
+    /// v20: the **timeline reference sample rate** (TLD-1, steering §10.1): the rate under which
+    /// every persisted sample-domain timeline field (clip placements, MIDI clip anchors/windows,
+    /// locators, arrangement extent, playhead) is interpreted. Separate coordinate domain from the
+    /// live audio-device rate: a device-rate change MUST NOT re-stamp this field and MUST NOT
+    /// reinterpret the stored integers. The reader always normalizes this field to a valid rate:
+    /// v19-and-older files (and malformed values) initialize it from `deviceSampleRateAtSave`
+    /// (best available historical reference; 48000 when that is also invalid). Note the Locked
+    /// honesty limitation: migration cannot reconstruct timing a historical v19 re-save at a
+    /// different device rate already destroyed — v20 pins the interpretation from migration on.
+    double timelineSampleRate = 0.0;
     // v3: effective arrangement extent in samples (optional in JSON; 0 = treat as “absent / floor
     // from content only” on load — see `SessionSnapshot::withTracks`).
     std::int64_t arrangementExtentSamples = 0;

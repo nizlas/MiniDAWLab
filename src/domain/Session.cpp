@@ -1505,6 +1505,24 @@ std::int64_t Session::getRightLocatorSamples() const noexcept
     return (snap != nullptr) ? snap->getRightLocatorSamples() : 0;
 }
 
+double Session::timelineSampleRateOr(const double fallback) const noexcept
+{
+    return (timelineSampleRate_ > 0.0 && std::isfinite(timelineSampleRate_)) ? timelineSampleRate_
+                                                                             : fallback;
+}
+
+void Session::initializeTimelineSampleRateIfUnset(const double rate) noexcept
+{
+    if (timelineSampleRate_ > 0.0 && std::isfinite(timelineSampleRate_))
+    {
+        return; // Initialized once; never silently re-stamped (TLD-1).
+    }
+    if (rate > 0.0 && std::isfinite(rate))
+    {
+        timelineSampleRate_ = rate;
+    }
+}
+
 ProjectMusicalTime Session::getProjectMusicalTime() const noexcept
 {
     const std::shared_ptr<const SessionSnapshot> snap = loadSessionSnapshotForAudioThread();
@@ -1568,6 +1586,12 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     out.activeTrackId = activeTrackId_;
     out.playheadSamples = transport.readPlayheadSamplesForUi();
     out.deviceSampleRateAtSave = deviceSampleRate;
+    // TLD-1 (steering §10.1): `deviceSampleRateAtSave` above stays a re-stamped informational
+    // device fact; the timeline reference rate below is the authoritative interpretation domain
+    // for the sample integers and is written exactly as held — a save under a different device
+    // rate must NOT re-stamp it. A fresh never-initialized session adopts the device rate once.
+    initializeTimelineSampleRateIfUnset(deviceSampleRate);
+    out.timelineSampleRate = timelineSampleRate_;
     out.arrangementExtentSamples = s->getArrangementExtentSamples();
     out.leftLocatorSamples = s->getLeftLocatorSamples();
     out.rightLocatorSamples = s->getRightLocatorSamples();
@@ -2049,6 +2073,12 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
     }
 
     nextPlacedClipId_ = juce::jmax(parsed.nextPlacedClipId, static_cast<PlacedClipId>(maxClipInFile + 1));
+
+    // TLD-1: adopt the loaded project's timeline reference rate (the reader already normalized it:
+    // a v19 file arrives migrated from its stored `deviceSampleRateAtSave`). This deliberately
+    // overwrites any fresh-session initialization — the file is authoritative for its own timeline
+    // domain, and the current device rate never reinterprets the loaded sample integers.
+    timelineSampleRate_ = parsed.timelineSampleRate;
 
     ProjectMusicalTime loadedMusical;
     loadedMusical.bpm = parsed.bpm;

@@ -272,6 +272,19 @@ public:
     [[nodiscard]] std::int64_t getLeftLocatorSamples() const noexcept;
     [[nodiscard]] std::int64_t getRightLocatorSamples() const noexcept;
 
+    // [Message thread] TLD-1 (steering §10.1): the project's **timeline reference sample rate** —
+    // the rate under which every persisted sample-domain timeline field (clip placements, MIDI
+    // clip anchors/windows, locators, extent, playhead) is interpreted. Initialized **once** (from
+    // the loaded project's normalized v20 field, or from the device rate on a fresh session) and
+    // never silently re-stamped by device/engine-rate changes; an explicit future change must
+    // rescale all sample-domain fields atomically in the same operation. 0 = not yet initialized.
+    [[nodiscard]] double getTimelineSampleRate() const noexcept { return timelineSampleRate_; }
+    /// [Message thread] Reference rate when initialized, else `fallback` (typically the device rate).
+    [[nodiscard]] double timelineSampleRateOr(double fallback) const noexcept;
+    /// [Message thread] Adopts `rate` only while uninitialized (fresh session before first
+    /// load/save). Ignores invalid rates. Never overwrites an existing reference.
+    void initializeTimelineSampleRateIfUnset(double rate) noexcept;
+
     /// [Message thread] Global tempo/meter metadata on the snapshot (independent of MIDI clip `pattern.bpm`).
     [[nodiscard]] ProjectMusicalTime getProjectMusicalTime() const noexcept;
     /// [Message thread] Updates BPM only; publishes `SessionSnapshot::withMusicalTime`.
@@ -368,6 +381,8 @@ public:
     [[nodiscard]] std::uint64_t getProjectLoadGeneration() const noexcept;
 
 private:
+    // [Message thread] TLD-1 timeline reference rate (see getTimelineSampleRate above).
+    double timelineSampleRate_ = 0.0;
     // [Message thread only] Monotonic ids for new `PlacedClip` rows (add path). Not reset on clear
     // so a long edit session does not reuse ids while UI might still hold an old `PlacedClipId`.
     PlacedClipId nextPlacedClipId_ = 1;

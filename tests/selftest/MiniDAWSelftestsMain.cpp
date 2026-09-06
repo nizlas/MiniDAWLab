@@ -19,6 +19,7 @@
 #include "ui/experimental/MidiCcLaneViewState.h"
 #include "ui/experimental/ExperimentalMidiChannelDiagnostics.h"
 
+#include "domain/TimelineDomain.h"
 #include "instruments/InstrumentTrackController.h"
 #include "io/InstrumentMidiClipExport.h"
 #include "io/ProjectFile.h"
@@ -852,8 +853,11 @@ namespace
             const int cutStart = json.substring(0, ccPos).lastIndexOfChar(',');
             const int arrEnd = json.indexOf(ccPos, "]");
             juce::String v18Json = json.substring(0, cutStart) + json.substring(arrEnd + 1);
-            v18Json = v18Json.replace("\"version\": 19", "\"version\": 18")
-                          .replace("\"version\":19", "\"version\":18");
+            // The writer stamps the current version (20 since P1B); rewind it to an authentic 18.
+            v18Json = v18Json.replace("\"version\": " + juce::String(ProjectFileV1::kCurrentVersion),
+                                      "\"version\": 18")
+                          .replace("\"version\":" + juce::String(ProjectFileV1::kCurrentVersion),
+                                   "\"version\":18");
             expect(v18Json.contains("\"version\": 18") && !v18Json.contains("ccPoints"),
                    "synthesized v18 file has no CC data and an authentic version stamp");
             (void)v18File.replaceWithText(v18Json);
@@ -872,6 +876,260 @@ namespace
         }
         (void)v19File.deleteFile();
         (void)v18File.deleteFile();
+    }
+
+    // --- P1B: schema v20, timeline reference rate (TLD-1), proxy metadata ------------------
+    //
+    // Steering: docs/PORTABLE_INSTRUMENTS_AND_PROXIES.md §10.1 (TLD-1), §12.2 (proxy metadata),
+    // §9.3 (plugin version F1v), §18.1 (update modes); roadmap slice P1B, test T-21/T-05 parts.
+
+    [[nodiscard]] ProjectFileV1 makeV20FixtureProject()
+    {
+        ProjectFileV1 data;
+        data.deviceSampleRateAtSave = 48000.0;
+        data.timelineSampleRate = 48000.0;
+        data.nextTrackId = TrackId{ 5 };
+        ProjectFileTrackV1 instRow;
+        instRow.id = TrackId{ 2 };
+        instRow.name = "Organ";
+        instRow.kind = "instrument";
+        ProjectFileTrackV1 master;
+        master.id = TrackId{ 3 };
+        master.name = "Master";
+        master.kind = "master";
+        data.tracks.push_back(std::move(instRow));
+        data.tracks.push_back(std::move(master));
+
+        ProjectFileExperimentalInstrumentTrackV1 et;
+        et.trackId = TrackId{ 2 };
+        et.instrumentKind = "GenericVst3";
+        et.name = "Organ";
+        et.hasGenericVst3Descriptor = true;
+        et.genericVst3Descriptor.name = "VB3-II";
+        et.genericVst3Descriptor.manufacturerName = "GSi";
+        et.genericVst3Descriptor.pluginFormatName = "VST3";
+        et.genericVst3Descriptor.fileOrIdentifier = "C:/Plugins/VB3-II.vst3";
+        et.genericVst3Descriptor.uniqueId = 0x1234abcd;
+        et.genericVst3Descriptor.isInstrument = true;
+        et.pluginVersion = "2.3.1";
+        et.hasProxy = true;
+        et.proxy.generationId = "sha256:0011aabb";
+        et.proxy.fingerprintSchemaVersion = 1;
+        et.proxy.relativePath = "InstrumentProxies/track_2_sha256-0011aabb.wav";
+        et.proxy.sampleRate = 48000.0;
+        et.proxy.lengthSamples = 480000;
+        et.proxy.pluginLatencySamples = 256;
+        et.proxy.latencyPolicyVersion = 1;
+        et.proxy.tailPolicyVersion = 1;
+        et.proxy.renderPolicyVersion = 1;
+        et.proxy.proxyFormatVersion = 1;
+        et.proxy.renderedUtc = "2026-09-06T12:00:00Z";
+        et.proxyUpdateMode = "onSave";
+        ProjectFileExperimentalInstrumentClipV1 c;
+        c.id = 7;
+        c.name = "Organ clip";
+        c.startSamples = 96000;
+        c.timelineAnchorSamples.emplace(96000);
+        c.lengthSamples = 48000;
+        ProjectFileExperimentalTimelineNoteV12 n;
+        n.midiNote = 60;
+        n.channel = 1;
+        n.startTick = 0;
+        c.timelineNotes.push_back(n);
+        et.clips.push_back(std::move(c));
+        data.experimentalInstrumentTracks.push_back(std::move(et));
+        return data;
+    }
+
+    void testProjectV20SchemaRoundTripAndV19Migration()
+    {
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWSelftests");
+        (void)dir.createDirectory();
+        const juce::File v20File = dir.getChildFile("p1b-v20.dalproj");
+        const juce::File v19File = dir.getChildFile("p1b-v19.dalproj");
+        const juce::File malformedFile = dir.getChildFile("p1b-malformed.dalproj");
+
+        // v20 write → read round-trip of every new field.
+        const ProjectFileV1 data = makeV20FixtureProject();
+        {
+            const auto wr = writeProjectFile(v20File, data);
+            expect(wr.wasOk(), "p1b: v20 project with proxy metadata writes ok");
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(v20File, back);
+            expect(rr.wasOk() && back.version == 20, "p1b: v20 project reads back as version 20");
+            expect(back.timelineSampleRate == 48000.0,
+                   "p1b: timeline reference rate round-trips exactly");
+            bool ok = back.experimentalInstrumentTracks.size() == 1U;
+            if (ok)
+            {
+                const auto& et = back.experimentalInstrumentTracks[0];
+                ok = et.pluginVersion == "2.3.1" && et.hasProxy
+                     && et.proxy.generationId == "sha256:0011aabb"
+                     && et.proxy.relativePath == "InstrumentProxies/track_2_sha256-0011aabb.wav"
+                     && et.proxy.sampleRate == 48000.0 && et.proxy.lengthSamples == 480000
+                     && et.proxy.pluginLatencySamples == 256 && et.proxy.fingerprintSchemaVersion == 1
+                     && et.proxy.latencyPolicyVersion == 1 && et.proxy.tailPolicyVersion == 1
+                     && et.proxy.renderPolicyVersion == 1 && et.proxy.proxyFormatVersion == 1
+                     && et.proxy.renderedUtc == "2026-09-06T12:00:00Z"
+                     && et.proxyUpdateMode == "onSave";
+            }
+            expect(ok, "p1b: pluginVersion + full proxy metadata + update mode round-trip");
+        }
+
+        // Reference-rate stability: a v20 file whose device rate differs keeps its own reference.
+        {
+            ProjectFileV1 crossRate = makeV20FixtureProject();
+            crossRate.deviceSampleRateAtSave = 44100.0; // device changed; reference did not
+            crossRate.timelineSampleRate = 48000.0;
+            const auto wr = writeProjectFile(v20File, crossRate);
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(v20File, back);
+            expect(wr.wasOk() && rr.wasOk() && back.timelineSampleRate == 48000.0
+                       && back.deviceSampleRateAtSave == 44100.0,
+                   "p1b: device-rate change does not re-stamp the persisted timeline reference");
+            // Sample-domain integers are untouched by the rate difference.
+            expect(back.experimentalInstrumentTracks.size() == 1U
+                       && back.experimentalInstrumentTracks[0].clips.size() == 1U
+                       && back.experimentalInstrumentTracks[0].clips[0].startSamples == 96000,
+                   "p1b: stored sample-domain integers survive a device-rate difference unchanged");
+        }
+
+        // v19 migration: strip the v20 keys, rewind the version — the reader initializes the
+        // timeline reference from deviceSampleRateAtSave and defaults proxy fields. The surgery
+        // works on the parsed var tree (the writer emits single-line JSON), so it is robust
+        // against formatting details.
+        {
+            const auto wr = writeProjectFile(v20File, data);
+            expect(wr.wasOk(), "p1b: fixture rewrite for v19 surgery ok");
+            juce::var root;
+            const auto pr = juce::JSON::parse(v20File.loadFileAsString(), root);
+            juce::DynamicObject* rootObj = root.getDynamicObject();
+            expect(pr.wasOk() && rootObj != nullptr && root.hasProperty("timelineSampleRate"),
+                   "p1b: v20 JSON actually carries the new root key");
+            rootObj->setProperty("version", 19);
+            rootObj->removeProperty("timelineSampleRate");
+            bool sawTrackKeys = false;
+            if (const auto* exArr = root.getProperty("experimentalInstrumentTracks", {}).getArray())
+            {
+                for (const juce::var& tv : *exArr)
+                {
+                    if (juce::DynamicObject* to = tv.getDynamicObject())
+                    {
+                        sawTrackKeys = sawTrackKeys
+                                       || (tv.hasProperty("proxy") && tv.hasProperty("pluginVersion")
+                                           && tv.hasProperty("proxyUpdateMode"));
+                        to->removeProperty("proxy");
+                        to->removeProperty("pluginVersion");
+                        to->removeProperty("proxyUpdateMode");
+                    }
+                }
+            }
+            expect(sawTrackKeys, "p1b: v20 JSON actually carries the new per-track keys");
+            (void)v19File.replaceWithText(juce::JSON::toString(root, true));
+            ProjectFileV1 old;
+            const auto rr = readProjectFile(v19File, old);
+            expect(rr.wasOk() && old.version == 19,
+                   std::string("p1b: synthesized v19 file loads")
+                       + (rr.wasOk() ? "" : (std::string(" — ") + rr.getErrorMessage().toStdString())));
+            expect(old.timelineSampleRate == old.deviceSampleRateAtSave
+                       && old.timelineSampleRate == 48000.0,
+                   "p1b: v19 migration initializes the timeline reference from deviceSampleRateAtSave");
+            expect(old.experimentalInstrumentTracks.size() == 1U
+                       && !old.experimentalInstrumentTracks[0].hasProxy
+                       && old.experimentalInstrumentTracks[0].pluginVersion.isEmpty()
+                       && old.experimentalInstrumentTracks[0].proxyUpdateMode == "auto",
+                   "p1b: v19 loads with no proxy, no plugin version, update mode auto");
+        }
+
+        // Malformed proxy metadata / malformed timeline rate never fail the load (PI-025).
+        {
+            const auto wr = writeProjectFile(v20File, data);
+            expect(wr.wasOk(), "p1b: fixture rewrite for malformed surgery ok");
+            juce::var root;
+            const auto pr = juce::JSON::parse(v20File.loadFileAsString(), root);
+            expect(pr.wasOk() && root.getDynamicObject() != nullptr, "p1b: malformed-surgery parse ok");
+            root.getDynamicObject()->setProperty("timelineSampleRate", -7.5);
+            if (const auto* exArr = root.getProperty("experimentalInstrumentTracks", {}).getArray())
+            {
+                for (const juce::var& tv : *exArr)
+                {
+                    if (juce::DynamicObject* to = tv.getDynamicObject())
+                    {
+                        if (juce::DynamicObject* po = tv.getProperty("proxy", {}).getDynamicObject())
+                        {
+                            po->setProperty("generationId", juce::String());
+                            po->setProperty("sampleRate", "not-a-number");
+                        }
+                        to->setProperty("proxyUpdateMode", "bogus");
+                    }
+                }
+            }
+            (void)malformedFile.replaceWithText(juce::JSON::toString(root, true));
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(malformedFile, back);
+            expect(rr.wasOk(), "p1b: malformed proxy metadata never makes the project unloadable");
+            expect(back.experimentalInstrumentTracks.size() == 1U
+                       && !back.experimentalInstrumentTracks[0].hasProxy,
+                   "p1b: malformed proxy object degrades to no-proxy");
+            expect(back.timelineSampleRate == 48000.0,
+                   "p1b: malformed timeline rate falls back to deviceSampleRateAtSave");
+            expect(back.experimentalInstrumentTracks[0].proxyUpdateMode == "auto",
+                   "p1b: unrecognized proxyUpdateMode repairs to auto");
+        }
+
+        // Newer versions stay rejected (unchanged contract).
+        {
+            juce::var root;
+            const auto pr = juce::JSON::parse(v20File.loadFileAsString(), root);
+            expect(pr.wasOk() && root.getDynamicObject() != nullptr, "p1b: newer-version parse ok");
+            root.getDynamicObject()->setProperty("version", 21);
+            (void)malformedFile.replaceWithText(juce::JSON::toString(root, true));
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(malformedFile, back);
+            expect(!rr.wasOk(), "p1b: files newer than v20 are still rejected");
+        }
+
+        // Musical-undo strip removes the v20 proxy/identity fields.
+        {
+            ProjectFileExperimentalInstrumentTrackV1 et = makeV20FixtureProject().experimentalInstrumentTracks[0];
+            stripExperimentalInstrumentTrackPluginFieldsForUndo(et);
+            expect(!et.hasProxy && et.pluginVersion.isEmpty() && et.proxyUpdateMode == "auto",
+                   "p1b: undo strip clears proxy metadata, plugin version and update mode");
+        }
+
+        (void)v20File.deleteFile();
+        (void)v19File.deleteFile();
+        (void)malformedFile.deleteFile();
+    }
+
+    void testTimelineDomainConversion()
+    {
+        using timeline_domain::convertSampleCount;
+        using timeline_domain::engineToReferenceSamples;
+        using timeline_domain::referenceToEngineSamples;
+
+        // Identity: equal rates are bit-exact with no rounding.
+        expect(convertSampleCount(123456789, 48000.0, 48000.0) == 123456789,
+               "tld: equal-rate conversion is exact identity");
+        // Wall-clock preservation: one second stays one second across the domain change.
+        expect(referenceToEngineSamples(48000, 48000.0, 44100.0) == 44100,
+               "tld: one reference second converts to one engine second (48k->44.1k)");
+        expect(referenceToEngineSamples(44100, 44100.0, 48000.0) == 48000,
+               "tld: one reference second converts to one engine second (44.1k->48k)");
+        // Round-trip stays within one sample (integer rounding bound).
+        const std::int64_t original = 96123;
+        const std::int64_t there = referenceToEngineSamples(original, 48000.0, 44100.0);
+        const std::int64_t backAgain = engineToReferenceSamples(there, 44100.0, 48000.0);
+        expect(std::llabs(backAgain - original) <= 1,
+               "tld: reference->engine->reference round-trip is within one sample");
+        // Invalid rates pass the value through unchanged (callers validate at the boundary).
+        expect(convertSampleCount(500, 0.0, 48000.0) == 500
+                   && convertSampleCount(500, 48000.0, -1.0) == 500,
+               "tld: invalid rates never invent a rescale");
+        // Rounding is nearest, not truncation.
+        expect(convertSampleCount(1, 48000.0, 44100.0) == 1,
+               "tld: sub-sample results round to nearest");
     }
 
     // --- Audition dispatch integration (Note Off regression fix) ---------------------------
@@ -1704,6 +1962,8 @@ int main()
     testCcEventGeneration();
     testExportWithCc();
     testProjectV19PersistenceAndMigration();
+    testProjectV20SchemaRoundTripAndV19Migration();
+    testTimelineDomainConversion();
     testAuditionDispatchIntegration();
     testToolbarLayoutAndVisibility();
     testCcLaneViewState();

@@ -736,6 +736,61 @@ namespace
                     et.genericVst3Descriptor.isInstrument = static_cast<int>(static_cast<double>(isInst) + 0.5) != 0;
                 }
             }
+            // v20 additive fields. Absent keys keep their DTO defaults (no proxy, mode "auto",
+            // empty version). A malformed `proxy` object degrades to "no proxy" and MUST NOT fail
+            // the load (PI-025); the project stays fully usable without proxy metadata.
+            et.pluginVersion = tv.getProperty("pluginVersion", {}).toString();
+            const juce::var& proxyV = tv.getProperty("proxy", {});
+            if (proxyV.isObject())
+            {
+                ProjectFileProxyMetadataV20 p;
+                p.generationId = proxyV.getProperty("generationId", {}).toString();
+                p.relativePath = proxyV.getProperty("relativePath", {}).toString();
+                const juce::var& psr = proxyV.getProperty("sampleRate", {});
+                if (psr.isDouble() || psr.isInt() || psr.isInt64())
+                {
+                    p.sampleRate = (double)psr;
+                }
+                const auto readNonNegativeInt = [&proxyV](const char* key, const int fallback) {
+                    const juce::var& v = proxyV.getProperty(key, {});
+                    if (v.isInt() || v.isInt64() || v.isDouble())
+                    {
+                        const int n = (int)static_cast<double>(v);
+                        if (n >= 0)
+                        {
+                            return n;
+                        }
+                    }
+                    return fallback;
+                };
+                p.fingerprintSchemaVersion = readNonNegativeInt("fingerprintSchemaVersion", 1);
+                p.pluginLatencySamples = readNonNegativeInt("pluginLatencySamples", 0);
+                p.latencyPolicyVersion = readNonNegativeInt("latencyPolicyVersion", 1);
+                p.tailPolicyVersion = readNonNegativeInt("tailPolicyVersion", 1);
+                p.renderPolicyVersion = readNonNegativeInt("renderPolicyVersion", 1);
+                p.proxyFormatVersion = readNonNegativeInt("proxyFormatVersion", 1);
+                const juce::var& plen = proxyV.getProperty("lengthSamples", {});
+                if (plen.isInt64() || plen.isInt() || plen.isDouble())
+                {
+                    p.lengthSamples = static_cast<std::int64_t>(static_cast<double>(plen));
+                }
+                p.renderedUtc = proxyV.getProperty("renderedUtc", {}).toString();
+                // Validity gate: identity, path, rate, and length must be usable; otherwise the
+                // whole object is treated as absent (degraded, never fatal).
+                if (p.generationId.isNotEmpty() && p.relativePath.isNotEmpty() && p.sampleRate > 0.0
+                    && std::isfinite(p.sampleRate) && p.lengthSamples >= 0)
+                {
+                    et.hasProxy = true;
+                    et.proxy = std::move(p);
+                }
+            }
+            {
+                const juce::String mode = tv.getProperty("proxyUpdateMode", {}).toString().trim();
+                // Recognized values only (steering §18.1); anything else repairs to "auto".
+                et.proxyUpdateMode = (mode == "onSave" || mode == "manual" || mode == "off")
+                                         ? mode
+                                         : juce::String("auto");
+            }
             const juce::var& clipsV = tv.getProperty("clips", {});
             if (clipsV.isArray())
             {
@@ -968,6 +1023,16 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     root->setProperty("activeTrackId", static_cast<std::int64_t>(data.activeTrackId));
     root->setProperty("playheadSamples", data.playheadSamples);
     root->setProperty("deviceSampleRateAtSave", data.deviceSampleRateAtSave);
+    if (data.version >= 20)
+    {
+        // TLD-1 (steering §10.1): the timeline reference rate is required at v20 and is written
+        // exactly as held — never re-derived from the device. Callers (Session) own the
+        // initialize-once / never-re-stamp discipline; the writer only refuses junk.
+        const double tlr = (data.timelineSampleRate > 0.0 && std::isfinite(data.timelineSampleRate))
+                               ? data.timelineSampleRate
+                               : data.deviceSampleRateAtSave;
+        root->setProperty("timelineSampleRate", tlr);
+    }
     if (data.version >= 3)
     {
         root->setProperty("arrangementExtentSamples", data.arrangementExtentSamples);
@@ -1082,6 +1147,40 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             if (et.instrumentKind == "GenericVst3" && et.hasGenericVst3Descriptor)
             {
                 eo->setProperty("genericVst3Descriptor", genericVst3DescriptorToVar(et.genericVst3Descriptor));
+            }
+            if (data.version >= 20)
+            {
+                // v20 additive proxy/identity fields (steering §12.2). All omit-when-default so a
+                // v20 file without proxies differs from v19 only by the version and the root
+                // timeline reference rate.
+                if (et.pluginVersion.isNotEmpty())
+                {
+                    eo->setProperty("pluginVersion", et.pluginVersion);
+                }
+                if (et.hasProxy && et.proxy.generationId.isNotEmpty() && et.proxy.relativePath.isNotEmpty()
+                    && et.proxy.sampleRate > 0.0 && std::isfinite(et.proxy.sampleRate))
+                {
+                    juce::DynamicObject::Ptr po = new juce::DynamicObject();
+                    po->setProperty("generationId", et.proxy.generationId);
+                    po->setProperty("fingerprintSchemaVersion", et.proxy.fingerprintSchemaVersion);
+                    po->setProperty("relativePath", et.proxy.relativePath);
+                    po->setProperty("sampleRate", et.proxy.sampleRate);
+                    po->setProperty("lengthSamples", static_cast<juce::int64>(et.proxy.lengthSamples));
+                    po->setProperty("pluginLatencySamples", et.proxy.pluginLatencySamples);
+                    po->setProperty("latencyPolicyVersion", et.proxy.latencyPolicyVersion);
+                    po->setProperty("tailPolicyVersion", et.proxy.tailPolicyVersion);
+                    po->setProperty("renderPolicyVersion", et.proxy.renderPolicyVersion);
+                    po->setProperty("proxyFormatVersion", et.proxy.proxyFormatVersion);
+                    if (et.proxy.renderedUtc.isNotEmpty())
+                    {
+                        po->setProperty("renderedUtc", et.proxy.renderedUtc);
+                    }
+                    eo->setProperty("proxy", juce::var(po.get()));
+                }
+                if (et.proxyUpdateMode.isNotEmpty() && et.proxyUpdateMode != "auto")
+                {
+                    eo->setProperty("proxyUpdateMode", et.proxyUpdateMode);
+                }
             }
             if (!et.powerOn)
             {
@@ -1341,6 +1440,30 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
     else
     {
         return juce::Result::fail("Project missing or invalid deviceSampleRateAtSave.");
+    }
+
+    // v20 timeline reference rate (TLD-1, steering §10.1). The reader always yields a valid rate:
+    // a v20 key wins when usable; v19-and-older files (and malformed/absent values) migrate by
+    // initializing from the stored `deviceSampleRateAtSave` — the best available historical
+    // reference — with 48000 as the last-resort default (matching the engine's timeline default).
+    // This is the entire v19→v20 migration for the field: purely additive, never a load failure,
+    // and no sample-domain integer is rescaled or reinterpreted here.
+    {
+        double tlr = 0.0;
+        const juce::var& tv = root.getProperty("timelineSampleRate", {});
+        if (tv.isDouble() || tv.isInt() || tv.isInt64())
+        {
+            tlr = (double)tv;
+        }
+        if (!(tlr > 0.0) || !std::isfinite(tlr))
+        {
+            tlr = out.deviceSampleRateAtSave;
+        }
+        if (!(tlr > 0.0) || !std::isfinite(tlr))
+        {
+            tlr = 48000.0;
+        }
+        out.timelineSampleRate = tlr;
     }
 
     out.arrangementExtentSamples = 0;
@@ -1850,6 +1973,13 @@ void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimental
     t.genericVst3Descriptor = {};
     t.drumNoteNameOverrides.clear();
     t.drumNoteNameAutoPlugin.clear();
+    // v20 (steering §12.3, §18.3): proxy metadata, the persisted plugin version, and the update
+    // mode are not musical state — they must never create or pollute musical-undo entries. The
+    // musical comparison below ignores them by construction once stripped here.
+    t.pluginVersion.clear();
+    t.hasProxy = false;
+    t.proxy = {};
+    t.proxyUpdateMode = "auto";
 }
 
 namespace

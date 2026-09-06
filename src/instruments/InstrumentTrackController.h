@@ -334,11 +334,25 @@ public:
     /// Generic catalog VST3 project restore (descriptor + catalog repair; no plugin binary state).
     void runPendingGenericVst3ProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
 
-    /// Device sample rate for **musical** length derivation (message thread). Does not rescale clips.
+    /// Timeline interpretation rate for **musical** length derivation and tick→sample baking
+    /// (message thread). Does not rescale clips. TLD-1: when the session holds a persisted
+    /// timeline reference rate, that reference is authoritative and the passed (device) rate is
+    /// only a fallback — see the definition for the full contract.
     void setTimelineSampleRate(double sampleRate) noexcept;
 
     /// Same rate as set by `setTimelineSampleRate` (arrangement note-preview tick->sample mapping).
     [[nodiscard]] double getTimelineSampleRate() const noexcept { return timelineSampleRate_; }
+
+    // --- v20 proxy/identity persistence (P1B; steering §12.2) — message thread only --------------
+    /// Persisted plugin version (F1v): loaded value, refreshed from the live plugin at save.
+    [[nodiscard]] juce::String getPersistedPluginVersion() const noexcept { return persistedPluginVersion_; }
+    /// Published Primary proxy metadata; `nullptr` when the destination has no proxy.
+    [[nodiscard]] const ProjectFileProxyMetadataV20* getProxyMetadata() const noexcept
+    {
+        return hasProxyMetadata_ ? &proxyMetadata_ : nullptr;
+    }
+    /// Per-destination proxy update mode ("auto" | "onSave" | "manual" | "off", steering §18.1).
+    [[nodiscard]] juce::String getProxyUpdateMode() const noexcept { return proxyUpdateMode_; }
 
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;
@@ -475,6 +489,18 @@ private:
     juce::String pendingInstrumentKind_;
     /// Persisted/display DTO kind for this lane (`GrooveAgentSE` / `HALionSonic`). Not consulted on audio thread.
     juce::String experimentalInstrumentKind_;
+
+    // --- v20 proxy/identity persistence round-trip (P1B; steering §12.2) -------------------------
+    /// `PluginDescription::version` as loaded from the project (F1v). Save prefers the live loaded
+    /// plugin's fresh version and falls back to this when no plugin is loaded, so the persisted
+    /// version survives save-without-plugin round-trips. Empty = unknown.
+    juce::String persistedPluginVersion_;
+    /// Published Primary proxy metadata (absent ⇒ no proxy). Opaque round-trip in P1B — no render
+    /// engine consumes it yet; P1F publication will own updates.
+    bool hasProxyMetadata_ = false;
+    ProjectFileProxyMetadataV20 proxyMetadata_;
+    /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
+    juce::String proxyUpdateMode_ { "auto" };
 
     double timelineSampleRate_ = 48000.0;
 
