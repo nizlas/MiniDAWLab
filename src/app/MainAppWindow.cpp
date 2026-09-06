@@ -1431,6 +1431,23 @@ public:
         };
         cb.seekTransport = [this](std::int64_t sampleIndex) { transport.requestSeek(sampleIndex); };
         cb.readCycleWrapCount = [this] { return transport.readCycleWrapCountForUi(); };
+        // SPIKE-02 contention plans: drain the engine's always-on audio callback load window
+        // (the same counters tickPlaybackUiLoadDiagnostics reads when its compile flag is on).
+        cb.snapshotAudioLoad = [this]() -> Spike01AudioLoadStats {
+            const auto s = playbackEngine_.snapshotAudioCallbackLoadAndReset();
+            Spike01AudioLoadStats o;
+            o.blocks = s.blocks;
+            o.minMs = s.minMs;
+            o.meanMs = s.meanMs;
+            o.maxMs = s.maxMs;
+            o.meanBudgetPercent = s.meanBudgetPercent;
+            o.maxBudgetPercent = s.maxBudgetPercent;
+            o.nearOverruns = s.nearOverruns;
+            o.overruns = s.overruns;
+            o.lastBlockSamples = s.lastBlockSamples;
+            o.sampleRate = s.sampleRate;
+            return o;
+        };
         spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
                                                                                autoPlanId);
     }

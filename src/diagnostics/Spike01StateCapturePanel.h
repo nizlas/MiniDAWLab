@@ -30,6 +30,7 @@
 
 #include <JuceHeader.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -43,6 +44,23 @@ struct Spike01RuntimeChoice
 {
     TrackId trackId = kInvalidTrackId;
     juce::String label;
+};
+
+/// [SPIKE-02 only] Decoupled copy of PlaybackEngine::AudioCallbackLoadSnapshot (so this
+/// header does not pull in the engine). Drained via the same message-thread
+/// `snapshotAudioCallbackLoadAndReset()` the playback-UI-load diagnostics use.
+struct Spike01AudioLoadStats
+{
+    std::uint64_t blocks = 0;
+    double minMs = 0.0;
+    double meanMs = 0.0;
+    double maxMs = 0.0;
+    double meanBudgetPercent = 0.0;
+    double maxBudgetPercent = 0.0;
+    std::uint32_t nearOverruns = 0; ///< blocks >= 70% of the realtime budget
+    std::uint32_t overruns = 0;     ///< blocks >= 100% of the realtime budget
+    int lastBlockSamples = 0;
+    double sampleRate = 0.0;
 };
 
 /// Decoupling seam: the panel never touches coordinators/session directly.
@@ -62,6 +80,9 @@ struct Spike01PanelCallbacks
     /// (through `Transport::requestSeek`), and read the cycle wrap count. May be null.
     std::function<void(std::int64_t)> seekTransport;
     std::function<std::uint32_t()> readCycleWrapCount;
+    /// [Message thread; SPIKE-02 contention plans only] Read-and-reset the engine's audio
+    /// callback load window (PlaybackEngine::snapshotAudioCallbackLoadAndReset). May be null.
+    std::function<Spike01AudioLoadStats()> snapshotAudioLoad;
     juce::String appVersion;
 };
 

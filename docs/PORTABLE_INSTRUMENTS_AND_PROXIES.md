@@ -1,11 +1,35 @@
 # Portable Instruments and Proxy Rendering — Technical Steering Document
 
 **Status:** `Canonical`
-**Date:** 2026-09-06 (revision 5, approved by explicit human review 2026-09-06 of the SPIKE-01B /
-SPIKE-01B-M evidence — see below; revision 4 applied the SPIKE-01 amendment approved 2026-09-05;
-revision 3 canonicalized through explicit human review 2026-09-04; revision 2 incorporated the
-2026-09-03 design review)
+**Date:** 2026-09-06 (revision 6, closing SPIKE-02 per its reviewed evidence report; revision 5
+approved by explicit human review 2026-09-06 of the SPIKE-01B / SPIKE-01B-M evidence — see below;
+revision 4 applied the SPIKE-01 amendment approved 2026-09-05; revision 3 canonicalized through
+explicit human review 2026-09-04; revision 2 incorporated the 2026-09-03 design review)
 **Authority:** normative for all Portable Instruments / Proxy implementation slices.
+
+> **Revision 6 (2026-09-06).** Based on the SPIKE-02 evidence
+> (`docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md`, verdict **PASS**; measured plugins:
+> VB3-II and Groove Agent SE; results are evidence for the measured plugins/sessions, not
+> universal plugin claims), this revision:
+>
+> * **locks the initial PID-005 numeric tail policy** (§15.2): −70 dBFS peak threshold, 1.0 s
+>   continuous-silence window, 30 s maximum tail — tail-policy v1;
+> * **locks the measured P1 resource defaults** (§14.3, §15.4): one low-priority render worker,
+>   unpaced/faster-than-realtime processing allowed, rendering may continue during transport
+>   playback, recording pauses background rendering, initial render block size 512,
+>   plugin-specific realtime fallback allowed, no percentage CPU cap in P1;
+> * **clarifies the render span and the published asset's end** (§15.6): the asset ends when the
+>   accepted tail completes and is never zero-padded to the project/song end;
+> * **adds the empty-destination silent-generation rule** (§15.7) with its honesty constraints
+>   for autonomous generators;
+> * **records regional/partial re-rendering as deferred P4 work** (§15.8): P1 always fully
+>   re-renders an affected destination.
+>
+> SPIKE-02 additionally validated the §9.4.4 isolated-instance lifecycle for the measured VB3-II
+> scenario (restore → prepare → reset/flush → deterministic chase → render from project start;
+> not a universal, deterministic or bit-exact equivalence claim for arbitrary plugins) — P1D's
+> per-plugin validation obligation stands. `setNonRealtime` was speed-neutral for the measured
+> VB3-II instance; this is not a general guarantee for other plugins.
 
 > **Revision 5 (2026-09-06).** Based on the reviewed SPIKE-01B / SPIKE-01B-M evidence
 > (`docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md`, measurement verdict
@@ -70,7 +94,8 @@ Canonical document:
   contract** (§9.4). Resolved by explicitly accepting the plugin API's observability boundary;
   E2 (MIDI-learn-class silent state) and plugin coverage beyond the two measured remain
   documented compatibility limitations, not P1 blockers.
-* PID-005's numeric tail values remain evidence-gated behind SPIKE-02.
+* PID-005's numeric tail values were evidence-gated behind SPIKE-02; **SPIKE-02 completed
+  (verdict PASS) and revision 6 locks tail-policy v1** (−70 dBFS / 1.0 s / 30 s, §15.2).
 * OI-002's bounded playback I/O and sample-rate-adaptation mechanism remains evidence-gated behind
   SPIKE-03.
 * PID-009's Secondary persistence shape remains deliberately deferred to P2.
@@ -81,7 +106,7 @@ open; full context for every controlled gate lives in the decision register (§2
 | ID | Question | Status after review | Gate |
 |---|---|---|---|
 | **PID-001** (part) | Authoritative plugin-state capture mechanism: how does DAL observe "the user tweaked VB3-II drawbars" so the proxy goes stale and renders from *current* state? (Audit U2, H2) | **Locked (reviewed) — hybrid authoritative-state and host-observed identity contract, human review 2026-09-06 (revision 5).** Capture layer: fresh checkpoint capture (Resolved on measured evidence). Identity layer: host-managed revision + conservative lifecycle bumps + persisted save-pairing; raw bytes never as general validity identity; byte equality only as positive "unchanged" evidence for byte-stable-classified plugins at host-observable quiescence (§9.4). Resolved by explicitly accepting the observability boundary — not by claiming DAL detects unknowable internal changes. Documented compatibility limitations (non-blocking): E2 (MIDI-learn), plugins beyond the two measured. | SPIKE-01 + SPIKE-01B/01B-M **completed** (final measurement verdict PARTIAL PASS, reviewed). P1C unblocked. |
-| **PID-005** (part) | Tail-policy numeric values: silence threshold, continuous-silence window, maximum tail duration. | **Open / evidence-gated.** Structure is Locked (§15.2); −60 dBFS / 1 s / 30 s are experimental starting points only, not canonical defaults. | **SPIKE-02** measurements with VB3-II-class tails. Blocks P1D numeric confirmation. |
+| **PID-005** (part) | Tail-policy numeric values: silence threshold, continuous-silence window, maximum tail duration. | **Locked (revision 6, SPIKE-02 evidence):** tail-policy v1 = −70 dBFS peak / 1.0 s continuous window / 30 s maximum tail (§15.2). All 72 measured candidate combinations completed for VB3-II and Groove Agent SE (idle floors −149 dBFS and digital silence); the evidence covers the measured plugins/sessions — a plugin whose idle floor exceeds the threshold fails at the cap and receives a compatibility limitation. | **SPIKE-02 completed** (verdict PASS, `docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md`). P1D unblocked. |
 | **OI-002** | Bounded proxy playback I/O and sample-rate adaptation: the audio-thread-safe playback-source mechanism (bounded memory, read-ahead vs budgeted preload vs cached conversion, resampler placement). | **Open / evidence-gated.** The *requirements* are Locked (§7.3, §15.3, PI-030/PI-031); only the technical mechanism is open. Unbounded full preload is rejected. | **SPIKE-03** (§22) — blocks P1G. |
 | **PID-009** (part) | Secondary persistence/registry shape (second descriptor+state home per instrument track). | **Reviewed and deliberately deferred to P2.** Non-blocking for P1; technically unresolved until P2 design. P1B adds no placeholder schema (§12.4). | P2 design, using then-current architecture evidence. |
 
@@ -1285,18 +1310,30 @@ the create-on-message / process-on-worker handoff before P1D relies on it.
 10. Publish only if the job remains fingerprint-current (PI-028).
 11. Discard obsolete or failed temporary output safely.
 
-### 14.3 Execution policy (Locked capabilities, Recommended parameters)
+### 14.3 Execution policy (Locked capabilities; measured P1 defaults Locked at revision 6)
 
 The architecture MUST allow: offline/non-realtime plugin indication where supported; controlled
 realtime fallback for incompatible plugins; low-priority execution; limited concurrency; render
 progress and speed reporting; cooperative cancellation/obsolescence checks at safe block
 boundaries; pausing during recording; optional pausing during playback if required to avoid
 glitches; safe project close and application shutdown. Faster-than-realtime rendering is
-normal-case but **not guaranteed**. **Recommended:** one worker, concurrency 1 (PID-004);
-pause-during-playback MAY default ON until SPIKE-02 measures contention — but this is purely a
-**resource-contention safeguard**, never a correctness requirement: background rendering with an
-already eligible snapshot is architecturally allowed during transport playback (§9.4.4), and the
-transport never needs to remain stopped throughout a render.
+normal-case but **not guaranteed**.
+
+**Measured P1 resource defaults (Locked, revision 6 — SPIKE-02 evidence §7/§8):**
+
+* **one** low-priority render worker, concurrency 1 (PID-004);
+* **unpaced/faster-than-realtime processing is allowed** (measured ~32× realtime for VB3-II in a
+  Debug build with zero audio-callback impact);
+* **rendering may continue during transport playback** — the measured default is *no* pause and
+  *no* cooperative throttling (unthrottled low-priority rendering produced 0 overruns and
+  statistically unchanged callback load next to the playback-alone baseline). Cooperative
+  yielding remains an available knob if a slower machine shows contention; it is a
+  resource-contention safeguard, never a correctness requirement (§9.4.4);
+* **recording pauses background rendering** (unchanged pause condition);
+* **initial render block size 512** (§15.4);
+* **plugin-specific realtime-paced fallback remains allowed** (§15.4, §13 compatibility paths);
+* **no percentage CPU cap is required in P1** — plugins may create internal threads, so a precise
+  in-process cap cannot be guaranteed.
 
 ### 14.4 What is reused vs rejected from existing offline code (Verified basis)
 
@@ -1325,14 +1362,22 @@ stopping. Generation/staleness precedents to imitate: `Session::loadGeneration_`
   and mixdown consistently when it arrives. `LatencySettingsStore` is device playback/recording
   offset only and does **not** provide PDC (Verified).
 
-### 15.2 Tail (Locked structure; numeric values Open)
+### 15.2 Tail (Locked structure; numeric values Locked at revision 6 — tail-policy v1)
 
 * The renderer MUST continue past the final MIDI event until deterministic silence detection
   triggers or the maximum-tail limit is reached.
 * Silence detection (structure Locked): peak amplitude below threshold X for a continuous window
-  Y ⇒ tail complete. X, Y and the max-tail cap Z remain **evidence-gated by SPIKE-02** (PID-005).
-  −60 dBFS, 1 s, and 30 s MAY be used as experimental starting points; they are not canonical
-  defaults.
+  Y ⇒ tail complete.
+* **Numeric values (Locked, revision 6, PID-005 — SPIKE-02 evidence §11/§12): tail-policy v1 =
+  X −70 dBFS absolute per-block peak, Y 1.0 s continuous window, Z 30 s maximum tail after the
+  final relevant event.** Basis: all 72 measured candidate combinations completed for VB3-II
+  (idle floor −149 dBFS) and Groove Agent SE (digital-silence idle floor) with no
+  misclassification and no post-decision re-rise; −70/1.0/30 sits mid-range of the safe region.
+  The evidence covers the measured plugins and sessions — it is not a universal compatibility
+  claim. A plugin whose idle noise floor exceeds X reaches Z materially non-silent ⇒ the render
+  is **Failed** (below) and the plugin receives an explicit compatibility limitation.
+* Changing X/Y/Z later bumps `tailPolicyVersion` (deterministic staleness); tail-policy v1 is the
+  first fingerprinted value set.
 * **Known tail truncation never becomes Current (Locked, reviewed).** Reaching the maximum-tail
   limit while output remains materially non-silent is a **diagnosed incomplete render**:
   * the incomplete render MUST NOT be published as the Current authoritative proxy;
@@ -1383,13 +1428,18 @@ Locked contract:
   before validation.
 * **Required validation:** T-17, T-25 (§23).
 
-### 15.4 Block policy (Recommended)
+### 15.4 Block policy (initial default Locked at revision 6)
 
-Fixed render block size (e.g. 512 samples), recorded as part of `renderPolicyVersion`; included in
-the fingerprint via F11 because some plugins are block-boundary sensitive. Offline/non-realtime
-indication (`setNonRealtime(true)` / VST3 offline processing) is applied where the plugin supports
-it; no such usage exists in the repo today (Verified §4.6), so SPIKE-02 validates behavior per
-plugin and defines the realtime-fallback trigger.
+Fixed render block size **512 samples** is the initial P1 default (Locked, revision 6 — SPIKE-02
+measured throughput block-size-neutral across 256/512/1024 for VB3-II, §5), recorded as part of
+`renderPolicyVersion`; included in the fingerprint via F11 because some plugins are block-boundary
+sensitive. Offline/non-realtime indication (`setNonRealtime(true)`) SHOULD be applied to render
+instances as a correctness signal; SPIKE-02 measured it **speed-neutral for the measured VB3-II
+instance** — that result is not a general guarantee for other plugins, and the plugin-specific
+realtime-paced fallback (measured to hold exactly 1.00×) remains the compatibility escape hatch
+for plugins that misbehave when processed faster than realtime. The render process buffer MUST
+span `max(2, totalNumInputChannels, totalNumOutputChannels)` channels (SPIKE-02 hazard H1:
+multi-bus instruments crash with a main-pair-only buffer; the product's scratch rule applies).
 
 ### 15.5 Render format (Recommended)
 
@@ -1397,13 +1447,54 @@ Stereo WAV (32-bit float recommended) matching the boundary signal (the host scr
 Verified §4.1). `proxyFormatVersion` in metadata + fingerprint (F13) allows future format changes
 to invalidate deterministically.
 
-### 15.6 Span rule (Locked, PID-007 reviewed)
+### 15.6 Span rule (Locked, PID-007 reviewed; asset-end clarification added at revision 6)
 
 Render from project start (sample 0) through the last render-relevant event of the destination's
 dependency set, plus tail. Rationale: CC chase and held state make mid-timeline starts unsafe
 (PI-010 reasons); rendering from zero guarantees the render instance experiences exactly the event
 history the live engine would produce. The span end is part of the snapshot; the span rule version
 is folded into `renderPolicyVersion`.
+
+**Asset-end clarification (Locked, revision 6):**
+
+* The renderer processes from the canonical project start/state boundary through the final
+  render-relevant destination MIDI/CC event and its detected tail (§15.2).
+* **The published audio asset ends when the accepted tail completes.** It MUST NOT be zero-padded
+  to the project or song end.
+* Proxy playback past the asset's EOF produces silence through the normal track path — no special
+  end-of-asset handling, no synthesized padding.
+* A shorter or longer render-relevant event span changes the snapshot's span end and therefore the
+  fingerprint (the span end is snapshot data).
+
+### 15.7 Empty-destination silent generation (Locked, revision 6)
+
+* If the authoritative destination snapshot contains **no** MIDI notes, note lifecycle events, CC
+  points, chase-relevant state, automation, or other host-scheduled events, P1 MAY represent the
+  destination's proxy as an **explicit silent generation** without storing a zero-filled WAV.
+* This fast path applies **only** to DAL-host-event-driven instruments: the classification input
+  is the absence of host-scheduled events, and the eligibility decision is a fingerprint input.
+* **Empty MIDI input alone MUST NOT be treated as proof that an arbitrary plugin is silent.**
+  Autonomous generators, plugin-internal sequencers, and similar self-driving instruments require
+  an explicit compatibility path or a normal full-span render.
+* Missing support for autonomous generators MUST be presented honestly (a compatibility
+  limitation, per §20 trust rules); DAL never silently classifies their output as silence.
+* **No speculative schema fields are added for this optimization.** A persisted
+  silent-generation representation is introduced only if P1B genuinely needs it for a current
+  invariant; until then the rule constrains behavior, not the schema.
+
+### 15.8 Regional/partial re-rendering (deferred — P4)
+
+Recorded as deferred future work; **P1 always fully re-renders an affected destination**:
+
+* P1 implements no dirty audio regions and never splices newly rendered note surroundings into an
+  old proxy asset.
+* Rationale: a MIDI edit may affect later sustain, CC state, Leslie/LFO phase, delay/reverb
+  content, round-robin state, or plugin randomness far beyond the edited region — a spliced
+  result can silently diverge from what the live engine would produce.
+* Future partial rendering requires validated state checkpoints or provably safe reset
+  boundaries, preroll, overlap/crossfade handling, and an unconditional fallback to complete
+  destination rendering. None of that is designed here.
+* The fingerprint deliberately contains **no** hypothetical partial-render dirty region.
 
 ## 16. Media lifecycle and atomic publication
 
@@ -1767,9 +1858,12 @@ flag + fingerprint currency check at publish (loadGeneration_ pattern); offline 
 supported with realtime-paced fallback per SPIKE-02 findings. *Alternatives:* worker pool
 (deferred until single-worker throughput proves insufficient); message-thread rendering (rejected:
 HR-5). *Consequences:* long projects render serially; acceptable for v1. *Required validation:*
-SPIKE-02; T-09, T-10, T-11, T-12. *Blocking slice:* P1D/P1E. *Status:* **Locked (reviewed)** —
-one low-priority render worker is required v1 behavior; offline-indication details and the
-create-on-message/process-on-worker handoff remain evidence-gated by SPIKE-02.
+SPIKE-02; T-09, T-10, T-11, T-12. *Blocking slice:* P1D/P1E. *Status:* **Locked (reviewed;
+SPIKE-02 gate satisfied at revision 6)** — one low-priority render worker is required v1
+behavior. SPIKE-02 validated the create-on-message/process-on-worker handoff, offline indication
+(speed-neutral for the measured VB3-II instance — not a general guarantee), realtime-paced
+fallback (holds 1.00×), unpaced rendering during transport playback with no callback impact, and
+cancellation within one block (§14.3 measured defaults).
 
 **PID-005 (Audit D5) — Tail and latency policy.**
 *Question:* Tail length source, latency trim vs preserve, live-vs-proxy timing parity.
@@ -1783,15 +1877,16 @@ render reaching the maximum-tail limit with materially non-silent output is a di
 render: it MUST NOT automatically become Current, the job terminates Failed with a tail-limit
 reason, the previous generation is retained, the user is informed, and a later retry MAY raise the
 limit; any future explicit "accept truncated result" feature is deferred and never silent.
-*Open:* tail numeric values (threshold, window, cap) — evidence-gated by SPIKE-02 measurements
-(−60 dBFS / 1 s / 30 s are experimental starting points, not canonical defaults). *Alternatives
-(latency):* trim-at-render (rejected: creates live/proxy timing divergence today);
-trim-at-playback (rejected: that *is* PDC — deferred). *Alternatives (truncation):*
-publish-with-warning (rejected by review: silently promotes an incomplete render to authoritative
-sound). *Consequences:* proxies inherit today's uncompensated timing — matching live behavior by
-design. *Required validation:* T-15, T-16. *Blocking slice:* P1D (policy versions must exist
-before first renders). *Status:* **Locked** (latency, tail structure incl. truncation-never-
-Current) / **Open** (tail numbers, SPIKE-02-gated).
+*Numeric values:* **Locked at revision 6 (tail-policy v1, SPIKE-02 evidence):** −70 dBFS peak /
+1.0 s window / 30 s cap (§15.2); evidence covers the measured plugins/sessions, and an
+incompatible idle floor routes to Failed + compatibility limitation, never a truncated
+publication. *Alternatives (latency):* trim-at-render (rejected: creates live/proxy timing
+divergence today); trim-at-playback (rejected: that *is* PDC — deferred). *Alternatives
+(truncation):* publish-with-warning (rejected by review: silently promotes an incomplete render
+to authoritative sound). *Consequences:* proxies inherit today's uncompensated timing — matching
+live behavior by design. *Required validation:* T-15, T-16. *Blocking slice:* P1D (policy
+versions must exist before first renders). *Status:* **Locked** (latency, tail structure incl.
+truncation-never-Current, and tail-policy v1 numbers per revision 6). Full PDC remains deferred.
 
 **PID-006 (Audit D6, U3) — Destination-mute semantics during proxy render.**
 *Question:* Does a muted/off destination render "as if audible"? *Audit evidence:* §5.3
@@ -1947,8 +2042,11 @@ integration gates marked below.
   (PID-001 Open item resolved or explicitly re-scoped). **P1C MUST NOT complete before this gate.**
   **Gate status: satisfied** — SPIKE-01 (2026-09-05) plus the corrective SPIKE-01B/SPIKE-01B-M
   follow-up (final measurement verdict PARTIAL PASS) were reviewed 2026-09-06 and locked the §9.4
-  hybrid contract (the original 2026-09-05 PASS verdict is historical/superseded). SPIKE-02
-  remains open and still gates P1D.
+  hybrid contract (the original 2026-09-05 PASS verdict is historical/superseded). **SPIKE-02 is
+  completed** (2026-09-06, verdict PASS,
+  `docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md`); revision 6 locked PID-005 tail-policy
+  v1 and the measured P1 resource defaults (§14.3, §15.2). P1D's numeric gate is satisfied; the
+  §9.4.4 per-plugin lifecycle validation obligation remains with P1D.
 
 ### SPIKE-03 — Proxy playback I/O, memory budget, seeking, and resampling (blocks P1G)
 
@@ -2030,7 +2128,7 @@ integration gates marked below.
 * **Goal:** `ProxyRenderInstance` (R6) + `ProxyDestinationRenderer` (R8) render a snapshot to a
   temp WAV, driven synchronously from a diagnostic/selftest entry point (no background queue).
 * **Included:** §14.2 steps 2–8 (foreground); latency metadata recording (§15.1); tail policy
-  v1 (§15.2, provisional Open numbers under version tag); span rule (§15.6); render-config
+  v1 (§15.2, Locked revision-6 numbers under version tag); span rule (§15.6); render-config
   policies (§15.3–15.5); **the §9.4.4 isolated-instance lifecycle validation** (restore →
   prepare → reset/flush where supported → deterministic MIDI/CC chase → complete render from
   project start), including the fallback obligation: a plugin whose lifecycle cannot remove
@@ -2040,8 +2138,8 @@ integration gates marked below.
 * **Expected files/components:** new render units (likely `src/plugins/` or a new `src/render/`);
   diagnostics hook.
 * **Invariants protected:** PI-010, PI-011, PI-014, PI-016, PI-017.
-* **Prerequisite decisions:** SPIKE-02 results; PID-004 lifecycle; PID-005 latency (Locked) +
-  provisional tail numbers.
+* **Prerequisite decisions:** SPIKE-02 results (completed, revision 6); PID-004 lifecycle;
+  PID-005 latency and tail-policy v1 numbers (Locked, §15.1/§15.2).
 * **Automated tests:** T-04 (capture-sink MIDI equivalence), T-09 (live instance untouched),
   T-31 harness parts; Level-1 harness.
 * **Plugin-dependent/manual:** T-15 (latency equivalence), T-16 (tail completion), T-31
@@ -2186,12 +2284,13 @@ integration gates marked below.
 ### Recommended next implementation slice
 
 *Historical:* SPIKE-01 was the recommended first slice; it and its corrective SPIKE-01B/SPIKE-01B-M
-follow-up are now **completed and reviewed** (revision 5; PID-001 Locked, §9.4). The SPIKE-01
-diagnostic scaffolding remains in the tree pending the cleanup recorded in the evidence report
-(§28.8) and is not removed by this revision. **The recommended next slice is SPIKE-02** (isolated
-render instance; gates P1D and PID-005's tail numbers), with ORD-1 and TLD-1/P1B as the earliest
-production micro-changes on the P1C path. (SPIKE-03 blocks only P1G and can run later, in parallel
-with P1B–P1F.) Implementation of product proxy behavior has **not** started.
+follow-up are now **completed and reviewed** (revision 5; PID-001 Locked, §9.4). **SPIKE-02 is
+also completed** (revision 6; PID-005 numbers and the measured resource defaults Locked). The
+SPIKE-01/SPIKE-02 diagnostic scaffolding remains in the tree pending the cleanup recorded in the
+evidence reports and is not removed by this revision. **The recommended next slices are P1B
+(including TLD-1) and P1C (with ORD-1 as its earliest production micro-change).** (SPIKE-03
+blocks only P1G and can run later, in parallel with P1B–P1F.) Implementation of product proxy
+behavior has **not** started as of revision 6.
 
 ## 23. Verification strategy
 
@@ -2281,10 +2380,11 @@ Proxy v1 (P1 complete) is accepted when all of the following hold:
 ### 25.1 Open decisions (authoritative list)
 
 Exactly the items in the top-of-document table, all evidence-gated or deliberately deferred —
-no product-behavior decision remains open: **PID-005** (tail numeric values — SPIKE-02-gated),
-**OI-002** (bounded playback I/O and rate-adaptation mechanism — SPIKE-03-gated, blocks P1G),
-**PID-009** (Secondary persistence shape — reviewed, deliberately deferred to P2, non-blocking
-for P1). PID-001 compatibility limitations (non-blocking, documented in §9.2/§9.4): E2
+no product-behavior decision remains open: **OI-002** (bounded playback I/O and rate-adaptation
+mechanism — SPIKE-03-gated, blocks P1G), **PID-009** (Secondary persistence shape — reviewed,
+deliberately deferred to P2, non-blocking for P1). **PID-005's numeric tail values were resolved
+at revision 6** (SPIKE-02 completed; tail-policy v1 Locked, §15.2). Regional/partial
+re-rendering is recorded as deferred P4 work (§15.8), not an open P1 decision. PID-001 compatibility limitations (non-blocking, documented in §9.2/§9.4): E2
 (MIDI-learn-class silent state) and plugins beyond the two measured — these are accepted
 observability limitations, not open decisions. Resolved by the 2026-09-03 human review: OI-001
 (→ Locked cross-rate playback requirement), PID-008 (→ Locked first-P2 audition split), PID-011

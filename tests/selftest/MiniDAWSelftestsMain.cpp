@@ -30,6 +30,10 @@
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
 
+// SPIKE-02 (isolated render / tail-policy spike) pure evaluation helpers — see
+// docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md. Removable with the spike.
+#include "diagnostics/Spike02TailAndStats.h"
+
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <cstdio>
@@ -1566,6 +1570,124 @@ namespace
                    "spike01b: reconciliation identity noteOn+noteOff+cc+other == hist+channelless");
         }
     }
+
+    // SPIKE-02 (removable with the spike): the timing-statistics aggregation used for the
+    // block-processing measurements (median = lower median, p95 = nearest rank).
+    void testSpike02TimingStats()
+    {
+        {
+            const auto s = spike02::computeTimingStats({});
+            expect(s.count == 0 && s.meanMs == 0.0 && s.p95Ms == 0.0,
+                   "spike02: empty timing series yields zeroed stats");
+        }
+        {
+            // 20 values 1..20 ms: median(lower)=10, p95 = ceil(0.95*20)=19th value = 19, max=20.
+            std::vector<double> v;
+            for (int i = 1; i <= 20; ++i)
+                v.push_back((double)i);
+            const auto s = spike02::computeTimingStats(std::move(v));
+            expect(s.count == 20 && s.medianMs == 10.0 && s.p95Ms == 19.0 && s.maxMs == 20.0
+                       && s.minMs == 1.0 && std::abs(s.meanMs - 10.5) < 1e-12,
+                   "spike02: timing stats median/p95/max/min/mean on 1..20 ms");
+        }
+        {
+            // Order independence: shuffled single-element and duplicates.
+            const auto s = spike02::computeTimingStats({ 5.0, 1.0, 5.0 });
+            expect(s.count == 3 && s.medianMs == 5.0 && s.maxMs == 5.0 && s.minMs == 1.0,
+                   "spike02: timing stats sort before ranking");
+        }
+    }
+
+    // SPIKE-02 (removable with the spike): the tail-policy candidate evaluator that interprets
+    // the measured post-final-event peak/RMS series (steering §15 locked structure: absolute
+    // peak threshold X, continuous window Y, maximum tail Z; reaching Z non-silent = Failed).
+    void testSpike02TailPolicyEvaluator()
+    {
+        using spike02::BlockLevel;
+        using spike02::TailCandidate;
+
+        // Synthetic series at 0.1 s/block: 2 s of loud decay, then quiet, with a re-rise
+        // burst at 8.0..8.2 s above -60 dB, then silence to 20 s.
+        std::vector<BlockLevel> series;
+        const auto lin = [](const double db) { return spike02::linearFromDbfs(db); };
+        for (int i = 0; i < 200; ++i)
+        {
+            const double t = 0.1 * i;
+            double db;
+            if (t < 2.0)
+                db = -10.0 - t * 20.0; // -10 dB decaying to -50 dB
+            else if (t >= 8.0 && t < 8.3)
+                db = -40.0; // re-rise burst
+            else
+                db = -85.0; // "quiet" floor above a -90 threshold
+            series.push_back({ lin(db), lin(db - 3.0) });
+        }
+        const double blockSec = 0.1;
+
+        {
+            // X=-60, Y=1s, Z=15s: quiet from 2.0 s; window 2.0..3.0 s completes; the 8.0 s
+            // burst rises above -60 again after the decision -> must be flagged.
+            const auto r = spike02::evaluateTailCandidate(series, blockSec,
+                                                          TailCandidate{ -60.0, 1.0, 15.0 });
+            expect(r.completed && std::abs(r.tailSec - 2.0) < 0.15
+                       && std::abs(r.decisionSec - 3.0) < 0.15,
+                   "spike02: tail completes at first 1s window below -60 (tail ~2s)");
+            expect(r.roseAboveThresholdAfterDecision && r.peakAfterDecisionDb > -41.0,
+                   "spike02: material re-rising above X after the decision is detected");
+        }
+        {
+            // X=-90: the -85 dB floor never qualifies -> Failed at cap (never publishes).
+            const auto r = spike02::evaluateTailCandidate(series, blockSec,
+                                                          TailCandidate{ -90.0, 1.0, 15.0 });
+            expect(!r.completed && r.failedAtCap,
+                   "spike02: idle floor above X (-85 vs -90) fails at the cap, never publishes");
+        }
+        {
+            // A window long enough (6.5 s) that the 8.0 s burst interrupts the first quiet run
+            // (2.0..8.0 s = 6.0 s): the run must RESTART after the burst (quiet resumes 8.3 s)
+            // and complete at 8.3 + 6.5 = 14.8 s, inside Z=15 s.
+            const auto r = spike02::evaluateTailCandidate(series, blockSec,
+                                                          TailCandidate{ -60.0, 6.5, 15.0 });
+            expect(r.completed && std::abs(r.tailSec - 8.3) < 0.15
+                       && std::abs(r.decisionSec - 14.8) < 0.15,
+                   "spike02: continuous-window requirement restarts after an above-X block");
+        }
+        {
+            // Z shorter than the needed decision time: quiet run 2.0..3.0 completes at 3.0 s,
+            // but with Z=2.5 s the decision cannot land within the cap -> Failed.
+            const auto r = spike02::evaluateTailCandidate(series, blockSec,
+                                                          TailCandidate{ -60.0, 1.0, 2.5 });
+            expect(!r.completed && r.failedAtCap,
+                   "spike02: decision landing beyond Z fails at the cap");
+        }
+        {
+            // Immediately silent series: tail = 0, decision = Y.
+            std::vector<BlockLevel> quiet(50, BlockLevel{ lin(-100.0), lin(-105.0) });
+            const auto r = spike02::evaluateTailCandidate(quiet, blockSec,
+                                                          TailCandidate{ -70.0, 0.5, 15.0 });
+            expect(r.completed && r.tailSec == 0.0 && std::abs(r.decisionSec - 0.5) < 0.15
+                       && !r.roseAboveThresholdAfterDecision,
+                   "spike02: already-silent output yields a zero-length tail");
+        }
+        {
+            const auto grid = spike02::evaluateTailCandidateGrid(series, blockSec);
+            expect(grid.size() == 36, "spike02: candidate grid covers 4 thresholds x 3 windows x 3 caps");
+        }
+        {
+            // dBFS helpers round-trip.
+            expect(std::abs(spike02::dbfsFromLinear(spike02::linearFromDbfs(-70.0)) + 70.0) < 1e-9
+                       && spike02::dbfsFromLinear(0.0) == -200.0,
+                   "spike02: dBFS conversion round-trips and clamps silence");
+        }
+        {
+            // Level summary.
+            std::vector<BlockLevel> s = { { 0.5, 0.1 }, { 0.25, 0.3 } };
+            const auto sum = spike02::summarizeLevels(s);
+            expect(sum.blocks == 2 && std::abs(sum.maxPeak - 0.5) < 1e-12
+                       && std::abs(sum.meanRms - 0.2) < 1e-12,
+                   "spike02: level summary computes max peak and mean RMS");
+        }
+    }
 } // namespace
 
 int main()
@@ -1587,6 +1709,8 @@ int main()
     testCcLaneViewState();
     testSpike01CaptureDiagnostics();
     testSpike01MidiDeliveryCounters();
+    testSpike02TimingStats();
+    testSpike02TailPolicyEvaluator();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

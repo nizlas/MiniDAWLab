@@ -7,6 +7,7 @@
 #include "diagnostics/Spike01MidiDeliveryCounters.h"
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
+#include "diagnostics/Spike02RenderHarness.h" // SPIKE-02 isolated-render harness (S2* plans only)
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -363,6 +364,10 @@ private:
                 return true;
             });
         }
+        else if (autoPlanId_.startsWith("S2")) // SPIKE-02: isolated render-instance measurements
+        {
+            buildSpike02Plan();
+        }
         else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
         {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
                                        // ch2 from "Organ Lower", ch3 from "Organ pedal"), with a
@@ -466,6 +471,808 @@ private:
         }
     }
 
+    //==========================================================================
+    // SPIKE-02 (isolated render-instance lifecycle / throughput / contention /
+    // snapshot initial-condition / latency / tail; steering §9.4.4, §14, §15,
+    // §21 PID-004/PID-005, §22 P1D). Plans: S2A, S2B, S2C (S2CN = nonRealtime
+    // off), S2D, S2E, S2F, S2G. All heavy machinery lives in
+    // diagnostics/Spike02RenderHarness.h; the panel only sequences steps on the
+    // message thread and polls the worker's done flag through waitProbe_.
+    //==========================================================================
+
+    static constexpr double kS2SampleRate = 48000.0;
+
+    [[nodiscard]] static std::int64_t s2Samples(const double seconds)
+    {
+        return (std::int64_t)std::llround(seconds * kS2SampleRate);
+    }
+
+    void ensureS2()
+    {
+        if (s2_ == nullptr)
+        {
+            s2_ = std::make_unique<spike02::Controller>();
+        }
+    }
+
+    /// Capture the SELECTED track's live-instance state into a named controller slot
+    /// (message thread, Save-path precedent) and remember the live pointer for identity checks.
+    [[nodiscard]] bool s2CaptureLive(const juce::String& slot)
+    {
+        ensureS2();
+        auto* host = resolveSelectedHost();
+        auto* inst = host != nullptr ? host->spike01LiveInstanceForDiagnostics() : nullptr;
+        if (inst == nullptr)
+        {
+            return false;
+        }
+        s2LivePtr_ = (const void*)inst;
+        return s2_->captureStateToSlot(*inst, slot);
+    }
+
+    /// Create + restore + configure + prepare an isolated instance of the SELECTED track's
+    /// plugin (message thread). Logs the live-vs-render identity comparison.
+    [[nodiscard]] bool s2CreateFromSelected(const spike02::RenderConfig& cfg,
+                                            const juce::String& slot,
+                                            const bool resetAfterPrepare)
+    {
+        ensureS2();
+        auto* host = resolveSelectedHost();
+        juce::PluginDescription desc;
+        if (host == nullptr || !host->getLastLoadedPluginDescription(desc))
+        {
+            return false;
+        }
+        if (!s2_->createIsolatedPlugin(desc, cfg, slot, resetAfterPrepare))
+        {
+            return false;
+        }
+        auto* iso = s2_->isolatedForMessageThreadChecks();
+        spike02::log("identity: liveInstance=" + spike02::ptrHex(s2LivePtr_) + " renderInstance="
+                     + spike02::ptrHex(iso)
+                     + (iso != nullptr && (const void*)iso != s2LivePtr_ ? " DIFFERENT (required)"
+                                                                         : " SAME (VIOLATION)"));
+        return iso != nullptr && (const void*)iso != s2LivePtr_;
+    }
+
+    /// Arm the generic wait probe for "current render job finished".
+    void addS2WaitJob(const juce::String& desc, const double timeoutSec)
+    {
+        autoSteps_.push_back({ 0, "wait: " + desc, [this, desc, timeoutSec] {
+                                  waitProbeDesc_ = desc;
+                                  waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes()
+                                                         + timeoutSec * 1000.0;
+                                  waitProbe_ = [this] {
+                                      return (s2_ != nullptr && !s2_->jobRunning()) ? 1 : 0;
+                                  };
+                                  return true;
+                              } });
+    }
+
+    [[nodiscard]] bool s2FinishJob()
+    {
+        return s2_ != nullptr && s2_->finishJob(s2LastResult_);
+    }
+
+    void s2LogPerSecond(const spike02::RenderResult& r, const int maxSeconds)
+    {
+        const int n = juce::jmin((int)r.perSecond.size(), maxSeconds);
+        for (int i = 0; i < n; ++i)
+        {
+            spike02::log("persec[" + r.label + "]: sec=" + juce::String(i) + " peakDb="
+                         + juce::String(spike02::dbfsFromLinear(r.perSecond[(size_t)i].peak), 1)
+                         + " rmsDb="
+                         + juce::String(spike02::dbfsFromLinear(r.perSecond[(size_t)i].rms), 1));
+        }
+    }
+
+    void s2EvaluateTailAndLog(const spike02::RenderResult& r, const juce::String& tag)
+    {
+        const double blockSec = (double)s2_->lastConfig().blockSize / kS2SampleRate;
+        const auto idle = spike02::summarizeLevels(r.blockLevels);
+        spike02::log("tailSeries[" + tag + "]: blocks=" + juce::String((juce::int64)idle.blocks)
+                     + " maxPeakDb=" + juce::String(idle.maxPeakDb, 1) + " meanRmsDb="
+                     + juce::String(idle.meanRmsDb, 1) + " maxRmsDb="
+                     + juce::String(idle.maxRmsDb, 1) + " blockSec=" + juce::String(blockSec, 4));
+        for (const auto& c : spike02::evaluateTailCandidateGrid(r.blockLevels, blockSec))
+        {
+            spike02::log("tailCandidate[" + tag + "]: X=" + juce::String(c.candidate.thresholdDb, 0)
+                         + "dB Y=" + juce::String(c.candidate.windowSec, 1) + "s Z="
+                         + juce::String(c.candidate.capSec, 0) + "s -> "
+                         + (c.completed ? "COMPLETED" : "FAILED_AT_CAP") + " tailSec="
+                         + juce::String(c.tailSec, 2) + " decisionSec="
+                         + juce::String(c.decisionSec, 2) + " peakAfterDb="
+                         + juce::String(c.peakAfterDecisionDb, 1) + " roseAgain="
+                         + (c.roseAboveThresholdAfterDecision ? "TRUE" : "false"));
+        }
+    }
+
+    void s2LogAudioLoad(const juce::String& tag)
+    {
+        if (!callbacks_.snapshotAudioLoad)
+        {
+            spike02::log("audioLoad[" + tag + "]: unavailable (no callback)");
+            return;
+        }
+        const auto s = callbacks_.snapshotAudioLoad();
+        spike02::log("audioLoad[" + tag + "]: blocks=" + juce::String((juce::int64)s.blocks)
+                     + " meanMs=" + juce::String(s.meanMs, 3) + " maxMs=" + juce::String(s.maxMs, 3)
+                     + " meanBudget%=" + juce::String(s.meanBudgetPercent, 1) + " maxBudget%="
+                     + juce::String(s.maxBudgetPercent, 1) + " nearOverruns(>=70%)="
+                     + juce::String((int)s.nearOverruns) + " overruns(>=100%)="
+                     + juce::String((int)s.overruns) + " blockSamples="
+                     + juce::String(s.lastBlockSamples) + " sr=" + juce::String(s.sampleRate, 0));
+    }
+
+    void s2DiscardAudioLoad()
+    {
+        if (callbacks_.snapshotAudioLoad)
+        {
+            (void)callbacks_.snapshotAudioLoad();
+        }
+    }
+
+    /// Message-thread scheduling-jitter probe (SPIKE-02 D: UI responsiveness under contention).
+    struct S2JitterProbe final : juce::Timer
+    {
+        std::vector<double> deltasMs;
+        double lastMs = 0.0;
+
+        void begin()
+        {
+            deltasMs.clear();
+            lastMs = juce::Time::getMillisecondCounterHiRes();
+            startTimer(50);
+        }
+
+        void timerCallback() override
+        {
+            const double now = juce::Time::getMillisecondCounterHiRes();
+            deltasMs.push_back(now - lastMs);
+            lastMs = now;
+        }
+
+        void endAndLog(const juce::String& tag)
+        {
+            stopTimer();
+            const auto st = spike02::computeTimingStats(deltasMs);
+            spike02::log("uiJitter[" + tag + "]: ticks=" + juce::String((juce::int64)st.count)
+                         + " target=50ms meanMs=" + juce::String(st.meanMs, 1) + " medianMs="
+                         + juce::String(st.medianMs, 1) + " p95Ms=" + juce::String(st.p95Ms, 1)
+                         + " maxMs=" + juce::String(st.maxMs, 1));
+        }
+    };
+
+    void buildSpike02Plan()
+    {
+        auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
+            autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
+        };
+        const auto organSchedule = [](const double seconds) {
+            return spike02::makeOrganPatternSchedule(kS2SampleRate, s2Samples(seconds));
+        };
+        const auto vb3Cfg = [](const int bs, const bool nrt) {
+            spike02::RenderConfig c;
+            c.sampleRate = kS2SampleRate;
+            c.blockSize = bs;
+            c.nonRealtime = nrt;
+            return c;
+        };
+
+        if (autoPlanId_ == "S2A") // lifecycle + isolation (synthetic, then VB3 during live playback)
+        {
+            addWaitForTrackStep("Organ");
+            add(1000, "A1 synthetic create+prepare", [this, vb3Cfg] {
+                ensureS2();
+                return s2_->createIsolatedSynthetic(vb3Cfg(512, true));
+            });
+            add(100, "A1 synthetic 10s render start", [this] {
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(10.0);
+                c.label = "A1-synth";
+                std::vector<spike02::ScheduledMidi> sched;
+                sched.push_back(spike02::noteOn(s2Samples(1.0), 1, 60, 100));
+                sched.push_back(spike02::noteOff(s2Samples(1.5), 1, 60));
+                return s2_->startJob(c, std::move(sched));
+            });
+            addS2WaitJob("A1 synthetic render", 60.0);
+            add(100, "A1 finish + latency-position check", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                const std::int64_t expected =
+                    s2Samples(1.0) + spike02::SyntheticLatencyInstrument::kFixedLatencySamples;
+                spike02::log(juce::String("check[A1]: firstNonZero=")
+                             + juce::String(s2LastResult_.firstNonZeroSample) + " expected="
+                             + juce::String(expected)
+                             + (s2LastResult_.firstNonZeroSample == expected ? " OK" : " MISMATCH"));
+                return true;
+            });
+            add(100, "A2 synthetic cancellation target start", [this, vb3Cfg] {
+                if (!s2_->createIsolatedSynthetic(vb3Cfg(512, true)))
+                {
+                    return false;
+                }
+                spike02::RenderConfig c = vb3Cfg(512, true);
+                c.totalSamples = s2Samples(600.0);
+                c.realtimePaced = true; // guarantee it is still running when we cancel
+                c.label = "A2-synth-cancel";
+                return s2_->startJob(c, {});
+            });
+            add(500, "A2 request cancel", [this] {
+                s2_->requestCancel();
+                return true;
+            });
+            addS2WaitJob("A2 cancelled render", 30.0);
+            add(100, "A2 finish (cancellation latency in log)", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                s2_->teardownIsolated("A2-after-cancel");
+                return s2LastResult_.cancelled;
+            });
+            add(500, "A3 capture VB3 state (quiescent)", [this] { return s2CaptureLive("A"); });
+            add(100, "A3 create isolated VB3 (restore A)", [this, vb3Cfg] {
+                return s2CreateFromSelected(vb3Cfg(512, true), "A", false);
+            });
+            add(200, "A3 start live transport playback", [this] {
+                if (!callbacks_.startTransport)
+                {
+                    return false;
+                }
+                callbacks_.startTransport();
+                return true;
+            });
+            add(1000, "A3 render 30s on worker during live playback", [this, organSchedule] {
+                s2DiscardAudioLoad();
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(30.0);
+                c.label = "A3-vb3-during-playback";
+                return s2_->startJob(c, organSchedule(30.0));
+            });
+            addS2WaitJob("A3 VB3 render", 180.0);
+            add(100, "A3 finish + isolation evidence", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                const bool playing = callbacks_.isTransportPlaying && callbacks_.isTransportPlaying();
+                const juce::String wraps = callbacks_.readCycleWrapCount
+                                               ? juce::String(callbacks_.readCycleWrapCount())
+                                               : juce::String("n/a");
+                s2LogAudioLoad("A3-during-render-playback");
+                auto* host = resolveSelectedHost();
+                auto* liveNow = host != nullptr ? host->spike01LiveInstanceForDiagnostics() : nullptr;
+                spike02::log(juce::String("check[A3]: transportStillPlaying=")
+                             + (playing ? "true" : "FALSE") + " cycleWraps=" + wraps
+                             + " livePtrUnchanged="
+                             + ((const void*)liveNow == s2LivePtr_ ? "true" : "FALSE")
+                             + " liveHasInstrument="
+                             + (host != nullptr && host->hasInstrument() ? "true" : "FALSE"));
+                if (callbacks_.stopTransport)
+                {
+                    callbacks_.stopTransport();
+                }
+                s2_->teardownIsolated("A3-done");
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "S2B") // offline modes x block sizes (VB3, 60 s each)
+        {
+            addWaitForTrackStep("Organ");
+            add(1000, "B capture VB3 state", [this] { return s2CaptureLive("B"); });
+            struct ModeDef
+            {
+                const char* tag;
+                bool nonRealtime;
+                bool paced;
+            };
+            static constexpr ModeDef kModes[] = { { "nrtOff-fast", false, false },
+                                                  { "nrtOn-fast", true, false },
+                                                  { "paced", false, true } };
+            for (const auto& mode : kModes)
+            {
+                for (const int bs : { 256, 512, 1024 })
+                {
+                    const juce::String label =
+                        "B-" + juce::String(mode.tag) + "-bs" + juce::String(bs);
+                    add(200, label + " create", [this, mode, bs] {
+                        spike02::RenderConfig c;
+                        c.sampleRate = kS2SampleRate;
+                        c.blockSize = bs;
+                        c.nonRealtime = mode.nonRealtime;
+                        return s2CreateFromSelected(c, "B", false);
+                    });
+                    add(100, label + " render 60s", [this, mode, bs, label, organSchedule] {
+                        spike02::RenderConfig c;
+                        c.sampleRate = kS2SampleRate;
+                        c.blockSize = bs;
+                        c.nonRealtime = mode.nonRealtime;
+                        c.realtimePaced = mode.paced;
+                        c.totalSamples = s2Samples(60.0);
+                        c.label = label;
+                        return s2_->startJob(c, organSchedule(60.0));
+                    });
+                    addS2WaitJob(label, mode.paced ? 150.0 : 300.0);
+                    add(100, label + " finish", [this] { return s2FinishJob(); });
+                }
+            }
+            add(100, "B teardown", [this] {
+                s2_->teardownIsolated("B-done");
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "S2C" || autoPlanId_ == "S2CN") // ten-minute benchmark (+WAV) + tail
+        {
+            const bool nrt = autoPlanId_ == "S2C";
+            addWaitForTrackStep("Organ");
+            add(1000, "C capture VB3 state", [this] { return s2CaptureLive("C"); });
+            add(100, "C create isolated (bs=512)", [this, vb3Cfg, nrt] {
+                return s2CreateFromSelected(vb3Cfg(512, nrt), "C", false);
+            });
+            add(100, "C render 600s with WAV", [this, organSchedule, nrt] {
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = nrt;
+                c.totalSamples = s2Samples(600.0);
+                c.label = nrt ? "C-600s-nrtOn" : "C-600s-nrtOff";
+                c.wavPath = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getChildFile("MiniDAWLab-spike02")
+                                .getChildFile("s2c-render.wav")
+                                .getFullPathName();
+                return s2_->startJob(c, organSchedule(600.0));
+            });
+            addS2WaitJob("C ten-minute render", 1500.0);
+            add(100, "C finish + delete WAV artifact", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                const juce::File wav = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                           .getChildFile("MiniDAWLab-spike02")
+                                           .getChildFile("s2c-render.wav");
+                spike02::log("artifact[C]: wavBytes=" + juce::String(wav.getSize()) + " deleted="
+                             + (wav.deleteFile() ? "true" : "FALSE"));
+                (void)wav.getParentDirectory().deleteRecursively();
+                return true;
+            });
+            add(100, "C tail (silence-fed, 60s cap)", [this] {
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = s2_->lastConfig().nonRealtime;
+                c.totalSamples = s2Samples(60.0);
+                c.levelsFromSample = 0;
+                c.label = "C-tail";
+                return s2_->startJob(c, {});
+            });
+            addS2WaitJob("C tail render", 300.0);
+            add(100, "C tail finish + evaluate", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                s2EvaluateTailAndLog(s2LastResult_, "C-tail");
+                s2_->teardownIsolated("C-done");
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "S2D") // playback contention + resource policy
+        {
+            addWaitForTrackStep("Organ");
+            add(1000, "D capture VB3 state", [this] { return s2CaptureLive("D"); });
+            add(100, "D create isolated (512, nrtOn)", [this, vb3Cfg] {
+                return s2CreateFromSelected(vb3Cfg(512, true), "D", false);
+            });
+            add(200, "D1 baseline: start transport + probes", [this] {
+                if (!callbacks_.startTransport)
+                {
+                    return false;
+                }
+                callbacks_.startTransport();
+                s2DiscardAudioLoad();
+                s2Jitter_.begin();
+                return true;
+            });
+            add(30000, "D1 baseline read (30s playback alone)", [this] {
+                s2LogAudioLoad("D1-baseline-playback-alone");
+                s2Jitter_.endAndLog("D1-baseline");
+                return true;
+            });
+            add(500, "D2 unpaced render start (during playback)", [this, organSchedule] {
+                s2DiscardAudioLoad();
+                s2Jitter_.begin();
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(3600.0); // cancelled after the observation window
+                c.label = "D2-unpaced";
+                return s2_->startJob(c, organSchedule(3600.0));
+            });
+            add(45000, "D2 read (45s contention) + cancel", [this] {
+                s2LogAudioLoad("D2-playback-plus-unpaced-render");
+                s2Jitter_.endAndLog("D2-unpaced");
+                s2_->requestCancel();
+                return true;
+            });
+            addS2WaitJob("D2 cancelled render", 30.0);
+            add(100, "D2 finish", [this] { return s2FinishJob(); });
+            add(200, "D3 recreate isolated (clean state)", [this, vb3Cfg] {
+                return s2CreateFromSelected(vb3Cfg(512, true), "D", false);
+            });
+            add(200, "D3 yielding render start (during playback)", [this, organSchedule] {
+                s2DiscardAudioLoad();
+                s2Jitter_.begin();
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(3600.0);
+                c.yieldEveryBlocks = 4;
+                c.yieldMs = 3;
+                c.label = "D3-yield";
+                return s2_->startJob(c, organSchedule(3600.0));
+            });
+            add(45000, "D3 read (45s cooperative) + cancel", [this] {
+                s2LogAudioLoad("D3-playback-plus-yielding-render");
+                s2Jitter_.endAndLog("D3-yield");
+                s2_->requestCancel();
+                return true;
+            });
+            addS2WaitJob("D3 cancelled render", 30.0);
+            add(100, "D3 finish + stop transport", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                if (callbacks_.stopTransport)
+                {
+                    callbacks_.stopTransport();
+                }
+                s2_->teardownIsolated("D-done");
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "S2E") // snapshot initial-condition validation (P1D lifecycle)
+        {
+            addWaitForTrackStep("Organ");
+            add(1000, "E capture Q (host-observable quiescence)", [this] {
+                return s2CaptureLive("Q");
+            });
+            add(200, "E install delivery sink + seek 0 + start transport", [this] {
+                auto* host = resolveSelectedHost();
+                if (host == nullptr || !callbacks_.seekTransport || !callbacks_.startTransport)
+                {
+                    return false;
+                }
+                host->installMidiDeliveryCaptureSinkForTests(&midiSinkAdapter_);
+                m2vSinkHostTrackId_ = selectedTrackId();
+                callbacks_.seekTransport(0);
+                callbacks_.startTransport();
+                return true;
+            });
+            add(3500, "E capture M during PROVEN MIDI/CC delivery", [this] {
+                const auto n = midiCounters_.noteOn.load(std::memory_order_relaxed);
+                const auto c = midiCounters_.cc.load(std::memory_order_relaxed);
+                spike02::log("delivery[E]: " + midiCounters_.summary());
+                if (n == 0 || c == 0)
+                {
+                    spike02::log("delivery[E]: INSUFFICIENT (noteOn=" + juce::String((juce::int64)n)
+                                 + " cc=" + juce::String((juce::int64)c) + ") — aborting");
+                    return false;
+                }
+                const bool ok = s2CaptureLive("M");
+                spike02::log(juce::String("capture[E-M]: duringTransportPlaying=")
+                             + ((callbacks_.isTransportPlaying && callbacks_.isTransportPlaying())
+                                    ? "true"
+                                    : "FALSE"));
+                return ok;
+            });
+            add(300, "E stop transport + clear sink", [this] {
+                if (callbacks_.stopTransport)
+                {
+                    callbacks_.stopTransport();
+                }
+                clearMidiSinkIfInstalled();
+                return true;
+            });
+            // Identical P1D lifecycle for both snapshots: restore -> prepare -> reset ->
+            // deterministic chase prefix -> render from "project start".
+            struct ERun
+            {
+                const char* slot;
+                const char* label;
+                bool reset;
+                bool chase;
+            };
+            static constexpr ERun kERuns[] = { { "Q", "E-RQ", true, true },
+                                               { "M", "E-RM", true, true },
+                                               { "M", "E-RM-noreset", false, false } };
+            for (const auto& run : kERuns)
+            {
+                add(500, juce::String(run.label) + " create+render 30s", [this, run, vb3Cfg,
+                                                                          organSchedule] {
+                    if (!s2CreateFromSelected(vb3Cfg(512, true), run.slot, run.reset))
+                    {
+                        return false;
+                    }
+                    spike02::RenderConfig c = vb3Cfg(512, true);
+                    c.totalSamples = s2Samples(30.0);
+                    c.label = run.label;
+                    auto sched = organSchedule(30.0);
+                    if (run.chase)
+                    {
+                        auto chase = spike02::makeChasePrefix();
+                        sched.insert(sched.begin(), chase.begin(), chase.end());
+                    }
+                    return s2_->startJob(c, std::move(sched));
+                });
+                addS2WaitJob(juce::String(run.label) + " render", 300.0);
+                add(100, juce::String(run.label) + " finish", [this] {
+                    if (!s2FinishJob())
+                    {
+                        return false;
+                    }
+                    s2LogPerSecond(s2LastResult_, 30);
+                    return true;
+                });
+            }
+            add(100, "E compare per-second profiles", [this] {
+                const auto& all = s2_->allResults();
+                const spike02::RenderResult* rq = nullptr;
+                const spike02::RenderResult* rm = nullptr;
+                const spike02::RenderResult* rmNr = nullptr;
+                for (const auto& r : all)
+                {
+                    if (r.label == "E-RQ") rq = &r;
+                    else if (r.label == "E-RM") rm = &r;
+                    else if (r.label == "E-RM-noreset") rmNr = &r;
+                }
+                const auto compare = [](const spike02::RenderResult& a,
+                                        const spike02::RenderResult& b) {
+                    const size_t n = juce::jmin(a.perSecond.size(), b.perSecond.size());
+                    double maxD = 0.0, sumD = 0.0;
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        const double d = std::abs(spike02::dbfsFromLinear(a.perSecond[i].rms)
+                                                  - spike02::dbfsFromLinear(b.perSecond[i].rms));
+                        maxD = juce::jmax(maxD, d);
+                        sumD += d;
+                    }
+                    return juce::String("secs=") + juce::String((juce::int64)n) + " maxRmsDeltaDb="
+                           + juce::String(maxD, 2) + " meanRmsDeltaDb="
+                           + juce::String(n > 0 ? sumD / (double)n : 0.0, 2);
+                };
+                if (rq != nullptr && rm != nullptr)
+                {
+                    spike02::log("compare[E]: RQ-vs-RM " + compare(*rq, *rm));
+                }
+                if (rq != nullptr && rmNr != nullptr)
+                {
+                    spike02::log("compare[E]: RQ-vs-RM-noreset " + compare(*rq, *rmNr));
+                }
+                s2_->teardownIsolated("E-done");
+                return rq != nullptr && rm != nullptr;
+            });
+        }
+        else if (autoPlanId_ == "S2F") // latency reporting + preservation (synthetic + VB3)
+        {
+            addWaitForTrackStep("Organ");
+            add(500, "F capture VB3 state", [this] { return s2CaptureLive("F"); });
+            for (const bool nrt : { false, true })
+            {
+                for (const int bs : { 256, 512, 1024 })
+                {
+                    const juce::String tag =
+                        "F-synth-bs" + juce::String(bs) + (nrt ? "-nrtOn" : "-nrtOff");
+                    add(100, tag + " create+render 3s", [this, bs, nrt, tag] {
+                        spike02::RenderConfig c;
+                        c.sampleRate = kS2SampleRate;
+                        c.blockSize = bs;
+                        c.nonRealtime = nrt;
+                        if (!s2_->createIsolatedSynthetic(c))
+                        {
+                            return false;
+                        }
+                        c.totalSamples = s2Samples(3.0);
+                        c.label = tag;
+                        std::vector<spike02::ScheduledMidi> sched;
+                        sched.push_back(spike02::noteOn(s2Samples(1.0), 1, 60, 100));
+                        sched.push_back(spike02::noteOff(s2Samples(1.5), 1, 60));
+                        return s2_->startJob(c, std::move(sched));
+                    });
+                    addS2WaitJob(tag, 60.0);
+                    add(100, tag + " finish + verify", [this, bs] {
+                        if (!s2FinishJob())
+                        {
+                            return false;
+                        }
+                        const std::int64_t expected =
+                            s2Samples(1.0)
+                            + spike02::SyntheticLatencyInstrument::kFixedLatencySamples;
+                        const bool latencyOk =
+                            s2LastResult_.latencySamplesAtStart
+                                == spike02::SyntheticLatencyInstrument::kFixedLatencySamples
+                            && s2LastResult_.latencySamplesAtEnd
+                                   == spike02::SyntheticLatencyInstrument::kFixedLatencySamples;
+                        spike02::log("check[" + s2LastResult_.label + "]: latencyReported="
+                                     + juce::String(s2LastResult_.latencySamplesAtStart)
+                                     + (latencyOk ? " OK" : " CHANGED(!)") + " firstNonZero="
+                                     + juce::String(s2LastResult_.firstNonZeroSample) + " expected="
+                                     + juce::String(expected)
+                                     + (s2LastResult_.firstNonZeroSample == expected
+                                            ? " PRESERVED"
+                                            : " SHIFTED(!)")
+                                     + " blocks=" + juce::String((juce::int64)s2LastResult_.blocks)
+                                     + " expectedBlocks="
+                                     + juce::String((s2Samples(3.0) + bs - 1) / bs));
+                        return true;
+                    });
+                }
+            }
+            for (const bool nrt : { false, true })
+            {
+                for (const int bs : { 256, 512, 1024 })
+                {
+                    const juce::String tag =
+                        "F-vb3-bs" + juce::String(bs) + (nrt ? "-nrtOn" : "-nrtOff");
+                    add(100, tag + " create+render 2s", [this, bs, nrt, tag, organSchedule] {
+                        spike02::RenderConfig c;
+                        c.sampleRate = kS2SampleRate;
+                        c.blockSize = bs;
+                        c.nonRealtime = nrt;
+                        if (!s2CreateFromSelected(c, "F", false))
+                        {
+                            return false;
+                        }
+                        c.totalSamples = s2Samples(2.0);
+                        c.label = tag;
+                        return s2_->startJob(c, organSchedule(2.0));
+                    });
+                    addS2WaitJob(tag, 60.0);
+                    add(100, tag + " finish", [this] { return s2FinishJob(); });
+                }
+            }
+            add(100, "F teardown", [this] {
+                s2_->teardownIsolated("F-done");
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "S2G") // idle noise floor + tail measurement (VB3 + optional GA)
+        {
+            addWaitForTrackStep("Organ");
+            add(1000, "G capture VB3 state", [this] { return s2CaptureLive("G"); });
+            add(100, "G create isolated (512, nrtOn)", [this, vb3Cfg] {
+                return s2CreateFromSelected(vb3Cfg(512, true), "G", false);
+            });
+            add(100, "G idle floor 5s (no MIDI)", [this] {
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(5.0);
+                c.levelsFromSample = 0;
+                c.label = "G-idle-vb3";
+                return s2_->startJob(c, {});
+            });
+            addS2WaitJob("G idle floor", 60.0);
+            add(100, "G idle floor summarize", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                const auto s = spike02::summarizeLevels(s2LastResult_.blockLevels);
+                spike02::log("idleFloor[vb3]: maxPeakDb=" + juce::String(s.maxPeakDb, 1)
+                             + " meanRmsDb=" + juce::String(s.meanRmsDb, 1) + " maxRmsDb="
+                             + juce::String(s.maxRmsDb, 1) + " blocks="
+                             + juce::String((juce::int64)s.blocks));
+                return true;
+            });
+            add(100, "G phrase + 60s tail", [this] {
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(63.0); // 3 s phrase + 60 s tail window
+                c.levelsFromSample = s2Samples(3.0); // final event (all offs + CC64 0) at 3.0 s
+                c.label = "G-tail-vb3";
+                return s2_->startJob(c, spike02::makeTailPhraseSchedule(kS2SampleRate, 3.0));
+            });
+            addS2WaitJob("G tail render", 300.0);
+            add(100, "G tail evaluate", [this] {
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                s2EvaluateTailAndLog(s2LastResult_, "vb3");
+                s2_->teardownIsolated("G-vb3-done");
+                return true;
+            });
+            add(200, "G optional: select Groove Agent track", [this] {
+                refreshTrackList();
+                s2GaAvailable_ = selectTrackContaining("Groove");
+                spike02::log(juce::String("ga[G]: available=")
+                             + (s2GaAvailable_ ? "true" : "false — skipping second plugin"));
+                return true;
+            });
+            add(200, "G GA capture+create", [this, vb3Cfg] {
+                if (!s2GaAvailable_)
+                {
+                    return true;
+                }
+                return s2CaptureLive("GA") && s2CreateFromSelected(vb3Cfg(512, true), "GA", false);
+            });
+            add(100, "G GA idle floor 5s", [this] {
+                if (!s2GaAvailable_)
+                {
+                    return true;
+                }
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(5.0);
+                c.levelsFromSample = 0;
+                c.label = "G-idle-ga";
+                return s2_->startJob(c, {});
+            });
+            addS2WaitJob("G GA idle floor", 60.0);
+            add(100, "G GA idle summarize", [this] {
+                if (!s2GaAvailable_)
+                {
+                    return true;
+                }
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                const auto s = spike02::summarizeLevels(s2LastResult_.blockLevels);
+                spike02::log("idleFloor[ga]: maxPeakDb=" + juce::String(s.maxPeakDb, 1)
+                             + " meanRmsDb=" + juce::String(s.meanRmsDb, 1) + " blocks="
+                             + juce::String((juce::int64)s.blocks));
+                return true;
+            });
+            add(100, "G GA hits + 60s tail", [this] {
+                if (!s2GaAvailable_)
+                {
+                    return true;
+                }
+                spike02::RenderConfig c;
+                c.sampleRate = kS2SampleRate;
+                c.blockSize = 512;
+                c.nonRealtime = true;
+                c.totalSamples = s2Samples(61.0); // 1 s hits + 60 s tail window
+                c.levelsFromSample = s2Samples(1.0);
+                c.label = "G-tail-ga";
+                return s2_->startJob(c, spike02::makeDrumHitSchedule(kS2SampleRate, 1.0));
+            });
+            addS2WaitJob("G GA tail render", 300.0);
+            add(100, "G GA tail evaluate + teardown", [this] {
+                if (!s2GaAvailable_)
+                {
+                    return true;
+                }
+                if (!s2FinishJob())
+                {
+                    return false;
+                }
+                s2EvaluateTailAndLog(s2LastResult_, "ga");
+                s2_->teardownIsolated("G-ga-done");
+                return true;
+            });
+        }
+    }
+
     /// M2P: deterministically wiggle the first automatable non-bypass parameter through the
     /// same notify-host path the UI uses; the original value is stored for the revert step.
     [[nodiscard]] bool perturbFirstAutomatableParameter()
@@ -557,6 +1364,36 @@ private:
             }
             return;
         }
+        // SPIKE-02 waiting mode: poll a generic predicate (render-worker done flag) until it
+        // reports satisfied/failed or times out. Polling only reads atomics; the worker owns
+        // the render instance exclusively until it reports done.
+        if (waitProbe_)
+        {
+            const int probe = waitProbe_();
+            if (probe > 0)
+            {
+                appendSessionLog("auto: wait satisfied — " + waitProbeDesc_);
+                waitProbe_ = {};
+                startTimer(autoIndex_ < autoSteps_.size()
+                               ? juce::jmax(1, autoSteps_[autoIndex_].delayBeforeMs)
+                               : 1);
+            }
+            else if (probe < 0)
+            {
+                waitProbe_ = {};
+                abortAuto("wait failed: " + waitProbeDesc_);
+            }
+            else if (juce::Time::getMillisecondCounterHiRes() > waitProbeDeadlineMs_)
+            {
+                waitProbe_ = {};
+                abortAuto("wait timeout: " + waitProbeDesc_);
+            }
+            else
+            {
+                startTimer(500);
+            }
+            return;
+        }
         if (autoIndex_ >= autoSteps_.size())
         {
             finishAuto();
@@ -570,9 +1407,9 @@ private:
             abortAuto("step failed: " + step.describe);
             return;
         }
-        if (waitTrackNeedle_.isNotEmpty())
+        if (waitTrackNeedle_.isNotEmpty() || waitProbe_)
         {
-            startTimer(500); // the step armed waiting mode
+            startTimer(500); // the step armed a waiting mode
         }
         else if (autoIndex_ < autoSteps_.size())
         {
@@ -596,6 +1433,15 @@ private:
     {
         autoActive_ = false;
         clearMidiSinkIfInstalled();
+        // SPIKE-02: never leave a render worker running unattended — cancel it; the
+        // controller destructor joins the worker and tears the instance down on the
+        // message thread (abort/shutdown lifecycle evidence in the spike02 log).
+        if (s2_ != nullptr)
+        {
+            s2_->requestCancel();
+            spike02::log("panel abort: '" + reason + "' — cancel requested on in-flight job");
+        }
+        s2Jitter_.stopTimer();
         appendSessionLog("auto: ABORT — " + reason);
         writeReport(); // partial data is still valuable
         setStatus("AUTO plan '" + autoPlanId_ + "' ABORTED: " + reason);
@@ -1083,6 +1929,16 @@ private:
     TrackId m2vSinkHostTrackId_ = kInvalidTrackId;
     const void* m2vInstanceAtInstall_ = nullptr;
     std::uint64_t m2vBoundaryAtInstall_ = 0;
+
+    // SPIKE-02 (S2* plans only; see buildSpike02Plan)
+    std::unique_ptr<spike02::Controller> s2_;
+    spike02::RenderResult s2LastResult_;
+    const void* s2LivePtr_ = nullptr;
+    bool s2GaAvailable_ = false;
+    S2JitterProbe s2Jitter_;
+    std::function<int()> waitProbe_; ///< 1 = satisfied, 0 = pending, -1 = failed
+    double waitProbeDeadlineMs_ = 0.0;
+    juce::String waitProbeDesc_;
 
     std::vector<spike01::CaptureSample> samples_;
     std::vector<spike01::ParamEvent> events_;   // guarded by eventsLock_
