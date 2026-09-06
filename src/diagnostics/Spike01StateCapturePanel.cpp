@@ -4,6 +4,7 @@
 
 #include "diagnostics/Spike01StateCapturePanel.h"
 
+#include "diagnostics/Spike01MidiDeliveryCounters.h"
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -42,10 +43,12 @@ namespace
 
 //==============================================================================
 class Spike01StateCapturePanel::Content final : public juce::Component,
-                                                private juce::AudioProcessorListener
+                                                private juce::AudioProcessorListener,
+                                                private juce::Timer
 {
 public:
-    explicit Content(Spike01PanelCallbacks callbacks) : callbacks_(std::move(callbacks))
+    explicit Content(Spike01PanelCallbacks callbacks, juce::String autoPlanId)
+        : callbacks_(std::move(callbacks)), autoPlanId_(std::move(autoPlanId))
     {
         auto initLabel = [this](juce::Label& l, const juce::String& text) {
             l.setText(text, juce::dontSendNotification);
@@ -129,13 +132,32 @@ public:
                          + (juce::JUCEApplication::getInstance() != nullptr
                                 ? juce::JUCEApplication::getInstance()->getApplicationVersion()
                                 : juce::String("unknown"))
+                         + (autoPlanId_.isNotEmpty() ? " autoPlan=" + autoPlanId_ : juce::String())
                          + " ===");
         refreshTrackList();
         setSize(640, 470);
+
+        if (autoPlanId_.isNotEmpty())
+        {
+            buildAutoPlan();
+            if (autoSteps_.empty())
+            {
+                appendSessionLog("auto: ABORT — unknown plan '" + autoPlanId_ + "'");
+            }
+            else
+            {
+                autoActive_ = true;
+                setStatus("AUTO plan '" + autoPlanId_ + "' armed ("
+                          + juce::String((int)autoSteps_.size())
+                          + " steps). Do not interact until it reports COMPLETE.");
+                startTimer(1500); // let startup/project-load settle before step 1
+            }
+        }
     }
 
     ~Content() override
     {
+        clearMidiSinkIfInstalled();
         detachListenerIfPossible();
         // Loss-proofing: if measurements exist that were never (or not last) written to a
         // report, write one automatically before the window/app goes away.
@@ -185,6 +207,435 @@ public:
     }
 
 private:
+    //==========================================================================
+    // SPIKE-01B-M unattended auto plans (message-thread juce::Timer state machine).
+    // Deviation note: the SPIKE-01B-M task said "document panel limitations rather
+    // than extending it"; the operator explicitly requested automation instead
+    // (recorded in the evidence report). Scaffolding-only; unreachable without
+    // `--spike01-state-capture --spike01-auto=<plan>`.
+    //==========================================================================
+    struct AutoStep
+    {
+        int delayBeforeMs = 0;
+        juce::String describe;
+        std::function<bool()> run; // false => abort plan (partial report still written)
+    };
+
+    /// SPIKE-01B-M M2V: observes the exact merged MidiBuffer handed to the destination
+    /// instrument's process boundary (ExperimentalInstrumentHost.cpp: the single choke point
+    /// `audioThread_processBlockAndAddToOutputs`, called immediately before
+    /// `inst.processBlock(view, blockMidi)`). Proves scheduled MIDI/CC actually reached the
+    /// same instance `spike01LiveInstanceForDiagnostics()` returns, because both resolve from
+    /// the host's single `activeOwner_->inst`. The classification/counting logic lives in
+    /// `spike01::MidiDeliveryCounters` (Spike01MidiDeliveryCounters.h — RT-safe raw-byte
+    /// parsing, no allocation; covered by deterministic selftests); this adapter only binds it
+    /// to the host's sink interface.
+    struct MidiSinkAdapter final : public ExperimentalInstrumentHost::MidiDeliveryCaptureSink
+    {
+        explicit MidiSinkAdapter(spike01::MidiDeliveryCounters& c) noexcept : counters_(c) {}
+
+        void onMidiBlockDelivered(const juce::MidiBuffer& merged, const int numSamples) override
+        {
+            counters_.countBlock(merged, numSamples);
+        }
+
+        spike01::MidiDeliveryCounters& counters_;
+    };
+
+    void buildAutoPlan()
+    {
+        auto phaseAndCapture = [this](const juce::String& phaseId, const int n) {
+            return [this, phaseId, n] {
+                setCustomPhase(phaseId);
+                const size_t before = samples_.size();
+                captureRaw(n);
+                return samples_.size() == before + (size_t)n;
+            };
+        };
+        auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
+            autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
+        };
+
+        if (autoPlanId_ == "M1X") // Groove Agent, untouched-first: captures only at 60 s / 120 s
+        {
+            addWaitForTrackStep("Groove Agent");
+            add(60000, "M1X-60s x10", phaseAndCapture("M1X-60s", 10));
+            add(60000, "M1X-120s x10", phaseAndCapture("M1X-120s", 10));
+        }
+        else if (autoPlanId_ == "M1Y") // Groove Agent, capture-heavy from t≈0
+        {
+            addWaitForTrackStep("Groove Agent");
+            add(0, "M1Y-0s x10", phaseAndCapture("M1Y-0s", 10));
+            add(30000, "M1Y-30s x10", phaseAndCapture("M1Y-30s", 10));
+            add(30000, "M1Y-60s x10", phaseAndCapture("M1Y-60s", 10));
+            add(60000, "M1Y-120s x10", phaseAndCapture("M1Y-120s", 10));
+        }
+        else if (autoPlanId_ == "M2" || autoPlanId_ == "M2O") // VB3-II post-transport settling,
+        {                                                     // two passes. M2O targets the
+                                                              // "Organ" track (arranged CC
+                                                              // content); M2 hit trackId 4
+                                                              // (notes only, no CC).
+            addWaitForTrackStep(autoPlanId_ == "M2O" ? "Organ" : "VB3");
+            add(1000, "attach listener", [this] {
+                if (attachedInstance_ == nullptr)
+                {
+                    toggleListener();
+                }
+                return attachedInstance_ != nullptr;
+            });
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                add(pass == 0 ? 500 : 2000, "start transport", [this] {
+                    if (!callbacks_.startTransport)
+                    {
+                        return false;
+                    }
+                    callbacks_.startTransport();
+                    return true;
+                });
+                add(4000, "M2-play x10 (a)", phaseAndCapture("M2-play", 10));
+                add(4000, "M2-play x10 (b)", phaseAndCapture("M2-play", 10));
+                add(1000, "stop transport + M2-stop x1 (t=0)", [this] {
+                    if (!callbacks_.stopTransport)
+                    {
+                        return false;
+                    }
+                    setCustomPhase("M2-stop");
+                    callbacks_.stopTransport();
+                    const size_t before = samples_.size();
+                    captureRaw(1);
+                    return samples_.size() == before + 1;
+                });
+                add(100, "M2-stop x1 (~100ms)", phaseAndCapture("M2-stop", 1));
+                add(150, "M2-stop x1 (~250ms)", phaseAndCapture("M2-stop", 1));
+                add(250, "M2-stop x1 (~500ms)", phaseAndCapture("M2-stop", 1));
+                add(500, "M2-stop x1 (~1s)", phaseAndCapture("M2-stop", 1));
+                add(1000, "M2-stop x1 (~2s)", phaseAndCapture("M2-stop", 1));
+                add(3000, "M2-late x10 (~5s)", phaseAndCapture("M2-late", 10));
+                add(5000, "M2-late x10 (~10s)", phaseAndCapture("M2-late", 10));
+            }
+            add(500, "detach listener", [this] {
+                detachListenerIfPossible();
+                listenerButton_.setButtonText("Attach parameter listener");
+                updateListenerLabel();
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "M2P") // VB3-II settling after a deterministic parameter
+        {                              // wiggle+revert. Parameter-round-trip test, deliberately
+                                       // independent of arranged MIDI (the project DOES contain
+                                       // arranged MIDI for Organ — the MIDI/CC playback path is
+                                       // measured separately by the M2V plan).
+            addWaitForTrackStep("VB3");
+            add(1000, "attach listener", [this] {
+                if (attachedInstance_ == nullptr)
+                {
+                    toggleListener();
+                }
+                return attachedInstance_ != nullptr;
+            });
+            add(500, "M2P-pre x10", phaseAndCapture("M2P-pre", 10));
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                add(pass == 0 ? 1000 : 3000, "perturb parameter", [this] {
+                    return perturbFirstAutomatableParameter();
+                });
+                add(250, "M2P-mid x1 (perturbed)", phaseAndCapture("M2P-mid", 1));
+                add(250, "revert parameter + M2P-post x1 (t=0)", [this, phaseAndCapture] {
+                    if (!revertPerturbedParameter())
+                    {
+                        return false;
+                    }
+                    return phaseAndCapture("M2P-post", 1)();
+                });
+                add(100, "M2P-post x1 (~100ms)", phaseAndCapture("M2P-post", 1));
+                add(150, "M2P-post x1 (~250ms)", phaseAndCapture("M2P-post", 1));
+                add(250, "M2P-post x1 (~500ms)", phaseAndCapture("M2P-post", 1));
+                add(500, "M2P-post x1 (~1s)", phaseAndCapture("M2P-post", 1));
+                add(1000, "M2P-post x1 (~2s)", phaseAndCapture("M2P-post", 1));
+                add(3000, "M2P-late x10 (~5s)", phaseAndCapture("M2P-late", 10));
+                add(5000, "M2P-late x10 (~10s)", phaseAndCapture("M2P-late", 10));
+            }
+            add(500, "detach listener", [this] {
+                detachListenerIfPossible();
+                listenerButton_.setButtonText("Attach parameter listener");
+                updateListenerLabel();
+                return true;
+            });
+        }
+        else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
+        {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
+                                       // ch2 from "Organ Lower", ch3 from "Organ pedal"), with a
+                                       // delivery sink proving the events reached the instance.
+            addWaitForTrackStep("Organ");
+            add(500, "install MIDI delivery sink + attach listener", [this] {
+                auto* host = resolveSelectedHost();
+                if (host == nullptr)
+                {
+                    return false;
+                }
+                // Identity proof: record the destination instance pointer the sink boundary
+                // will feed (same activeOwner_->inst on this host).
+                auto* inst = host->spike01LiveInstanceForDiagnostics();
+                m2vInstanceAtInstall_ = (const void*) inst;
+                m2vBoundaryAtInstall_ = host->getMidiDeliveryBoundaryBlockCountRelaxed();
+                host->installMidiDeliveryCaptureSinkForTests(&midiSinkAdapter_);
+                m2vSinkHostTrackId_ = selectedTrackId();
+                if (attachedInstance_ == nullptr)
+                {
+                    toggleListener();
+                }
+                appendSessionLog("auto: M2V sink installed; destInstance="
+                                 + juce::String::toHexString((juce::pointer_sized_int) inst)
+                                 + " boundaryBlocksAtInstall="
+                                 + juce::String((juce::int64) m2vBoundaryAtInstall_)
+                                 + " destTrackId=" + juce::String((int) m2vSinkHostTrackId_));
+                return inst != nullptr;
+            });
+            add(500, "seek to sample 0", [this] {
+                if (!callbacks_.seekTransport)
+                {
+                    return false;
+                }
+                callbacks_.seekTransport(0);
+                return true;
+            });
+            add(500, "M2V-pre x10 (stopped, before playback)", phaseAndCapture("M2V-pre", 10));
+            add(500, "start transport", [this] {
+                if (!callbacks_.startTransport)
+                {
+                    return false;
+                }
+                callbacks_.startTransport();
+                return true;
+            });
+            // Clips span ticks 960..11520 @ tpq960/180bpm => ~0.33..4.0 s; cycle is 0..288000
+            // samples (~6 s). Sample the serialized blob DENSELY (every ~250 ms for ~9 s, past
+            // one wrap) so a capture cannot systematically fall into a note gap and miss any
+            // transient performance-state variation while MIDI/CC delivery is proven concurrently.
+            for (int i = 0; i < 36; ++i)
+            {
+                add(250, "M2V-play x1 (~" + juce::String((i + 1) * 250) + "ms)",
+                    phaseAndCapture("M2V-play", 1));
+            }
+            add(0, "log delivery mid-run", [this] {
+                appendSessionLog("auto: M2V delivery (mid-run) " + midiCounters_.summary());
+                return true;
+            });
+            add(1000, "stop transport + M2V-stop x1 (t=0)", [this] {
+                if (!callbacks_.stopTransport)
+                {
+                    return false;
+                }
+                setCustomPhase("M2V-stop");
+                callbacks_.stopTransport();
+                const size_t before = samples_.size();
+                captureRaw(1);
+                return samples_.size() == before + 1;
+            });
+            add(100, "M2V-stop x1 (~100ms)", phaseAndCapture("M2V-stop", 1));
+            add(150, "M2V-stop x1 (~250ms)", phaseAndCapture("M2V-stop", 1));
+            add(250, "M2V-stop x1 (~500ms)", phaseAndCapture("M2V-stop", 1));
+            add(500, "M2V-stop x1 (~1s)", phaseAndCapture("M2V-stop", 1));
+            add(1000, "M2V-stop x1 (~2s)", phaseAndCapture("M2V-stop", 1));
+            add(3000, "M2V-late x10 (~5s)", phaseAndCapture("M2V-late", 10));
+            add(5000, "M2V-late x10 (~10s)", phaseAndCapture("M2V-late", 10));
+            add(500, "log delivery final + wrap count", [this] {
+                const juce::String wrap = callbacks_.readCycleWrapCount
+                                              ? juce::String(callbacks_.readCycleWrapCount())
+                                              : juce::String("n/a");
+                appendSessionLog("auto: M2V delivery (final) " + midiCounters_.summary()
+                                 + " cycleWraps=" + wrap);
+                return true;
+            });
+            add(500, "clear sink + detach listener", [this] {
+                if (auto* host = callbacks_.resolveHostForTrack
+                                     ? callbacks_.resolveHostForTrack(m2vSinkHostTrackId_)
+                                     : nullptr)
+                {
+                    host->installMidiDeliveryCaptureSinkForTests(nullptr);
+                    appendSessionLog("auto: M2V sink cleared; boundaryBlocksNow="
+                                     + juce::String((juce::int64)
+                                           host->getMidiDeliveryBoundaryBlockCountRelaxed()));
+                }
+                detachListenerIfPossible();
+                listenerButton_.setButtonText("Attach parameter listener");
+                updateListenerLabel();
+                return true;
+            });
+        }
+    }
+
+    /// M2P: deterministically wiggle the first automatable non-bypass parameter through the
+    /// same notify-host path the UI uses; the original value is stored for the revert step.
+    [[nodiscard]] bool perturbFirstAutomatableParameter()
+    {
+        auto* host = resolveSelectedHost();
+        auto* inst = host != nullptr ? host->spike01LiveInstanceForDiagnostics() : nullptr;
+        if (inst == nullptr)
+        {
+            return false;
+        }
+        juce::AudioProcessorParameter* target = nullptr;
+        for (auto* p : inst->getParameters())
+        {
+            if (p != nullptr && p->isAutomatable() && !p->getName(64).containsIgnoreCase("bypass"))
+            {
+                target = p;
+                break;
+            }
+        }
+        if (target == nullptr)
+        {
+            appendSessionLog("auto: no automatable parameter found");
+            return false;
+        }
+        perturbParamIndex_ = target->getParameterIndex();
+        perturbOriginalValue_ = target->getValue();
+        const float v1 = perturbOriginalValue_ <= 0.5f ? juce::jmin(1.0f, perturbOriginalValue_ + 0.25f)
+                                                       : juce::jmax(0.0f, perturbOriginalValue_ - 0.25f);
+        appendSessionLog("auto: perturb idx=" + juce::String(perturbParamIndex_) + " \""
+                         + target->getName(64) + "\" v0=" + juce::String(perturbOriginalValue_, 4)
+                         + " -> v1=" + juce::String(v1, 4));
+        target->setValueNotifyingHost(v1);
+        return true;
+    }
+
+    [[nodiscard]] bool revertPerturbedParameter()
+    {
+        auto* host = resolveSelectedHost();
+        auto* inst = host != nullptr ? host->spike01LiveInstanceForDiagnostics() : nullptr;
+        if (inst == nullptr || perturbParamIndex_ < 0)
+        {
+            return false;
+        }
+        const auto& params = inst->getParameters();
+        if (perturbParamIndex_ >= params.size())
+        {
+            return false;
+        }
+        params[perturbParamIndex_]->setValueNotifyingHost(perturbOriginalValue_);
+        appendSessionLog("auto: revert idx=" + juce::String(perturbParamIndex_) + " -> v0="
+                         + juce::String(perturbOriginalValue_, 4));
+        return true;
+    }
+
+    void addWaitForTrackStep(const juce::String& needle)
+    {
+        autoSteps_.push_back({ 0, "wait for track containing '" + needle + "'", [this, needle] {
+                                  waitTrackNeedle_ = needle;
+                                  waitDeadlineMs_ = juce::Time::getMillisecondCounterHiRes()
+                                                    + 120000.0; // plugin restore can be slow
+                                  return true;
+                              } });
+    }
+
+    void timerCallback() override
+    {
+        stopTimer();
+        if (!autoActive_)
+        {
+            return;
+        }
+        // Waiting mode: poll for the requested runtime until it exists or times out.
+        if (waitTrackNeedle_.isNotEmpty())
+        {
+            refreshTrackList();
+            if (selectTrackContaining(waitTrackNeedle_))
+            {
+                appendSessionLog("auto: track found for '" + waitTrackNeedle_ + "'");
+                waitTrackNeedle_.clear();
+                startTimer(1); // proceed to the next step immediately
+            }
+            else if (juce::Time::getMillisecondCounterHiRes() > waitDeadlineMs_)
+            {
+                abortAuto("timeout waiting for track");
+            }
+            else
+            {
+                startTimer(500);
+            }
+            return;
+        }
+        if (autoIndex_ >= autoSteps_.size())
+        {
+            finishAuto();
+            return;
+        }
+        const auto& step = autoSteps_[autoIndex_++];
+        appendSessionLog("auto: step " + juce::String((int)autoIndex_) + "/"
+                         + juce::String((int)autoSteps_.size()) + " — " + step.describe);
+        if (!step.run())
+        {
+            abortAuto("step failed: " + step.describe);
+            return;
+        }
+        if (waitTrackNeedle_.isNotEmpty())
+        {
+            startTimer(500); // the step armed waiting mode
+        }
+        else if (autoIndex_ < autoSteps_.size())
+        {
+            startTimer(juce::jmax(1, autoSteps_[autoIndex_].delayBeforeMs));
+        }
+        else
+        {
+            finishAuto();
+        }
+    }
+
+    void finishAuto()
+    {
+        autoActive_ = false;
+        writeReport();
+        appendSessionLog("auto: plan " + autoPlanId_ + " COMPLETE");
+        setStatus("AUTO plan '" + autoPlanId_ + "' COMPLETE — report written. Safe to close.");
+    }
+
+    void abortAuto(const juce::String& reason)
+    {
+        autoActive_ = false;
+        clearMidiSinkIfInstalled();
+        appendSessionLog("auto: ABORT — " + reason);
+        writeReport(); // partial data is still valuable
+        setStatus("AUTO plan '" + autoPlanId_ + "' ABORTED: " + reason);
+    }
+
+    /// Defensive: never leave the audio thread holding a pointer to `midiSinkAdapter_` after the
+    /// panel goes away (M2V installs it on a host that outlives the panel).
+    void clearMidiSinkIfInstalled()
+    {
+        if (m2vSinkHostTrackId_ == kInvalidTrackId || !callbacks_.resolveHostForTrack)
+        {
+            return;
+        }
+        if (auto* host = callbacks_.resolveHostForTrack(m2vSinkHostTrackId_))
+        {
+            host->installMidiDeliveryCaptureSinkForTests(nullptr);
+        }
+        m2vSinkHostTrackId_ = kInvalidTrackId;
+    }
+
+    [[nodiscard]] bool selectTrackContaining(const juce::String& needle)
+    {
+        for (size_t i = 0; i < choices_.size(); ++i)
+        {
+            if (choices_[i].label.containsIgnoreCase(needle))
+            {
+                trackBox_.setSelectedId((int)i + 1, juce::dontSendNotification);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void setCustomPhase(const juce::String& phaseId)
+    {
+        const int customItemId = (int)spike01::requiredPhases().size() + 1;
+        phaseBox_.setSelectedId(customItemId, juce::dontSendNotification);
+        customPhaseEditor_.setText(phaseId, juce::dontSendNotification);
+    }
+
     //==========================================================================
     // Track selection
     //==========================================================================
@@ -617,6 +1068,22 @@ private:
     Spike01PanelCallbacks callbacks_;
     std::vector<Spike01RuntimeChoice> choices_;
 
+    // SPIKE-01B-M auto mode
+    juce::String autoPlanId_;
+    std::vector<AutoStep> autoSteps_;
+    size_t autoIndex_ = 0;
+    bool autoActive_ = false;
+    juce::String waitTrackNeedle_;
+    double waitDeadlineMs_ = 0.0;
+    int perturbParamIndex_ = -1;
+    float perturbOriginalValue_ = 0.0f;
+
+    spike01::MidiDeliveryCounters midiCounters_;
+    MidiSinkAdapter midiSinkAdapter_{ midiCounters_ };
+    TrackId m2vSinkHostTrackId_ = kInvalidTrackId;
+    const void* m2vInstanceAtInstall_ = nullptr;
+    std::uint64_t m2vBoundaryAtInstall_ = 0;
+
     std::vector<spike01::CaptureSample> samples_;
     std::vector<spike01::ParamEvent> events_;   // guarded by eventsLock_
     juce::CriticalSection eventsLock_;
@@ -639,14 +1106,15 @@ private:
 };
 
 //==============================================================================
-Spike01StateCapturePanel::Spike01StateCapturePanel(Spike01PanelCallbacks callbacks)
+Spike01StateCapturePanel::Spike01StateCapturePanel(Spike01PanelCallbacks callbacks,
+                                                   juce::String autoPlanId)
     : juce::DocumentWindow("SPIKE-01 state-capture probe (diagnostic)",
                            juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                                juce::ResizableWindow::backgroundColourId),
                            juce::DocumentWindow::closeButton)
 {
     setUsingNativeTitleBar(true);
-    auto content = std::make_unique<Content>(std::move(callbacks));
+    auto content = std::make_unique<Content>(std::move(callbacks), std::move(autoPlanId));
     content_ = content.get();
     setContentOwned(content.release(), true);
     setResizable(true, true);

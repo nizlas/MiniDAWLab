@@ -15,10 +15,53 @@ or **Proposed** (a recommendation, not implemented).
 
 ## 1. Executive verdict
 
-> ## `PASS (measured) — checkpoint fresh-capture + generation-counter mechanism confirmed`
+> ## `PARTIAL PASS (SPIKE-01B-M final) — capture layer and byte-stable identity path now fully Measured; volatile-class currency remains hint-based by fundamental observability limit; E2 remains Open`
+
+**SPIKE-01B-M final note (2026-09-06, corrected; full measurement pass in §28):** Groove Agent
+SE's churn is present from the very first post-restore capture and grows with **capture count,
+not elapsed time** (~+20–30 bytes per past `getStateInformation` call — the serializer observably
+perturbs its own next output); in both measured sessions a k=2 probe sufficed to classify it
+volatile (M1, §28.2).
+For VB3-II the M2 story was **corrected after a schema-inspection error** (§28.0): an earlier
+automated run drew MIDI-only source tracks from the wrong JSON path and wrongly concluded the
+project had no MIDI and that transport/MIDI does not perturb VB3-II. That claim is **retracted**.
+The corrected, delivery-proven run (M2V, §28.3) installs a capture sink at VB3-II's process
+boundary and proves the exact destination instance receives 32 note-ons, 32 note-offs and 368
+CC11 events across three channels (ch1 authored + ch2/ch3 routed from two MIDI-only tracks); with
+delivery proven, dense sampling shows the serialized blob **does vary transiently during active
+playback** (9/36 snapshots differed from the at-rest baseline) and, in this session, returned to
+the exact authored baseline by the first post-stop capture (no settling window observable at the
+~100 ms capture granularity). **Playback capture is therefore unsafe for identity** — confirming
+the conservative direction on a proven-delivery basis, not the retracted "unchanged" claim. For
+the *render-state* role: background rendering may run concurrently with playback (isolated
+instance), but a snapshot beginning a project-start render SHOULD be captured at a
+host-observable-quiescence boundary — capture during active MIDI/CC delivery is not yet proven
+to provide clean initial conditions, and no clone/restore/render equivalence test was performed
+for a playback-time blob (P1D validation obligation, §22.1/§28.7).
+M2P (§28.3B) is retained only as a parameter round-trip result and is **not** a substitute for
+MIDI/CC testing. PID-001: capture layer Resolved; identity layer remains **Open pending human
+review of §23-E/§26**, with the §28.7 corrections applied. M3/E2 (MIDI-learn) remains Open. The
+fundamental observability limit (§28.5) stands: DAL can observe *host-observable quiescence*
+only (§28.6), never internal plugin state.
+
+**SPIKE-01B corrective note (2026-09-05, supersedes the original PASS verdict below where they
+conflict; full analysis in §22–§27):** the measured results stand unchanged and validate the
+checkpoint fresh-capture strategy **for byte-stable plugins like VB3-II only**. The original
+conclusion was internally incomplete for volatile serializers (Groove-Agent-class): raw state
+bytes cannot participate in any validity identity for such plugins (every proxy would be
+permanently stale, §23-A), while a bare generation counter cannot by itself rule out unnotified
+sound-relevant changes (bounded false-current risk, §23-B). PID-001 therefore must remain
+**Open** until the split identity contract in §26 is human-reviewed. Canonical steering revision
+4 (merged as PR #3 on the original PASS verdict) marks PID-001 Resolved and is now known to be
+premature; the corrective amendment is **Proposed** in §26 and has NOT been applied.
+
+The original SPIKE-01 verdict text follows, preserved for the measured evidence it summarizes:
+
+> `PASS (measured) — checkpoint fresh-capture + generation-counter mechanism confirmed` *(superseded as stated above)*
 
 The diagnostic harness is implemented, compiled, and its pure logic is verified by 17 new
-deterministic selftest checks (**Measured**, §16 below: 194 checks total, 0 failures). All
+deterministic selftest checks (**Measured**, §16 below: 194 checks at the time of §16; 202 after
+the SPIKE-01B-M `spike01b:` delivery-counter tests, 0 failures). All
 repository-level SPIKE-01 questions (call chains, editor-close behavior, notification
 infrastructure, Save/autosave agreement, dirty/undo semantics, threading constraints) are answered
 with **Verified** evidence, and the runtime questions are now answered with **Measured** evidence
@@ -50,13 +93,18 @@ notifications, two plugins — appendix §21):
 * **F (agreement):** the F1 checkpoint measured **identical hashes** for the raw capture and the
   production Save path (both 10 393 bytes; 0.56 vs 0.55 ms).
 
-The recommended mechanism (§17) — authoritative fresh capture at checkpoints, listeners and
-editor transitions only as generation-counter hints, hash equality only as a positive
-short-circuit — is confirmed with **high confidence** for the measured plugins.
+The mechanism sketched in §17 — authoritative fresh capture at checkpoints, listeners and editor
+transitions only as generation-counter hints, hash equality only as a positive short-circuit —
+survives SPIKE-01B **for the capture layer**, but §17's identity story was underspecified:
+SPIKE-01B splits it into three distinct layers (authoritative render state / semantic validity
+identity / volatile runtime bytes, §22) and evaluates five identity policies against both failure
+modes (§23). Only the hybrid contract (§23-E) covers both **false-current** (silently rendering
+stale sound) and **permanent-stale** (a volatile plugin that can never publish a valid proxy).
 
-**PID-001:** the §9.2 evidence gate is now satisfied for a first VB3-II-class instrument.
-Resolving PID-001 and applying the §19 steering amendment remain a **human review decision**;
-this branch does not modify the canonical document. Known residual gaps: E2 (MIDI-learn) was not
+**PID-001: remains Open.** The §9.2 evidence gate is satisfied for the *capture* questions
+(A/B/C/E1/F measured), but the *identity contract* — what token proves a completed render is
+still current, for plugins whose bytes never repeat — was not part of the original gate and is a
+blocking finding (§22, SPIKE01B-F1). Known residual gaps in addition: E2 (MIDI-learn) was not
 performed, and generalization beyond the two measured plugins is unsupported (§18).
 
 ---
@@ -404,7 +452,7 @@ signal. Canonical §9.2's "hints, never authority" stance is now measured, not a
 | D | Editor open/close behavior | close captures nothing; safe hook exists; insert precedent (Verified) | B2: open/close changes no bytes (§9) | **Answered (Verified + Measured)** |
 | E | Non-parameter state | `ChangeDetails.nonParameterStateChanged` observable (Verified API) | E1 measured (silent callback-wise, visible via burst + blob); E2 not performed (§10) | **E1 answered (Measured); E2 Open** |
 | F | Save/autosave/enqueue agreement | one shared fresh-capture path (Verified) | F1 checkpoint: hashes MATCH (§11) | **Answered (Verified + Measured)** |
-| G | Fallback for non-byte-stable blobs | design evaluated §17 | Groove Agent SE proves the fallback is required in general; VB3-II shows equality short-circuit works (§7) | **Answered — mechanism Proposed with measured gating data** |
+| G | Fallback for non-byte-stable blobs | design evaluated §17; **re-evaluated in depth by SPIKE-01B (§22–§23)** | Groove Agent SE proves the fallback is required in general; VB3-II shows equality short-circuit works (§7) | **Re-opened by SPIKE-01B — the fallback needs the full split identity contract (§26), not just a counter; blocking for PID-001** |
 | H | Dirty/undo semantics | GUI edits never dirty; undo strips blobs; capture mutates nothing (Verified) | no anomalies observed; formal Ctrl+Z note skipped (§13) | **Answered (Verified)** |
 
 ## 16. Checks run (Measured)
@@ -448,8 +496,9 @@ signal. Canonical §9.2's "hints, never authority" stance is now measured, not a
    "unchanged" only as a positive equality check on byte-stable plugins at quiescent checkpoints
    (§7) — never in general (Groove Agent SE).
 
-### Recommended mechanism (Proposed; confidence: **high** — A/B/C/E1/F measured on VB3-II, and
-the byte-instability worst case measured on Groove Agent SE)
+### Recommended mechanism (Proposed — **partially superseded by SPIKE-01B, §22–§26**: the
+capture layer below stands; the identity/staleness layer is refined into the three-layer
+contract and Policy E, and "confidence: high" is withdrawn for the identity layer)
 
 Answers to the required recommendation questions:
 
@@ -532,7 +581,13 @@ Answers to the required recommendation questions:
 * `spike01LiveInstanceForDiagnostics` intentionally trusts the operator not to unload/replace the
   instrument mid-action; it is not production-hardened (diagnostic scaffolding only).
 
-## 19. Exact proposed steering amendment (for separate human review — NOT applied)
+## 19. Original proposed steering amendment (SUPERSEDED — see §26)
+
+> **SPIKE-01B note:** the amendment below was approved by human review on 2026-09-05 and merged
+> to `main` as steering revision 4 (PR #3) **before** the SPIKE-01B analysis. Its point 7 and its
+> status change ("PID-001 may be marked Resolved") are now known to be premature: they do not
+> resolve the volatile-state identity contradiction (§22). The corrective amendment is §26.
+> Points 1–6 (the measured findings) remain accurate.
 
 > **Amendment to §9.2 (after the SPIKE-01 requirement list), proposed by SPIKE-01:**
 >
@@ -577,9 +632,12 @@ Answers to the required recommendation questions:
 
 * Harness: complete, compiled, selftested (Measured).
 * Repository questions (D, F, H + all call chains): answered (Verified).
-* Runtime questions (A, B, C, E1, F-confirmation, G-gating): **answered (Measured,
-  2026-09-05)** — see §6–§11 and appendix §21. E2 remains Open (§18).
-* PID-001: resolution **recommended** (VB3-II-class evidence) — human review decides (§19).
+* Runtime questions (A, B, C, E1, F-confirmation): **answered (Measured, 2026-09-05)** — see
+  §6–§11 and appendix §21. E2 remains Open (§18).
+* G (fallback/identity): **re-opened by SPIKE-01B** — the identity contract is a blocking
+  finding (§22); resolution path is §26 + the follow-up measurements in §27.
+* PID-001: **Open.** Steering revision 4 (which marked it Resolved) requires the corrective
+  amendment in §26 — a human review decision, not applied by SPIKE-01B.
 
 ### 20.2 Local procedure, as executed (Windows PowerShell, from the spike worktree)
 
@@ -636,7 +694,8 @@ dumps. (The format cannot contain them by construction, but verify visually.)
 
 Done: the measurement appendix is §21, the raw sanitized reports are committed under
 `docs/audits/spike01-measurements/`, and §1/§6–§13/§15/§17 have been updated with the Measured
-findings. The PR leaves draft after human review of this report and the §19 amendment.
+findings. *(Historical note: the original PR #2 was merged on the PASS verdict; SPIKE-01B
+subsequently revised the verdict to PARTIAL PASS — see §22–§27.)*
 
 ---
 
@@ -704,3 +763,861 @@ Classification uses the per-sample recorded flags, not the label.
 | Groove Agent SE (listener attached, idle) | — | 0 | state churn (§7) invisible to listener |
 
 Threading totals: captures 167/167 message thread; notifications 230/230 message thread.
+
+---
+
+# SPIKE-01B — Corrective addendum: the plugin-state identity contract
+
+*Added 2026-09-05 (local, uncommitted pending human review). Scope: architecture validation and
+documentation only — no product code, no schema, no renderer, no steering-document change. The
+same Verified / Measured / Inference / Open / Proposed classification applies.*
+
+## 22. The blocking finding: one blob cannot serve three roles (SPIKE01B-F1)
+
+SPIKE-01 measured four facts (§6–§10, §21): VB3-II blobs are byte-stable at quiescent
+checkpoints; Groove Agent SE blobs differ on every idle capture with growing size and zero
+notifications; blobs may change while transport feeds MIDI/CC; listeners are hints, not a record.
+
+The original §17 conclusion implicitly let one artifact — the captured blob (and its hash) — play
+three different roles. SPIKE-01B separates them, because the measurements prove no single
+artifact can safely serve all three:
+
+1. **Authoritative render state** — the exact bytes captured on the message thread at render
+   enqueue and restored via `setStateInformation` into the isolated render instance. Volatility
+   does not threaten *identity* here (bytes are never compared in this role), and the capture
+   *mechanics* are fully validated (cost §6, Save-path agreement §11) for both plugin classes.
+   **What is NOT yet validated (corrected, SPIKE-01B-M):** no clone/restore/reset/render
+   equivalence test has been performed for a blob captured during playback; M2V (§28.3) shows
+   such a blob may contain transient MIDI/CC-dependent performance state. Whether the isolated
+   render instance's lifecycle (restore → prepare → reset/flush as supported → deterministic
+   MIDI/CC chase → render from project start) removes those transient initial conditions is a
+   **P1D validation obligation**, not a measured fact. See §22.1 for the corrected capture-
+   boundary rule.
+
+2. **Semantic validity identity** — the token compared to answer "is this proxy/completed job
+   still current?" This is where the contradiction lives:
+   * If the token is the raw blob hash (§23-A), a volatile serializer makes **every** proxy
+     instantly stale and **every** completed render obsolete at publication — the
+     **permanent-stale** failure mode. Measured basis: Groove Agent SE, 10/10 distinct idle
+     hashes (§7).
+   * If the token is only a host-side generation counter (§23-B), a sound-relevant change that
+     produces no notification and no observed lifecycle event is never detected — the
+     **false-current** failure mode, which canonical §9.2/PI-020 rule G forbids more strictly
+     than the first.
+   A safe contract must bound *both* modes at once; §23-E is the only evaluated policy that does.
+
+3. **Volatile/runtime state** — bytes inside the blob that change without any user-visible or
+   sound-authoring action: Groove Agent's idle counter/clock churn (Measured), VB3-II's
+   transient performance values during active MIDI/CC (Measured; settle back after stop). These
+   bytes are **not identifiable from the host side**: JUCE 8.0.4 serializes a VST3 plugin as an
+   opaque two-stream XML container (`IComponent` + `IEditController` states,
+   `juce_VST3PluginFormat.cpp:3279–3297`, Verified in the vendored JUCE source) with no semantic
+   view into either stream. Per the task rule and this evidence, **no generic normalization is
+   possible**; volatile bytes can only be *routed around* (role 2 must not depend on them), never
+   filtered out.
+
+### 22.1 The active-playback / quiescence problem (explicit definition)
+
+Measured (§7): captures taken while the transport actively drives the instrument with MIDI/CC
+differ between adjacent captures (VB3-II: 4 distinct hashes in one 10-capture burst; sizes
+10 452–10 453 B vs the 10 433 B resting baseline), then settle back to the resting hash after
+stop. Two distinct consequences:
+
+* **For role 1 (render state; corrected by SPIKE-01B-M):** capture during playback is
+  *mechanically possible* — `getStateInformation` returns a blob in any transport state, and
+  explicit Save already does this in production (§11). But what the measurements prove stops
+  there: M2V (§28.3) shows a playback-time blob may contain transient MIDI/CC-dependent
+  performance state, and **no clone/restore/reset/render equivalence test was performed for a
+  playback-time blob** — it is *not* proven that such a blob provides clean initial conditions
+  for a project-start proxy render. The Save precedent does not transfer by itself: Save's blob
+  is restored into the *same* instance at load, which is a different contract from seeding an
+  isolated render instance. Corrected rules:
+  * **Background rendering MAY run concurrently with normal DAL playback** — it uses an
+    isolated plugin instance; the transport never needs to stop (or stay stopped) for the
+    render itself.
+  * **Snapshot capture and background rendering are separate operations.** A snapshot used to
+    begin a complete render from project start SHOULD normally be captured at a
+    host-observable-quiescence boundary (§28.5). Capturing while the destination is actively
+    receiving MIDI/CC is not yet proven to provide clean initial conditions.
+  * **P1D must validate the isolated-instance lifecycle:** restore state → prepare →
+    reset/flush as supported → deterministic MIDI/CC chase → render from project start. If that
+    lifecycle cannot remove performance-transient initial state for a plugin, snapshot capture
+    must be deferred until an eligible boundary, or the plugin receives an explicit
+    compatibility limitation.
+* **For role 2 (validity identity):** hashes of playback-time captures are **meaningless as
+  identity evidence** even for byte-stable plugins (Measured). Any byte-equality evidence MUST
+  be taken at a quiescent capture boundary — originally defined here as "message thread;
+  transport stopped; no parameter/processor notification for the §18.1 debounce window", and
+  **corrected by §28.5/§28.7 to `host-observable quiescence`** (no host-sent MIDI/CC + full
+  notification silence; transport state is not itself a criterion, and the boundary makes no
+  claim about internal plugin quiescence). Captures outside that boundary never contribute
+  identity truth.
+
+### 22.2 What DAL/JUCE/plugin APIs actually provide (Verified, JUCE 8.0.4 vendored source)
+
+Investigated for each required capability:
+
+| Capability | Evidence | Verdict |
+|---|---|---|
+| Distinguish semantic vs volatile bytes | VST3 blob = opaque `IComponent`+`IEditController` streams (`juce_VST3PluginFormat.cpp:3279–3297, 3473+`); no JUCE API exposes structure | **Not possible** from the host; plugin state stays opaque |
+| Finer-grained "program-only" state | `AudioProcessor::getCurrentProgramStateInformation` exists but the VST3 wrapper does not override it — default forwards to full `getStateInformation` (`juce_AudioProcessor.cpp:921–924`) | **No help** for VST3 hosting |
+| Plugin-announced non-parameter changes | VST3 `IComponentHandler2::setDirty(true)` → JUCE `updateHostDisplay(ChangeDetails{}.withNonParameterStateChanged(true))` → `audioProcessorChanged` (`juce_VST3PluginFormat.cpp:3961–3967`) | **API path exists and is wired**; Measured: neither tested plugin ever used it (0 events, §8). A hint channel, coverage plugin-dependent |
+| Other lifecycle signals | `restartComponent` flags (`kParamValuesChanged`, `kMidiCCAssignmentChanged`, `kLatencyChanged`, …) are handled on the message thread (`juce_VST3PluginFormat.cpp:3950–4002`) and surface as listener callbacks | Additional hint sources; same coverage caveat |
+| Safe quiescent boundary | Transport intent + notification silence are both observable host-side (Verified: transport flag recorded per sample; notifications timestamped) | **Definable** (§22.1) without plugin cooperation |
+| Compare job vs current state without byte compare | Host-side monotonic generation/revision per Primary (does not exist yet — Proposed §23-B/E); persisted save-pairing restores identity at load *by construction* (`setStateInformation(saved blob)` makes live state = saved state) | **Possible** without touching volatile bytes |
+
+## 23. Policy analysis
+
+Evaluated against both failure modes. "False-stale" = unnecessary re-render (canonically
+acceptable, §9.2 rule G); "false-current" = stale sound presented as current (forbidden).
+
+### 23-A. Raw-blob identity (bytes fingerprinted exactly)
+
+* **Correctness guarantee:** equal bytes ⇒ identical restored state ⇒ identical rendered sound
+  (assuming deterministic rendering). Sound; but only the *positive* direction exists.
+* **False-stale risk:** unbounded for volatile serializers — Groove Agent SE re-fingerprints
+  differently on every capture (Measured §7): every proxy is stale the moment it is published.
+  Also fires for byte-stable plugins if any capture happens outside quiescence (Measured §22.1).
+* **False-current risk:** none (inequality always treated as changed).
+* **During playback:** always inequality ⇒ constant false-stale (Measured, VB3-II burst).
+* **After Save/load:** VB3-II: works (round trip byte-identical, §7 B3). Volatile plugins: fresh
+  capture after load differs from the saved blob ⇒ stale after every load, forever.
+* **Publication race:** completed job compares captured hash vs fresh hash — volatile plugins
+  fail every time ⇒ **render starvation loop** (enqueue → render → obsolete → enqueue …).
+* **Compatibility consequences:** correct for the VB3-II class only; structurally broken for the
+  Groove-Agent class (which includes a Steinberg first-party product — not an exotic outlier).
+* **Implementation complexity:** lowest (hash + compare).
+* **Required tests:** per-plugin idle-churn probe test; save/reload hash round-trip test;
+  playback-capture exclusion test.
+* **Verdict: rejected as the sole identity.** Usable only as *positive* evidence (see E).
+
+### 23-B. Host revision identity (blob renders; host-managed revision decides currency)
+
+* **Mechanism:** monotonic per-Primary revision, bumped by every observed change source:
+  parameter/processor notifications (incl. `nonParameterStateChanged`/`setDirty` when plugins
+  send it, §22.2), editor open and close, preset/program operations initiated through DAL,
+  plugin replace/reload, project load, state restore, MIDI-mapping changes. A render job stores
+  the revision at capture; currency = "revision unchanged since capture".
+* **Correctness guarantee:** currency means *no observed change* — exact for every change that
+  produces a notification or an observable lifecycle event.
+* **False-stale risk:** low-moderate: hints fire only on real interactions; an editor-open bump
+  with no actual edit forces one unnecessary re-render (recoverable via E's equality rescue).
+* **False-current risk:** **nonzero and unbounded in principle**: a sound-relevant change with no
+  notification, made while no lifecycle event is observed (e.g. a plugin applying an external
+  config/preset file change, or GUI edits on a plugin that notifies nothing — not observed in
+  the tested plugins, but §8 proves coverage is plugin-specific). This is the policy's blind
+  spot; unhandled, it violates rule G.
+* **During playback:** safe — the revision derives from events, never from bytes.
+* **After Save/load:** safe *by construction*: load restores the exact saved blob into the
+  instance, so the live state equals the state the proxy was rendered from if the proxy was
+  Current at save; persisted pairing (proxy generation ↔ saved state) re-establishes validity
+  without any byte comparison of a fresh capture. (Requires persisting the pairing — P1B
+  schema concern, out of scope here.)
+* **Publication race:** compare stored revision vs current revision at publication — volatile-
+  safe, no starvation. A bump during render correctly marks the job obsolete.
+* **Compatibility consequences:** works identically for both measured plugin classes.
+* **Implementation complexity:** moderate — one counter per Primary + bump plumbing at each
+  hint/lifecycle source + persisted pairing.
+* **Required tests:** revision bookkeeping unit tests; obsolete-at-publication test; load-pairing
+  test; regression: no bump from capture itself (rule 6).
+* **Verdict: necessary core, insufficient alone** (blind spot must be bounded by C/D).
+
+### 23-C. Conservative lifecycle invalidation
+
+* **Mechanism:** every observable lifecycle event conservatively invalidates (or forces
+  recapture + revision bump): editor open (not just close), preset browser use, plugin
+  replace, project load without a persisted pairing, sample-rate/config changes, unload/reload.
+* **Correctness guarantee:** eliminates false-current for every change the user makes *through
+  an observable surface*. With the editor-open bump, the entire editor-open period counts as
+  "possibly changed" regardless of notification coverage.
+* **False-stale risk:** highest of all policies — every editor peek without an edit re-renders
+  (bounded by E's equality rescue for stable plugins; unbounded for volatile ones).
+* **False-current risk (remaining blind spots):** changes with *no* observable surface:
+  editor-closed plugin-internal changes (external file watchers, inter-instance sync, hardware
+  controllers wired directly to the plugin via its own MIDI input outside DAL's routing).
+  DAL-routed MIDI is **not** a blind spot: DAL sends it, so DAL can count it (Verified: routing
+  goes through DAL's own merge path, §8.1 of the steering document); whether routed MIDI should
+  bump the revision is a steering choice (it marks performance state, usually not authoring).
+* **During playback / Save-load / publication / compatibility:** as B (it feeds B's counter).
+* **Implementation complexity:** low-moderate (hooks exist: editor open/close handlers Verified
+  §9; load/replace paths Verified §3).
+* **Required tests:** each lifecycle source bumps exactly once; editor-open→close with no edit
+  triggers re-render unless rescued by equality.
+* **Verdict: required companion to B**; blind spots must be *named and accepted* (D), not
+  silently ignored.
+
+### 23-D. Explicit unsupported/limited classification
+
+* **Mechanism:** classify each plugin instance's state behavior at runtime and surface it.
+  **Detection (Measured basis):** at instrument load/restore, on the message thread at a
+  quiescent moment, take k (2–3) captures a few ms apart (§6: 1–10 ms total even for a 148 KB
+  blob). All equal ⇒ class **byte-stable** (positive-evidence features enabled). Any difference
+  ⇒ class **volatile** (equality features disabled). Cache per plugin identity+version;
+  re-probe per session. Misclassification risk is **asymmetric, not universally harmless**
+  (corrected by SPIKE-01B-M, §28.6): false-volatile (a stable plugin classified volatile) loses
+  the equality rescue — unnecessary re-rendering or reduced availability — but never strengthens
+  a currency claim; false-stable (a volatile plugin classified stable) may temporarily expose
+  the hybrid policy's bounded false-current blind spot until detected. Repeated at-rest byte
+  inequality may safely demote stable → volatile; classification must **never** promote
+  volatile → stable without a new qualifying probe.
+* **User-visible semantics (Proposed):** volatile-class Primaries still render proxies (role 1
+  is unaffected), but proxy currency is presented as **hint-based** ("Current (assumed — this
+  plugin cannot confirm unchanged state)") rather than byte-verified; byte inequality is never
+  shown to the user as "you changed the sound". A stricter P1 variant — Auto-mode proxies
+  disabled for volatile plugins, Manual render only — is a steering choice; both variants must
+  never claim byte-verified currency.
+* **Correctness guarantee:** honesty — the system never asserts stronger validity than the
+  plugin's behavior supports.
+* **False-stale / false-current:** inherits B+C for volatile plugins; adds no new risk.
+* **Playback / Save-load / publication:** as B/C.
+* **Compatibility consequences:** every plugin gets *some* proxy support; none gets false
+  guarantees.
+* **Implementation complexity:** low (k-capture probe + a flag + UI string).
+* **Required tests:** probe classification test against a synthetic volatile stub; UI state
+  test.
+* **Verdict: required transparency layer** for the volatile class.
+
+### 23-E. Hybrid contract (Proposed — the recommended resolution of SPIKE01B-F1)
+
+Combine the validated pieces, each in the only role it is fit for:
+
+1. **Render state (role 1; corrected by SPIKE-01B-M):** a fresh message-thread capture at
+   enqueue. A snapshot that begins a complete render from project start SHOULD normally be
+   captured at a host-observable-quiescence boundary (§22.1/§28.5): capture while the
+   destination is actively receiving MIDI/CC is not yet proven to provide clean initial
+   conditions, pending P1D's isolated-instance lifecycle validation (restore → prepare →
+   reset/flush as supported → deterministic MIDI/CC chase → render from start). Background
+   rendering itself may run concurrently with playback on the isolated instance; the transport
+   never needs to stop for the render.
+2. **Validity identity (role 2):** the host revision (B) + conservative lifecycle bumps (C) +
+   persisted save-pairing for load. Never raw bytes.
+3. **Positive byte evidence (stable class only):** at quiescent boundaries (§22.1), if a fresh
+   capture's hash equals the job's captured hash, the revision bump that triggered re-evaluation
+   is *rescued* — the proxy is proven still current and the re-render is cancelled. Equality is
+   the only byte verdict that exists; inequality is silent (no user-facing meaning).
+4. **Classification (D):** k-capture probe selects stable vs volatile; volatile plugins run
+   without feature 3 and with hint-based currency presentation.
+5. **Publication:** revision compare only; feature-3 equality may additionally rescue a
+   stable-class job whose revision bumped mid-render.
+
+* **Correctness guarantee:** false-current bounded by C's named blind spots (explicitly
+  accepted, user-visible via D); permanent-stale impossible (no byte compare on the critical
+  path; volatile plugins publish via revision compare like everyone else).
+* **False-stale risk:** bounded — worst case one unnecessary re-render per editor-open cycle for
+  volatile plugins; rescued by equality for stable plugins.
+* **False-current risk:** only C's blind-spot residue; strictly smaller than B alone.
+* **During playback:** background rendering explicitly allowed (isolated instance; the
+  transport need not stop or stay stopped); *snapshot capture* for a project-start render is
+  deferred to a host-observable-quiescence boundary unless P1D validates playback-time capture
+  for the plugin (§22.1); identity untouched (no byte evidence collected).
+* **After Save/load:** validity restored by pairing, both classes.
+* **Publication race:** revision compare, starvation-free; equality rescue is an optimization,
+  never a requirement.
+* **Compatibility consequences:** full support for stable class; honest, slightly more
+  re-render-prone support for volatile class.
+* **Implementation complexity:** the sum of B+C+D plus the rescue rule — each piece individually
+  small; the composition is the cost.
+* **Required tests:** all of B/C/D's tests plus: equality-rescue happy path; volatile plugin
+  never rescued; playback captures never enter identity records; end-to-end no-starvation test
+  with a synthetic always-differing stub.
+
+## 24. (Reserved — merged into §22.2 to keep the API evidence beside the finding.)
+
+## 25. Diagnostic-code review (all SPIKE-01 code now on `main`)
+
+Reviewed files: `src/diagnostics/Spike01StateCapturePanel.h/.cpp`, `Spike01Sha256.h`,
+`Spike01ReportFormat.h`, the two accessors in `src/plugins/ExperimentalInstrumentHost.h/.cpp`,
+the flag hook in `src/Main.cpp:275–286`, the forwarding chain
+(`MainWindow`, `TransportControlsShortcutTarget.h`, `MainAppWindow.cpp`), the CMake registration,
+and the selftest block in `tests/selftest/MiniDAWSelftestsMain.cpp`.
+
+* **Inertness without the flag: Verified.** The only product-path reference is the
+  `commandLine.contains("--spike01-state-capture")` branch in `Main.cpp` (Verified by search:
+  no other call sites construct the panel). Without the flag: no panel, no session-log file, no
+  listener, no captures. The two host accessors compile into the product but have no callers
+  outside the panel. `MainAppWindow` holds a null `unique_ptr` and one extra include.
+* **Live-instance raw pointer (`spike01LiveInstanceForDiagnostics` → `attachedInstance_`):
+  bounded diagnostic risk, zero product risk.** The panel stores the raw
+  `juce::AudioPluginInstance*` while the listener is attached. Detach re-validates through the
+  host's `asyncAliveGuard()` + a fresh host resolve + pointer-identity comparison (no deref)
+  before calling `removeListener` (`Spike01StateCapturePanel.cpp:417–438`, Verified). Residual
+  hazard: if the operator unloads/replaces the instrument *while attached*, the instance is
+  destroyed with the listener still registered; the stale pointer is never dereferenced
+  afterwards (identity compare only), but callbacks arriving during teardown are theoretically
+  possible. Same-thread execution (all lifecycle on the message thread) makes this a
+  narrow-window, operator-triggered condition — acceptable for flag-gated scaffolding, expressly
+  not production-hardened (already documented in §18).
+* **Listener side effects:** `addListener` mutates the live instance's listener list — a real
+  (if tiny) interaction with a production object. Only reachable via the panel. No evidence of
+  cost or behavior change while attached (Measured: A/B phases ran with listener attached with
+  no anomalies).
+* **Session log:** written only when the panel exists; sanitized (sizes/hashes/metadata);
+  location `%APPDATA%\MiniDAWLab\spike01-capture-log.txt`. No product interaction.
+* **Selftest additions:** pure-function checks; no product risk.
+
+**Disposition recommendation (Proposed; do not execute in SPIKE-01B):**
+
+1. **Retain through the SPIKE-01B follow-up measurements** (§27 needs the panel for the
+   volatile-restore probe and the quiescence-settling probe) and through SPIKE-02 planning
+   (parts — SHA-256 helper, report format — are directly reusable).
+2. Then remove in one dedicated cleanup commit: delete `src/diagnostics/Spike01*.*`, the two
+   `spike01*ForDiagnostics` accessors, the `Main.cpp` flag branch, the
+   `startSpike01StateCaptureProbe` / `invokeStartSpike01StateCaptureProbeFromStartup` forwarding
+   chain and the panel member in `MainAppWindow`, the CMake source line, and the
+   `spike01:` selftest block (or move `Spike01Sha256.h`/`Spike01ReportFormat.h` under a shared
+   diagnostics-support name if SPIKE-02 adopts them).
+3. If retention extends past SPIKE-02: move compilation behind a CMake option
+   (e.g. `MINIDAW_ENABLE_SPIKE_DIAGNOSTICS`, default OFF for packaging presets) so release
+   binaries cannot contain the scaffolding even inert.
+
+## 26. Corrective proposed steering amendment (Proposed — NOT applied; supersedes §19)
+
+> **Corrective amendment to §9.2 and PID-001 (steering revision 5, proposed by SPIKE-01B):**
+>
+> 1. *Revision 4's status change is narrowed: SPIKE-01's measured findings (§9.2 findings block
+>    points 1–6) stand; point 7's mechanism confirmation and the "PID-001 Resolved" status are
+>    withdrawn. **PID-001's capture layer is Resolved; its identity layer is Open** pending
+>    review of the split identity contract below.*
+> 2. *Identity contract (three roles): (a) the authoritative render state is a fresh
+>    message-thread capture at enqueue; a snapshot that begins a complete render from project
+>    start SHOULD normally be captured at a host-observable-quiescence boundary, because capture
+>    while the destination is actively receiving MIDI/CC is not yet proven to provide clean
+>    initial conditions — P1D must validate the isolated-instance lifecycle (restore → prepare →
+>    reset/flush as supported → deterministic MIDI/CC chase → render from project start), and a
+>    plugin for which that lifecycle cannot remove performance-transient initial state gets
+>    deferred capture or an explicit compatibility limitation. Background rendering may run
+>    concurrently with normal playback on the isolated instance — the transport never needs to
+>    stop for the render; (b) semantic validity identity
+>    is a host-managed monotonic revision per Primary — bumped by parameter/processor
+>    notifications, editor open and close, preset operations, plugin replace, load/restore —
+>    plus a persisted proxy↔saved-state pairing that restores validity at load by construction;
+>    (c) raw state bytes NEVER serve as validity identity. Byte-hash equality taken at a
+>    quiescent boundary (transport stopped, notification-silent for the debounce window) is
+>    admissible only as positive "still current" evidence for plugins classified byte-stable;
+>    byte inequality has no semantic meaning anywhere.*
+> 3. *Plugin classification: at load/restore, a k-capture quiescent probe classifies each
+>    instance byte-stable or volatile. Misclassification risk is asymmetric, not universally
+>    harmless: false-volatile loses the equality rescue (unnecessary re-rendering or reduced
+>    availability) but never strengthens a currency claim; false-stable may temporarily expose
+>    the bounded false-current blind spot. Repeated at-rest inequality may safely demote
+>    stable → volatile; promotion volatile → stable requires a new qualifying probe. Volatile
+>    plugins render proxies normally but present hint-based currency; they are never blocked
+>    from publication by byte comparison.*
+> 4. *Publication/obsolete checks compare revisions, never bytes (equality may rescue
+>    stable-class jobs). This bounds both failure modes: false-current is limited to the named
+>    lifecycle blind spots (accepted, user-visible), permanent-stale is structurally impossible.*
+> 5. *Residual Opens carried forward: E2 (MIDI-learn), plugins beyond the two measured, and the
+>    steering choice between hint-based Auto proxies vs Manual-only for volatile plugins in P1.*
+>
+> **Status change (subject to human review):** PID-001 → **Open (identity layer) / Resolved
+> (capture layer)**; steering document header notes revision 5 correcting revision 4.
+
+## 27. Smallest next slice and completion status
+
+*(2026-09-05 late evening: SPIKE-01B-M has since been executed — see §28. The "no new code"
+constraint below was consciously waived by the operator, who requested unattended automation;
+the deviation and its scope are documented in §28.1 and §28.8.)*
+
+**Recommended smallest next step — SPIKE-01B-M, a ~15-minute follow-up measurement with the
+existing panel (no new code):**
+
+1. *Volatile restore probe:* load a project containing Groove Agent SE; immediately at load
+   (quiescent), capture ×3. Question: does the churn exist from the first post-restore capture
+   (expected yes)? This pins the k-capture classification probe's reliability at the exact
+   moment it would run in production.
+2. *Quiescence settling probe:* VB3-II — play with active CC, stop, capture ×3 immediately and
+   ×3 after ~2 s. Question: how quickly does the state settle to the resting hash (bounds the
+   quiescent-boundary debounce)?
+3. *(Optional)* E2 attempt: one MIDI-learn or mode switch in VB3-II with listener attached.
+
+After SPIKE-01B-M (or a decision to skip it): human review of §23-E + §26; apply steering
+revision 5; then the first implementation slice for the mechanism is the **revision counter +
+lifecycle bump plumbing** (policy B+C core) as a P1B/P1C prerequisite — small, product-visible
+only through proxy code that does not exist yet.
+
+**SPIKE-01B completion report:**
+
+* Files inspected: the two steering/audit documents, all three measurement reports, the seven
+  diagnostic/product files listed in §25, the vendored JUCE 8.0.4 sources
+  (`juce_VST3PluginFormat.cpp`, `juce_AudioProcessor.h/.cpp`, `juce_VST3Common.h`).
+* Files changed: **this document only** (verdict, §15-G, §17 banner, §19 banner, §20.1, new
+  §22–§27).
+* Tests/builds run: none — no code was changed; the 194-check selftest result from SPIKE-01
+  (§16) is unaffected.
+* Production behavior modified: **no.**
+* Git state: changes are local and uncommitted on `main` (per task instruction: no commit, push,
+  or PR until the findings are reviewed). The steering document (revision 4) is intentionally
+  untouched; §26 carries the corrective amendment as Proposed.
+
+---
+
+# SPIKE-01B-M — Final targeted measurement pass (2026-09-05; corrected 2026-09-06)
+
+## 28. SPIKE-01B-M: unattended measurements M1/M2/M3
+
+### 28.0 Correction record: schema-inspection error and its cause (2026-09-06)
+
+An earlier pass of this section (dated 2026-09-05, now rewritten below) asserted that
+`TSE_pt2.dalproj` "contains no arranged MIDI clips at all." **That claim is false and is fully
+retracted.** Root cause: the project was inspected with an ad-hoc PowerShell `ConvertFrom-Json`
+query that looked for clips/notes under each entry of the top-level `tracks` array. In DAL's real
+on-disk schema (`src/io/ProjectFile.cpp`), instrument-lane musical content lives in a **separate
+top-level array, `experimentalInstrumentTracks`**, keyed by `trackId`; the `tracks` array carries
+only routing/identity for the classic lanes. Notes are stored as `timelineNotes` (tick-based:
+`midiNote`/`velocity`/`offVelocity`/`channel`/`startTick`/`durationTicks`), and continuous
+controllers as `ccPoints` (`startTick`/`controller`/`value`/`channel`/`interp`). Querying the
+wrong array returned empty note/CC lists, and a second bug (PowerShell counting a scalar/null as
+one element) masked the emptiness. The corrected inspection was cross-checked against DAL's
+runtime scheduling code (§28.0.2), not left to the ad-hoc query.
+
+Everything the earlier pass concluded *from that false premise* is invalidated: specifically the
+claim that transport/scheduled MIDI does not perturb VB3-II state (the old §28.3 "control
+finding") and the framing of session 5 (`M2`) as a valid control. See §28.3 (rewritten) and the
+INVALID banner on `2026-09-05-session5-m2-vb3ii-transport-only.md`.
+
+#### 28.0.1 Verified project MIDI topology (real schema, cross-checked)
+
+Destination instrument: **trackId 7, name "Organ", instrument VB3-II** (`instrumentKind`
+generic VST3; `output` → master trackId 2). Three channels of MIDI converge on this one instance:
+
+| Source | `tracks` kind | `midiChannel` (output remap) | routing | clip content (ticks @ tpq 960, 180 bpm) |
+|---|---|---|---|---|
+| trackId 7 "Organ" (own lane) | instrument | 1 | self | 8 `timelineNotes` ch1, ticks 960–11520; 3 `ccPoints` **CC11** ch1, `interp=linear` (expression ramp) |
+| trackId 8 "Organ Lower" | **midi** | 2 | `midiTo: 7` | 3 `timelineNotes` ch2, ticks 5760–10560 |
+| trackId 9 "Organ pedal" | **midi** | 3 | `midiTo: 7` | 5 `timelineNotes` ch3, ticks 960–11520 |
+
+So: **16 notes/cycle across three effective channels (1, 2, 3)** plus a linear **CC11** expression
+ramp on channel 1, with channels 2 and 3 routed in from two MIDI-only source tracks via
+`midiTo`. On the JSON `midiChannel` field: it is each track's **output-channel remap**
+(`Track::midiOutputChannel`, `ProjectFile.cpp:169–174/1670–1675`; absent = `Any`/preserve each
+note's own channel, `1…16` = force that channel on send — remap logic baked at
+`InstrumentTrackController.cpp:2334`). Here it is set to 1/2/3, so the effective delivered
+channel is forced to 1/2/3 (and coincides with the stored note channels). The **effective**
+channels 1/2/3 are what matters and are proven delivered by the M2V counters (§28.3); the
+mechanism is a forced remap, not "preserve native." (Cross-check by
+[Map MIDI scheduling to instrument hosts](54a06019-b203-4f39-bf97-ee40d3b1d98a) and re-verified in
+`ProjectFile.cpp`.) Tick range 960–11520 = quarter-notes 1–12 ≈ **0.33 s – 4.0 s**; clip
+`lengthSamples` 240000 (5 s at 48 kHz). The project's saved cycle is
+`0 … rightLocatorSamples 288000` (6 s), `cycleEnabled=true`; saved `playheadSamples` 249600
+(5.2 s). Playing from 0 with the cycle armed therefore encounters all clips; the corrected run
+seeks to sample 0 explicitly via `Transport::requestSeek(0)` (the Stop button also seeks to
+sample 0, not the left locator — immaterial here since the left locator is 0).
+
+#### 28.0.2 Cross-check against DAL runtime scheduling (Verified)
+
+The single many-to-one MIDI choke point is
+`ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs`
+(`src/plugins/ExperimentalInstrumentHost.cpp:3488`, audio thread). It merges UI-enqueued MIDI and
+transport MIDI (`rtBlockMidi_`, filled per event by `audioThread_addMidiEventForCurrentBlock`,
+line 1704 — the message already carries its channel; no remap) into one `juce::MidiBuffer blockMidi`,
+then calls `inst.processBlock(view, blockMidi)` at line 3575 on `owner->inst`. The same
+`activeOwner_->inst` is what `spike01LiveInstanceForDiagnostics()` returns (line 2087/2101), so a
+sink observing this boundary observes exactly the buffer the diagnosed instance receives. A
+pre-existing test seam — `MidiDeliveryCaptureSink` + `installMidiDeliveryCaptureSinkForTests`
+(header lines 153–166) — is invoked at line 3531, *before* the plugin's `processBlock`, once per
+block; that is the mechanism §28.3 uses to prove delivery.
+
+### 28.1 Deviation record and exact procedure (Measured)
+
+The task specification said to document panel limitations rather than extend the panel. The
+operator explicitly requested unattended automation instead ("Jag hinner inte lägga så mycket
+testningstid. Kan du automatisera det?"), which was executed as a conscious, recorded deviation.
+The extension is confined to the same flag-gated scaffolding chain reviewed in §25:
+
+* `Spike01StateCapturePanel.h/.cpp`: a `juce::Timer`-driven auto-run state machine
+  (`--spike01-auto=<plan>`, plans `M1X`, `M1Y`, `M2`, `M2O`, `M2P`, `M2V`), track selection by
+  label substring, custom-phase setting, a parameter wiggle/revert helper
+  (`setValueNotifyingHost` — the same notify-host path the UI uses), a **MIDI-delivery capture
+  sink** (`spike01::MidiDeliveryCounters` in `Spike01MidiDeliveryCounters.h` — RT-safe atomics,
+  raw-byte parsing, selftest-covered — bound to the pre-existing
+  `ExperimentalInstrumentHost::MidiDeliveryCaptureSink` interface by a thin `MidiSinkAdapter` in
+  the panel), and four optional callbacks
+  (`startTransport`/`stopTransport`/`seekTransport`/`readCycleWrapCount`).
+* `MainAppWindow.cpp`: the four transport callbacks, wired to
+  `TransportPlayPauseStopController::togglePlayPauseFromUi()` / `stopOrSeekFromStopButton()` and
+  `Transport::requestSeek` / `readCycleWrapCountForUi` — the exact code paths the transport
+  strip uses.
+* `Main.cpp`, `MainWindow.h/.cpp`, `TransportControlsShortcutTarget.h`: the `autoPlanId`
+  string threaded through the existing forwarding chain.
+
+The sink is installed only during an M2V run, cleared in the plan's final step, and cleared
+defensively on abort and in `~Content()` so the audio thread never holds a dangling pointer.
+Nothing runs without both `--spike01-state-capture` and `--spike01-auto=`; the operator-driven
+panel is unchanged in behavior. Product behavior without the flags: unchanged.
+
+#### 28.1.1 Diagnostic-code review record (2026-09-06, pre-PR)
+
+* **Inactive without flags:** the panel exists only when `--spike01-state-capture` is on the
+  command line (`Main.cpp:280`), and the auto-run state machine additionally requires
+  `--spike01-auto=<plan>`. Without both, no timer, no sink, no transport callbacks run.
+* **No product behavior introduced:** all new logic lives in the flag-gated panel; the
+  `MainAppWindow` callbacks are bound only when the panel is created and call the same transport
+  entry points the UI strip uses. The host-side sink hook (`midiCaptureSink_`, atomic
+  pointer checked once per block, `ExperimentalInstrumentHost.cpp:3501/3531`) is pre-existing
+  test infrastructure.
+* **Audio-thread safety:** `spike01::MidiDeliveryCounters::countBlock` classifies events from
+  the raw `meta.data` bytes — no `juce::MidiMessage` construction, hence no allocation even for
+  SysEx; fixed-size relaxed atomics; no locks, no file I/O, no state serialization. All 72 blob
+  captures of session 9 executed on the message thread (sanitized report, Threading section).
+* **Bounded storage:** the counter set is a fixed struct (8 scalars + 16-slot histogram); no
+  growth with run length.
+* **No invalid plugin pointer can be retained:** the sink holds no plugin pointer at all.
+  `m2vInstanceAtInstall_` is a `const void*` recorded for the log and never dereferenced;
+  instance identity is established structurally (§28.0.2: sink boundary and
+  `spike01LiveInstanceForDiagnostics()` resolve the same `activeOwner_->inst`), not by
+  dereferencing a diagnostic pointer on the audio thread.
+* **Lifecycle:** sink cleared in the plan's final step, on abort, and in the panel destructor;
+  the host clears it independently on teardown.
+* **Clean removability:** the whole chain (auto-run machinery, counters header, adapter,
+  selftest, callbacks, `autoPlanId` threading) is enumerated in §28.8 for a single cleanup
+  commit; the pre-existing sink seam stays.
+
+Unattended sessions were launched against the operator's real project (`TSE_pt2.dalproj`, 7
+instrument tracks — passed on the command line through the existing Explorer-open path) on the
+Debug build, each in a fresh process, each auto-writing a sanitized report on completion:
+
+| Session | Plan | Window | Status | Purpose |
+|---|---|---|---|---|
+| 4 | `M1X` | 09-05 23:34 | valid | Groove Agent SE, **untouched-first**: captures at 60 s, 120 s |
+| 5 | `M2` | 09-05 23:37 | **INVALID** (§28.0) | VB3-II trackId 4; no MIDI delivery; wrongly read as "transport doesn't perturb" — retracted |
+| 6 | `M1Y` | 09-05 23:38 | valid | Groove Agent SE, **capture-heavy**: bursts at ≈0/30/60/120 s |
+| 7 | `M2P` | 09-05 23:44 | valid (param only) | VB3-II parameter wiggle (Volume 0.5040→0.2540→0.5040); **not** a MIDI/CC test |
+| 8 | `M2O` | 09-06 00:08 | preliminary | VB3-II "Organ" trackId 7, real MIDI, **no delivery counters** — superseded by session 9 |
+| 9 | `M2V` | 09-06 00:21 | **valid, delivery-proven** | VB3-II "Organ" trackId 7; sink proves note/CC delivery; dense play sampling + post-stop cadence |
+
+Timer-scheduled capture points hit their targets within ≤10 ms (per-sample ISO timestamps in
+the sanitized session log). Sanitized outputs: `docs/audits/spike01-measurements/`
+`2026-09-05-session4…7-*.md` and `2026-09-06-session8…9-*.md` plus the incremental session log.
+
+### 28.2 M1 — Groove Agent SE volatility probe (Measured)
+
+First-of-burst blob size against elapsed time and prior capture count:
+
+| Session | Burst | Elapsed since load | Prior captures | First-capture bytes |
+|---|---|---|---|---|
+| M1X | 60 s | ~60 s | 0 | 148 561 |
+| M1Y | 0 s | ~0 s | 0 | 148 601 |
+| M1X | 120 s | ~120 s | 10 | 148 788 |
+| M1Y | 30 s | ~30 s | 10 | 148 821 |
+| M1Y | 60 s | ~60 s | 20 | 149 100 |
+| M1Y | 120 s | ~120 s | 30 | 149 267 |
+
+* **Churn exists from the very first post-restore capture** in both sessions: all 10 hashes in
+  every burst are distinct, and consecutive captures 3–15 ms apart already differ. A **k=2
+  probe classified Groove Agent SE volatile in every measured burst**; no tested settling
+  interval changed this (60 s and 120 s untouched behaved the same as 0 s).
+* **Growth correlates with capture count, not elapsed time.** With prior-capture count held
+  equal, first-of-burst sizes match within ~40 bytes regardless of whether 0, 30, 60 or 120
+  idle seconds passed; each additional past capture adds ~20–30 bytes. Untouched idle time
+  contributes little (+15–25 bytes per 30–60 s window at most, same order as one capture).
+* **`getStateInformation` observably perturbs the plugin's own next serialized output**
+  (self-perturbation / observation effect). Consequences: (a) capture is not idempotent for
+  volatile plugins — even a Save changes the next byte image, so bytes can never be compared
+  across saves either; (b) the side effect is harmless **to the proposed validity-identity
+  algorithm** (volatile bytes are excluded from identity), but **sonic equivalence of the
+  successively growing blobs was not measured** — this result must not be generalized into an
+  audible-equivalence claim, and the number of diagnostic/production captures should therefore
+  remain minimal; (c) no capture-frequency policy can make a volatile plugin byte-comparable.
+
+### 28.3 M2 — corrected, delivery-proven VB3-II playback probe (M2V, Measured)
+
+The corrected run drives the **real arranged MIDI** of §28.0.1 into VB3-II (trackId 7 "Organ"),
+seeks the playhead to 0, plays with the cycle armed, samples the serialized blob densely during
+playback (every ~250 ms for ~9 s, past one cycle wrap) and again after stop
+(+0/100/250/500/1000/2000 ms, then two late bursts), with the delivery sink installed at the
+process boundary throughout.
+
+**Delivery proof (sink counters, session 9 — the decisive numbers).** The destination instance
+pointer recorded at sink-install (`spike01LiveInstanceForDiagnostics()` on trackId 7) is the
+instance whose `processBlock` the counted buffer feeds (§28.0.2), and the boundary block counter
+advanced 187 → 2447 during the run. Merged-buffer contents actually delivered:
+
+| Metric | Value |
+|---|---|
+| Note-On / Note-Off | **32 / 32** (balanced) |
+| CC total / of which CC11 | **384 / 368** |
+| Channel histogram | **ch1=401, ch2=13, ch3=21, ch4–16=1 each** — histogram total **448** |
+| Blocks with MIDI / total boundary blocks | 327 / 2210 |
+| First / last event (abs samples since install) | 88 000 / 555 360; cycle wraps = 1 |
+| other (non-note/non-CC) | 0 |
+
+**Counter reconciliation — all 448 counted messages accounted for.** The by-type totals and the
+channel histogram are two complete views of the same event set and agree exactly:
+
+```
+by type:     32 noteOn + 32 noteOff + 384 CC + 0 other                    = 448
+by channel:  401 (ch1) + 13 (ch2) + 21 (ch3) + 13×1 (ch4…ch16)           = 448
+
+ch1     = 16 noteOn + 16 noteOff + 368 CC11 + 1 CC123                     = 401
+ch2     =  6 noteOn +  6 noteOff            + 1 CC123                     =  13
+ch3     = 10 noteOn + 10 noteOff            + 1 CC123                     =  21
+ch4–16  = 1 CC123 each                                                    =  13
+
+CC      = 368 CC11 (expression ramp, ch1) + 16 CC123 (one per channel)    = 384
+notes   = (8 + 3 + 5) arranged notes × 2 laps (cycleWraps = 1)            = 32 on / 32 off
+```
+
+The 16 non-CC11 controller events are **proven, not inferred**: on transport stop,
+`InstrumentTrackController::audioThread_flushTransportMidi`
+(`src/instruments/InstrumentTrackController.cpp:2538–2541`) sends
+`juce::MidiMessage::allNotesOff(c)` — **CC 123**, a 0xBn controller event — on every channel
+c = 1…16. Those land in the CC total and put exactly one event on each of ch1–ch16, which is why
+ch1 shows 401 (not 400) and ch4–16 show 1 each despite carrying no arranged music. A summary that
+adds only ch1+ch2+ch3 gets 435 and appears 13 short; the "missing" 13 are precisely the ch4–16
+all-notes-off flush. No non-channel messages were delivered (`other = 0`), and the histogram
+total equals the type total, so no event escaped channel attribution.
+
+After the run, the counter implementation was hardened without changing classification
+semantics: extracted to `src/diagnostics/Spike01MidiDeliveryCounters.h`
+(`spike01::MidiDeliveryCounters`, raw-byte status parsing — no `juce::MidiMessage` construction,
+so provably allocation-free on the audio thread even for SysEx), given an explicit `channelless`
+counter so the identity `noteOn + noteOff + cc + other == Σ channelHist + channelless` is
+structural, and covered by a deterministic selftest (`testSpike01MidiDeliveryCounters`,
+including the CC123/velocity-0/SysEx edge cases). For the ≤3-byte channel messages of session 9
+the counting is byte-for-byte equivalent to the code that produced the numbers above.
+
+This proves scheduled events reached the exact VB3-II instance from **all three sources**: the
+Organ lane (ch1 notes + the CC11 expression ramp), "Organ Lower" (ch2, routed via `midiTo`), and
+"Organ pedal" (ch3, routed via `midiTo`). CC11 delivery is proven (368 events). Merely observing
+that transport was running is *not* what is claimed here — the buffer handed to the plugin was
+counted.
+
+**State effect under proven delivery (this is the corrected finding).** With delivery proven and
+the blob sampled densely during playback:
+
+* **During playback the serialized blob varies transiently.** Of 36 dense play-phase captures,
+  **27 equalled the at-rest authored baseline `875dc964caa6…` (10 393 bytes) and 9 differed**
+  (10 413 / 10 415 bytes, distinct hashes such as `dad4f30b4a51…`, `40ee6a58fae1…`,
+  `09ba00347f3a…`). VB3-II therefore **does fold active performance state into
+  `getStateInformation` while notes/expression are live** — playback perturbs the observable
+  byte image. (The earlier automated run at trackId 4 saw one constant hash only because no MIDI
+  reached it — §28.0; that non-result is retracted, not evidence of stability.)
+* **On stop it returned to the exact authored baseline by the first post-stop capture** in this
+  session. All 6 post-stop captures (+0 … +2000 ms) and all 20 late captures are
+  `875dc964caa6…` — the same hash as the pre-play baseline and as the original SPIKE-01 baseline
+  (§1). No settling window is observable at the ~100 ms capture granularity of this run; a
+  slower-settling plugin (or a slower VB3-II code path not exercised here) would need its own
+  measurement, which is why the §26/§28.7 debounce is sized from evidence per plugin rather than
+  assumed zero.
+* **Notifications fired concurrently:** 156–368 `paramChanged` events during the run (the CC11
+  expression stream surfaced as parameter-change notifications). So this is explicitly **not** a
+  notification-silent case: host-observable activity and blob variation coincided, and the blob
+  returned to baseline once the host stopped sending events.
+
+**Consequences.** Capturing plugin state **during playback is unsafe for identity** — the blob
+does not equal the authored baseline while performance state is live, so a during-playback
+capture could be mistaken for a distinct authored state. This confirms the conservative direction
+of the original §7 caveat ("not byte-stable while playback actively drives it") on a
+**proven-delivery** basis and **retracts** the earlier automated claim that transport/MIDI leaves
+VB3-II unchanged. The safe capture boundary is host-observable quiescence (§28.6): transport
+stopped **and** no host-sent MIDI/CC **and** notification-silent for a debounce window.
+
+### 28.3B M2P — parameter round-trip (session 7; retained, scope-limited)
+
+M2P remains a *separate* result and is **not** presented as a substitute for MIDI/CC playback
+testing. It measured only a deterministic automatable parameter wiggle through the UI notify-host
+path on trackId 4 VB3-II:
+
+* Baseline ×10 `f19a23677e…`; perturbed (Volume 0.5040→0.2540) `482a3aa086…` (identical across the
+  two measured passes — in this session the byte image behaved as a deterministic function of the
+  parameter value); revert to 0.5040 returned to exactly `f19a23677e…` by the first capture ≤5 ms
+  later; all post-revert captures identical. Exactly 4 `paramChanged` events, correct
+  index/name/value, all on the message thread.
+
+This shows that for VB3-II, in the measured sessions, an *authored-parameter* change was
+deterministic and fully reversible in the blob, and that its restore→serialize round trip was
+byte-deterministic across OS processes (session-7 baseline matched an earlier session on
+identical semantic state). It says **nothing** about how
+received MIDI/CC affects state — that is what M2V (§28.3) measures. Parameter-wiggle behavior does
+**not** predict MIDI/CC behavior; indeed the two differ (a reverted parameter returns to baseline
+with the transport stopped, whereas live MIDI perturbs the blob only while playing).
+
+### 28.4 M3 — MIDI-learn / non-parameter control attempt (Not performed; E2 stays Open)
+
+MIDI-learn requires interacting with the plugin's native editor UI (right-click context
+gestures inside the vendor GUI) plus hardware CC input — not automatable through any existing
+DAL surface without simulating input into the plugin's own window, which was judged unsafe and
+out of scope. **E2 remains Open**, unchanged from §10/§18. M2V now proves the *received-MIDI/CC*
+path end to end, and M2P proves the *authored-parameter* path; the still-unmeasured E2 class is
+specifically **silent non-parameter authored state** (no note, no CC, no parameter notification,
+no dirty flag) — exactly the fundamental observability limit of §28.5.
+
+### 28.5 The fundamental observability limit and `host-observable quiescence`
+
+Define **`host-observable quiescence`** = the host has sent no MIDI/CC to the instance, received
+no parameter-change notifications, and received no dirty-state / non-parameter-state
+notifications, for a debounce window. This is the *only* kind of quiescence DAL can establish.
+It is **not** the same as the plugin being internally at rest: a plugin may continue changing
+its own state (release tails, LFOs, internal counters, deferred housekeeping) while the host
+observes complete silence.
+
+If a plugin changes sound-relevant authored state internally and (a) changes no observable
+parameter, (b) does not set VST3 dirty state, and (c) gives no other notification, **DAL cannot
+detect that change with certainty without interpreting opaque plugin state.** SPIKE-01B-M makes
+the limit concrete on both sides: Groove Agent SE shows silent byte churn with zero
+notifications (bytes change with no semantic event), and its self-perturbation shows the
+converse (the observation itself manufactures byte differences), so byte inequality can never be
+promoted to a semantic signal for the volatile class. VB3-II shows a third shape: proven MIDI/CC
+delivery perturbs the blob *while playing* and it returns to baseline on stop (§28.3) — but DAL
+learns "safe to trust the blob" only from **host-observable quiescence**, never from any direct
+read of the plugin's internal activity. This limit is a property of the plugin API surface, not
+of any DAL policy, and no conservative-invalidation scheme removes it; conservative bumps only
+*narrow* the accepted blind spots (§23-C/§23-E). **We do not claim notification silence proves
+quiescence, and we do not claim DAL can observe internal plugin activity.**
+
+### 28.6 Effect on the required interpretation points and policies A–E
+
+* **k-capture probe safety/reliability:** validated for classification. k=2 sufficed for
+  GA-class volatility; the VB3-II bursts show no false-volatile flakiness *at rest*. Probe
+  self-perturbation is harmless to the proposed validity-identity algorithm (volatile bytes are
+  excluded from identity, §28.2), but its sonic equivalence was not measured, so capture counts
+  stay minimal. Residual: a plugin volatile only *outside* the probe window would be
+  misclassified stable — detectable later as repeated at-rest inequality; §28.7 adds an optional
+  demotion rule.
+* **Misclassification risk direction (asymmetric — neither direction universally harmless):**
+  false-volatile loses the equality rescue and may cause unnecessary re-rendering or reduced
+  availability, but never strengthens a currency claim. False-stable may temporarily expose the
+  hybrid policy's bounded false-current blind spot — the same bound as §23-C's blind spots,
+  since equality is only ever *positive* evidence. Repeated at-rest inequality may safely
+  demote stable → volatile; promotion volatile → stable requires a new qualifying probe.
+* **Playback capture (corrected):** a `getStateInformation` call is mechanically possible in
+  any transport state, but a **during-playback capture must never be admitted as byte identity
+  evidence** — M2V proves the blob differs from the authored baseline while MIDI/CC is live
+  (§28.3). For the *render-state* role, a snapshot beginning a project-start render SHOULD be
+  captured at a host-observable-quiescence boundary until P1D validates the isolated-instance
+  lifecycle (§22.1); no clone/restore/reset/render equivalence test was performed for a
+  playback-time blob. Background rendering itself remains allowed during playback (isolated
+  instance). Byte *equality* evidence is admissible only at a **host-observable quiescence**
+  boundary, not merely "transport stopped."
+* **Quiescence definition (corrected):** must be expressed as host-observable quiescence
+  (§28.5), i.e. no host-sent MIDI/CC **and** notification silence for the debounce window —
+  transport state alone is neither necessary nor sufficient. The debounce is a generic host-side
+  window; it bounds only what the host can see and makes **no** claim about internal settling.
+  The earlier "≤5 ms settling" observation belongs to the M2P *parameter round-trip* (§28.3B)
+  and must not be generalized to MIDI/CC or to internal plugin state.
+* **Policies:** A (raw-blob identity) is further condemned — GA can never satisfy it, and by
+  self-perturbation even a Save invalidates it. B/C bounds unchanged. D's probe is now Measured
+  rather than Proposed-reliable. **E (hybrid) survives and is still the recommended contract**;
+  its rule-G guarantee holds *only within the explicitly accepted blind spots* of §28.5, and
+  only if byte evidence is gated on host-observable quiescence and never collected during
+  playback. Volatile plugins must not be presented as proven-Current in P1 (hint-based
+  presentation stays mandatory; the P1 Auto-vs-Manual steering choice remains a residual Open).
+
+### 28.7 Required corrections to the proposed revision 5 amendment (§26)
+
+1. **Quiescent boundary (amendment point 2c):** replace "transport stopped, notification-silent
+   for the debounce window" with "**`host-observable quiescence`: the host has sent no MIDI/CC to
+   the instance, and received no parameter/dirty/non-parameter-state notifications, for the
+   debounce window. Transport state is not itself a criterion. Host-observable quiescence does
+   NOT imply the plugin is internally at rest — it bounds only what the host can see.**" Byte
+   equality taken at such a boundary is admissible as positive "still current" evidence for
+   byte-stable-classified plugins only; a capture taken while MIDI/CC is being delivered is never
+   admissible as identity evidence (Measured: M2V, §28.3).
+2. **Render-state snapshot boundary (amendment point 2a):** the amendment must state that
+   snapshot capture and background rendering are separate operations; that background rendering
+   may run concurrently with normal playback (isolated instance — the transport never needs to
+   stop for the render); that a snapshot beginning a complete render from project start SHOULD
+   normally be captured at a host-observable-quiescence boundary, because capture during active
+   MIDI/CC delivery to the destination is not yet proven to provide clean initial conditions
+   (no clone/restore/reset/render equivalence test was performed for a playback-time blob); and
+   that P1D must validate the isolated-instance lifecycle (restore → prepare → reset/flush as
+   supported → deterministic MIDI/CC chase → render from project start), deferring capture or
+   declaring an explicit compatibility limitation for plugins where the lifecycle cannot remove
+   performance-transient initial state. Save-time capture remains a distinct operation: Save may
+   capture during playback as today, but that precedent does not by itself prove suitability as
+   the initial state of a project-start proxy render.
+3. **Probe note (amendment point 3):** add "the classification probe itself may perturb a
+   volatile plugin's subsequent bytes (Measured on Groove Agent SE); this is harmless to the
+   validity-identity algorithm because bytes never serve as identity for the volatile class —
+   but sonic equivalence of the successively growing blobs was not measured, so the result must
+   not be generalized into an audible-equivalence claim and capture counts (diagnostic or
+   production) should remain minimal. Optionally, repeated at-rest byte inequality on a
+   stable-classified instance may demote it to volatile (a safe direction); promotion
+   volatile → stable requires a new qualifying probe."
+4. **Debounce sizing:** the debounce window is a host-side safety margin, not a measured
+   internal-settling time. The ≤5 ms figure applies only to the M2P parameter round-trip and
+   must not be cited for MIDI/CC or internal state; 250 ms is a reasonable default pending
+   broader plugin coverage.
+5. **New explicit non-claims (must appear in the amendment):** the steering text must state that
+   DAL (a) cannot observe internal plugin quiescence, (b) does not treat notification silence as
+   proof of quiescence, and (c) distinguishes host-observable quiescence from unknowable internal
+   plugin activity. Currency for any plugin is therefore "current as far as the host can observe,"
+   never an absolute guarantee.
+6. Otherwise the §26 text stands. **PID-001 status recommendation unchanged: capture layer
+   Resolved, identity layer Open until §23-E/§26 (with these corrections) passes human review.**
+   SPIKE-01B-M removes the last *measurement* obstacles for the byte-stable and volatile classes;
+   what remains is a steering decision (accepting the blind spots and the volatile-class
+   presentation), plus the named residual Opens (E2; plugin coverage).
+
+### 28.8 Diagnostic scaffolding cleanup recommendation (updated)
+
+§25's disposition stands, extended: the auto-run machinery (`buildAutoPlan`,
+`timerCallback`-state machine, perturb/revert helpers, `Spike01MidiDeliveryCounters.h` with the
+panel's `MidiSinkAdapter`, the `testSpike01MidiDeliveryCounters` selftest, the four
+transport callbacks and the `autoPlanId` threading) joins the same single cleanup commit. The
+`MidiDeliveryCaptureSink` seam it uses is pre-existing product-test infrastructure and stays.
+Retention until SPIKE-02 planning concludes is still recommended because the SHA-256 / report /
+auto-run / delivery-counter pieces are directly reusable for a future regression probe. The
+M3/E2 limitation (native-editor interaction not automatable) is a documented panel limitation,
+not a reason to extend further.
+
+### 28.9 Verdict impact
+
+The verdict **remains PARTIAL PASS**. The correction does not lower it: it *removes an
+over-claim* (the retracted "transport/MIDI leaves VB3-II unchanged") and *replaces it with a
+stronger, delivery-proven finding* (playback perturbs the blob; capture during playback is
+unsafe for identity; byte-equality evidence is admissible only at host-observable quiescence,
+and a project-start render snapshot should be captured there pending P1D validation, §22.1/§28.7
+point 2). The §9.2 capture-layer gate is
+unaffected. What changed inside the PARTIAL PASS: the byte-stable class's safe-capture rule is
+now correctly conditioned on host-observable quiescence rather than "transport stopped," and the
+identity layer's Open status is unchanged pending human review of §23-E/§26 with the §28.7
+corrections. E2 remains a named residual Open.
+
+### 28.10 SPIKE-01B-M completion report (corrected)
+
+* **Schema-inspection error:** documented in §28.0 (queried `tracks` instead of the top-level
+  `experimentalInstrumentTracks`; a scalar/null counted as one element masked it). Cause and fix
+  recorded; the false "no MIDI clips" claim retracted everywhere (§1, §28.0, §28.3, session-5
+  banner).
+* **Invalidated earlier interpretation:** session 5 (`M2`, trackId 4, no delivery proof) marked
+  INVALID/Inconclusive; its raw measurements preserved as evidence only, not used for any
+  conclusion.
+* **Verified project MIDI topology:** §28.0.1 — destination trackId 7 "Organ" (VB3-II); own-lane
+  ch1 (8 notes + CC11 ramp) plus ch2 (3 notes, from MIDI-only "Organ Lower", `midiTo:7`) and ch3
+  (5 notes, from MIDI-only "Organ pedal", `midiTo:7`); tick range 960–11520 (~0.33–4.0 s);
+  cycle 0–288000 samples. Cross-checked against DAL's runtime choke point (§28.0.2).
+* **Corrected M2 procedure and results:** §28.3 (M2V) — seek to 0, cycle-armed playback, dense
+  in-play sampling + post-stop cadence, delivery sink installed throughout.
+* **Exact proof MIDI/CC reached VB3-II:** sink counters on the destination instance (trackId 7,
+  pointer recorded at install): **Note-On 32, Note-Off 32, CC 384 (CC11 368), channels
+  ch1=401/ch2=13/ch3=21/ch4–16=1 each**, blocks-with-MIDI 327, boundary blocks 187→2447,
+  first/last event 88000/555360 samples, 1 cycle wrap. All 448 messages reconcile exactly
+  (by-type total = histogram total; equation in §28.3 — the 16 non-CC11 controllers are the
+  proven CC123 all-notes-off stop flush, one per channel). Same-instance confirmation via
+  §28.0.2 (sink boundary and `spike01LiveInstanceForDiagnostics()` resolve the identical
+  `activeOwner_->inst`).
+* **Verdict change:** none (remains PARTIAL PASS); rationale in §28.9.
+* **Files changed:** this document (§1 note, §27 pointer, §28 incl. new §28.0/§28.3/§28.3B/
+  §28.9/§28.10 and corrected §28.5–§28.7);
+  `src/diagnostics/Spike01StateCapturePanel.h/.cpp`,
+  `src/diagnostics/Spike01MidiDeliveryCounters.h` (extracted, hardened counter),
+  `tests/selftest/MiniDAWSelftestsMain.cpp` (focused counter selftests), `src/app/MainAppWindow.cpp`,
+  `src/app/MainWindow.h/.cpp`, `src/app/TransportControlsShortcutTarget.h`, `src/Main.cpp`
+  (auto-run mode + delivery sink); six sanitized measurement outputs under
+  `docs/audits/spike01-measurements/` (sessions 4–9). The canonical steering document and the
+  operator's version/release changes (`CMakeLists.txt`, `installer/MiniDAWLab.iss`) are untouched.
+* **Tests/builds run:** four Debug rebuilds via `scripts/build-windows.ps1` (all OK);
+  `MiniDAWSelftests` rebuilt and run — final state **202 checks, 0 failures** (194 from §16 plus
+  8 new `spike01b:` delivery-counter checks, including the reconciliation identity).
+* **Measurement sessions:** six unattended sessions (M1X, M2, M1Y, M2P, M2O, M2V) plus one
+  invalidated (M2); all COMPLETE; zero operator interaction after launch.
+* **Remaining open questions:** E2 (silent non-parameter authored state); plugin coverage beyond
+  VB3-II and Groove Agent SE; the P1 presentation choice for volatile plugins; human review +
+  application of steering revision 5 with the §28.7 corrections.
+* **Git state:** the SPIKE-01B/01B-M changes (this report, the diagnostic/automation code, the
+  delivery-counter header + selftests, the sanitized measurement outputs) are committed on the
+  dedicated review branch `spike/spike-01b-measured` and opened as a **draft PR against `main`
+  — DO NOT MERGE BEFORE HUMAN REVIEW**. Nothing is merged. The operator's unrelated
+  version/release changes (`CMakeLists.txt`, `installer/MiniDAWLab.iss`) and the canonical
+  steering document remain uncommitted/untouched.

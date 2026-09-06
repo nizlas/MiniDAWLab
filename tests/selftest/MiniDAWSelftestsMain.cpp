@@ -26,6 +26,7 @@
 
 // SPIKE-01 (P0/P1A validation spike) pure diagnostic helpers — see
 // docs/audits/SPIKE_01_AUTHORITATIVE_PLUGIN_STATE_CAPTURE.md. Removable with the spike.
+#include "diagnostics/Spike01MidiDeliveryCounters.h"
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
 
@@ -1507,6 +1508,64 @@ namespace
             expect(all, "spike01: required phase list covers A1..A5, B2..B5, E1, E2, F1");
         }
     }
+
+    // SPIKE-01B-M (removable with the spike): the MIDI-delivery counters used to prove that
+    // scheduled MIDI/CC reached the measured plugin instance in the M2V session. Synthetic
+    // buffers exercise the exact raw-byte classification code used in the measurement and the
+    // reconciliation identity reported in the audit (§28.3):
+    //   noteOn + noteOff + cc + other == sum(channelHist) + channelless
+    void testSpike01MidiDeliveryCounters()
+    {
+        spike01::MidiDeliveryCounters c;
+
+        // Block 1 (512 samples): note-on ch1, note-on-vel0 ch2 (counts as note-off per JUCE
+        // semantics), CC11 ch1, CC123 (All Notes Off — the transport-stop flush) ch16, SysEx.
+        {
+            juce::MidiBuffer b;
+            b.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 10);
+            b.addEvent(juce::MidiMessage::noteOn(2, 61, (juce::uint8) 0), 20);
+            b.addEvent(juce::MidiMessage::controllerEvent(1, 11, 64), 30);
+            b.addEvent(juce::MidiMessage::allNotesOff(16), 40);
+            const juce::uint8 sysex[] = { 0x01, 0x02, 0x03 };
+            b.addEvent(juce::MidiMessage::createSysExMessage(sysex, 3), 50);
+            c.countBlock(b, 512);
+        }
+        // Block 2 (512 samples): empty — blocks advances, blocksWithMidi must not.
+        {
+            juce::MidiBuffer b;
+            c.countBlock(b, 512);
+        }
+        // Block 3 (512 samples): plain note-off ch3 at offset 5 → absolute position 1029.
+        {
+            juce::MidiBuffer b;
+            b.addEvent(juce::MidiMessage::noteOff(3, 60, (juce::uint8) 0), 5);
+            c.countBlock(b, 512);
+        }
+
+        expect(c.blocks.load() == 3 && c.blocksWithMidi.load() == 2,
+               "spike01b: delivery counters track blocks and blocks-with-midi separately");
+        expect(c.noteOn.load() == 1, "spike01b: note-on with velocity>0 counted as noteOn");
+        expect(c.noteOff.load() == 2,
+               "spike01b: 0x80 note-off and 0x90 velocity-0 both counted as noteOff");
+        expect(c.cc.load() == 2 && c.cc11.load() == 1,
+               "spike01b: CC counts include CC123 all-notes-off; cc11 counts only controller 11");
+        expect(c.other.load() == 1 && c.channelless.load() == 1,
+               "spike01b: SysEx counted as other and channelless (excluded from histogram)");
+        expect(c.channelHist[0].load() == 2 && c.channelHist[1].load() == 1
+                       && c.channelHist[2].load() == 1 && c.channelHist[15].load() == 1,
+               "spike01b: channel histogram attributes events to ch1/ch2/ch3/ch16");
+        expect(c.firstEventAbs.load() == 10 && c.lastEventAbs.load() == 1024 + 5,
+               "spike01b: first/last event positions are absolute across blocks");
+        {
+            std::uint64_t histSum = 0;
+            for (const auto& h : c.channelHist)
+                histSum += h.load();
+            const std::uint64_t typed
+                = c.noteOn.load() + c.noteOff.load() + c.cc.load() + c.other.load();
+            expect(typed == histSum + c.channelless.load(),
+                   "spike01b: reconciliation identity noteOn+noteOff+cc+other == hist+channelless");
+        }
+    }
 } // namespace
 
 int main()
@@ -1527,6 +1586,7 @@ int main()
     testToolbarLayoutAndVisibility();
     testCcLaneViewState();
     testSpike01CaptureDiagnostics();
+    testSpike01MidiDeliveryCounters();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

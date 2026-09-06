@@ -54,13 +54,25 @@ struct Spike01PanelCallbacks
     std::function<ExperimentalInstrumentHost*(TrackId)> resolveHostForTrack;
     /// [Message thread] Whether the transport is currently playing (for sample labels).
     std::function<bool()> isTransportPlaying;
+    /// [Message thread; SPIKE-01B-M auto mode only] Start/stop playback through the same
+    /// controller the transport UI uses. May be null (auto plans then fail their step).
+    std::function<void()> startTransport;
+    std::function<void()> stopTransport;
+    /// [Message thread; SPIKE-01B-M M2V only] Seek the transport playhead to a sample index
+    /// (through `Transport::requestSeek`), and read the cycle wrap count. May be null.
+    std::function<void(std::int64_t)> seekTransport;
+    std::function<std::uint32_t()> readCycleWrapCount;
     juce::String appVersion;
 };
 
 class Spike01StateCapturePanel final : public juce::DocumentWindow
 {
 public:
-    explicit Spike01StateCapturePanel(Spike01PanelCallbacks callbacks);
+    /// `autoPlanId` (SPIKE-01B-M, `--spike01-auto=<id>`): when non-empty, the panel runs the
+    /// named scripted measurement plan unattended (timer-driven on the message thread) and
+    /// writes the sanitized report automatically. Empty = normal operator-driven panel.
+    explicit Spike01StateCapturePanel(Spike01PanelCallbacks callbacks,
+                                      juce::String autoPlanId = {});
     ~Spike01StateCapturePanel() override;
 
     void closeButtonPressed() override;
