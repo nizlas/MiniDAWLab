@@ -14,6 +14,11 @@ class CountInClickOutput;
 class LatencySettingsStore;
 class PlaybackEngine;
 
+namespace proxy_render
+{
+class ProxyRenderScheduler;
+}
+
 struct CreatedTransportUiForMainWindow
 {
     std::unique_ptr<juce::Component> component;
@@ -28,4 +33,5 @@ CreatedTransportUiForMainWindow createTransportUiForMainWindow(
     RecorderService& recorderService,
     CountInClickOutput& countInClicks,
     LatencySettingsStore& latencyStore,
-    PlaybackEngine& playbackEngine);
+    PlaybackEngine& playbackEngine,
+    proxy_render::ProxyRenderScheduler& proxyRenderScheduler);

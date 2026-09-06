@@ -165,6 +165,11 @@ struct ProxyRenderResult
     // Evidence for thread-affinity assertions in tests/integration logging.
     juce::String workerThreadId;
     double wallMs = 0.0;
+
+    /// PI-011 diagnostic evidence (set by the production engine at prepare time): the isolated
+    /// render instance pointer differed from the live audio-thread instance pointer. Value-only —
+    /// no plugin instance is ever exposed through scheduler/status APIs.
+    bool renderInstanceDistinctFromLive = false;
 };
 
 //==============================================================================

@@ -29,7 +29,8 @@ MainWindow::MainWindow(const juce::String& name,
                        RecorderService& recorderService,
                        CountInClickOutput& countInClicks,
                        LatencySettingsStore& latencyStore,
-                       PlaybackEngine& playbackEngine)
+                       PlaybackEngine& playbackEngine,
+                       proxy_render::ProxyRenderScheduler& proxyRenderScheduler)
     : DocumentWindow(name,
                      juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(
                          juce::ResizableWindow::backgroundColourId),
@@ -44,7 +45,8 @@ MainWindow::MainWindow(const juce::String& name,
                                                                                     recorderService,
                                                                                     countInClicks,
                                                                                     latencyStore,
-                                                                                    playbackEngine);
+                                                                                    playbackEngine,
+                                                                                    proxyRenderScheduler);
     shortcutTargetFromContent_ = bundle.shortcutTarget;
     setContentOwned(bundle.component.release(), true);
 
@@ -326,9 +328,10 @@ bool MainWindow::routeShortcut(const juce::KeyPress& key)
                                              RecorderService& recorderService,
                                              CountInClickOutput& countInClicks,
                                              LatencySettingsStore& latencyStore,
-                                             PlaybackEngine& playbackEngine)
+                                             PlaybackEngine& playbackEngine,
+                                             proxy_render::ProxyRenderScheduler& proxyRenderScheduler)
 {
     return std::make_unique<MainWindow>(
         name, transport, session, pluginInsertHost, deviceManager, recorderService, countInClicks,
-        latencyStore, playbackEngine);
+        latencyStore, playbackEngine, proxyRenderScheduler);
 }

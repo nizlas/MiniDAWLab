@@ -100,6 +100,7 @@
 #include <vector>
 
 #include "app/MainWindow.h"
+#include "instruments/ProxyRenderScheduler.h"
 
 void MiniDAWLabApplication::initialise(const juce::String& commandLine)
 {
@@ -202,6 +203,13 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // not paint or load files before the device exists.
     deviceManager.addAudioCallback(playbackEngine.get());
 
+    // P1E: application-owned proxy render scheduler (one low-priority worker). Created before
+    // the window so the content view can attach its production engine; posted completions run
+    // via MessageManager::callAsync. Owned HERE (application scope, sibling of Session) — never
+    // by a UI component.
+    proxyRenderScheduler_ = std::make_unique<proxy_render::ProxyRenderScheduler>(
+        [](std::function<void()> fn) { juce::MessageManager::callAsync(std::move(fn)); });
+
     mainWindow = createMainWindow(
         getApplicationName(),
         *transport,
@@ -211,7 +219,8 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         *recorderService,
         *countInOutput_,
         *latencySettingsStore,
-        *playbackEngine);
+        *playbackEngine,
+        *proxyRenderScheduler_);
 
     // ".dalproj" on the command line (Explorer double-click / shell "open"): load it through the
     // normal project pipeline once the window is up. `getCommandLineParameterArray()` keeps quoted
@@ -339,8 +348,16 @@ void MiniDAWLabApplication::shutdown()
     }
 
     // Window next: coordinators and plugin hosts owned by the window tear down with no audio
-    // callback running.
+    // callback running. The content view detaches the proxy-render engine in its destructor
+    // (cancel + bounded join + message-thread instance teardown) BEFORE the coordinators die.
     mainWindow.reset();
+
+    // P1E worker join after the window detached its engine; before Session teardown.
+    if (proxyRenderScheduler_ != nullptr)
+    {
+        proxyRenderScheduler_->shutdown();
+        proxyRenderScheduler_.reset();
+    }
 
     deviceManager.closeAudioDevice();
 

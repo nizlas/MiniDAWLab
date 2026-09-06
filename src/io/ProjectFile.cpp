@@ -779,9 +779,15 @@ namespace
                     p.lengthSamples = static_cast<std::int64_t>(static_cast<double>(plen));
                 }
                 p.renderedUtc = proxyV.getProperty("renderedUtc", {}).toString();
+                // P1F: explicit silent generation (§15.7) — metadata WITHOUT an asset path.
+                // Optional key; absent loads as false (older v20 drafts have no silent proxies).
+                p.silentGeneration = static_cast<bool>(proxyV.getProperty("silentGeneration", false));
                 // Validity gate: identity, path, rate, and length must be usable; otherwise the
-                // whole object is treated as absent (degraded, never fatal).
-                if (p.generationId.isNotEmpty() && p.relativePath.isNotEmpty() && p.sampleRate > 0.0
+                // whole object is treated as absent (degraded, never fatal). A silent generation
+                // is valid with an EMPTY path (and only with one — no ambiguous fake paths).
+                const bool pathValid = p.silentGeneration ? p.relativePath.isEmpty()
+                                                          : p.relativePath.isNotEmpty();
+                if (p.generationId.isNotEmpty() && pathValid && p.sampleRate > 0.0
                     && std::isfinite(p.sampleRate) && p.lengthSamples >= 0)
                 {
                     et.hasProxy = true;
@@ -1161,14 +1167,23 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 {
                     eo->setProperty("pluginVersion", et.pluginVersion);
                 }
-                if (et.hasProxy && et.proxy.generationId.isNotEmpty() && et.proxy.relativePath.isNotEmpty()
+                if (et.hasProxy && et.proxy.generationId.isNotEmpty()
+                    && (et.proxy.relativePath.isNotEmpty()
+                        || (et.proxy.silentGeneration && et.proxy.relativePath.isEmpty()))
                     && et.proxy.sampleRate > 0.0 && std::isfinite(et.proxy.sampleRate))
                 {
                     juce::DynamicObject::Ptr po = new juce::DynamicObject();
                     po->setProperty("generationId", et.proxy.generationId);
                     po->setProperty("fingerprintSchemaVersion", et.proxy.fingerprintSchemaVersion);
                     po->setProperty("fingerprintAlgorithmId", et.proxy.fingerprintAlgorithmId);
-                    po->setProperty("relativePath", et.proxy.relativePath);
+                    if (et.proxy.relativePath.isNotEmpty())
+                    {
+                        po->setProperty("relativePath", et.proxy.relativePath);
+                    }
+                    if (et.proxy.silentGeneration)
+                    {
+                        po->setProperty("silentGeneration", true);
+                    }
                     po->setProperty("sampleRate", et.proxy.sampleRate);
                     po->setProperty("channels", et.proxy.channels);
                     po->setProperty("lengthSamples", static_cast<juce::int64>(et.proxy.lengthSamples));

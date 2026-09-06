@@ -6,6 +6,7 @@
 #include "engine/CountInClickOutput.h"
 #include "engine/PlaybackEngine.h"
 #include "engine/RecorderService.h"
+#include "instruments/ProxyRenderScheduler.h"
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
 

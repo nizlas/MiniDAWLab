@@ -15,6 +15,11 @@ class PluginInsertHost;
 class PlaybackEngine;
 class LatencySettingsStore;
 
+namespace proxy_render
+{
+class ProxyRenderScheduler;
+}
+
 class MiniDAWLabApplication : public juce::JUCEApplication
 {
 public:
@@ -48,6 +53,11 @@ private:
     std::unique_ptr<PluginInsertHost> pluginInsertHost_;
     std::unique_ptr<PlaybackEngine> playbackEngine;
     std::unique_ptr<LatencySettingsStore> latencySettingsStore;
+    /// P1E service (steering §6/§13): APPLICATION-owned background proxy-render scheduler —
+    /// a sibling of Session, never owned by a UI component. The window content attaches the
+    /// production engine and MUST detach it (cancel + join + teardown) in its destructor;
+    /// shutdown order below is mainWindow.reset() → scheduler shutdown → session/engine.
+    std::unique_ptr<proxy_render::ProxyRenderScheduler> proxyRenderScheduler_;
     juce::AudioDeviceManager deviceManager;
     std::unique_ptr<MainWindow> mainWindow;
 };

@@ -197,6 +197,11 @@ struct ProjectFileProxyMetadataV20
     int proxyFormatVersion = 1;
     /// ISO-8601 UTC render timestamp (informational only; never part of validity identity).
     juce::String renderedUtc;
+    /// P1F optional (§15.7): explicit silent generation — a valid published generation with NO
+    /// audio asset (empty `relativePath`, `lengthSamples` 0). Playback of a silent generation is
+    /// silence by definition. Absent loads as false; a silent generation is valid only with an
+    /// empty path (no ambiguous fake paths), a non-silent one only with a non-empty path.
+    bool silentGeneration = false;
 };
 
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).

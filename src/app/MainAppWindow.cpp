@@ -55,10 +55,10 @@
 #include "engine/RecorderService.h"
 #include "plugins/PluginInsertHost.h"
 #include "plugins/ExperimentalInstrumentHost.h"
+#include "app/AppProxyRenderEngine.h"
 #include "instruments/InstrumentTrackController.h"
-#include "instruments/ProxyFingerprint.h"
-#include "instruments/ProxyRenderInstanceLifecycle.h"
-#include "instruments/ProxyRenderSnapshot.h"
+#include "instruments/ProxyAssetStore.h"
+#include "instruments/ProxyRenderScheduler.h"
 #include "plugins/InsertSlotId.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
@@ -267,7 +267,8 @@ public:
                              RecorderService& recorderIn,
                              CountInClickOutput& countInClicksIn,
                              LatencySettingsStore& latencyStoreIn,
-                             PlaybackEngine& playbackEngineIn)
+                             PlaybackEngine& playbackEngineIn,
+                             proxy_render::ProxyRenderScheduler& proxyRenderSchedulerIn)
         : transport(transportIn)
         , session(sessionIn)
         , pluginHost_(pluginInsertHostIn)
@@ -276,6 +277,7 @@ public:
         , countInClicks_(countInClicksIn)
         , latencyStore_(latencyStoreIn)
         , playbackEngine_(playbackEngineIn)
+        , proxyRenderScheduler_(proxyRenderSchedulerIn)
         , timelineViewport_()
         , audioWaveformCache_()
         , rulerView(
@@ -484,6 +486,58 @@ public:
                     }
                 },
             });
+
+        // P1E/P1F: attach the production render engine (P1C capture + P1D lifecycle/executor +
+        // P1F asset store + controller metadata) to the application-owned scheduler. Job
+        // ownership lives in the scheduler — this view only calls the narrow API.
+        {
+            proxy_render::AppProxyRenderEngine::Dependencies engineDeps;
+            engineDeps.session = &session;
+            engineDeps.deviceManager = &deviceManager;
+            engineDeps.hostForTrack = [this](const TrackId tid) -> ExperimentalInstrumentHost* {
+                return instrumentRuntimeCoordinator_ != nullptr
+                           ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                           : nullptr;
+            };
+            engineDeps.controllerForTrack
+                = [this](const TrackId tid) -> InstrumentTrackController* {
+                return instrumentRuntimeCoordinator_ != nullptr
+                           ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                           : nullptr;
+            };
+            engineDeps.clipsForTrack
+                = [this](const TrackId tid) -> std::vector<const InstrumentMidiClip*> {
+                std::vector<const InstrumentMidiClip*> clips;
+                if (instrumentRuntimeCoordinator_ == nullptr)
+                {
+                    return clips;
+                }
+                InstrumentTrackController* c
+                    = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(tid);
+                }
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+                }
+                if (c != nullptr)
+                {
+                    for (const auto& up : c->getClips())
+                    {
+                        if (up != nullptr)
+                        {
+                            clips.push_back(up.get());
+                        }
+                    }
+                }
+                return clips;
+            };
+            proxyRenderEngine_
+                = std::make_unique<proxy_render::AppProxyRenderEngine>(std::move(engineDeps));
+            proxyRenderScheduler_.attachEngine(proxyRenderEngine_.get());
+        }
 
         arrangementEventSelectionCoordinator_
             = std::make_unique<ArrangementEventSelectionCoordinator>(trackLanesView, *instrumentRuntimeCoordinator_);
@@ -1239,6 +1293,12 @@ public:
 
     ~TransportControlsContent() override
     {
+        // P1E shutdown order: cancel + join + tear down every render job BEFORE the instrument
+        // hosts/coordinators the engine reaches into are destroyed. The scheduler itself (app-
+        // owned) outlives this view; only the engine attachment ends here.
+        proxyRenderScheduler_.detachEngineAndShutdownJobs();
+        proxyRenderEngine_.reset();
+
         stability_invariants::registerGlobalStabilityInvariantChecker(nullptr);
         session.setOnTimelineRulerTimeDisplayChanged({});
         audioWaveformCache_.setOnPyramidReady({});
@@ -1434,111 +1494,33 @@ public:
         };
         cb.seekTransport = [this](std::int64_t sampleIndex) { transport.requestSeek(sampleIndex); };
         cb.readCycleWrapCount = [this] { return transport.readCycleWrapCountForUi(); };
-        // P1D integration plan: build the complete PRODUCTION render request on the message
-        // thread (§2 snapshot-and-identity sequence): expected fingerprint + semantic revision,
-        // exact opaque Primary state bytes, immutable P1C destination snapshot, plugin
-        // identity/version, render configuration, span and tail policy. Everything is deep-
-        // copied — the request holds no Session/Track/host/editor references.
-        cb.buildProxyRenderRequest = [this](const TrackId destTrackId,
-                                            proxy_render::ProxyRenderRequest& out) -> juce::String {
-            if (instrumentRuntimeCoordinator_ == nullptr)
-            {
-                return "no instrument runtime coordinator";
-            }
-            auto* host = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(destTrackId);
-            if (host == nullptr || !host->hasInstrument())
-            {
-                return "destination has no loaded instrument";
-            }
-            juce::PluginDescription desc;
-            if (!host->getLastLoadedPluginDescription(desc))
-            {
-                return "no plugin description for the destination instrument";
-            }
-            juce::MemoryBlock stateBlob;
-            if (!host->captureInstrumentStateForRender(stateBlob))
-            {
-                return "Primary state capture failed or returned no bytes";
-            }
-            const auto sessionSnap = session.loadSessionSnapshotForAudioThread();
-            if (sessionSnap == nullptr)
-            {
-                return "no session snapshot";
-            }
-
-            // §15.3 Locked: v1 renders at the current engine rate at enqueue time; persisted
-            // sample-domain placement stays interpreted under the timeline REFERENCE rate.
-            double renderRate = 0.0;
-            if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
-            {
-                renderRate = dev->getCurrentSampleRate();
-            }
-            const double referenceRate
-                = session.timelineSampleRateOr(renderRate > 0.0 ? renderRate : 48000.0);
-            if (!(renderRate > 0.0))
-            {
-                renderRate = referenceRate;
-            }
-
-            proxy_snapshot::BuildInputs in;
-            in.pluginIdentity.fileOrIdentifier = desc.fileOrIdentifier;
-            in.pluginIdentity.uniqueId = desc.uniqueId;
-            in.pluginIdentity.deprecatedUid = desc.deprecatedUid;
-            in.pluginIdentity.format = desc.pluginFormatName;
-            in.pluginIdentity.isInstrument = desc.isInstrument;
-            in.pluginIdentity.version = desc.version;
-            in.stateIdentity.primaryStateRevision = host->getPrimarySemanticRevision();
-            in.stateIdentity.pairedWithSavedState = false;
-            in.pluginStateBlob = stateBlob;
-            in.renderConfig.renderSampleRate = renderRate;
-            in.renderConfig.renderBlockSize = proxy_render::kRenderBlockSize;
-            in.renderConfig.timelineReferenceRate = referenceRate;
-            in.renderConfig.noteOffGateMs = 100;
-            // §15.7 conservative default: no instrument is classified host-event-driven yet, so
-            // the silent fast path stays disabled and empty destinations render the safe path.
-            in.instrumentClassifiedHostEventDriven = false;
-
-            const auto clipsForTrack
-                = [this](const TrackId tid) -> std::vector<const InstrumentMidiClip*> {
-                std::vector<const InstrumentMidiClip*> clips;
-                InstrumentTrackController* c
-                    = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
-                if (c == nullptr)
-                {
-                    c = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(tid);
-                }
-                if (c == nullptr)
-                {
-                    c = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
-                }
-                if (c != nullptr)
-                {
-                    for (const auto& up : c->getClips())
-                    {
-                        if (up != nullptr)
-                        {
-                            clips.push_back(up.get());
-                        }
-                    }
-                }
-                return clips;
-            };
-
-            out.snapshot = proxy_snapshot::buildProxyRenderSnapshot(*sessionSnap, destTrackId,
-                                                                    clipsForTrack, in);
-            out.pluginDescription = desc;
-            out.expectedFingerprint = proxy_fingerprint::computeFingerprint(out.snapshot);
-            out.primarySemanticRevision = in.stateIdentity.primaryStateRevision;
-            out.renderSampleRate = renderRate;
-            out.renderBlockSize = proxy_render::kRenderBlockSize;
-            // Temp artifact outside project media (never inside the project folder / JSON).
-            out.temporaryWavFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                                       .getChildFile("MiniDAWLab")
-                                       .getChildFile("proxy-p1d-" + juce::String((int)destTrackId)
-                                                     + "-" + juce::String(juce::Time::currentTimeMillis())
-                                                     + ".wav");
-            return {};
+        // P1EF integration plan: the NARROW production service API only (job ownership and
+        // request capture live in the application-owned scheduler + AppProxyRenderEngine —
+        // the former P1D request builder moved there). No plugin instance crosses this seam.
+        cb.requestProxyRender = [this](const TrackId tid) {
+            return proxyRenderScheduler_.requestRender(tid);
         };
+        cb.queryProxyJobStatus = [this](const TrackId tid) {
+            return proxyRenderScheduler_.jobStatus(tid);
+        };
+        cb.queryProxyDestinationState = [this](const TrackId tid) {
+            return proxyRenderScheduler_.destinationState(tid);
+        };
+        cb.getPublishedProxyMetadata
+            = [this](const TrackId tid, ProjectFileProxyMetadataV20& out) -> bool {
+            InstrumentTrackController* c
+                = instrumentRuntimeCoordinator_ != nullptr
+                      ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                      : nullptr;
+            const auto* meta = c != nullptr ? c->getProxyMetadata() : nullptr;
+            if (meta == nullptr)
+            {
+                return false;
+            }
+            out = *meta;
+            return true;
+        };
+        cb.getProjectFolder = [this] { return session.getCurrentProjectFolder(); };
         spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
                                                                                autoPlanId);
     }
@@ -2189,6 +2171,12 @@ private:
         // Secondary watchdog heartbeat: keeps the stall detector alive when playback (and thereby
         // the 60 Hz overlay frame callback) is stopped.
         ui_hang_watchdog::heartbeat();
+        // P1E §14.3 resource policy: recording pauses starting/progressing background proxy
+        // rendering. Pushed as an immutable flag on this 10 Hz message-thread tick (transport
+        // PLAYBACK intentionally never pauses rendering — measured default, revision 6).
+        proxyRenderScheduler_.notifyRecordingState(
+            recorder_.isRecording()
+            || (recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive()));
         if (instrumentTimelineRowCoordinator_ != nullptr)
         {
             instrumentTimelineRowCoordinator_->tickStructuralEditBlockedHeaderStripRepaint(
@@ -2602,6 +2590,11 @@ private:
     CountInClickOutput& countInClicks_;
     LatencySettingsStore& latencyStore_;
     PlaybackEngine& playbackEngine_;
+    /// P1E: application-owned scheduler (narrow API only — this view never owns jobs). The
+    /// production engine below reaches into the runtime coordinator, so the destructor MUST
+    /// call detachEngineAndShutdownJobs() before the coordinators are destroyed.
+    proxy_render::ProxyRenderScheduler& proxyRenderScheduler_;
+    std::unique_ptr<proxy_render::AppProxyRenderEngine> proxyRenderEngine_;
 
     std::unique_ptr<InstrumentRuntimeCoordinator> instrumentRuntimeCoordinator_;
     /// Listed after IRC: reverse member destruction runs this dtor first while `instrumentRuntimeCoordinator_` still exists.
@@ -3274,7 +3267,8 @@ CreatedTransportUiForMainWindow createTransportUiForMainWindow(
     RecorderService& recorderService,
     CountInClickOutput& countInClicks,
     LatencySettingsStore& latencyStore,
-    PlaybackEngine& playbackEngine)
+    PlaybackEngine& playbackEngine,
+    proxy_render::ProxyRenderScheduler& proxyRenderScheduler)
 {
     auto component = std::make_unique<mini_daw_app_transport::TransportControlsContent>(
         transport,
@@ -3284,7 +3278,8 @@ CreatedTransportUiForMainWindow createTransportUiForMainWindow(
         recorderService,
         countInClicks,
         latencyStore,
-        playbackEngine);
+        playbackEngine,
+        proxyRenderScheduler);
 
     TransportControlsShortcutTarget* const shortcutTarget =
         static_cast<TransportControlsShortcutTarget*>(component.get());

@@ -39,6 +39,7 @@
 
 // SPIKE-02 (isolated render / tail-policy spike) pure evaluation helpers — see
 // docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md. Removable with the spike.
+#include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyOfflineSequencer.h"
 #include "instruments/ProxyRenderExecutor.h"
 #include "instruments/ProxyRenderScheduler.h"
@@ -3922,6 +3923,347 @@ namespace
                "p1e-race: concurrent status queries never corrupt the outcome");
     }
 
+    //==========================================================================
+    // P1F — ProxyAssetStore: layout, path safety, publication transaction,
+    // retention, silent/short generations, conservative cleanup, v20 round-trip.
+    //==========================================================================
+    [[nodiscard]] juce::File p1fTestRoot()
+    {
+        const juce::File root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getChildFile("MiniDAWSelftests")
+                                    .getChildFile("p1f-project");
+        (void)root.deleteRecursively();
+        (void)root.createDirectory();
+        return root;
+    }
+
+    /// Write a real 32-bit-float stereo WAV of `lengthSamples` at `rate` to `target`.
+    [[nodiscard]] bool p1fWriteWav(const juce::File& target, const double rate,
+                                   const std::int64_t lengthSamples)
+    {
+        (void)target.getParentDirectory().createDirectory();
+        (void)target.deleteFile();
+        juce::WavAudioFormat fmt;
+        auto stream = target.createOutputStream();
+        if (stream == nullptr)
+        {
+            return false;
+        }
+        std::unique_ptr<juce::AudioFormatWriter> w(
+            fmt.createWriterFor(stream.release(), rate, 2, 32, {}, 0));
+        if (w == nullptr)
+        {
+            return false;
+        }
+        juce::AudioBuffer<float> buf(2, (int)lengthSamples);
+        for (int c = 0; c < 2; ++c)
+        {
+            for (int i = 0; i < (int)lengthSamples; ++i)
+            {
+                buf.setSample(c, i, 0.25f * std::sin(0.05f * (float)i));
+            }
+        }
+        return w->writeFromAudioSampleBuffer(buf, 0, (int)lengthSamples);
+    }
+
+    [[nodiscard]] proxy_render::ProxyRenderResult p1fSucceededResult(const juce::File& temp,
+                                                                     const juce::String& fp,
+                                                                     const std::int64_t length)
+    {
+        proxy_render::ProxyRenderResult r;
+        r.status = proxy_render::ProxyRenderStatus::Succeeded;
+        r.expectedFingerprint = fp;
+        r.primarySemanticRevision = 3;
+        r.renderSampleRate = 8000.0;
+        r.blockSize = 512;
+        r.channels = 2;
+        r.pluginLatencySamplesAtStart = r.pluginLatencySamplesAtEnd = 64;
+        r.renderedLengthSamples = length;
+        r.tailCompleted = true;
+        r.temporaryWavFile = temp;
+        return r;
+    }
+
+    void testProxyAssetStoreNamingAndPathSafety()
+    {
+        using namespace proxy_store;
+        expect(generationFileName(TrackId{ 7 }, "sha256:00ff") == "track_7_sha256_00ff.wav",
+               "p1f-name: TrackId-owned content-addressed generation file name");
+        expect(generationRelativePath(TrackId{ 7 }, "sha256:00ff")
+                   == "InstrumentProxies/track_7_sha256_00ff.wav",
+               "p1f-name: forward-slash project-relative pointer");
+        expect(sanitizeFingerprintForFileName("sha256:AB/..\\x")== "sha256_AB_.._x",
+               "p1f-name: non-filename-safe characters map to underscore");
+
+        expect(isSafeProxyRelativePath("InstrumentProxies/track_7_sha256_00ff.wav"),
+               "p1f-path: canonical relative path accepted");
+        const char* bad[] = {
+            "",                                            // empty
+            "InstrumentProxies/../secret.wav",             // traversal
+            "InstrumentProxies/..wav",                     // dotdot fragment
+            "C:/InstrumentProxies/x.wav",                  // drive prefix / colon
+            "/InstrumentProxies/x.wav",                    // absolute-ish
+            "InstrumentProxies\\x.wav",                    // backslash
+            "Audio/x.wav",                                 // wrong root
+            "InstrumentProxies/a/b.wav",                   // extra depth
+            "InstrumentProxies/x.txt",                     // wrong extension
+            "InstrumentProxies/x:y.wav",                   // alternate stream
+            "InstrumentProxies/.hidden.wav",               // dot-leading name
+        };
+        for (const char* p : bad)
+        {
+            expect(!isSafeProxyRelativePath(p),
+                   std::string("p1f-path: rejected unsafe relative path '") + p + "'");
+        }
+
+        const juce::File root = p1fTestRoot();
+        expect(resolveProxyRelativePath(root, "InstrumentProxies/track_1_a.wav")
+                   .getFullPathName()
+                   .startsWith(root.getFullPathName()),
+               "p1f-path: safe path resolves below the project root");
+        expect(resolveProxyRelativePath(root, "InstrumentProxies/../x.wav") == juce::File(),
+               "p1f-path: traversal resolves to an invalid File");
+
+        const juce::File t1 = tempRenderTarget(root, TrackId{ 3 }, 41);
+        const juce::File t2 = tempRenderTarget(root, TrackId{ 3 }, 42);
+        expect(t1.getParentDirectory() == proxyDirectory(root)
+                   && t2.getParentDirectory() == proxyDirectory(root),
+               "p1f-temp: temp targets live in the proxy directory (same-volume rename)");
+        expect(t1 != t2 && t1.getFileName().startsWith("tmp_")
+                   && t1.getFileName().contains("gen41"),
+               "p1f-temp: generation-salted unique tmp_ names, never a generation name");
+    }
+
+    void testProxyAssetStorePublicationTransaction()
+    {
+        using namespace proxy_store;
+        const juce::File root = p1fTestRoot();
+        const juce::String fp = "sha256:feedc0de";
+        proxy_snapshot::SnapshotPolicies policies;
+
+        // 1) Successful transaction: temp → validate → rename → verify → metadata.
+        const juce::File temp1 = tempRenderTarget(root, TrackId{ 7 }, 1);
+        expect(p1fWriteWav(temp1, 8000.0, 4096), "p1f-pub: temp WAV written");
+        const auto out1 = publishRenderedProxy(root, TrackId{ 7 },
+                                               p1fSucceededResult(temp1, fp, 4096), policies);
+        expect(out1.ok && !out1.reusedExistingIdentical, "p1f-pub: publication succeeds");
+        expect(out1.finalFile.existsAsFile() && !temp1.existsAsFile(),
+               "p1f-pub: temp consumed by same-volume rename to the immutable name");
+        expect(out1.metadata.generationId == fp
+                   && out1.metadata.relativePath == generationRelativePath(TrackId{ 7 }, fp)
+                   && out1.metadata.sampleRate == 8000.0 && out1.metadata.lengthSamples == 4096
+                   && out1.metadata.channels == 2 && out1.metadata.pluginLatencySamples == 64
+                   && out1.metadata.fingerprintAlgorithmId == 1
+                   && !out1.metadata.silentGeneration && out1.metadata.renderedUtc.isNotEmpty(),
+               "p1f-pub: metadata carries actual render identity/config/latency");
+        // Short generation contract: the asset ends at the completed tail — never
+        // padded to any project end (asset length == rendered length exactly).
+        const auto check1 = validatePublishedAsset(root, out1.metadata);
+        expect(check1.ok && check1.file.getSize() > 0,
+               "p1f-pub: published asset validates (length == rendered length, no padding)");
+
+        // 2) Identical-generation reuse: same fingerprint again ⇒ validate + reuse.
+        const juce::File temp2 = tempRenderTarget(root, TrackId{ 7 }, 2);
+        expect(p1fWriteWav(temp2, 8000.0, 4096), "p1f-reuse: second temp written");
+        const auto out2 = publishRenderedProxy(root, TrackId{ 7 },
+                                               p1fSucceededResult(temp2, fp, 4096), policies);
+        expect(out2.ok && out2.reusedExistingIdentical && !temp2.existsAsFile()
+                   && out2.finalFile == out1.finalFile,
+               "p1f-reuse: identical existing generation validated and reused; temp dropped");
+
+        // 3) Collision with a NON-identical existing file fails safely (never overwrite).
+        const juce::String fp3 = "sha256:c0111de";
+        const juce::File final3 = proxyDirectory(root).getChildFile(
+            generationFileName(TrackId{ 7 }, fp3));
+        expect(final3.replaceWithText("NOT A WAV"), "p1f-collide: alien file planted");
+        const juce::File temp3 = tempRenderTarget(root, TrackId{ 7 }, 3);
+        expect(p1fWriteWav(temp3, 8000.0, 2048), "p1f-collide: temp written");
+        const auto out3 = publishRenderedProxy(root, TrackId{ 7 },
+                                               p1fSucceededResult(temp3, fp3, 2048), policies);
+        expect(!out3.ok && out3.error.contains("collision"),
+               "p1f-collide: non-identical existing file fails publication safely");
+        expect(final3.loadFileAsString() == "NOT A WAV" && temp3.existsAsFile(),
+               "p1f-collide: alien file untouched; failed temp left for caller cleanup");
+        (void)temp3.deleteFile();
+        (void)final3.deleteFile();
+
+        // 4) Corrupt render output is never published (final validation deletes the
+        // unreferenced moved file and errors).
+        const juce::String fp4 = "sha256:badbad";
+        const juce::File temp4 = tempRenderTarget(root, TrackId{ 7 }, 4);
+        expect(temp4.replaceWithText("garbage bytes"), "p1f-corrupt: corrupt temp planted");
+        const auto out4 = publishRenderedProxy(root, TrackId{ 7 },
+                                               p1fSucceededResult(temp4, fp4, 2048), policies);
+        expect(!out4.ok
+                   && !proxyDirectory(root)
+                           .getChildFile(generationFileName(TrackId{ 7 }, fp4))
+                           .existsAsFile(),
+               "p1f-corrupt: corrupt/invalid WAV is never published as a generation");
+
+        // 5) Rename failure (a directory blocks the final name): error, temp retained,
+        // previously published generation (out1) untouched.
+        const juce::String fp5 = "sha256:b10cced";
+        const juce::File blocker = proxyDirectory(root).getChildFile(
+            generationFileName(TrackId{ 7 }, fp5));
+        expect(blocker.createDirectory().wasOk(), "p1f-rename: blocking directory planted");
+        const juce::File temp5 = tempRenderTarget(root, TrackId{ 7 }, 5);
+        expect(p1fWriteWav(temp5, 8000.0, 1024), "p1f-rename: temp written");
+        const auto out5 = publishRenderedProxy(root, TrackId{ 7 },
+                                               p1fSucceededResult(temp5, fp5, 1024), policies);
+        expect(!out5.ok && temp5.existsAsFile(),
+               "p1f-rename: rename failure reports an error and retains the temp for cleanup");
+        expect(validatePublishedAsset(root, out1.metadata).ok,
+               "p1f-rename: the previously published generation remains intact");
+        (void)temp5.deleteFile();
+        (void)blocker.deleteRecursively();
+
+        // 6) Unsaved project: no permanent path is invented.
+        const juce::File temp6 = tempRenderTarget(root, TrackId{ 7 }, 6);
+        expect(p1fWriteWav(temp6, 8000.0, 512), "p1f-unsaved: temp written");
+        const auto out6 = publishRenderedProxy(juce::File(), TrackId{ 7 },
+                                               p1fSucceededResult(temp6, "sha256:aa", 512),
+                                               policies);
+        expect(!out6.ok && out6.waitingForProjectLocation
+                   && out6.error.contains("WaitingForProjectLocation"),
+               "p1f-unsaved: unsaved project reports WaitingForProjectLocation, publishes nothing");
+        (void)temp6.deleteFile();
+
+        // 7) Only Succeeded results are publishable; missing temp fails.
+        auto cancelled = p1fSucceededResult(juce::File(), "sha256:cc", 1);
+        cancelled.status = proxy_render::ProxyRenderStatus::Cancelled;
+        expect(!publishRenderedProxy(root, TrackId{ 7 }, cancelled, policies).ok,
+               "p1f-pub: non-Succeeded result is rejected");
+        auto missingTemp = p1fSucceededResult(proxyDirectory(root).getChildFile("tmp_missing.wav"),
+                                              "sha256:dd", 1);
+        expect(!publishRenderedProxy(root, TrackId{ 7 }, missingTemp, policies).ok,
+               "p1f-pub: missing temp artifact is rejected");
+
+        (void)root.deleteRecursively();
+    }
+
+    void testProxyAssetStoreSilentAndAssetValidation()
+    {
+        using namespace proxy_store;
+        const juce::File root = p1fTestRoot();
+        proxy_snapshot::SnapshotPolicies policies;
+
+        // Explicit silent generation: metadata only — no WAV, no fake path.
+        proxy_render::ProxyRenderResult silent;
+        silent.status = proxy_render::ProxyRenderStatus::SucceededSilent;
+        silent.expectedFingerprint = "sha256:511e17";
+        silent.renderSampleRate = 8000.0;
+        silent.channels = 2;
+        silent.pluginLatencySamplesAtStart = 32;
+        const auto so = publishSilentGeneration(silent, policies);
+        expect(so.ok && so.metadata.silentGeneration && so.metadata.relativePath.isEmpty()
+                   && so.metadata.lengthSamples == 0 && so.metadata.generationId == "sha256:511e17",
+               "p1f-silent: silent generation publishes unambiguous metadata without a WAV");
+        expect(!proxyDirectory(root).exists() || proxyDirectory(root)
+                       .findChildFiles(juce::File::findFiles, false, "*.wav")
+                       .isEmpty(),
+               "p1f-silent: no zero-filled WAV is created anywhere");
+        expect(validatePublishedAsset(root, so.metadata).ok,
+               "p1f-silent: silent metadata validates without touching disk");
+        auto notSilent = silent;
+        notSilent.status = proxy_render::ProxyRenderStatus::Succeeded;
+        expect(!publishSilentGeneration(notSilent, policies).ok,
+               "p1f-silent: only SucceededSilent may publish as silent");
+
+        // Missing/corrupt asset degrades safely (PI-025 inputs), never a crash/throw.
+        const juce::File temp = tempRenderTarget(root, TrackId{ 2 }, 1);
+        expect(p1fWriteWav(temp, 8000.0, 2048), "p1f-degrade: temp written");
+        const auto pub = publishRenderedProxy(root, TrackId{ 2 },
+                                              p1fSucceededResult(temp, "sha256:dead", 2048),
+                                              policies);
+        expect(pub.ok, "p1f-degrade: baseline publication");
+        auto meta = pub.metadata;
+        expect(validatePublishedAsset(root, meta).ok, "p1f-degrade: valid asset validates");
+        (void)pub.finalFile.replaceWithText("corrupted!");
+        expect(!validatePublishedAsset(root, meta).ok,
+               "p1f-degrade: corrupt asset reported (degraded), not published state");
+        (void)pub.finalFile.deleteFile();
+        const auto missing = validatePublishedAsset(root, meta);
+        expect(!missing.ok && missing.missing,
+               "p1f-degrade: missing asset reported as missing, load never fails");
+        auto evil = meta;
+        evil.relativePath = "InstrumentProxies/../evil.wav";
+        expect(!validatePublishedAsset(root, evil).ok,
+               "p1f-degrade: unsafe loaded relative path rejected");
+
+        (void)root.deleteRecursively();
+    }
+
+    void testProxyAssetStoreConservativeCleanup()
+    {
+        using namespace proxy_store;
+        const juce::File root = p1fTestRoot();
+        const juce::File dir = proxyDirectory(root);
+        (void)dir.createDirectory();
+        const juce::File tmpA = dir.getChildFile("tmp_track_1_gen1_1.wav");
+        const juce::File tmpB = dir.getChildFile("tmp_track_1_gen2_2.wav");
+        const juce::File gen = dir.getChildFile("track_1_sha256_aa.wav");
+        (void)tmpA.replaceWithText("a");
+        (void)tmpB.replaceWithText("b");
+        (void)gen.replaceWithText("g");
+
+        juce::StringArray active;
+        active.add(tmpB.getFileName()); // an active job's temp is NEVER cleaned
+        const int removed = sweepOrphanTemporaries(root, active);
+        expect(removed == 1 && !tmpA.existsAsFile() && tmpB.existsAsFile() && gen.existsAsFile(),
+               "p1f-clean: orphan temporaries swept; active temp and generations untouched");
+
+        // Generation files: REPORT-only, never deleted (ownership cannot be proven here).
+        juce::StringArray referenced;
+        expect(listUnreferencedGenerationFiles(root, referenced)
+                       == juce::StringArray{ "InstrumentProxies/track_1_sha256_aa.wav" }
+                   && gen.existsAsFile(),
+               "p1f-clean: unreferenced generation is reported, never removed");
+        referenced.add("InstrumentProxies/track_1_sha256_aa.wav");
+        expect(listUnreferencedGenerationFiles(root, referenced).isEmpty(),
+               "p1f-clean: referenced generation is not reported as an orphan");
+
+        (void)root.deleteRecursively();
+    }
+
+    /// v20 silentGeneration round-trip + validity rules (P1F schema addition).
+    void testProxyMetadataSilentGenerationRoundTrip()
+    {
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWSelftests");
+        (void)dir.createDirectory();
+        const juce::File f = dir.getChildFile("p1f-silent.dalproj");
+
+        ProjectFileV1 data = makeV20FixtureProject();
+        auto& et = data.experimentalInstrumentTracks[0];
+        et.proxy.silentGeneration = true;
+        et.proxy.relativePath = {};
+        et.proxy.lengthSamples = 0;
+        {
+            const auto wr = writeProjectFile(f, data);
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(f, back);
+            expect(wr.wasOk() && rr.wasOk() && back.experimentalInstrumentTracks.size() == 1U,
+                   "p1f-schema: silent-generation project round-trips");
+            const auto& bt = back.experimentalInstrumentTracks[0];
+            expect(bt.hasProxy && bt.proxy.silentGeneration && bt.proxy.relativePath.isEmpty()
+                       && bt.proxy.lengthSamples == 0
+                       && bt.proxy.generationId == "sha256:0011aabb",
+                   "p1f-schema: silent generation loads with empty path and zero length");
+        }
+        // A NON-silent proxy with an empty path stays invalid (degrades to no proxy).
+        et.proxy.silentGeneration = false;
+        {
+            const auto wr = writeProjectFile(f, data);
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(f, back);
+            expect(wr.wasOk() && rr.wasOk()
+                       && (back.experimentalInstrumentTracks.empty()
+                           || !back.experimentalInstrumentTracks[0].hasProxy),
+                   "p1f-schema: non-silent metadata without a path degrades to no proxy");
+        }
+        (void)f.deleteFile();
+    }
+
     /// Executor-side pause-gate seam: called once per block, before processing.
     void testProxyExecutorPauseGateSeam()
     {
@@ -3994,6 +4336,11 @@ int main()
     testProxySchedulerShutdownWhileActive();
     testProxySchedulerStatusRaceSafety();
     testProxyExecutorPauseGateSeam();
+    testProxyAssetStoreNamingAndPathSafety();
+    testProxyAssetStorePublicationTransaction();
+    testProxyAssetStoreSilentAndAssetValidation();
+    testProxyAssetStoreConservativeCleanup();
+    testProxyMetadataSilentGenerationRoundTrip();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

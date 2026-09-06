@@ -7,7 +7,7 @@
 #include "diagnostics/Spike01MidiDeliveryCounters.h"
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
-#include "instruments/ProxyRenderInstanceLifecycle.h" // production renderer (P1D plan drives it)
+#include "instruments/ProxyAssetStore.h" // P1EF plan verification (path safety + asset check)
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -137,10 +137,6 @@ public:
                          + " ===");
         refreshTrackList();
         setSize(640, 470);
-
-        // P1D plan: the production ProxyForegroundRenderJob creates its isolated instance
-        // through this VST3-capable format manager (message thread, same format the host uses).
-        p1dFormatManager_.addFormat(new juce::VST3PluginFormat());
 
         if (autoPlanId_.isNotEmpty())
         {
@@ -368,9 +364,9 @@ private:
                 return true;
             });
         }
-        else if (autoPlanId_ == "P1D") // P1D: production isolated proxy renderer integration
+        else if (autoPlanId_ == "P1EF") // P1E/P1F: background scheduler + atomic publication
         {
-            buildP1dPlan();
+            buildP1efPlan();
         }
         else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
         {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
@@ -476,126 +472,143 @@ private:
     }
 
     //==========================================================================
-    // P1D integration plan (PRODUCTION isolated proxy renderer; steering §13/§15,
-    // roadmap P1D). Plan "P1D" builds a production ProxyRenderRequest for the
-    // selected Organ destination through the app callback, runs the production
-    // ProxyForegroundRenderJob (ProxyRenderInstanceLifecycle.h — the exact code
-    // the product render path uses, not a spike reimplementation) and verifies
-    // the P1D integration contract: distinct clone identity, routed ch1/2/3 +
-    // CC11 delivery to the clone, a validated non-empty temporary WAV, and an
-    // operational transport afterwards. The SPIKE-02 harness that previously
-    // lived here is superseded by the production renderer and was removed with
-    // its S2* plans (evidence reports remain under docs/audits/).
+    // P1EF integration plan (PRODUCTION background scheduler + atomic publication;
+    // steering §13/§14/§16, roadmap P1E/P1F). Plan "P1EF" requests an explicit
+    // render for the Organ destination through the NARROW service API (the panel
+    // owns no job and sees no plugin instance), waits for the application-owned
+    // scheduler to render on its low-priority worker through the P1D isolated
+    // renderer, then verifies the publication contract: routed ch1/2/3 + CC11
+    // delivery, distinct render-instance evidence, a validated immutable WAV
+    // below <project>/InstrumentProxies/, safe relative metadata, a Current
+    // destination state, swept temporaries and an operational transport. This
+    // plan supersedes the P1D foreground plan (its coverage is included here).
     //==========================================================================
 
-    void buildP1dPlan()
+    void buildP1efPlan()
     {
         auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
             autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
         };
 
         addWaitForTrackStep("Organ");
-        add(1000, "P1D build production render request + start foreground job", [this] {
-            auto* host = resolveSelectedHost();
-            if (host == nullptr || !callbacks_.buildProxyRenderRequest)
+        add(1000, "P1EF request explicit render through the service API", [this] {
+            if (!callbacks_.requestProxyRender || !callbacks_.queryProxyJobStatus
+                || !callbacks_.queryProxyDestinationState || !callbacks_.getPublishedProxyMetadata
+                || !callbacks_.getProjectFolder)
             {
+                appendSessionLog("p1ef: service callbacks missing");
                 return false;
             }
-            // Identity proof input: the live instance pointer is captured as a VALUE only
-            // (never dereferenced by the job or the worker).
-            p1dLivePtr_ = (const void*)host->spike01LiveInstanceForDiagnostics();
-            proxy_render::ProxyRenderRequest req;
-            const juce::String err = callbacks_.buildProxyRenderRequest(selectedTrackId(), req);
-            if (err.isNotEmpty())
+            const auto s = callbacks_.requestProxyRender(selectedTrackId());
+            if (!s.exists)
             {
-                appendSessionLog("p1d: request build FAILED: " + err);
+                appendSessionLog("p1ef: request REJECTED: " + s.message);
                 return false;
             }
-            appendSessionLog("p1d: request destTrackId="
-                             + juce::String((int)req.snapshot.destinationTrackId)
-                             + " fingerprint=" + req.expectedFingerprint
-                             + " revision=" + juce::String((juce::int64)req.primarySemanticRevision)
-                             + " renderRate=" + juce::String(req.renderSampleRate, 0)
-                             + " refRate="
-                             + juce::String(req.snapshot.renderConfig.timelineReferenceRate, 0)
-                             + " sources=" + juce::String((int)req.snapshot.sources.size())
-                             + " destClips=" + juce::String((int)req.snapshot.destinationClips.size())
-                             + " spanEndRef="
-                             + juce::String(req.snapshot.spanAndSilence.lastRelevantEventReferenceSample)
-                             + " stateBytes="
-                             + juce::String((juce::int64)req.snapshot.pluginStateBlob.getSize()));
-            p1dJob_ = std::make_unique<proxy_render::ProxyForegroundRenderJob>(
-                p1dFormatManager_, std::move(req), p1dLivePtr_);
-            p1dClonePtr_ = p1dJob_->isolatedInstanceForIdentityCheck();
-            appendSessionLog(juce::String("p1d: identity liveInstance=0x")
-                             + juce::String::toHexString((juce::pointer_sized_int)p1dLivePtr_)
-                             + " renderInstance=0x"
-                             + juce::String::toHexString((juce::pointer_sized_int)p1dClonePtr_)
-                             + (p1dClonePtr_ != nullptr && p1dClonePtr_ != p1dLivePtr_
-                                    ? " DIFFERENT (required)"
-                                    : " SAME/NULL (VIOLATION)"));
-            return true;
+            p1efGeneration_ = s.generation;
+            appendSessionLog("p1ef: request queued generation=" + juce::String((juce::int64)s.generation)
+                             + " phase=" + proxy_render::toString(s.phase)
+                             + " fingerprint=" + s.expectedFingerprint
+                             + " revision=" + juce::String((juce::int64)s.primarySemanticRevision));
+            const auto destState = callbacks_.queryProxyDestinationState(selectedTrackId());
+            appendSessionLog(juce::String("p1ef: destinationState=")
+                             + proxy_render::toString(destState) + " (expect Rendering)");
+            return s.phase == proxy_render::ProxyJobPhase::Queued
+                   || s.phase == proxy_render::ProxyJobPhase::Preparing
+                   || s.phase == proxy_render::ProxyJobPhase::Rendering;
         });
         autoSteps_.push_back(
-            { 0, "wait: P1D foreground render", [this] {
-                 waitProbeDesc_ = "P1D foreground render";
+            { 0, "wait: P1EF background render + publication", [this] {
+                 waitProbeDesc_ = "P1EF background render + publication";
                  waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 600000.0;
-                 waitProbe_ = [this] { return (p1dJob_ != nullptr && p1dJob_->isDone()) ? 1 : 0; };
+                 waitProbe_ = [this] {
+                     const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+                     const bool terminal
+                         = s.exists
+                           && (s.phase == proxy_render::ProxyJobPhase::Published
+                               || s.phase == proxy_render::ProxyJobPhase::Obsolete
+                               || s.phase == proxy_render::ProxyJobPhase::Cancelled
+                               || s.phase == proxy_render::ProxyJobPhase::Failed);
+                     return terminal ? 1 : 0;
+                 };
                  return true;
              } });
-        add(200, "P1D finish + verify integration contract", [this] {
-            if (p1dJob_ == nullptr || !p1dJob_->isDone())
-            {
-                return false;
-            }
-            const bool cloneDistinct = p1dClonePtr_ != nullptr && p1dClonePtr_ != p1dLivePtr_;
-            const auto r = p1dJob_->finish(); // joins worker + message-thread teardown
-            p1dJob_.reset();
+        add(200, "P1EF verify publication contract", [this] {
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            const auto& r = s.result;
             const auto& m = r.midi;
-            appendSessionLog(juce::String("p1d: result status=") + proxy_render::toString(r.status)
-                             + " reason=" + proxy_render::toString(r.failureReason) + " msg=\""
-                             + r.message + "\" renderRate=" + juce::String(r.renderSampleRate, 0)
-                             + " blockSize=" + juce::String(r.blockSize)
+            appendSessionLog(juce::String("p1ef: job phase=") + proxy_render::toString(s.phase)
+                             + " generation=" + juce::String((juce::int64)s.generation)
+                             + " msg=\"" + s.message + "\"");
+            appendSessionLog(juce::String("p1ef: result status=") + proxy_render::toString(r.status)
+                             + " renderRate=" + juce::String(r.renderSampleRate, 0)
                              + " latencyStart=" + juce::String(r.pluginLatencySamplesAtStart)
-                             + " latencyEnd=" + juce::String(r.pluginLatencySamplesAtEnd)
                              + " spanEnd=" + juce::String(r.spanEndRenderSamples)
                              + " length=" + juce::String(r.renderedLengthSamples)
                              + " tail=" + juce::String(r.tailLengthSamples)
                              + " tailCompleted=" + (r.tailCompleted ? "true" : "false")
                              + " peak=" + juce::String(r.maxPeakLinear, 6)
-                             + " allFinite=" + (r.allFinite ? "true" : "FALSE")
                              + " blocks=" + juce::String((juce::int64)r.blocksProcessed)
-                             + " blocksWithMidi=" + juce::String((juce::int64)r.blocksWithMidi)
                              + " workerThread=" + r.workerThreadId
                              + " wallMs=" + juce::String(r.wallMs, 1)
-                             + " wavBytes=" + juce::String(r.wavBytes));
-            appendSessionLog("p1d: midi ch1on=" + juce::String(m.noteOnsByChannel[0])
+                             + " instanceDistinct="
+                             + (r.renderInstanceDistinctFromLive ? "true" : "FALSE"));
+            appendSessionLog("p1ef: midi ch1on=" + juce::String(m.noteOnsByChannel[0])
                              + " ch2on=" + juce::String(m.noteOnsByChannel[1])
                              + " ch3on=" + juce::String(m.noteOnsByChannel[2])
-                             + " ch1off=" + juce::String(m.noteOffsByChannel[0])
-                             + " ch2off=" + juce::String(m.noteOffsByChannel[1])
-                             + " ch3off=" + juce::String(m.noteOffsByChannel[2])
                              + " cc11=" + juce::String(m.ccByController[11])
-                             + " cc64=" + juce::String(m.ccByController[64])
                              + " totalEvents=" + juce::String(m.totalEvents));
-            const bool wavOk = r.status == proxy_render::ProxyRenderStatus::Succeeded
-                               && r.temporaryWavFile.existsAsFile() && r.wavBytes > 0;
+
+            const bool published = s.phase == proxy_render::ProxyJobPhase::Published
+                                   && s.generation == p1efGeneration_;
             const bool midiOk = m.noteOnsByChannel[0] > 0 && m.noteOnsByChannel[1] > 0
                                 && m.noteOnsByChannel[2] > 0 && m.ccByController[11] > 0;
-            appendSessionLog(juce::String("p1d: VERIFY cloneDistinct=")
-                             + (cloneDistinct ? "PASS" : "FAIL")
-                             + " routedCh123AndCc11=" + (midiOk ? "PASS" : "FAIL")
-                             + " validatedWav=" + (wavOk ? "PASS" : "FAIL")
-                             + " nonSilent=" + (r.maxPeakLinear > 1.0e-6 ? "PASS" : "FAIL"));
-            // Diagnostic-artifact policy: metrics are recorded above; the temporary WAV is
-            // removed (nothing is published in P1D — publication is P1F).
-            if (r.temporaryWavFile != juce::File())
+
+            // Published metadata: safe relative path below the temp project's
+            // InstrumentProxies/, valid immutable WAV, matching generation identity.
+            ProjectFileProxyMetadataV20 meta;
+            const bool hasMeta = callbacks_.getPublishedProxyMetadata(selectedTrackId(), meta);
+            const juce::File projectFolder = callbacks_.getProjectFolder();
+            bool metaOk = false;
+            bool assetOk = false;
+            bool tempsSwept = false;
+            if (hasMeta && projectFolder != juce::File())
             {
-                (void)r.temporaryWavFile.deleteFile();
+                metaOk = meta.generationId == s.expectedFingerprint && !meta.silentGeneration
+                         && proxy_store::isSafeProxyRelativePath(meta.relativePath)
+                         && meta.lengthSamples == r.renderedLengthSamples
+                         && meta.sampleRate == r.renderSampleRate && meta.channels == r.channels
+                         && meta.pluginLatencySamples
+                                == juce::jmax(0, r.pluginLatencySamplesAtStart);
+                const auto check = proxy_store::validatePublishedAsset(projectFolder, meta);
+                assetOk = check.ok && check.file.existsAsFile() && check.file.getSize() > 0;
+                appendSessionLog("p1ef: metadata relativePath=" + meta.relativePath
+                                 + " generationId=" + meta.generationId
+                                 + " length=" + juce::String(meta.lengthSamples)
+                                 + " latency=" + juce::String(meta.pluginLatencySamples)
+                                 + " renderedUtc=" + meta.renderedUtc
+                                 + " assetBytes="
+                                 + juce::String(check.file != juce::File() ? check.file.getSize() : 0)
+                                 + (assetOk ? "" : (" assetError=" + check.error)));
+                // Temp render targets must be consumed by the publication rename.
+                const auto temps = proxy_store::proxyDirectory(projectFolder)
+                                       .findChildFiles(juce::File::findFiles, false, "tmp_*.wav");
+                tempsSwept = temps.isEmpty();
             }
-            return cloneDistinct && wavOk && midiOk;
+            const auto destState = callbacks_.queryProxyDestinationState(selectedTrackId());
+            const bool currentOk = destState == proxy_render::ProxyDestinationState::Current;
+            appendSessionLog(juce::String("p1ef: VERIFY published=") + (published ? "PASS" : "FAIL")
+                             + " routedCh123AndCc11=" + (midiOk ? "PASS" : "FAIL")
+                             + " instanceDistinct="
+                             + (r.renderInstanceDistinctFromLive ? "PASS" : "FAIL")
+                             + " metadata=" + (metaOk ? "PASS" : "FAIL")
+                             + " immutableWav=" + (assetOk ? "PASS" : "FAIL")
+                             + " tempsSwept=" + (tempsSwept ? "PASS" : "FAIL")
+                             + " destinationCurrent=" + (currentOk ? "PASS" : "FAIL"));
+            return published && midiOk && r.renderInstanceDistinctFromLive && metaOk && assetOk
+                   && tempsSwept && currentOk;
         });
-        add(300, "P1D transport still operational after render", [this] {
+        add(300, "P1EF transport still operational after render", [this] {
             if (!callbacks_.startTransport || !callbacks_.isTransportPlaying
                 || !callbacks_.stopTransport)
             {
@@ -604,10 +617,10 @@ private:
             callbacks_.startTransport();
             return true;
         });
-        add(1500, "P1D stop transport + record operational check", [this] {
+        add(1500, "P1EF stop transport + record operational check", [this] {
             const bool playing = callbacks_.isTransportPlaying();
             callbacks_.stopTransport();
-            appendSessionLog(juce::String("p1d: transportOperationalAfterRender=")
+            appendSessionLog(juce::String("p1ef: transportOperationalAfterRender=")
                              + (playing ? "PASS" : "FAIL"));
             return playing;
         });
@@ -773,13 +786,8 @@ private:
     {
         autoActive_ = false;
         clearMidiSinkIfInstalled();
-        // P1D: never leave a render worker running unattended — the job destructor performs
-        // the RAII shutdown (cancel + join + message-thread instance teardown + temp cleanup).
-        if (p1dJob_ != nullptr)
-        {
-            appendSessionLog("p1d: abort — cancelling in-flight foreground render job");
-            p1dJob_.reset();
-        }
+        // P1EF: the panel owns no render job — in-flight background work is owned and cleaned
+        // up by the application-owned scheduler (cancel/detach on app shutdown).
         appendSessionLog("auto: ABORT — " + reason);
         writeReport(); // partial data is still valuable
         setStatus("AUTO plan '" + autoPlanId_ + "' ABORTED: " + reason);
@@ -1268,13 +1276,9 @@ private:
     const void* m2vInstanceAtInstall_ = nullptr;
     std::uint64_t m2vBoundaryAtInstall_ = 0;
 
-    // P1D production-renderer integration (plan "P1D" only; see buildP1dPlan). The format
-    // manager creates the ISOLATED render instance; the live instance is only compared by
-    // pointer value.
-    juce::AudioPluginFormatManager p1dFormatManager_;
-    std::unique_ptr<proxy_render::ProxyForegroundRenderJob> p1dJob_;
-    const void* p1dLivePtr_ = nullptr;
-    const void* p1dClonePtr_ = nullptr;
+    // P1EF service-integration plan (plan "P1EF" only; see buildP1efPlan). The panel holds
+    // only the requested generation for verification — no job, no plugin instance.
+    std::uint64_t p1efGeneration_ = 0;
 
     std::function<int()> waitProbe_; ///< 1 = satisfied, 0 = pending, -1 = failed
     double waitProbeDeadlineMs_ = 0.0;

@@ -354,6 +354,16 @@ public:
     /// Per-destination proxy update mode ("auto" | "onSave" | "manual" | "off", steering §18.1).
     [[nodiscard]] juce::String getProxyUpdateMode() const noexcept { return proxyUpdateMode_; }
 
+    /// [Message thread] P1F publication: replace the in-memory proxy metadata after a SUCCESSFUL
+    /// atomic publication (§16.3 step 7). Cache metadata only: creates NO musical undo entry,
+    /// rewrites NO musical track state, and does not itself trigger/wait for a project save —
+    /// the next normal save simply persists it (the save DTO already reads these fields).
+    void setProxyMetadataFromPublication(const ProjectFileProxyMetadataV20& metadata) noexcept
+    {
+        proxyMetadata_ = metadata;
+        hasProxyMetadata_ = true;
+    }
+
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;
 

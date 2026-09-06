@@ -15,6 +15,11 @@ class PlaybackEngine;
 class TransportControlsShortcutTarget;
 struct StabilityScenarioRequest;
 
+namespace proxy_render
+{
+class ProxyRenderScheduler;
+}
+
 class MainWindow final : public juce::DocumentWindow, public juce::KeyListener
 {
 public:
@@ -26,7 +31,8 @@ public:
                RecorderService& recorderService,
                CountInClickOutput& countInClicks,
                LatencySettingsStore& latencyStore,
-               PlaybackEngine& playbackEngine);
+               PlaybackEngine& playbackEngine,
+               proxy_render::ProxyRenderScheduler& proxyRenderScheduler);
 
     ~MainWindow() override;
 
@@ -69,4 +75,5 @@ private:
     RecorderService& recorderService,
     CountInClickOutput& countInClicks,
     LatencySettingsStore& latencyStore,
-    PlaybackEngine& playbackEngine);
+    PlaybackEngine& playbackEngine,
+    proxy_render::ProxyRenderScheduler& proxyRenderScheduler);

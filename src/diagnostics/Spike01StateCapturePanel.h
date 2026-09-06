@@ -36,13 +36,10 @@
 #include <vector>
 
 #include "domain/Track.h"
+#include "instruments/ProxyRenderScheduler.h" // narrow P1E status vocabulary (by value)
+#include "io/ProjectFile.h"                   // ProjectFileProxyMetadataV20 (verification copy)
 
 class ExperimentalInstrumentHost;
-
-namespace proxy_render
-{
-struct ProxyRenderRequest; // production render request (ProxyRenderInstanceLifecycle.h)
-}
 
 /// One selectable instrument runtime (an instrument track with its host).
 struct Spike01RuntimeChoice
@@ -68,11 +65,16 @@ struct Spike01PanelCallbacks
     /// (through `Transport::requestSeek`), and read the cycle wrap count. May be null.
     std::function<void(std::int64_t)> seekTransport;
     std::function<std::uint32_t()> readCycleWrapCount;
-    /// [Message thread; P1D integration plan only] Build the complete PRODUCTION proxy render
-    /// request (P1C snapshot + fingerprint + captured Primary state + plugin identity + render
-    /// configuration) for the given destination track. Returns an error string, or empty on
-    /// success. May be null (the P1D plan then fails its build step).
-    std::function<juce::String(TrackId, proxy_render::ProxyRenderRequest&)> buildProxyRenderRequest;
+    /// [Message thread; P1EF integration plan only] The NARROW production service API — the
+    /// panel never owns jobs or touches plugin instances (P1E: job ownership lives in the
+    /// application-owned ProxyRenderScheduler; no instances cross this seam).
+    std::function<proxy_render::ProxyJobStatus(TrackId)> requestProxyRender;
+    std::function<proxy_render::ProxyJobStatus(TrackId)> queryProxyJobStatus;
+    std::function<proxy_render::ProxyDestinationState(TrackId)> queryProxyDestinationState;
+    /// [Message thread] Copy of the destination's published v20 proxy metadata (false = none).
+    std::function<bool(TrackId, ProjectFileProxyMetadataV20&)> getPublishedProxyMetadata;
+    /// [Message thread] Current project folder (invalid File when the project is unsaved).
+    std::function<juce::File()> getProjectFolder;
     juce::String appVersion;
 };
 
