@@ -354,6 +354,37 @@ public:
     /// Per-destination proxy update mode ("auto" | "onSave" | "manual" | "off", steering §18.1).
     [[nodiscard]] juce::String getProxyUpdateMode() const noexcept { return proxyUpdateMode_; }
 
+    /// [Message thread] P1H mode change (UI): persisted project state — the CALLER marks the
+    /// project dirty on a true return (§18.3: dirties the project, never part of musical undo;
+    /// the undo DTO strips it, see stripExperimentalInstrumentTrackPluginFieldsForUndo).
+    /// Unrecognized values repair to "auto" like the project reader. Returns true when changed.
+    bool setProxyUpdateModeFromUi(const juce::String& mode) noexcept
+    {
+        const juce::String valid = (mode == "onSave" || mode == "manual" || mode == "off")
+                                       ? mode
+                                       : juce::String("auto");
+        if (valid == proxyUpdateMode_)
+        {
+            return false;
+        }
+        proxyUpdateMode_ = valid;
+        return true;
+    }
+
+    /// [Message thread] P1H Save As rehoming: last known ABSOLUTE file of the referenced
+    /// generation asset (invalid File when unknown or silent generation). Runtime-only hint —
+    /// never persisted; captured where the project folder is authoritatively known (project
+    /// load, autosave recovery, publication) so a later Save As can copy the asset even after
+    /// the session's save path was cleared (autosave recovery clears it).
+    [[nodiscard]] const juce::File& getProxyAssetSourceHint() const noexcept
+    {
+        return proxyAssetSourceHint_;
+    }
+    void setProxyAssetSourceHint(const juce::File& sourceFile) noexcept
+    {
+        proxyAssetSourceHint_ = sourceFile;
+    }
+
     /// [Message thread] P1F publication: replace the in-memory proxy metadata after a SUCCESSFUL
     /// atomic publication (§16.3 step 7). Cache metadata only: creates NO musical undo entry,
     /// rewrites NO musical track state, and does not itself trigger/wait for a project save —
@@ -521,6 +552,7 @@ private:
     bool proxyPublishedThisSession_ = false;
     /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
     juce::String proxyUpdateMode_ { "auto" };
+    juce::File proxyAssetSourceHint_; ///< P1H Save As rehoming (runtime-only, see accessor)
 
     double timelineSampleRate_ = 48000.0;
 

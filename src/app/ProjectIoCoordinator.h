@@ -50,6 +50,24 @@ public:
 
         /// Optional: transient "Saving project" indicator, invoked right before the project file write.
         std::function<void()> showSavingProjectIndicator;
+
+        // ------------------------------------------------------------------ P1H
+        /// Fired right before a loaded project replaces the current one (before instrument
+        /// runtimes are cleared): the proxy scheduler obsoletes/cancels old-project jobs and the
+        /// update-policy runtime drops its (runtime-only) timers/pending flags.
+        std::function<void()> onProjectAboutToBeReplaced;
+        /// Fired after a project load completed, with the loaded project's folder. Used to
+        /// capture per-destination proxy asset source hints (Save As rehoming) while the asset
+        /// location is authoritatively known.
+        std::function<void(const juce::File& projectFolder)> onProjectLoaded;
+        /// §18.2: fired after every successful EXPLICIT user save (normal and first-time
+        /// Save As). Queues proxy work per destination update mode; never waits for rendering.
+        /// The autosave path deliberately NEVER fires this (autosave must not trigger renders).
+        std::function<void()> onSuccessfulUserSave;
+        /// §16.6: fired after a successful FIRST-TIME Save As write, with the new project
+        /// folder — copies/validates referenced proxy generation assets into the new layout
+        /// (honest nonfatal degradation on failure; the original project is never touched).
+        std::function<void(const juce::File& projectFolder)> rehomeProxyAssetsAfterSaveAs;
     };
 
     ProjectIoCoordinator(Transport& transport,

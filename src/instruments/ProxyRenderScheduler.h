@@ -905,12 +905,29 @@ private:
         s.phase = job.phase.load(std::memory_order_acquire);
         s.expectedFingerprint = job.expectedFingerprint;
         s.primarySemanticRevision = job.primarySemanticRevision;
-        // The worker owns `result`/`message` until the job leaves the worker
-        // phases (release-ordered phase store) — copy them only when safe.
-        if (s.phase != ProxyJobPhase::Preparing && s.phase != ProxyJobPhase::Rendering)
+        // RACE-SAFETY CONTRACT (P1H hang fix): `message`/`result` contain reference-counted
+        // juce::String/juce::File members that the worker mutates during Preparing/Rendering
+        // AND the message thread mutates during Finalizing (finalizeOnMessageThread writes
+        // job->message and clears result.temporaryWavFile) and during the shutdown sweep
+        // (phase still Queued). None of those writers hold `mutex_`, so copying here while
+        // they run is a data race on the COW refcounts — in a Debug CRT heap that corrupts
+        // allocator metadata and manifested as the intermittent P1E selftest hang. Copy the
+        // mutable payload ONLY after acquiring a TERMINAL phase: the terminal store is
+        // release-ordered after the last mutation, and terminal jobs are never written again.
+        switch (s.phase)
         {
-            s.message = job.message;
-            s.result = job.result;
+            case ProxyJobPhase::Published:
+            case ProxyJobPhase::Obsolete:
+            case ProxyJobPhase::Cancelled:
+            case ProxyJobPhase::Failed:
+                s.message = job.message;
+                s.result = job.result;
+                break;
+            case ProxyJobPhase::Queued:
+            case ProxyJobPhase::Preparing:
+            case ProxyJobPhase::Rendering:
+            case ProxyJobPhase::Finalizing:
+                break; // payload still owned by the worker or the finalizing message thread
         }
         return s;
     }

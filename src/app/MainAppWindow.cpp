@@ -57,6 +57,7 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "app/AppProxyRenderEngine.h"
 #include "instruments/ProxyPlaybackCoordinator.h"
+#include "instruments/ProxyUpdatePolicyService.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyRenderScheduler.h"
@@ -540,6 +541,16 @@ public:
                 {
                     proxyPlaybackCoordinator_->refreshDestination(tid);
                 }
+                // P1H §18.3 (Recommended, Locked classification): publication metadata updates
+                // DIRTY the project (the file references changed and should be saved) but are
+                // excluded from musical undo (the undo snapshot strips proxy fields — §12.3
+                // precedent). This is what guarantees metadata published after the previous
+                // Save is not silently lost on close: close sees a dirty project and prompts,
+                // and autosave persists the reference without ever triggering rendering.
+                if (projectIoCoordinator_ != nullptr)
+                {
+                    projectIoCoordinator_->markProjectDirtyFromEdit();
+                }
             };
             proxyRenderEngine_
                 = std::make_unique<proxy_render::AppProxyRenderEngine>(std::move(engineDeps));
@@ -632,6 +643,91 @@ public:
             };
             proxyPlaybackCoordinator_
                 = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
+        }
+
+        // P1H: the per-destination update-policy engine (§18.1). Same project-runtime owner as
+        // the render engine and playback coordinator; observes canonical identity, runs the
+        // fixed five-minute Auto idle timers on its OWN 1 Hz timer (never the UI tick) and
+        // feeds the P1E scheduler. All policy state is runtime-only (§20).
+        {
+            proxy_policy::ProxyUpdatePolicyService::Dependencies polDeps;
+            polDeps.nowMs = [this]() -> double {
+                return juce::Time::getMillisecondCounterHiRes() + proxyPolicyTestClockOffsetMs_;
+            };
+            polDeps.listDestinations = [this]() -> std::vector<TrackId> {
+                std::vector<TrackId> out;
+                if (const auto snap = session.loadSessionSnapshotForAudioThread())
+                {
+                    for (int i = 0; i < snap->getNumTracks(); ++i)
+                    {
+                        const Track& t = snap->getTrack(i);
+                        if (t.getKind() == TrackKind::Instrument
+                            && instrumentRuntimeCoordinator_ != nullptr
+                            && instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(
+                                   t.getId())
+                                   != nullptr)
+                        {
+                            out.push_back(t.getId());
+                        }
+                    }
+                }
+                return out;
+            };
+            polDeps.modeForTrack = [this](const TrackId tid) -> juce::String {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                return c != nullptr ? c->getProxyUpdateMode() : juce::String("auto");
+            };
+            polDeps.identityForTrack = [this](const TrackId tid) {
+                proxy_policy::ProxyUpdatePolicyService::DestinationIdentity id;
+                if (proxyRenderEngine_ != nullptr)
+                {
+                    const auto cur = proxyRenderEngine_->currentIdentity(tid);
+                    id.exists = cur.destinationExists && cur.expectedFingerprint.isNotEmpty();
+                    id.fingerprint = cur.expectedFingerprint;
+                    id.revision = cur.primarySemanticRevision;
+                }
+                return id;
+            };
+            polDeps.destinationState
+                = [this](const TrackId tid) { return proxyRenderScheduler_.destinationState(tid); };
+            polDeps.jobStatus
+                = [this](const TrackId tid) { return proxyRenderScheduler_.jobStatus(tid); };
+            polDeps.requestRender
+                = [this](const TrackId tid) { return proxyRenderScheduler_.requestRender(tid); };
+            polDeps.cancelDestination
+                = [this](const TrackId tid) { proxyRenderScheduler_.cancelDestination(tid); };
+            polDeps.notifyIdentityChanged = [this](const TrackId tid) {
+                proxyRenderScheduler_.notifyDestinationIdentityChanged(tid);
+            };
+            polDeps.recordingActive = [this] {
+                return recorder_.isRecording()
+                       || (recordingCoordinator_ != nullptr
+                           && recordingCoordinator_->isCountInActive());
+            };
+            polDeps.snapshotEligible = [this](const TrackId tid) {
+                // §9.4.4 host-observable quiescence: recent host MIDI/CC delivery defers
+                // snapshot capture. Notifier silence is a practical observation, never proof
+                // of internal plugin quiescence (§9.4.5).
+                ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                          : nullptr;
+                return h == nullptr
+                       || h->millisecondsSinceLastHostMidiDelivery()
+                              >= proxy_policy::kSnapshotQuiescenceDebounceMs;
+            };
+            polDeps.onRenderRelevantChangeObserved = [this](const TrackId tid) {
+                if (proxyPlaybackCoordinator_ != nullptr)
+                {
+                    proxyPlaybackCoordinator_->refreshDestination(tid); // honest ProxyStale now
+                }
+            };
+            proxyUpdatePolicyService_
+                = std::make_unique<proxy_policy::ProxyUpdatePolicyService>(std::move(polDeps));
+            proxyUpdatePolicyService_->startProductionTicker(1000);
         }
 
         arrangementEventSelectionCoordinator_
@@ -1192,6 +1288,32 @@ public:
                     }
                 },
                 [this] { showSavingProjectToast(); },
+                // P1H onProjectAboutToBeReplaced: obsolete/cancel the OLD project's proxy work
+                // and drop the runtime-only policy timers before runtimes are cleared (§13.3).
+                [this] {
+                    proxyRenderScheduler_.notifyProjectChanged();
+                    if (proxyUpdatePolicyService_ != nullptr)
+                    {
+                        proxyUpdatePolicyService_->noteProjectChanged();
+                    }
+                },
+                // P1H onProjectLoaded: capture asset source hints for later Save As rehoming.
+                [this](const juce::File& projectFolder) {
+                    captureProxyAssetSourceHints(projectFolder);
+                },
+                // P1H §18.2 onSuccessfulUserSave: queue proxy work per destination update mode
+                // (On Save queues stale destinations; Auto queues only already-eligible work;
+                // Manual/Off queue nothing). Never waits for rendering; autosave never fires it.
+                [this] {
+                    if (proxyUpdatePolicyService_ != nullptr)
+                    {
+                        proxyUpdatePolicyService_->noteSuccessfulUserSave();
+                    }
+                },
+                // P1H §16.6 Save As: copy referenced generations into the new project layout.
+                [this](const juce::File& projectFolder) {
+                    rehomeProxyAssetsIntoFolder(projectFolder);
+                },
             });
 
         // Stability C5: app-level states that must block a periodic autosave tick. Everything
@@ -1388,6 +1510,15 @@ public:
 
     ~TransportControlsContent() override
     {
+        // P1H shutdown: the policy ticker dies FIRST so no timer callback runs into the
+        // scheduler/engine teardown below. Every timer/pending flag is runtime-only (§20) —
+        // dropping them loses nothing persisted; staleness is re-derived on next load.
+        if (proxyUpdatePolicyService_ != nullptr)
+        {
+            proxyUpdatePolicyService_->stopProductionTicker();
+            proxyUpdatePolicyService_.reset();
+        }
+
         // P1E shutdown order: cancel + join + tear down every render job BEFORE the instrument
         // hosts/coordinators the engine reaches into are destroyed. The scheduler itself (app-
         // owned) outlives this view; only the engine attachment ends here.
@@ -2841,6 +2972,107 @@ private:
         }
     }
 
+    /// [Message thread] P1H: remember each destination's referenced asset's ABSOLUTE location
+    /// while the project folder is authoritatively known (after load / after publication). The
+    /// hint is runtime-only; Save As uses it as the copy source (§16.6) because by then the
+    /// coordinator has already switched the save path to the NEW folder.
+    void captureProxyAssetSourceHints(const juce::File& projectFolder)
+    {
+        if (instrumentRuntimeCoordinator_ == nullptr || projectFolder == juce::File())
+        {
+            return;
+        }
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            return;
+        }
+        for (int i = 0; i < snap->getNumTracks(); ++i)
+        {
+            const Track& t = snap->getTrack(i);
+            if (t.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(t.getId());
+            if (c == nullptr)
+            {
+                continue;
+            }
+            const ProjectFileProxyMetadataV20* const meta = c->getProxyMetadata();
+            if (meta == nullptr || meta->silentGeneration || meta->relativePath.isEmpty())
+            {
+                continue;
+            }
+            const juce::File f
+                = proxy_store::resolveProxyRelativePath(projectFolder, meta->relativePath);
+            if (f != juce::File() && f.existsAsFile())
+            {
+                c->setProxyAssetSourceHint(f);
+            }
+        }
+    }
+
+    /// [Message thread] P1H §16.6 Save As rehoming: copy every referenced generation asset into
+    /// the NEW project's `InstrumentProxies/` layout (copy + validate + immutable rename; the
+    /// original project and its assets are never touched). Failures are honest nonfatal states
+    /// (the destination shows ProxyMissing in the new project) — no modal, diagnostics only.
+    void rehomeProxyAssetsIntoFolder(const juce::File& newProjectFolder)
+    {
+        if (instrumentRuntimeCoordinator_ == nullptr)
+        {
+            return;
+        }
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr)
+        {
+            return;
+        }
+        std::vector<proxy_store::ProxyRehomeItem> items;
+        for (int i = 0; i < snap->getNumTracks(); ++i)
+        {
+            const Track& t = snap->getTrack(i);
+            if (t.getKind() != TrackKind::Instrument)
+            {
+                continue;
+            }
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(t.getId());
+            const ProjectFileProxyMetadataV20* const meta
+                = c != nullptr ? c->getProxyMetadata() : nullptr;
+            if (meta == nullptr)
+            {
+                continue;
+            }
+            proxy_store::ProxyRehomeItem item;
+            item.trackId = t.getId();
+            item.metadata = *meta;
+            item.sourceFile = c->getProxyAssetSourceHint();
+            items.push_back(std::move(item));
+        }
+        if (items.empty())
+        {
+            return;
+        }
+        const auto outcome = proxy_store::rehomeProxyAssets(newProjectFolder, items);
+        juce::Logger::writeToLog("[ProxyRehome] copied=" + juce::String(outcome.copied)
+                                 + " alreadyPresent=" + juce::String(outcome.alreadyPresent)
+                                 + " silent=" + juce::String(outcome.silent)
+                                 + " errors=" + juce::String(outcome.errors.size()));
+        for (const auto& e : outcome.errors)
+        {
+            juce::Logger::writeToLog("[ProxyRehome] " + e);
+        }
+        // Successfully rehomed assets are the new authoritative source location.
+        captureProxyAssetSourceHints(newProjectFolder);
+        // Re-derive playback views/status against the new project folder.
+        if (proxyPlaybackCoordinator_ != nullptr)
+        {
+            proxyPlaybackCoordinator_->refreshAllInstrumentDestinations();
+        }
+    }
+
     Transport& transport;
     Session& session;
     PluginInsertHost& pluginHost_;
@@ -2857,6 +3089,13 @@ private:
     /// P1G: playback-source coordination (proxy substitution views + reader lifecycle).
     /// Shut down in the destructor BEFORE the instrument runtime is torn down.
     std::unique_ptr<proxy_playback::ProxyPlaybackCoordinator> proxyPlaybackCoordinator_;
+    /// P1H: per-destination update-policy engine (§18.1) — owns the fixed five-minute Auto
+    /// idle timers on a dedicated 1 Hz timer. Destroyed FIRST in the destructor (before the
+    /// scheduler detach) so no tick runs into torn-down runtimes. All state runtime-only.
+    std::unique_ptr<proxy_policy::ProxyUpdatePolicyService> proxyUpdatePolicyService_;
+    /// Test/integration clock skew added to the policy clock (0 in production; the automated
+    /// P1H integration advances it to cross the five-minute boundary without waiting).
+    double proxyPolicyTestClockOffsetMs_ = 0.0;
 
     std::unique_ptr<InstrumentRuntimeCoordinator> instrumentRuntimeCoordinator_;
     /// Listed after IRC: reverse member destruction runs this dtor first while `instrumentRuntimeCoordinator_` still exists.

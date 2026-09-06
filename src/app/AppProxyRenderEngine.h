@@ -271,6 +271,9 @@ public:
         // metadata: no musical undo entry, no track-state rewrite; the next normal
         // project save persists it (the save DTO reads these controller fields).
         controller->setProxyMetadataFromPublication(outcome.metadata);
+        // P1H Save As rehoming: remember the published asset's absolute location while
+        // it is authoritatively known (runtime-only hint; empty for silent generations).
+        controller->setProxyAssetSourceHint(outcome.finalFile);
         if (deps_.onProxyPublished)
         {
             deps_.onProxyPublished(destination);

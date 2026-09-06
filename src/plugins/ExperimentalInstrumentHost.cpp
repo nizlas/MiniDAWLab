@@ -3714,6 +3714,13 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     rtBlockMidi_.clear();
 
     rtMidiDeliveryBoundaryBlocks_.fetch_add(1, std::memory_order_relaxed);
+    if (!blockMidi.isEmpty())
+    {
+        // P1H §9.4.4 host-observable quiescence input: relaxed timestamp of the most recent
+        // block that actually delivered MIDI/CC to the instance. Lock/allocation-free.
+        rtLastMidiDeliveryMs_.store((juce::int64)juce::Time::getMillisecondCounter(),
+                                    std::memory_order_relaxed);
+    }
     if (captureSink != nullptr)
     {
         captureSink->onMidiBlockDelivered(blockMidi, numSamples);

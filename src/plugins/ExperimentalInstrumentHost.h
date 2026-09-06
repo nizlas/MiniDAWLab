@@ -322,6 +322,19 @@ public:
     /// a semantic currency check.
     [[nodiscard]] bool captureInstrumentStateForRender(juce::MemoryBlock& out) const;
 
+    /// [Any thread] Milliseconds since the audio thread last delivered a non-empty MIDI block to
+    /// the instance (P1H §9.4.4 snapshot-eligibility input). A very large value means "never".
+    /// Host-notifier silence is a practical observation, never proof of plugin quiescence.
+    [[nodiscard]] double millisecondsSinceLastHostMidiDelivery() const noexcept
+    {
+        const juce::int64 last = rtLastMidiDeliveryMs_.load(std::memory_order_relaxed);
+        if (last <= 0)
+        {
+            return 1.0e12; // never delivered in this session
+        }
+        return juce::jmax(0.0, (double)((juce::int64)juce::Time::getMillisecondCounter() - last));
+    }
+
     // -----------------------------------------------------------------------
     // SPIKE-01 diagnostics (P0/P1A validation spike; removable with the spike)
     // -----------------------------------------------------------------------
@@ -367,6 +380,8 @@ private:
     /// Test-only capture sink for the MIDI delivery boundary (null in production).
     std::atomic<MidiDeliveryCaptureSink*> midiCaptureSink_{ nullptr };
     std::atomic<std::uint64_t> rtMidiDeliveryBoundaryBlocks_{ 0 };
+    /// P1H §9.4.4: millisecond stamp of the last non-empty MIDI delivery (0 = never; relaxed).
+    std::atomic<juce::int64> rtLastMidiDeliveryMs_{ 0 };
 
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
 

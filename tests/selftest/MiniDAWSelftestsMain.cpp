@@ -49,10 +49,13 @@
 #include "instruments/ProxyRenderExecutor.h"
 #include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderTypes.h"
+#include "instruments/ProxyUpdatePolicyService.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <deque>
 #include <functional>
@@ -69,6 +72,58 @@ namespace
     int failures = 0;
     int checks = 0;
 
+    // ------------------------------------------------------------------------------------------
+    // Hang watchdog (P1H prerequisite diagnosis machinery): a silent suite hang becomes a
+    // diagnosed abort naming the LAST COMPLETED check instead of a truncated log. `expect`
+    // flushes stdout per check so redirected logs never lose the tail, and bumps the progress
+    // counter the watchdog thread monitors. The stall threshold is generous (120 s) because a
+    // few measurement tests legitimately run tens of seconds between checks.
+    // ------------------------------------------------------------------------------------------
+    std::atomic<std::uint64_t> selftestProgressCounter{ 0 };
+    std::mutex selftestLastCheckMutex;
+    std::string selftestLastCheck; // guarded by selftestLastCheckMutex
+
+    struct SelftestHangWatchdog
+    {
+        SelftestHangWatchdog() : th([this] { run(); }) {}
+        ~SelftestHangWatchdog()
+        {
+            stop.store(true);
+            th.join();
+        }
+        void run()
+        {
+            std::uint64_t last = selftestProgressCounter.load();
+            int stalledSeconds = 0;
+            while (!stop.load())
+            {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                const std::uint64_t now = selftestProgressCounter.load();
+                if (now != last)
+                {
+                    last = now;
+                    stalledSeconds = 0;
+                    continue;
+                }
+                if (++stalledSeconds >= 120)
+                {
+                    std::string lastCheck;
+                    {
+                        const std::lock_guard<std::mutex> lock(selftestLastCheckMutex);
+                        lastCheck = selftestLastCheck;
+                    }
+                    std::printf("\n[WATCHDOG] selftest suite stalled for %d s; last completed "
+                                "check: \"%s\" — aborting\n",
+                                stalledSeconds, lastCheck.c_str());
+                    std::fflush(stdout);
+                    std::abort();
+                }
+            }
+        }
+        std::atomic<bool> stop{ false };
+        std::thread th;
+    };
+
     void expect(const bool ok, const std::string& what)
     {
         ++checks;
@@ -77,6 +132,12 @@ namespace
             ++failures;
         }
         std::printf("%s %s\n", ok ? "[ ok ]" : "[FAIL]", what.c_str());
+        std::fflush(stdout);
+        {
+            const std::lock_guard<std::mutex> lock(selftestLastCheckMutex);
+            selftestLastCheck = what;
+        }
+        selftestProgressCounter.fetch_add(1, std::memory_order_relaxed);
     }
 
     void expectEq(const juce::String& got, const juce::String& want, const std::string& what)
@@ -3357,6 +3418,8 @@ namespace
         juce::Thread::ThreadID lastRenderThread{};
         juce::Thread::ThreadID lastTeardownThread{};
         std::vector<juce::String> publishedFingerprints; // guarded by m
+        juce::File lastTempFile;                         // guarded by m (engine-side record;
+                                                         // snapshots hide non-terminal payload)
 
         void expectMessageThread(const char* what)
         {
@@ -3479,6 +3542,10 @@ namespace
                     (void)tmp.replaceWithText("fake");
                     r.temporaryWavFile = tmp;
                     r.wavBytes = tmp.getSize();
+                    {
+                        const std::lock_guard<std::mutex> lock(e.m);
+                        e.lastTempFile = tmp;
+                    }
                 }
                 return r;
             }
@@ -3677,9 +3744,11 @@ namespace
                    "p1e-editfinal: reaches Finalizing with the finalize still queued");
             juce::File temp;
             {
-                // The completed result holds a real temp file on disk.
-                const auto s = fx.sched->jobStatus(TrackId{ 6 });
-                temp = s.result.temporaryWavFile;
+                // The completed result holds a real temp file on disk. Non-terminal
+                // status snapshots deliberately hide the mutable payload (race-safety
+                // contract, P1H hang fix) — read the engine-side record instead.
+                const std::lock_guard<std::mutex> lock(fx.engine.m);
+                temp = fx.engine.lastTempFile;
             }
             expect(temp != juce::File() && temp.existsAsFile(),
                    "p1e-editfinal: completed render left a temp artifact pre-finalize");
@@ -3926,6 +3995,203 @@ namespace
         expect(queries.load() > 0
                    && fx.sched->jobStatus(TrackId{ 31 }).phase == ProxyJobPhase::Published,
                "p1e-race: concurrent status queries never corrupt the outcome");
+    }
+
+    /// P1H hang regression: `statusOfLocked` used to copy `message`/`result`
+    /// (reference-counted juce::String/File members) while the phase was Queued or
+    /// Finalizing — racing the message thread's finalize mutations (job->message
+    /// assignment, result.temporaryWavFile clear) and the shutdown sweep. The COW
+    /// refcount race corrupted the Debug CRT heap and hung the suite intermittently.
+    /// This test (a) pins the safe-copy contract — non-terminal snapshots carry NO
+    /// mutable payload, terminal snapshots carry the complete payload — and (b)
+    /// hammers the exact identified window (foreign-thread status copies across many
+    /// finalize cycles that assign the publication-failure message). Pre-fix this
+    /// corrupts the heap within a few hundred cycles; the suite watchdog then turns
+    /// the hang into a diagnosed abort. Post-fix it is race-free by construction.
+    void testProxySchedulerStatusSnapshotRaceRegression()
+    {
+        SchedulerFixture fx;
+        fx.engine.dests[TrackId{ 41 }] = { true, "fp41", 1, {} };
+
+        // (a) Contract: snapshots taken in every non-terminal phase expose no payload.
+        fx.engine.holdRender = true;
+        fx.sched->notifyRecordingState(true); // deterministically park pickup in Queued
+        (void)fx.sched->requestRender(TrackId{ 41 });
+        const auto queued = fx.sched->jobStatus(TrackId{ 41 });
+        expect(queued.phase == ProxyJobPhase::Queued && queued.message.isEmpty()
+                   && queued.result.temporaryWavFile == juce::File()
+                   && queued.result.message.isEmpty(),
+               "p1e-hangfix: Queued snapshot carries no mutable payload");
+        fx.sched->notifyRecordingState(false);
+        expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+               "p1e-hangfix: reaches Rendering");
+        const auto rendering = fx.sched->jobStatus(TrackId{ 41 });
+        expect(rendering.phase == ProxyJobPhase::Rendering && rendering.message.isEmpty()
+                   && rendering.result.temporaryWavFile == juce::File(),
+               "p1e-hangfix: Rendering snapshot carries no mutable payload");
+        fx.engine.releaseRender.signal();
+        // Reach Finalizing while the posted finalize still waits in the pump queue.
+        expect(fx.pump.pumpUntil([&] {
+                   return fx.sched->jobStatus(TrackId{ 41 }).phase == ProxyJobPhase::Finalizing;
+               }),
+               "p1e-hangfix: reaches Finalizing (finalize not yet drained)");
+        const auto finalizing = fx.sched->jobStatus(TrackId{ 41 });
+        expect(finalizing.message.isEmpty()
+                   && finalizing.result.temporaryWavFile == juce::File(),
+               "p1e-hangfix: Finalizing snapshot carries no mutable payload");
+        expect(fx.pumpUntilTerminal(TrackId{ 41 }), "p1e-hangfix: baseline terminalizes");
+        const auto published = fx.sched->jobStatus(TrackId{ 41 });
+        expect(published.phase == ProxyJobPhase::Published
+                   && published.result.status == proxy_render::ProxyRenderStatus::Succeeded,
+               "p1e-hangfix: terminal snapshot carries the complete result payload");
+
+        // (b) The identified corruption window, hammered: publication failure assigns
+        // job->message inside finalize while a foreign thread copies status snapshots.
+        fx.engine.holdRender = false;
+        fx.engine.publishShouldFail = true;
+        std::atomic<bool> stop{ false };
+        std::atomic<std::int64_t> copies{ 0 };
+        std::atomic<int> contractViolations{ 0 };
+        std::thread hammer([&] {
+            while (!stop.load())
+            {
+                const auto s = fx.sched->jobStatus(TrackId{ 41 });
+                const bool terminal = s.phase == ProxyJobPhase::Published
+                                      || s.phase == ProxyJobPhase::Obsolete
+                                      || s.phase == ProxyJobPhase::Cancelled
+                                      || s.phase == ProxyJobPhase::Failed;
+                if (!terminal
+                    && (s.message.isNotEmpty() || s.result.temporaryWavFile != juce::File()))
+                {
+                    ++contractViolations;
+                }
+                ++copies;
+            }
+        });
+        bool cyclesOk = true;
+        for (int cycle = 0; cycle < 200 && cyclesOk; ++cycle)
+        {
+            // Alternate the identity so every request enqueues a fresh job (no coalescing
+            // onto a terminal job) and finalize keeps assigning the failure message.
+            {
+                const std::lock_guard<std::mutex> lock(fx.engine.m);
+                fx.engine.dests[TrackId{ 41 }].rev = (std::uint64_t)(2 + cycle);
+            }
+            (void)fx.sched->requestRender(TrackId{ 41 });
+            cyclesOk = fx.pumpUntilTerminal(TrackId{ 41 });
+        }
+        stop = true;
+        hammer.join();
+        expect(cyclesOk, "p1e-hangfix: 200 publication-failure cycles terminalize");
+        expect(contractViolations.load() == 0,
+               "p1e-hangfix: no snapshot ever exposed a non-terminal mutable payload ("
+                   + std::to_string((long long)copies.load()) + " foreign-thread copies)");
+        const auto last = fx.sched->jobStatus(TrackId{ 41 });
+        expect(last.phase == ProxyJobPhase::Failed
+                   && last.message.contains("publication failed"),
+               "p1e-hangfix: terminal failure message is complete and intact");
+        fx.engine.publishShouldFail = false;
+    }
+
+    /// P1H prerequisite: shutdown/cancellation stays BOUNDED from every scheduler
+    /// phase (Queued / Preparing / Rendering / Finalizing). Each case drives one job
+    /// deterministically to the target phase, then requires full shutdown to finish
+    /// well inside the deadline with the job terminal as Cancelled and no leaked
+    /// prepared instance.
+    void testProxySchedulerBoundedShutdownEveryPhase()
+    {
+        constexpr double kBoundMs = 10000.0;
+
+        // Queued: recording blocks pickup, so the job never leaves the queue.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 51 }] = { true, "fp", 1, {} };
+            fx.sched->notifyRecordingState(true);
+            (void)fx.sched->requestRender(TrackId{ 51 });
+            expect(fx.sched->jobStatus(TrackId{ 51 }).phase == ProxyJobPhase::Queued,
+                   "p1e-bound: job parked in Queued (recording pause)");
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            fx.sched->shutdown();
+            const double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
+            while (fx.pump.drainOne()) {}
+            expect(elapsed < kBoundMs
+                       && fx.sched->jobStatus(TrackId{ 51 }).phase == ProxyJobPhase::Cancelled,
+                   "p1e-bound: shutdown from Queued bounded ("
+                       + std::to_string((int)elapsed) + " ms), job Cancelled");
+        }
+
+        // Preparing: the worker posts the prepare and waits; the pump is NOT drained,
+        // so the job is parked in Preparing when shutdown starts.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 52 }] = { true, "fp", 1, {} };
+            (void)fx.sched->requestRender(TrackId{ 52 });
+            const double w0 = juce::Time::getMillisecondCounterHiRes();
+            while (fx.sched->jobStatus(TrackId{ 52 }).phase != ProxyJobPhase::Preparing
+                   && juce::Time::getMillisecondCounterHiRes() - w0 < 5000.0)
+            {
+                juce::Thread::sleep(1); // deliberately no pump drain
+            }
+            expect(fx.sched->jobStatus(TrackId{ 52 }).phase == ProxyJobPhase::Preparing,
+                   "p1e-bound: job parked in Preparing (prepare undrained)");
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            fx.sched->shutdown();
+            const double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
+            while (fx.pump.drainOne()) {}
+            expect(elapsed < kBoundMs
+                       && fx.sched->jobStatus(TrackId{ 52 }).phase == ProxyJobPhase::Cancelled
+                       && fx.engine.preparedAlive.load() == 0,
+                   "p1e-bound: shutdown from Preparing bounded ("
+                       + std::to_string((int)elapsed) + " ms), job Cancelled, no leak");
+        }
+
+        // Rendering: held render; cancellation must stop it at the block boundary.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 53 }] = { true, "fp", 1, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 53 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-bound: job reaches Rendering");
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            fx.sched->shutdown();
+            const double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
+            while (fx.pump.drainOne()) {}
+            expect(elapsed < kBoundMs
+                       && fx.sched->jobStatus(TrackId{ 53 }).phase == ProxyJobPhase::Cancelled
+                       && fx.engine.preparedAlive.load() == 0,
+                   "p1e-bound: shutdown from Rendering bounded ("
+                       + std::to_string((int)elapsed) + " ms), job Cancelled, no leak");
+        }
+
+        // Finalizing: render returned, finalize still queued in the pump.
+        {
+            SchedulerFixture fx;
+            fx.engine.dests[TrackId{ 54 }] = { true, "fp", 1, {} };
+            fx.engine.holdRender = true;
+            (void)fx.sched->requestRender(TrackId{ 54 });
+            expect(fx.pump.pumpUntil([&] { return fx.engine.renderStarted.wait(0); }),
+                   "p1e-bound: rendering before finalize parking");
+            fx.engine.releaseRender.signal();
+            expect(fx.pump.pumpUntil([&] {
+                       return fx.sched->jobStatus(TrackId{ 54 }).phase
+                              == ProxyJobPhase::Finalizing;
+                   }),
+                   "p1e-bound: job parked in Finalizing (finalize undrained)");
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            fx.sched->shutdown();
+            const double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
+            while (fx.pump.drainOne()) {}
+            const auto phase = fx.sched->jobStatus(TrackId{ 54 }).phase;
+            // A job whose render already SUCCEEDED may legitimately finalize as
+            // Cancelled here (shutdown cancellation wins) — it must just be terminal,
+            // never Published (nothing may publish during shutdown) and never leak.
+            expect(elapsed < kBoundMs && phase == ProxyJobPhase::Cancelled
+                       && fx.engine.publishCount.load() == 0
+                       && fx.engine.preparedAlive.load() == 0,
+                   "p1e-bound: shutdown from Finalizing bounded ("
+                       + std::to_string((int)elapsed) + " ms), Cancelled, nothing published");
+        }
     }
 
     //==========================================================================
@@ -5975,10 +6241,591 @@ namespace
                "p1g-schema: revision pairing + recorded render config survive the round trip");
         (void)file.deleteFile();
     }
+
+    //==========================================================================
+    // P1H — ProxyUpdatePolicyService: the four §18.1 update modes against the
+    // REAL scheduler (fake engine, manual pump) with a FAKE monotonic clock.
+    // Auto idle boundary is exact (never a real five-minute wait); staleness is
+    // the scheduler's derived identity verdict, never a dirty flag.
+    //==========================================================================
+    struct PolicyFixture
+    {
+        SchedulerFixture fx; // real scheduler + controllable engine + manual pump
+        double now = 1000.0; // fake monotonic ms (injectable clock)
+        std::map<TrackId, juce::String> modes;
+        bool recording = false;
+        std::map<TrackId, bool> quiescent; // absent = quiescent (eligible)
+        std::vector<TrackId> observedChanges;
+        std::unique_ptr<proxy_policy::ProxyUpdatePolicyService> policy;
+
+        PolicyFixture()
+        {
+            proxy_policy::ProxyUpdatePolicyService::Dependencies d;
+            d.nowMs = [this] { return now; };
+            d.listDestinations = [this] {
+                std::vector<TrackId> out;
+                const std::lock_guard<std::mutex> lock(fx.engine.m);
+                for (const auto& [tid, dest] : fx.engine.dests)
+                {
+                    juce::ignoreUnused(dest);
+                    out.push_back(tid);
+                }
+                return out;
+            };
+            d.modeForTrack = [this](const TrackId t) {
+                const auto it = modes.find(t);
+                return it != modes.end() ? it->second : juce::String("auto");
+            };
+            d.identityForTrack = [this](const TrackId t) {
+                proxy_policy::ProxyUpdatePolicyService::DestinationIdentity id;
+                const std::lock_guard<std::mutex> lock(fx.engine.m);
+                if (const auto it = fx.engine.dests.find(t);
+                    it != fx.engine.dests.end() && it->second.exists)
+                {
+                    id.exists = true;
+                    id.fingerprint = it->second.fp;
+                    id.revision = it->second.rev;
+                }
+                return id;
+            };
+            d.destinationState = [this](const TrackId t) { return fx.sched->destinationState(t); };
+            d.jobStatus = [this](const TrackId t) { return fx.sched->jobStatus(t); };
+            d.requestRender = [this](const TrackId t) { return fx.sched->requestRender(t); };
+            d.cancelDestination = [this](const TrackId t) { fx.sched->cancelDestination(t); };
+            d.notifyIdentityChanged
+                = [this](const TrackId t) { fx.sched->notifyDestinationIdentityChanged(t); };
+            d.recordingActive = [this] { return recording; };
+            d.snapshotEligible = [this](const TrackId t) {
+                const auto it = quiescent.find(t);
+                return it == quiescent.end() || it->second;
+            };
+            d.onRenderRelevantChangeObserved
+                = [this](const TrackId t) { observedChanges.push_back(t); };
+            policy = std::make_unique<proxy_policy::ProxyUpdatePolicyService>(std::move(d));
+        }
+
+        /// Destination with a published CURRENT generation (fp == published).
+        void addCurrentDest(const TrackId t, const juce::String& fp)
+        {
+            const std::lock_guard<std::mutex> lock(fx.engine.m);
+            fx.engine.dests[t] = { true, fp, 1, fp };
+        }
+
+        /// Render-relevant musical edit: the canonical identity changes (§11.1).
+        void edit(const TrackId t, const juce::String& newFp)
+        {
+            {
+                const std::lock_guard<std::mutex> lock(fx.engine.m);
+                auto& dd = fx.engine.dests[t];
+                dd.fp = newFp;
+                ++dd.rev;
+            }
+            policy->tick(); // observation happens on the next policy tick
+        }
+
+        /// Advance the fake clock and tick (the production 1 Hz timer analogue).
+        void advance(const double ms)
+        {
+            now += ms;
+            policy->tick();
+        }
+
+        [[nodiscard]] bool hasActiveJob(const TrackId t)
+        {
+            const auto s = fx.sched->jobStatus(t);
+            return s.exists
+                   && !(s.phase == ProxyJobPhase::Published || s.phase == ProxyJobPhase::Obsolete
+                        || s.phase == ProxyJobPhase::Cancelled || s.phase == ProxyJobPhase::Failed);
+        }
+
+        [[nodiscard]] proxy_policy::ProxyPolicyStatus status(const TrackId t)
+        {
+            return policy->statusForTrack(t);
+        }
+
+        /// Run the held/queued job to a terminal phase and re-tick the policy.
+        [[nodiscard]] bool finishJob(const TrackId t)
+        {
+            const bool ok = fx.pumpUntilTerminal(t);
+            policy->tick();
+            return ok;
+        }
+    };
+
+    void testProxyPolicyAutoIdleExactBoundary()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        expect(pf.status(TrackId{ 1 }).state == RS::Passive && !pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-auto: current destination is Passive and renders nothing");
+
+        pf.edit(TrackId{ 1 }, "b"); // stale immediately; five-minute window starts
+        expect(pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Stale,
+               "p1h-auto: render-relevant edit marks the destination Stale immediately");
+        expect(pf.observedChanges.size() == 1 && pf.observedChanges[0] == TrackId{ 1 },
+               "p1h-auto: the change observation fired for exactly this destination");
+        {
+            const auto s = pf.status(TrackId{ 1 });
+            expect(s.state == RS::WaitingForIdle
+                       && std::abs(s.idleRemainingMs - 300000.0) < 0.5,
+                   "p1h-auto: WaitingForIdle with the full five-minute window remaining");
+        }
+        pf.advance(299999.0); // 4:59.999
+        expect(!pf.hasActiveJob(TrackId{ 1 })
+                   && pf.status(TrackId{ 1 }).state == RS::WaitingForIdle,
+               "p1h-auto: no render one millisecond before the five-minute boundary");
+        pf.advance(1.0); // exactly 5:00.000
+        expect(pf.hasActiveJob(TrackId{ 1 })
+                   && pf.status(TrackId{ 1 }).state == RS::RequestedToScheduler,
+               "p1h-auto: the render request is issued exactly at the five-minute boundary");
+        const auto gen1 = pf.fx.sched->jobStatus(TrackId{ 1 }).generation;
+        pf.advance(1000.0);
+        pf.advance(1000.0);
+        expect(pf.fx.sched->jobStatus(TrackId{ 1 }).generation == gen1,
+               "p1h-auto: further ticks coalesce (no duplicate job for the same identity)");
+        expect(pf.finishJob(TrackId{ 1 })
+                   && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current
+                   && pf.status(TrackId{ 1 }).state == RS::Passive,
+               "p1h-auto: publication makes the destination Current and the policy Passive");
+        const int captures = pf.fx.engine.captureCount.load();
+        pf.advance(3600000.0); // one silent hour
+        expect(pf.fx.engine.captureCount.load() == captures && !pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-auto: an already-current destination never re-renders (no polling loop)");
+    }
+
+    void testProxyPolicyAutoIndependentTimersAndReset()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a1");
+        pf.addCurrentDest(TrackId{ 2 }, "a2");
+        pf.policy->tick();
+        pf.edit(TrackId{ 1 }, "b1");
+        pf.edit(TrackId{ 2 }, "b2"); // both stale at ~t0
+        pf.advance(299000.0);        // 4:59
+        pf.edit(TrackId{ 1 }, "c1"); // resets ONLY destination 1
+        {
+            const auto s1 = pf.status(TrackId{ 1 });
+            const auto s2 = pf.status(TrackId{ 2 });
+            expect(s1.state == RS::WaitingForIdle && s1.idleRemainingMs > 299000.0,
+                   "p1h-auto: the 4:59 edit restarts destination 1's full window");
+            expect(s2.state == RS::WaitingForIdle && s2.idleRemainingMs < 2000.0,
+                   "p1h-auto: destination 2's independent timer is NOT reset by track 1's edit");
+        }
+        pf.advance(1000.0); // dest 2 crosses five minutes; dest 1 must not
+        expect(pf.hasActiveJob(TrackId{ 2 }) && !pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-auto: only the undisturbed destination renders at its own boundary");
+        expect(pf.finishJob(TrackId{ 2 }), "p1h-auto: destination 2 publishes");
+        pf.advance(299000.0); // dest 1 reaches its own (restarted) boundary
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-auto: the reset destination renders five minutes after ITS last edit");
+        expect(pf.finishJob(TrackId{ 1 }), "p1h-auto: destination 1 publishes after its window");
+    }
+
+    void testProxyPolicyAutoUnrelatedAndPostBoundaryEditsInert()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.edit(TrackId{ 1 }, "b");
+        // Post-boundary changes (DAL inserts, fader, pan, routing, unrelated tracks,
+        // viewport state) are excluded from the canonical fingerprint by construction
+        // (§11.2/§11.3, covered by testFingerprintExclusions). At the policy seam they
+        // are therefore IDENTITY-PRESERVING ticks — which must not reset the window.
+        for (int i = 0; i < 299; ++i)
+        {
+            pf.advance(1000.0); // 299 identity-preserving ticks (4:59 elapsed)
+        }
+        expect(!pf.hasActiveJob(TrackId{ 1 })
+                   && pf.status(TrackId{ 1 }).state == RS::WaitingForIdle,
+               "p1h-auto: identity-preserving ticks neither reset the timer nor render early");
+        pf.advance(1000.0); // 5:00
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-auto: the window elapses on schedule despite post-boundary-only activity");
+        expect(pf.finishJob(TrackId{ 1 }), "p1h-auto: publishes");
+        expect(pf.observedChanges.size() == 1,
+               "p1h-auto: exactly ONE render-relevant change was ever observed");
+    }
+
+    void testProxyPolicyAutoEditDuringRenderObsoletesAndRestarts()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.fx.engine.holdRender = true;
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(300000.0);
+        expect(pf.fx.pump.pumpUntil([&] { return pf.fx.engine.renderStarted.wait(0); }),
+               "p1h-auto: render for 'b' starts after the idle window");
+        pf.edit(TrackId{ 1 }, "c"); // edit DURING render: obsoletes + restarts window
+        pf.fx.engine.releaseRender.signal();
+        expect(pf.fx.pumpUntilTerminal(TrackId{ 1 }), "p1h-auto: superseded job terminalizes");
+        pf.policy->tick();
+        {
+            const auto job = pf.fx.sched->jobStatus(TrackId{ 1 });
+            expect(job.phase == ProxyJobPhase::Obsolete || job.phase == ProxyJobPhase::Cancelled,
+                   "p1h-auto: the in-flight job became Obsolete and never published 'b'");
+            bool bNeverPublished = true;
+            {
+                const std::lock_guard<std::mutex> lock(pf.fx.engine.m);
+                for (const auto& f : pf.fx.engine.publishedFingerprints)
+                {
+                    bNeverPublished = bNeverPublished && f != juce::String("b");
+                }
+            }
+            expect(bNeverPublished, "p1h-auto: the obsolete result was never published");
+        }
+        {
+            const auto s = pf.status(TrackId{ 1 });
+            expect(s.state == RS::WaitingForIdle && s.idleRemainingMs > 299000.0,
+                   "p1h-auto: the edit during render restarted a FULL five-minute interval");
+        }
+        pf.fx.engine.holdRender = false;
+        pf.advance(300000.0);
+        expect(pf.hasActiveJob(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 }),
+               "p1h-auto: the new identity renders after its own idle window");
+        bool cPublished = false;
+        {
+            const std::lock_guard<std::mutex> lock(pf.fx.engine.m);
+            for (const auto& f : pf.fx.engine.publishedFingerprints)
+            {
+                cPublished = cPublished || f == juce::String("c");
+            }
+        }
+        expect(cPublished, "p1h-auto: the current identity 'c' published");
+    }
+
+    void testProxyPolicyRecordingPausesEligibilityNotPlayback()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.recording = true;
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(300001.0); // window elapsed while recording
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-record: an elapsed window does not request while recording");
+        {
+            const auto s = pf.status(TrackId{ 1 });
+            expect(s.state == RS::WaitingForIdle && s.recordingPaused,
+                   "p1h-record: status shows the due request held by recording");
+        }
+        pf.recording = false;
+        pf.advance(1.0); // next tick after recording stops — no new edit required
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-record: the retained request starts right after recording ends");
+        expect(pf.finishJob(TrackId{ 1 }), "p1h-record: publishes after resume");
+        // Transport playback is deliberately NOT an input of the policy service
+        // (§14.3: playback never prevents isolated background rendering) — the
+        // dependency surface has no playback query at all, and the scheduler-level
+        // guarantee is covered by the P1E recording/pause tests.
+    }
+
+    void testProxyPolicyOnSaveMode()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.modes[TrackId{ 1 }] = "onSave";
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        // A second, AUTO destination stale for only one minute: Save must NOT force it.
+        pf.addCurrentDest(TrackId{ 2 }, "x");
+        pf.policy->tick();
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(600000.0); // ten idle minutes
+        expect(!pf.hasActiveJob(TrackId{ 1 })
+                   && pf.status(TrackId{ 1 }).state == RS::WaitingForSave,
+               "p1h-onsave: staleness never starts rendering by itself (no idle trigger)");
+        pf.edit(TrackId{ 2 }, "y");
+        pf.advance(60000.0); // Auto destination stale for one minute only
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        pf.policy->noteSuccessfulUserSave();
+        const double saveMs = juce::Time::getMillisecondCounterHiRes() - t0;
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-onsave: the explicit Save queued the stale On Save destination");
+        expect(!pf.hasActiveJob(TrackId{ 2 }),
+               "p1h-onsave: Save does NOT force a not-yet-idle Auto destination (no storm)");
+        expect(saveMs < 1000.0,
+               "p1h-onsave: queueing is non-blocking (" + std::to_string((int)saveMs)
+                   + " ms; Save never waits for rendering)");
+        expect(pf.finishJob(TrackId{ 1 }), "p1h-onsave: queued work publishes in background");
+        // Autosave path: the ProjectIoCoordinator autosave writer never calls
+        // noteSuccessfulUserSave — at the policy seam, ticks alone must never
+        // request for a stale On Save destination.
+        pf.edit(TrackId{ 1 }, "c");
+        pf.advance(600000.0);
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-onsave: without an explicit Save (autosave analogue), nothing renders");
+    }
+
+    void testProxyPolicyManualMode()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.modes[TrackId{ 1 }] = "manual";
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(600000.0);
+        expect(!pf.hasActiveJob(TrackId{ 1 })
+                   && pf.status(TrackId{ 1 }).state == RS::WaitingForManual
+                   && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Stale,
+               "p1h-manual: stays honestly Stale, no automatic render ever starts");
+        pf.policy->noteSuccessfulUserSave();
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-manual: an explicit Save queues nothing in Manual mode");
+        // Render now → Cancel → Retry.
+        pf.fx.engine.holdRender = true;
+        expect(pf.policy->renderNow(TrackId{ 1 }) && pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-manual: explicit Render now starts the job");
+        expect(pf.fx.pump.pumpUntil([&] { return pf.fx.engine.renderStarted.wait(0); }),
+               "p1h-manual: job reaches Rendering");
+        pf.policy->cancel(TrackId{ 1 });
+        expect(pf.fx.pumpUntilTerminal(TrackId{ 1 })
+                   && pf.fx.sched->jobStatus(TrackId{ 1 }).phase == ProxyJobPhase::Cancelled,
+               "p1h-manual: explicit Cancel terminalizes the job as Cancelled");
+        pf.policy->tick();
+        expect(pf.status(TrackId{ 1 }).state == RS::WaitingForManual,
+               "p1h-manual: after Cancel the destination honestly remains stale/manual");
+        pf.fx.engine.holdRender = false;
+        expect(pf.policy->retry(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 })
+                   && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current,
+               "p1h-manual: explicit Retry renders and publishes to Current");
+    }
+
+    void testProxyPolicyOffModeAndFailureRearm()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.modes[TrackId{ 1 }] = "off";
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(600000.0);
+        pf.policy->noteSuccessfulUserSave();
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-off: no idle, Save or any automatic trigger renders in Off");
+        expect(pf.status(TrackId{ 1 }).state == RS::Passive
+                   && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Stale,
+               "p1h-off: policy is passive while the derived state stays honestly Stale");
+        expect(!pf.policy->renderNow(TrackId{ 1 }) && !pf.policy->retry(TrackId{ 1 }),
+               "p1h-off: no one-shot Render now/Retry in Off (only P1J may override, §16.6)");
+        {
+            const std::lock_guard<std::mutex> lock(pf.fx.engine.m);
+            expect(pf.fx.engine.dests[TrackId{ 1 }].published == "a",
+                   "p1h-off: the existing retained generation was never deleted or replaced");
+        }
+        // Mode change Off → Auto: the edit was observed IN-SESSION ten idle minutes ago,
+        // so the destination is already eligible under the Auto policy ("five continuous
+        // minutes without a render-relevant edit" have genuinely elapsed) — the switch
+        // starts the render promptly. (A LOAD-stale destination without an in-session
+        // edit instead arms a full window — separate test below.)
+        pf.fx.engine.renderShouldFail = true; // reuse the eligible render for the failure test
+        pf.modes[TrackId{ 1 }] = "auto";
+        pf.advance(1.0);
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-off: switching to Auto after an elapsed in-session window is eligible");
+        // Failure re-arm contract: a failed render must NOT loop in Auto.
+        expect(pf.finishJob(TrackId{ 1 })
+                   && pf.fx.sched->jobStatus(TrackId{ 1 }).phase == ProxyJobPhase::Failed,
+               "p1h-fail: the render fails terminally");
+        const int captures = pf.fx.engine.captureCount.load();
+        pf.advance(600000.0);
+        expect(pf.fx.engine.captureCount.load() == captures,
+               "p1h-fail: Auto never restarts the SAME failed identity (no failure loop)");
+        pf.fx.engine.renderShouldFail = false;
+        expect(pf.policy->retry(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 })
+                   && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current,
+               "p1h-fail: explicit Retry re-arms and publishes");
+    }
+
+    void testProxyPolicySnapshotEligibilityDefersCapture()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.quiescent[TrackId{ 1 }] = false; // active host MIDI/CC delivery (§9.4.4)
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(300000.0);
+        const int captures = pf.fx.engine.captureCount.load();
+        expect(!pf.hasActiveJob(TrackId{ 1 })
+                   && pf.fx.engine.captureCount.load() == captures
+                   && pf.status(TrackId{ 1 }).state == RS::WaitingForSnapshot,
+               "p1h-snap: active MIDI/CC defers capture; status is WaitingForSnapshot");
+        pf.advance(30000.0);
+        expect(pf.status(TrackId{ 1 }).state == RS::WaitingForSnapshot,
+               "p1h-snap: the deferred request is retained across ticks");
+        pf.quiescent[TrackId{ 1 }] = true; // host quiescence reached — NO new edit
+        pf.advance(1000.0);
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-snap: eligible capture starts later WITHOUT another edit");
+        expect(pf.finishJob(TrackId{ 1 })
+                   && pf.fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Current,
+               "p1h-snap: deferred request renders and publishes normally");
+    }
+
+    void testProxyPolicyProjectCloseAndReplacementDropRuntimeState()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.policy->tick();
+        pf.edit(TrackId{ 1 }, "b");
+        pf.advance(100000.0);
+        expect(pf.status(TrackId{ 1 }).state == RS::WaitingForIdle,
+               "p1h-close: pending idle timer before project replacement");
+        // Project close/replacement: runtime-only policy state drops; scheduler jobs
+        // are handled by its own notifyProjectChanged (P1E lifecycle, already tested).
+        pf.policy->noteProjectChanged();
+        pf.fx.sched->notifyProjectChanged();
+        {
+            // The destination table now represents the NEW project: same track id,
+            // already current — the old pending timer must be gone.
+            const std::lock_guard<std::mutex> lock(pf.fx.engine.m);
+            pf.fx.engine.dests[TrackId{ 1 }] = { true, "b", 2, "b" };
+        }
+        pf.advance(600000.0);
+        expect(!pf.hasActiveJob(TrackId{ 1 })
+                   && pf.status(TrackId{ 1 }).state == RS::Passive,
+               "p1h-close: no stale timer of the old project survives into the new one");
+        // Deleted destination (vanishes from the table) drops its policy state too.
+        pf.edit(TrackId{ 1 }, "c");
+        {
+            const std::lock_guard<std::mutex> lock(pf.fx.engine.m);
+            pf.fx.engine.dests.erase(TrackId{ 1 });
+        }
+        pf.advance(600000.0);
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-close: a deleted destination never renders from a leftover timer");
+    }
+
+    void testProxyPolicyLoadStaleArmsFullWindow()
+    {
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+        // A project LOADS with a stale Auto destination (the edit happened in a past
+        // session; the idle timer is runtime-only §20 and did not survive): the first
+        // in-session observation arms a FULL five-minute window — never an instant
+        // render on open, and never a permanently ignored stale destination.
+        PolicyFixture pf;
+        {
+            const std::lock_guard<std::mutex> lock(pf.fx.engine.m);
+            pf.fx.engine.dests[TrackId{ 1 }] = { true, "new-fp", 5, "old-fp" }; // loads Stale
+        }
+        pf.policy->tick();
+        {
+            const auto s = pf.status(TrackId{ 1 });
+            expect(!pf.hasActiveJob(TrackId{ 1 }) && s.state == RS::WaitingForIdle
+                       && s.idleRemainingMs > 299000.0,
+                   "p1h-load: a load-stale Auto destination arms a full idle window");
+        }
+        pf.advance(299999.0);
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-load: no render before the full window elapses");
+        pf.advance(1.0);
+        expect(pf.hasActiveJob(TrackId{ 1 }) && pf.finishJob(TrackId{ 1 })
+                   && pf.fx.sched->destinationState(TrackId{ 1 })
+                          == ProxyDestinationState::Current,
+               "p1h-load: the load-stale destination renders after its full window");
+    }
+
+    //==========================================================================
+    // P1H — Save As rehoming (§16.6): copy referenced generations into a new
+    // project layout with validation; the original stays untouched; failures
+    // are honest nonfatal states.
+    //==========================================================================
+    void testProxySaveAsRehoming()
+    {
+        const juce::File root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getChildFile("MiniDAWSelftests")
+                                    .getChildFile("p1h-rehome");
+        (void)root.deleteRecursively();
+        const juce::File oldProject = root.getChildFile("old");
+        const juce::File newProject = root.getChildFile("new");
+        (void)oldProject.createDirectory();
+        (void)newProject.createDirectory();
+
+        // A real published generation in the OLD project.
+        const juce::String fp = "sha256:1234abcd";
+        const juce::String rel = proxy_store::generationRelativePath(TrackId{ 7 }, fp);
+        const juce::File oldAsset = proxy_store::resolveProxyRelativePath(oldProject, rel);
+        expect(p1fWriteWav(oldAsset, 8000.0, 2048), "p1h-rehome: source asset written");
+        ProjectFileProxyMetadataV20 meta;
+        meta.generationId = fp;
+        meta.relativePath = rel;
+        meta.sampleRate = 8000.0;
+        meta.lengthSamples = 2048;
+        meta.channels = 2;
+
+        // Silent generation (metadata-only) and a missing-source item alongside.
+        ProjectFileProxyMetadataV20 silentMeta;
+        silentMeta.generationId = "sha256:silent";
+        silentMeta.silentGeneration = true;
+        ProjectFileProxyMetadataV20 missingMeta = meta;
+        missingMeta.generationId = "sha256:gone";
+        missingMeta.relativePath = proxy_store::generationRelativePath(TrackId{ 9 },
+                                                                       "sha256:gone");
+
+        std::vector<proxy_store::ProxyRehomeItem> items;
+        items.push_back({ TrackId{ 7 }, meta, oldAsset });
+        items.push_back({ TrackId{ 8 }, silentMeta, {} });
+        items.push_back({ TrackId{ 9 }, missingMeta, {} }); // no source hint → honest failure
+        const auto out = proxy_store::rehomeProxyAssets(newProject, items);
+        expect(out.copied == 1 && out.silent == 1 && out.errors.size() == 1,
+               "p1h-rehome: one copied, one silent (nothing to copy), one honest failure");
+        const juce::File newAsset = proxy_store::resolveProxyRelativePath(newProject, rel);
+        expect(newAsset.existsAsFile()
+                   && proxy_store::validatePublishedAsset(newProject, meta).ok,
+               "p1h-rehome: the copied generation validates in the NEW project layout");
+        expect(oldAsset.existsAsFile() && oldAsset.getSize() == newAsset.getSize(),
+               "p1h-rehome: the ORIGINAL project asset is untouched");
+        expect(proxy_store::proxyDirectory(newProject)
+                       .findChildFiles(juce::File::findFiles, false, "tmp_*.wav")
+                       .isEmpty(),
+               "p1h-rehome: no temp file survives the copy transaction");
+
+        // Idempotent second run: the identical asset is reused, never re-copied.
+        std::vector<proxy_store::ProxyRehomeItem> again;
+        again.push_back({ TrackId{ 7 }, meta, oldAsset });
+        const auto out2 = proxy_store::rehomeProxyAssets(newProject, again);
+        expect(out2.copied == 0 && out2.alreadyPresent == 1 && out2.allOk(),
+               "p1h-rehome: an identical existing generation is reused, not overwritten");
+
+        // Occupied-by-foreign-file failure: never overwrite, report honestly.
+        const juce::String fp2 = "sha256:5678";
+        const juce::String rel2 = proxy_store::generationRelativePath(TrackId{ 7 }, fp2);
+        const juce::File foreign = proxy_store::resolveProxyRelativePath(newProject, rel2);
+        (void)foreign.getParentDirectory().createDirectory();
+        (void)foreign.replaceWithText("not a wav");
+        ProjectFileProxyMetadataV20 meta2 = meta;
+        meta2.generationId = fp2;
+        meta2.relativePath = rel2;
+        std::vector<proxy_store::ProxyRehomeItem> blocked;
+        blocked.push_back({ TrackId{ 7 }, meta2, oldAsset });
+        const auto out3 = proxy_store::rehomeProxyAssets(newProject, blocked);
+        expect(out3.copied == 0 && out3.errors.size() == 1
+                   && foreign.loadFileAsString() == "not a wav",
+               "p1h-rehome: a non-matching occupying file is never overwritten");
+
+        // Unsafe path is rejected before any filesystem work.
+        ProjectFileProxyMetadataV20 evil = meta;
+        evil.relativePath = "../outside.wav";
+        std::vector<proxy_store::ProxyRehomeItem> evilItems;
+        evilItems.push_back({ TrackId{ 7 }, evil, oldAsset });
+        const auto out4 = proxy_store::rehomeProxyAssets(newProject, evilItems);
+        expect(out4.copied == 0 && out4.errors.size() == 1,
+               "p1h-rehome: a path-escaping relative path is rejected");
+        (void)root.deleteRecursively();
+    }
 } // namespace
 
 int main()
 {
+    const SelftestHangWatchdog watchdog; // silent hangs become diagnosed aborts
     testTitleAndStatus();
     testOctaveLabels();
     testChannelSemantics();
@@ -6023,6 +6870,8 @@ int main()
     testProxySchedulerLifecycleRaces();
     testProxySchedulerShutdownWhileActive();
     testProxySchedulerStatusRaceSafety();
+    testProxySchedulerStatusSnapshotRaceRegression();
+    testProxySchedulerBoundedShutdownEveryPhase();
     testProxyExecutorPauseGateSeam();
     testProxyAssetStoreNamingAndPathSafety();
     testProxyAssetStorePublicationTransaction();
@@ -6046,6 +6895,19 @@ int main()
     testProxyPlaybackMixSubstitutionSeam();
     testProxyPlaybackCoordinatorEndToEnd();
     testProxyMetadataV20P1GFieldsRoundTrip();
+
+    testProxyPolicyAutoIdleExactBoundary();
+    testProxyPolicyAutoIndependentTimersAndReset();
+    testProxyPolicyAutoUnrelatedAndPostBoundaryEditsInert();
+    testProxyPolicyAutoEditDuringRenderObsoletesAndRestarts();
+    testProxyPolicyRecordingPausesEligibilityNotPlayback();
+    testProxyPolicyOnSaveMode();
+    testProxyPolicyManualMode();
+    testProxyPolicyOffModeAndFailureRearm();
+    testProxyPolicySnapshotEligibilityDefersCapture();
+    testProxyPolicyProjectCloseAndReplacementDropRuntimeState();
+    testProxyPolicyLoadStaleArmsFullWindow();
+    testProxySaveAsRehoming();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

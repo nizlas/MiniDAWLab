@@ -594,6 +594,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             markProjectCleanNow();
             deleteAutosaveArtifactsAfterSuccessfulSave();
             warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
+            // P1H §18.2: queue proxy work per destination update mode. Never waits.
+            if (callbacks_.onSuccessfulUserSave != nullptr)
+            {
+                callbacks_.onSuccessfulUserSave();
+            }
             reportDone(true);
         }
         return;
@@ -716,6 +721,18 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             markProjectCleanNow();
             deleteAutosaveArtifactsAfterSuccessfulSave();
             warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
+            // P1H §16.6 Save As: rehome referenced proxy generation assets into the new
+            // project layout (copy + validate only — never blocks on rendering, never
+            // touches the original assets; failures degrade to honest ProxyMissing).
+            if (callbacks_.rehomeProxyAssetsAfterSaveAs != nullptr)
+            {
+                callbacks_.rehomeProxyAssetsAfterSaveAs(projectFolder);
+            }
+            // P1H §18.2: queue proxy work per destination update mode. Never waits.
+            if (callbacks_.onSuccessfulUserSave != nullptr)
+            {
+                callbacks_.onSuccessfulUserSave();
+            }
             reportDone(true);
         }
     });
@@ -796,6 +813,14 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
                                         + juce::String((int)parsedLoad.experimentalInstrumentTracks.size()));
         transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
         appendProjectLoadDiagnosticLine("load: transport stopped");
+
+        // P1H project replacement (§13.3): obsolete/cancel every proxy job of the OLD project
+        // and drop the runtime-only policy timers BEFORE the runtimes they reference are
+        // cleared. Queued work is re-derivable from fingerprints on reopen; nothing waits.
+        if (callbacks_.onProjectAboutToBeReplaced != nullptr)
+        {
+            callbacks_.onProjectAboutToBeReplaced();
+        }
 
         const ScopedInstrumentProcessingLoadGate instrumentLoadGate(playbackEngine_, session_);
         const std::uint64_t loadGeneration = instrumentLoadGate.loadGeneration();
@@ -1056,6 +1081,13 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject begin");
         callbacks_.refreshAllUiAfterLoadedProject();
         appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject end");
+        // P1H: capture proxy asset source hints while the on-disk location is known (the
+        // autosave recovery flow clears the save path AFTER this, so a later first-time
+        // Save As can still copy the referenced generations from here).
+        if (callbacks_.onProjectLoaded != nullptr)
+        {
+            callbacks_.onProjectLoaded(f.getParentDirectory());
+        }
         appendProjectLoadDiagnosticLine("load: complete");
         markProjectCleanNow();
         writeLastOperationBreadcrumb("project load end ok: " + f.getFullPathName());

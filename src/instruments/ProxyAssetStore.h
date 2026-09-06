@@ -46,6 +46,7 @@
 #include <juce_core/juce_core.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace proxy_store
 {
@@ -390,6 +391,118 @@ struct ProxyAssetCheck
     }
     c.ok = true;
     return c;
+}
+
+//==============================================================================
+// P1H Save As rehoming (§16.6): copy referenced generations into a NEW project
+// folder. The persisted relative path is content-addressed and project-relative,
+// so it is identical in the new layout — nothing in the metadata changes; the
+// gate is copy + validation. The ORIGINAL project and its assets are read-only
+// inputs here (copy, never move). Failures are honest nonfatal states: the new
+// project simply shows ProxyMissing for that destination (PI-025 degradation).
+//==============================================================================
+struct ProxyRehomeItem
+{
+    TrackId trackId = kInvalidTrackId;
+    ProjectFileProxyMetadataV20 metadata; ///< referenced generation (by value)
+    juce::File sourceFile;                ///< last known absolute asset location
+};
+
+struct ProxyRehomeOutcome
+{
+    int copied = 0;          ///< assets copied + validated into the new layout
+    int alreadyPresent = 0;  ///< identical asset already present and valid
+    int silent = 0;          ///< silent generations (nothing to copy by design)
+    juce::StringArray errors; ///< per-item honest failures (nonfatal)
+    [[nodiscard]] bool allOk() const noexcept { return errors.isEmpty(); }
+};
+
+/// [Message thread] Rehome every referenced generation into `newProjectFolder`
+/// using the §16.3 discipline: copy to a unique temp sibling, validate against
+/// the metadata contract, then same-volume rename to the immutable final name.
+/// A partially copied temp never survives; an existing valid identical asset is
+/// reused; an existing NON-matching file under the generation name is an error
+/// (never overwritten).
+[[nodiscard]] inline ProxyRehomeOutcome
+    rehomeProxyAssets(const juce::File& newProjectFolder,
+                      const std::vector<ProxyRehomeItem>& items)
+{
+    ProxyRehomeOutcome out;
+    if (newProjectFolder == juce::File() || !newProjectFolder.isDirectory())
+    {
+        out.errors.add("rehome target project folder does not exist");
+        return out;
+    }
+    std::uint64_t salt = 0;
+    for (const auto& item : items)
+    {
+        const auto& meta = item.metadata;
+        if (meta.silentGeneration)
+        {
+            ++out.silent; // metadata-only generation: nothing to copy (§15.7)
+            continue;
+        }
+        const juce::String label = "track " + juce::String((juce::int64)item.trackId) + ": ";
+        if (!isSafeProxyRelativePath(meta.relativePath))
+        {
+            out.errors.add(label + "unsafe relative path — not rehomed");
+            continue;
+        }
+        const juce::File target = resolveProxyRelativePath(newProjectFolder, meta.relativePath);
+        if (target == juce::File())
+        {
+            out.errors.add(label + "relative path did not resolve under the new project");
+            continue;
+        }
+        if (target.existsAsFile())
+        {
+            const auto v = proxy_render::validateTemporaryWav(target, meta.sampleRate,
+                                                              meta.channels,
+                                                              meta.lengthSamples);
+            if (v.ok)
+            {
+                ++out.alreadyPresent; // identical immutable generation already in place
+            }
+            else
+            {
+                out.errors.add(label + "target name occupied by a non-matching file: "
+                               + v.error);
+            }
+            continue;
+        }
+        if (item.sourceFile == juce::File() || !item.sourceFile.existsAsFile())
+        {
+            out.errors.add(label + "source asset unknown or missing — stays honest-missing");
+            continue;
+        }
+        (void)target.getParentDirectory().createDirectory();
+        const juce::File temp = target.getParentDirectory().getChildFile(
+            "tmp_rehome_" + juce::String((juce::int64)item.trackId) + "_"
+            + juce::String((juce::int64)++salt) + "_"
+            + juce::String(juce::Time::currentTimeMillis()) + ".wav");
+        if (!item.sourceFile.copyFileTo(temp))
+        {
+            (void)temp.deleteFile();
+            out.errors.add(label + "copy into the new project failed");
+            continue;
+        }
+        const auto v = proxy_render::validateTemporaryWav(temp, meta.sampleRate, meta.channels,
+                                                          meta.lengthSamples);
+        if (!v.ok)
+        {
+            (void)temp.deleteFile();
+            out.errors.add(label + "copied asset failed validation: " + v.error);
+            continue;
+        }
+        if (target.isDirectory() || !temp.moveFileTo(target))
+        {
+            (void)temp.deleteFile();
+            out.errors.add(label + "rename to the immutable generation name failed");
+            continue;
+        }
+        ++out.copied;
+    }
+    return out;
 }
 
 //==============================================================================
