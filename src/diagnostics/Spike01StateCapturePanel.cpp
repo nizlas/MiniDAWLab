@@ -8,6 +8,7 @@
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
 #include "instruments/ProxyAssetStore.h" // P1EF plan verification (path safety + asset check)
+#include "instruments/ProxyPlaybackSource.h" // P1G plan verification (runtime source states)
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -368,6 +369,10 @@ private:
         {
             buildP1efPlan();
         }
+        else if (autoPlanId_ == "P1G") // P1G: missing-Primary proxy playback end to end
+        {
+            buildP1gPlan();
+        }
         else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
         {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
                                        // ch2 from "Organ Lower", ch3 from "Organ pedal"), with a
@@ -623,6 +628,481 @@ private:
             appendSessionLog(juce::String("p1ef: transportOperationalAfterRender=")
                              + (playing ? "PASS" : "FAIL"));
             return playing;
+        });
+    }
+
+    //==========================================================================
+    // P1G integration plan (missing-Primary CURRENT-PROXY PLAYBACK end to end;
+    // steering §7.3/§12/§15.6, roadmap P1G). Runs against a TEMPORARY project
+    // copy only (the launcher copies the real Organ/VB3-II project). Sequence:
+    // publish a fresh current proxy through the production scheduler -> save the
+    // temp project (persists the §12.3 save pairing) -> force Primary
+    // "unavailable" through the coordinator test hook (identity intact) ->
+    // verify the proxy is SELECTED and audibly consumed through the normal
+    // post-instrument track path (transport, loop wrap, seek, EOF silence) ->
+    // verify offline mixdown consumes the proxy and that MUTE through the shared
+    // strip gates it -> verify playback at a DIFFERENT engine rate -> verify a
+    // render-relevant musical edit makes the generation Stale and deselects it.
+    // Evidence sources: host proxy diagnostics (blocks-mixed counter + pre-strip
+    // block peak), coordinator runtime state, and rendered mixdown WAV peaks.
+    //==========================================================================
+
+    [[nodiscard]] std::uint64_t p1gProxyBlocksNow()
+    {
+        auto* host = callbacks_.resolveHostForTrack
+                         ? callbacks_.resolveHostForTrack(selectedTrackId())
+                         : nullptr;
+        return host != nullptr ? host->getProxyBlocksMixedCountRelaxed() : 0;
+    }
+
+    [[nodiscard]] float p1gProxyPeakNow()
+    {
+        auto* host = callbacks_.resolveHostForTrack
+                         ? callbacks_.resolveHostForTrack(selectedTrackId())
+                         : nullptr;
+        return host != nullptr ? host->getProxyLastBlockPeakForDiagnostics() : -1.0f;
+    }
+
+    [[nodiscard]] juce::String p1gStateName()
+    {
+        const int s = callbacks_.queryProxyPlaybackRuntimeState
+                          ? callbacks_.queryProxyPlaybackRuntimeState(selectedTrackId())
+                          : -1;
+        return s < 0 ? juce::String("(no coordinator)")
+                     : juce::String(proxy_playback::proxyPlaybackSourceStateName(
+                           (proxy_playback::ProxyPlaybackSourceState)s));
+    }
+
+    [[nodiscard]] bool p1gStateIs(const proxy_playback::ProxyPlaybackSourceState want)
+    {
+        return callbacks_.queryProxyPlaybackRuntimeState
+               && callbacks_.queryProxyPlaybackRuntimeState(selectedTrackId()) == (int)want;
+    }
+
+    /// Settled state check: the runtime status reports a real underrun ONCE (P1I
+    /// one-shot signal) — after a deliberate discontinuity (seek/loop/rate change)
+    /// the plan consumes that transient report and asserts the recovered state.
+    [[nodiscard]] bool p1gStateSettledIs(const proxy_playback::ProxyPlaybackSourceState want)
+    {
+        if (!callbacks_.queryProxyPlaybackRuntimeState)
+        {
+            return false;
+        }
+        const int first = callbacks_.queryProxyPlaybackRuntimeState(selectedTrackId());
+        if (first == (int)want)
+        {
+            return true;
+        }
+        if (first != (int)proxy_playback::ProxyPlaybackSourceState::PlaybackUnderrun)
+        {
+            return false;
+        }
+        appendSessionLog("p1g: transient PlaybackUnderrun consumed (discontinuity)");
+        return callbacks_.queryProxyPlaybackRuntimeState(selectedTrackId()) == (int)want;
+    }
+
+    /// Whole-file linear peak of a rendered mixdown WAV (message thread; small files).
+    [[nodiscard]] static float p1gReadWavPeak(const juce::File& f)
+    {
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(f));
+        if (r == nullptr || r->numChannels == 0)
+        {
+            return -1.0f;
+        }
+        juce::AudioBuffer<float> buf((int)r->numChannels, 8192);
+        float peak = 0.0f;
+        for (std::int64_t pos = 0; pos < r->lengthInSamples;)
+        {
+            const int n = (int)juce::jmin((std::int64_t)8192, r->lengthInSamples - pos);
+            if (!r->read(&buf, 0, n, pos, true, true))
+            {
+                return -1.0f;
+            }
+            for (int c = 0; c < (int)r->numChannels; ++c)
+            {
+                peak = juce::jmax(peak, buf.getMagnitude(c, 0, n));
+            }
+            pos += n;
+        }
+        return peak;
+    }
+
+    void buildP1gPlan()
+    {
+        auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
+            autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
+        };
+
+        addWaitForTrackStep("Organ");
+
+        add(1000, "P1G preflight: required callbacks present", [this] {
+            const bool ok = callbacks_.requestProxyRender && callbacks_.queryProxyJobStatus
+                            && callbacks_.getPublishedProxyMetadata && callbacks_.getProjectFolder
+                            && callbacks_.setProxyPrimaryForcedUnavailable
+                            && callbacks_.queryProxyPlaybackRuntimeState
+                            && callbacks_.isProxyViewSelected && callbacks_.saveProjectNow
+                            && callbacks_.runOfflineMixdownWav && callbacks_.setTrackMuted
+                            && callbacks_.appendStaleTestClip && callbacks_.getEngineSampleRate
+                            && callbacks_.trySetEngineSampleRate && callbacks_.startTransport
+                            && callbacks_.stopTransport && callbacks_.seekTransport
+                            && callbacks_.readCycleWrapCount && callbacks_.resolveHostForTrack;
+            if (!ok)
+            {
+                appendSessionLog("p1g: missing plan callbacks");
+            }
+            return ok;
+        });
+
+        // --- publish a fresh CURRENT generation through the production scheduler ---
+        add(500, "P1G request proxy render (production scheduler)", [this] {
+            const auto s = callbacks_.requestProxyRender(selectedTrackId());
+            if (!s.exists)
+            {
+                appendSessionLog("p1g: render request REJECTED: " + s.message);
+                return false;
+            }
+            p1efGeneration_ = s.generation;
+            appendSessionLog("p1g: render queued generation="
+                             + juce::String((juce::int64)s.generation)
+                             + " fingerprint=" + s.expectedFingerprint);
+            return true;
+        });
+        autoSteps_.push_back(
+            { 0, "wait: P1G background render + publication", [this] {
+                 waitProbeDesc_ = "P1G background render + publication";
+                 waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 600000.0;
+                 waitProbe_ = [this] {
+                     const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+                     const bool terminal
+                         = s.exists
+                           && (s.phase == proxy_render::ProxyJobPhase::Published
+                               || s.phase == proxy_render::ProxyJobPhase::Obsolete
+                               || s.phase == proxy_render::ProxyJobPhase::Cancelled
+                               || s.phase == proxy_render::ProxyJobPhase::Failed);
+                     return terminal ? 1 : 0;
+                 };
+                 return true;
+             } });
+        add(200, "P1G verify published generation represents ch1/2/3 + CC11", [this] {
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            const auto& m = s.result.midi;
+            const bool published = s.phase == proxy_render::ProxyJobPhase::Published
+                                   && s.generation == p1efGeneration_;
+            const bool midiOk = m.noteOnsByChannel[0] > 0 && m.noteOnsByChannel[1] > 0
+                                && m.noteOnsByChannel[2] > 0 && m.ccByController[11] > 0;
+            ProjectFileProxyMetadataV20 meta;
+            const bool hasMeta = callbacks_.getPublishedProxyMetadata(selectedTrackId(), meta);
+            if (hasMeta)
+            {
+                p1gAssetLenSamples_ = meta.lengthSamples;
+                p1gAssetRate_ = meta.sampleRate;
+            }
+            appendSessionLog(juce::String("p1g: VERIFY published=") + (published ? "PASS" : "FAIL")
+                             + " routedCh123AndCc11=" + (midiOk ? "PASS" : "FAIL")
+                             + " ch1on=" + juce::String(m.noteOnsByChannel[0])
+                             + " ch2on=" + juce::String(m.noteOnsByChannel[1])
+                             + " ch3on=" + juce::String(m.noteOnsByChannel[2])
+                             + " cc11=" + juce::String(m.ccByController[11])
+                             + " assetLen=" + juce::String(p1gAssetLenSamples_)
+                             + " assetRate=" + juce::String(p1gAssetRate_, 0));
+            return published && midiOk && hasMeta && p1gAssetLenSamples_ > 0
+                   && p1gAssetRate_ > 0.0;
+        });
+        add(300, "P1G save temp project (persist §12.3 save pairing)", [this] {
+            const bool ok = callbacks_.saveProjectNow();
+            appendSessionLog(juce::String("p1g: projectSaved=") + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+
+        // --- simulate missing Primary; the identity/expected fingerprint is untouched ---
+        add(300, "P1G force Primary unavailable (identity intact)", [this] {
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), true);
+            const bool selected = callbacks_.isProxyViewSelected(selectedTrackId());
+            const bool stateOk
+                = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent)
+                  || p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyPreparing);
+            appendSessionLog(juce::String("p1g: primaryForcedUnavailable state=") + p1gStateName()
+                             + " proxySelected=" + (selected ? "PASS" : "FAIL"));
+            return selected && stateOk;
+        });
+
+        // --- transport: proxy audible through the normal post-instrument path ---
+        add(300, "P1G seek 0 + start transport", [this] {
+            callbacks_.seekTransport(0);
+            p1gBlocksMark_ = p1gProxyBlocksNow();
+            p1gWrapMark_ = callbacks_.readCycleWrapCount();
+            callbacks_.startTransport();
+            return true;
+        });
+        add(2500, "P1G verify non-silent proxy playback (normal track path)", [this] {
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const float peak = p1gProxyPeakNow();
+            const bool consumed = blocks > p1gBlocksMark_;
+            const bool audible = peak > 0.0005f;
+            const bool current
+                = p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            appendSessionLog("p1g: playback blocksMixedDelta="
+                             + juce::String((juce::int64)(blocks - p1gBlocksMark_))
+                             + " lastBlockPeak=" + juce::String(peak, 6) + " state="
+                             + p1gStateName() + " -> proxyConsumed=" + (consumed ? "PASS" : "FAIL")
+                             + " nonSilent=" + (audible ? "PASS" : "FAIL")
+                             + " stateCurrent=" + (current ? "PASS" : "FAIL"));
+            return consumed && audible && current;
+        });
+        autoSteps_.push_back({ 0, "wait: P1G transport loop wrap", [this] {
+                                  waitProbeDesc_ = "P1G transport loop wrap";
+                                  waitProbeDeadlineMs_
+                                      = juce::Time::getMillisecondCounterHiRes() + 30000.0;
+                                  waitProbe_ = [this] {
+                                      return callbacks_.readCycleWrapCount() > p1gWrapMark_ ? 1 : 0;
+                                  };
+                                  return true;
+                              } });
+        add(1200, "P1G verify audible after loop wrap", [this] {
+            const float peak = p1gProxyPeakNow();
+            const bool ok
+                = peak > 0.0005f
+                  && p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            appendSessionLog("p1g: loopWrap peak=" + juce::String(peak, 6) + " state="
+                             + p1gStateName() + " -> " + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+        add(200, "P1G seek to 1.0 s while playing", [this] {
+            const double rate = callbacks_.getEngineSampleRate();
+            p1gBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.seekTransport((std::int64_t)rate);
+            return rate > 0.0;
+        });
+        add(1200, "P1G verify audible after seek", [this] {
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const float peak = p1gProxyPeakNow();
+            const bool ok = blocks > p1gBlocksMark_ && peak > 0.0005f;
+            appendSessionLog("p1g: seek blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1gBlocksMark_)) + " peak="
+                             + juce::String(peak, 6) + " -> " + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+
+        // --- EOF: published assets end at completed tail; beyond EOF is exact silence ---
+        add(200, "P1G seek past proxy EOF", [this] {
+            const double engineRate = callbacks_.getEngineSampleRate();
+            const double eofSec = (double)p1gAssetLenSamples_ / p1gAssetRate_;
+            const auto seekTo = (std::int64_t)((eofSec + 0.30) * engineRate);
+            p1gBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.seekTransport(seekTo);
+            appendSessionLog("p1g: eof seekTo=" + juce::String(seekTo) + " (eofSec="
+                             + juce::String(eofSec, 3) + " engineRate="
+                             + juce::String(engineRate, 0) + ")");
+            return engineRate > 0.0;
+        });
+        add(500, "P1G verify EOF silence (still ProxyCurrent, still consuming)", [this] {
+            float maxPeak = 0.0f;
+            for (int i = 0; i < 5; ++i)
+            {
+                maxPeak = juce::jmax(maxPeak, p1gProxyPeakNow());
+                juce::Thread::sleep(60);
+            }
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const bool consuming = blocks > p1gBlocksMark_;
+            const bool silent = maxPeak == 0.0f;
+            const bool current
+                = p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            appendSessionLog("p1g: eof maxPeak=" + juce::String(maxPeak, 6) + " blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1gBlocksMark_)) + " state="
+                             + p1gStateName() + " -> silence=" + (silent ? "PASS" : "FAIL")
+                             + " consuming=" + (consuming ? "PASS" : "FAIL")
+                             + " stateCurrent=" + (current ? "PASS" : "FAIL"));
+            return silent && consuming && current;
+        });
+        add(100, "P1G stop transport", [this] {
+            callbacks_.stopTransport();
+            return true;
+        });
+
+        // --- offline mixdown consumes the proxy; MUTE gates it through the shared strip ---
+        add(500, "P1G offline mixdown consumes the current proxy", [this] {
+            // Isolation: mute every OTHER sound-producing track so the file peaks
+            // measure exactly the proxy destination through its normal strip.
+            p1gOtherMuted_.clear();
+            if (callbacks_.listSoundProducingTracks)
+            {
+                for (const TrackId tid : callbacks_.listSoundProducingTracks())
+                {
+                    if (tid != selectedTrackId())
+                    {
+                        callbacks_.setTrackMuted(tid, true);
+                        p1gOtherMuted_.push_back(tid);
+                    }
+                }
+            }
+            p1gMixdownA_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                               .getChildFile("p1g_mixdown_proxy.wav");
+            p1gBlocksMark_ = p1gProxyBlocksNow();
+            const auto res = callbacks_.runOfflineMixdownWav(p1gMixdownA_);
+            const float peak = p1gReadWavPeak(p1gMixdownA_);
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const bool consumed = blocks > p1gBlocksMark_;
+            const bool ok = res.wasOk() && peak > 0.001f && consumed;
+            appendSessionLog("p1g: mixdown result=" + (res.wasOk() ? "ok" : res.getErrorMessage())
+                             + " filePeak=" + juce::String(peak, 6) + " proxyBlocksDelta="
+                             + juce::String((juce::int64)(blocks - p1gBlocksMark_))
+                             + " -> proxyMixdown=" + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+        add(300, "P1G mute gates proxy through the shared downstream strip", [this] {
+            p1gMixdownB_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                               .getChildFile("p1g_mixdown_muted.wav");
+            callbacks_.setTrackMuted(selectedTrackId(), true);
+            const auto res = callbacks_.runOfflineMixdownWav(p1gMixdownB_);
+            callbacks_.setTrackMuted(selectedTrackId(), false);
+            for (const TrackId tid : p1gOtherMuted_)
+            {
+                callbacks_.setTrackMuted(tid, false);
+            }
+            p1gOtherMuted_.clear();
+            const float peak = p1gReadWavPeak(p1gMixdownB_);
+            const bool ok = res.wasOk() && peak >= 0.0f && peak < 1.0e-6f;
+            appendSessionLog("p1g: mutedMixdown result="
+                             + (res.wasOk() ? "ok" : res.getErrorMessage()) + " filePeak="
+                             + juce::String(peak, 8) + " -> muteGatesProxy="
+                             + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+
+        // --- cross-rate: same generation stays Current and playable at another rate.
+        // When the CURRENT device cannot open the alternate rate at all, the live
+        // repeat is skipped with an explicit reason (cross-rate conversion itself
+        // is deterministically proven by the 44.1<->48 selftests + the coordinator
+        // rebuild test) — a hardware capability gap must not fake a failure.
+        add(300, "P1G switch engine sample rate", [this] {
+            p1gOriginalRate_ = callbacks_.getEngineSampleRate();
+            const double alt = p1gOriginalRate_ > 45000.0 ? 44100.0 : 48000.0;
+            const bool switched = callbacks_.trySetEngineSampleRate(alt);
+            if (!switched)
+            {
+                p1gRateSwitchSkipped_ = true;
+                appendSessionLog("p1g: engineRate " + juce::String(p1gOriginalRate_, 0) + " -> "
+                                 + juce::String(alt, 0)
+                                 + " UNSUPPORTED by the current device -> SKIP live cross-rate "
+                                   "repeat (covered by deterministic selftests)");
+                return true;
+            }
+            appendSessionLog("p1g: engineRate " + juce::String(p1gOriginalRate_, 0) + " -> "
+                             + juce::String(alt, 0) + " switched=PASS");
+            return true;
+        });
+        autoSteps_.push_back(
+            { 0, "wait: P1G proxy Current at the new engine rate", [this] {
+                 if (p1gRateSwitchSkipped_)
+                 {
+                     return true;
+                 }
+                 waitProbeDesc_ = "P1G proxy Current at the new engine rate";
+                 waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 20000.0;
+                 waitProbe_ = [this] {
+                     return (callbacks_.isProxyViewSelected(selectedTrackId())
+                             && p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent))
+                                ? 1
+                                : 0;
+                 };
+                 return true;
+             } });
+        add(300, "P1G start transport at the new rate", [this] {
+            if (p1gRateSwitchSkipped_)
+            {
+                return true;
+            }
+            callbacks_.seekTransport((std::int64_t)(0.5 * callbacks_.getEngineSampleRate()));
+            p1gBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.startTransport();
+            return true;
+        });
+        add(2000, "P1G verify audible cross-rate proxy playback", [this] {
+            if (p1gRateSwitchSkipped_)
+            {
+                appendSessionLog("p1g: crossRate SKIPPED (device rate capability)");
+                return true;
+            }
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const float peak = p1gProxyPeakNow();
+            callbacks_.stopTransport();
+            const bool ok
+                = blocks > p1gBlocksMark_ && peak > 0.0005f
+                  && p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            appendSessionLog("p1g: crossRate rate=" + juce::String(callbacks_.getEngineSampleRate(), 0)
+                             + " blocksDelta=" + juce::String((juce::int64)(blocks - p1gBlocksMark_))
+                             + " peak=" + juce::String(peak, 6) + " state=" + p1gStateName()
+                             + " -> " + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+        add(300, "P1G restore original engine rate", [this] {
+            if (p1gRateSwitchSkipped_)
+            {
+                return true;
+            }
+            const bool switched = callbacks_.trySetEngineSampleRate(p1gOriginalRate_);
+            appendSessionLog("p1g: engineRate restored=" + juce::String(p1gOriginalRate_, 0)
+                             + " switched=" + (switched ? "PASS" : "FAIL"));
+            return switched;
+        });
+        autoSteps_.push_back(
+            { 0, "wait: P1G proxy Current again at the original rate", [this] {
+                 if (p1gRateSwitchSkipped_)
+                 {
+                     return true;
+                 }
+                 waitProbeDesc_ = "P1G proxy Current again at the original rate";
+                 waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 20000.0;
+                 waitProbe_ = [this] {
+                     return (callbacks_.isProxyViewSelected(selectedTrackId())
+                             && p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent))
+                                ? 1
+                                : 0;
+                 };
+                 return true;
+             } });
+
+        // --- a render-relevant edit makes the generation Stale; it is never selected ---
+        add(300, "P1G stale edit deselects the proxy", [this] {
+            if (!callbacks_.appendStaleTestClip(selectedTrackId()))
+            {
+                appendSessionLog("p1g: stale-test clip append failed");
+                return false;
+            }
+            const bool stale = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyStale);
+            const bool deselected = !callbacks_.isProxyViewSelected(selectedTrackId());
+            appendSessionLog(juce::String("p1g: staleEdit state=") + p1gStateName()
+                             + " proxyDeselected=" + (deselected ? "PASS" : "FAIL")
+                             + " stateStale=" + (stale ? "PASS" : "FAIL"));
+            return stale && deselected;
+        });
+        add(200, "P1G stale proxy is never consumed by transport", [this] {
+            p1gBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.seekTransport(0);
+            callbacks_.startTransport();
+            return true;
+        });
+        add(1500, "P1G verify zero proxy consumption while Stale", [this] {
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            callbacks_.stopTransport();
+            const bool ok = blocks == p1gBlocksMark_;
+            appendSessionLog("p1g: staleTransport proxyBlocksDelta="
+                             + juce::String((juce::int64)(blocks - p1gBlocksMark_))
+                             + " -> neverSelected=" + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+
+        // --- restore + cleanup (temp project itself is cleaned by the launcher) ---
+        add(300, "P1G restore Primary availability + clean temp mixdowns", [this] {
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), false);
+            const bool primary = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::Primary);
+            p1gMixdownA_.deleteFile();
+            p1gMixdownB_.deleteFile();
+            appendSessionLog(juce::String("p1g: restored state=") + p1gStateName()
+                             + " backToPrimary=" + (primary ? "PASS" : "FAIL"));
+            return primary;
         });
     }
 
@@ -1279,6 +1759,17 @@ private:
     // P1EF service-integration plan (plan "P1EF" only; see buildP1efPlan). The panel holds
     // only the requested generation for verification — no job, no plugin instance.
     std::uint64_t p1efGeneration_ = 0;
+
+    // P1G proxy-playback plan (plan "P1G" only; see buildP1gPlan): verification
+    // bookkeeping only — the panel owns no reader, view or coordinator state.
+    std::int64_t p1gAssetLenSamples_ = 0;
+    double p1gAssetRate_ = 0.0;
+    double p1gOriginalRate_ = 0.0;
+    bool p1gRateSwitchSkipped_ = false;
+    std::uint64_t p1gBlocksMark_ = 0;
+    std::uint32_t p1gWrapMark_ = 0;
+    std::vector<TrackId> p1gOtherMuted_;
+    juce::File p1gMixdownA_, p1gMixdownB_;
 
     std::function<int()> waitProbe_; ///< 1 = satisfied, 0 = pending, -1 = failed
     double waitProbeDeadlineMs_ = 0.0;

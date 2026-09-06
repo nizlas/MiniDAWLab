@@ -38,6 +38,8 @@
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
 #include "instruments/PrimarySemanticRevision.h"
+#include "instruments/ProxyPlaybackMix.h"
+#include "instruments/ProxyPlaybackSource.h"
 #include "plugins/Vst3ChildProcessScan.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -236,6 +238,48 @@ public:
                                                  float outputGain = 1.0f,
                                                  float stereoPan = 0.0f) noexcept;
 
+    // -----------------------------------------------------------------------
+    // P1G proxy playback substitution (steering §12): the selector's published
+    // decision replaces ONLY the instrument-generation stage of this host; the
+    // downstream DAL strip (inserts/fader/pan/meters/routing) stays shared.
+    // -----------------------------------------------------------------------
+    /// Fixed cap of distinct playing timeline segments one device block can carry for this
+    /// destination (loop wrap yields 2; extras are dropped and counted, never allocated).
+    static constexpr int kMaxProxySegmentsPerBlock = 8;
+
+    /// [Message thread] Publish the authoritative per-destination playback-source decision as
+    /// one immutable view (`decideProxyPlaybackSource`). The audio thread latches it at the next
+    /// block boundary — Primary and Proxy are never mixed within one block. `nullptr` or
+    /// `useProxy == false` restores normal live-Primary semantics.
+    void setProxyPlaybackView(std::shared_ptr<const proxy_playback::ProxyPlaybackView> view) noexcept;
+
+    /// [Any thread] Currently published view (acquire); may be nullptr.
+    [[nodiscard]] std::shared_ptr<const proxy_playback::ProxyPlaybackView> getProxyPlaybackView() const noexcept;
+
+    /// [Audio thread] Note one playing timeline segment for the current block. Called by the
+    /// engine between `audioThread_beginAudioBlock` and the mix call, mirroring transport-MIDI
+    /// scheduling. `timelineStartFrames` is the engine-rate transport frame at `outOffsetInBlock`.
+    void audioThread_noteProxyTimelineSegmentForCurrentBlock(std::int64_t timelineStartFrames,
+                                                             int outOffsetInBlock,
+                                                             int numSamples) noexcept;
+
+    /// [Message thread] Offline mixdown: block until the proxy range is resident so the
+    /// following block render cannot underrun. True when resident, past EOF, or not in proxy
+    /// mode; false on stream failure/timeout.
+    [[nodiscard]] bool messageThread_prefetchProxyRangeForOffline(std::int64_t timelineStartFrames,
+                                                                  int numSamples,
+                                                                  int timeoutMs) noexcept;
+
+    /// Diagnostics: blocks in which the proxy source produced (possibly intentionally silent)
+    /// output instead of Primary generation. Relaxed.
+    [[nodiscard]] std::uint64_t getProxyBlocksMixedCountRelaxed() const noexcept
+    {
+        return rtProxyBlocksMixed_.load(std::memory_order_relaxed);
+    }
+
+    /// Diagnostics: peak |sample| of the most recent proxy block (pre-strip). Relaxed.
+    [[nodiscard]] float getProxyLastBlockPeakForDiagnostics() const noexcept;
+
 public:
     /// Stability Slice 4: capture this guard in Timer::callAfterDelay / MessageManager::callAsync
     /// lambdas and check `isAlive()` before touching the host. Invalidated when the host is
@@ -319,6 +363,15 @@ private:
     std::atomic<std::uint64_t> rtMidiDeliveryBoundaryBlocks_{ 0 };
 
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
+
+    // --- P1G proxy playback (view swapped on message thread, latched per audio block;
+    //     segment scratch is audio-thread-only state reset by `audioThread_beginAudioBlock`).
+    std::atomic<std::shared_ptr<const proxy_playback::ProxyPlaybackView>> proxyPlaybackView_;
+    proxy_playback::ProxyTimelineSegment proxySegments_[kMaxProxySegmentsPerBlock]; // audio thread only
+    int proxySegmentCount_ = 0;                                     // audio thread only
+    std::atomic<std::uint64_t> rtProxyBlocksMixed_{ 0 };
+    std::atomic<std::uint64_t> rtProxySegmentsDropped_{ 0 };
+    std::atomic<std::uint32_t> rtProxyLastPeakBits_{ 0 }; // bitwise float
 
     /// §9.4.2 host-observed identity: relays juce::AudioProcessorListener notifications from the
     /// live instance into the semantic revision. Callbacks may arrive on ANY thread (plugins may

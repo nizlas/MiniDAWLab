@@ -186,7 +186,8 @@ struct ProxyPublishOutcome
     buildGenerationMetadata(const proxy_render::ProxyRenderResult& result,
                             const proxy_snapshot::SnapshotPolicies& policies,
                             const juce::String& relativePath,
-                            const bool silentGeneration)
+                            const bool silentGeneration,
+                            const proxy_snapshot::ProxyRenderSnapshot* identitySource = nullptr)
 {
     ProjectFileProxyMetadataV20 m;
     m.generationId = result.expectedFingerprint;
@@ -203,6 +204,23 @@ struct ProxyPublishOutcome
     m.renderPolicyVersion = policies.renderPolicyVersion;
     m.proxyFormatVersion = policies.proxyFormatVersion;
     m.renderedUtc = juce::Time::getCurrentTime().toISO8601(true);
+    if (identitySource != nullptr)
+    {
+        // P1G (§12.3): record the exact non-musical fingerprint inputs so currency can be
+        // recomputed under this generation's recorded configuration when Primary is missing.
+        m.pluginFileOrIdentifier = identitySource->pluginIdentity.fileOrIdentifier;
+        m.pluginUniqueId = identitySource->pluginIdentity.uniqueId;
+        m.pluginDeprecatedUid = identitySource->pluginIdentity.deprecatedUid;
+        m.pluginFormatName = identitySource->pluginIdentity.format;
+        m.pluginIsInstrument = identitySource->pluginIdentity.isInstrument;
+        m.pluginVersionAtRender = identitySource->pluginIdentity.version;
+        m.primaryStateRevisionAtPublish
+            = (std::int64_t)identitySource->stateIdentity.primaryStateRevision;
+        m.pairedWithSavedStateAtRender = identitySource->stateIdentity.pairedWithSavedState;
+        m.timelineReferenceRate = identitySource->renderConfig.timelineReferenceRate;
+        m.renderBlockSize = identitySource->renderConfig.renderBlockSize;
+        m.noteOffGateMs = identitySource->renderConfig.noteOffGateMs;
+    }
     return m;
 }
 
@@ -216,7 +234,8 @@ struct ProxyPublishOutcome
     publishRenderedProxy(const juce::File& projectFolder,
                          const TrackId trackId,
                          const proxy_render::ProxyRenderResult& result,
-                         const proxy_snapshot::SnapshotPolicies& policies)
+                         const proxy_snapshot::SnapshotPolicies& policies,
+                         const proxy_snapshot::ProxyRenderSnapshot* identitySource = nullptr)
 {
     ProxyPublishOutcome out;
 
@@ -298,7 +317,7 @@ struct ProxyPublishOutcome
     out.ok = true;
     out.finalFile = finalFile;
     out.metadata = buildGenerationMetadata(result, policies, relativePath,
-                                           /*silentGeneration*/ false);
+                                           /*silentGeneration*/ false, identitySource);
     return out;
 }
 
@@ -307,7 +326,8 @@ struct ProxyPublishOutcome
 /// silentGeneration flag makes the metadata unambiguous).
 [[nodiscard]] inline ProxyPublishOutcome
     publishSilentGeneration(const proxy_render::ProxyRenderResult& result,
-                            const proxy_snapshot::SnapshotPolicies& policies)
+                            const proxy_snapshot::SnapshotPolicies& policies,
+                            const proxy_snapshot::ProxyRenderSnapshot* identitySource = nullptr)
 {
     ProxyPublishOutcome out;
     if (result.status != proxy_render::ProxyRenderStatus::SucceededSilent)
@@ -316,7 +336,8 @@ struct ProxyPublishOutcome
         return out;
     }
     out.ok = true;
-    out.metadata = buildGenerationMetadata(result, policies, {}, /*silentGeneration*/ true);
+    out.metadata = buildGenerationMetadata(result, policies, {}, /*silentGeneration*/ true,
+                                           identitySource);
     return out;
 }
 

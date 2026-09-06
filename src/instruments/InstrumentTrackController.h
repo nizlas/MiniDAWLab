@@ -362,6 +362,15 @@ public:
     {
         proxyMetadata_ = metadata;
         hasProxyMetadata_ = true;
+        proxyPublishedThisSession_ = true;
+    }
+
+    /// True when `setProxyMetadataFromPublication` ran in THIS app session. P1G §12.3 pairing:
+    /// an in-session publication rendered from the live in-memory state, so the state component
+    /// pairs directly without the persisted save-pairing stamp.
+    [[nodiscard]] bool wasProxyPublishedThisSession() const noexcept
+    {
+        return proxyPublishedThisSession_;
     }
 
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
@@ -509,6 +518,7 @@ private:
     /// engine consumes it yet; P1F publication will own updates.
     bool hasProxyMetadata_ = false;
     ProjectFileProxyMetadataV20 proxyMetadata_;
+    bool proxyPublishedThisSession_ = false;
     /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
     juce::String proxyUpdateMode_ { "auto" };
 

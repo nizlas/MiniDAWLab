@@ -969,7 +969,19 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     dto.hasProxy = hasProxyMetadata_;
     if (hasProxyMetadata_)
     {
+        // P1G save pairing (§12.3 "persisted save-pairing"): when the Primary is loaded at
+        // save time, stamp its live semantic revision next to the generation. If it equals
+        // `primaryStateRevisionAtPublish`, the plugin state blob saved in this same file is by
+        // construction the state the generation rendered — a later missing-Primary load may
+        // then treat the state component as current. Without a live Primary the loaded stamp
+        // persists unchanged (a portable resave never destroys pairing evidence). Cache
+        // metadata only: no musical undo entry, no track-state rewrite.
         dto.proxy = proxyMetadata_;
+        if (host_ != nullptr && host_->hasInstrument())
+        {
+            dto.proxy.primaryStateRevisionAtSave
+                = (std::int64_t)host_->getPrimarySemanticRevision();
+        }
     }
     dto.proxyUpdateMode = proxyUpdateMode_;
     for (const auto& kv : drumLabels_)

@@ -1708,6 +1708,60 @@ void ExperimentalInstrumentHost::enqueueMidiMessageFromMessageThread(const juce:
 void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int numSamples) noexcept
 {
     audioCallbackBlockSamples_ = juce::jmax(0, numSamples);
+    proxySegmentCount_ = 0; // P1G: per-block segment scratch (audio thread only)
+}
+
+void ExperimentalInstrumentHost::setProxyPlaybackView(
+    std::shared_ptr<const proxy_playback::ProxyPlaybackView> view) noexcept
+{
+    // Release store; the audio thread latches the pointer once per block (block-boundary
+    // source switch — steering §12.2). The previous view's reader is retired by the
+    // coordinator off the audio thread after this swap.
+    proxyPlaybackView_.store(std::move(view), std::memory_order_release);
+}
+
+std::shared_ptr<const proxy_playback::ProxyPlaybackView>
+    ExperimentalInstrumentHost::getProxyPlaybackView() const noexcept
+{
+    return proxyPlaybackView_.load(std::memory_order_acquire);
+}
+
+void ExperimentalInstrumentHost::audioThread_noteProxyTimelineSegmentForCurrentBlock(
+    const std::int64_t timelineStartFrames, const int outOffsetInBlock, const int numSamples) noexcept
+{
+    const int cap = audioCallbackBlockSamples_;
+    if (numSamples <= 0 || outOffsetInBlock < 0 || cap <= 0 || outOffsetInBlock + numSamples > cap)
+    {
+        return;
+    }
+    if (proxySegmentCount_ >= kMaxProxySegmentsPerBlock)
+    {
+        rtProxySegmentsDropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    auto& seg = proxySegments_[proxySegmentCount_++];
+    seg.timelineStart = timelineStartFrames;
+    seg.outOffset = outOffsetInBlock;
+    seg.numSamples = numSamples;
+}
+
+bool ExperimentalInstrumentHost::messageThread_prefetchProxyRangeForOffline(
+    const std::int64_t timelineStartFrames, const int numSamples, const int timeoutMs) noexcept
+{
+    const auto view = proxyPlaybackView_.load(std::memory_order_acquire);
+    if (view == nullptr || !view->useProxy || view->reader == nullptr)
+    {
+        return true; // live Primary or silent generation: nothing to pre-reside
+    }
+    return view->reader->messageThread_ensureRangeReady(timelineStartFrames, numSamples, timeoutMs);
+}
+
+float ExperimentalInstrumentHost::getProxyLastBlockPeakForDiagnostics() const noexcept
+{
+    const std::uint32_t bits = rtProxyLastPeakBits_.load(std::memory_order_relaxed);
+    float v{};
+    std::memcpy(&v, &bits, sizeof(float));
+    return v;
 }
 
 void ExperimentalInstrumentHost::audioThread_addMidiEventForCurrentBlock(int sampleOffsetInBlock,
@@ -3545,6 +3599,63 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     {
         rtDiag_skipBadIoArgs_.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
+
+    // ---------------------------------------------------------------- P1G proxy source
+    // Latch the published source decision once per block (block-boundary switch — §12.2;
+    // Primary and Proxy are never mixed inside one block). When Proxy is selected, ONLY the
+    // instrument-generation stage below is replaced: the caller applies the identical
+    // downstream strip (DAL inserts, fader, pan, meters, routing) to whatever this function
+    // adds to `outputChannelData`. Audio-thread contract (PI-031): the branch performs no
+    // file I/O, takes no locks, allocates nothing, and never destroys the reader — the view
+    // shared_ptr loaded here is released only by the message-thread coordinator.
+    if (const auto proxyView = proxyPlaybackView_.load(std::memory_order_acquire);
+        proxyView != nullptr && proxyView->useProxy)
+    {
+        // Live/UI MIDI is drained and DISCARDED: newly played MIDI can neither alter the
+        // fixed proxy nor sound over Proxy transport (steering §12 monitoring policy).
+        if (midiIo_ != nullptr)
+        {
+            const juce::ScopedLock sl(midiIo_->midiLock);
+            midiIo_->uiPendingMidi.clear();
+        }
+        rtBlockMidi_.clear();
+
+        // `prepareForDevice` sizes stereo scratch even when no plugin is loaded (the normal
+        // missing-Primary case). Bail silently if the device never prepared us.
+        if (scratch_.getNumSamples() < numSamples || scratch_.getNumChannels() < kStereoChannels)
+        {
+            rtDiag_skipScratchTooSmallForCallback_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        float* const L = scratch_.getWritePointer(0);
+        float* const R = scratch_.getWritePointer(1);
+        if (L == nullptr || R == nullptr)
+        {
+            return;
+        }
+
+        // Production mix step is the extracted (selftest-covered) pure function:
+        // COPY semantics into scratch, zeros outside playing segments, silent
+        // generation zeros, per-block peak. EOF/pre-readiness silence lives in the reader.
+        const proxy_playback::ProxyMixOutcome outcome
+            = proxy_playback::renderProxySegmentsToStereoScratch(
+                *proxyView, proxySegments_, proxySegmentCount_, L, R, numSamples);
+
+        if (outcome.producedBlock)
+        {
+            std::uint32_t peakBits{};
+            std::memcpy(&peakBits, &outcome.peak, sizeof(float));
+            rtProxyLastPeakBits_.store(peakBits, std::memory_order_relaxed);
+            rtProxyBlocksMixed_.fetch_add(1, std::memory_order_relaxed);
+
+            const float g = juce::jmax(0.0f, outputGain);
+            addFirstStereoBusToDeviceOutputs(L, R, numSamples, numOutputChannels,
+                                             outputChannelData,
+                                             g * trackPanLawGainLeft(stereoPan),
+                                             g * trackPanLawGainRight(stereoPan));
+        }
+        return; // Proxy replaced the instrument-generation stage for this whole block.
     }
 
     auto owner = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);

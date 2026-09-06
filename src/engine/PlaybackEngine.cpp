@@ -1396,6 +1396,14 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                      deviceBlockSizeInFrames,
                                                                                      emitPtr);
 
+                // P1G: note the audible timeline segment for proxy substitution — consumed by
+                // the host only when its published playback view selects Proxy for this block.
+                if (entry->host != nullptr)
+                {
+                    entry->host->audioThread_noteProxyTimelineSegmentForCurrentBlock(
+                        timelineStartAudible, outFrame0 + silencePrefix, audibleRun);
+                }
+
                 if (routePlayEdgeDiag && sx >= 0 && emitPtr != nullptr)
                 {
                     routingInstSlots[sx].firstSegDiagCaptured = true;
@@ -1883,6 +1891,18 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                    instrumentForceDiscontinuity,
                                                                                    numSamples,
                                                                                    nullptr);
+
+                // P1G: offline mixdown uses the same authoritative source selection — the host
+                // substitutes the current proxy for this segment when its view selects Proxy.
+                // Offline runs off the audio thread faster than realtime, so block briefly
+                // until the proxy range is resident (avoids artificial underruns in the file).
+                if (entry->host != nullptr)
+                {
+                    (void)entry->host->messageThread_prefetchProxyRangeForOffline(
+                        timelineStartAudible, audibleRun, 2000);
+                    entry->host->audioThread_noteProxyTimelineSegmentForCurrentBlock(
+                        timelineStartAudible, audibleRun > 0 ? silencePrefix : 0, audibleRun);
+                }
             }
 
             // TrackKind::Midi sources: same destination resolution and merge order as the

@@ -362,10 +362,16 @@ public:
         return true;
     }
 
+    /// [I/O service, message thread] The service installs its wake event at
+    /// registration so blocking prefetch can nudge it without a service handle.
+    void setServiceWakeEvent(juce::WaitableEvent* wakeOrNull) noexcept
+    {
+        serviceWake_.store(wakeOrNull, std::memory_order_release);
+    }
+
     /// [Message thread] Offline-mixdown support: block until [t0, t0+n) is resident
     /// (or past EOF / failed / timeout). Never called on the audio thread.
     bool messageThread_ensureRangeReady(const std::int64_t t0, const int n,
-                                        juce::WaitableEvent& serviceWake,
                                         const int timeoutMs) noexcept
     {
         const std::int64_t end = t0 + n;
@@ -388,7 +394,10 @@ public:
             {
                 return false;
             }
-            serviceWake.signal();
+            if (auto* wake = serviceWake_.load(std::memory_order_acquire))
+            {
+                wake->signal();
+            }
             progress_.wait(2);
         }
     }
@@ -510,6 +519,7 @@ private:
     std::atomic<bool> streamFailed_{ false };
     std::atomic<std::int64_t> lastFetchStart_{ 0 };
     std::atomic<std::uint64_t> fetchCalls_{ 0 };
+    std::atomic<juce::WaitableEvent*> serviceWake_{ nullptr };
     juce::WaitableEvent progress_; ///< pulsed after each fill step (offline waits)
 };
 
@@ -541,6 +551,7 @@ public:
         {
             return;
         }
+        reader->setServiceWakeEvent(&wake_);
         {
             const std::lock_guard<std::mutex> lock(mutex_);
             readers_.push_back(std::move(reader));
@@ -557,6 +568,7 @@ public:
         {
             if (readers_[i].get() == reader)
             {
+                readers_[i]->setServiceWakeEvent(nullptr);
                 readers_.erase(readers_.begin() + static_cast<std::ptrdiff_t>(i));
                 return;
             }

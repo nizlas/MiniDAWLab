@@ -63,6 +63,9 @@ public:
         std::function<InstrumentTrackController*(TrackId)> controllerForTrack;
         /// [Message thread] Stored clips of any track id (destination + sources).
         std::function<std::vector<const InstrumentMidiClip*>(TrackId)> clipsForTrack;
+        /// [Message thread, optional] Fired after a successful publication + metadata
+        /// update (P1G: lets the playback coordinator re-evaluate source selection).
+        std::function<void(TrackId)> onProxyPublished;
     };
 
     explicit AppProxyRenderEngine(Dependencies deps) : deps_(std::move(deps))
@@ -248,13 +251,15 @@ public:
         {
             // §15.7 explicit silent generation: metadata only, no WAV, no fake path.
             outcome = proxy_store::publishSilentGeneration(result,
-                                                           c.request.snapshot.policies);
+                                                           c.request.snapshot.policies,
+                                                           &c.request.snapshot);
         }
         else
         {
             outcome = proxy_store::publishRenderedProxy(deps_.session->getCurrentProjectFolder(),
                                                         destination, result,
-                                                        c.request.snapshot.policies);
+                                                        c.request.snapshot.policies,
+                                                        &c.request.snapshot);
         }
         if (!outcome.ok)
         {
@@ -266,6 +271,10 @@ public:
         // metadata: no musical undo entry, no track-state rewrite; the next normal
         // project save persists it (the save DTO reads these controller fields).
         controller->setProxyMetadataFromPublication(outcome.metadata);
+        if (deps_.onProxyPublished)
+        {
+            deps_.onProxyPublished(destination);
+        }
         return true;
     }
 

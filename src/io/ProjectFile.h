@@ -202,6 +202,36 @@ struct ProjectFileProxyMetadataV20
     /// silence by definition. Absent loads as false; a silent generation is valid only with an
     /// empty path (no ambiguous fake paths), a non-silent one only with a non-empty path.
     bool silentGeneration = false;
+
+    // ------------------------------------------------------------------ P1G
+    // Recorded identity inputs of the published generation (steering §12.3):
+    // currency is evaluated by recomputing the expected fingerprint UNDER THE
+    // GENERATION'S RECORDED RENDER CONFIGURATION — these fields make that
+    // recomputation possible when the Primary plugin is not loaded (the
+    // portable case, PI-030). All keys are optional/additive; absent values
+    // load as the defaults below. When `pluginFileOrIdentifier` is empty the
+    // recorded identity is unknown (pre-P1G metadata) and missing-Primary
+    // currency conservatively evaluates to Stale.
+    /// F1 identity inputs exactly as hashed at render time.
+    juce::String pluginFileOrIdentifier;
+    int pluginUniqueId = 0;
+    int pluginDeprecatedUid = 0;
+    juce::String pluginFormatName;
+    bool pluginIsInstrument = true;
+    juce::String pluginVersionAtRender;
+    /// F2 state-identity component recorded at publication (§9.4.2). Never a blob hash.
+    std::int64_t primaryStateRevisionAtPublish = 0;
+    bool pairedWithSavedStateAtRender = false;
+    /// Save pairing stamp: the destination host's live semantic revision at the moment this
+    /// metadata was last SAVED with a loaded Primary. Pairing holds when it equals
+    /// `primaryStateRevisionAtPublish` — the saved plugin state blob is then by construction
+    /// the state this generation rendered (§12.3 "persisted save-pairing"). 0 = never stamped.
+    std::int64_t primaryStateRevisionAtSave = 0;
+    /// F10/F11 render-config inputs as recorded (0/defaults = unknown → fall back to
+    /// the current session/policy constants).
+    double timelineReferenceRate = 0.0;
+    int renderBlockSize = 512;
+    int noteOffGateMs = 100;
 };
 
 /// v11: experimental Groove Agent instrument row + in-memory MIDI clips (advisory `pluginBundlePath` only).

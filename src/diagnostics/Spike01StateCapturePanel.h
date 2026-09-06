@@ -75,6 +75,28 @@ struct Spike01PanelCallbacks
     std::function<bool(TrackId, ProjectFileProxyMetadataV20&)> getPublishedProxyMetadata;
     /// [Message thread] Current project folder (invalid File when the project is unsaved).
     std::function<juce::File()> getProjectFolder;
+
+    // --- P1G proxy-playback end-to-end integration plan only (plan "P1G") ---
+    /// Simulate Primary unavailable WITHOUT unloading the plugin (coordinator test
+    /// hook + destination refresh; the expected musical identity stays intact).
+    std::function<void(TrackId, bool)> setProxyPrimaryForcedUnavailable;
+    /// (int)proxy_playback::ProxyPlaybackSourceState; -1 when the coordinator is absent.
+    std::function<int(TrackId)> queryProxyPlaybackRuntimeState;
+    /// True when the coordinator's published view for the track selects Proxy.
+    std::function<bool(TrackId)> isProxyViewSelected;
+    /// Save through the normal ProjectIoCoordinator path (persists the save pairing).
+    std::function<bool()> saveProjectNow;
+    /// Blocking offline WAV mixdown through the real exporter (device rate, overwrite ok).
+    std::function<juce::Result(juce::File)> runOfflineMixdownWav;
+    /// Track mute through the normal Session seam (shared strip evidence).
+    std::function<void(TrackId, bool)> setTrackMuted;
+    /// All Audio/Instrument track ids (mixdown isolation: mute everything else).
+    std::function<std::vector<TrackId>()> listSoundProducingTracks;
+    /// Real render-relevant musical edit (appends a 1-note clip) + destination refresh.
+    std::function<bool(TrackId)> appendStaleTestClip;
+    std::function<double()> getEngineSampleRate;
+    /// Attempt a device sample-rate switch; false when the device rejects the rate.
+    std::function<bool(double)> trySetEngineSampleRate;
     juce::String appVersion;
 };
 

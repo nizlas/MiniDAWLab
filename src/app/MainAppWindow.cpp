@@ -56,6 +56,7 @@
 #include "plugins/PluginInsertHost.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "app/AppProxyRenderEngine.h"
+#include "instruments/ProxyPlaybackCoordinator.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyRenderScheduler.h"
@@ -534,9 +535,103 @@ public:
                 }
                 return clips;
             };
+            engineDeps.onProxyPublished = [this](const TrackId tid) {
+                if (proxyPlaybackCoordinator_ != nullptr)
+                {
+                    proxyPlaybackCoordinator_->refreshDestination(tid);
+                }
+            };
             proxyRenderEngine_
                 = std::make_unique<proxy_render::AppProxyRenderEngine>(std::move(engineDeps));
             proxyRenderScheduler_.attachEngine(proxyRenderEngine_.get());
+        }
+
+        // P1G: playback-source coordination (proxy substitution). Same project-runtime
+        // owner as the render engine; holds no Session/host/UI references — every model
+        // access goes through these message-thread lookups (all null-guarded).
+        {
+            proxy_playback::ProxyPlaybackCoordinator::Dependencies pbDeps;
+            pbDeps.sessionSnapshotProvider = [this] {
+                return session.loadSessionSnapshotForAudioThread();
+            };
+            pbDeps.projectFolderProvider = [this] { return session.getCurrentProjectFolder(); };
+            pbDeps.timelineRateOrFallback
+                = [this](const double fb) { return session.timelineSampleRateOr(fb); };
+            pbDeps.destinationExists = [this](const TrackId tid) {
+                return instrumentRuntimeCoordinator_ != nullptr
+                       && instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid) != nullptr;
+            };
+            pbDeps.primaryUsable = [this](const TrackId tid) {
+                ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                          : nullptr;
+                return h != nullptr && h->hasInstrument();
+            };
+            pbDeps.publishView
+                = [this](const TrackId tid,
+                         std::shared_ptr<const proxy_playback::ProxyPlaybackView> view) {
+                if (ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                          : nullptr)
+                {
+                    h->setProxyPlaybackView(std::move(view));
+                }
+            };
+            pbDeps.proxyMetadataForTrack
+                = [this](const TrackId tid) -> const ProjectFileProxyMetadataV20* {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                return c != nullptr ? c->getProxyMetadata() : nullptr;
+            };
+            pbDeps.proxyPublishedThisSession = [this](const TrackId tid) {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                return c != nullptr && c->wasProxyPublishedThisSession();
+            };
+            pbDeps.clipsForTrack
+                = [this](const TrackId tid) -> std::vector<const InstrumentMidiClip*> {
+                std::vector<const InstrumentMidiClip*> clips;
+                if (instrumentRuntimeCoordinator_ == nullptr)
+                {
+                    return clips;
+                }
+                InstrumentTrackController* c
+                    = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(tid);
+                }
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+                }
+                if (c != nullptr)
+                {
+                    for (const auto& up : c->getClips())
+                    {
+                        if (up != nullptr)
+                        {
+                            clips.push_back(up.get());
+                        }
+                    }
+                }
+                return clips;
+            };
+            pbDeps.engineRateProvider = [this]() -> double {
+                if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
+                {
+                    return dev->getCurrentSampleRate();
+                }
+                return 0.0;
+            };
+            proxyPlaybackCoordinator_
+                = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
         }
 
         arrangementEventSelectionCoordinator_
@@ -1299,6 +1394,15 @@ public:
         proxyRenderScheduler_.detachEngineAndShutdownJobs();
         proxyRenderEngine_.reset();
 
+        // P1G shutdown: unpublish every playback view, drain the audio callback, destroy
+        // readers off-audio, stop the I/O thread — all BEFORE the instrument hosts that
+        // hold the atomic view slots are destroyed below.
+        if (proxyPlaybackCoordinator_ != nullptr)
+        {
+            proxyPlaybackCoordinator_->shutdown();
+            proxyPlaybackCoordinator_.reset();
+        }
+
         stability_invariants::registerGlobalStabilityInvariantChecker(nullptr);
         session.setOnTimelineRulerTimeDisplayChanged({});
         audioWaveformCache_.setOnPyramidReady({});
@@ -1521,6 +1625,138 @@ public:
             return true;
         };
         cb.getProjectFolder = [this] { return session.getCurrentProjectFolder(); };
+        // P1G integration plan: playback-source coordination test seams. Everything goes
+        // through the production coordinator/session/exporter — the panel owns no state.
+        cb.setProxyPrimaryForcedUnavailable = [this](const TrackId tid, const bool unavailable) {
+            if (proxyPlaybackCoordinator_ != nullptr)
+            {
+                proxyPlaybackCoordinator_->setPrimaryForcedUnavailableForTests(tid, unavailable);
+                proxyPlaybackCoordinator_->refreshDestination(tid);
+            }
+        };
+        cb.queryProxyPlaybackRuntimeState = [this](const TrackId tid) -> int {
+            return proxyPlaybackCoordinator_ != nullptr
+                       ? (int)proxyPlaybackCoordinator_->runtimeStateForTrack(tid)
+                       : -1;
+        };
+        cb.isProxyViewSelected = [this](const TrackId tid) -> bool {
+            if (proxyPlaybackCoordinator_ == nullptr)
+            {
+                return false;
+            }
+            const auto view = proxyPlaybackCoordinator_->publishedViewForTrack(tid);
+            return view != nullptr && view->useProxy;
+        };
+        cb.saveProjectNow = [this] {
+            if (projectIoCoordinator_ == nullptr)
+            {
+                return false;
+            }
+            projectIoCoordinator_->saveProject();
+            return !projectIoCoordinator_->isProjectDirty();
+        };
+        cb.runOfflineMixdownWav = [this](const juce::File& outputFile) -> juce::Result {
+            juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr)
+            {
+                return juce::Result::fail("no active audio device");
+            }
+            auto syncUi = [this] {
+                if (transportPlayPauseStopController_ != nullptr)
+                {
+                    transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
+                }
+            };
+            mini_daw_audio_mixdown::MixdownExportRequest req;
+            req.outputFile = outputFile;
+            req.sampleRate = device->getCurrentSampleRate();
+            req.bits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm24;
+            req.overwriteConfirmed = true;
+            return mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(
+                transport, session, playbackEngine_, deviceManager, syncUi, req);
+        };
+        cb.setTrackMuted = [this](const TrackId tid, const bool muted) {
+            session.setTrackMuted(tid, muted);
+        };
+        cb.listSoundProducingTracks = [this]() -> std::vector<TrackId> {
+            std::vector<TrackId> out;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return out;
+            }
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                if (tr.getKind() == TrackKind::Audio || tr.getKind() == TrackKind::Instrument)
+                {
+                    out.push_back(tr.getId());
+                }
+            }
+            return out;
+        };
+        cb.appendStaleTestClip = [this](const TrackId tid) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr
+                      ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                      : nullptr;
+            if (c == nullptr)
+            {
+                return false;
+            }
+            // One real render-relevant note through the normal arrangement-import seam.
+            TimelineMidiNote n;
+            n.midiNote = 60;
+            n.velocity = 100;
+            n.channel = 1;
+            n.startTick = 0;
+            n.durationTicks = kDefaultExperimentalTicksPerQuarter / 2;
+            const auto clipId = c->appendImportedTimelineMidiClipAtSamples(
+                { n }, 0, "P1G stale-test clip");
+            if (clipId == 0)
+            {
+                return false;
+            }
+            if (proxyPlaybackCoordinator_ != nullptr)
+            {
+                proxyPlaybackCoordinator_->refreshDestination(tid);
+            }
+            return true;
+        };
+        cb.getEngineSampleRate = [this]() -> double {
+            juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+            return device != nullptr ? device->getCurrentSampleRate() : 0.0;
+        };
+        cb.trySetEngineSampleRate = [this](const double rate) -> bool {
+            juce::AudioIODevice* const device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr)
+            {
+                return false;
+            }
+            if (!device->getAvailableSampleRates().contains(rate))
+            {
+                juce::String rates;
+                for (const double r : device->getAvailableSampleRates())
+                {
+                    rates << juce::String(r, 0) << " ";
+                }
+                appendMixdownDiagnosticLine("p1g: device \"" + device->getName()
+                                            + "\" does not offer " + juce::String(rate, 0)
+                                            + " Hz (available: " + rates.trim() + ")");
+                return false;
+            }
+            auto setup = deviceManager.getAudioDeviceSetup();
+            setup.sampleRate = rate;
+            const juce::String err = deviceManager.setAudioDeviceSetup(setup, false);
+            if (err.isNotEmpty())
+            {
+                appendMixdownDiagnosticLine("p1g: setAudioDeviceSetup(" + juce::String(rate, 0)
+                                            + ") failed: " + err);
+                return false;
+            }
+            juce::AudioIODevice* const now = deviceManager.getCurrentAudioDevice();
+            return now != nullptr && std::abs(now->getCurrentSampleRate() - rate) < 1.0;
+        };
         spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
                                                                                autoPlanId);
     }
@@ -2114,6 +2350,13 @@ private:
         {
             lv->syncFromStore();
         }
+        // P1G (PI-030): an engine/device-rate change rebuilds proxy readers as derived
+        // state — generation currency is untouched; status shows ProxyPreparing until
+        // the new-rate representation is primed.
+        if (proxyPlaybackCoordinator_ != nullptr)
+        {
+            proxyPlaybackCoordinator_->notifyEngineRateMaybeChanged();
+        }
     }
 
     void showAudioMixdownDialog()
@@ -2570,6 +2813,12 @@ private:
     {
         instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
         instrumentRuntimeCoordinator_->updateExperimentalPlaybackBridgeAfterRegistryChange();
+        // P1G: Primary availability may have changed (load/unload/replace/project load) —
+        // re-evaluate the authoritative playback source for every destination.
+        if (proxyPlaybackCoordinator_ != nullptr)
+        {
+            proxyPlaybackCoordinator_->refreshAllInstrumentDestinations();
+        }
         instrumentRuntimeCoordinator_->syncAllKeyedAndStagingShellWithHostState();
         trackLanesView.refreshInstrumentHeaderReorderAttachments();
         trackLanesView.rebuildVisibleTrackEntries();
@@ -2595,6 +2844,9 @@ private:
     /// call detachEngineAndShutdownJobs() before the coordinators are destroyed.
     proxy_render::ProxyRenderScheduler& proxyRenderScheduler_;
     std::unique_ptr<proxy_render::AppProxyRenderEngine> proxyRenderEngine_;
+    /// P1G: playback-source coordination (proxy substitution views + reader lifecycle).
+    /// Shut down in the destructor BEFORE the instrument runtime is torn down.
+    std::unique_ptr<proxy_playback::ProxyPlaybackCoordinator> proxyPlaybackCoordinator_;
 
     std::unique_ptr<InstrumentRuntimeCoordinator> instrumentRuntimeCoordinator_;
     /// Listed after IRC: reverse member destruction runs this dtor first while `instrumentRuntimeCoordinator_` still exists.

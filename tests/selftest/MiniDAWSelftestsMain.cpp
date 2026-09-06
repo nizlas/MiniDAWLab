@@ -41,7 +41,11 @@
 // docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md. Removable with the spike.
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyOfflineSequencer.h"
+#include "instruments/ProxyPlaybackCoordinator.h"
+#include "instruments/ProxyPlaybackMix.h"
 #include "instruments/ProxyPlaybackReader.h"
+#include "instruments/ProxyPlaybackSource.h"
+#include "domain/TrackStereoPan.h"
 #include "instruments/ProxyRenderExecutor.h"
 #include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderTypes.h"
@@ -4373,7 +4377,8 @@ namespace
                             proxy_playback::ProxyPlaybackIoService& svc,
                             const std::int64_t t0, const int n, const char* what)
     {
-        expect(r.messageThread_ensureRangeReady(t0, n, svc.wakeEvent(), 5000),
+        juce::ignoreUnused(svc); // readers self-nudge the registered service's wake event
+        expect(r.messageThread_ensureRangeReady(t0, n, 5000),
                std::string(what) + ": range became resident");
         std::vector<float> l((size_t)n, -9.0f), rr((size_t)n, -9.0f);
         expect(r.audioThread_fetch(t0, l.data(), rr.data(), n),
@@ -4410,7 +4415,7 @@ namespace
         // Straddle EOF: tail must be exact zeros; full-service (EOF is normal).
         {
             const std::int64_t t0 = len - 100;
-            expect(reader->messageThread_ensureRangeReady(t0, 512, svc.wakeEvent(), 5000),
+            expect(reader->messageThread_ensureRangeReady(t0, 512, 5000),
                    "spike03-same eof: resident");
             std::vector<float> l(512, -9.0f), r(512, -9.0f);
             const std::uint64_t underBefore = reader->underrunCount();
@@ -4567,7 +4572,7 @@ namespace
             const std::int64_t t0 = block * 512;
             for (auto& r : readers)
             {
-                if (!r->messageThread_ensureRangeReady(t0, 512, svc.wakeEvent(), 5000))
+                if (!r->messageThread_ensureRangeReady(t0, 512, 5000))
                 {
                     allExact = false;
                     continue;
@@ -4613,7 +4618,7 @@ namespace
         {
             auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
             svc.registerReader(reader);
-            expect(reader->messageThread_ensureRangeReady(0, 512, svc.wakeEvent(), 5000),
+            expect(reader->messageThread_ensureRangeReady(0, 512, 5000),
                    "spike03-retire: streamed before retirement");
             // Windows: the open read handle blocks deletion — retirement must close it.
             svc.unregisterReader(reader.get());
@@ -4685,7 +4690,7 @@ namespace
 
         // Seek-to-ready latency (cold window at a far position).
         const double t0 = juce::Time::getMillisecondCounterHiRes();
-        expect(reader->messageThread_ensureRangeReady(48000ll * 30, 512, svc.wakeEvent(), 5000),
+        expect(reader->messageThread_ensureRangeReady(48000ll * 30, 512, 5000),
                "spike03-measure: far seek becomes ready");
         const double seekReadyMs = juce::Time::getMillisecondCounterHiRes() - t0;
 
@@ -4693,7 +4698,7 @@ namespace
         // 64-block window is made resident first so the measurement is pure ring copy).
         std::vector<float> l(512), r(512);
         const std::int64_t base = 48000ll * 30;
-        expect(reader->messageThread_ensureRangeReady(base, 65 * 512, svc.wakeEvent(), 5000),
+        expect(reader->messageThread_ensureRangeReady(base, 65 * 512, 5000),
                "spike03-measure: fetch-cost window resident");
         const double f0 = juce::Time::getMillisecondCounterHiRes();
         constexpr int kBlocks = 2000;
@@ -4706,13 +4711,13 @@ namespace
 
         // Sustained sequential fill throughput (frames/s) over 10 s of material.
         const std::int64_t seqStart = 0;
-        expect(reader->messageThread_ensureRangeReady(seqStart, 512, svc.wakeEvent(), 5000),
+        expect(reader->messageThread_ensureRangeReady(seqStart, 512, 5000),
                "spike03-measure: sequential window ready");
         const double s0 = juce::Time::getMillisecondCounterHiRes();
         std::int64_t served = 0;
         for (std::int64_t t = seqStart; t < seqStart + 48000ll * 10; t += 512)
         {
-            if (!reader->messageThread_ensureRangeReady(t, 512, svc.wakeEvent(), 5000))
+            if (!reader->messageThread_ensureRangeReady(t, 512, 5000))
             {
                 break;
             }
@@ -4731,6 +4736,586 @@ namespace
                     (unsigned long long)reader->underrunCount());
         svc.unregisterReader(reader.get());
         (void)wav.deleteFile();
+    }
+
+    //==========================================================================
+    // P1G — authoritative playback-source selection, proxy substitution mix
+    // step, and the playback coordinator (ProxyPlaybackSource.h,
+    // ProxyPlaybackMix.h, ProxyPlaybackCoordinator.h). Deterministic: synthetic
+    // WAVs + the Organ fixture; no plugins, no audio device.
+    //==========================================================================
+    using proxy_playback::ProxyAssetAvailability;
+    using proxy_playback::ProxyCurrencyVerdict;
+    using proxy_playback::ProxyPlaybackSourceState;
+
+    /// v20 metadata as publication would record it for the Organ fixture (§12.3
+    /// recorded identity = exactly the capture-time BuildInputs).
+    [[nodiscard]] ProjectFileProxyMetadataV20 p1gMetaFromFixture(const ProxyFixture& f,
+                                                                 const juce::String& generationId)
+    {
+        ProjectFileProxyMetadataV20 m;
+        m.generationId = generationId;
+        m.fingerprintSchemaVersion = (int)proxy_fingerprint::kFingerprintSchemaVersion;
+        m.fingerprintAlgorithmId = (int)proxy_fingerprint::kFingerprintAlgorithmId;
+        m.sampleRate = f.inputs.renderConfig.renderSampleRate;
+        m.pluginFileOrIdentifier = f.inputs.pluginIdentity.fileOrIdentifier;
+        m.pluginUniqueId = f.inputs.pluginIdentity.uniqueId;
+        m.pluginDeprecatedUid = f.inputs.pluginIdentity.deprecatedUid;
+        m.pluginFormatName = f.inputs.pluginIdentity.format;
+        m.pluginIsInstrument = f.inputs.pluginIdentity.isInstrument;
+        m.pluginVersionAtRender = f.inputs.pluginIdentity.version;
+        m.primaryStateRevisionAtPublish = (std::int64_t)f.inputs.stateIdentity.primaryStateRevision;
+        m.pairedWithSavedStateAtRender = f.inputs.stateIdentity.pairedWithSavedState;
+        m.timelineReferenceRate = f.inputs.renderConfig.timelineReferenceRate;
+        m.renderBlockSize = f.inputs.renderConfig.renderBlockSize;
+        m.noteOffGateMs = f.inputs.renderConfig.noteOffGateMs;
+        return m;
+    }
+
+    [[nodiscard]] std::function<std::vector<const InstrumentMidiClip*>(TrackId)>
+        p1gClipsFn(const ProxyFixture& f)
+    {
+        return [&f](const TrackId tid) {
+            std::vector<const InstrumentMidiClip*> out;
+            const auto it = f.clipsByTrack.find(tid);
+            if (it != f.clipsByTrack.end())
+            {
+                for (const auto& c : it->second)
+                {
+                    out.push_back(&c);
+                }
+            }
+            return out;
+        };
+    }
+
+    void testProxyPlaybackSourceSelectionMatrix()
+    {
+        using proxy_playback::decideProxyPlaybackSource;
+
+        // Primary wins whenever usable — regardless of proxy currency/asset state.
+        for (const auto cur : { ProxyCurrencyVerdict::Current, ProxyCurrencyVerdict::Stale,
+                                ProxyCurrencyVerdict::NoMetadata })
+        {
+            for (const auto asset :
+                 { ProxyAssetAvailability::SilentGeneration, ProxyAssetAvailability::Available,
+                   ProxyAssetAvailability::Missing, ProxyAssetAvailability::Corrupt })
+            {
+                const auto d = decideProxyPlaybackSource(true, cur, asset);
+                expect(d.state == ProxyPlaybackSourceState::Primary && !d.useProxy,
+                       "p1g-select: Primary wins whenever usable (never proxy)");
+            }
+        }
+
+        // Missing Primary: canonical priority with NO fallback between (2) and (4).
+        const auto cur = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                   ProxyAssetAvailability::Available);
+        expect(cur.state == ProxyPlaybackSourceState::ProxyCurrent && cur.useProxy,
+               "p1g-select: current proxy wins only when Primary is unavailable");
+        const auto silent = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                      ProxyAssetAvailability::SilentGeneration);
+        expect(silent.state == ProxyPlaybackSourceState::ProxyCurrent && silent.useProxy,
+               "p1g-select: valid silent generation is ProxyCurrent (intentional silence)");
+        const auto stale = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Stale,
+                                                     ProxyAssetAvailability::Available);
+        expect(stale.state == ProxyPlaybackSourceState::ProxyStale && !stale.useProxy,
+               "p1g-select: stale proxy is retained but NEVER selected");
+        const auto missing = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                       ProxyAssetAvailability::Missing);
+        expect(missing.state == ProxyPlaybackSourceState::ProxyMissing && !missing.useProxy,
+               "p1g-select: missing asset is honest silence, never approximated");
+        const auto corrupt = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                       ProxyAssetAvailability::Corrupt);
+        expect(corrupt.state == ProxyPlaybackSourceState::ProxyCorrupt && !corrupt.useProxy,
+               "p1g-select: corrupt asset is honest silence, never approximated");
+        const auto none = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::NoMetadata,
+                                                    ProxyAssetAvailability::Missing);
+        expect(none.state == ProxyPlaybackSourceState::MissingPrimary && !none.useProxy,
+               "p1g-select: no metadata + no Primary = MissingPrimary (no Secondary exists in P1)");
+
+        // §12.3 persisted save-pairing gate.
+        ProjectFileProxyMetadataV20 m;
+        m.primaryStateRevisionAtPublish = 7;
+        m.primaryStateRevisionAtSave = 7;
+        expect(proxy_playback::proxyStatePairingHolds(m, false),
+               "p1g-select: pairing holds when the save stamp equals the publish revision");
+        m.primaryStateRevisionAtSave = 6;
+        expect(!proxy_playback::proxyStatePairingHolds(m, false),
+               "p1g-select: pairing broken when the save stamp mismatches");
+        expect(proxy_playback::proxyStatePairingHolds(m, true),
+               "p1g-select: in-session publication pairs directly (runtime flag)");
+        m.primaryStateRevisionAtPublish = 0;
+        m.primaryStateRevisionAtSave = 0;
+        expect(!proxy_playback::proxyStatePairingHolds(m, false),
+               "p1g-select: unstamped metadata (0/0) never claims pairing");
+    }
+
+    void testProxyCurrencyUnderRecordedConfig()
+    {
+        const ProxyFixture f = makeOrganFixture();
+        const auto meta = p1gMetaFromFixture(f, f.fp());
+        const auto snap = f.session();
+
+        // Unchanged content: recomputation under the RECORDED config reproduces the
+        // generation id exactly (identity snapshot has an EMPTY state blob — this also
+        // proves blob bytes are no fingerprint input).
+        const juce::String expected = proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+            *snap, TrackId{ 1 }, p1gClipsFn(f), meta, 48000.0);
+        expect(expected.isNotEmpty() && expected == meta.generationId,
+               "p1g-currency: recorded-config recomputation reproduces the generation id");
+
+        // Engine/device rate is NOT a currency input: a different fallback rate changes
+        // nothing while the recorded timeline reference rate is present (PI-030).
+        const juce::String at441 = proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+            *snap, TrackId{ 1 }, p1gClipsFn(f), meta, 44100.0);
+        expect(at441 == expected,
+               "p1g-currency: engine-rate mismatch does not change proxy currency");
+
+        // Render-relevant musical edit -> mismatch (Stale).
+        ProxyFixture edited = makeOrganFixture();
+        edited.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes.push_back(
+            makeNote(72, 240, 480, 1));
+        const auto editedSnap = edited.session();
+        const juce::String afterEdit = proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+            *editedSnap, TrackId{ 1 }, p1gClipsFn(edited), meta, 48000.0);
+        expect(afterEdit.isNotEmpty() && afterEdit != meta.generationId,
+               "p1g-currency: render-relevant musical edit breaks currency");
+
+        // Recorded plugin identity drift (version) -> mismatch.
+        auto metaVersion = meta;
+        metaVersion.pluginVersionAtRender = "9.9.9";
+        const juce::String withOtherVersion
+            = proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+                *snap, TrackId{ 1 }, p1gClipsFn(f), metaVersion, 48000.0);
+        expect(withOtherVersion != meta.generationId,
+               "p1g-currency: recorded plugin-version drift breaks currency");
+
+        // No recorded identity (pre-P1G metadata) -> not verifiable (empty), never a match.
+        auto metaNoIdentity = meta;
+        metaNoIdentity.pluginFileOrIdentifier.clear();
+        expect(proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+                   *snap, TrackId{ 1 }, p1gClipsFn(f), metaNoIdentity, 48000.0)
+                   .isEmpty(),
+               "p1g-currency: metadata without recorded identity is not verifiable");
+    }
+
+    void testProxyPlaybackMixSubstitutionSeam()
+    {
+        const juce::File wav = spike03Root().getChildFile("p1g-mix.wav");
+        expect(spike03WriteAsset(wav, 48000.0, 30000), "p1g-mix: synthetic asset written");
+        proxy_playback::ProxyStreamMapping mapping;
+        mapping.assetRate = 48000.0;
+        mapping.timelineRate = 48000.0;
+        mapping.assetLengthFrames = 30000;
+
+        proxy_playback::ProxyPlaybackIoService svc;
+        auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, mapping);
+        expect(!reader->openFailed(), "p1g-mix: reader opened");
+        svc.registerReader(reader);
+
+        proxy_playback::ProxyPlaybackView view;
+        view.selectedState = ProxyPlaybackSourceState::ProxyCurrent;
+        view.useProxy = true;
+        view.reader = reader;
+
+        constexpr int kN = 512;
+        std::vector<float> L((size_t)kN), R((size_t)kN);
+        const auto renderWith = [&](const proxy_playback::ProxyPlaybackView& v,
+                                    std::initializer_list<proxy_playback::ProxyTimelineSegment> segs) {
+            std::vector<proxy_playback::ProxyTimelineSegment> s(segs);
+            std::fill(L.begin(), L.end(), -9.0f);
+            std::fill(R.begin(), R.end(), -9.0f);
+            return proxy_playback::renderProxySegmentsToStereoScratch(
+                v, s.data(), (int)s.size(), L.data(), R.data(), kN);
+        };
+
+        // Full block from timeline 0: exact reference samples (substitution replaces ONLY
+        // instrument generation; downstream fader/pan/inserts are applied by the shared strip).
+        expect(reader->messageThread_ensureRangeReady(0, kN, 5000), "p1g-mix: [0,512) resident");
+        auto out = renderWith(view, { { 0, 0, kN } });
+        {
+            bool ok = out.producedBlock && out.peak > 0.0f;
+            for (int i = 0; i < kN && ok; ++i)
+            {
+                ok = L[(size_t)i] == spike03Reference(0, i, mapping)
+                     && R[(size_t)i] == spike03Reference(1, i, mapping);
+            }
+            expect(ok, "p1g-mix: full block is the exact proxy audio (COPY semantics)");
+        }
+
+        // Partial segment: zeros outside the playing range (no stray audio in the block).
+        expect(reader->messageThread_ensureRangeReady(1000, 200, 5000), "p1g-mix: sub-range resident");
+        out = renderWith(view, { { 1000, 100, 200 } });
+        {
+            bool ok = out.producedBlock;
+            for (int i = 0; i < kN && ok; ++i)
+            {
+                const float expectedL = (i >= 100 && i < 300)
+                                            ? spike03Reference(0, 1000 + (i - 100), mapping)
+                                            : 0.0f;
+                ok = L[(size_t)i] == expectedL;
+            }
+            expect(ok, "p1g-mix: frames outside the playing segment are exactly zero");
+        }
+
+        // Loop wrap: tail segment + wrapped segment in ONE block, both exact. The whole
+        // 30000-frame asset fits the read-ahead window, so one prefetch makes both
+        // ranges resident (a longer asset serves the wrapped segment on the next fill).
+        expect(reader->messageThread_ensureRangeReady(0, 30000, 5000),
+               "p1g-mix: whole short asset resident for the wrap block");
+        out = renderWith(view, { { 29900, 0, 100 }, { 0, 100, 412 } });
+        {
+            bool ok = out.producedBlock;
+            for (int i = 0; i < 100 && ok; ++i)
+            {
+                ok = L[(size_t)i] == spike03Reference(0, 29900 + i, mapping);
+            }
+            for (int i = 100; i < kN && ok; ++i)
+            {
+                ok = L[(size_t)i] == spike03Reference(0, i - 100, mapping);
+            }
+            expect(ok, "p1g-mix: loop wrap returns to the correct source position");
+        }
+
+        // EOF: normal silence (produced output, zero peak — not an underrun, not missing).
+        out = renderWith(view, { { 30000, 0, kN } });
+        expect(out.producedBlock && out.peak == 0.0f,
+               "p1g-mix: post-EOF is exact silence and still counts as proxy output");
+
+        // Silent generation: useProxy with a null reader — zeros by definition.
+        proxy_playback::ProxyPlaybackView silentView;
+        silentView.selectedState = ProxyPlaybackSourceState::ProxyCurrent;
+        silentView.useProxy = true;
+        silentView.silentGeneration = true;
+        out = renderWith(silentView, { { 0, 0, kN } });
+        {
+            bool zeros = out.producedBlock && out.peak == 0.0f;
+            for (int i = 0; i < kN && zeros; ++i)
+            {
+                zeros = L[(size_t)i] == 0.0f && R[(size_t)i] == 0.0f;
+            }
+            expect(zeros, "p1g-mix: silent generation produces exact zeros without a WAV");
+        }
+
+        // Not in proxy mode -> the substitution step produces nothing (Primary and Proxy can
+        // never sound together: the host takes exactly ONE branch per block).
+        proxy_playback::ProxyPlaybackView primaryView;
+        primaryView.useProxy = false;
+        out = renderWith(primaryView, { { 0, 0, kN } });
+        expect(!out.producedBlock, "p1g-mix: non-proxy view produces no proxy output (no double sound)");
+
+        // Stopped transport (no segments) and malformed segments are silent no-ops.
+        out = renderWith(view, {});
+        expect(!out.producedBlock, "p1g-mix: no playing segment -> no proxy output");
+        out = renderWith(view, { { 0, 500, 100 } });
+        expect(!out.producedBlock, "p1g-mix: out-of-block segment bounds are rejected");
+
+        // Deterministic ProxyPreparing evidence: a reader with NO I/O service never becomes
+        // ready — fetch yields silence + underrun accounting, isReadyAtDesired stays false.
+        auto lonely = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, mapping);
+        expect(!lonely->openFailed(), "p1g-mix: standalone reader opened");
+        std::vector<float> sl((size_t)kN), sr((size_t)kN);
+        expect(!lonely->audioThread_fetch(0, sl.data(), sr.data(), kN)
+                   && !lonely->isReadyAtDesired() && lonely->underrunCount() == 1,
+               "p1g-mix: unprimed reader = silence + honest not-ready (ProxyPreparing basis)");
+
+        // Downstream strip gain math (applied by the shared path after substitution).
+        expect(trackPanLawGainLeft(kTrackStereoPanCenter) == 1.0f
+                   && trackPanLawGainRight(kTrackStereoPanCenter) == 1.0f
+                   && trackPanLawGainRight(-1.0f) == 0.0f && trackPanLawGainLeft(1.0f) == 0.0f,
+               "p1g-mix: shared pan law is center-preserving with full-side attenuation");
+
+        svc.unregisterReader(reader.get());
+        (void)wav.deleteFile();
+    }
+
+    void testProxyPlaybackCoordinatorEndToEnd()
+    {
+        // Deterministic §11 mirror with a synthetic published generation: Organ musical
+        // identity + missing Primary + published current proxy, exercising selection,
+        // playback through the published view, staleness, missing/corrupt/silent handling,
+        // engine-rate rebuild, underrun status, retirement, track removal and shutdown.
+        ProxyFixture f = makeOrganFixture();
+        const juce::File proj = spike03Root().getChildFile("p1g-project");
+        (void)proj.createDirectory();
+        const juce::String relPath = "InstrumentProxies/track_1_p1g.wav";
+        const juce::File asset = proj.getChildFile("InstrumentProxies").getChildFile("track_1_p1g.wav");
+        (void)asset.getParentDirectory().createDirectory();
+        constexpr std::int64_t kLen = 200000; // >> read-ahead so real underruns are possible
+        expect(spike03WriteAsset(asset, 48000.0, kLen), "p1g-e2e: proxy asset written");
+
+        const auto baseSnap = f.session();
+        ProjectFileProxyMetadataV20 meta = p1gMetaFromFixture(
+            f, proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+                   *baseSnap, TrackId{ 1 }, p1gClipsFn(f), p1gMetaFromFixture(f, "x"), 48000.0));
+        meta.relativePath = relPath;
+        meta.lengthSamples = kLen;
+
+        bool primaryLoaded = false;
+        bool publishedThisSession = true;
+        bool metadataPresent = true;
+        double engineRate = 48000.0;
+        bool musicalEdit = false;
+        ProxyFixture edited = makeOrganFixture();
+        edited.clipsByTrack[TrackId{ 1 }][0].pattern.timelineNotes.push_back(
+            makeNote(75, 120, 240, 1));
+
+        std::shared_ptr<const proxy_playback::ProxyPlaybackView> hostSlot; // the host's atomic slot
+
+        proxy_playback::ProxyPlaybackCoordinator::Dependencies deps;
+        deps.sessionSnapshotProvider = [&] { return musicalEdit ? edited.session() : f.session(); };
+        deps.projectFolderProvider = [&] { return proj; };
+        deps.timelineRateOrFallback = [](const double fb) { return fb; };
+        deps.destinationExists = [](const TrackId tid) { return tid == TrackId{ 1 }; };
+        deps.primaryUsable = [&](const TrackId) { return primaryLoaded; };
+        deps.publishView = [&](const TrackId tid,
+                               std::shared_ptr<const proxy_playback::ProxyPlaybackView> v) {
+            if (tid == TrackId{ 1 })
+            {
+                hostSlot = std::move(v);
+            }
+        };
+        deps.proxyMetadataForTrack = [&](const TrackId) -> const ProjectFileProxyMetadataV20* {
+            return metadataPresent ? &meta : nullptr;
+        };
+        deps.proxyPublishedThisSession = [&](const TrackId) { return publishedThisSession; };
+        deps.clipsForTrack = [&](const TrackId tid) {
+            const auto& fx = musicalEdit ? edited : f;
+            std::vector<const InstrumentMidiClip*> out;
+            const auto it = fx.clipsByTrack.find(tid);
+            if (it != fx.clipsByTrack.end())
+            {
+                for (const auto& c : it->second)
+                {
+                    out.push_back(&c);
+                }
+            }
+            return out;
+        };
+        deps.engineRateProvider = [&] { return engineRate; };
+
+        proxy_playback::ProxyPlaybackCoordinator coord(std::move(deps));
+        const TrackId dest{ 1 };
+
+        // 1) Primary usable -> Primary wins; no proxy view is published.
+        primaryLoaded = true;
+        coord.refreshDestination(dest);
+        expect(hostSlot == nullptr
+                   && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::Primary,
+               "p1g-e2e: Primary wins when usable — no proxy view published");
+
+        // 2) Primary forced unavailable WITHOUT changing musical identity -> current proxy
+        //    is selected and actually plays the published generation's audio.
+        primaryLoaded = true;
+        coord.setPrimaryForcedUnavailableForTests(dest, true);
+        coord.refreshDestination(dest);
+        expect(hostSlot != nullptr && hostSlot->useProxy && hostSlot->reader != nullptr
+                   && hostSlot->selectedState == ProxyPlaybackSourceState::ProxyCurrent,
+               "p1g-e2e: missing Primary + current generation selects the proxy");
+        expect(hostSlot->reader->messageThread_ensureRangeReady(0, 512, 5000),
+               "p1g-e2e: coordinator-registered reader becomes resident");
+        {
+            std::vector<float> l(512), r(512);
+            proxy_playback::ProxyTimelineSegment seg{ 0, 0, 512 };
+            const auto out = proxy_playback::renderProxySegmentsToStereoScratch(
+                *hostSlot, &seg, 1, l.data(), r.data(), 512);
+            bool ok = out.producedBlock && out.peak > 0.0f;
+            for (int i = 0; i < 512 && ok; ++i)
+            {
+                ok = l[(size_t)i] == spike03Reference(0, i, hostSlot->reader->mapping());
+            }
+            expect(ok, "p1g-e2e: non-silent proxy audio flows through the substitution path");
+        }
+        expect(coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCurrent,
+               "p1g-e2e: runtime status is ProxyCurrent once resident");
+
+        // 3) Engine-rate change: derived state rebuilt, generation stays Current (PI-030).
+        engineRate = 44100.0;
+        coord.notifyEngineRateMaybeChanged();
+        expect(hostSlot != nullptr && hostSlot->useProxy && hostSlot->reader != nullptr
+                   && hostSlot->reader->mapping().timelineRate == 44100.0
+                   && hostSlot->selectedState == ProxyPlaybackSourceState::ProxyCurrent,
+               "p1g-e2e: rate change rebuilds the reader (44.1k mapping) without staleness");
+        expect(coord.retiredCountForTests() > 0,
+               "p1g-e2e: the replaced reader went through deferred retirement");
+        coord.purgeRetiredForTests();
+        expect(coord.retiredCountForTests() == 0, "p1g-e2e: retired readers destroyed off-audio");
+        expect(hostSlot->reader->messageThread_ensureRangeReady(0, 512, 5000),
+               "p1g-e2e: rebuilt reader primes at the new rate");
+        {
+            std::vector<float> l(512), r(512);
+            proxy_playback::ProxyTimelineSegment seg{ 0, 0, 512 };
+            (void)proxy_playback::renderProxySegmentsToStereoScratch(*hostSlot, &seg, 1, l.data(),
+                                                                     r.data(), 512);
+            bool ok = true;
+            for (int i = 0; i < 512 && ok; ++i)
+            {
+                ok = l[(size_t)i] == spike03Reference(0, i, hostSlot->reader->mapping());
+            }
+            expect(ok, "p1g-e2e: cross-rate playback matches the deterministic 44.1k mapping");
+        }
+        engineRate = 48000.0;
+        coord.notifyEngineRateMaybeChanged();
+        coord.purgeRetiredForTests();
+
+        // 4) Real pre-EOF underrun -> one-shot PlaybackUnderrun status, then recovery.
+        expect(hostSlot->reader->messageThread_ensureRangeReady(0, 512, 5000),
+               "p1g-e2e: 48k reader re-primed");
+        {
+            std::vector<float> l(512), r(512);
+            expect(!hostSlot->reader->audioThread_fetch(150000, l.data(), r.data(), 512),
+                   "p1g-e2e: far pre-EOF fetch outside the window underruns to silence");
+        }
+        expect(coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::PlaybackUnderrun,
+               "p1g-e2e: underrun surfaces once as PlaybackUnderrun");
+        expect(hostSlot->reader->messageThread_ensureRangeReady(150000, 512, 5000),
+               "p1g-e2e: stream recovers after the seek");
+        expect(coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCurrent,
+               "p1g-e2e: status returns to ProxyCurrent after recovery");
+
+        // 5) Render-relevant edit -> Stale: retained, NEVER selected (honest silence).
+        musicalEdit = true;
+        coord.refreshDestination(dest);
+        expect(hostSlot == nullptr
+                   && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyStale
+                   && asset.existsAsFile(),
+               "p1g-e2e: stale edit prevents selection; the asset is retained on disk");
+        musicalEdit = false;
+        coord.refreshDestination(dest);
+        expect(hostSlot != nullptr && hostSlot->useProxy,
+               "p1g-e2e: reverting the edit restores ProxyCurrent selection");
+
+        // 6) Broken save pairing (portable resave without pairing evidence) -> Stale.
+        publishedThisSession = false;
+        coord.refreshDestination(dest);
+        expect(hostSlot == nullptr
+                   && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyStale,
+               "p1g-e2e: missing save-pairing evidence conservatively evaluates Stale");
+        meta.primaryStateRevisionAtSave = meta.primaryStateRevisionAtPublish;
+        coord.refreshDestination(dest);
+        expect(hostSlot != nullptr && hostSlot->useProxy,
+               "p1g-e2e: persisted save-pairing stamp restores currency");
+
+        // 7) Missing file -> ProxyMissing (project loadable, honest silence, no deletion).
+        const juce::File hidden = asset.getSiblingFile("track_1_p1g.hidden");
+        expect(asset.moveFileTo(hidden), "p1g-e2e: asset temporarily hidden");
+        coord.refreshDestination(dest);
+        expect(hostSlot == nullptr
+                   && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyMissing,
+               "p1g-e2e: missing asset file -> ProxyMissing, never selected");
+        expect(hidden.moveFileTo(asset), "p1g-e2e: asset restored");
+
+        // 8) Corrupt WAV -> ProxyCorrupt (no fallthrough to an approximate source).
+        {
+            juce::TemporaryFile bad(asset);
+            (void)bad.getFile().replaceWithText("this is not a wav");
+            (void)asset.moveFileTo(hidden);
+            (void)bad.getFile().moveFileTo(asset);
+        }
+        coord.refreshDestination(dest);
+        expect(hostSlot == nullptr
+                   && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCorrupt,
+               "p1g-e2e: unreadable WAV -> ProxyCorrupt, never selected");
+        (void)asset.deleteFile();
+        expect(hidden.moveFileTo(asset), "p1g-e2e: asset restored after corrupt case");
+
+        // 9) Unsafe relative path -> ProxyCorrupt (path traversal rejected).
+        {
+            auto evil = meta;
+            const auto saved = meta;
+            meta.relativePath = "../outside.wav";
+            coord.refreshDestination(dest);
+            expect(hostSlot == nullptr
+                       && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCorrupt,
+                   "p1g-e2e: escaping relative path -> ProxyCorrupt");
+            meta = saved;
+            juce::ignoreUnused(evil);
+        }
+
+        // 10) Silent generation: valid metadata-only generation is ProxyCurrent with a null
+        //     reader; malformed silent metadata (fake path) is rejected as corrupt.
+        {
+            const auto saved = meta;
+            meta.silentGeneration = true;
+            meta.relativePath = {};
+            meta.lengthSamples = 0;
+            coord.refreshDestination(dest);
+            expect(hostSlot != nullptr && hostSlot->useProxy && hostSlot->reader == nullptr
+                       && hostSlot->silentGeneration
+                       && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCurrent,
+                   "p1g-e2e: silent generation is ProxyCurrent with intentional silence");
+            meta.relativePath = relPath; // malformed: silent generation must carry NO path
+            coord.refreshDestination(dest);
+            expect(hostSlot == nullptr
+                       && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCorrupt,
+                   "p1g-e2e: malformed silent metadata is rejected safely");
+            meta = saved;
+        }
+
+        // 11) No metadata at all -> MissingPrimary.
+        metadataPresent = false;
+        coord.refreshDestination(dest);
+        expect(hostSlot == nullptr
+                   && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::MissingPrimary,
+               "p1g-e2e: no generation + no Primary = honest MissingPrimary silence");
+        metadataPresent = true;
+
+        // 12) Track removal + shutdown with an active reader (deterministic teardown).
+        coord.refreshDestination(dest);
+        expect(hostSlot != nullptr, "p1g-e2e: proxy re-selected before teardown");
+        coord.notifyTrackRemoved(dest);
+        expect(hostSlot == nullptr, "p1g-e2e: track removal unpublishes the view");
+        coord.refreshDestination(dest);
+        expect(hostSlot != nullptr, "p1g-e2e: re-added destination republishes");
+        coord.shutdown();
+        expect(hostSlot == nullptr && coord.ioServiceForTests() == nullptr
+                   && coord.retiredCountForTests() == 0,
+               "p1g-e2e: shutdown unpublishes, drains and destroys all runtime state");
+
+        (void)proj.deleteRecursively();
+    }
+
+    void testProxyMetadataV20P1GFieldsRoundTrip()
+    {
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWSelftests");
+        (void)dir.createDirectory();
+        const juce::File file = dir.getChildFile("p1g-v20.dalproj");
+
+        ProjectFileV1 data = makeV20FixtureProject();
+        auto& p = data.experimentalInstrumentTracks[0].proxy;
+        p.pluginFileOrIdentifier = "C:\\Plugins\\VB3-II.vst3";
+        p.pluginUniqueId = 0x1234abcd;
+        p.pluginDeprecatedUid = 77;
+        p.pluginFormatName = "VST3";
+        p.pluginIsInstrument = true;
+        p.pluginVersionAtRender = "2.3.1";
+        p.primaryStateRevisionAtPublish = 41;
+        p.pairedWithSavedStateAtRender = true;
+        p.primaryStateRevisionAtSave = 41;
+        p.timelineReferenceRate = 48000.0;
+        p.renderBlockSize = 256;
+        p.noteOffGateMs = 90;
+
+        const auto wr = writeProjectFile(file, data);
+        ProjectFileV1 back;
+        const auto rr = readProjectFile(file, back);
+        expect(wr.wasOk() && rr.wasOk() && back.experimentalInstrumentTracks.size() == 1U
+                   && back.experimentalInstrumentTracks[0].hasProxy,
+               "p1g-schema: project with P1G identity fields round-trips");
+        const auto& b = back.experimentalInstrumentTracks[0].proxy;
+        expect(b.pluginFileOrIdentifier == p.pluginFileOrIdentifier
+                   && b.pluginUniqueId == p.pluginUniqueId
+                   && b.pluginDeprecatedUid == p.pluginDeprecatedUid
+                   && b.pluginFormatName == p.pluginFormatName
+                   && b.pluginIsInstrument == p.pluginIsInstrument
+                   && b.pluginVersionAtRender == p.pluginVersionAtRender,
+               "p1g-schema: recorded plugin identity survives the round trip");
+        expect(b.primaryStateRevisionAtPublish == 41 && b.pairedWithSavedStateAtRender
+                   && b.primaryStateRevisionAtSave == 41 && b.timelineReferenceRate == 48000.0
+                   && b.renderBlockSize == 256 && b.noteOffGateMs == 90,
+               "p1g-schema: revision pairing + recorded render config survive the round trip");
+        (void)file.deleteFile();
     }
 } // namespace
 
@@ -4795,6 +5380,12 @@ int main()
     testProxyPlaybackReaderRetirementReleasesHandle();
     testProxyPlaybackReaderOpenValidation();
     testProxyPlaybackReaderMeasurements();
+
+    testProxyPlaybackSourceSelectionMatrix();
+    testProxyCurrencyUnderRecordedConfig();
+    testProxyPlaybackMixSubstitutionSeam();
+    testProxyPlaybackCoordinatorEndToEnd();
+    testProxyMetadataV20P1GFieldsRoundTrip();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

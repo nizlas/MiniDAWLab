@@ -782,6 +782,38 @@ namespace
                 // P1F: explicit silent generation (§15.7) — metadata WITHOUT an asset path.
                 // Optional key; absent loads as false (older v20 drafts have no silent proxies).
                 p.silentGeneration = static_cast<bool>(proxyV.getProperty("silentGeneration", false));
+                // P1G: recorded identity inputs (§12.3) — optional additive keys; absent values
+                // keep the struct defaults (empty identity ⇒ conservative missing-Primary Stale).
+                p.pluginFileOrIdentifier
+                    = proxyV.getProperty("pluginFileOrIdentifier", {}).toString();
+                p.pluginUniqueId = (int)static_cast<double>(
+                    proxyV.getProperty("pluginUniqueId", 0));
+                p.pluginDeprecatedUid = (int)static_cast<double>(
+                    proxyV.getProperty("pluginDeprecatedUid", 0));
+                p.pluginFormatName = proxyV.getProperty("pluginFormatName", {}).toString();
+                p.pluginIsInstrument
+                    = static_cast<bool>(proxyV.getProperty("pluginIsInstrument", true));
+                p.pluginVersionAtRender
+                    = proxyV.getProperty("pluginVersionAtRender", {}).toString();
+                p.primaryStateRevisionAtPublish = static_cast<std::int64_t>(
+                    static_cast<double>(proxyV.getProperty("primaryStateRevisionAtPublish", 0)));
+                p.pairedWithSavedStateAtRender = static_cast<bool>(
+                    proxyV.getProperty("pairedWithSavedStateAtRender", false));
+                p.primaryStateRevisionAtSave = static_cast<std::int64_t>(
+                    static_cast<double>(proxyV.getProperty("primaryStateRevisionAtSave", 0)));
+                {
+                    const juce::var& trr = proxyV.getProperty("timelineReferenceRate", {});
+                    if (trr.isDouble() || trr.isInt() || trr.isInt64())
+                    {
+                        const double v = static_cast<double>(trr);
+                        if (v > 0.0 && std::isfinite(v))
+                        {
+                            p.timelineReferenceRate = v;
+                        }
+                    }
+                }
+                p.renderBlockSize = juce::jmax(1, readNonNegativeInt("renderBlockSize", 512));
+                p.noteOffGateMs = readNonNegativeInt("noteOffGateMs", 100);
                 // Validity gate: identity, path, rate, and length must be usable; otherwise the
                 // whole object is treated as absent (degraded, never fatal). A silent generation
                 // is valid with an EMPTY path (and only with one — no ambiguous fake paths).
@@ -1195,6 +1227,36 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     if (et.proxy.renderedUtc.isNotEmpty())
                     {
                         po->setProperty("renderedUtc", et.proxy.renderedUtc);
+                    }
+                    // P1G recorded identity inputs (§12.3) — omit-when-default additive keys.
+                    if (et.proxy.pluginFileOrIdentifier.isNotEmpty())
+                    {
+                        po->setProperty("pluginFileOrIdentifier", et.proxy.pluginFileOrIdentifier);
+                        po->setProperty("pluginUniqueId", et.proxy.pluginUniqueId);
+                        po->setProperty("pluginDeprecatedUid", et.proxy.pluginDeprecatedUid);
+                        po->setProperty("pluginFormatName", et.proxy.pluginFormatName);
+                        po->setProperty("pluginIsInstrument", et.proxy.pluginIsInstrument);
+                        if (et.proxy.pluginVersionAtRender.isNotEmpty())
+                        {
+                            po->setProperty("pluginVersionAtRender", et.proxy.pluginVersionAtRender);
+                        }
+                        po->setProperty("primaryStateRevisionAtPublish",
+                                        static_cast<juce::int64>(et.proxy.primaryStateRevisionAtPublish));
+                        if (et.proxy.pairedWithSavedStateAtRender)
+                        {
+                            po->setProperty("pairedWithSavedStateAtRender", true);
+                        }
+                        if (et.proxy.primaryStateRevisionAtSave != 0)
+                        {
+                            po->setProperty("primaryStateRevisionAtSave",
+                                            static_cast<juce::int64>(et.proxy.primaryStateRevisionAtSave));
+                        }
+                        if (et.proxy.timelineReferenceRate > 0.0)
+                        {
+                            po->setProperty("timelineReferenceRate", et.proxy.timelineReferenceRate);
+                        }
+                        po->setProperty("renderBlockSize", et.proxy.renderBlockSize);
+                        po->setProperty("noteOffGateMs", et.proxy.noteOffGateMs);
                     }
                     eo->setProperty("proxy", juce::var(po.get()));
                 }
