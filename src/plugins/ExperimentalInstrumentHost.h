@@ -263,6 +263,12 @@ public:
                                                              int outOffsetInBlock,
                                                              int numSamples) noexcept;
 
+    /// [Audio thread] Note the active transport cycle so the proxy reader prepares
+    /// the loop-start region BEFORE the wrap (P1G prepared loop wrapping; atomics
+    /// only). Engine-rate frames in the same domain as the timeline segments.
+    void audioThread_noteProxyLoopRangeForCurrentBlock(std::int64_t loopStartFrames,
+                                                       std::int64_t loopEndFrames) noexcept;
+
     /// [Message thread] Offline mixdown: block until the proxy range is resident so the
     /// following block render cannot underrun. True when resident, past EOF, or not in proxy
     /// mode; false on stream failure/timeout.
@@ -372,6 +378,8 @@ private:
     std::atomic<std::uint64_t> rtProxyBlocksMixed_{ 0 };
     std::atomic<std::uint64_t> rtProxySegmentsDropped_{ 0 };
     std::atomic<std::uint32_t> rtProxyLastPeakBits_{ 0 }; // bitwise float
+    std::atomic<std::int64_t> rtProxyLoopStart_{ -1 };    // prepared transport cycle
+    std::atomic<std::int64_t> rtProxyLoopEnd_{ -1 };
 
     /// §9.4.2 host-observed identity: relays juce::AudioProcessorListener notifications from the
     /// live instance into the semantic revision. Callbacks may arrive on ANY thread (plugins may

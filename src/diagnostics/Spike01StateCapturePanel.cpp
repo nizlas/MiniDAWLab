@@ -747,7 +747,8 @@ private:
                             && callbacks_.appendStaleTestClip && callbacks_.getEngineSampleRate
                             && callbacks_.trySetEngineSampleRate && callbacks_.startTransport
                             && callbacks_.stopTransport && callbacks_.seekTransport
-                            && callbacks_.readCycleWrapCount && callbacks_.resolveHostForTrack;
+                            && callbacks_.readCycleWrapCount && callbacks_.resolveHostForTrack
+                            && callbacks_.queryProxyReaderUnderrunCount;
             if (!ok)
             {
                 appendSessionLog("p1g: missing plan callbacks");
@@ -849,6 +850,10 @@ private:
                              + p1gStateName() + " -> proxyConsumed=" + (consumed ? "PASS" : "FAIL")
                              + " nonSilent=" + (audible ? "PASS" : "FAIL")
                              + " stateCurrent=" + (current ? "PASS" : "FAIL"));
+            // Prepared-loop baseline: once playback is settled, any further underrun
+            // before/at/after the wrap would be a REAL defect (the loop head must
+            // already be prefetched by now — the wrap is minutes of blocks away).
+            p1gUnderrunMark_ = callbacks_.queryProxyReaderUnderrunCount(selectedTrackId());
             return consumed && audible && current;
         });
         autoSteps_.push_back({ 0, "wait: P1G transport loop wrap", [this] {
@@ -860,13 +865,23 @@ private:
                                   };
                                   return true;
                               } });
-        add(1200, "P1G verify audible after loop wrap", [this] {
+        add(1200, "P1G verify seamless prepared loop wrap (zero underruns)", [this] {
             const float peak = p1gProxyPeakNow();
-            const bool ok
-                = peak > 0.0005f
-                  && p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            const std::int64_t underruns
+                = callbacks_.queryProxyReaderUnderrunCount(selectedTrackId());
+            // STRICT state check (no transient-underrun tolerance): a normally
+            // prepared transport loop wrap must never pass through PlaybackUnderrun.
+            const bool current
+                = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            const bool noUnderrun
+                = underruns >= 0 && p1gUnderrunMark_ >= 0 && underruns == p1gUnderrunMark_;
+            const bool ok = peak > 0.0005f && current && noUnderrun;
             appendSessionLog("p1g: loopWrap peak=" + juce::String(peak, 6) + " state="
-                             + p1gStateName() + " -> " + (ok ? "PASS" : "FAIL"));
+                             + p1gStateName() + " underrunDelta="
+                             + juce::String((juce::int64)(underruns - p1gUnderrunMark_))
+                             + " -> nonSilent=" + (peak > 0.0005f ? "PASS" : "FAIL")
+                             + " stateCurrent=" + (current ? "PASS" : "FAIL")
+                             + " zeroUnderruns=" + (noUnderrun ? "PASS" : "FAIL"));
             return ok;
         });
         add(200, "P1G seek to 1.0 s while playing", [this] {
@@ -1768,6 +1783,7 @@ private:
     bool p1gRateSwitchSkipped_ = false;
     std::uint64_t p1gBlocksMark_ = 0;
     std::uint32_t p1gWrapMark_ = 0;
+    std::int64_t p1gUnderrunMark_ = -1; ///< reader underruns at settled playback
     std::vector<TrackId> p1gOtherMuted_;
     juce::File p1gMixdownA_, p1gMixdownB_;
 

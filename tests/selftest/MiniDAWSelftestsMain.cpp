@@ -4353,8 +4353,30 @@ namespace
         return true;
     }
 
-    /// Independent reference for the reader's stateless linear mapping (same float
-    /// math as ProxyPlaybackReader::convertRangeIntoRing).
+    /// INDEPENDENT modified Bessel I0 via the plain power series (deliberately a
+    /// different algorithm from the Numerical-Recipes polynomial the reader inlines,
+    /// so the reference validates the production kernel rather than mirroring it).
+    [[nodiscard]] static double spike03BesselI0Series(const double x)
+    {
+        double term = 1.0;
+        double sum = 1.0;
+        for (int k = 1; k < 64; ++k)
+        {
+            const double h = x / (2.0 * k);
+            term *= h * h;
+            sum += term;
+            if (term < sum * 1.0e-18)
+            {
+                break;
+            }
+        }
+        return sum;
+    }
+
+    /// Independent analytic reference for the reader's position-stateless
+    /// band-limited mapping: the EXACT continuous Kaiser-windowed sinc (no phase
+    /// table) at the documented P1 kernel parameters, double precision throughout.
+    /// Same-rate mapping is a bit-exact copy by contract.
     [[nodiscard]] float spike03Reference(const int ch, const std::int64_t t,
                                          const proxy_playback::ProxyStreamMapping& m)
     {
@@ -4366,13 +4388,56 @@ namespace
         {
             return at(t);
         }
-        const double p = static_cast<double>(t) * ratio;
-        const std::int64_t i0 = static_cast<std::int64_t>(std::floor(p));
-        const float frac = static_cast<float>(p - static_cast<double>(i0));
-        return at(i0) * (1.0f - frac) + at(i0 + 1) * frac;
+        const double z = (double)proxy_playback::kSincZeroCrossings;
+        const double stretch
+            = proxy_playback::kSincCutoffScale * (ratio > 1.0 ? 1.0 / ratio : 1.0);
+        const double half = z / stretch;
+        const double p = (double)t * ratio;
+        const double i0Beta = spike03BesselI0Series(proxy_playback::kSincKaiserBeta);
+        std::int64_t i0 = (std::int64_t)std::ceil(p - half);
+        std::int64_t i1 = (std::int64_t)std::floor(p + half);
+        i0 = std::max<std::int64_t>(i0, 0);
+        i1 = std::min<std::int64_t>(i1, m.assetLengthFrames - 1);
+        double acc = 0.0;
+        for (std::int64_t i = i0; i <= i1; ++i)
+        {
+            const double u = std::abs(((double)i - p) * stretch);
+            double w = 1.0;
+            if (u >= z)
+            {
+                w = 0.0;
+            }
+            else if (u > 0.0)
+            {
+                const double x = juce::MathConstants<double>::pi * u;
+                const double frac = u / z;
+                w = (std::sin(x) / x)
+                    * spike03BesselI0Series(proxy_playback::kSincKaiserBeta
+                                            * std::sqrt(1.0 - frac * frac))
+                    / i0Beta;
+            }
+            acc += (double)at(i) * w;
+        }
+        return (float)(acc * stretch);
     }
 
-    /// Fetch [t0, t0+n) after ensuring residency; expect exact reference equality.
+    /// Reference match: bit-exact for the same-rate copy path; a small tolerance
+    /// for cross-rate conversion (production uses a 512-phase table with linear
+    /// inter-phase interpolation — < 1e-4 vs. the exact continuous kernel).
+    [[nodiscard]] bool spike03MatchesReference(const int ch, const std::int64_t t,
+                                               const float got,
+                                               const proxy_playback::ProxyStreamMapping& m)
+    {
+        const float want = spike03Reference(ch, t, m);
+        if (juce::approximatelyEqual(m.ratio(), 1.0))
+        {
+            return got == want;
+        }
+        return std::abs(got - want) <= 7.5e-4f;
+    }
+
+    /// Fetch [t0, t0+n) after ensuring residency; expect reference equality (exact
+    /// for same-rate, tight tolerance for cross-rate — see spike03MatchesReference).
     void spike03ExpectRange(proxy_playback::ProxyPlaybackReader& r,
                             proxy_playback::ProxyPlaybackIoService& svc,
                             const std::int64_t t0, const int n, const char* what)
@@ -4386,10 +4451,10 @@ namespace
         bool ok = true;
         for (int i = 0; i < n && ok; ++i)
         {
-            ok = l[(size_t)i] == spike03Reference(0, t0 + i, r.mapping())
-                 && rr[(size_t)i] == spike03Reference(1, t0 + i, r.mapping());
+            ok = spike03MatchesReference(0, t0 + i, l[(size_t)i], r.mapping())
+                 && spike03MatchesReference(1, t0 + i, rr[(size_t)i], r.mapping());
         }
-        expect(ok, std::string(what) + ": samples match the deterministic reference exactly");
+        expect(ok, std::string(what) + ": samples match the independent band-limited reference");
     }
 
     void testProxyPlaybackReaderSameRateBitExactAndEof()
@@ -4544,17 +4609,19 @@ namespace
 
     void testProxyPlaybackReaderSixteenReadersBounded()
     {
+        // Production-resampler configuration (44.1 kHz assets on a 48 kHz timeline):
+        // every fill runs the band-limited Kaiser-windowed sinc, not the copy path.
         const juce::File root = spike03Root();
         proxy_playback::ProxyPlaybackIoService svc;
         std::vector<std::shared_ptr<proxy_playback::ProxyPlaybackReader>> readers;
-        const std::int64_t len = 480000; // 10 s @ 48k each
+        const std::int64_t len = 441000; // 10 s @ 44.1k each
         for (int i = 0; i < 16; ++i)
         {
             const juce::File wav = root.getChildFile("many-" + juce::String(i) + ".wav");
-            expect(spike03WriteAsset(wav, 48000.0, len),
+            expect(spike03WriteAsset(wav, 44100.0, len),
                    "spike03-16: asset " + std::to_string(i) + " written");
             proxy_playback::ProxyStreamMapping m;
-            m.assetRate = 48000.0;
+            m.assetRate = 44100.0;
             m.timelineRate = 48000.0;
             m.assetLengthFrames = len;
             auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
@@ -4564,41 +4631,82 @@ namespace
         }
         expect(svc.registeredCount() == 16, "spike03-16: all readers registered");
 
-        // Simulated audio consumption across all 16 (blocks of 512).
+        // Simulated audio consumption across all 16 (blocks of 512) — every pre-EOF
+        // fetch must be fully served with zero underruns while the sinc fill keeps up.
         const double tStart = juce::Time::getMillisecondCounterHiRes();
-        bool allExact = true;
+        bool allServed = true;
+        std::vector<float> l(512), rr(512);
         for (std::int64_t block = 0; block < 64; ++block)
         {
             const std::int64_t t0 = block * 512;
             for (auto& r : readers)
             {
-                if (!r->messageThread_ensureRangeReady(t0, 512, 5000))
-                {
-                    allExact = false;
-                    continue;
-                }
-                std::vector<float> l(512), rr(512);
-                (void)r->audioThread_fetch(t0, l.data(), rr.data(), 512);
-                for (int i = 0; i < 512 && allExact; ++i)
-                {
-                    allExact = allExact && l[(size_t)i] == spike03Sample(0, t0 + i);
-                }
+                allServed = allServed && r->messageThread_ensureRangeReady(t0, 512, 5000)
+                            && r->audioThread_fetch(t0, l.data(), rr.data(), 512);
             }
         }
         const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - tStart;
-        expect(allExact, "spike03-16: 16 simultaneous readers all serve exact audio");
+        expect(allServed, "spike03-16: 16 cross-rate readers stay fully served");
+        std::uint64_t totalUnderruns = 0;
+        for (auto& r : readers)
+        {
+            totalUnderruns += r->underrunCount();
+        }
+        expect(totalUnderruns == 0, "spike03-16: zero underruns across 16 sinc readers");
 
-        // Documented per-reader bound: ring (2 * kRingFrames floats) + fill scratch.
-        const size_t perReaderBytes =
-            2u * proxy_playback::kRingFrames * sizeof(float)
-            + 2u * ((size_t)std::ceil(proxy_playback::kFillChunkFrames
-                                      * proxy_playback::kMaxConversionRatio)
-                    + 8u)
-                  * sizeof(float);
+        // Spot-check correctness against the independent analytic reference (one
+        // reader, one block — bulk math identity is covered by the quality suite).
+        {
+            bool ok = readers[0]->audioThread_fetch(8192, l.data(), rr.data(), 512);
+            for (int i = 0; i < 512 && ok; ++i)
+            {
+                ok = spike03MatchesReference(0, 8192 + i, l[(size_t)i], readers[0]->mapping());
+            }
+            expect(ok, "spike03-16: cross-rate audio matches the independent reference");
+        }
+
+        // Representative AUDIO-CALLBACK cost: one resident 512-frame fetch per reader
+        // (the audio-thread contract is atomics + memcpy regardless of the resampler,
+        // which runs on the I/O thread). Report the aggregate 16-reader cost.
+        const std::int64_t warm = 16 * 512;
+        for (auto& r : readers)
+        {
+            expect(r->messageThread_ensureRangeReady(warm, 64 * 512, 5000),
+                   "spike03-16: callback-cost window resident");
+        }
+        const double c0 = juce::Time::getMillisecondCounterHiRes();
+        constexpr int kReps = 500;
+        for (int rep = 0; rep < kReps; ++rep)
+        {
+            const std::int64_t t0 = warm + (rep % 64) * 512;
+            for (auto& r : readers)
+            {
+                (void)r->audioThread_fetch(t0, l.data(), rr.data(), 512);
+            }
+        }
+        const double callbackUs
+            = (juce::Time::getMillisecondCounterHiRes() - c0) * 1000.0 / kReps;
+        // 512 frames @ 48 kHz = 10667 us deadline; 16 proxy fetches must be far below.
+        expect(callbackUs < 2000.0,
+               "spike03-16: 16-reader callback cost stays far below the 10.7 ms deadline");
+
+        // Documented per-reader bound: ring + asset scratch + converted-output
+        // scratch + loop-head cache (all preallocated, all floats, 2 channels).
+        const size_t chunkCap
+            = (size_t)std::ceil(proxy_playback::kFillChunkFrames
+                                * proxy_playback::kMaxConversionRatio)
+              + 2u * (size_t)proxy_playback::kSincMaxSupportFrames + 16u;
+        const size_t perReaderBytes
+            = 2u * sizeof(float)
+              * ((size_t)proxy_playback::kRingFrames + chunkCap
+                 + (size_t)proxy_playback::kFillChunkFrames
+                 + (size_t)proxy_playback::kLoopHeadFrames);
         const double totalMiB = 16.0 * (double)perReaderBytes / (1024.0 * 1024.0);
-        expect(totalMiB < 24.0, "spike03-16: 16-reader ring memory stays under 24 MiB");
-        std::printf("[spike03] 16 readers: perReader=%.2f MiB total=%.2f MiB consume64blocksX16=%.1f ms\n",
-                    (double)perReaderBytes / (1024.0 * 1024.0), totalMiB, elapsedMs);
+        expect(totalMiB < 24.0, "spike03-16: 16-reader memory stays under 24 MiB");
+        std::printf("[spike03] 16 sinc readers: perReader=%.2f MiB total=%.2f MiB "
+                    "consume64blocksX16=%.1f ms callback16x512=%.0f us (deadline 10667 us)\n",
+                    (double)perReaderBytes / (1024.0 * 1024.0), totalMiB, elapsedMs,
+                    callbackUs);
         for (auto& r : readers)
         {
             svc.unregisterReader(r.get());
@@ -4736,6 +4844,556 @@ namespace
                     (unsigned long long)reader->underrunCount());
         svc.unregisterReader(reader.get());
         (void)wav.deleteFile();
+
+        // Cross-rate fill throughput with the PRODUCTION band-limited resampler
+        // (44.1k asset on a 48k timeline — every frame runs the windowed sinc).
+        const juce::File xwav = root.getChildFile("measure-30s-44k1.wav");
+        const std::int64_t xlen = 44100ll * 30;
+        expect(spike03WriteAsset(xwav, 44100.0, xlen), "spike03-measure: 44.1k asset written");
+        proxy_playback::ProxyStreamMapping xm;
+        xm.assetRate = 44100.0;
+        xm.timelineRate = 48000.0;
+        xm.assetLengthFrames = xlen;
+        auto xreader = std::make_shared<proxy_playback::ProxyPlaybackReader>(xwav, xm);
+        expect(!xreader->openFailed(), "spike03-measure: cross-rate reader opened");
+        svc.registerReader(xreader);
+        expect(xreader->messageThread_ensureRangeReady(0, 512, 5000),
+               "spike03-measure: cross-rate window ready");
+        const double xs0 = juce::Time::getMillisecondCounterHiRes();
+        std::int64_t xserved = 0;
+        for (std::int64_t t = 0; t < 48000ll * 10; t += 512)
+        {
+            if (!xreader->messageThread_ensureRangeReady(t, 512, 5000))
+            {
+                break;
+            }
+            (void)xreader->audioThread_fetch(t, l.data(), r.data(), 512);
+            xserved += 512;
+        }
+        const double xstreamMs = juce::Time::getMillisecondCounterHiRes() - xs0;
+        const double xRt = ((double)xserved / 48000.0) / (xstreamMs / 1000.0);
+        expect(xserved == 938ll * 512 && !xreader->streamFailed(),
+               "spike03-measure: 10 s cross-rate sinc stream served without loss");
+        // One shared low-priority I/O thread must comfortably feed 16 readers:
+        // require well above 16x realtime for a single sinc stream.
+        expect(xRt > 16.0, "spike03-measure: sinc fill sustains > 16x realtime");
+        std::printf("[spike03] sinc 44.1->48 stream10s=%.1f ms (%.0fx realtime) underruns=%llu\n",
+                    xstreamMs, xRt, (unsigned long long)xreader->underrunCount());
+        svc.unregisterReader(xreader.get());
+        (void)xwav.deleteFile();
+    }
+
+    //==========================================================================
+    // P1G hardening — production resampler quality (analytic signals, independent
+    // reference math) and prepared loop wrapping. docs/audits/SPIKE_03_*.md §quality.
+    //==========================================================================
+    /// Stereo analytic sine asset: ch0 = +A sin(2πft/rate), ch1 = the exact negation
+    /// (stereo-synchronization witness: conversion must preserve bit-symmetry).
+    [[nodiscard]] bool spike03WriteSineAsset(const juce::File& target, const double rate,
+                                             const std::int64_t len, const double freq,
+                                             const float amp)
+    {
+        (void)target.deleteFile();
+        juce::WavAudioFormat fmt;
+        auto stream = target.createOutputStream();
+        if (stream == nullptr)
+        {
+            return false;
+        }
+        std::unique_ptr<juce::AudioFormatWriter> w(
+            fmt.createWriterFor(stream.release(), rate, 2, 32, {}, 0));
+        if (w == nullptr)
+        {
+            return false;
+        }
+        juce::AudioBuffer<float> buf(2, 4096);
+        std::int64_t done = 0;
+        while (done < len)
+        {
+            const int run = (int)std::min<std::int64_t>(4096, len - done);
+            for (int i = 0; i < run; ++i)
+            {
+                const double ph = juce::MathConstants<double>::twoPi * freq
+                                  * (double)(done + i) / rate;
+                const auto v = (float)((double)amp * std::sin(ph));
+                buf.setSample(0, i, v);
+                buf.setSample(1, i, -v);
+            }
+            if (!w->writeFromAudioSampleBuffer(buf, 0, run))
+            {
+                return false;
+            }
+            done += run;
+        }
+        return true;
+    }
+
+    /// Ramp asset for structural loop verification: ch0[i] = (i+1) * 2^-24 (exact in
+    /// float for every index used), ch1 = the exact negation. Any inserted zero,
+    /// duplicated or omitted frame changes at least one output sample visibly.
+    [[nodiscard]] bool spike03WriteRampAsset(const juce::File& target, const double rate,
+                                             const std::int64_t len)
+    {
+        (void)target.deleteFile();
+        juce::WavAudioFormat fmt;
+        auto stream = target.createOutputStream();
+        if (stream == nullptr)
+        {
+            return false;
+        }
+        std::unique_ptr<juce::AudioFormatWriter> w(
+            fmt.createWriterFor(stream.release(), rate, 2, 32, {}, 0));
+        if (w == nullptr)
+        {
+            return false;
+        }
+        juce::AudioBuffer<float> buf(2, 4096);
+        std::int64_t done = 0;
+        while (done < len)
+        {
+            const int run = (int)std::min<std::int64_t>(4096, len - done);
+            for (int i = 0; i < run; ++i)
+            {
+                const auto v = (float)((double)(done + i + 1) / 16777216.0);
+                buf.setSample(0, i, v);
+                buf.setSample(1, i, -v);
+            }
+            if (!w->writeFromAudioSampleBuffer(buf, 0, run))
+            {
+                return false;
+            }
+            done += run;
+        }
+        return true;
+    }
+
+    [[nodiscard]] static float spike03RampValue(const std::int64_t i)
+    {
+        return (float)((double)(i + 1) / 16777216.0);
+    }
+
+    /// Fetch a long output range in 4096-frame steps (ensure + fetch each step).
+    /// Returns false if any pre-EOF step is not fully served.
+    [[nodiscard]] bool spike03FetchRange(proxy_playback::ProxyPlaybackReader& r,
+                                         const std::int64_t t0, const std::int64_t n,
+                                         std::vector<float>& outL, std::vector<float>& outR)
+    {
+        outL.assign((size_t)n, -9.0f);
+        outR.assign((size_t)n, -9.0f);
+        for (std::int64_t off = 0; off < n; off += 4096)
+        {
+            const int run = (int)std::min<std::int64_t>(4096, n - off);
+            if (!r.messageThread_ensureRangeReady(t0 + off, run, 5000)
+                || !r.audioThread_fetch(t0 + off, outL.data() + off, outR.data() + off, run))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void testProxyResamplerQualityAnalytic()
+    {
+        const juce::File root = spike03Root();
+        struct Direction
+        {
+            const char* name;
+            double assetRate;
+            double timelineRate;
+        };
+        const Direction dirs[] = { { "44k1-to-48k", 44100.0, 48000.0 },
+                                   { "48k-to-44k1", 48000.0, 44100.0 } };
+        constexpr float kAmp = 0.5f;
+        const double kRefRms = (double)kAmp / std::sqrt(2.0);
+
+        // ---- Passband flatness: <= 0.25 dB through 18 kHz in BOTH directions;
+        // ---- stereo synchronization: ch1 stays the exact negation of ch0.
+        for (const Direction& d : dirs)
+        {
+            for (const double freq : { 1000.0, 10000.0, 18000.0 })
+            {
+                const juce::File wav = root.getChildFile(
+                    juce::String("q-pass-") + d.name + "-" + juce::String((int)freq) + ".wav");
+                const auto len = (std::int64_t)(2.0 * d.assetRate);
+                expect(spike03WriteSineAsset(wav, d.assetRate, len, freq, kAmp),
+                       std::string("q-pass ") + d.name + ": sine asset written");
+                proxy_playback::ProxyStreamMapping m;
+                m.assetRate = d.assetRate;
+                m.timelineRate = d.timelineRate;
+                m.assetLengthFrames = len;
+                proxy_playback::ProxyPlaybackIoService svc;
+                auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+                expect(!r->openFailed(), std::string("q-pass ") + d.name + ": open");
+                svc.registerReader(r);
+                // Steady-state window: skip the first/last 4800 output frames (edge
+                // transients from the asset's own boundaries are not passband error).
+                const auto n = (std::int64_t)d.timelineRate; // 1 s
+                std::vector<float> L, R;
+                expect(spike03FetchRange(*r, 4800, n, L, R),
+                       std::string("q-pass ") + d.name + ": steady range served");
+                double sum2 = 0.0;
+                bool sync = true;
+                for (std::int64_t i = 0; i < n; ++i)
+                {
+                    sum2 += (double)L[(size_t)i] * (double)L[(size_t)i];
+                    sync = sync && (R[(size_t)i] == -L[(size_t)i]);
+                }
+                const double rms = std::sqrt(sum2 / (double)n);
+                const double errDb = 20.0 * std::log10(rms / kRefRms);
+                expect(std::abs(errDb) <= 0.25,
+                       std::string("q-pass ") + d.name + " " + std::to_string((int)freq)
+                           + " Hz: level error " + std::to_string(errDb)
+                           + " dB within 0.25 dB");
+                expect(sync, std::string("q-pass ") + d.name
+                                 + ": channels stay bit-symmetric (no drift)");
+                std::printf("[q] pass %s %5.0f Hz err=%+.4f dB\n", d.name, freq, errDb);
+                svc.unregisterReader(r.get());
+                (void)wav.deleteFile();
+            }
+        }
+
+        // ---- Alias rejection (downsampling 48 -> 44.1): a 23 kHz tone lies above
+        // ---- the 22.05 kHz output Nyquist and must vanish (>= 70 dB down).
+        {
+            const juce::File wav = root.getChildFile("q-alias-23k.wav");
+            const std::int64_t len = 96000; // 2 s @ 48k
+            expect(spike03WriteSineAsset(wav, 48000.0, len, 23000.0, kAmp),
+                   "q-alias: 23 kHz asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 48000.0;
+            m.timelineRate = 44100.0;
+            m.assetLengthFrames = len;
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            svc.registerReader(r);
+            std::vector<float> L, R;
+            expect(spike03FetchRange(*r, 4410, 44100, L, R), "q-alias: range served");
+            double sum2 = 0.0;
+            for (const float v : L)
+            {
+                sum2 += (double)v * (double)v;
+            }
+            const double rms = std::sqrt(sum2 / (double)L.size());
+            const double rejectionDb
+                = rms > 0.0 ? 20.0 * std::log10(kRefRms / rms) : 200.0;
+            expect(rejectionDb >= 70.0,
+                   "q-alias: 23 kHz aliases rejected by " + std::to_string(rejectionDb)
+                       + " dB (>= 70 dB)");
+            std::printf("[q] alias 48->44.1 23 kHz rejection=%.1f dB\n", rejectionDb);
+            svc.unregisterReader(r.get());
+            (void)wav.deleteFile();
+        }
+
+        // ---- Image rejection (upsampling 44.1 -> 48): a 21 kHz tone's first image
+        // ---- lands at 44.1 - 21 = 23.1 kHz (< 24 kHz output Nyquist) and must be
+        // ---- >= 70 dB below the source amplitude. Hann-windowed Goertzel probe.
+        {
+            const juce::File wav = root.getChildFile("q-image-21k.wav");
+            const std::int64_t len = 88200; // 2 s @ 44.1k
+            expect(spike03WriteSineAsset(wav, 44100.0, len, 21000.0, kAmp),
+                   "q-image: 21 kHz asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 44100.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = len;
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            svc.registerReader(r);
+            const std::int64_t n = 32768;
+            std::vector<float> L, R;
+            expect(spike03FetchRange(*r, 4800, n, L, R), "q-image: range served");
+            const auto goertzelHannAmp = [&](const double freq) {
+                const double w = juce::MathConstants<double>::twoPi * freq / 48000.0;
+                double re = 0.0;
+                double im = 0.0;
+                double winSum = 0.0;
+                for (std::int64_t i = 0; i < n; ++i)
+                {
+                    const double hann
+                        = 0.5
+                          - 0.5
+                                * std::cos(juce::MathConstants<double>::twoPi * (double)i
+                                           / (double)(n - 1));
+                    const double s = (double)L[(size_t)i] * hann;
+                    re += s * std::cos(w * (double)i);
+                    im -= s * std::sin(w * (double)i);
+                    winSum += hann;
+                }
+                return 2.0 * std::sqrt(re * re + im * im) / winSum;
+            };
+            const double imageAmp = goertzelHannAmp(23100.0);
+            const double imageDb = imageAmp > 0.0
+                                       ? 20.0 * std::log10((double)kAmp / imageAmp)
+                                       : 200.0;
+            expect(imageDb >= 70.0,
+                   "q-image: 23.1 kHz image rejected by " + std::to_string(imageDb)
+                       + " dB (>= 70 dB)");
+            std::printf("[q] image 44.1->48 (21 kHz -> 23.1 kHz) rejection=%.1f dB\n", imageDb);
+            svc.unregisterReader(r.get());
+            (void)wav.deleteFile();
+        }
+
+        // ---- Exact output duration over a long input (integer rational math).
+        {
+            const std::int64_t len = 44100ll * 60 + 37; // deliberately non-round
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 44100.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = len;
+            const std::int64_t expected = (len * 48000 + 44099) / 44100; // ceil
+            expect(m.timelineEofFrames() == expected,
+                   "q-duration: 60 s+37 timeline EOF matches the exact rational length");
+            proxy_playback::ProxyStreamMapping m2;
+            m2.assetRate = 48000.0;
+            m2.timelineRate = 44100.0;
+            m2.assetLengthFrames = 48000ll * 60 + 41;
+            const std::int64_t expected2 = (m2.assetLengthFrames * 44100 + 47999) / 48000;
+            expect(m2.timelineEofFrames() == expected2,
+                   "q-duration: inverse direction EOF matches the exact rational length");
+        }
+
+        // ---- Impulse response: finite, bounded, and exactly zero outside the
+        // ---- kernel support (stability witness for the windowed sinc).
+        {
+            const juce::File wav = root.getChildFile("q-impulse.wav");
+            const std::int64_t len = 44100;
+            {
+                (void)wav.deleteFile();
+                juce::WavAudioFormat fmt;
+                auto stream = wav.createOutputStream();
+                expect(stream != nullptr, "q-impulse: stream created");
+                std::unique_ptr<juce::AudioFormatWriter> w(
+                    fmt.createWriterFor(stream.release(), 44100.0, 2, 32, {}, 0));
+                expect(w != nullptr, "q-impulse: writer created");
+                juce::AudioBuffer<float> buf(2, 4096);
+                std::int64_t done = 0;
+                while (done < len)
+                {
+                    const int run = (int)std::min<std::int64_t>(4096, len - done);
+                    buf.clear();
+                    if (done <= 10000 && 10000 < done + run)
+                    {
+                        buf.setSample(0, (int)(10000 - done), 1.0f);
+                        buf.setSample(1, (int)(10000 - done), -1.0f);
+                    }
+                    expect(w->writeFromAudioSampleBuffer(buf, 0, run), "q-impulse: chunk");
+                    done += run;
+                }
+            }
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 44100.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = len;
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            svc.registerReader(r);
+            // Impulse at asset 10000 maps to timeline ~10884; the kernel support is
+            // kSincZeroCrossings / stretch asset samples (< 60 timeline frames here).
+            const std::int64_t center = 10884;
+            std::vector<float> L, R;
+            expect(spike03FetchRange(*r, center - 512, 1024, L, R), "q-impulse: served");
+            bool finite = true;
+            float peak = 0.0f;
+            for (std::int64_t i = 0; i < 1024; ++i)
+            {
+                finite = finite && std::isfinite(L[(size_t)i]);
+                peak = std::max(peak, std::abs(L[(size_t)i]));
+                const std::int64_t t = center - 512 + i;
+                if (std::abs(t - center) > 90)
+                {
+                    finite = finite && L[(size_t)i] == 0.0f; // decays to EXACT zero
+                }
+            }
+            expect(finite && peak > 0.5f && peak <= 1.0f,
+                   "q-impulse: response is finite, bounded and exactly zero outside support");
+            svc.unregisterReader(r.get());
+            (void)wav.deleteFile();
+        }
+
+        // ---- Seek/reset determinism: a heavily seeked reader reproduces BIT-EXACTLY
+        // ---- what a fresh reader produces at the same position (cross-rate).
+        {
+            const juce::File wav = root.getChildFile("q-seek.wav");
+            const std::int64_t len = 441000; // 10 s @ 44.1k
+            expect(spike03WriteAsset(wav, 44100.0, len), "q-seek: asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 44100.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = len;
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto seeker = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            auto fresh = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            svc.registerReader(seeker);
+            svc.registerReader(fresh);
+            std::vector<float> aL, aR, bL, bR;
+            expect(spike03FetchRange(*seeker, 0, 4096, aL, aR), "q-seek: sequential play");
+            expect(spike03FetchRange(*seeker, 400000, 4096, aL, aR), "q-seek: far seek");
+            expect(spike03FetchRange(*seeker, 50000, 2048, aL, aR), "q-seek: seek back");
+            expect(spike03FetchRange(*fresh, 50000, 2048, bL, bR), "q-seek: fresh reader");
+            bool identical = true;
+            for (size_t i = 0; i < aL.size() && identical; ++i)
+            {
+                identical = aL[i] == bL[i] && aR[i] == bR[i];
+            }
+            expect(identical,
+                   "q-seek: seeked reader output is bit-identical to a fresh reader");
+            svc.unregisterReader(seeker.get());
+            svc.unregisterReader(fresh.get());
+            (void)wav.deleteFile();
+        }
+    }
+
+    void testProxyPlaybackReaderPreparedLoop()
+    {
+        const juce::File root = spike03Root();
+
+        // ---- Same-rate ramp source: structural bit-exact loop verification.
+        const juce::File wav = root.getChildFile("loop-ramp-48k.wav");
+        const std::int64_t len = 480000; // 10 s @ 48k
+        expect(spike03WriteRampAsset(wav, 48000.0, len), "p1g-loop: ramp asset written");
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 48000.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = len;
+        proxy_playback::ProxyPlaybackIoService svc;
+        auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+        expect(!r->openFailed(), "p1g-loop: reader opened");
+        svc.registerReader(r);
+
+        const std::int64_t L = 100000;
+        const std::int64_t R = 140000;
+        std::vector<float> dl(512), dr(512);
+        const auto fetchExact = [&](const std::int64_t t0, const int n, const char* what) {
+            const bool served = r->audioThread_fetch(t0, dl.data(), dr.data(), n);
+            bool ok = served;
+            for (int i = 0; i < n && ok; ++i)
+            {
+                ok = dl[(size_t)i] == spike03RampValue(t0 + i)
+                     && dr[(size_t)i] == -spike03RampValue(t0 + i);
+            }
+            expect(ok, std::string("p1g-loop: ") + what
+                           + ": fully served with exact ramp continuity (no zeros, "
+                             "no duplicated or omitted frames)");
+        };
+
+        // Play near the boundary; the loop head must become resident BEFORE the wrap
+        // while the ring window is still parked at the pre-wrap region.
+        expect(r->messageThread_ensureRangeReady(R - 4096, 4096, 5000),
+               "p1g-loop: pre-boundary region resident");
+        r->audioThread_setPreparedLoop(L, R);
+        expect(r->messageThread_ensureLoopHeadReady(5000),
+               "p1g-loop: loop head prepared in advance");
+        expect(r->loopHeadReadyFor(L), "p1g-loop: head is resident for the loop start");
+
+        // (1) Block ends EXACTLY at the loop end, next block starts at the loop start.
+        fetchExact(R - 512, 512, "block ending exactly at loop end");
+        fetchExact(L, 512, "wrapped block from the loop head");
+        expect(r->isReadyAtDesired(),
+               "p1g-loop: a prepared wrap is READY, not ProxyPreparing");
+        expect(r->underrunCount() == 0, "p1g-loop: exact-boundary wrap has ZERO underruns");
+
+        // (2) Boundary in the MIDDLE of a 512-frame block (two segments, one block).
+        // Production steady state: the loop span (40000) is smaller than the
+        // read-ahead (65536), so after the first wrap the ring covers the WHOLE
+        // loop — make that state explicit, then split a block across the boundary.
+        expect(r->messageThread_ensureRangeReady(L, (int)(R - L), 5000),
+               "p1g-loop: whole loop window resident (span < read-ahead)");
+        fetchExact(R - 300, 300, "tail segment up to the boundary");
+        fetchExact(L, 212, "wrapped mid-block segment");
+        expect(r->underrunCount() == 0, "p1g-loop: mid-block wrap has ZERO underruns");
+
+        // (3) Loop-range CHANGE prepares the new window; a very short loop wraps
+        //     multiple times inside one 512-frame block, entirely from the head.
+        const std::int64_t L2 = 300000;
+        const std::int64_t R2 = 300150; // 150-frame loop: 3 wraps inside one block
+        r->audioThread_setPreparedLoop(L2, R2);
+        expect(r->messageThread_ensureLoopHeadReady(5000),
+               "p1g-loop: changed loop range re-prepares the head");
+        expect(r->loopHeadReadyFor(L2) && !r->loopHeadReadyFor(L),
+               "p1g-loop: head now serves the NEW loop window");
+        fetchExact(L2, 150, "short-loop pass 1");
+        fetchExact(L2, 150, "short-loop pass 2");
+        fetchExact(L2, 150, "short-loop pass 3");
+        fetchExact(L2, 62, "short-loop final partial segment");
+        expect(r->underrunCount() == 0, "p1g-loop: multiple wraps per block, ZERO underruns");
+        // Re-sync the ring with the last consumed position before jumping back:
+        // guarantees no in-flight recenter targets a stale position afterwards.
+        expect(r->messageThread_ensureRangeReady(L2, 150, 5000),
+               "p1g-loop: ring re-synced after the short-loop excursion");
+
+        // (4) Repeated loops: 30 wraps with NO accumulated drift (positions are
+        //     absolute — every pass reproduces the identical ramp values). One
+        //     residency wait re-parks the window on the loop after the short-loop
+        //     excursion; every pass then runs like real transport (no reseeks).
+        r->audioThread_setPreparedLoop(L, R);
+        expect(r->messageThread_ensureLoopHeadReady(5000), "p1g-loop: head back on [L,R)");
+        expect(r->messageThread_ensureRangeReady(L, (int)(R - L), 5000),
+               "p1g-loop: loop window re-parked for repeated passes");
+        for (int pass = 0; pass < 30; ++pass)
+        {
+            fetchExact(R - 512, 512, "repeated-loop tail");
+            fetchExact(L, 512, "repeated-loop wrap");
+        }
+        expect(r->underrunCount() == 0,
+               "p1g-loop: 30 prepared wraps produced ZERO underruns and no drift");
+
+        // (5) GENUINE I/O starvation still reports an underrun (distinct from a
+        //     prepared wrap): far pre-EOF position outside ring AND head.
+        expect(!r->audioThread_fetch(430000, dl.data(), dr.data(), 512),
+               "p1g-loop: starved fetch is not fully served");
+        expect(r->underrunCount() == 1,
+               "p1g-loop: genuine starvation still counts exactly one underrun");
+        svc.unregisterReader(r.get());
+
+        // ---- Non-integer rate mapping at the boundary (44.1k asset, 48k timeline):
+        // ---- wrap output is bit-identical to a fresh reader at the same positions.
+        const juce::File xwav = root.getChildFile("loop-cross-44k1.wav");
+        const std::int64_t xlen = 441000;
+        expect(spike03WriteRampAsset(xwav, 44100.0, xlen), "p1g-loop-x: asset written");
+        proxy_playback::ProxyStreamMapping xm;
+        xm.assetRate = 44100.0;
+        xm.timelineRate = 48000.0;
+        xm.assetLengthFrames = xlen;
+        auto xr = std::make_shared<proxy_playback::ProxyPlaybackReader>(xwav, xm);
+        auto xfresh = std::make_shared<proxy_playback::ProxyPlaybackReader>(xwav, xm);
+        svc.registerReader(xr);
+        svc.registerReader(xfresh);
+        const std::int64_t L3 = 48001; // deliberately non-round timeline positions
+        const std::int64_t R3 = 96003;
+        expect(xr->messageThread_ensureRangeReady(R3 - 1024, 1024, 5000),
+               "p1g-loop-x: pre-boundary resident");
+        xr->audioThread_setPreparedLoop(L3, R3);
+        expect(xr->messageThread_ensureLoopHeadReady(5000), "p1g-loop-x: head prepared");
+        std::vector<float> aL(512), aR(512), bL(512), bR(512);
+        expect(xr->audioThread_fetch(R3 - 256, aL.data(), aR.data(), 256),
+               "p1g-loop-x: tail before non-integer boundary served");
+        expect(xfresh->messageThread_ensureRangeReady(R3 - 256, 256, 5000)
+                   && xfresh->audioThread_fetch(R3 - 256, bL.data(), bR.data(), 256),
+               "p1g-loop-x: fresh reader tail served");
+        bool same = true;
+        for (int i = 0; i < 256 && same; ++i)
+        {
+            same = aL[(size_t)i] == bL[(size_t)i] && aR[(size_t)i] == bR[(size_t)i];
+        }
+        expect(same, "p1g-loop-x: tail is bit-identical to a fresh reader");
+        expect(xr->audioThread_fetch(L3, aL.data(), aR.data(), 256),
+               "p1g-loop-x: wrapped segment served from the head");
+        expect(xfresh->messageThread_ensureRangeReady(L3, 256, 5000)
+                   && xfresh->audioThread_fetch(L3, bL.data(), bR.data(), 256),
+               "p1g-loop-x: fresh reader wrap served");
+        same = true;
+        for (int i = 0; i < 256 && same; ++i)
+        {
+            same = aL[(size_t)i] == bL[(size_t)i] && aR[(size_t)i] == bR[(size_t)i];
+        }
+        expect(same,
+               "p1g-loop-x: non-integer-rate wrap is bit-identical to a fresh reader "
+               "(no duplicated or omitted timeline frames)");
+        expect(xr->underrunCount() == 0, "p1g-loop-x: cross-rate prepared wrap, ZERO underruns");
+        svc.unregisterReader(xr.get());
+        svc.unregisterReader(xfresh.get());
+        (void)wav.deleteFile();
+        (void)xwav.deleteFile();
     }
 
     //==========================================================================
@@ -5150,7 +5808,7 @@ namespace
             bool ok = true;
             for (int i = 0; i < 512 && ok; ++i)
             {
-                ok = l[(size_t)i] == spike03Reference(0, i, hostSlot->reader->mapping());
+                ok = spike03MatchesReference(0, i, l[(size_t)i], hostSlot->reader->mapping());
             }
             expect(ok, "p1g-e2e: cross-rate playback matches the deterministic 44.1k mapping");
         }
@@ -5380,6 +6038,8 @@ int main()
     testProxyPlaybackReaderRetirementReleasesHandle();
     testProxyPlaybackReaderOpenValidation();
     testProxyPlaybackReaderMeasurements();
+    testProxyResamplerQualityAnalytic();
+    testProxyPlaybackReaderPreparedLoop();
 
     testProxyPlaybackSourceSelectionMatrix();
     testProxyCurrencyUnderRecordedConfig();

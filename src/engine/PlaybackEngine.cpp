@@ -1402,6 +1402,14 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     entry->host->audioThread_noteProxyTimelineSegmentForCurrentBlock(
                         timelineStartAudible, outFrame0 + silencePrefix, audibleRun);
+                    // Prepared loop wrapping: announce the active cycle (in the same
+                    // shifted timeline domain as the segments) so the proxy reader
+                    // prefetches the loop-start region before the wrap. Atomics only.
+                    if (validCycle)
+                    {
+                        entry->host->audioThread_noteProxyLoopRangeForCurrentBlock(
+                            locL + playbackShift, locR + playbackShift);
+                    }
                 }
 
                 if (routePlayEdgeDiag && sx >= 0 && emitPtr != nullptr)

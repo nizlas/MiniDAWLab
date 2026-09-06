@@ -84,6 +84,9 @@ struct Spike01PanelCallbacks
     std::function<int(TrackId)> queryProxyPlaybackRuntimeState;
     /// True when the coordinator's published view for the track selects Proxy.
     std::function<bool(TrackId)> isProxyViewSelected;
+    /// Cumulative proxy-reader underrun count for the track's published view
+    /// (-1 when no reader). A normally PREPARED loop wrap must not increase it.
+    std::function<std::int64_t(TrackId)> queryProxyReaderUnderrunCount;
     /// Save through the normal ProjectIoCoordinator path (persists the save pairing).
     std::function<bool()> saveProjectNow;
     /// Blocking offline WAV mixdown through the real exporter (device rate, overwrite ok).

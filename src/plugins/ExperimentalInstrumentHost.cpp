@@ -1745,6 +1745,17 @@ void ExperimentalInstrumentHost::audioThread_noteProxyTimelineSegmentForCurrentB
     seg.numSamples = numSamples;
 }
 
+void ExperimentalInstrumentHost::audioThread_noteProxyLoopRangeForCurrentBlock(
+    const std::int64_t loopStartFrames, const std::int64_t loopEndFrames) noexcept
+{
+    if (loopStartFrames < 0 || loopEndFrames <= loopStartFrames)
+    {
+        return;
+    }
+    rtProxyLoopStart_.store(loopStartFrames, std::memory_order_relaxed);
+    rtProxyLoopEnd_.store(loopEndFrames, std::memory_order_relaxed);
+}
+
 bool ExperimentalInstrumentHost::messageThread_prefetchProxyRangeForOffline(
     const std::int64_t timelineStartFrames, const int numSamples, const int timeoutMs) noexcept
 {
@@ -3633,6 +3644,20 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         if (L == nullptr || R == nullptr)
         {
             return;
+        }
+
+        // Prepared loop wrapping: forward the engine-announced transport cycle to
+        // the reader (atomics only) so the I/O thread keeps the loop-start region
+        // resident BEFORE the playhead reaches the boundary. A normal loop wrap is
+        // then served from the loop-head cache with zero underruns.
+        if (proxyView->reader != nullptr)
+        {
+            const std::int64_t lps = rtProxyLoopStart_.load(std::memory_order_relaxed);
+            if (lps >= 0)
+            {
+                proxyView->reader->audioThread_setPreparedLoop(
+                    lps, rtProxyLoopEnd_.load(std::memory_order_relaxed));
+            }
         }
 
         // Production mix step is the extracted (selftest-covered) pure function:

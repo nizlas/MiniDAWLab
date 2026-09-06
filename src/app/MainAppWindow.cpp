@@ -1647,6 +1647,16 @@ public:
             const auto view = proxyPlaybackCoordinator_->publishedViewForTrack(tid);
             return view != nullptr && view->useProxy;
         };
+        cb.queryProxyReaderUnderrunCount = [this](const TrackId tid) -> std::int64_t {
+            if (proxyPlaybackCoordinator_ == nullptr)
+            {
+                return -1;
+            }
+            const auto view = proxyPlaybackCoordinator_->publishedViewForTrack(tid);
+            return (view != nullptr && view->reader != nullptr)
+                       ? (std::int64_t)view->reader->underrunCount()
+                       : -1;
+        };
         cb.saveProjectNow = [this] {
             if (projectIoCoordinator_ == nullptr)
             {
