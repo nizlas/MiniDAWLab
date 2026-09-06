@@ -764,6 +764,10 @@ namespace
                     return fallback;
                 };
                 p.fingerprintSchemaVersion = readNonNegativeInt("fingerprintSchemaVersion", 1);
+                // P1D preflight additions — optional keys, absent-key defaults (algorithm 1 =
+                // SHA-256; channels 2 = stereo proxy v1). Values below 1 repair to the default.
+                p.fingerprintAlgorithmId = juce::jmax(1, readNonNegativeInt("fingerprintAlgorithmId", 1));
+                p.channels = juce::jmax(1, readNonNegativeInt("channels", 2));
                 p.pluginLatencySamples = readNonNegativeInt("pluginLatencySamples", 0);
                 p.latencyPolicyVersion = readNonNegativeInt("latencyPolicyVersion", 1);
                 p.tailPolicyVersion = readNonNegativeInt("tailPolicyVersion", 1);
@@ -1163,8 +1167,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                     juce::DynamicObject::Ptr po = new juce::DynamicObject();
                     po->setProperty("generationId", et.proxy.generationId);
                     po->setProperty("fingerprintSchemaVersion", et.proxy.fingerprintSchemaVersion);
+                    po->setProperty("fingerprintAlgorithmId", et.proxy.fingerprintAlgorithmId);
                     po->setProperty("relativePath", et.proxy.relativePath);
                     po->setProperty("sampleRate", et.proxy.sampleRate);
+                    po->setProperty("channels", et.proxy.channels);
                     po->setProperty("lengthSamples", static_cast<juce::int64>(et.proxy.lengthSamples));
                     po->setProperty("pluginLatencySamples", et.proxy.pluginLatencySamples);
                     po->setProperty("latencyPolicyVersion", et.proxy.latencyPolicyVersion);

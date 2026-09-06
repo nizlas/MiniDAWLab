@@ -1660,12 +1660,22 @@ void ExperimentalInstrumentHost::clearControllerWireCallbacks() noexcept
 
 void ExperimentalInstrumentHost::closeNativeEditor()
 {
+    if (editorWindow_ != nullptr)
+    {
+        // §9.4.2 conservative lifecycle invalidation (editor close half; see openNativeEditor).
+        primarySemanticRevision_.bump();
+    }
     editorWindow_.reset();
 }
 
 void ExperimentalInstrumentHost::editorWindowClosing()
 {
     writeExperimentalInstrumentLogLine("native editor: window closing (released)");
+    if (editorWindow_ != nullptr)
+    {
+        // §9.4.2 conservative lifecycle invalidation (user-driven editor close path).
+        primarySemanticRevision_.bump();
+    }
     editorWindow_.reset();
 }
 
@@ -2002,6 +2012,11 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromVst3File(const juce::
     owner->inst = std::move(inst);
     owner->layoutOk = true;
 
+    // §9.4.2: plugin assignment/replacement is a Primary sound-state change; attach the
+    // notification relay before publish so no host-observable change can be missed.
+    owner->inst->addListener(&primaryRevisionBumpListener_);
+    primarySemanticRevision_.bump();
+
     std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
@@ -2082,6 +2097,29 @@ juce::String ExperimentalInstrumentHost::getCurrentInstrumentStateBase64() const
     writeExperimentalInstrumentLogLine("plugin-state: save ok bytes=" + juce::String(nBytes)
                                        + " base64Chars=" + juce::String(b64.length()));
     return b64;
+}
+
+bool ExperimentalInstrumentHost::captureInstrumentStateForRender(juce::MemoryBlock& out) const
+{
+    // Production proxy-render snapshot capture (§9.4.1): message thread only — the same
+    // `getStateInformation` boundary the Save path uses. The captured bytes are the exact
+    // opaque render payload; capture counts stay minimal (§9.4.3 volatile-capture caution).
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        jassertfalse;
+        return false;
+    }
+    auto o = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
+    if (o == nullptr || o->inst == nullptr || !o->layoutOk)
+    {
+        return false;
+    }
+    out.reset();
+    o->inst->getStateInformation(out);
+    writeExperimentalInstrumentLogLine("plugin-state: render-snapshot capture bytes="
+                                       + juce::String((juce::int64)out.getSize()));
+    return out.getSize() > 0;
 }
 
 juce::AudioPluginInstance* ExperimentalInstrumentHost::spike01LiveInstanceForDiagnostics() const noexcept
@@ -2332,6 +2370,11 @@ juce::Result ExperimentalInstrumentHost::loadInstrumentFromDescription(const juc
     owner->inst = std::move(inst);
     owner->layoutOk = finalLayoutOk;
 
+    // §9.4.2: assignment/replacement + any DAL-performed state restore above are Primary
+    // sound-state changes; attach the notification relay before publish.
+    owner->inst->addListener(&primaryRevisionBumpListener_);
+    primarySemanticRevision_.bump();
+
     std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
 
     const int totalCh = owner->inst->getTotalNumOutputChannels();
@@ -2476,6 +2519,10 @@ void ExperimentalInstrumentHost::unloadInstrument()
 
     if (prev != nullptr && prev->inst != nullptr)
     {
+        // §9.4.2: plugin removal is a Primary sound-state change. Detach the notification
+        // relay before destruction so a tearing-down instance can never call back.
+        prev->inst->removeListener(&primaryRevisionBumpListener_);
+        primarySemanticRevision_.bump();
         prev->inst->releaseResources();
     }
 
@@ -3399,6 +3446,9 @@ void ExperimentalInstrumentHost::openNativeEditor()
         return;
     }
     editorWindow_ = std::make_unique<ExperimentalPluginEditorWindow>(*this, *owner->inst, std::move(ed));
+    // §9.4.2 conservative lifecycle invalidation: a native editor session may change the
+    // Primary's sound state without any notification DAL can observe.
+    primarySemanticRevision_.bump();
     writeExperimentalInstrumentLogLine("native editor: open succeeded");
     schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
 }

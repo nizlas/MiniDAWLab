@@ -174,6 +174,9 @@ struct ProjectFileProxyMetadataV20
     /// render ("sha256:…"). Empty ⇒ invalid ⇒ whole object treated as absent on load.
     juce::String generationId;
     int fingerprintSchemaVersion = 1;
+    /// Fingerprint hash algorithm id (1 = SHA-256, `proxy_fingerprint::kFingerprintAlgorithmId`).
+    /// Optional v20 key (P1D preflight); absent loads as 1.
+    int fingerprintAlgorithmId = 1;
     /// Project-relative path under `InstrumentProxies/` (forward slashes). Empty ⇒ invalid.
     juce::String relativePath;
     /// Recorded RENDER sample rate — generation identity (PI-030). Playback at another engine
@@ -182,6 +185,10 @@ struct ProjectFileProxyMetadataV20
     /// Asset length at the recorded render rate. The asset ends when the accepted tail completes
     /// (§15.6) — it is never zero-padded to the project end.
     std::int64_t lengthSamples = 0;
+    /// Rendered audio channel count (proxy v1 assets are stereo, §15.5). Optional v20 key
+    /// (P1D preflight); absent loads as 2. The concrete sample format is versioned by
+    /// `proxyFormatVersion` (format v1 = 32-bit-float WAV).
+    int channels = 2;
     /// PI-014: `getLatencySamples` of the prepared render instance; recorded, never pre-trimmed.
     int pluginLatencySamples = 0;
     int latencyPolicyVersion = 1;

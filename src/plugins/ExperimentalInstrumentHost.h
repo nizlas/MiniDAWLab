@@ -37,6 +37,7 @@
 #include <set>
 
 #include "diagnostics/DrumNameDiagnosticConfig.h"
+#include "instruments/PrimarySemanticRevision.h"
 #include "plugins/Vst3ChildProcessScan.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -245,6 +246,33 @@ public:
     }
 
     // -----------------------------------------------------------------------
+    // Primary semantic revision + render-state capture (production; steering
+    // §9.4.2 hybrid identity contract, wired in the P1D preflight)
+    // -----------------------------------------------------------------------
+    /// [Any thread] The host-managed monotonic Primary revision for THIS host slot. Bumped by
+    /// every DAL-observable Primary sound-state change (see PrimarySemanticRevision.h for the
+    /// authoritative bump-source list). 0 = nothing observed yet. Proxy currency compares a
+    /// captured revision against this — never freshly captured state bytes (§9.4.2, PI-028).
+    [[nodiscard]] std::uint64_t getPrimarySemanticRevision() const noexcept
+    {
+        return primarySemanticRevision_.current();
+    }
+
+    /// [Any thread] Explicit DAL-initiated Primary state operation (§9.4.2 bump source) that is
+    /// not already covered by the load/unload/editor/listener wiring inside this host.
+    void bumpPrimarySemanticRevision() noexcept
+    {
+        (void)primarySemanticRevision_.bump();
+    }
+
+    /// [Message thread] Capture the live Primary's exact opaque state bytes for a proxy render
+    /// request (§9.4.1 authoritative render state; same `getStateInformation` boundary as Save).
+    /// Returns false when no processable instrument is loaded or called off the message thread.
+    /// The bytes are the RENDER PAYLOAD restored into the isolated render instance only — never
+    /// a semantic currency check.
+    [[nodiscard]] bool captureInstrumentStateForRender(juce::MemoryBlock& out) const;
+
+    // -----------------------------------------------------------------------
     // SPIKE-01 diagnostics (P0/P1A validation spike; removable with the spike)
     // -----------------------------------------------------------------------
     /// [Message thread] SPIKE-01 state-capture probe ONLY (see
@@ -291,6 +319,31 @@ private:
     std::atomic<std::uint64_t> rtMidiDeliveryBoundaryBlocks_{ 0 };
 
     std::atomic<std::shared_ptr<InstrumentOwner>> activeOwner_;
+
+    /// §9.4.2 host-observed identity: relays juce::AudioProcessorListener notifications from the
+    /// live instance into the semantic revision. Callbacks may arrive on ANY thread (plugins may
+    /// notify from the audio thread) — the relay only performs one relaxed atomic increment.
+    struct PrimaryRevisionBumpListener final : juce::AudioProcessorListener
+    {
+        explicit PrimaryRevisionBumpListener(mini_daw::PrimarySemanticRevision& r) noexcept
+            : rev(r)
+        {
+        }
+        void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override
+        {
+            (void)rev.bump(); // host-observed parameter change
+        }
+        void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override
+        {
+            // Covers nonParameterStateChanged (setDirty hints), programChanged and
+            // latencyChanged — all conservative §9.4 sound-state-change signals.
+            (void)rev.bump();
+        }
+        mini_daw::PrimarySemanticRevision& rev;
+    };
+
+    mini_daw::PrimarySemanticRevision primarySemanticRevision_;
+    PrimaryRevisionBumpListener primaryRevisionBumpListener_{ primarySemanticRevision_ };
 
     std::unique_ptr<juce::DocumentWindow> editorWindow_;
 

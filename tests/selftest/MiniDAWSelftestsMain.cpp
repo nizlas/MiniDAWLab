@@ -24,6 +24,7 @@
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/MidiDependencyEnumeration.h"
+#include "instruments/PrimarySemanticRevision.h"
 #include "instruments/ProxyFingerprint.h"
 #include "instruments/ProxyRenderSnapshot.h"
 #include "io/InstrumentMidiClipExport.h"
@@ -46,6 +47,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -922,6 +924,8 @@ namespace
         et.hasProxy = true;
         et.proxy.generationId = "sha256:0011aabb";
         et.proxy.fingerprintSchemaVersion = 1;
+        et.proxy.fingerprintAlgorithmId = 1;
+        et.proxy.channels = 2;
         et.proxy.relativePath = "InstrumentProxies/track_2_sha256-0011aabb.wav";
         et.proxy.sampleRate = 48000.0;
         et.proxy.lengthSamples = 480000;
@@ -978,10 +982,40 @@ namespace
                      && et.proxy.pluginLatencySamples == 256 && et.proxy.fingerprintSchemaVersion == 1
                      && et.proxy.latencyPolicyVersion == 1 && et.proxy.tailPolicyVersion == 1
                      && et.proxy.renderPolicyVersion == 1 && et.proxy.proxyFormatVersion == 1
+                     && et.proxy.fingerprintAlgorithmId == 1 && et.proxy.channels == 2
                      && et.proxy.renderedUtc == "2026-09-06T12:00:00Z"
                      && et.proxyUpdateMode == "onSave";
             }
             expect(ok, "p1b: pluginVersion + full proxy metadata + update mode round-trip");
+        }
+
+        // P1D preflight keys are optional: a v20 proxy object written before them (or by another
+        // tool) loads with the locked defaults (algorithm 1 = SHA-256, 2 = stereo channels).
+        {
+            const auto wr = writeProjectFile(v20File, data);
+            juce::var root;
+            const auto pr = juce::JSON::parse(v20File.loadFileAsString(), root);
+            expect(wr.wasOk() && pr.wasOk() && root.getDynamicObject() != nullptr,
+                   "p1d-preflight: fixture parse ok");
+            if (auto* arr = root.getProperty("experimentalInstrumentTracks", {}).getArray())
+            {
+                for (auto& tv : *arr)
+                {
+                    if (auto* proxyObj = tv.getProperty("proxy", {}).getDynamicObject())
+                    {
+                        proxyObj->removeProperty("fingerprintAlgorithmId");
+                        proxyObj->removeProperty("channels");
+                    }
+                }
+            }
+            (void)v20File.replaceWithText(juce::JSON::toString(root, true));
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(v20File, back);
+            expect(rr.wasOk() && back.experimentalInstrumentTracks.size() == 1U
+                       && back.experimentalInstrumentTracks[0].hasProxy
+                       && back.experimentalInstrumentTracks[0].proxy.fingerprintAlgorithmId == 1
+                       && back.experimentalInstrumentTracks[0].proxy.channels == 2,
+                   "p1d-preflight: absent fingerprintAlgorithmId/channels load as defaults");
         }
 
         // Reference-rate stability: a v20 file whose device rate differs keeps its own reference.
@@ -2489,6 +2523,39 @@ namespace
     }
 } // namespace
 
+namespace
+{
+    /// P1D preflight — §9.4.2 host-managed monotonic Primary revision: monotonic from 0, exact
+    /// under concurrent bumps (plugin notifications may arrive on any thread, incl. audio).
+    void testPrimarySemanticRevisionCounter()
+    {
+        mini_daw::PrimarySemanticRevision rev;
+        expect(rev.current() == 0, "p1d-preflight: revision starts at 0 (nothing observed)");
+        expect(rev.bump() == 1 && rev.current() == 1,
+               "p1d-preflight: bump returns the new monotonic value");
+
+        constexpr int kThreads = 4;
+        constexpr int kBumpsPerThread = 5000;
+        std::vector<std::thread> ts;
+        ts.reserve(kThreads);
+        for (int t = 0; t < kThreads; ++t)
+        {
+            ts.emplace_back([&rev] {
+                for (int i = 0; i < kBumpsPerThread; ++i)
+                {
+                    (void)rev.bump();
+                }
+            });
+        }
+        for (auto& t : ts)
+        {
+            t.join();
+        }
+        expect(rev.current() == 1 + (std::uint64_t)kThreads * kBumpsPerThread,
+               "p1d-preflight: concurrent bumps lose no revision (atomic counter)");
+    }
+} // namespace
+
 int main()
 {
     testTitleAndStatus();
@@ -2511,6 +2578,7 @@ int main()
     testFingerprintExclusions();
     testSilentGenerationAndSpan();
     testCcNormalizationLastWins();
+    testPrimarySemanticRevisionCounter();
     testAuditionDispatchIntegration();
     testToolbarLayoutAndVisibility();
     testCcLaneViewState();
