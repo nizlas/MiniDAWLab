@@ -155,6 +155,10 @@ struct ProxyRenderExecutionConfig
     /// Diagnostic retention of a tail-limit-failed artifact (§15.2: MAY be retained for
     /// diagnostics, never published). Default false ⇒ failures always delete the temp file.
     bool retainFailedTailArtifactForDiagnostics = false;
+    /// P1I live progress (PI-013): called once per block with the milliseconds of
+    /// destination material rendered so far. Must be cheap (production stores to a
+    /// scheduler-owned atomic); null = no progress reporting.
+    std::function<void(std::int64_t renderedMs)> progressSink;
 };
 
 //==============================================================================
@@ -259,6 +263,11 @@ template <typename Proc>
         if (cfg.blockBoundaryPauseGate)
         {
             cfg.blockBoundaryPauseGate();
+        }
+        // P1I live progress (PI-013): rendered-material milliseconds so far.
+        if (cfg.progressSink)
+        {
+            cfg.progressSink((std::int64_t)(1000.0 * (double)pos / cfg.renderSampleRate));
         }
         // §9 cooperative cancellation at every block boundary (P1E seam): prompt stop,
         // Cancelled (never Failed), temp cleanup via the guard, live plugin untouched.

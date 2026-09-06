@@ -57,6 +57,7 @@
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "app/AppProxyRenderEngine.h"
 #include "instruments/ProxyPlaybackCoordinator.h"
+#include "instruments/ProxyStatusModel.h"
 #include "instruments/ProxyUpdatePolicyService.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
@@ -728,6 +729,86 @@ public:
             proxyUpdatePolicyService_
                 = std::make_unique<proxy_policy::ProxyUpdatePolicyService>(std::move(polDeps));
             proxyUpdatePolicyService_->startProductionTicker(1000);
+        }
+
+        // P1I: Inspector proxy status/control seams (§19). The view displays the pure
+        // ProxyStatusModel output and invokes the narrow service actions; every wording
+        // and availability rule lives in the tested model, not in the component.
+        {
+            InspectorProxyHost proxyUi;
+            proxyUi.isProxyDestination = [this](const TrackId tid) {
+                return instrumentRuntimeCoordinator_ != nullptr
+                       && instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                              != nullptr;
+            };
+            proxyUi.getStatusView = [this](const TrackId tid) {
+                proxy_status::ProxyStatusInputs in;
+                if (proxyPlaybackCoordinator_ != nullptr)
+                {
+                    in.sourceState = proxyPlaybackCoordinator_->runtimeStateForTrack(tid);
+                }
+                in.destinationState = proxyRenderScheduler_.destinationState(tid);
+                in.job = proxyRenderScheduler_.jobStatus(tid);
+                if (proxyUpdatePolicyService_ != nullptr)
+                {
+                    in.policy = proxyUpdatePolicyService_->statusForTrack(tid);
+                }
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                const ProjectFileProxyMetadataV20* const meta
+                    = c != nullptr ? c->getProxyMetadata() : nullptr;
+                in.hasMetadata = meta != nullptr;
+                in.silentGeneration = meta != nullptr && meta->silentGeneration;
+                return proxy_status::buildProxyStatusView(in);
+            };
+            proxyUi.setUpdateMode = [this](const TrackId tid, const int modeComboIndex) {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                if (c == nullptr)
+                {
+                    return;
+                }
+                const auto mode = (proxy_policy::ProxyUpdateMode)juce::jlimit(0, 3,
+                                                                              modeComboIndex);
+                if (c->setProxyUpdateModeFromUi(
+                        proxy_policy::proxyUpdateModePersistedString(mode)))
+                {
+                    // §18.3: proxyUpdateMode is persisted project state — a change
+                    // dirties the project but is not part of musical undo (the undo
+                    // snapshot strips it). Runtime policy reacts on its next tick.
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                    if (proxyUpdatePolicyService_ != nullptr)
+                    {
+                        proxyUpdatePolicyService_->tick();
+                    }
+                }
+            };
+            proxyUi.renderNow = [this](const TrackId tid) {
+                if (proxyUpdatePolicyService_ != nullptr)
+                {
+                    (void)proxyUpdatePolicyService_->renderNow(tid);
+                }
+            };
+            proxyUi.cancelRender = [this](const TrackId tid) {
+                if (proxyUpdatePolicyService_ != nullptr)
+                {
+                    proxyUpdatePolicyService_->cancel(tid);
+                }
+            };
+            proxyUi.retryRender = [this](const TrackId tid) {
+                if (proxyUpdatePolicyService_ != nullptr)
+                {
+                    (void)proxyUpdatePolicyService_->retry(tid);
+                }
+            };
+            inspectorView_.setInspectorProxyHost(std::move(proxyUi));
         }
 
         arrangementEventSelectionCoordinator_
@@ -1898,6 +1979,76 @@ public:
             juce::AudioIODevice* const now = deviceManager.getCurrentAudioDevice();
             return now != nullptr && std::abs(now->getCurrentSampleRate() - rate) < 1.0;
         };
+        // P1H integration plan: policy-service test seams. The injectable clock offset makes
+        // the five-minute boundary deterministic (§18.1); everything else goes through the
+        // production policy service / project I/O — the panel owns no policy state.
+        cb.advanceProxyPolicyClockMs = [this](const double ms) {
+            proxyPolicyTestClockOffsetMs_ += juce::jmax(0.0, ms);
+            if (proxyUpdatePolicyService_ != nullptr)
+            {
+                proxyUpdatePolicyService_->tick();
+            }
+        };
+        cb.queryProxyPolicyStatus = [this](const TrackId tid) {
+            return proxyUpdatePolicyService_ != nullptr
+                       ? proxyUpdatePolicyService_->statusForTrack(tid)
+                       : proxy_policy::ProxyPolicyStatus{};
+        };
+        cb.setProxyUpdateMode = [this](const TrackId tid, const int modeComboIndex) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr
+                      ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                      : nullptr;
+            if (c == nullptr)
+            {
+                return false;
+            }
+            const auto mode
+                = (proxy_policy::ProxyUpdateMode)juce::jlimit(0, 3, modeComboIndex);
+            if (!c->setProxyUpdateModeFromUi(proxy_policy::proxyUpdateModePersistedString(mode)))
+            {
+                return false;
+            }
+            if (projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->markProjectDirtyFromEdit(); // §18.3 persisted mode
+            }
+            if (proxyUpdatePolicyService_ != nullptr)
+            {
+                proxyUpdatePolicyService_->tick();
+            }
+            return true;
+        };
+        cb.policyRenderNow = [this](const TrackId tid) -> bool {
+            return proxyUpdatePolicyService_ != nullptr
+                   && proxyUpdatePolicyService_->renderNow(tid);
+        };
+        cb.policyCancel = [this](const TrackId tid) {
+            if (proxyUpdatePolicyService_ != nullptr)
+            {
+                proxyUpdatePolicyService_->cancel(tid);
+            }
+        };
+        cb.forceAutosaveNow = [this]() -> bool {
+            if (projectIoCoordinator_ == nullptr)
+            {
+                return false;
+            }
+            juce::String failReason;
+            const bool ok = projectIoCoordinator_->forceAutosaveNowForStabilityTest(failReason);
+            if (!ok)
+            {
+                appendMixdownDiagnosticLine("p1h: autosave skipped: " + failReason);
+            }
+            return ok;
+        };
+        cb.loadProjectNow = [this](const juce::File& f) {
+            if (projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->loadProjectFromFile(f);
+            }
+        };
+        cb.getProjectFile = [this] { return session.getCurrentProjectFile(); };
         spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
                                                                                autoPlanId);
     }

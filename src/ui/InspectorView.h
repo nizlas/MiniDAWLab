@@ -1,6 +1,7 @@
 #pragma once
 
 #include "domain/Track.h"
+#include "instruments/ProxyStatusModel.h" // P1I proxy status view (pure model)
 #include "plugins/InsertSlotId.h"
 
 #include "ui/InspectorPanControl.h"
@@ -37,6 +38,23 @@ struct InspectorPluginHost
     std::function<void(TrackId, InsertSlotId, int)> requestReorderInStage;
 };
 
+/// [Message thread] P1I instrument-proxy section seams (wired from Main). The Inspector
+/// never touches the scheduler/policy services directly: it displays the precomputed
+/// ProxyStatusView and invokes these narrow actions. All optional (null = hidden section).
+struct InspectorProxyHost
+{
+    /// True only for instrument destinations with a proxy-capable runtime.
+    std::function<bool(TrackId)> isProxyDestination;
+    /// Complete precomputed status view (labels, tooltip, control availability).
+    std::function<proxy_status::ProxyStatusView(TrackId)> getStatusView;
+    /// Persisted per-destination update mode (0 Auto / 1 On Save / 2 Manual / 3 Off).
+    /// Dirty semantics live behind this seam (§18.3), never in the view.
+    std::function<void(TrackId, int modeComboIndex)> setUpdateMode;
+    std::function<void(TrackId)> renderNow;
+    std::function<void(TrackId)> cancelRender;
+    std::function<void(TrackId)> retryRender;
+};
+
 /// Active-track-only controls (Cubase-style Inspector), not repeated in every track header.
 
 class InspectorView final : public juce::Component,
@@ -56,6 +74,8 @@ public:
     void refreshFromSession();
 
     void setInspectorPluginHost(InspectorPluginHost host) noexcept { pluginHost_ = std::move(host); }
+
+    void setInspectorProxyHost(InspectorProxyHost host) noexcept { proxyHost_ = std::move(host); }
 
     /// [Message thread] Undoable rename (`TrackLanesEditCoordinator`). Empty default = inspector name field commits as no-op.
     void setRenameTrackHandler(std::function<bool(TrackId, juce::String)> fn) noexcept
@@ -140,6 +160,10 @@ private:
     void syncSendsNoActiveTrack();
     void syncSendsForActiveTrack(TrackId active, const Track& track);
 
+    /// P1I: show/refresh or hide the instrument-proxy section for the active row.
+    void syncProxySectionForActiveTrack(TrackId active, const Track& track);
+    void setProxySectionVisible(bool visible);
+
     void commitSendAmountField(int sendRowIndex);
     void setSendAmountEditorText(int sendRowIndex, float amountLinear);
     void populateSendDestCombo(int sendRowIndex, TrackId activeTrackId, const Track& track);
@@ -190,6 +214,23 @@ private:
     juce::Label sendsSectionLabel_;
     juce::Label sendsExtraLabel_;
     SendRowUi sendRows_[kVisibleSendRows];
+
+    // ------------------------------------------------------------------ P1I
+    // Instrument proxy status + controls (visible only for proxy destinations).
+    // No Secondary control exists (P1); no extra track/mixer channel is created.
+    juce::Label proxySectionLabel_;
+    juce::Label proxySourceCaptionLabel_;
+    juce::Label proxySourceValueLabel_; ///< playback source (compact, PI-021)
+    juce::Label proxyCacheCaptionLabel_;
+    juce::Label proxyCacheValueLabel_;  ///< cache/maintenance state (distinct axis)
+    juce::Label proxyProgressLabel_;    ///< unobtrusive "12.3 s rendered" (no modal)
+    juce::Label proxyModeCaptionLabel_;
+    juce::ComboBox proxyModeComboBox_;  ///< Auto after idle / On Save / Manual / Off
+    juce::TextButton proxyRenderNowButton_;
+    juce::TextButton proxyCancelButton_;
+    juce::TextButton proxyRetryButton_;
+    bool proxyModeComboGuard_ = false;
+    InspectorProxyHost proxyHost_;
 
     std::unique_ptr<StageDropTarget> preStageDrop_;
     std::unique_ptr<StageDropTarget> postStageDrop_;

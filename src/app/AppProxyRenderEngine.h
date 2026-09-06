@@ -183,7 +183,8 @@ public:
         }
 
         ProxyRenderResult render(const ProxyRenderCancellationToken& cancel,
-                                 const std::function<void()>& waitWhilePaused) override
+                                 const std::function<void()>& waitWhilePaused,
+                                 std::atomic<std::int64_t>& progressRenderedMs) override
         {
             ProxyRenderExecutionConfig cfg;
             cfg.renderSampleRate = request_.renderSampleRate;
@@ -192,6 +193,9 @@ public:
             cfg.expectedFingerprint = request_.expectedFingerprint;
             cfg.primarySemanticRevision = request_.primarySemanticRevision;
             cfg.blockBoundaryPauseGate = waitWhilePaused; // recording pause (§14.3)
+            cfg.progressSink = [&progressRenderedMs](const std::int64_t renderedMs) {
+                progressRenderedMs.store(renderedMs, std::memory_order_relaxed);
+            };
             ProxyRenderResult r
                 = renderProxyDestination(*instance_, request_.snapshot, cfg, cancel);
             r.renderInstanceDistinctFromLive = distinctFromLive_;

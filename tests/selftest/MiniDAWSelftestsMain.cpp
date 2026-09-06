@@ -45,6 +45,7 @@
 #include "instruments/ProxyPlaybackMix.h"
 #include "instruments/ProxyPlaybackReader.h"
 #include "instruments/ProxyPlaybackSource.h"
+#include "instruments/ProxyStatusModel.h"
 #include "domain/TrackStereoPan.h"
 #include "instruments/ProxyRenderExecutor.h"
 #include "instruments/ProxyRenderScheduler.h"
@@ -3485,8 +3486,10 @@ namespace
 
             proxy_render::ProxyRenderResult
                 render(const proxy_render::ProxyRenderCancellationToken& token,
-                       const std::function<void()>& waitWhilePaused) override
+                       const std::function<void()>& waitWhilePaused,
+                       std::atomic<std::int64_t>& progressRenderedMs) override
             {
+                progressRenderedMs.store(1234, std::memory_order_relaxed); // P1I probe value
                 e.lastRenderThread = juce::Thread::getCurrentThreadId();
                 {
                     const std::lock_guard<std::mutex> lock(e.m);
@@ -6821,6 +6824,207 @@ namespace
                "p1h-rehome: a path-escaping relative path is rejected");
         (void)root.deleteRecursively();
     }
+
+    // =========================================================================
+    // P1I — ProxyStatusModel mapping (steering §19/§20, PI-020..PI-022).
+    // The Inspector displays these views verbatim, so testing the pure model IS
+    // testing the visible wording and control availability.
+    // =========================================================================
+    void testProxyStatusModelMapping()
+    {
+        using proxy_status::ProxyStatusInputs;
+        using proxy_status::buildProxyStatusView;
+        using Src = proxy_playback::ProxyPlaybackSourceState;
+        using Dst = ProxyDestinationState;
+        using Phase = ProxyJobPhase;
+        using ProxyRenderFailureReason = proxy_render::ProxyRenderFailureReason;
+        using Mode = proxy_policy::ProxyUpdateMode;
+        using RS = proxy_policy::ProxyPolicyRuntimeState;
+
+        const auto noSecondary = [](const proxy_status::ProxyStatusView& v) {
+            return !v.sourceLabel.containsIgnoreCase("secondary")
+                   && !v.cacheLabel.containsIgnoreCase("secondary")
+                   && !v.tooltip.containsIgnoreCase("secondary");
+        };
+
+        // (1) EVERY source state maps to a non-empty distinct label + tooltip,
+        //     and Secondary is never mentioned anywhere (PI-023).
+        {
+            juce::StringArray seen;
+            for (const Src s : { Src::Primary, Src::ProxyPreparing, Src::ProxyCurrent,
+                                 Src::ProxyStale, Src::ProxyMissing, Src::ProxyCorrupt,
+                                 Src::MissingPrimary, Src::PlaybackUnderrun })
+            {
+                ProxyStatusInputs in;
+                in.sourceState = s;
+                const auto v = buildProxyStatusView(in);
+                expect(v.sourceLabel.isNotEmpty() && v.tooltip.isNotEmpty()
+                           && v.cacheLabel.isNotEmpty() && noSecondary(v),
+                       "p1i-status: source state has label+tooltip, no Secondary");
+                expect(!seen.contains(v.sourceLabel), "p1i-status: source labels distinct");
+                seen.add(v.sourceLabel);
+            }
+        }
+
+        // (2) Source axis and cache axis stay distinct: Primary playing while the
+        //     proxy is stale/rendering shows BOTH truths at once (PI-021/PI-022).
+        {
+            ProxyStatusInputs in;
+            in.sourceState = Src::Primary;
+            in.destinationState = Dst::Stale;
+            in.policy.mode = Mode::Manual;
+            const auto v = buildProxyStatusView(in);
+            expect(v.sourceLabel == "Primary" && v.cacheLabel.containsIgnoreCase("stale"),
+                   "p1i-status: playing Primary while proxy stale shows both axes");
+            expect(!v.cacheLabel.containsIgnoreCase("current"),
+                   "p1i-status: a stale proxy is never presented as current");
+        }
+
+        // (3) Active job phases: labels, live progress, Cancel availability.
+        {
+            for (const Phase p : { Phase::Queued, Phase::Preparing, Phase::Rendering,
+                                   Phase::Finalizing })
+            {
+                ProxyStatusInputs in;
+                in.destinationState = Dst::Rendering;
+                in.job.exists = true;
+                in.job.phase = p;
+                in.job.progressRenderedMs = 12345;
+                const auto v = buildProxyStatusView(in);
+                expect(v.canCancel && !v.canRenderNow && !v.canRetry,
+                       "p1i-status: active job offers Cancel only");
+                if (p == Phase::Rendering)
+                {
+                    expect(v.showProgress && v.progressText == "12.3 s rendered",
+                           "p1i-status: rendering shows unobtrusive live progress");
+                }
+                else
+                {
+                    expect(!v.showProgress, "p1i-status: progress only while rendering");
+                }
+            }
+        }
+
+        // (4) Waiting-for-idle countdown (Auto) + recording pause presentation.
+        {
+            ProxyStatusInputs in;
+            in.destinationState = Dst::Stale;
+            in.policy.mode = Mode::AutoAfterIdle;
+            in.policy.state = RS::WaitingForIdle;
+            in.policy.idleRemainingMs = 4.0 * 60.0 * 1000.0 + 59000.0; // 4:59
+            const auto v = buildProxyStatusView(in);
+            expect(v.cacheLabel == "Waiting for idle (4:59)",
+                   "p1i-status: idle countdown is shown mm:ss");
+            expect(v.tooltip.contains("five minutes") && v.tooltip.contains("Saving never waits"),
+                   "p1i-status: Auto tooltip explains the five-minute contract");
+            ProxyStatusInputs rec = in;
+            rec.policy.recordingPaused = true;
+            const auto vr = buildProxyStatusView(rec);
+            expect(vr.cacheLabel == "Waiting (recording)"
+                       && vr.tooltip.contains("paused while recording"),
+                   "p1i-status: recording pause is visible");
+        }
+
+        // (5) Waiting for snapshot/quiescence status (§9.4.4).
+        {
+            ProxyStatusInputs in;
+            in.destinationState = Dst::Stale;
+            in.policy.state = RS::WaitingForSnapshot;
+            const auto v = buildProxyStatusView(in);
+            expect(v.cacheLabel == "Waiting for quiescence"
+                       && v.tooltip.contains("MIDI/CC"),
+                   "p1i-status: waiting-for-quiescence is exposed");
+        }
+
+        // (6) Render now availability: Manual + needs render, never during a job,
+        //     never in Off (§18.1: Off offers no render controls in P1).
+        {
+            ProxyStatusInputs in;
+            in.destinationState = Dst::Stale;
+            in.policy.mode = Mode::Manual;
+            expect(buildProxyStatusView(in).canRenderNow,
+                   "p1i-status: Manual+stale offers Render now");
+            in.policy.mode = Mode::Off;
+            const auto vOff = buildProxyStatusView(in);
+            expect(!vOff.canRenderNow && !vOff.canRetry,
+                   "p1i-status: Off offers no render/retry controls");
+            expect(vOff.cacheLabel.containsIgnoreCase("off"),
+                   "p1i-status: Off mode staleness stays honest");
+            in.policy.mode = Mode::Manual;
+            in.job.exists = true;
+            in.job.phase = Phase::Rendering;
+            expect(!buildProxyStatusView(in).canRenderNow,
+                   "p1i-status: no Render now while a job is active");
+        }
+
+        // (7) Failure: reason text (tail/disk/plugin), Retry availability.
+        {
+            ProxyStatusInputs in;
+            in.destinationState = Dst::Failed;
+            in.policy.mode = Mode::AutoAfterIdle;
+            in.job.exists = true;
+            in.job.phase = Phase::Failed;
+            in.job.result.failureReason = ProxyRenderFailureReason::TailLimitReached;
+            const auto v = buildProxyStatusView(in);
+            expect(v.cacheLabel == "Render failed" && v.canRetry && !v.canCancel,
+                   "p1i-status: failure offers Retry");
+            expect(v.tooltip.contains("tail limit"),
+                   "p1i-status: tail-limit failure reason is spelled out");
+            in.job.result.failureReason = ProxyRenderFailureReason::WavWriteFailed;
+            expect(buildProxyStatusView(in).tooltip.contains("disk"),
+                   "p1i-status: disk failure reason is spelled out");
+            in.job.result.failureReason = ProxyRenderFailureReason::PluginCreationFailed;
+            expect(buildProxyStatusView(in).tooltip.contains("plugin"),
+                   "p1i-status: plugin failure reason is spelled out");
+            expect(buildProxyStatusView(in).tooltip.contains("previous proxy was kept"),
+                   "p1i-status: failure explains previous generation is retained");
+        }
+
+        // (8) Cancelled presentation (terminal, non-fatal).
+        {
+            ProxyStatusInputs in;
+            in.destinationState = Dst::Absent;
+            in.job.exists = true;
+            in.job.phase = Phase::Cancelled;
+            const auto v = buildProxyStatusView(in);
+            expect(v.cacheLabel == "Cancelled" && !v.canCancel,
+                   "p1i-status: cancelled render is labelled and offers no Cancel");
+        }
+
+        // (9) Current + silent generation are honest; missing/corrupt is nonfatal.
+        {
+            ProxyStatusInputs in;
+            in.destinationState = Dst::Current;
+            in.hasMetadata = true;
+            expect(buildProxyStatusView(in).cacheLabel == "Proxy current",
+                   "p1i-status: current proxy labelled current");
+            in.silentGeneration = true;
+            in.sourceState = Src::ProxyCurrent;
+            const auto vs = buildProxyStatusView(in);
+            expect(vs.sourceLabel == "Proxy current (silent)"
+                       && vs.cacheLabel == "Proxy current (silent)"
+                       && vs.tooltip.contains("intentional"),
+                   "p1i-status: intentional silent proxy is distinguished");
+            ProxyStatusInputs miss;
+            miss.sourceState = Src::ProxyMissing;
+            miss.destinationState = Dst::Absent;
+            miss.hasMetadata = true;
+            const auto vm = buildProxyStatusView(miss);
+            expect(vm.tooltip.containsIgnoreCase("editable"),
+                   "p1i-status: missing asset is presented as nonfatal");
+        }
+
+        // (10) Mode combo index round-trip for all four persisted modes.
+        {
+            for (int m = 0; m < 4; ++m)
+            {
+                ProxyStatusInputs in;
+                in.policy.mode = (Mode)m;
+                expect(buildProxyStatusView(in).modeComboIndex == m,
+                       "p1i-status: mode maps to its selector index");
+            }
+        }
+    }
 } // namespace
 
 int main()
@@ -6908,6 +7112,7 @@ int main()
     testProxyPolicyProjectCloseAndReplacementDropRuntimeState();
     testProxyPolicyLoadStaleArmsFullWindow();
     testProxySaveAsRehoming();
+    testProxyStatusModelMapping();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -746,6 +746,114 @@ InspectorView::InspectorView(Session& session)
     };
     addAndMakeVisible(addPostInsertButton_);
 
+    // ---------------------------------------------------------------- P1I
+    // Instrument proxy status + controls (visible only for proxy destinations;
+    // steering §19). Two distinct axes: what is PLAYING now (source) and the
+    // proxy cache/maintenance state — never merged (PI-021/PI-022). Progress is
+    // an unobtrusive label, never a modal dialog. No Secondary control exists.
+    proxySectionLabel_.setText("Instrument Proxy", juce::dontSendNotification);
+    proxySectionLabel_.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(proxySectionLabel_);
+
+    proxySourceCaptionLabel_.setText("Playing", juce::dontSendNotification);
+    proxySourceCaptionLabel_.setFont(juce::FontOptions(10.0f));
+    proxySourceCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    addAndMakeVisible(proxySourceCaptionLabel_);
+
+    proxySourceValueLabel_.setFont(juce::FontOptions(12.0f));
+    proxySourceValueLabel_.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(proxySourceValueLabel_);
+
+    proxyCacheCaptionLabel_.setText("Proxy", juce::dontSendNotification);
+    proxyCacheCaptionLabel_.setFont(juce::FontOptions(10.0f));
+    proxyCacheCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    addAndMakeVisible(proxyCacheCaptionLabel_);
+
+    proxyCacheValueLabel_.setFont(juce::FontOptions(12.0f));
+    proxyCacheValueLabel_.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(proxyCacheValueLabel_);
+
+    proxyProgressLabel_.setFont(juce::Font(juce::FontOptions(10.0f)).italicised());
+    proxyProgressLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    proxyProgressLabel_.setJustificationType(juce::Justification::centredLeft);
+    proxyProgressLabel_.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(proxyProgressLabel_);
+
+    proxyModeCaptionLabel_.setText("Proxy updates", juce::dontSendNotification);
+    proxyModeCaptionLabel_.setFont(juce::FontOptions(10.0f));
+    proxyModeCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    addAndMakeVisible(proxyModeCaptionLabel_);
+
+    // Item ids are modeComboIndex + 1 (0 Auto / 1 On Save / 2 Manual / 3 Off).
+    proxyModeComboBox_.addItem("Auto after idle", 1);
+    proxyModeComboBox_.addItem("On Save", 2);
+    proxyModeComboBox_.addItem("Manual", 3);
+    proxyModeComboBox_.addItem("Off", 4);
+    proxyModeComboBox_.setTooltip(
+        "How this instrument's proxy (portable audio stand-in) is kept up to date.\n\n"
+        "Auto after idle: an edit marks the proxy stale immediately; rendering begins "
+        "after five minutes without further relevant edits. Saving never waits for "
+        "rendering, and playback can continue while it renders.\n"
+        "On Save: rendering is queued by an explicit Save (autosave never renders).\n"
+        "Manual: rendering starts only from Render now / Retry.\n"
+        "Off: no automatic updates; existing proxy files are kept safe.");
+    proxyModeComboBox_.onChange = [this] {
+        if (proxyModeComboGuard_ || !proxyHost_.setUpdateMode)
+        {
+            return;
+        }
+        const TrackId active = session_.getActiveTrackId();
+        const int pick = proxyModeComboBox_.getSelectedId();
+        if (active == kInvalidTrackId || pick <= 0)
+        {
+            return;
+        }
+        proxyHost_.setUpdateMode(active, pick - 1);
+        refreshFromSession();
+    };
+    addAndMakeVisible(proxyModeComboBox_);
+
+    proxyRenderNowButton_.setButtonText("Render now");
+    proxyRenderNowButton_.setTooltip("Render this instrument's proxy now (Manual mode).");
+    proxyRenderNowButton_.setWantsKeyboardFocus(false);
+    proxyRenderNowButton_.onClick = [this] {
+        const TrackId active = session_.getActiveTrackId();
+        if (active != kInvalidTrackId && proxyHost_.renderNow)
+        {
+            proxyHost_.renderNow(active);
+            refreshFromSession();
+        }
+    };
+    addAndMakeVisible(proxyRenderNowButton_);
+
+    proxyCancelButton_.setButtonText("Cancel");
+    proxyCancelButton_.setTooltip(
+        "Cancel the queued or running proxy render. The previous proxy is kept.");
+    proxyCancelButton_.setWantsKeyboardFocus(false);
+    proxyCancelButton_.onClick = [this] {
+        const TrackId active = session_.getActiveTrackId();
+        if (active != kInvalidTrackId && proxyHost_.cancelRender)
+        {
+            proxyHost_.cancelRender(active);
+            refreshFromSession();
+        }
+    };
+    addAndMakeVisible(proxyCancelButton_);
+
+    proxyRetryButton_.setButtonText("Retry");
+    proxyRetryButton_.setTooltip("Retry the failed proxy render.");
+    proxyRetryButton_.setWantsKeyboardFocus(false);
+    proxyRetryButton_.onClick = [this] {
+        const TrackId active = session_.getActiveTrackId();
+        if (active != kInvalidTrackId && proxyHost_.retryRender)
+        {
+            proxyHost_.retryRender(active);
+            refreshFromSession();
+        }
+    };
+    addAndMakeVisible(proxyRetryButton_);
+    setProxySectionVisible(false);
+
     sendsSectionLabel_.setText("Sends", juce::dontSendNotification);
     sendsSectionLabel_.setFont(juce::FontOptions(11.0f));
     addAndMakeVisible(sendsSectionLabel_);
@@ -1604,6 +1712,57 @@ void InspectorView::commitVolumeField()
     }
 }
 
+void InspectorView::setProxySectionVisible(const bool visible)
+{
+    const bool changed = proxySectionLabel_.isVisible() != visible;
+    proxySectionLabel_.setVisible(visible);
+    proxySourceCaptionLabel_.setVisible(visible);
+    proxySourceValueLabel_.setVisible(visible);
+    proxyCacheCaptionLabel_.setVisible(visible);
+    proxyCacheValueLabel_.setVisible(visible);
+    proxyProgressLabel_.setVisible(visible);
+    proxyModeCaptionLabel_.setVisible(visible);
+    proxyModeComboBox_.setVisible(visible);
+    proxyRenderNowButton_.setVisible(visible);
+    proxyCancelButton_.setVisible(visible);
+    proxyRetryButton_.setVisible(visible);
+    if (changed)
+    {
+        resized(); // the section only claims vertical space while visible
+    }
+}
+
+void InspectorView::syncProxySectionForActiveTrack(const TrackId active, const Track& track)
+{
+    const bool isDestination = track.getKind() == TrackKind::Instrument
+                               && proxyHost_.isProxyDestination && proxyHost_.getStatusView
+                               && proxyHost_.isProxyDestination(active);
+    setProxySectionVisible(isDestination);
+    if (!isDestination)
+    {
+        return;
+    }
+    const proxy_status::ProxyStatusView view = proxyHost_.getStatusView(active);
+
+    proxySourceValueLabel_.setText(view.sourceLabel, juce::dontSendNotification);
+    proxyCacheValueLabel_.setText(view.cacheLabel, juce::dontSendNotification);
+    proxyProgressLabel_.setText(view.showProgress ? view.progressText : juce::String(),
+                                juce::dontSendNotification);
+    // One shared explanatory tooltip on the read-only status row (§19 accessible text).
+    proxySourceValueLabel_.setTooltip(view.tooltip);
+    proxyCacheValueLabel_.setTooltip(view.tooltip);
+    proxySourceCaptionLabel_.setTooltip(view.tooltip);
+    proxyCacheCaptionLabel_.setTooltip(view.tooltip);
+
+    proxyModeComboGuard_ = true;
+    proxyModeComboBox_.setSelectedId(view.modeComboIndex + 1, juce::dontSendNotification);
+    proxyModeComboGuard_ = false;
+
+    proxyRenderNowButton_.setEnabled(view.canRenderNow);
+    proxyCancelButton_.setEnabled(view.canCancel);
+    proxyRetryButton_.setEnabled(view.canRetry);
+}
+
 void InspectorView::refreshFromSession()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -1619,6 +1778,7 @@ void InspectorView::refreshFromSession()
         panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
         syncSendsWhenInspectorDisabled();
+        setProxySectionVisible(false);
         return;
     }
     setEnabled(true);
@@ -1640,6 +1800,7 @@ void InspectorView::refreshFromSession()
         outputComboDestIds_.clear();
         syncInsertsNoActiveTrack();
         syncSendsNoActiveTrack();
+        setProxySectionVisible(false);
         return;
     }
     const Track& tr = snap->getTrack(idx);
@@ -1656,6 +1817,7 @@ void InspectorView::refreshFromSession()
 
     syncInsertsForActiveTrack(active);
     syncSendsForActiveTrack(active, tr);
+    syncProxySectionForActiveTrack(active, tr);
 
     if (!panField_.isMouseButtonDown())
     {
@@ -1949,6 +2111,38 @@ void InspectorView::resized()
         rowArea.removeFromRight(6);
         sendRows_[row].destCombo.setBounds(rowArea);
         area.removeFromTop(2);
+    }
+
+    // P1I instrument-proxy section (bottom; only claims space while visible).
+    if (proxySectionLabel_.isVisible())
+    {
+        area.removeFromTop(10);
+        proxySectionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        {
+            auto row = area.removeFromTop(18);
+            proxySourceCaptionLabel_.setBounds(row.removeFromLeft(48));
+            proxySourceValueLabel_.setBounds(row);
+        }
+        {
+            auto row = area.removeFromTop(18);
+            proxyCacheCaptionLabel_.setBounds(row.removeFromLeft(48));
+            proxyCacheValueLabel_.setBounds(row);
+        }
+        proxyProgressLabel_.setBounds(area.removeFromTop(14));
+        area.removeFromTop(4);
+        proxyModeCaptionLabel_.setBounds(area.removeFromTop(14));
+        proxyModeComboBox_.setBounds(area.removeFromTop(24));
+        area.removeFromTop(4);
+        {
+            auto row = area.removeFromTop(22);
+            const int w = juce::jmax(60, row.getWidth() / 3 - 2);
+            proxyRenderNowButton_.setBounds(row.removeFromLeft(w + 20));
+            row.removeFromLeft(3);
+            proxyCancelButton_.setBounds(row.removeFromLeft(w - 10));
+            row.removeFromLeft(3);
+            proxyRetryButton_.setBounds(row);
+        }
     }
 
     syncActiveTrackNameEditorDisplay();

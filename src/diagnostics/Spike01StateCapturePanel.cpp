@@ -9,6 +9,7 @@
 #include "diagnostics/Spike01Sha256.h"
 #include "instruments/ProxyAssetStore.h" // P1EF plan verification (path safety + asset check)
 #include "instruments/ProxyPlaybackSource.h" // P1G plan verification (runtime source states)
+#include "instruments/ProxyStatusModel.h"    // P1H plan verification (P1I status view mapping)
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "util/AsyncLifetimeToken.h"
 
@@ -372,6 +373,10 @@ private:
         else if (autoPlanId_ == "P1G") // P1G: missing-Primary proxy playback end to end
         {
             buildP1gPlan();
+        }
+        else if (autoPlanId_ == "P1H") // P1H: update policies + Save/close end to end
+        {
+            buildP1hPlan();
         }
         else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
         {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
@@ -1121,6 +1126,393 @@ private:
         });
     }
 
+    //==========================================================================
+    // P1H integration plan (update policies + Save/close semantics end to end;
+    // steering §18/§19/§20, roadmap P1H/P1I). Runs against a TEMPORARY project
+    // copy only (the launcher copies the real Organ/VB3-II project and verifies
+    // the original is byte-identical afterwards). The five-minute Auto boundary
+    // is crossed by advancing the policy service's INJECTABLE clock — never by
+    // waiting. Status evidence uses the same pure ProxyStatusModel the Inspector
+    // displays, so "status/control state throughout" is the shipped mapping.
+    //==========================================================================
+
+    [[nodiscard]] proxy_policy::ProxyPolicyStatus p1hPolicy()
+    {
+        return callbacks_.queryProxyPolicyStatus
+                   ? callbacks_.queryProxyPolicyStatus(selectedTrackId())
+                   : proxy_policy::ProxyPolicyStatus{};
+    }
+
+    [[nodiscard]] bool p1hJobActive()
+    {
+        const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+        return s.exists
+               && !(s.phase == proxy_render::ProxyJobPhase::Published
+                    || s.phase == proxy_render::ProxyJobPhase::Obsolete
+                    || s.phase == proxy_render::ProxyJobPhase::Cancelled
+                    || s.phase == proxy_render::ProxyJobPhase::Failed);
+    }
+
+    /// Build the SAME status view the Inspector shows and assert on its cache
+    /// label (compact evidence that every scenario state maps to honest UI text).
+    [[nodiscard]] bool p1hStatusViewCacheContains(const juce::String& needle)
+    {
+        proxy_status::ProxyStatusInputs in;
+        in.sourceState = (proxy_playback::ProxyPlaybackSourceState)juce::jmax(
+            0, callbacks_.queryProxyPlaybackRuntimeState
+                   ? callbacks_.queryProxyPlaybackRuntimeState(selectedTrackId())
+                   : 0);
+        in.destinationState = callbacks_.queryProxyDestinationState(selectedTrackId());
+        in.job = callbacks_.queryProxyJobStatus(selectedTrackId());
+        in.policy = p1hPolicy();
+        ProjectFileProxyMetadataV20 meta;
+        in.hasMetadata = callbacks_.getPublishedProxyMetadata(selectedTrackId(), meta);
+        in.silentGeneration = in.hasMetadata && meta.silentGeneration;
+        const auto view = proxy_status::buildProxyStatusView(in);
+        const bool ok = view.cacheLabel.containsIgnoreCase(needle);
+        appendSessionLog("p1h: statusView source=\"" + view.sourceLabel + "\" cache=\""
+                         + view.cacheLabel + "\" renderNow=" + (view.canRenderNow ? "1" : "0")
+                         + " cancel=" + (view.canCancel ? "1" : "0")
+                         + " retry=" + (view.canRetry ? "1" : "0")
+                         + " expect~\"" + needle + "\" -> " + (ok ? "PASS" : "FAIL"));
+        return ok;
+    }
+
+    /// Wait until no ACTIVE job remains for the selected destination (terminal
+    /// snapshot or none). Bounded by the plan-wide probe deadline.
+    void addP1hWaitJobSettledStep(const juce::String& what)
+    {
+        autoSteps_.push_back({ 0, "wait: " + what, [this, what] {
+                                  waitProbeDesc_ = what;
+                                  waitProbeDeadlineMs_
+                                      = juce::Time::getMillisecondCounterHiRes() + 600000.0;
+                                  waitProbe_ = [this] { return p1hJobActive() ? 0 : 1; };
+                                  return true;
+                              } });
+    }
+
+    void buildP1hPlan()
+    {
+        using DestSt = proxy_render::ProxyDestinationState;
+        using PSt = proxy_policy::ProxyPolicyRuntimeState;
+        auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
+            autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
+        };
+
+        addWaitForTrackStep("Organ");
+
+        add(1000, "P1H preflight: callbacks + project file", [this] {
+            const bool ok = callbacks_.requestProxyRender && callbacks_.queryProxyJobStatus
+                            && callbacks_.queryProxyDestinationState
+                            && callbacks_.getPublishedProxyMetadata && callbacks_.getProjectFolder
+                            && callbacks_.advanceProxyPolicyClockMs
+                            && callbacks_.queryProxyPolicyStatus && callbacks_.setProxyUpdateMode
+                            && callbacks_.policyRenderNow && callbacks_.policyCancel
+                            && callbacks_.forceAutosaveNow && callbacks_.loadProjectNow
+                            && callbacks_.getProjectFile && callbacks_.saveProjectNow
+                            && callbacks_.appendStaleTestClip
+                            && callbacks_.setProxyPrimaryForcedUnavailable
+                            && callbacks_.queryProxyPlaybackRuntimeState
+                            && callbacks_.startTransport && callbacks_.stopTransport
+                            && callbacks_.isTransportPlaying;
+            p1hProjectFile_ = callbacks_.getProjectFile ? callbacks_.getProjectFile()
+                                                        : juce::File();
+            appendSessionLog("p1h: preflight callbacks=" + juce::String(ok ? "ok" : "MISSING")
+                             + " project=" + p1hProjectFile_.getFullPathName());
+            return ok && p1hProjectFile_.existsAsFile();
+        });
+
+        // ------------------------------------------------ baseline current proxy
+        add(300, "P1H baseline explicit render request", [this] {
+            const auto s = callbacks_.requestProxyRender(selectedTrackId());
+            appendSessionLog("p1h: baseline request phase=" + juce::String(proxy_render::toString(s.phase)));
+            return s.exists;
+        });
+        addP1hWaitJobSettledStep("P1H baseline publication");
+        add(200, "P1H baseline verify Current + save pairing", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const bool saved = callbacks_.saveProjectNow();
+            appendSessionLog(juce::String("p1h: baseline current=") + (current ? "PASS" : "FAIL")
+                             + " saved=" + (saved ? "PASS" : "FAIL"));
+            return current && saved && p1hStatusViewCacheContains("current");
+        });
+
+        // ------------------------- Auto: edit -> immediate stale + 5-minute timer
+        add(300, "P1H render-relevant edit -> immediate Stale + WaitingForIdle", [this] {
+            if (!callbacks_.appendStaleTestClip(selectedTrackId()))
+            {
+                return false;
+            }
+            callbacks_.advanceProxyPolicyClockMs(0.0); // deterministic observation tick
+            const auto ps = p1hPolicy();
+            const bool stale
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Stale;
+            p1hIdleRemainingMs_ = ps.idleRemainingMs;
+            appendSessionLog(juce::String("p1h: afterEdit stale=") + (stale ? "PASS" : "FAIL")
+                             + " policyState="
+                             + proxy_policy::proxyPolicyRuntimeStateName(ps.state)
+                             + " idleRemainingMs=" + juce::String(ps.idleRemainingMs, 0));
+            return stale && ps.state == PSt::WaitingForIdle
+                   && ps.idleRemainingMs > 295000.0 && ps.idleRemainingMs <= 300000.0
+                   && p1hStatusViewCacheContains("Waiting for idle");
+        });
+        add(200, "P1H advance to ~4:59 -> no render", [this] {
+            callbacks_.advanceProxyPolicyClockMs(p1hIdleRemainingMs_ - 1500.0);
+            const auto ps = p1hPolicy();
+            const bool noJob = !p1hJobActive();
+            appendSessionLog(juce::String("p1h: at4:59 noRender=") + (noJob ? "PASS" : "FAIL")
+                             + " idleRemainingMs=" + juce::String(ps.idleRemainingMs, 0)
+                             + " policyState="
+                             + proxy_policy::proxyPolicyRuntimeStateName(ps.state));
+            return noJob && ps.state == PSt::WaitingForIdle && ps.idleRemainingMs > 0.0;
+        });
+        add(200, "P1H advance past 5:00 -> background render begins", [this] {
+            callbacks_.advanceProxyPolicyClockMs(5000.0);
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            const bool began = s.exists; // active or already terminal (fast render)
+            appendSessionLog(juce::String("p1h: past5:00 renderBegan=") + (began ? "PASS" : "FAIL")
+                             + " phase=" + juce::String(proxy_render::toString(s.phase)));
+            return began;
+        });
+        add(100, "P1H transport during render", [this] {
+            callbacks_.startTransport();
+            return true;
+        });
+        add(1200, "P1H transport operational while rendering", [this] {
+            const bool playing = callbacks_.isTransportPlaying();
+            callbacks_.stopTransport();
+            appendSessionLog(juce::String("p1h: transportDuringRender=")
+                             + (playing ? "PASS" : "FAIL"));
+            return playing;
+        });
+        addP1hWaitJobSettledStep("P1H auto publication");
+        add(200, "P1H auto publication -> Current", [this] {
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            const bool published = s.exists && s.phase == proxy_render::ProxyJobPhase::Published;
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            appendSessionLog(juce::String("p1h: autoPublish published=")
+                             + (published ? "PASS" : "FAIL")
+                             + " current=" + (current ? "PASS" : "FAIL"));
+            return published && current && p1hStatusViewCacheContains("current");
+        });
+
+        // ------------------------------------------------------- save + reload
+        add(200, "P1H save + reload temp project", [this] {
+            if (!callbacks_.saveProjectNow())
+            {
+                return false;
+            }
+            callbacks_.loadProjectNow(p1hProjectFile_);
+            return true;
+        });
+        addWaitForTrackStep("Organ");
+        add(1000, "P1H after reload: proxy still Current", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            appendSessionLog(juce::String("p1h: afterReload current=")
+                             + (current ? "PASS" : "FAIL"));
+            return current;
+        });
+
+        // -------------------------------- missing Primary -> ProxyCurrent playback
+        add(300, "P1H force Primary unavailable -> proxy selected", [this] {
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), true);
+            // The reader/derived cache is primed OFF-thread: ProxyPreparing is the
+            // honest transitional status; the settled check follows during playback.
+            const bool proxySel
+                = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent)
+                  || p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyPreparing);
+            appendSessionLog(juce::String("p1h: primaryUnavailable state=") + p1gStateName()
+                             + " proxySelected=" + (proxySel ? "PASS" : "FAIL"));
+            p1hBlocksMark_ = p1gProxyBlocksNow();
+            if (callbacks_.seekTransport)
+            {
+                callbacks_.seekTransport(0);
+            }
+            callbacks_.startTransport();
+            return proxySel;
+        });
+        add(2500, "P1H verify settled ProxyCurrent playback + restore Primary", [this] {
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const bool current
+                = p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            callbacks_.stopTransport();
+            const bool consumed = blocks > p1hBlocksMark_;
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), false);
+            const bool primary = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::Primary);
+            appendSessionLog("p1h: proxyPlayback blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1hBlocksMark_))
+                             + " settledProxyCurrent=" + (current ? "PASS" : "FAIL")
+                             + " consumed=" + (consumed ? "PASS" : "FAIL")
+                             + " restoredPrimary=" + (primary ? "PASS" : "FAIL"));
+            return current && consumed && primary;
+        });
+
+        // ------------------------------------------------------------- On Save
+        add(300, "P1H OnSave: set mode + edit -> WaitingForSave", [this] {
+            if (!callbacks_.setProxyUpdateMode(selectedTrackId(), 1)
+                || !callbacks_.appendStaleTestClip(selectedTrackId()))
+            {
+                return false;
+            }
+            callbacks_.advanceProxyPolicyClockMs(0.0);
+            const auto ps = p1hPolicy();
+            appendSessionLog(juce::String("p1h: onSave policyState=")
+                             + proxy_policy::proxyPolicyRuntimeStateName(ps.state));
+            return ps.mode == proxy_policy::ProxyUpdateMode::OnSave
+                   && ps.state == PSt::WaitingForSave
+                   && p1hStatusViewCacheContains("Save");
+        });
+        add(200, "P1H OnSave: idle time alone never renders", [this] {
+            callbacks_.advanceProxyPolicyClockMs(6.0 * 60.0 * 1000.0);
+            const bool noJob = !p1hJobActive();
+            appendSessionLog(juce::String("p1h: onSaveIdleTime noRender=")
+                             + (noJob ? "PASS" : "FAIL"));
+            return noJob && p1hPolicy().state == PSt::WaitingForSave;
+        });
+        add(200, "P1H OnSave: autosave never renders", [this] {
+            const bool wrote = callbacks_.forceAutosaveNow();
+            callbacks_.advanceProxyPolicyClockMs(0.0);
+            const bool noJob = !p1hJobActive();
+            appendSessionLog(juce::String("p1h: autosave wrote=") + (wrote ? "yes" : "NO")
+                             + " noRender=" + (noJob ? "PASS" : "FAIL"));
+            return wrote && noJob && p1hPolicy().state == PSt::WaitingForSave;
+        });
+        add(200, "P1H OnSave: explicit Save queues render without waiting", [this] {
+            const bool saved = callbacks_.saveProjectNow(); // returned => Save did not wait
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            appendSessionLog(juce::String("p1h: userSave saved=") + (saved ? "PASS" : "FAIL")
+                             + " jobAfterSave=" + juce::String(proxy_render::toString(s.phase))
+                             + " (Save returned before publication)");
+            return saved && s.exists;
+        });
+        addP1hWaitJobSettledStep("P1H OnSave publication");
+        add(200, "P1H OnSave publication -> Current", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            appendSessionLog(juce::String("p1h: onSavePublish current=")
+                             + (current ? "PASS" : "FAIL"));
+            return current;
+        });
+
+        // -------------------------------------------------------------- Manual
+        add(300, "P1H Manual: set mode + edit -> WaitingForManual", [this] {
+            if (!callbacks_.setProxyUpdateMode(selectedTrackId(), 2)
+                || !callbacks_.appendStaleTestClip(selectedTrackId()))
+            {
+                return false;
+            }
+            callbacks_.advanceProxyPolicyClockMs(6.0 * 60.0 * 1000.0); // idle never triggers
+            const auto ps = p1hPolicy();
+            const bool noJob = !p1hJobActive();
+            appendSessionLog(juce::String("p1h: manual policyState=")
+                             + proxy_policy::proxyPolicyRuntimeStateName(ps.state)
+                             + " noAutoRender=" + (noJob ? "PASS" : "FAIL"));
+            return noJob && ps.state == PSt::WaitingForManual
+                   && p1hStatusViewCacheContains("manual");
+        });
+        add(200, "P1H Manual: Render now starts, Cancel honoured", [this] {
+            if (!callbacks_.policyRenderNow(selectedTrackId()))
+            {
+                return false;
+            }
+            const bool started = callbacks_.queryProxyJobStatus(selectedTrackId()).exists;
+            callbacks_.policyCancel(selectedTrackId());
+            appendSessionLog(juce::String("p1h: manualRenderNow started=")
+                             + (started ? "PASS" : "FAIL") + " cancelRequested=yes");
+            return started;
+        });
+        addP1hWaitJobSettledStep("P1H Manual cancel settles");
+        add(200, "P1H Manual: cancelled stays honestly stale, then render again", [this] {
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            p1hManualCancelWon_ = s.exists
+                                  && s.phase == proxy_render::ProxyJobPhase::Cancelled;
+            if (p1hManualCancelWon_)
+            {
+                const bool stale = callbacks_.queryProxyDestinationState(selectedTrackId())
+                                   == DestSt::Stale;
+                appendSessionLog(juce::String("p1h: manualCancel terminal=Cancelled stale=")
+                                 + (stale ? "PASS" : "FAIL"));
+                if (!stale || !p1hStatusViewCacheContains("Cancelled"))
+                {
+                    return false;
+                }
+                return callbacks_.policyRenderNow(selectedTrackId());
+            }
+            appendSessionLog("p1h: manualCancel lost the race (job already "
+                             + juce::String(proxy_render::toString(s.phase))
+                             + ") — acceptable, render already complete");
+            return true;
+        });
+        addP1hWaitJobSettledStep("P1H Manual publication");
+        add(200, "P1H Manual publication -> Current", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            appendSessionLog(juce::String("p1h: manualPublish current=")
+                             + (current ? "PASS" : "FAIL"));
+            return current;
+        });
+
+        // ----------------------------------------------------------------- Off
+        add(300, "P1H Off: no automatic work, assets retained, no one-shot", [this] {
+            if (!callbacks_.setProxyUpdateMode(selectedTrackId(), 3)
+                || !callbacks_.appendStaleTestClip(selectedTrackId()))
+            {
+                return false;
+            }
+            callbacks_.advanceProxyPolicyClockMs(6.0 * 60.0 * 1000.0);
+            const bool noJob = !p1hJobActive();
+            const bool stale
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Stale;
+            const bool renderNowRefused = !callbacks_.policyRenderNow(selectedTrackId());
+            ProjectFileProxyMetadataV20 meta;
+            const bool metaKept
+                = callbacks_.getPublishedProxyMetadata(selectedTrackId(), meta);
+            bool assetKept = false;
+            if (metaKept)
+            {
+                const auto check = proxy_store::validatePublishedAsset(
+                    callbacks_.getProjectFolder(), meta);
+                assetKept = check.ok && check.file.existsAsFile();
+            }
+            appendSessionLog(juce::String("p1h: off noRender=") + (noJob ? "PASS" : "FAIL")
+                             + " staleHonest=" + (stale ? "PASS" : "FAIL")
+                             + " renderNowRefused=" + (renderNowRefused ? "PASS" : "FAIL")
+                             + " metadataKept=" + (metaKept ? "PASS" : "FAIL")
+                             + " assetKept=" + (assetKept ? "PASS" : "FAIL"));
+            return noJob && stale && renderNowRefused && metaKept && assetKept
+                   && p1hStatusViewCacheContains("off");
+        });
+        add(200, "P1H Off -> Auto: stale destination re-arms and renders", [this] {
+            if (!callbacks_.setProxyUpdateMode(selectedTrackId(), 0))
+            {
+                return false;
+            }
+            // The in-session relevant change is already older than five fake
+            // minutes, so the next evaluation requests immediately (§18.1).
+            callbacks_.advanceProxyPolicyClockMs(6.0 * 60.0 * 1000.0);
+            const bool began = callbacks_.queryProxyJobStatus(selectedTrackId()).exists;
+            appendSessionLog(juce::String("p1h: offToAuto renderBegan=")
+                             + (began ? "PASS" : "FAIL"));
+            return began;
+        });
+        addP1hWaitJobSettledStep("P1H Off->Auto publication");
+        add(200, "P1H final verify: Current + Passive + save persists metadata", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const auto ps = p1hPolicy();
+            const bool saved = callbacks_.saveProjectNow(); // metadata not lost on close (§18.4)
+            appendSessionLog(juce::String("p1h: final current=") + (current ? "PASS" : "FAIL")
+                             + " policyState="
+                             + proxy_policy::proxyPolicyRuntimeStateName(ps.state)
+                             + " finalSave=" + (saved ? "PASS" : "FAIL"));
+            return current && ps.state == PSt::Passive && saved
+                   && p1hStatusViewCacheContains("current");
+        });
+    }
+
     /// M2P: deterministically wiggle the first automatable non-bypass parameter through the
     /// same notify-host path the UI uses; the original value is stored for the revert step.
     [[nodiscard]] bool perturbFirstAutomatableParameter()
@@ -1786,6 +2178,13 @@ private:
     std::int64_t p1gUnderrunMark_ = -1; ///< reader underruns at settled playback
     std::vector<TrackId> p1gOtherMuted_;
     juce::File p1gMixdownA_, p1gMixdownB_;
+
+    // P1H update-policy plan (plan "P1H" only; see buildP1hPlan): verification
+    // bookkeeping only — policy/timers/jobs live in the production services.
+    juce::File p1hProjectFile_;
+    double p1hIdleRemainingMs_ = 0.0;
+    std::uint64_t p1hBlocksMark_ = 0;
+    bool p1hManualCancelWon_ = false;
 
     std::function<int()> waitProbe_; ///< 1 = satisfied, 0 = pending, -1 = failed
     double waitProbeDeadlineMs_ = 0.0;

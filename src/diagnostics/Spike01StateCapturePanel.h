@@ -36,8 +36,9 @@
 #include <vector>
 
 #include "domain/Track.h"
-#include "instruments/ProxyRenderScheduler.h" // narrow P1E status vocabulary (by value)
-#include "io/ProjectFile.h"                   // ProjectFileProxyMetadataV20 (verification copy)
+#include "instruments/ProxyRenderScheduler.h"     // narrow P1E status vocabulary (by value)
+#include "instruments/ProxyUpdatePolicyService.h" // narrow P1H policy vocabulary (by value)
+#include "io/ProjectFile.h"                       // ProjectFileProxyMetadataV20 (verification copy)
 
 class ExperimentalInstrumentHost;
 
@@ -100,6 +101,25 @@ struct Spike01PanelCallbacks
     std::function<double()> getEngineSampleRate;
     /// Attempt a device sample-rate switch; false when the device rejects the rate.
     std::function<bool(double)> trySetEngineSampleRate;
+
+    // --- P1H update-policy end-to-end integration plan only (plan "P1H") ---
+    /// Advance the policy service's injectable clock by `ms` and tick it once
+    /// (deterministic five-minute boundary without waiting; §18.1).
+    std::function<void(double)> advanceProxyPolicyClockMs;
+    /// Immutable P1H policy status (mode + runtime state + idle countdown).
+    std::function<proxy_policy::ProxyPolicyStatus(TrackId)> queryProxyPolicyStatus;
+    /// Persist a new update mode through the SAME seam the Inspector uses
+    /// (0 Auto / 1 On Save / 2 Manual / 3 Off); returns true when it changed.
+    std::function<bool(TrackId, int)> setProxyUpdateMode;
+    /// Policy-service actions (obey mode rules: Render now = Manual only, …).
+    std::function<bool(TrackId)> policyRenderNow;
+    std::function<void(TrackId)> policyCancel;
+    /// Real autosave checkpoint (dirty policy applies). MUST NOT trigger renders.
+    std::function<bool()> forceAutosaveNow;
+    /// Reload a project through the normal ProjectIoCoordinator pipeline.
+    std::function<void(juce::File)> loadProjectNow;
+    /// The current project FILE (invalid when unsaved).
+    std::function<juce::File()> getProjectFile;
     juce::String appVersion;
 };
 

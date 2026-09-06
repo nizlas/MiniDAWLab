@@ -150,8 +150,13 @@ struct ProxyPreparedJob
 
     /// [Render worker] Blocking render. Must honor `cancel` at block boundaries
     /// and call `waitWhilePaused` (recording pause gate) once per block.
+    /// `progressRenderedMs` is a scheduler-owned atomic the implementation SHOULD
+    /// update (relaxed) with the milliseconds of material rendered so far (P1I
+    /// live progress, PI-013); implementations may ignore it.
     [[nodiscard]] virtual ProxyRenderResult render(const ProxyRenderCancellationToken& cancel,
-                                                   const std::function<void()>& waitWhilePaused) = 0;
+                                                   const std::function<void()>& waitWhilePaused,
+                                                   std::atomic<std::int64_t>& progressRenderedMs)
+        = 0;
 };
 
 /// Production: AppProxyRenderEngine (P1D lifecycle + executor + P1F asset store).
@@ -200,6 +205,11 @@ struct ProxyJobStatus
     std::uint64_t primarySemanticRevision = 0;
     juce::String message;        ///< failure/publication detail
     ProxyRenderResult result;    ///< meaningful once terminal (copy)
+    /// P1I live progress (PI-013): milliseconds of destination material rendered so
+    /// far (worker-updated atomic; safe to copy in ANY phase — plain integer, no COW).
+    /// A percentage is deliberately not offered: the total length is unknown until
+    /// the tail completes (§15.2), so honest progress is rendered material + speed.
+    std::int64_t progressRenderedMs = 0;
 };
 
 //==============================================================================
@@ -495,6 +505,8 @@ private:
         std::atomic<bool> cancelledExplicitly{ false };
         std::atomic<bool> renderReturned{ false }; ///< worker set, release-ordered by phase store
         bool finalized = false; ///< message-thread-only latch (single finalize)
+        /// P1I live progress (PI-013): worker-updated rendered-material milliseconds.
+        std::atomic<std::int64_t> progressRenderedMs{ 0 };
 
         std::unique_ptr<ProxyCapturedRequest> request;  ///< written msg thread pre-enqueue
         std::unique_ptr<ProxyPreparedJob> prepared;     ///< create+destroy msg thread; render worker
@@ -612,15 +624,18 @@ private:
 
         // Rendering — the worker exclusively owns the prepared instance now.
         job.phase.store(ProxyJobPhase::Rendering, std::memory_order_release);
-        job.result = job.prepared->render(job.token, [this, &job] {
-            // Recording pause gate: hold PROGRESS at the block boundary while
-            // recording, but never a cancelled/exiting job (prompt cancellation).
-            while (recordingActive_.load(std::memory_order_acquire)
-                   && !job.token.isCancelled() && !worker_.threadShouldExit())
-            {
-                pauseWake_.wait(50);
-            }
-        });
+        job.result = job.prepared->render(
+            job.token,
+            [this, &job] {
+                // Recording pause gate: hold PROGRESS at the block boundary while
+                // recording, but never a cancelled/exiting job (prompt cancellation).
+                while (recordingActive_.load(std::memory_order_acquire)
+                       && !job.token.isCancelled() && !worker_.threadShouldExit())
+                {
+                    pauseWake_.wait(50);
+                }
+            },
+            job.progressRenderedMs);
 
         // Finalizing (message thread: currency check + publication + teardown).
         job.renderReturned.store(true, std::memory_order_release);
@@ -905,6 +920,8 @@ private:
         s.phase = job.phase.load(std::memory_order_acquire);
         s.expectedFingerprint = job.expectedFingerprint;
         s.primarySemanticRevision = job.primarySemanticRevision;
+        // Plain atomic — safe to copy in any phase (P1I live progress).
+        s.progressRenderedMs = job.progressRenderedMs.load(std::memory_order_relaxed);
         // RACE-SAFETY CONTRACT (P1H hang fix): `message`/`result` contain reference-counted
         // juce::String/juce::File members that the worker mutates during Preparing/Rendering
         // AND the message thread mutates during Finalizing (finalizeOnMessageThread writes
