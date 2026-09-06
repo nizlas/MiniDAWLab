@@ -41,6 +41,7 @@
 // docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md. Removable with the spike.
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyOfflineSequencer.h"
+#include "instruments/ProxyPlaybackReader.h"
 #include "instruments/ProxyRenderExecutor.h"
 #include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderTypes.h"
@@ -4287,6 +4288,450 @@ namespace
                "p1e-gate: executor calls the pause gate exactly once per block");
         (void)r.temporaryWavFile.deleteFile();
     }
+    //==========================================================================
+    // SPIKE-03 / P1G — ProxyPlaybackReader: bounded read-ahead streaming with
+    // off-audio-thread rate conversion (docs/audits/SPIKE_03_PROXY_PLAYBACK_
+    // IO_RATE_ADAPTATION.md). Deterministic synthetic WAVs only — no plugins.
+    //==========================================================================
+    [[nodiscard]] juce::File spike03Root()
+    {
+        const juce::File root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getChildFile("MiniDAWSelftests")
+                                    .getChildFile("spike03");
+        (void)root.createDirectory();
+        return root;
+    }
+
+    /// Deterministic per-channel synthetic sample (integer hash noise): both the
+    /// asset writer AND every reference computation use this exact function, so
+    /// bit-exactness claims are checkable.
+    [[nodiscard]] float spike03Sample(const int ch, const std::int64_t i)
+    {
+        const std::uint64_t h = (static_cast<std::uint64_t>(i) * 2654435761ull
+                                 + static_cast<std::uint64_t>(ch) * 97531ull);
+        return static_cast<float>(static_cast<double>((h >> 7) & 0xFFFF) / 65535.0 - 0.5);
+    }
+
+    [[nodiscard]] bool spike03WriteAsset(const juce::File& target, const double rate,
+                                         const std::int64_t len)
+    {
+        (void)target.deleteFile();
+        juce::WavAudioFormat fmt;
+        auto stream = target.createOutputStream();
+        if (stream == nullptr)
+        {
+            return false;
+        }
+        std::unique_ptr<juce::AudioFormatWriter> w(
+            fmt.createWriterFor(stream.release(), rate, 2, 32, {}, 0));
+        if (w == nullptr)
+        {
+            return false;
+        }
+        juce::AudioBuffer<float> buf(2, 4096);
+        std::int64_t done = 0;
+        while (done < len)
+        {
+            const int run = (int)std::min<std::int64_t>(4096, len - done);
+            for (int c = 0; c < 2; ++c)
+            {
+                for (int i = 0; i < run; ++i)
+                {
+                    buf.setSample(c, i, spike03Sample(c, done + i));
+                }
+            }
+            if (!w->writeFromAudioSampleBuffer(buf, 0, run))
+            {
+                return false;
+            }
+            done += run;
+        }
+        return true;
+    }
+
+    /// Independent reference for the reader's stateless linear mapping (same float
+    /// math as ProxyPlaybackReader::convertRangeIntoRing).
+    [[nodiscard]] float spike03Reference(const int ch, const std::int64_t t,
+                                         const proxy_playback::ProxyStreamMapping& m)
+    {
+        const double ratio = m.ratio();
+        const auto at = [&](const std::int64_t i) -> float {
+            return (i >= 0 && i < m.assetLengthFrames) ? spike03Sample(ch, i) : 0.0f;
+        };
+        if (juce::approximatelyEqual(ratio, 1.0))
+        {
+            return at(t);
+        }
+        const double p = static_cast<double>(t) * ratio;
+        const std::int64_t i0 = static_cast<std::int64_t>(std::floor(p));
+        const float frac = static_cast<float>(p - static_cast<double>(i0));
+        return at(i0) * (1.0f - frac) + at(i0 + 1) * frac;
+    }
+
+    /// Fetch [t0, t0+n) after ensuring residency; expect exact reference equality.
+    void spike03ExpectRange(proxy_playback::ProxyPlaybackReader& r,
+                            proxy_playback::ProxyPlaybackIoService& svc,
+                            const std::int64_t t0, const int n, const char* what)
+    {
+        expect(r.messageThread_ensureRangeReady(t0, n, svc.wakeEvent(), 5000),
+               std::string(what) + ": range became resident");
+        std::vector<float> l((size_t)n, -9.0f), rr((size_t)n, -9.0f);
+        expect(r.audioThread_fetch(t0, l.data(), rr.data(), n),
+               std::string(what) + ": fetch fully served");
+        bool ok = true;
+        for (int i = 0; i < n && ok; ++i)
+        {
+            ok = l[(size_t)i] == spike03Reference(0, t0 + i, r.mapping())
+                 && rr[(size_t)i] == spike03Reference(1, t0 + i, r.mapping());
+        }
+        expect(ok, std::string(what) + ": samples match the deterministic reference exactly");
+    }
+
+    void testProxyPlaybackReaderSameRateBitExactAndEof()
+    {
+        const juce::File root = spike03Root();
+        const juce::File wav = root.getChildFile("same-rate-48k.wav");
+        const std::int64_t len = 96000; // 2 s @ 48k
+        expect(spike03WriteAsset(wav, 48000.0, len), "spike03-same: synthetic asset written");
+
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 48000.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = len;
+        expect(m.timelineEofFrames() == len, "spike03-same: ratio 1 EOF == asset length");
+
+        proxy_playback::ProxyPlaybackIoService svc;
+        auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+        expect(!reader->openFailed(), "spike03-same: open + validate succeeds");
+        svc.registerReader(reader);
+
+        spike03ExpectRange(*reader, svc, 0, 512, "spike03-same head");
+        spike03ExpectRange(*reader, svc, 48000, 512, "spike03-same mid");
+        // Straddle EOF: tail must be exact zeros; full-service (EOF is normal).
+        {
+            const std::int64_t t0 = len - 100;
+            expect(reader->messageThread_ensureRangeReady(t0, 512, svc.wakeEvent(), 5000),
+                   "spike03-same eof: resident");
+            std::vector<float> l(512, -9.0f), r(512, -9.0f);
+            const std::uint64_t underBefore = reader->underrunCount();
+            expect(reader->audioThread_fetch(t0, l.data(), r.data(), 512),
+                   "spike03-same eof: straddling fetch is fully served");
+            bool ok = true;
+            for (int i = 0; i < 512 && ok; ++i)
+            {
+                const float want = spike03Reference(0, t0 + i, m);
+                ok = l[(size_t)i] == want && (t0 + i < len || l[(size_t)i] == 0.0f);
+            }
+            expect(ok, "spike03-same eof: pre-EOF exact, post-EOF exactly zero");
+            expect(reader->underrunCount() == underBefore,
+                   "spike03-same eof: EOF never counts as underrun");
+        }
+        // Entirely past EOF.
+        {
+            std::vector<float> l(512, -9.0f), r(512, -9.0f);
+            expect(reader->audioThread_fetch(len + 5000, l.data(), r.data(), 512),
+                   "spike03-same past-eof: served");
+            bool zeros = true;
+            for (int i = 0; i < 512; ++i)
+            {
+                zeros = zeros && l[(size_t)i] == 0.0f && r[(size_t)i] == 0.0f;
+            }
+            expect(zeros, "spike03-same past-eof: silence");
+        }
+        svc.unregisterReader(reader.get());
+    }
+
+    void testProxyPlaybackReaderCrossRateMappingDeterministic()
+    {
+        const juce::File root = spike03Root();
+        struct Case
+        {
+            const char* name;
+            double assetRate;
+            double timelineRate;
+        };
+        const Case cases[] = { { "44k1-to-48k", 44100.0, 48000.0 },
+                               { "48k-to-44k1", 48000.0, 44100.0 } };
+        for (const Case& c : cases)
+        {
+            const juce::File wav = root.getChildFile(juce::String("cross-") + c.name + ".wav");
+            const std::int64_t len = (std::int64_t)(2.0 * c.assetRate);
+            expect(spike03WriteAsset(wav, c.assetRate, len),
+                   std::string("spike03-cross ") + c.name + ": asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = c.assetRate;
+            m.timelineRate = c.timelineRate;
+            m.assetLengthFrames = len;
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            expect(!reader->openFailed(),
+                   std::string("spike03-cross ") + c.name + ": open succeeds");
+            svc.registerReader(reader);
+            spike03ExpectRange(*reader, svc, 0, 512, (std::string("spike03-cross head ") + c.name).c_str());
+            spike03ExpectRange(*reader, svc, 30000, 1024,
+                               (std::string("spike03-cross mid ") + c.name).c_str());
+            const std::int64_t eof = m.timelineEofFrames();
+            spike03ExpectRange(*reader, svc, eof - 700, 512,
+                               (std::string("spike03-cross near-eof ") + c.name).c_str());
+            svc.unregisterReader(reader.get());
+        }
+    }
+
+    void testProxyPlaybackReaderSeekLoopDeterministic()
+    {
+        const juce::File root = spike03Root();
+        const juce::File wav = root.getChildFile("seek-44k1.wav");
+        const std::int64_t len = 132300; // 3 s @ 44.1k
+        expect(spike03WriteAsset(wav, 44100.0, len), "spike03-seek: asset written");
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 44100.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = len;
+        proxy_playback::ProxyPlaybackIoService svc;
+        auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+        svc.registerReader(reader);
+
+        // Sequential play, far forward seek, then LOOP WRAP back — every range must
+        // equal the stateless reference regardless of history.
+        spike03ExpectRange(*reader, svc, 0, 2048, "spike03-seek sequential");
+        spike03ExpectRange(*reader, svc, 120000, 2048, "spike03-seek forward");
+        spike03ExpectRange(*reader, svc, 4096, 2048, "spike03-seek loop-wrap back");
+        spike03ExpectRange(*reader, svc, 120000, 2048, "spike03-seek forward again (identical)");
+        svc.unregisterReader(reader.get());
+    }
+
+    void testProxyPlaybackReaderUnderrunVsEof()
+    {
+        const juce::File root = spike03Root();
+        const juce::File wav = root.getChildFile("underrun-48k.wav");
+        const std::int64_t len = 48000;
+        expect(spike03WriteAsset(wav, 48000.0, len), "spike03-underrun: asset written");
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 48000.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = len;
+        // NO service registered: every pre-EOF fetch is a REAL underrun -> silence,
+        // counted, and reported (returns false). Post-EOF stays a normal full serve.
+        proxy_playback::ProxyPlaybackReader reader(wav, m);
+        expect(!reader.openFailed(), "spike03-underrun: open succeeds");
+        std::vector<float> l(512, -9.0f), r(512, -9.0f);
+        expect(!reader.audioThread_fetch(1000, l.data(), r.data(), 512),
+               "spike03-underrun: unserviced pre-EOF fetch reports not-fully-served");
+        bool zeros = true;
+        for (int i = 0; i < 512; ++i)
+        {
+            zeros = zeros && l[(size_t)i] == 0.0f;
+        }
+        expect(zeros && reader.underrunCount() == 1,
+               "spike03-underrun: silence + exactly one underrun counted");
+        expect(reader.audioThread_fetch(len + 10, l.data(), r.data(), 512)
+                   && reader.underrunCount() == 1,
+               "spike03-underrun: post-EOF fetch is served silence, NOT an underrun");
+        // Recovery: register late, wait, re-fetch the same range successfully.
+        proxy_playback::ProxyPlaybackIoService svc;
+        auto shared = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+        svc.registerReader(shared);
+        spike03ExpectRange(*shared, svc, 1000, 512, "spike03-underrun recovery");
+        expect(shared->underrunCount() == 0,
+               "spike03-underrun: serviced fetch adds no underrun");
+        svc.unregisterReader(shared.get());
+    }
+
+    void testProxyPlaybackReaderSixteenReadersBounded()
+    {
+        const juce::File root = spike03Root();
+        proxy_playback::ProxyPlaybackIoService svc;
+        std::vector<std::shared_ptr<proxy_playback::ProxyPlaybackReader>> readers;
+        const std::int64_t len = 480000; // 10 s @ 48k each
+        for (int i = 0; i < 16; ++i)
+        {
+            const juce::File wav = root.getChildFile("many-" + juce::String(i) + ".wav");
+            expect(spike03WriteAsset(wav, 48000.0, len),
+                   "spike03-16: asset " + std::to_string(i) + " written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 48000.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = len;
+            auto r = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            expect(!r->openFailed(), "spike03-16: open " + std::to_string(i));
+            svc.registerReader(r);
+            readers.push_back(std::move(r));
+        }
+        expect(svc.registeredCount() == 16, "spike03-16: all readers registered");
+
+        // Simulated audio consumption across all 16 (blocks of 512).
+        const double tStart = juce::Time::getMillisecondCounterHiRes();
+        bool allExact = true;
+        for (std::int64_t block = 0; block < 64; ++block)
+        {
+            const std::int64_t t0 = block * 512;
+            for (auto& r : readers)
+            {
+                if (!r->messageThread_ensureRangeReady(t0, 512, svc.wakeEvent(), 5000))
+                {
+                    allExact = false;
+                    continue;
+                }
+                std::vector<float> l(512), rr(512);
+                (void)r->audioThread_fetch(t0, l.data(), rr.data(), 512);
+                for (int i = 0; i < 512 && allExact; ++i)
+                {
+                    allExact = allExact && l[(size_t)i] == spike03Sample(0, t0 + i);
+                }
+            }
+        }
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - tStart;
+        expect(allExact, "spike03-16: 16 simultaneous readers all serve exact audio");
+
+        // Documented per-reader bound: ring (2 * kRingFrames floats) + fill scratch.
+        const size_t perReaderBytes =
+            2u * proxy_playback::kRingFrames * sizeof(float)
+            + 2u * ((size_t)std::ceil(proxy_playback::kFillChunkFrames
+                                      * proxy_playback::kMaxConversionRatio)
+                    + 8u)
+                  * sizeof(float);
+        const double totalMiB = 16.0 * (double)perReaderBytes / (1024.0 * 1024.0);
+        expect(totalMiB < 24.0, "spike03-16: 16-reader ring memory stays under 24 MiB");
+        std::printf("[spike03] 16 readers: perReader=%.2f MiB total=%.2f MiB consume64blocksX16=%.1f ms\n",
+                    (double)perReaderBytes / (1024.0 * 1024.0), totalMiB, elapsedMs);
+        for (auto& r : readers)
+        {
+            svc.unregisterReader(r.get());
+        }
+    }
+
+    void testProxyPlaybackReaderRetirementReleasesHandle()
+    {
+        const juce::File root = spike03Root();
+        const juce::File wav = root.getChildFile("retire-48k.wav");
+        expect(spike03WriteAsset(wav, 48000.0, 48000), "spike03-retire: asset written");
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 48000.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = 48000;
+        proxy_playback::ProxyPlaybackIoService svc;
+        {
+            auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            svc.registerReader(reader);
+            expect(reader->messageThread_ensureRangeReady(0, 512, svc.wakeEvent(), 5000),
+                   "spike03-retire: streamed before retirement");
+            // Windows: the open read handle blocks deletion — retirement must close it.
+            svc.unregisterReader(reader.get());
+            // reader (last ref) destroyed here on the message thread — off audio.
+        }
+        juce::Thread::sleep(50); // let any in-flight service round drop its ref
+        expect(wav.deleteFile(),
+               "spike03-retire: file deletable after retirement (Windows handle closed)");
+    }
+
+    void testProxyPlaybackReaderOpenValidation()
+    {
+        const juce::File root = spike03Root();
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 48000.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = 1000;
+
+        // Missing file.
+        {
+            proxy_playback::ProxyPlaybackReader r(root.getChildFile("nope.wav"), m);
+            expect(r.openFailed(), "spike03-open: missing file fails open");
+        }
+        // Corrupt bytes.
+        {
+            const juce::File bad = root.getChildFile("corrupt.wav");
+            expect(bad.replaceWithText("this is not a wav"), "spike03-open: corrupt written");
+            proxy_playback::ProxyPlaybackReader r(bad, m);
+            expect(r.openFailed(), "spike03-open: corrupt file fails open");
+        }
+        // Metadata mismatch (length).
+        {
+            const juce::File wav = root.getChildFile("mismatch.wav");
+            expect(spike03WriteAsset(wav, 48000.0, 2000), "spike03-open: asset written");
+            proxy_playback::ProxyPlaybackReader r(wav, m); // metadata says 1000
+            expect(r.openFailed(), "spike03-open: length mismatch vs metadata fails open");
+        }
+        // Metadata mismatch (rate).
+        {
+            const juce::File wav = root.getChildFile("mismatch-rate.wav");
+            expect(spike03WriteAsset(wav, 44100.0, 1000), "spike03-open: 44k1 asset written");
+            proxy_playback::ProxyPlaybackReader r(wav, m); // metadata says 48k
+            expect(r.openFailed(), "spike03-open: rate mismatch vs metadata fails open");
+        }
+        // Absurd mapping ratio (corrupt metadata guard).
+        {
+            const juce::File wav = root.getChildFile("ratio.wav");
+            expect(spike03WriteAsset(wav, 48000.0, 1000), "spike03-open: ratio asset written");
+            proxy_playback::ProxyStreamMapping bad = m;
+            bad.timelineRate = 1000.0; // ratio 48 >> kMaxConversionRatio
+            proxy_playback::ProxyPlaybackReader r(wav, bad);
+            expect(r.openFailed(), "spike03-open: out-of-range conversion ratio fails open");
+        }
+    }
+
+    void testProxyPlaybackReaderMeasurements()
+    {
+        const juce::File root = spike03Root();
+        const juce::File wav = root.getChildFile("measure-60s-48k.wav");
+        const std::int64_t len = 48000ll * 60; // one long proxy (constant reader memory)
+        expect(spike03WriteAsset(wav, 48000.0, len), "spike03-measure: 60 s asset written");
+        proxy_playback::ProxyStreamMapping m;
+        m.assetRate = 48000.0;
+        m.timelineRate = 48000.0;
+        m.assetLengthFrames = len;
+        proxy_playback::ProxyPlaybackIoService svc;
+        auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+        svc.registerReader(reader);
+
+        // Seek-to-ready latency (cold window at a far position).
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        expect(reader->messageThread_ensureRangeReady(48000ll * 30, 512, svc.wakeEvent(), 5000),
+               "spike03-measure: far seek becomes ready");
+        const double seekReadyMs = juce::Time::getMillisecondCounterHiRes() - t0;
+
+        // audioThread_fetch cost per 512-frame block over resident data (the whole
+        // 64-block window is made resident first so the measurement is pure ring copy).
+        std::vector<float> l(512), r(512);
+        const std::int64_t base = 48000ll * 30;
+        expect(reader->messageThread_ensureRangeReady(base, 65 * 512, svc.wakeEvent(), 5000),
+               "spike03-measure: fetch-cost window resident");
+        const double f0 = juce::Time::getMillisecondCounterHiRes();
+        constexpr int kBlocks = 2000;
+        for (int i = 0; i < kBlocks; ++i)
+        {
+            (void)reader->audioThread_fetch(base + (i % 64) * 512, l.data(), r.data(), 512);
+        }
+        const double fetchNsPerBlock =
+            (juce::Time::getMillisecondCounterHiRes() - f0) * 1.0e6 / kBlocks;
+
+        // Sustained sequential fill throughput (frames/s) over 10 s of material.
+        const std::int64_t seqStart = 0;
+        expect(reader->messageThread_ensureRangeReady(seqStart, 512, svc.wakeEvent(), 5000),
+               "spike03-measure: sequential window ready");
+        const double s0 = juce::Time::getMillisecondCounterHiRes();
+        std::int64_t served = 0;
+        for (std::int64_t t = seqStart; t < seqStart + 48000ll * 10; t += 512)
+        {
+            if (!reader->messageThread_ensureRangeReady(t, 512, svc.wakeEvent(), 5000))
+            {
+                break;
+            }
+            (void)reader->audioThread_fetch(t, l.data(), r.data(), 512);
+            served += 512;
+        }
+        const double streamMs = juce::Time::getMillisecondCounterHiRes() - s0;
+        const double xRealtime = (48000.0 * (streamMs / 1000.0)) > 0
+                                     ? ((double)served / 48000.0) / (streamMs / 1000.0)
+                                     : 0.0;
+        // 938 whole 512-frame blocks cover the 480000-frame span (ceil).
+        expect(served == 938ll * 512, "spike03-measure: 10 s streamed without loss");
+        expect(!reader->streamFailed(), "spike03-measure: stream never failed");
+        std::printf("[spike03] seekReady=%.2f ms fetch512=%.0f ns stream10s=%.1f ms (%.0fx realtime) underruns=%llu\n",
+                    seekReadyMs, fetchNsPerBlock, streamMs, xRealtime,
+                    (unsigned long long)reader->underrunCount());
+        svc.unregisterReader(reader.get());
+        (void)wav.deleteFile();
+    }
 } // namespace
 
 int main()
@@ -4341,6 +4786,15 @@ int main()
     testProxyAssetStoreSilentAndAssetValidation();
     testProxyAssetStoreConservativeCleanup();
     testProxyMetadataSilentGenerationRoundTrip();
+
+    testProxyPlaybackReaderSameRateBitExactAndEof();
+    testProxyPlaybackReaderCrossRateMappingDeterministic();
+    testProxyPlaybackReaderSeekLoopDeterministic();
+    testProxyPlaybackReaderUnderrunVsEof();
+    testProxyPlaybackReaderSixteenReadersBounded();
+    testProxyPlaybackReaderRetirementReleasesHandle();
+    testProxyPlaybackReaderOpenValidation();
+    testProxyPlaybackReaderMeasurements();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
