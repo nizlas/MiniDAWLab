@@ -1365,7 +1365,7 @@ public:
 
     // SPIKE-01 (P0/P1A validation spike; removable): opens the hidden diagnostic panel. Reached
     // only from the `--spike01-state-capture` command line (Main.cpp); no product path calls it.
-    void invokeStartSpike01StateCaptureProbeFromStartup() override
+    void invokeStartSpike01StateCaptureProbeFromStartup(const juce::String& autoPlanId) override
     {
         if (spike01StateCapturePanel_ != nullptr)
         {
@@ -1413,7 +1413,26 @@ public:
         cb.isTransportPlaying = [this] {
             return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
         };
-        spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb));
+        // SPIKE-01B-M auto mode: transport control through the same controller the
+        // transport strip uses (start only when not already playing; stop = stop button path).
+        cb.startTransport = [this] {
+            if (transportPlayPauseStopController_ != nullptr
+                && transport.readPlaybackIntentForUi() != PlaybackIntent::Playing)
+            {
+                transportPlayPauseStopController_->togglePlayPauseFromUi();
+            }
+        };
+        cb.stopTransport = [this] {
+            if (transportPlayPauseStopController_ != nullptr
+                && transport.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+            {
+                transportPlayPauseStopController_->stopOrSeekFromStopButton();
+            }
+        };
+        cb.seekTransport = [this](std::int64_t sampleIndex) { transport.requestSeek(sampleIndex); };
+        cb.readCycleWrapCount = [this] { return transport.readCycleWrapCountForUi(); };
+        spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
+                                                                               autoPlanId);
     }
 
     // Stability C2: build hooks over the real coordinators/views and start the scenario runner.

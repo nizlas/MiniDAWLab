@@ -275,12 +275,22 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // SPIKE-01 (P0/P1A validation spike; removable): hidden diagnostic panel for the
     // authoritative plugin-state capture measurements. Normal startup is unchanged when the
     // flag is absent — this is the only product-path reference to the spike scaffolding.
+    // SPIKE-01B-M: `--spike01-auto=<plan>` additionally runs a scripted unattended
+    // measurement plan (M1X/M1Y/M2) inside the panel.
     if (commandLine.contains("--spike01-state-capture"))
     {
-        juce::MessageManager::callAsync([this] {
+        juce::String spike01AutoPlan;
+        for (const auto& arg : cliArgs)
+        {
+            if (arg.startsWith("--spike01-auto="))
+            {
+                spike01AutoPlan = arg.fromFirstOccurrenceOf("=", false, false).trim();
+            }
+        }
+        juce::MessageManager::callAsync([this, spike01AutoPlan] {
             if (mainWindow != nullptr)
             {
-                mainWindow->startSpike01StateCaptureProbe();
+                mainWindow->startSpike01StateCaptureProbe(spike01AutoPlan);
             }
         });
     }

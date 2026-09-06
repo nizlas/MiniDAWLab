@@ -48,8 +48,9 @@ public:
     void startStabilityScenario(const StabilityScenarioRequest& request);
 
     /// [Message thread] SPIKE-01 (P0/P1A validation spike; removable): open the hidden
-    /// `--spike01-state-capture` diagnostic panel.
-    void startSpike01StateCaptureProbe();
+    /// `--spike01-state-capture` diagnostic panel. `autoPlanId` (SPIKE-01B-M): non-empty runs
+    /// a scripted unattended measurement plan (`--spike01-auto=<plan>`).
+    void startSpike01StateCaptureProbe(const juce::String& autoPlanId = {});
 
 private:
     [[nodiscard]] bool routeShortcut(const juce::KeyPress& key);

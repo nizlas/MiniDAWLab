@@ -50,6 +50,7 @@ public:
 
     /// SPIKE-01 (P0/P1A validation spike; removable): open the hidden `--spike01-state-capture`
     /// diagnostic panel (see src/diagnostics/Spike01StateCapturePanel.h). Never invoked without
-    /// the command-line flag.
-    virtual void invokeStartSpike01StateCaptureProbeFromStartup() = 0;
+    /// the command-line flag. `autoPlanId` (SPIKE-01B-M): non-empty runs a scripted unattended
+    /// measurement plan.
+    virtual void invokeStartSpike01StateCaptureProbeFromStartup(const juce::String& autoPlanId) = 0;
 };

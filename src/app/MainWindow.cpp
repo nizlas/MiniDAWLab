@@ -113,11 +113,11 @@ void MainWindow::startStabilityScenario(const StabilityScenarioRequest& request)
     }
 }
 
-void MainWindow::startSpike01StateCaptureProbe()
+void MainWindow::startSpike01StateCaptureProbe(const juce::String& autoPlanId)
 {
     if (shortcutTargetFromContent_ != nullptr)
     {
-        shortcutTargetFromContent_->invokeStartSpike01StateCaptureProbeFromStartup();
+        shortcutTargetFromContent_->invokeStartSpike01StateCaptureProbeFromStartup(autoPlanId);
     }
 }
 
