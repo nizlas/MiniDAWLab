@@ -56,6 +56,9 @@
 #include "plugins/PluginInsertHost.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "instruments/InstrumentTrackController.h"
+#include "instruments/ProxyFingerprint.h"
+#include "instruments/ProxyRenderInstanceLifecycle.h"
+#include "instruments/ProxyRenderSnapshot.h"
 #include "plugins/InsertSlotId.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
@@ -1431,22 +1434,110 @@ public:
         };
         cb.seekTransport = [this](std::int64_t sampleIndex) { transport.requestSeek(sampleIndex); };
         cb.readCycleWrapCount = [this] { return transport.readCycleWrapCountForUi(); };
-        // SPIKE-02 contention plans: drain the engine's always-on audio callback load window
-        // (the same counters tickPlaybackUiLoadDiagnostics reads when its compile flag is on).
-        cb.snapshotAudioLoad = [this]() -> Spike01AudioLoadStats {
-            const auto s = playbackEngine_.snapshotAudioCallbackLoadAndReset();
-            Spike01AudioLoadStats o;
-            o.blocks = s.blocks;
-            o.minMs = s.minMs;
-            o.meanMs = s.meanMs;
-            o.maxMs = s.maxMs;
-            o.meanBudgetPercent = s.meanBudgetPercent;
-            o.maxBudgetPercent = s.maxBudgetPercent;
-            o.nearOverruns = s.nearOverruns;
-            o.overruns = s.overruns;
-            o.lastBlockSamples = s.lastBlockSamples;
-            o.sampleRate = s.sampleRate;
-            return o;
+        // P1D integration plan: build the complete PRODUCTION render request on the message
+        // thread (§2 snapshot-and-identity sequence): expected fingerprint + semantic revision,
+        // exact opaque Primary state bytes, immutable P1C destination snapshot, plugin
+        // identity/version, render configuration, span and tail policy. Everything is deep-
+        // copied — the request holds no Session/Track/host/editor references.
+        cb.buildProxyRenderRequest = [this](const TrackId destTrackId,
+                                            proxy_render::ProxyRenderRequest& out) -> juce::String {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return "no instrument runtime coordinator";
+            }
+            auto* host = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(destTrackId);
+            if (host == nullptr || !host->hasInstrument())
+            {
+                return "destination has no loaded instrument";
+            }
+            juce::PluginDescription desc;
+            if (!host->getLastLoadedPluginDescription(desc))
+            {
+                return "no plugin description for the destination instrument";
+            }
+            juce::MemoryBlock stateBlob;
+            if (!host->captureInstrumentStateForRender(stateBlob))
+            {
+                return "Primary state capture failed or returned no bytes";
+            }
+            const auto sessionSnap = session.loadSessionSnapshotForAudioThread();
+            if (sessionSnap == nullptr)
+            {
+                return "no session snapshot";
+            }
+
+            // §15.3 Locked: v1 renders at the current engine rate at enqueue time; persisted
+            // sample-domain placement stays interpreted under the timeline REFERENCE rate.
+            double renderRate = 0.0;
+            if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
+            {
+                renderRate = dev->getCurrentSampleRate();
+            }
+            const double referenceRate
+                = session.timelineSampleRateOr(renderRate > 0.0 ? renderRate : 48000.0);
+            if (!(renderRate > 0.0))
+            {
+                renderRate = referenceRate;
+            }
+
+            proxy_snapshot::BuildInputs in;
+            in.pluginIdentity.fileOrIdentifier = desc.fileOrIdentifier;
+            in.pluginIdentity.uniqueId = desc.uniqueId;
+            in.pluginIdentity.deprecatedUid = desc.deprecatedUid;
+            in.pluginIdentity.format = desc.pluginFormatName;
+            in.pluginIdentity.isInstrument = desc.isInstrument;
+            in.pluginIdentity.version = desc.version;
+            in.stateIdentity.primaryStateRevision = host->getPrimarySemanticRevision();
+            in.stateIdentity.pairedWithSavedState = false;
+            in.pluginStateBlob = stateBlob;
+            in.renderConfig.renderSampleRate = renderRate;
+            in.renderConfig.renderBlockSize = proxy_render::kRenderBlockSize;
+            in.renderConfig.timelineReferenceRate = referenceRate;
+            in.renderConfig.noteOffGateMs = 100;
+            // §15.7 conservative default: no instrument is classified host-event-driven yet, so
+            // the silent fast path stays disabled and empty destinations render the safe path.
+            in.instrumentClassifiedHostEventDriven = false;
+
+            const auto clipsForTrack
+                = [this](const TrackId tid) -> std::vector<const InstrumentMidiClip*> {
+                std::vector<const InstrumentMidiClip*> clips;
+                InstrumentTrackController* c
+                    = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(tid);
+                }
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+                }
+                if (c != nullptr)
+                {
+                    for (const auto& up : c->getClips())
+                    {
+                        if (up != nullptr)
+                        {
+                            clips.push_back(up.get());
+                        }
+                    }
+                }
+                return clips;
+            };
+
+            out.snapshot = proxy_snapshot::buildProxyRenderSnapshot(*sessionSnap, destTrackId,
+                                                                    clipsForTrack, in);
+            out.pluginDescription = desc;
+            out.expectedFingerprint = proxy_fingerprint::computeFingerprint(out.snapshot);
+            out.primarySemanticRevision = in.stateIdentity.primaryStateRevision;
+            out.renderSampleRate = renderRate;
+            out.renderBlockSize = proxy_render::kRenderBlockSize;
+            // Temp artifact outside project media (never inside the project folder / JSON).
+            out.temporaryWavFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                       .getChildFile("MiniDAWLab")
+                                       .getChildFile("proxy-p1d-" + juce::String((int)destTrackId)
+                                                     + "-" + juce::String(juce::Time::currentTimeMillis())
+                                                     + ".wav");
+            return {};
         };
         spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
                                                                                autoPlanId);

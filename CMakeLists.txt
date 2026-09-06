@@ -176,6 +176,8 @@ target_compile_definitions(MiniDAWSelftests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_
 target_link_libraries(MiniDAWSelftests
     PRIVATE
         juce::juce_audio_basics
+        # P1D: temporary-WAV write/validate in the ProxyRenderExecutor.h tests.
+        juce::juce_audio_formats
         # P1C: proxy fingerprint hashing (juce::SHA256) in ProxyFingerprint.h tests.
         juce::juce_cryptography
         juce::juce_events

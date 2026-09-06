@@ -39,7 +39,9 @@
 
 // SPIKE-02 (isolated render / tail-policy spike) pure evaluation helpers — see
 // docs/audits/SPIKE_02_ISOLATED_RENDER_TAIL_LATENCY.md. Removable with the spike.
-#include "diagnostics/Spike02TailAndStats.h"
+#include "instruments/ProxyOfflineSequencer.h"
+#include "instruments/ProxyRenderExecutor.h"
+#include "instruments/ProxyRenderTypes.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -2404,121 +2406,814 @@ namespace
         }
     }
 
-    // SPIKE-02 (removable with the spike): the timing-statistics aggregation used for the
-    // block-processing measurements (median = lower median, p95 = nearest rank).
-    void testSpike02TimingStats()
+    //==========================================================================
+    // P1D — production isolated proxy renderer (ProxyRenderTypes.h,
+    // ProxyOfflineSequencer.h, ProxyRenderExecutor.h). The executor's processor
+    // seam is a template, so these deterministic tests drive the COMPLETE render
+    // loop (scheduling parity, scratch rule, latency preservation, tail policy,
+    // WAV write + validation, cancellation, failure paths) with fake processors
+    // and no plugin hosting. The isolated-instance lifecycle halves are covered
+    // by Debug assertions + the automated real-plugin P1D integration plan.
+    //==========================================================================
+
+    /// Minimal snapshot builders (fields are plain data; the P1C builder itself is covered by
+    /// the existing snapshot/fingerprint tests above).
+    proxy_snapshot::SnapshotClip makeSeqClip(const std::int64_t anchorRef,
+                                             const std::int64_t startRef,
+                                             const std::int64_t lengthRef,
+                                             const double bpm = 120.0,
+                                             const int tpq = 960)
     {
+        proxy_snapshot::SnapshotClip c;
+        c.clipId = 1;
+        c.timelineAnchorSamples = anchorRef;
+        c.startSamples = startRef;
+        c.lengthSamples = lengthRef;
+        c.bpm = bpm;
+        c.ticksPerQuarter = tpq;
+        return c;
+    }
+
+    proxy_snapshot::SnapshotNote makeSeqNote(const std::int64_t startTick,
+                                             const std::int64_t durationTicks,
+                                             const int note,
+                                             const int channel)
+    {
+        proxy_snapshot::SnapshotNote n;
+        n.midiNote = note;
+        n.velocity = 100;
+        n.offVelocity = 64;
+        n.channel = channel;
+        n.startTick = startTick;
+        n.durationTicks = durationTicks;
+        return n;
+    }
+
+    /// Flattened emission for assertions: absolute sample + raw status/data bytes.
+    struct EmittedEvent
+    {
+        std::int64_t absSample = 0;
+        int status = 0; // 0x90 on / 0x80 off / 0xB0 cc (already channel-stripped)
+        int channel = 1;
+        int d1 = 0;
+        int d2 = 0;
+    };
+
+    std::vector<EmittedEvent> runSequencer(proxy_render::ProxyOfflineSequencer& seq,
+                                           const std::int64_t totalSamples,
+                                           const int blockSize,
+                                           const bool includeResetPrefix)
+    {
+        std::vector<EmittedEvent> out;
+        juce::MidiBuffer midi;
+        bool first = true;
+        for (std::int64_t pos = 0; pos < totalSamples; pos += blockSize)
         {
-            const auto s = spike02::computeTimingStats({});
-            expect(s.count == 0 && s.meanMs == 0.0 && s.p95Ms == 0.0,
-                   "spike02: empty timing series yields zeroed stats");
+            midi.clear();
+            if (first && includeResetPrefix)
+            {
+                seq.emitResetAndChasePrefix(midi);
+            }
+            first = false;
+            seq.emitBlock(pos, blockSize, midi);
+            for (const auto meta : midi)
+            {
+                if (meta.numBytes >= 3)
+                {
+                    EmittedEvent e;
+                    e.absSample = pos + meta.samplePosition;
+                    e.status = meta.data[0] & 0xF0;
+                    e.channel = (meta.data[0] & 0x0F) + 1;
+                    e.d1 = meta.data[1];
+                    e.d2 = meta.data[2];
+                    out.push_back(e);
+                }
+            }
         }
+        return out;
+    }
+
+    /// Live-parity ordering + domains: merge order (destination first, then eligible sources in
+    /// session order), CC-before-NoteOn at equal offsets, ORD-1 stored-order tie-break, Note Off
+    /// lifecycle across block boundaries, ineligible-source skip, reset/chase prefix, and §10.1
+    /// reference→render conversion at the renderer boundary.
+    void testProxyOfflineSequencerLiveParity()
+    {
+        using proxy_render::ProxyOfflineSequencer;
+        const double refRate = 48000.0;
+
+        proxy_snapshot::ProxyRenderSnapshot snap;
+        snap.destinationTrackId = TrackId{ 7 };
+        snap.destinationMidiOutputChannel = 0; // Any → native channels
+        snap.renderConfig.timelineReferenceRate = refRate;
+        snap.renderConfig.noteOffGateMs = 100;
+
+        // Destination clip: CC11 at tick 0 + two equal-time notes (stored order 60 then 64,
+        // both ch1) + a long note whose Note Off lands in a later block (tick 960 @120bpm/960tpq
+        // = 0.5 s = 24000 samples at 48 kHz).
         {
-            // 20 values 1..20 ms: median(lower)=10, p95 = ceil(0.95*20)=19th value = 19, max=20.
-            std::vector<double> v;
-            for (int i = 1; i <= 20; ++i)
-                v.push_back((double)i);
-            const auto s = spike02::computeTimingStats(std::move(v));
-            expect(s.count == 20 && s.medianMs == 10.0 && s.p95Ms == 19.0 && s.maxMs == 20.0
-                       && s.minMs == 1.0 && std::abs(s.meanMs - 10.5) < 1e-12,
-                   "spike02: timing stats median/p95/max/min/mean on 1..20 ms");
+            auto clip = makeSeqClip(0, 0, 4 * 48000);
+            clip.notes.push_back(makeSeqNote(0, 960, 60, 1));
+            clip.notes.push_back(makeSeqNote(0, 960, 64, 1));
+            proxy_snapshot::SnapshotCcPoint cc;
+            cc.startTick = 0;
+            cc.controller = 11;
+            cc.value = 100;
+            cc.channel = 1;
+            cc.interpolationToNext = 0;
+            clip.ccPoints.push_back(cc);
+            snap.destinationClips.push_back(std::move(clip));
         }
+        // Source A (session order first): native ch5 remapped to its track channel 2.
         {
-            // Order independence: shuffled single-element and duplicates.
-            const auto s = spike02::computeTimingStats({ 5.0, 1.0, 5.0 });
-            expect(s.count == 3 && s.medianMs == 5.0 && s.maxMs == 5.0 && s.minMs == 1.0,
-                   "spike02: timing stats sort before ranking");
+            proxy_snapshot::SnapshotSource s;
+            s.trackId = TrackId{ 8 };
+            s.midiOutputChannel = 2;
+            auto clip = makeSeqClip(0, 0, 4 * 48000);
+            clip.notes.push_back(makeSeqNote(0, 960, 48, 5));
+            s.clips.push_back(std::move(clip));
+            snap.sources.push_back(std::move(s));
+        }
+        // Source B: channel 3.
+        {
+            proxy_snapshot::SnapshotSource s;
+            s.trackId = TrackId{ 9 };
+            s.midiOutputChannel = 3;
+            auto clip = makeSeqClip(0, 0, 4 * 48000);
+            clip.notes.push_back(makeSeqNote(0, 960, 36, 3));
+            s.clips.push_back(std::move(clip));
+            snap.sources.push_back(std::move(s));
+        }
+        // Ineligible source (muted): must not deliver anything (fingerprint keeps it; PID-006).
+        {
+            proxy_snapshot::SnapshotSource s;
+            s.trackId = TrackId{ 10 };
+            s.midiOutputChannel = 4;
+            s.muted = true;
+            auto clip = makeSeqClip(0, 0, 4 * 48000);
+            clip.notes.push_back(makeSeqNote(0, 960, 40, 4));
+            s.clips.push_back(std::move(clip));
+            snap.sources.push_back(std::move(s));
+        }
+
+        ProxyOfflineSequencer seq(snap, refRate);
+        expect(seq.hasAnyEvents(), "p1d-seq: baked schedule has events");
+        expect(seq.lastEventRenderSample() == 24000,
+               "p1d-seq: span end = last Note Off at 0.5s (24000 samples @48k)");
+
+        const auto evs = runSequencer(seq, 48000, 512, true);
+        // Reset/chase prefix: channels 1,2,3 used (muted ch4 source skipped) → 12 CC at t=0
+        // (64/120/121/123 per channel), BEFORE any musical event.
+        bool prefixOk = evs.size() > 12;
+        for (int i = 0; i < 12 && prefixOk; ++i)
+        {
+            prefixOk = evs[(size_t)i].status == 0xB0 && evs[(size_t)i].absSample == 0
+                       && (evs[(size_t)i].d1 == 64 || evs[(size_t)i].d1 == 120
+                           || evs[(size_t)i].d1 == 121 || evs[(size_t)i].d1 == 123);
+        }
+        expect(prefixOk, "p1d-seq: reset/flush prefix (CC64/120/121/123) precedes all events");
+        bool ch4Seen = false;
+        for (const auto& e : evs)
+        {
+            ch4Seen = ch4Seen || e.channel == 4;
+        }
+        expect(!ch4Seen, "p1d-seq: muted source delivers nothing (playback gate honored)");
+
+        // Musical events at t=0 directly after the prefix: CC11 ch1 BEFORE the destination
+        // Note Ons (Stage D rule), dest notes in STORED order (ORD-1), then source A (ch2,
+        // remapped from native 5), then source B (ch3) — the live merge order.
+        {
+            bool ok = evs.size() >= 17;
+            size_t i = 12;
+            ok = ok && evs[i].status == 0xB0 && evs[i].channel == 1 && evs[i].d1 == 11
+                 && evs[i].d2 == 100 && evs[i].absSample == 0;
+            ++i;
+            ok = ok && evs[i].status == 0x90 && evs[i].channel == 1 && evs[i].d1 == 60;
+            ++i;
+            ok = ok && evs[i].status == 0x90 && evs[i].channel == 1 && evs[i].d1 == 64;
+            ++i;
+            ok = ok && evs[i].status == 0x90 && evs[i].channel == 2 && evs[i].d1 == 48;
+            ++i;
+            ok = ok && evs[i].status == 0x90 && evs[i].channel == 3 && evs[i].d1 == 36;
+            expect(ok, "p1d-seq: CC-before-NoteOn, ORD-1 stored order, dest-then-sources merge");
+        }
+
+        // Note Off lifecycle: every Note On gets its true Note Off at exactly 24000 (deferred
+        // across ~46 block boundaries via the pending queue).
+        {
+            int offsAt24000 = 0;
+            for (const auto& e : evs)
+            {
+                if (e.status == 0x80 && e.absSample == 24000)
+                {
+                    ++offsAt24000;
+                }
+            }
+            expect(offsAt24000 == 4,
+                   "p1d-seq: all four Note Offs land at the exact deferred sample (24000)");
+        }
+
+        // §10.1 conversion at the renderer boundary: the same snapshot rendered at 96 kHz puts
+        // tick 960 (0.5 s) at sample 48000 — reference integers are converted, ticks re-bake.
+        {
+            ProxyOfflineSequencer seq96(snap, 96000.0);
+            expect(seq96.lastEventRenderSample() == 48000,
+                   "p1d-seq: reference→render conversion (0.5s = 48000 samples @96k)");
+            const auto evs96 = runSequencer(seq96, 96000, 512, false);
+            bool sawOnAtZero = false;
+            bool sawOffAt48000 = false;
+            for (const auto& e : evs96)
+            {
+                sawOnAtZero = sawOnAtZero || (e.status == 0x90 && e.absSample == 0 && e.d1 == 60);
+                sawOffAt48000 = sawOffAt48000
+                                || (e.status == 0x80 && e.absSample == 48000 && e.d1 == 60);
+            }
+            expect(sawOnAtZero && sawOffAt48000,
+                   "p1d-seq: events re-bake at the render rate, never the device rate");
+        }
+
+        // CC dedup parity: an unchanged chased/repeated value is never re-sent.
+        {
+            ProxyOfflineSequencer seq2(snap, refRate);
+            const auto evs2 = runSequencer(seq2, 48000, 512, false);
+            int cc11Count = 0;
+            for (const auto& e : evs2)
+            {
+                if (e.status == 0xB0 && e.d1 == 11)
+                {
+                    ++cc11Count;
+                }
+            }
+            expect(cc11Count == 1, "p1d-seq: single-point CC stream emits exactly one CC11");
         }
     }
 
-    // SPIKE-02 (removable with the spike): the tail-policy candidate evaluator that interprets
-    // the measured post-final-event peak/RMS series (steering §15 locked structure: absolute
-    // peak threshold X, continuous window Y, maximum tail Z; reaching Z non-silent = Failed).
-    void testSpike02TailPolicyEvaluator()
+    /// Locked tail policy v1 (−70 dBFS peak / 1.0 s window / 30 s cap; §15.2).
+    void testProxyTailDetectorPolicy()
     {
-        using spike02::BlockLevel;
-        using spike02::TailCandidate;
-
-        // Synthetic series at 0.1 s/block: 2 s of loud decay, then quiet, with a re-rise
-        // burst at 8.0..8.2 s above -60 dB, then silence to 20 s.
-        std::vector<BlockLevel> series;
-        const auto lin = [](const double db) { return spike02::linearFromDbfs(db); };
-        for (int i = 0; i < 200; ++i)
-        {
-            const double t = 0.1 * i;
-            double db;
-            if (t < 2.0)
-                db = -10.0 - t * 20.0; // -10 dB decaying to -50 dB
-            else if (t >= 8.0 && t < 8.3)
-                db = -40.0; // re-rise burst
-            else
-                db = -85.0; // "quiet" floor above a -90 threshold
-            series.push_back({ lin(db), lin(db - 3.0) });
-        }
-        const double blockSec = 0.1;
+        using proxy_render::ProxyTailDetector;
+        const double sr = 48000.0;
+        const double loud = proxy_render::dbToLinear(-40.0);
+        const double quiet = proxy_render::dbToLinear(-80.0);
 
         {
-            // X=-60, Y=1s, Z=15s: quiet from 2.0 s; window 2.0..3.0 s completes; the 8.0 s
-            // burst rises above -60 again after the decision -> must be flagged.
-            const auto r = spike02::evaluateTailCandidate(series, blockSec,
-                                                          TailCandidate{ -60.0, 1.0, 15.0 });
-            expect(r.completed && std::abs(r.tailSec - 2.0) < 0.15
-                       && std::abs(r.decisionSec - 3.0) < 0.15,
-                   "spike02: tail completes at first 1s window below -60 (tail ~2s)");
-            expect(r.roseAboveThresholdAfterDecision && r.peakAfterDecisionDb > -41.0,
-                   "spike02: material re-rising above X after the decision is detected");
+            // 0.5 s loud tail, then quiet: completes when the 1.0 s window fills.
+            ProxyTailDetector d(sr);
+            std::int64_t fed = 0;
+            auto verdict = ProxyTailDetector::Verdict::Continue;
+            while (verdict == ProxyTailDetector::Verdict::Continue)
+            {
+                verdict = d.feedBlock(fed < (std::int64_t)(0.5 * sr) ? loud : quiet, 512);
+                fed += 512;
+            }
+            expect(verdict == ProxyTailDetector::Verdict::TailComplete,
+                   "p1d-tail: decaying signal completes the tail");
+            const double tailSec = (double)d.tailSamplesConsumed() / sr;
+            expect(tailSec > 1.45 && tailSec < 1.60,
+                   "p1d-tail: tail = material 0.5s + 1.0s continuous silence window");
         }
         {
-            // X=-90: the -85 dB floor never qualifies -> Failed at cap (never publishes).
-            const auto r = spike02::evaluateTailCandidate(series, blockSec,
-                                                          TailCandidate{ -90.0, 1.0, 15.0 });
-            expect(!r.completed && r.failedAtCap,
-                   "spike02: idle floor above X (-85 vs -90) fails at the cap, never publishes");
+            // Window restarts after a re-rise above the threshold.
+            ProxyTailDetector d(sr);
+            std::int64_t fed = 0;
+            auto verdict = ProxyTailDetector::Verdict::Continue;
+            while (verdict == ProxyTailDetector::Verdict::Continue)
+            {
+                const double t = (double)fed / sr;
+                const bool loudNow = t < 0.5 || (t >= 1.2 && t < 1.3); // burst inside the window
+                verdict = d.feedBlock(loudNow ? loud : quiet, 512);
+                fed += 512;
+            }
+            const double tailSec = (double)d.tailSamplesConsumed() / sr;
+            expect(verdict == ProxyTailDetector::Verdict::TailComplete && tailSec > 2.25
+                       && tailSec < 2.45,
+                   "p1d-tail: continuous-window requirement restarts after a re-rise");
         }
         {
-            // A window long enough (6.5 s) that the 8.0 s burst interrupts the first quiet run
-            // (2.0..8.0 s = 6.0 s): the run must RESTART after the burst (quiet resumes 8.3 s)
-            // and complete at 8.3 + 6.5 = 14.8 s, inside Z=15 s.
-            const auto r = spike02::evaluateTailCandidate(series, blockSec,
-                                                          TailCandidate{ -60.0, 6.5, 15.0 });
-            expect(r.completed && std::abs(r.tailSec - 8.3) < 0.15
-                       && std::abs(r.decisionSec - 14.8) < 0.15,
-                   "spike02: continuous-window requirement restarts after an above-X block");
+            // Material output for the whole 30 s cap ⇒ CapReached (diagnosed incomplete).
+            ProxyTailDetector d(sr);
+            auto verdict = ProxyTailDetector::Verdict::Continue;
+            while (verdict == ProxyTailDetector::Verdict::Continue)
+            {
+                verdict = d.feedBlock(loud, 4096);
+            }
+            expect(verdict == ProxyTailDetector::Verdict::CapReached,
+                   "p1d-tail: 30s cap with material output = CapReached, never complete");
         }
         {
-            // Z shorter than the needed decision time: quiet run 2.0..3.0 completes at 3.0 s,
-            // but with Z=2.5 s the decision cannot land within the cap -> Failed.
-            const auto r = spike02::evaluateTailCandidate(series, blockSec,
-                                                          TailCandidate{ -60.0, 1.0, 2.5 });
-            expect(!r.completed && r.failedAtCap,
-                   "spike02: decision landing beyond Z fails at the cap");
+            // Exactly-at-threshold peak is NOT silence (strict below-threshold contract).
+            ProxyTailDetector d(sr);
+            auto verdict = ProxyTailDetector::Verdict::Continue;
+            while (verdict == ProxyTailDetector::Verdict::Continue)
+            {
+                verdict = d.feedBlock(proxy_render::dbToLinear(-70.0), 4096);
+            }
+            expect(verdict == ProxyTailDetector::Verdict::CapReached,
+                   "p1d-tail: a floor at exactly -70 dBFS never qualifies as silence");
+        }
+    }
+
+    //==========================================================================
+    // Fake processors for the executor's template seam. Thread affinity note:
+    // production calls the executor from ONE dedicated render worker
+    // (ProxyForegroundRenderJob); these fakes additionally record the calling
+    // thread so the single-caller contract is asserted here too.
+    //==========================================================================
+    struct FakeProcBase
+    {
+        int ins = 0;
+        int outs = 2;
+        int latency = 0;
+        std::uint64_t blocks = 0;
+        juce::Thread::ThreadID firstCaller = nullptr;
+        bool singleCaller = true;
+        int maxChannelsSeen = 0;
+
+        int getTotalNumInputChannels() const { return ins; }
+        int getTotalNumOutputChannels() const { return outs; }
+        int getLatencySamples() const { return latency; }
+
+        void noteBlock(juce::AudioBuffer<float>& b)
+        {
+            ++blocks;
+            maxChannelsSeen = juce::jmax(maxChannelsSeen, b.getNumChannels());
+            const auto tid = juce::Thread::getCurrentThreadId();
+            if (firstCaller == nullptr)
+            {
+                firstCaller = tid;
+            }
+            else if (tid != firstCaller)
+            {
+                singleCaller = false;
+            }
+        }
+    };
+
+    /// Held-note tone with a fixed 1.5 s release tail (deterministic tail measurement) and
+    /// per-channel MIDI bookkeeping.
+    struct FakeSustainToneProc : FakeProcBase
+    {
+        std::int64_t pos = 0;
+        int held = 0;
+        std::int64_t toneUntil = -1; ///< output tone through this absolute sample
+        std::int64_t cc11Seen = 0;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
+        {
+            noteBlock(b);
+            for (const auto meta : midi)
+            {
+                const auto* d = meta.data;
+                if (meta.numBytes < 3)
+                {
+                    continue;
+                }
+                const int status = d[0] & 0xF0;
+                if (status == 0x90 && d[2] > 0)
+                {
+                    ++held;
+                    toneUntil = -1;
+                }
+                else if (status == 0x80 || (status == 0x90 && d[2] == 0))
+                {
+                    if (--held <= 0 && d[1] != 120 && d[1] != 123)
+                    {
+                        held = 0;
+                        toneUntil = pos + meta.samplePosition + (std::int64_t)(1.5 * 48000.0);
+                    }
+                }
+                else if (status == 0xB0 && d[1] == 11)
+                {
+                    ++cc11Seen;
+                }
+            }
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                const std::int64_t abs = pos + i;
+                const float v = (held > 0 || (toneUntil >= 0 && abs <= toneUntil)) ? 0.5f : 0.0f;
+                for (int c = 0; c < juce::jmin(2, b.getNumChannels()); ++c)
+                {
+                    b.setSample(c, i, v);
+                }
+            }
+            pos += b.getNumSamples();
+        }
+    };
+
+    /// SPIKE-02-equivalent fixed-latency instrument (333 samples): a noteOn at absolute T emits
+    /// a unit impulse at T + 333 — leading latency must survive into the WAV untrimmed.
+    struct FakeLatency333Proc : FakeProcBase
+    {
+        static constexpr int kLatency = 333;
+        std::int64_t pos = 0;
+        std::vector<std::int64_t> impulses;
+
+        FakeLatency333Proc() { latency = kLatency; }
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
+        {
+            noteBlock(b);
+            for (const auto meta : midi)
+            {
+                const auto* d = meta.data;
+                if (meta.numBytes >= 3 && (d[0] & 0xF0) == 0x90 && d[2] > 0)
+                {
+                    impulses.push_back(pos + meta.samplePosition + kLatency);
+                }
+            }
+            b.clear();
+            for (std::size_t k = 0; k < impulses.size();)
+            {
+                const std::int64_t t = impulses[k];
+                if (t < pos + b.getNumSamples())
+                {
+                    if (t >= pos)
+                    {
+                        for (int c = 0; c < juce::jmin(2, b.getNumChannels()); ++c)
+                        {
+                            b.setSample(c, (int)(t - pos), 1.0f);
+                        }
+                    }
+                    impulses.erase(impulses.begin() + (std::ptrdiff_t)k);
+                }
+                else
+                {
+                    ++k;
+                }
+            }
+            pos += b.getNumSamples();
+        }
+    };
+
+    /// Six-output instrument: junk on the extra bus channels, silence on the main pair —
+    /// proves the scratch rule (max(2,in,out) channels) and the §5 stereo boundary (junk on
+    /// channels 2..5 never reaches the WAV or the tail detector).
+    struct FakeMultiOutProc : FakeProcBase
+    {
+        FakeMultiOutProc() { outs = 6; }
+        bool markerWritten = false;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
+        {
+            noteBlock(b);
+            b.clear();
+            if (b.getNumChannels() >= 6)
+            {
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                {
+                    b.setSample(5, i, 0.9f); // junk outside the recorded boundary
+                }
+            }
+            if (!markerWritten && b.getNumChannels() >= 2 && b.getNumSamples() > 0)
+            {
+                b.setSample(0, 0, 0.25f);
+                b.setSample(1, 0, 0.25f);
+                markerWritten = true;
+            }
+        }
+    };
+
+    struct FakeNeverSilentProc : FakeProcBase
+    {
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
+        {
+            noteBlock(b);
+            for (int c = 0; c < juce::jmin(2, b.getNumChannels()); ++c)
+            {
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                {
+                    b.setSample(c, i, 0.1f); // -20 dBFS forever
+                }
+            }
+        }
+    };
+
+    struct FakeSilentProc : FakeProcBase
+    {
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
+        {
+            noteBlock(b);
+            b.clear();
+        }
+    };
+
+    struct FakeNanProc : FakeProcBase
+    {
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
+        {
+            noteBlock(b);
+            b.clear();
+            b.setSample(0, 0, std::numeric_limits<float>::quiet_NaN());
+        }
+    };
+
+    /// Requests cooperative cancellation from inside processBlock after N blocks (deterministic
+    /// single-thread cancellation test).
+    struct FakeSelfCancelProc : FakeProcBase
+    {
+        proxy_render::ProxyRenderCancellationToken token;
+        std::uint64_t cancelAfterBlocks = 3;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
+        {
+            noteBlock(b);
+            b.clear();
+            if (blocks >= cancelAfterBlocks)
+            {
+                token.requestCancel();
+            }
+        }
+    };
+
+    [[nodiscard]] juce::File p1dTempWav(const juce::String& tag)
+    {
+        return juce::File::getSpecialLocation(juce::File::tempDirectory)
+            .getChildFile("MiniDAWSelftests")
+            .getChildFile("p1d-" + tag + "-" + juce::String(juce::Time::currentTimeMillis())
+                          + ".wav");
+    }
+
+    /// Organ-topology snapshot (dest ch-Any + ch2/ch3 sources + CC11) for executor tests.
+    [[nodiscard]] proxy_snapshot::ProxyRenderSnapshot makeExecutorSnapshot(const double refRate)
+    {
+        proxy_snapshot::ProxyRenderSnapshot snap;
+        snap.destinationTrackId = TrackId{ 7 };
+        snap.destinationMidiOutputChannel = 0;
+        snap.renderConfig.timelineReferenceRate = refRate;
+        snap.renderConfig.noteOffGateMs = 100;
+        snap.spanAndSilence.hasHostScheduledEvents = true;
+        {
+            auto clip = makeSeqClip(0, 0, (std::int64_t)(4 * refRate));
+            clip.notes.push_back(makeSeqNote(0, 960, 60, 1)); // 0.5 s @120bpm
+            proxy_snapshot::SnapshotCcPoint cc;
+            cc.startTick = 0;
+            cc.controller = 11;
+            cc.value = 100;
+            cc.channel = 1;
+            clip.ccPoints.push_back(cc);
+            snap.destinationClips.push_back(std::move(clip));
         }
         {
-            // Immediately silent series: tail = 0, decision = Y.
-            std::vector<BlockLevel> quiet(50, BlockLevel{ lin(-100.0), lin(-105.0) });
-            const auto r = spike02::evaluateTailCandidate(quiet, blockSec,
-                                                          TailCandidate{ -70.0, 0.5, 15.0 });
-            expect(r.completed && r.tailSec == 0.0 && std::abs(r.decisionSec - 0.5) < 0.15
-                       && !r.roseAboveThresholdAfterDecision,
-                   "spike02: already-silent output yields a zero-length tail");
+            proxy_snapshot::SnapshotSource s;
+            s.trackId = TrackId{ 8 };
+            s.midiOutputChannel = 2;
+            auto clip = makeSeqClip(0, 0, (std::int64_t)(4 * refRate));
+            clip.notes.push_back(makeSeqNote(0, 960, 48, 5));
+            s.clips.push_back(std::move(clip));
+            snap.sources.push_back(std::move(s));
         }
         {
-            const auto grid = spike02::evaluateTailCandidateGrid(series, blockSec);
-            expect(grid.size() == 36, "spike02: candidate grid covers 4 thresholds x 3 windows x 3 caps");
+            proxy_snapshot::SnapshotSource s;
+            s.trackId = TrackId{ 9 };
+            s.midiOutputChannel = 3;
+            auto clip = makeSeqClip(0, 0, (std::int64_t)(4 * refRate));
+            clip.notes.push_back(makeSeqNote(0, 960, 36, 3));
+            s.clips.push_back(std::move(clip));
+            snap.sources.push_back(std::move(s));
+        }
+        return snap;
+    }
+
+    [[nodiscard]] proxy_render::ProxyRenderExecutionConfig makeExecCfg(const double rate,
+                                                                       const juce::String& tag)
+    {
+        proxy_render::ProxyRenderExecutionConfig cfg;
+        cfg.renderSampleRate = rate;
+        cfg.blockSize = 512;
+        cfg.temporaryWavFile = p1dTempWav(tag);
+        cfg.expectedFingerprint = "sha256:test-" + tag;
+        cfg.primarySemanticRevision = 42;
+        return cfg;
+    }
+
+    /// Complete happy path: MIDI merge/channels/CC11 delivery, tail completion, WAV
+    /// write + §8 validation, request↔result identity echo, single processBlock caller.
+    void testProxyRenderExecutorCompleteRender()
+    {
+        const double sr = 48000.0;
+        const auto snap = makeExecutorSnapshot(sr);
+        const auto cfg = makeExecCfg(sr, "complete");
+        FakeSustainToneProc proc;
+        proxy_render::ProxyRenderCancellationToken token;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+
+        expect(r.status == proxy_render::ProxyRenderStatus::Succeeded
+                   && r.failureReason == proxy_render::ProxyRenderFailureReason::None,
+               "p1d-exec: complete destination render succeeds");
+        expect(r.expectedFingerprint == cfg.expectedFingerprint
+                   && r.primarySemanticRevision == 42,
+               "p1d-exec: result echoes the captured request identity (fingerprint + revision)");
+        expect(r.midi.noteOnsByChannel[0] == 1 && r.midi.noteOnsByChannel[1] == 1
+                   && r.midi.noteOnsByChannel[2] == 1 && r.midi.ccByController[11] == 1,
+               "p1d-exec: routed ch1/ch2/ch3 notes and CC11 reach the processor");
+        expect(r.midi.noteOffsByChannel[0] >= 1 && r.midi.noteOffsByChannel[1] >= 1
+                   && r.midi.noteOffsByChannel[2] >= 1,
+               "p1d-exec: Note Off lifecycle delivered for every channel");
+        expect(r.spanEndRenderSamples == 24000,
+               "p1d-exec: span end = final relevant event in render samples");
+        // Tail: 1.5 s tone after the final Note Off + 1.0 s silence window, block-rounded.
+        const double tailSec = (double)r.tailLengthSamples / sr;
+        expect(r.tailCompleted && tailSec > 2.40 && tailSec < 2.65,
+               "p1d-exec: tail rendered to completion (release + silence window)");
+        expect(r.renderedLengthSamples > r.spanEndRenderSamples
+                   && r.renderedLengthSamples == (std::int64_t)r.blocksProcessed * 512,
+               "p1d-exec: asset ends when the accepted tail completes (no zero-padding)");
+        expect(r.temporaryWavFile.existsAsFile() && r.wavBytes > 0,
+               "p1d-exec: validated temporary WAV exists");
+        const auto v = proxy_render::validateTemporaryWav(r.temporaryWavFile, sr, 2,
+                                                          r.renderedLengthSamples);
+        expect(v.ok && v.isFloat && v.bitsPerSample == 32,
+               "p1d-exec: artifact revalidates as 32-bit-float stereo WAV at the render rate");
+        expect(proc.singleCaller, "p1d-exec: exactly one thread called processBlock");
+        expect(r.allFinite && r.maxPeakLinear > 0.4, "p1d-exec: finite, non-silent output");
+        (void)r.temporaryWavFile.deleteFile();
+    }
+
+    /// §7 latency preservation: first nonzero sample in the WAV = noteOn + 333 (never trimmed),
+    /// and the reported value is recorded in the result.
+    void testProxyRenderExecutorLatencyPreservation()
+    {
+        const double sr = 48000.0;
+        auto snap = makeExecutorSnapshot(sr);
+        snap.sources.clear(); // single ch1 note at t=0 keeps the impulse position exact
+        const auto cfg = makeExecCfg(sr, "latency");
+        FakeLatency333Proc proc;
+        proxy_render::ProxyRenderCancellationToken token;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+        expect(r.status == proxy_render::ProxyRenderStatus::Succeeded,
+               "p1d-latency: render succeeds");
+        expect(r.pluginLatencySamplesAtStart == 333 && r.pluginLatencySamplesAtEnd == 333,
+               "p1d-latency: reported plugin latency recorded in the result");
+
+        juce::WavAudioFormat fmt;
+        std::unique_ptr<juce::AudioFormatReader> reader(
+            fmt.createReaderFor(r.temporaryWavFile.createInputStream().release(), true));
+        std::int64_t firstNonZero = -1;
+        if (reader != nullptr)
+        {
+            juce::AudioBuffer<float> chunk(2, 4096);
+            for (std::int64_t pos = 0; pos < (std::int64_t)reader->lengthInSamples && firstNonZero < 0;)
+            {
+                const int n = (int)juce::jmin<std::int64_t>(4096, reader->lengthInSamples - pos);
+                reader->read(&chunk, 0, n, pos, true, true);
+                for (int i = 0; i < n && firstNonZero < 0; ++i)
+                {
+                    if (std::abs(chunk.getSample(0, i)) > 1.0e-7f)
+                    {
+                        firstNonZero = pos + i;
+                    }
+                }
+                pos += n;
+            }
+        }
+        expect(firstNonZero == 333,
+               "p1d-latency: leading latency preserved in the artifact (impulse at 0 + 333)");
+        (void)r.temporaryWavFile.deleteFile();
+    }
+
+    /// Scratch sizing + §5 stereo boundary for a >2-output plugin.
+    void testProxyRenderExecutorScratchAndStereoBoundary()
+    {
+        const double sr = 8000.0; // small rate keeps the silent tail fast
+        auto snap = makeExecutorSnapshot(sr);
+        const auto cfg = makeExecCfg(sr, "multiout");
+        FakeMultiOutProc proc;
+        proxy_render::ProxyRenderCancellationToken token;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+        expect(proc.maxChannelsSeen == 6,
+               "p1d-boundary: scratch spans max(2, totalIn, totalOut) channels (6-out plugin)");
+        expect(r.status == proxy_render::ProxyRenderStatus::Succeeded,
+               "p1d-boundary: junk on channels 2..5 never reaches the tail detector");
+        expect(r.maxPeakLinear <= 0.26,
+               "p1d-boundary: recorded boundary peak is the main-pair marker, not the junk");
+        const auto v = proxy_render::validateTemporaryWav(r.temporaryWavFile, sr, 2,
+                                                          r.renderedLengthSamples);
+        expect(v.ok && v.channels == 2,
+               "p1d-boundary: artifact is the stereo main pair only (same boundary as live DAL)");
+        (void)r.temporaryWavFile.deleteFile();
+    }
+
+    /// §15.2 Locked: 30 s cap with material output ⇒ Failed("tail limit"), nothing publishable,
+    /// temp artifact cleaned up (not retained unless explicitly diagnostic).
+    void testProxyRenderExecutorTailCapFailure()
+    {
+        const double sr = 8000.0;
+        auto snap = makeExecutorSnapshot(sr);
+        const auto cfg = makeExecCfg(sr, "tailcap");
+        FakeNeverSilentProc proc;
+        proxy_render::ProxyRenderCancellationToken token;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+        expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                   && r.failureReason == proxy_render::ProxyRenderFailureReason::TailLimitReached,
+               "p1d-tailcap: cap with material output = Failed tail-limit, never complete");
+        expect(!r.tailCompleted && r.temporaryWavFile == juce::File()
+                   && !cfg.temporaryWavFile.existsAsFile(),
+               "p1d-tailcap: no publishable result; temp artifact deleted by the RAII guard");
+        const double tailSec = (double)r.tailLengthSamples / sr;
+        expect(tailSec >= 29.9 && tailSec < 30.3, "p1d-tailcap: cap honored at 30s tail");
+    }
+
+    /// §9 cancellation: prompt stop at a block boundary, Cancelled (never Failed), temp cleanup.
+    void testProxyRenderExecutorCancellation()
+    {
+        const double sr = 48000.0;
+        const auto snap = makeExecutorSnapshot(sr);
+        const auto cfg = makeExecCfg(sr, "cancel");
+        FakeSelfCancelProc proc;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, proc.token);
+        expect(r.status == proxy_render::ProxyRenderStatus::Cancelled
+                   && r.failureReason == proxy_render::ProxyRenderFailureReason::None,
+               "p1d-cancel: cooperative cancellation returns Cancelled, not Failed");
+        expect(proc.blocks == 3,
+               "p1d-cancel: stops at the first block boundary after the request (no 4th block)");
+        expect(!cfg.temporaryWavFile.existsAsFile(),
+               "p1d-cancel: partial temp artifact cleaned up");
+    }
+
+    /// Failure paths: missing WAV target and non-finite plugin output.
+    void testProxyRenderExecutorFailurePaths()
+    {
+        const double sr = 8000.0;
+        const auto snap = makeExecutorSnapshot(sr);
+        {
+            auto cfg = makeExecCfg(sr, "nowav");
+            cfg.temporaryWavFile = juce::File(); // no target
+            FakeSilentProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::WavWriteFailed,
+                   "p1d-fail: unusable WAV target = WavWriteFailed");
         }
         {
-            // dBFS helpers round-trip.
-            expect(std::abs(spike02::dbfsFromLinear(spike02::linearFromDbfs(-70.0)) + 70.0) < 1e-9
-                       && spike02::dbfsFromLinear(0.0) == -200.0,
-                   "spike02: dBFS conversion round-trips and clamps silence");
+            const auto cfg = makeExecCfg(sr, "nan");
+            FakeNanProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::NonFiniteAudio,
+                   "p1d-fail: NaN output = NonFiniteAudio failure");
+            expect(!cfg.temporaryWavFile.existsAsFile(),
+                   "p1d-fail: failure path cleans the temp artifact up");
         }
         {
-            // Level summary.
-            std::vector<BlockLevel> s = { { 0.5, 0.1 }, { 0.25, 0.3 } };
-            const auto sum = spike02::summarizeLevels(s);
-            expect(sum.blocks == 2 && std::abs(sum.maxPeak - 0.5) < 1e-12
-                       && std::abs(sum.meanRms - 0.2) < 1e-12,
-                   "spike02: level summary computes max peak and mean RMS");
+            // Invalid render configuration.
+            auto cfg = makeExecCfg(sr, "badcfg");
+            cfg.renderSampleRate = 0.0;
+            FakeSilentProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::SnapshotInvalid,
+                   "p1d-fail: invalid render configuration is rejected");
+        }
+    }
+
+    /// §6 empty destination: conservative classification decides between the explicit silent
+    /// generation (no WAV) and the honest full-span render.
+    void testProxyRenderExecutorEmptyDestination()
+    {
+        const double sr = 8000.0;
+        proxy_snapshot::ProxyRenderSnapshot empty;
+        empty.destinationTrackId = TrackId{ 7 };
+        empty.renderConfig.timelineReferenceRate = sr;
+        empty.spanAndSilence.hasHostScheduledEvents = false;
+
+        {
+            // Eligible (explicitly host-event-driven): silent generation without a WAV.
+            auto snap = empty;
+            snap.spanAndSilence.instrumentClassifiedHostEventDriven = true;
+            snap.spanAndSilence.silentGenerationEligible = true;
+            const auto cfg = makeExecCfg(sr, "silentgen");
+            FakeSilentProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::SucceededSilent
+                       && r.temporaryWavFile == juce::File() && proc.blocks == 0
+                       && !cfg.temporaryWavFile.existsAsFile(),
+                   "p1d-empty: eligible empty destination = silent generation, no WAV, no render");
+        }
+        {
+            // Unclassified + actually silent: the normal safe path renders the silence window.
+            const auto cfg = makeExecCfg(sr, "emptysafe");
+            FakeSilentProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, empty, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Succeeded && proc.blocks > 0
+                       && r.renderedLengthSamples >= (std::int64_t)sr,
+                   "p1d-empty: unclassified empty destination takes the normal full render path");
+            (void)r.temporaryWavFile.deleteFile();
+        }
+        {
+            // Unclassified + autonomous output: NEVER silently discarded — the render honestly
+            // fails at the tail cap (compatibility limitation instead of fake silence).
+            const auto cfg = makeExecCfg(sr, "emptyauto");
+            FakeNeverSilentProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, empty, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::TailLimitReached,
+                   "p1d-empty: autonomous generator output is never classified as silence");
         }
     }
 } // namespace
@@ -2584,8 +3279,15 @@ int main()
     testCcLaneViewState();
     testSpike01CaptureDiagnostics();
     testSpike01MidiDeliveryCounters();
-    testSpike02TimingStats();
-    testSpike02TailPolicyEvaluator();
+        testProxyOfflineSequencerLiveParity();
+        testProxyTailDetectorPolicy();
+        testProxyRenderExecutorCompleteRender();
+        testProxyRenderExecutorLatencyPreservation();
+        testProxyRenderExecutorScratchAndStereoBoundary();
+        testProxyRenderExecutorTailCapFailure();
+        testProxyRenderExecutorCancellation();
+        testProxyRenderExecutorFailurePaths();
+        testProxyRenderExecutorEmptyDestination();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
