@@ -44,6 +44,7 @@
 #include "instruments/ProxyPlaybackCoordinator.h"
 #include "instruments/ProxyPlaybackMix.h"
 #include "instruments/ProxyPlaybackReader.h"
+#include "app/PortableProjectService.h"
 #include "instruments/ProxyPlaybackSource.h"
 #include "instruments/ProxyStatusModel.h"
 #include "domain/TrackStereoPan.h"
@@ -7025,6 +7026,750 @@ namespace
             }
         }
     }
+
+    // =========================================================================
+    // P1J — Prepare Portable Project (steering §16.6, PID-011, T-23/T-27
+    // deterministic halves). The service is driven with fake seams and manual
+    // tick() — no threads except where explicitly noted, no real renders.
+    // =========================================================================
+
+    /// Deterministic in-memory world for the preparation service: a REAL source
+    /// project folder on disk (project file + Audio/ media + proxy assets) plus
+    /// fake scheduler/identity seams the tests mutate directly.
+    struct PortableFixture
+    {
+        juce::File root, source, dest;
+        ProjectFileV1 data;
+        juce::String projectFileName { "Proj.dalproj" };
+
+        // Fake runtime state per destination.
+        struct Dest
+        {
+            juce::String name;
+            bool identityExists = true;
+            juce::String fingerprint;   ///< live expected fingerprint
+            ProxyDestinationState state = ProxyDestinationState::Absent;
+            proxy_render::ProxyJobStatus job; ///< exists=false → no job
+            bool hasMeta = false;
+            ProjectFileProxyMetadataV20 meta;
+        };
+        std::map<TrackId, Dest> dests;
+        std::vector<TrackId> renderRequests;   ///< order of requestRender calls
+        std::vector<TrackId> cancelRequests;
+        bool snapshotEligible = true;
+        bool recording = false;
+        bool dirty = false;
+        int saveCalls = 0;
+
+        portable_project::PortablePreparationService::Dependencies makeDeps(
+            const bool syncCollection = true)
+        {
+            portable_project::PortablePreparationService::Dependencies d;
+            d.nowMs = [] { return 0.0; };
+            d.listDestinations = [this] {
+                std::vector<TrackId> out;
+                for (const auto& [tid, unused] : dests)
+                {
+                    out.push_back(tid);
+                }
+                return out;
+            };
+            d.destinationName = [this](const TrackId t) { return dests[t].name; };
+            d.identityForTrack = [this](const TrackId t) {
+                portable_project::PortablePreparationService::Dependencies::Identity id;
+                id.exists = dests[t].identityExists;
+                id.fingerprint = dests[t].fingerprint;
+                return id;
+            };
+            d.destinationState = [this](const TrackId t) { return dests[t].state; };
+            d.jobStatus = [this](const TrackId t) { return dests[t].job; };
+            d.requestRender = [this](const TrackId t) {
+                renderRequests.push_back(t);
+                Dest& dd = dests[t];
+                dd.job.exists = true;
+                dd.job.phase = ProxyJobPhase::Queued;
+                dd.state = ProxyDestinationState::Rendering;
+                return dd.job;
+            };
+            d.cancelDestination = [this](const TrackId t) { cancelRequests.push_back(t); };
+            d.snapshotEligible = [this](TrackId) { return snapshotEligible; };
+            d.recordingActive = [this] { return recording; };
+            d.getProxyMetadata = [this](const TrackId t, ProjectFileProxyMetadataV20& out) {
+                if (!dests[t].hasMeta)
+                {
+                    return false;
+                }
+                out = dests[t].meta;
+                return true;
+            };
+            d.getProjectFile = [this] { return source.getChildFile(projectFileName); };
+            d.isProjectDirty = [this] { return dirty; };
+            d.saveProjectNow = [this] {
+                ++saveCalls;
+                return writeProject(); // persists the current fake metadata
+            };
+            d.runCollectionSynchronously = syncCollection;
+            return d;
+        }
+
+        /// Simulate the scheduler completing a render successfully: terminal
+        /// Published job, new published metadata equal to the live fingerprint,
+        /// destination Current, valid asset written on disk.
+        [[nodiscard]] bool completeRenderSuccessfully(const TrackId t)
+        {
+            Dest& dd = dests[t];
+            dd.job.exists = true;
+            dd.job.phase = ProxyJobPhase::Published;
+            dd.hasMeta = true;
+            dd.meta = ProjectFileProxyMetadataV20{};
+            dd.meta.generationId = dd.fingerprint;
+            dd.meta.relativePath
+                = proxy_store::generationRelativePath(t, dd.fingerprint);
+            dd.meta.sampleRate = 8000.0;
+            dd.meta.lengthSamples = 2048;
+            dd.meta.channels = 2;
+            dd.state = ProxyDestinationState::Current;
+            return p1fWriteWav(
+                proxy_store::resolveProxyRelativePath(source, dd.meta.relativePath), 8000.0,
+                2048);
+        }
+
+        /// Write the fake project data (with each destination's CURRENT metadata
+        /// mirrored into the experimental rows) to the source project file.
+        [[nodiscard]] bool writeProject()
+        {
+            for (auto& it : data.experimentalInstrumentTracks)
+            {
+                const auto found = dests.find(it.trackId);
+                if (found != dests.end())
+                {
+                    it.hasProxy = found->second.hasMeta;
+                    it.proxy = found->second.meta;
+                }
+            }
+            return writeProjectFile(source.getChildFile(projectFileName), data).wasOk();
+        }
+
+        /// Standard world: audio track with two clips sharing one file plus one
+        /// more file in a subfolder; destinations 7 (real asset), 8 (silent).
+        [[nodiscard]] bool build(const juce::String& caseName)
+        {
+            root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                       .getChildFile("MiniDAWSelftests")
+                       .getChildFile("p1j-" + caseName);
+            (void)root.deleteRecursively();
+            source = root.getChildFile("src");
+            dest = root.getChildFile("out").getChildFile("Portable");
+            if (!source.createDirectory())
+            {
+                return false;
+            }
+
+            data = ProjectFileV1{};
+            ProjectFileTrackV1 audio;
+            audio.id = TrackId{ 2 };
+            audio.name = "Drums";
+            audio.kind = "audio";
+            ProjectFileClipV1 c1;
+            c1.id = 1;
+            c1.sourcePath = "Audio/take_a.wav";
+            ProjectFileClipV1 c2 = c1;
+            c2.id = 2;
+            c2.startSample = 500; // same file referenced twice → collected once
+            ProjectFileClipV1 c3;
+            c3.id = 3;
+            c3.sourcePath = "Audio/sub/take_b.wav";
+            audio.clips = { c1, c2, c3 };
+            // A downstream insert: must be REPORTED as an external requirement,
+            // its state preserved, its binary never collected (PI-026).
+            ProjectFileInsertV1 fx;
+            fx.slotId = 1;
+            fx.stage = InsertStage::Post;
+            fx.pluginVst3Path = "C:/Plugins/SomeReverb.vst3";
+            fx.pluginIdentifier = "SomeReverb";
+            fx.pluginStateBase64 = "AAECAw==";
+            audio.inserts.push_back(fx);
+
+            ProjectFileTrackV1 inst7;
+            inst7.id = TrackId{ 7 };
+            inst7.name = "Organ";
+            inst7.kind = "instrument";
+            ProjectFileTrackV1 inst8;
+            inst8.id = TrackId{ 8 };
+            inst8.name = "Pads";
+            inst8.kind = "instrument";
+            data.tracks = { audio, inst7, inst8 };
+
+            ProjectFileExperimentalInstrumentTrackV1 x7;
+            x7.trackId = TrackId{ 7 };
+            x7.name = "Organ";
+            x7.instrumentKind = "GenericVst3";
+            x7.pluginStateBase64 = "T1JHQU4="; // opaque state stays in the package
+            x7.proxyUpdateMode = "off";        // mode is NEVER changed by preparation
+            ProjectFileExperimentalInstrumentTrackV1 x8;
+            x8.trackId = TrackId{ 8 };
+            x8.name = "Pads";
+            data.experimentalInstrumentTracks = { x7, x8 };
+
+            // Absolute machine path in a UI field: sanitized in the COPY only.
+            data.hasAudioMixdown = true;
+            data.audioMixdown.outputDirectory = "C:/Users/somebody/Mixdowns";
+
+            // Media on disk (content only needs to be byte-stable for hashing).
+            if (!source.getChildFile("Audio/sub").createDirectory())
+            {
+                return false;
+            }
+            if (!source.getChildFile("Audio/take_a.wav")
+                     .replaceWithText("RIFF-a-" + juce::String::repeatedString("x", 4000))
+                || !source.getChildFile("Audio/sub/take_b.wav")
+                       .replaceWithText("RIFF-b-" + juce::String::repeatedString("y", 2000)))
+            {
+                return false;
+            }
+
+            // Destination 7: current proxy with a real valid asset.
+            Dest d7;
+            d7.name = "Organ";
+            d7.fingerprint = "sha256:fp7";
+            d7.state = ProxyDestinationState::Current;
+            d7.hasMeta = true;
+            d7.meta.generationId = d7.fingerprint;
+            d7.meta.relativePath
+                = proxy_store::generationRelativePath(TrackId{ 7 }, d7.fingerprint);
+            d7.meta.sampleRate = 8000.0;
+            d7.meta.lengthSamples = 2048;
+            d7.meta.channels = 2;
+            if (!p1fWriteWav(proxy_store::resolveProxyRelativePath(source,
+                                                                   d7.meta.relativePath),
+                             8000.0, 2048))
+            {
+                return false;
+            }
+            dests[TrackId{ 7 }] = d7;
+
+            // Destination 8: current valid SILENT generation (no WAV by design).
+            Dest d8;
+            d8.name = "Pads";
+            d8.fingerprint = "sha256:fp8";
+            d8.state = ProxyDestinationState::Current;
+            d8.hasMeta = true;
+            d8.meta.generationId = d8.fingerprint;
+            d8.meta.silentGeneration = true;
+            d8.meta.sampleRate = 8000.0; // silent generations still record the render rate
+            dests[TrackId{ 8 }] = d8;
+
+            return writeProject();
+        }
+
+        [[nodiscard]] juce::String sourceTreeHash() const
+        {
+            juce::StringArray lines;
+            for (const auto& f : source.findChildFiles(juce::File::findFiles, true))
+            {
+                lines.add(f.getRelativePathFrom(source).replaceCharacter('\\', '/') + "="
+                          + portable_project::sha256HexOfFile(f));
+            }
+            lines.sort(false);
+            return lines.joinIntoString("\n");
+        }
+
+        void cleanup() { (void)root.deleteRecursively(); }
+    };
+
+    void testPortablePureHelpers()
+    {
+        using namespace portable_project;
+        expect(isSafePortableRelativePath("Audio/take.wav", "Audio/")
+                   && isSafePortableRelativePath("Audio/sub/x.wav", "Audio/")
+                   && !isSafePortableRelativePath("Audio/../secret.wav", "Audio/")
+                   && !isSafePortableRelativePath("../Audio/x.wav", "Audio/")
+                   && !isSafePortableRelativePath("C:/Audio/x.wav", "Audio/")
+                   && !isSafePortableRelativePath("Audio\\x.wav", "Audio/")
+                   && !isSafePortableRelativePath("/Audio/x.wav", "Audio/")
+                   && !isSafePortableRelativePath("Other/x.wav", "Audio/")
+                   && !isSafePortableRelativePath("", "Audio/"),
+               "p1j-pure: portable relative path safety matrix");
+
+        ProjectFileV1 d;
+        ProjectFileTrackV1 t;
+        ProjectFileClipV1 a, b, evil;
+        a.sourcePath = "Audio/one.wav";
+        b.sourcePath = "Audio/one.wav"; // duplicate reference → one collection item
+        evil.sourcePath = "Audio/../../etc/passwd";
+        t.clips = { a, b, evil };
+        d.tracks = { t };
+        const CollectionPlan plan = planMediaCollection(d);
+        expect(plan.mediaRelativePaths.size() == 1
+                   && plan.mediaRelativePaths[0] == "Audio/one.wav"
+                   && plan.problems.size() == 1,
+               "p1j-pure: dedup + traversal rejection in the collection plan");
+
+        ProjectFileV1 s;
+        s.hasAudioMixdown = true;
+        s.audioMixdown.outputDirectory = "C:/Users/x/Mix";
+        sanitizePortableProjectData(s);
+        expect(s.audioMixdown.outputDirectory == "Mixdown",
+               "p1j-pure: absolute mixdown path sanitized in the portable copy");
+        s.audioMixdown.outputDirectory = "Mixdown/night";
+        sanitizePortableProjectData(s);
+        expect(s.audioMixdown.outputDirectory == "Mixdown/night",
+               "p1j-pure: relative mixdown path untouched");
+
+        expect(isForbiddenPackageFile(juce::File::createFileWithoutCheckingPath(
+                   "C:/pkg/Evil.vst3"))
+                   && isForbiddenPackageFile(
+                       juce::File::createFileWithoutCheckingPath("C:/pkg/lib.dll"))
+                   && isForbiddenPackageFile(
+                       juce::File::createFileWithoutCheckingPath("C:/pkg/app.exe"))
+                   && !isForbiddenPackageFile(
+                       juce::File::createFileWithoutCheckingPath("C:/pkg/a.wav"))
+                   && !isForbiddenPackageFile(
+                       juce::File::createFileWithoutCheckingPath("C:/pkg/p.dalproj")),
+               "p1j-pure: plugin/licence binary extension boundary");
+
+        // Cancellable verified copy: cancellation fails the copy honestly.
+        const juce::File tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWSelftests")
+                                   .getChildFile("p1j-copy");
+        (void)tmp.deleteRecursively();
+        (void)tmp.createDirectory();
+        const juce::File srcF = tmp.getChildFile("s.bin");
+        (void)srcF.replaceWithText("0123456789");
+        std::atomic<bool> cancelled{ false };
+        expect(portable_project::copyFileVerified(srcF, tmp.getChildFile("d.bin"), cancelled)
+                   .wasOk(),
+               "p1j-pure: verified copy succeeds and checksums match");
+        expect(portable_project::sha256HexOfFile(srcF)
+                   == portable_project::sha256HexOfFile(tmp.getChildFile("d.bin")),
+               "p1j-pure: copied bytes hash-identical");
+        expect(portable_project::copyFileVerified(srcF, tmp.getChildFile("d.bin"), cancelled)
+                   .failed(),
+               "p1j-pure: an occupied destination is never overwritten");
+        cancelled = true;
+        expect(portable_project::copyFileVerified(srcF, tmp.getChildFile("e.bin"), cancelled)
+                   .failed(),
+               "p1j-pure: cancellation stops the copy");
+        (void)tmp.deleteRecursively();
+    }
+
+    void testPortablePreparationHappyPath()
+    {
+        using namespace portable_project;
+        PortableFixture fx;
+        expect(fx.build("happy"), "p1j-happy: fixture built");
+        const juce::String beforeHash = fx.sourceTreeHash();
+
+        PortablePreparationService svc(fx.makeDeps());
+        expect(svc.start(fx.dest), "p1j-happy: operation starts");
+        for (int i = 0; i < 20 && svc.running(); ++i)
+        {
+            svc.tick();
+        }
+        const auto st = svc.status();
+        expect(st.phase == PreparationPhase::Complete,
+               "p1j-happy: all-current project completes without rendering");
+        expect(fx.renderRequests.empty(), "p1j-happy: nothing needed rendering");
+        expect(fx.saveCalls == 0,
+               "p1j-happy: no renders -> no extra save of the source project");
+
+        // Package contents: loadable project + media + proxy + manifest.
+        expect(fx.dest.getChildFile(fx.projectFileName).existsAsFile(),
+               "p1j-happy: portable project file exists");
+        ProjectFileV1 packaged;
+        expect(readProjectFile(fx.dest.getChildFile(fx.projectFileName), packaged).wasOk(),
+               "p1j-happy: portable project file loads");
+        expect(packaged.audioMixdown.outputDirectory == "Mixdown",
+               "p1j-happy: absolute machine path sanitized in the copy");
+        expect(packaged.experimentalInstrumentTracks.size() == 2
+                   && packaged.experimentalInstrumentTracks[0].pluginStateBase64 == "T1JHQU4="
+                   && packaged.experimentalInstrumentTracks[0].proxyUpdateMode == "off",
+               "p1j-happy: opaque plugin state and persisted mode survive unchanged");
+        for (const char* rel : { "Audio/take_a.wav", "Audio/sub/take_b.wav" })
+        {
+            expect(sha256HexOfFile(fx.dest.getChildFile(rel))
+                       == sha256HexOfFile(fx.source.getChildFile(rel)),
+                   "p1j-happy: media copy checksum matches source");
+        }
+        expect(proxy_store::validatePublishedAsset(fx.dest, fx.dests[TrackId{ 7 }].meta).ok,
+               "p1j-happy: proxy asset validates inside the package");
+        expect(proxy_store::proxyDirectory(fx.dest)
+                       .getChildFile(juce::String("track_8"))
+                       .findChildFiles(juce::File::findFiles, true)
+                       .isEmpty(),
+               "p1j-happy: silent generation created no WAV in the package");
+        const juce::String manifest
+            = fx.dest.getChildFile("PortablePreparationReport.txt").loadFileAsString();
+        expect(manifest.contains("SomeReverb")
+                   && manifest.contains("NOT captured by instrument proxies"),
+               "p1j-happy: downstream effect reported as external requirement");
+        expect(manifest.contains("never packaged"),
+               "p1j-happy: plugin/licence boundary stated in the manifest");
+        expect(validatePortablePackage(fx.dest, fx.projectFileName,
+                                       { { TrackId{ 7 }, "sha256:fp7" },
+                                         { TrackId{ 8 }, "sha256:fp8" } })
+                   .isEmpty(),
+               "p1j-happy: full package validation passes");
+        expect(!fx.dest.getSiblingFile(fx.dest.getFileName() + ".preparing").exists(),
+               "p1j-happy: no staging folder survives publication");
+        expect(fx.sourceTreeHash() == beforeHash,
+               "p1j-happy: source project files byte-identical after preparation");
+
+        // Existing destination: clear conflict, nothing overwritten.
+        PortablePreparationService svc2(fx.makeDeps());
+        expect(svc2.start(fx.dest), "p1j-happy: second run starts");
+        svc2.tick();
+        expect(svc2.status().phase == PreparationPhase::Failed
+                   && svc2.status().failureReason.contains("already exists"),
+               "p1j-happy: existing destination is a clear conflict, not an overwrite");
+        expect(readProjectFile(fx.dest.getChildFile(fx.projectFileName), packaged).wasOk(),
+               "p1j-happy: the existing package is untouched by the conflict");
+        fx.cleanup();
+    }
+
+    void testPortablePreparationRendersRequired()
+    {
+        using namespace portable_project;
+        PortableFixture fx;
+        expect(fx.build("render"), "p1j-render: fixture built");
+        // Destination 7 becomes STALE with a NEW expected fingerprint (the old
+        // asset remains on disk — "most recent file" must not count as current).
+        fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+        fx.dests[TrackId{ 7 }].fingerprint = "sha256:fp7new";
+        expect(fx.writeProject(), "p1j-render: stale world written");
+
+        // Recording first: eligibility is paused, no request is issued.
+        fx.recording = true;
+        PortablePreparationService svc(fx.makeDeps());
+        expect(svc.start(fx.dest), "p1j-render: operation starts");
+        svc.tick();
+        expect(svc.status().phase == PreparationPhase::WaitingForRecording
+                   && fx.renderRequests.empty(),
+               "p1j-render: recording pauses the one-shot render request");
+
+        // Recording stops but the host is not quiescent: WaitingForSnapshot.
+        fx.recording = false;
+        fx.snapshotEligible = false;
+        svc.tick();
+        expect(svc.status().phase == PreparationPhase::WaitingForSnapshot
+                   && fx.renderRequests.empty(),
+               "p1j-render: snapshot eligibility defers capture (§9.4.4)");
+
+        // Eligible: the explicit one-shot request goes to the scheduler even
+        // though the persisted mode is "off" (§16.6 exception; mode unchanged).
+        fx.snapshotEligible = true;
+        svc.tick();
+        expect(fx.renderRequests == std::vector<TrackId>{ TrackId{ 7 } },
+               "p1j-render: one-shot render requested despite mode Off");
+        expect(svc.status().phase == PreparationPhase::RenderingProxies,
+               "p1j-render: rendering phase visible");
+
+        // Complete the render; the service verifies Current + captured fingerprint,
+        // persists metadata via the normal save, then collects and publishes.
+        expect(fx.completeRenderSuccessfully(TrackId{ 7 }),
+               "p1j-render: fake publication written");
+        for (int i = 0; i < 20 && svc.running(); ++i)
+        {
+            svc.tick();
+        }
+        expect(svc.status().phase == PreparationPhase::Complete,
+               "p1j-render: package completes after the required render");
+        expect(fx.saveCalls == 1,
+               "p1j-render: post-render metadata persisted through ONE normal save");
+        ProjectFileV1 packaged;
+        expect(readProjectFile(fx.dest.getChildFile(fx.projectFileName), packaged).wasOk()
+                   && packaged.experimentalInstrumentTracks[0].proxy.generationId
+                          == "sha256:fp7new"
+                   && packaged.experimentalInstrumentTracks[0].proxyUpdateMode == "off",
+               "p1j-render: package references the NEW generation; mode still off");
+        expect(proxy_store::validatePublishedAsset(fx.dest, fx.dests[TrackId{ 7 }].meta).ok,
+               "p1j-render: newly rendered asset validates inside the package");
+        fx.cleanup();
+    }
+
+    void testPortablePreparationBlockers()
+    {
+        using namespace portable_project;
+
+        // (1) Stale + unavailable Primary → blocker; nothing staged or published.
+        {
+            PortableFixture fx;
+            expect(fx.build("block1"), "p1j-block: fixture built");
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            fx.dests[TrackId{ 7 }].identityExists = false;
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick();
+            const auto st = svc.status();
+            expect(st.phase == PreparationPhase::Failed && st.blockers.size() == 1
+                       && st.blockers[0].contains("Organ")
+                       && st.blockers[0].contains("Primary"),
+                   "p1j-block: stale + missing Primary is an actionable blocker");
+            expect(!fx.dest.exists()
+                       && !fx.dest.getSiblingFile(fx.dest.getFileName() + ".preparing")
+                               .exists(),
+                   "p1j-block: no package or staging appears on blocked preparation");
+            fx.cleanup();
+        }
+
+        // (2) Missing Primary + CURRENT proxy is READY (not a blocker).
+        {
+            PortableFixture fx;
+            expect(fx.build("block2"), "p1j-block: fixture built");
+            fx.dests[TrackId{ 7 }].identityExists = false; // Primary gone; proxy current
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            for (int i = 0; i < 20 && svc.running(); ++i)
+            {
+                svc.tick();
+            }
+            expect(svc.status().phase == PreparationPhase::Complete,
+                   "p1j-block: missing Primary + current proxy packages fine");
+            fx.cleanup();
+        }
+
+        // (3) Render failure (tail limit) → blocker with the reason; no package.
+        {
+            PortableFixture fx;
+            expect(fx.build("block3"), "p1j-block: fixture built");
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick(); // issues the request
+            auto& d7 = fx.dests[TrackId{ 7 }];
+            d7.job.phase = ProxyJobPhase::Failed;
+            d7.job.result.failureReason
+                = proxy_render::ProxyRenderFailureReason::TailLimitReached;
+            d7.state = ProxyDestinationState::Failed;
+            svc.tick();
+            const auto st = svc.status();
+            expect(st.phase == PreparationPhase::Failed && st.blockers.size() == 1
+                       && st.blockers[0].containsIgnoreCase("tail limit"),
+                   "p1j-block: tail-limit failure blocks with the reason");
+            expect(!fx.dest.exists(), "p1j-block: failed render publishes no package");
+            fx.cleanup();
+        }
+
+        // (4) Obsolete result (edit during render) → project-changed failure.
+        {
+            PortableFixture fx;
+            expect(fx.build("block4"), "p1j-block: fixture built");
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick();
+            fx.dests[TrackId{ 7 }].job.phase = ProxyJobPhase::Obsolete;
+            svc.tick();
+            expect(svc.status().phase == PreparationPhase::Failed
+                       && svc.status().failureReason.contains("changed"),
+                   "p1j-block: obsolete render result = mixed generation refused");
+            fx.cleanup();
+        }
+
+        // (5) Published render that no longer matches the CAPTURED fingerprint
+        //     can never satisfy preparation (PI-028).
+        {
+            PortableFixture fx;
+            expect(fx.build("block5"), "p1j-block: fixture built");
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick();
+            // Edit during render: live fingerprint moves on; job publishes the OLD one.
+            fx.dests[TrackId{ 7 }].fingerprint = "sha256:fp7edited";
+            expect(fx.completeRenderSuccessfully(TrackId{ 7 }),
+                   "p1j-block: fake publication written");
+            fx.dests[TrackId{ 7 }].meta.generationId = "sha256:fp7old";
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            svc.tick();
+            expect(svc.status().phase == PreparationPhase::Failed
+                       && svc.status().failureReason.contains("changed"),
+                   "p1j-block: superseded publication refused, restart required");
+            fx.cleanup();
+        }
+
+        // (6) Missing referenced media → honest blocker before any copying.
+        {
+            PortableFixture fx;
+            expect(fx.build("block6"), "p1j-block: fixture built");
+            (void)fx.source.getChildFile("Audio/sub/take_b.wav").deleteFile();
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            for (int i = 0; i < 20 && svc.running(); ++i)
+            {
+                svc.tick();
+            }
+            const auto st = svc.status();
+            expect(st.phase == PreparationPhase::Failed
+                       && st.blockers.size() == 1
+                       && st.blockers[0].contains("take_b.wav"),
+                   "p1j-block: missing media is an honest named blocker");
+            expect(!fx.dest.exists(), "p1j-block: no package with missing media");
+            fx.cleanup();
+        }
+
+        // (7) Corrupt proxy asset (metadata present, WAV invalid) → validation
+        //     failure with no published package.
+        {
+            PortableFixture fx;
+            expect(fx.build("block7"), "p1j-block: fixture built");
+            (void)proxy_store::resolveProxyRelativePath(fx.source,
+                                                        fx.dests[TrackId{ 7 }].meta
+                                                            .relativePath)
+                .replaceWithText("corrupt");
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            for (int i = 0; i < 20 && svc.running(); ++i)
+            {
+                svc.tick();
+            }
+            expect(svc.status().phase == PreparationPhase::Failed
+                       && svc.status().failureReason.containsIgnoreCase("validation"),
+                   "p1j-block: corrupt proxy asset fails package validation");
+            expect(!fx.dest.exists()
+                       && !fx.dest.getSiblingFile(fx.dest.getFileName() + ".preparing")
+                               .exists(),
+                   "p1j-block: failed validation leaves no false-success folder");
+            fx.cleanup();
+        }
+
+        // (8) Dirty project → explicit save-first failure (never a live/saved mix).
+        {
+            PortableFixture fx;
+            expect(fx.build("block8"), "p1j-block: fixture built");
+            fx.dirty = true;
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick();
+            expect(svc.status().phase == PreparationPhase::Failed
+                       && svc.status().failureReason.contains("unsaved"),
+                   "p1j-block: unsaved changes must be saved first (no mixed state)");
+            fx.cleanup();
+        }
+    }
+
+    void testPortablePreparationCancelAndClose()
+    {
+        using namespace portable_project;
+
+        // (1) Cancel while a required render is in flight: the preparation-owned
+        //     request is cancelled, staging removed, source untouched.
+        {
+            PortableFixture fx;
+            expect(fx.build("cancel1"), "p1j-cancel: fixture built");
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            const juce::String beforeHash = fx.sourceTreeHash();
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick(); // request issued, job Queued
+            svc.cancel();
+            fx.dests[TrackId{ 7 }].job.phase = ProxyJobPhase::Cancelled;
+            svc.tick();
+            expect(svc.status().phase == PreparationPhase::Cancelled,
+                   "p1j-cancel: cancellation during rendering reaches Cancelled");
+            expect(fx.cancelRequests == std::vector<TrackId>{ TrackId{ 7 } },
+                   "p1j-cancel: the preparation-owned render request was cancelled");
+            expect(!fx.dest.exists()
+                       && !fx.dest.getSiblingFile(fx.dest.getFileName() + ".preparing")
+                               .exists(),
+                   "p1j-cancel: no staging or package remains");
+            expect(fx.sourceTreeHash() == beforeHash,
+                   "p1j-cancel: source files untouched by cancellation");
+            fx.cleanup();
+        }
+
+        // (2) Project close during ASYNC collection: bounded shutdownAndJoin
+        //     cleans staging and never publishes.
+        {
+            PortableFixture fx;
+            expect(fx.build("cancel2"), "p1j-cancel: fixture built");
+            PortablePreparationService svc(fx.makeDeps(/*syncCollection*/ false));
+            (void)svc.start(fx.dest);
+            // Collection begins on the worker; close immediately (bounded join).
+            svc.shutdownAndJoin();
+            expect(!svc.running(), "p1j-cancel: shutdown terminates the operation");
+            expect(!fx.dest.exists()
+                       && !fx.dest.getSiblingFile(fx.dest.getFileName() + ".preparing")
+                               .exists(),
+                   "p1j-cancel: close during collection leaves no staging/package");
+            fx.cleanup();
+        }
+
+        // (3) Destination appearing during preparation: publication refuses to
+        //     overwrite and fails cleanly (no false success).
+        {
+            PortableFixture fx;
+            expect(fx.build("cancel3"), "p1j-cancel: fixture built");
+            fx.dests[TrackId{ 7 }].state = ProxyDestinationState::Stale;
+            PortablePreparationService svc(fx.makeDeps());
+            (void)svc.start(fx.dest);
+            svc.tick(); // render requested → still running
+            expect(fx.dest.createDirectory().wasOk(),
+                   "p1j-cancel: destination occupied mid-run");
+            expect(fx.completeRenderSuccessfully(TrackId{ 7 }),
+                   "p1j-cancel: fake publication written");
+            for (int i = 0; i < 20 && svc.running(); ++i)
+            {
+                svc.tick();
+            }
+            const auto st = svc.status();
+            expect(st.phase == PreparationPhase::Failed
+                       && st.failureReason.contains("appeared"),
+                   "p1j-cancel: mid-run destination conflict fails without overwrite");
+            expect(fx.dest.findChildFiles(juce::File::findFiles, true).isEmpty(),
+                   "p1j-cancel: the occupying folder was not written into");
+            fx.cleanup();
+        }
+    }
+
+    void testPortablePackageValidatorBoundary()
+    {
+        using namespace portable_project;
+        PortableFixture fx;
+        expect(fx.build("validator"), "p1j-validator: fixture built");
+
+        // Produce a valid package first.
+        PortablePreparationService svc(fx.makeDeps());
+        (void)svc.start(fx.dest);
+        for (int i = 0; i < 20 && svc.running(); ++i)
+        {
+            svc.tick();
+        }
+        expect(svc.status().phase == PreparationPhase::Complete,
+               "p1j-validator: baseline package complete");
+        const std::vector<std::pair<TrackId, juce::String>> fps{
+            { TrackId{ 7 }, "sha256:fp7" }, { TrackId{ 8 }, "sha256:fp8" }
+        };
+        expect(validatePortablePackage(fx.dest, fx.projectFileName, fps).isEmpty(),
+               "p1j-validator: baseline package validates");
+
+        // Forbidden plugin-binary-like file → rejected (PI-026 enforced).
+        (void)fx.dest.getChildFile("Sneaky.vst3").replaceWithText("binary");
+        expect(!validatePortablePackage(fx.dest, fx.projectFileName, fps).isEmpty(),
+               "p1j-validator: plugin binary in package rejected");
+        (void)fx.dest.getChildFile("Sneaky.vst3").deleteFile();
+
+        // Temp render file → rejected.
+        (void)proxy_store::proxyDirectory(fx.dest)
+            .getChildFile("tmp_left.wav")
+            .replaceWithText("tmp");
+        expect(!validatePortablePackage(fx.dest, fx.projectFileName, fps).isEmpty(),
+               "p1j-validator: temporary render file rejected");
+        (void)proxy_store::proxyDirectory(fx.dest).getChildFile("tmp_left.wav").deleteFile();
+
+        // Wrong generation (not the captured fingerprint) → rejected.
+        expect(!validatePortablePackage(fx.dest, fx.projectFileName,
+                                        { { TrackId{ 7 }, "sha256:other" } })
+                    .isEmpty(),
+               "p1j-validator: non-captured generation rejected (no 'latest file')");
+
+        // Missing media → rejected.
+        (void)fx.dest.getChildFile("Audio/take_a.wav").deleteFile();
+        expect(!validatePortablePackage(fx.dest, fx.projectFileName, fps).isEmpty(),
+               "p1j-validator: missing packaged media rejected");
+
+        fx.cleanup();
+    }
 } // namespace
 
 int main()
@@ -7113,6 +7858,13 @@ int main()
     testProxyPolicyLoadStaleArmsFullWindow();
     testProxySaveAsRehoming();
     testProxyStatusModelMapping();
+
+    testPortablePureHelpers();
+    testPortablePreparationHappyPath();
+    testPortablePreparationRendersRequired();
+    testPortablePreparationBlockers();
+    testPortablePreparationCancelAndClose();
+    testPortablePackageValidatorBoundary();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
