@@ -4,6 +4,7 @@
 
 #include "diagnostics/Spike01StateCapturePanel.h"
 
+#include "app/PortableProjectService.h"  // P1J plan verification (package validator + hashes)
 #include "diagnostics/Spike01MidiDeliveryCounters.h"
 #include "diagnostics/Spike01ReportFormat.h"
 #include "diagnostics/Spike01Sha256.h"
@@ -377,6 +378,10 @@ private:
         else if (autoPlanId_ == "P1H") // P1H: update policies + Save/close end to end
         {
             buildP1hPlan();
+        }
+        else if (autoPlanId_ == "P1J") // P1J: Prepare Portable Project end to end
+        {
+            buildP1jPlan();
         }
         else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
         {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
@@ -1513,6 +1518,388 @@ private:
         });
     }
 
+    //==========================================================================
+    // P1J integration plan ("P1J"): Prepare Portable Project end to end
+    // (steering §16.6, PID-011, T-27). Runs against a TEMPORARY project copy in
+    // a temporary destination root only (the launcher copies TSE_pt2 and cleans
+    // up; the original Dropbox project is never touched). Proves: the explicit
+    // operation renders the stale Organ proxy while its persisted mode stays
+    // Off; the published package validates (paths/checksums/PI-026 boundary);
+    // the package plays Organ's proxy with Primary forced unavailable and the
+    // ORIGINAL source directory renamed away; downstream mute/mixdown still
+    // apply; cross-rate playback works; no extra track/channel appears; the
+    // source copy is byte-identical afterwards.
+    //==========================================================================
+
+    [[nodiscard]] juce::String p1jTreeHash(const juce::File& root) const
+    {
+        juce::StringArray lines;
+        for (const auto& f : root.findChildFiles(juce::File::findFiles, true))
+        {
+            lines.add(f.getRelativePathFrom(root).replaceCharacter('\\', '/') + "="
+                      + portable_project::sha256HexOfFile(f));
+        }
+        lines.sort(false);
+        return lines.joinIntoString("\n");
+    }
+
+    void buildP1jPlan()
+    {
+        using DestSt = proxy_render::ProxyDestinationState;
+        auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
+            autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
+        };
+
+        addWaitForTrackStep("Organ");
+
+        add(1000, "P1J preflight: callbacks + temp project", [this] {
+            const bool ok = callbacks_.portableStart && callbacks_.portablePhaseName
+                            && callbacks_.portableDetails && callbacks_.portableFinalFolder
+                            && callbacks_.getProjectFile && callbacks_.setProxyUpdateMode
+                            && callbacks_.queryProxyPolicyStatus
+                            && callbacks_.appendStaleTestClip && callbacks_.saveProjectNow
+                            && callbacks_.loadProjectNow
+                            && callbacks_.setProxyPrimaryForcedUnavailable
+                            && callbacks_.queryProxyPlaybackRuntimeState
+                            && callbacks_.isProxyViewSelected && callbacks_.runOfflineMixdownWav
+                            && callbacks_.setTrackMuted && callbacks_.listSoundProducingTracks
+                            && callbacks_.getEngineSampleRate && callbacks_.trySetEngineSampleRate
+                            && callbacks_.startTransport && callbacks_.stopTransport
+                            && callbacks_.seekTransport && callbacks_.queryProxyJobStatus
+                            && callbacks_.queryProxyDestinationState
+                            && callbacks_.getPublishedProxyMetadata
+                            && callbacks_.listInstrumentRuntimes;
+            p1jProjectFile_ = callbacks_.getProjectFile ? callbacks_.getProjectFile()
+                                                        : juce::File();
+            p1jSourceFolder_ = p1jProjectFile_.getParentDirectory();
+            p1jRuntimeCount_ = (int)callbacks_.listInstrumentRuntimes().size();
+            p1jTrackCount_ = callbacks_.listSoundProducingTracks
+                                 ? (int)callbacks_.listSoundProducingTracks().size()
+                                 : 0;
+            appendSessionLog("p1j: preflight callbacks=" + juce::String(ok ? "ok" : "MISSING")
+                             + " project=" + p1jProjectFile_.getFullPathName()
+                             + " runtimes=" + juce::String(p1jRuntimeCount_)
+                             + " tracks=" + juce::String(p1jTrackCount_));
+            return ok && p1jProjectFile_.existsAsFile();
+        });
+
+        // ---- world setup: Organ mode Off FIRST (no Auto timer arming), then stale
+        add(300, "P1J set Organ mode Off, make its proxy stale, save", [this] {
+            (void)callbacks_.setProxyUpdateMode(selectedTrackId(), 3);
+            const bool off = p1hPolicy().mode == proxy_policy::ProxyUpdateMode::Off;
+            if (!callbacks_.appendStaleTestClip(selectedTrackId()))
+            {
+                appendSessionLog("p1j: stale-test clip append failed");
+                return false;
+            }
+            const bool stale
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Stale
+                  || callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Absent;
+            const bool saved = callbacks_.saveProjectNow();
+            appendSessionLog(juce::String("p1j: setup modeOff=") + (off ? "PASS" : "FAIL")
+                             + " staleOrAbsent=" + (stale ? "PASS" : "FAIL")
+                             + " saved=" + (saved ? "PASS" : "FAIL"));
+            return off && stale && saved;
+        });
+
+        // ---- start the production preparation service into a TEMP destination
+        add(300, "P1J start Prepare Portable Project", [this] {
+            p1jPortableRoot_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWLab-p1j-e2e")
+                                   .getChildFile(p1jProjectFile_.getFileNameWithoutExtension()
+                                                 + " Portable");
+            (void)p1jPortableRoot_.deleteRecursively(); // fresh TEST destination only
+            (void)p1jPortableRoot_.getParentDirectory().createDirectory();
+            const bool started = callbacks_.portableStart(p1jPortableRoot_);
+            appendSessionLog("p1j: start dest=" + p1jPortableRoot_.getFullPathName()
+                             + " started=" + (started ? "PASS" : "FAIL"));
+            return started;
+        });
+        autoSteps_.push_back(
+            { 0, "wait: P1J preparation reaches a terminal phase", [this] {
+                 waitProbeDesc_ = "P1J preparation terminal phase";
+                 waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 600000.0;
+                 waitProbe_ = [this] {
+                     const juce::String ph = callbacks_.portablePhaseName();
+                     return (ph == "Complete" || ph == "Cancelled" || ph == "Failed") ? 1 : 0;
+                 };
+                 return true;
+             } });
+        add(300, "P1J verify Complete; mode still Off; Organ one-shot render", [this] {
+            const juce::String ph = callbacks_.portablePhaseName();
+            const bool complete = ph == "Complete";
+            if (!complete)
+            {
+                appendSessionLog("p1j: preparation NOT complete phase=" + ph + " details="
+                                 + callbacks_.portableDetails());
+                return false;
+            }
+            // The explicit operation rendered Organ despite mode Off — and did
+            // NOT change the persisted mode (§16.6/§18.1 Locked exception).
+            const bool off = p1hPolicy().mode == proxy_policy::ProxyUpdateMode::Off;
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            const auto& m = s.result.midi;
+            const bool published
+                = s.exists && s.phase == proxy_render::ProxyJobPhase::Published;
+            const bool midiOk = m.noteOnsByChannel[0] > 0 && m.noteOnsByChannel[1] > 0
+                                && m.noteOnsByChannel[2] > 0 && m.ccByController[11] > 0;
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            appendSessionLog(juce::String("p1j: complete=PASS modeStillOff=")
+                             + (off ? "PASS" : "FAIL")
+                             + " organPublished=" + (published ? "PASS" : "FAIL")
+                             + " routedCh123AndCc11=" + (midiOk ? "PASS" : "FAIL")
+                             + " ch1on=" + juce::String(m.noteOnsByChannel[0])
+                             + " ch2on=" + juce::String(m.noteOnsByChannel[1])
+                             + " ch3on=" + juce::String(m.noteOnsByChannel[2])
+                             + " cc11=" + juce::String(m.ccByController[11])
+                             + " destCurrent=" + (current ? "PASS" : "FAIL"));
+            return off && published && midiOk && current;
+        });
+
+        // ---- validate the published package (paths, checksums, PI-026 boundary)
+        add(200, "P1J validate published package", [this] {
+            p1jPortableProjectFile_
+                = p1jPortableRoot_.getChildFile(p1jProjectFile_.getFileName());
+            ProjectFileProxyMetadataV20 meta;
+            const bool hasMeta
+                = callbacks_.getPublishedProxyMetadata(selectedTrackId(), meta);
+            std::vector<std::pair<TrackId, juce::String>> fps;
+            if (hasMeta)
+            {
+                fps.emplace_back(selectedTrackId(), meta.generationId);
+            }
+            const juce::StringArray problems = portable_project::validatePortablePackage(
+                p1jPortableRoot_, p1jPortableProjectFile_.getFileName(), fps);
+            const bool manifest = p1jPortableRoot_
+                                      .getChildFile("PortablePreparationReport.txt")
+                                      .existsAsFile();
+            const bool noStaging
+                = !p1jPortableRoot_
+                       .getSiblingFile(p1jPortableRoot_.getFileName() + ".preparing")
+                       .exists();
+            appendSessionLog("p1j: packageValidation problems=\""
+                             + problems.joinIntoString("; ") + "\" manifest="
+                             + (manifest ? "PASS" : "FAIL")
+                             + " noStagingLeftover=" + (noStaging ? "PASS" : "FAIL"));
+            return hasMeta && problems.isEmpty() && manifest && noStaging
+                   && p1jPortableProjectFile_.existsAsFile();
+        });
+
+        // ---- record source hashes, then use ONLY the portable copy from here on
+        add(100, "P1J record source-copy hashes", [this] {
+            p1jSourceHashes_ = p1jTreeHash(p1jSourceFolder_);
+            appendSessionLog("p1j: sourceHashes files="
+                             + juce::String(juce::StringArray::fromLines(p1jSourceHashes_).size()));
+            return p1jSourceHashes_.isNotEmpty();
+        });
+        add(200, "P1J load the project from the portable package", [this] {
+            callbacks_.loadProjectNow(p1jPortableProjectFile_);
+            return true;
+        });
+        addWaitForTrackStep("Organ");
+        add(800, "P1J make the ORIGINAL source directory unavailable", [this] {
+            p1jSourceHidden_ = p1jSourceFolder_.getSiblingFile(
+                p1jSourceFolder_.getFileName() + ".hidden");
+            const bool moved = p1jSourceFolder_.moveFileTo(p1jSourceHidden_);
+            appendSessionLog(juce::String("p1j: sourceDirHidden=") + (moved ? "PASS" : "FAIL"));
+            return moved;
+        });
+
+        // ---- missing Primary: the portable proxy is selected and audible
+        add(300, "P1J force Primary unavailable (portable copy)", [this] {
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), true);
+            const bool selected = callbacks_.isProxyViewSelected(selectedTrackId());
+            const bool stateOk
+                = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent)
+                  || p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyPreparing);
+            appendSessionLog(juce::String("p1j: primaryForcedUnavailable state=")
+                             + p1gStateName()
+                             + " proxySelected=" + (selected ? "PASS" : "FAIL"));
+            return selected && stateOk;
+        });
+        autoSteps_.push_back(
+            { 0, "wait: P1J ProxyCurrent settled in the portable copy", [this] {
+                 waitProbeDesc_ = "P1J ProxyCurrent settled";
+                 waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 20000.0;
+                 waitProbe_ = [this] {
+                     return p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent)
+                                ? 1
+                                : 0;
+                 };
+                 return true;
+             } });
+        add(300, "P1J seek 0 + start transport", [this] {
+            callbacks_.seekTransport(0);
+            p1jBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.startTransport();
+            return true;
+        });
+        add(2500, "P1J verify non-silent Organ proxy playback from the package", [this] {
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const float peak = p1gProxyPeakNow();
+            callbacks_.stopTransport();
+            const bool consumed = blocks > p1jBlocksMark_;
+            const bool audible = peak > 0.0005f;
+            const bool current = p1gStateSettledIs(
+                proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            appendSessionLog("p1j: playback blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1jBlocksMark_))
+                             + " peak=" + juce::String(peak, 6) + " state=" + p1gStateName()
+                             + " -> consumed=" + (consumed ? "PASS" : "FAIL")
+                             + " nonSilent=" + (audible ? "PASS" : "FAIL")
+                             + " stateCurrent=" + (current ? "PASS" : "FAIL"));
+            return consumed && audible && current;
+        });
+
+        // ---- downstream normal DAL processing still applies (shared strip)
+        add(500, "P1J offline mixdown from the portable copy consumes the proxy", [this] {
+            p1jOtherMuted_.clear();
+            for (const TrackId tid : callbacks_.listSoundProducingTracks())
+            {
+                if (tid != selectedTrackId())
+                {
+                    callbacks_.setTrackMuted(tid, true);
+                    p1jOtherMuted_.push_back(tid);
+                }
+            }
+            p1jMixA_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                           .getChildFile("p1j_mixdown_proxy.wav");
+            p1jBlocksMark_ = p1gProxyBlocksNow();
+            const auto res = callbacks_.runOfflineMixdownWav(p1jMixA_);
+            const float peak = p1gReadWavPeak(p1jMixA_);
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const bool ok = res.wasOk() && peak > 0.001f && blocks > p1jBlocksMark_;
+            appendSessionLog("p1j: mixdown result="
+                             + (res.wasOk() ? juce::String("ok") : res.getErrorMessage())
+                             + " filePeak=" + juce::String(peak, 6) + " blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1jBlocksMark_)) + " -> "
+                             + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+        add(300, "P1J mute gates the proxy through the shared downstream strip", [this] {
+            p1jMixB_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                           .getChildFile("p1j_mixdown_muted.wav");
+            callbacks_.setTrackMuted(selectedTrackId(), true);
+            const auto res = callbacks_.runOfflineMixdownWav(p1jMixB_);
+            callbacks_.setTrackMuted(selectedTrackId(), false);
+            for (const TrackId tid : p1jOtherMuted_)
+            {
+                callbacks_.setTrackMuted(tid, false);
+            }
+            p1jOtherMuted_.clear();
+            const float peak = p1gReadWavPeak(p1jMixB_);
+            const bool ok = res.wasOk() && peak >= 0.0f && peak < 1.0e-6f;
+            appendSessionLog("p1j: mutedMixdown result="
+                             + (res.wasOk() ? juce::String("ok") : res.getErrorMessage())
+                             + " filePeak=" + juce::String(peak, 8)
+                             + " -> muteGatesProxy=" + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+
+        // ---- cross-rate playback of the SAME portable package (PI-030)
+        add(300, "P1J switch engine sample rate", [this] {
+            p1jOriginalRate_ = callbacks_.getEngineSampleRate();
+            const double alt = p1jOriginalRate_ > 45000.0 ? 44100.0 : 48000.0;
+            const bool switched = callbacks_.trySetEngineSampleRate(alt);
+            if (!switched)
+            {
+                p1jRateSwitchSkipped_ = true;
+                appendSessionLog("p1j: engineRate " + juce::String(p1jOriginalRate_, 0)
+                                 + " -> " + juce::String(alt, 0)
+                                 + " UNSUPPORTED by device -> SKIP live cross-rate repeat "
+                                   "(covered by deterministic selftests)");
+                return true;
+            }
+            appendSessionLog("p1j: engineRate " + juce::String(p1jOriginalRate_, 0) + " -> "
+                             + juce::String(alt, 0) + " switched=PASS");
+            return true;
+        });
+        autoSteps_.push_back(
+            { 0, "wait: P1J proxy Current at the new engine rate", [this] {
+                 if (p1jRateSwitchSkipped_)
+                 {
+                     return true;
+                 }
+                 waitProbeDesc_ = "P1J proxy Current at the new engine rate";
+                 waitProbeDeadlineMs_ = juce::Time::getMillisecondCounterHiRes() + 20000.0;
+                 waitProbe_ = [this] {
+                     return (callbacks_.isProxyViewSelected(selectedTrackId())
+                             && p1gStateIs(
+                                 proxy_playback::ProxyPlaybackSourceState::ProxyCurrent))
+                                ? 1
+                                : 0;
+                 };
+                 return true;
+             } });
+        add(300, "P1J start transport at the new rate", [this] {
+            if (p1jRateSwitchSkipped_)
+            {
+                return true;
+            }
+            callbacks_.seekTransport((std::int64_t)(0.5 * callbacks_.getEngineSampleRate()));
+            p1jBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.startTransport();
+            return true;
+        });
+        add(2000, "P1J verify audible cross-rate playback from the package", [this] {
+            if (p1jRateSwitchSkipped_)
+            {
+                appendSessionLog("p1j: crossRate SKIPPED (device rate capability)");
+                return true;
+            }
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const float peak = p1gProxyPeakNow();
+            callbacks_.stopTransport();
+            const bool ok
+                = blocks > p1jBlocksMark_ && peak > 0.0005f
+                  && p1gStateSettledIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent);
+            appendSessionLog("p1j: crossRate rate="
+                             + juce::String(callbacks_.getEngineSampleRate(), 0)
+                             + " blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1jBlocksMark_))
+                             + " peak=" + juce::String(peak, 6) + " state=" + p1gStateName()
+                             + " -> " + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+        add(300, "P1J restore original engine rate", [this] {
+            if (p1jRateSwitchSkipped_)
+            {
+                return true;
+            }
+            const bool switched = callbacks_.trySetEngineSampleRate(p1jOriginalRate_);
+            appendSessionLog("p1j: engineRate restored=" + juce::String(p1jOriginalRate_, 0)
+                             + " switched=" + (switched ? "PASS" : "FAIL"));
+            return switched;
+        });
+
+        // ---- structural honesty: no extra arrangement track / mixer channel
+        add(200, "P1J verify no additional arrangement track or mixer channel", [this] {
+            const int runtimes = (int)callbacks_.listInstrumentRuntimes().size();
+            const int tracks = (int)callbacks_.listSoundProducingTracks().size();
+            const bool ok = runtimes == p1jRuntimeCount_ && tracks == p1jTrackCount_;
+            appendSessionLog("p1j: structure runtimes=" + juce::String(runtimes) + "/"
+                             + juce::String(p1jRuntimeCount_) + " tracks="
+                             + juce::String(tracks) + "/" + juce::String(p1jTrackCount_)
+                             + " -> " + (ok ? "PASS" : "FAIL"));
+            return ok;
+        });
+
+        // ---- restore + verify the source copy is untouched, clean temp files
+        add(300, "P1J restore Primary + source dir; verify source unchanged", [this] {
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), false);
+            const bool restored = p1jSourceHidden_.moveFileTo(p1jSourceFolder_);
+            const bool identical
+                = restored && p1jTreeHash(p1jSourceFolder_) == p1jSourceHashes_;
+            (void)p1jMixA_.deleteFile();
+            (void)p1jMixB_.deleteFile();
+            appendSessionLog(juce::String("p1j: sourceRestored=") + (restored ? "PASS" : "FAIL")
+                             + " sourceByteIdentical=" + (identical ? "PASS" : "FAIL")
+                             + " (portable dest + temp roots cleaned by the launcher)");
+            return restored && identical;
+        });
+    }
+
     /// M2P: deterministically wiggle the first automatable non-bypass parameter through the
     /// same notify-host path the UI uses; the original value is stored for the revert step.
     [[nodiscard]] bool perturbFirstAutomatableParameter()
@@ -2185,6 +2572,19 @@ private:
     double p1hIdleRemainingMs_ = 0.0;
     std::uint64_t p1hBlocksMark_ = 0;
     bool p1hManualCancelWon_ = false;
+
+    // P1J portable-packaging plan (plan "P1J" only; see buildP1jPlan): verification
+    // bookkeeping only — the operation lives in the production preparation service.
+    juce::File p1jProjectFile_, p1jSourceFolder_, p1jSourceHidden_;
+    juce::File p1jPortableRoot_, p1jPortableProjectFile_;
+    juce::File p1jMixA_, p1jMixB_;
+    juce::String p1jSourceHashes_;
+    int p1jRuntimeCount_ = 0;
+    int p1jTrackCount_ = 0;
+    std::uint64_t p1jBlocksMark_ = 0;
+    double p1jOriginalRate_ = 0.0;
+    bool p1jRateSwitchSkipped_ = false;
+    std::vector<TrackId> p1jOtherMuted_;
 
     std::function<int()> waitProbe_; ///< 1 = satisfied, 0 = pending, -1 = failed
     double waitProbeDeadlineMs_ = 0.0;

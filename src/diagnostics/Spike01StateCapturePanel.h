@@ -120,6 +120,17 @@ struct Spike01PanelCallbacks
     std::function<void(juce::File)> loadProjectNow;
     /// The current project FILE (invalid when unsaved).
     std::function<juce::File()> getProjectFile;
+
+    // --- P1J Prepare Portable Project end-to-end integration plan only ("P1J") ---
+    /// Start the production portable-preparation service into the given final
+    /// folder (false = refused, e.g. already running).
+    std::function<bool(juce::File)> portableStart;
+    /// Current phase name of the preparation service ("Idle", …, "Complete").
+    std::function<juce::String()> portablePhaseName;
+    /// Human-readable failure reason + blocker list (empty while healthy).
+    std::function<juce::String()> portableDetails;
+    /// Final published folder (valid once Complete).
+    std::function<juce::File()> portableFinalFolder;
     juce::String appVersion;
 };
 

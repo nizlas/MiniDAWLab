@@ -15,6 +15,7 @@
 #include "app/MainMenuModel.h"
 #include "app/MidiEditorPresenter.h"
 #include "app/PluginHostUiBindings.h"
+#include "app/PortableProjectService.h"
 #include "app/ProjectIoCoordinator.h"
 #include "app/ProjectMainWindowBounds.h"
 #include "app/RecordingCoordinator.h"
@@ -75,6 +76,7 @@
 #include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
+#include "ui/PortablePreparationWindow.h"
 #include "ui/SnapResolutionComboBox.h"
 #include "ui/SnapSettings.h"
 #include "audio/AudioDeviceInfo.h"
@@ -811,6 +813,115 @@ public:
             inspectorView_.setInspectorProxyHost(std::move(proxyUi));
         }
 
+        // P1J: the "Prepare Portable Project" operation owner (§16.6, PID-011). Same
+        // project-runtime ownership as the policy service — never a dialog. Every seam
+        // null-checks at CALL time (coordinators below are created later in this ctor).
+        {
+            portable_project::PortablePreparationService::Dependencies prepDeps;
+            prepDeps.nowMs = [] { return juce::Time::getMillisecondCounterHiRes(); };
+            prepDeps.listDestinations = [this]() -> std::vector<TrackId> {
+                std::vector<TrackId> out;
+                if (const auto snap = session.loadSessionSnapshotForAudioThread())
+                {
+                    for (int i = 0; i < snap->getNumTracks(); ++i)
+                    {
+                        const Track& t = snap->getTrack(i);
+                        if (t.getKind() == TrackKind::Instrument
+                            && instrumentRuntimeCoordinator_ != nullptr
+                            && instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(
+                                   t.getId())
+                                   != nullptr)
+                        {
+                            out.push_back(t.getId());
+                        }
+                    }
+                }
+                return out;
+            };
+            prepDeps.destinationName = [this](const TrackId tid) -> juce::String {
+                if (const auto snap = session.loadSessionSnapshotForAudioThread())
+                {
+                    for (int i = 0; i < snap->getNumTracks(); ++i)
+                    {
+                        if (snap->getTrack(i).getId() == tid)
+                        {
+                            return snap->getTrack(i).getName();
+                        }
+                    }
+                }
+                return "Track " + juce::String((int)tid);
+            };
+            prepDeps.identityForTrack = [this](const TrackId tid) {
+                portable_project::PortablePreparationService::Dependencies::Identity id;
+                if (proxyRenderEngine_ != nullptr)
+                {
+                    const auto cur = proxyRenderEngine_->currentIdentity(tid);
+                    id.exists = cur.destinationExists && cur.expectedFingerprint.isNotEmpty();
+                    id.fingerprint = cur.expectedFingerprint;
+                    id.revision = cur.primarySemanticRevision;
+                }
+                return id;
+            };
+            prepDeps.destinationState
+                = [this](const TrackId tid) { return proxyRenderScheduler_.destinationState(tid); };
+            prepDeps.jobStatus
+                = [this](const TrackId tid) { return proxyRenderScheduler_.jobStatus(tid); };
+            prepDeps.requestRender
+                = [this](const TrackId tid) { return proxyRenderScheduler_.requestRender(tid); };
+            prepDeps.cancelDestination
+                = [this](const TrackId tid) { proxyRenderScheduler_.cancelDestination(tid); };
+            prepDeps.snapshotEligible = [this](const TrackId tid) {
+                ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid)
+                          : nullptr;
+                return h == nullptr
+                       || h->millisecondsSinceLastHostMidiDelivery()
+                              >= proxy_policy::kSnapshotQuiescenceDebounceMs;
+            };
+            prepDeps.recordingActive = [this] {
+                return recorder_.isRecording()
+                       || (recordingCoordinator_ != nullptr
+                           && recordingCoordinator_->isCountInActive());
+            };
+            prepDeps.getProxyMetadata
+                = [this](const TrackId tid, ProjectFileProxyMetadataV20& out) {
+                      InstrumentTrackController* const c
+                          = instrumentRuntimeCoordinator_ != nullptr
+                                ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(
+                                      tid)
+                                : nullptr;
+                      const ProjectFileProxyMetadataV20* const meta
+                          = c != nullptr ? c->getProxyMetadata() : nullptr;
+                      if (meta == nullptr)
+                      {
+                          return false;
+                      }
+                      out = *meta;
+                      return true;
+                  };
+            prepDeps.getProjectFile = [this] { return session.getCurrentProjectFile(); };
+            prepDeps.isProjectDirty = [this] {
+                return projectIoCoordinator_ != nullptr
+                       && projectIoCoordinator_->isProjectDirty();
+            };
+            prepDeps.saveProjectNow = [this] {
+                if (projectIoCoordinator_ == nullptr)
+                {
+                    return false;
+                }
+                // Synchronous known-file save (the flow requires a saved project
+                // before starting): persists the freshly published proxy metadata.
+                bool saved = false;
+                projectIoCoordinator_->saveProjectThen([&saved](const bool ok) { saved = ok; });
+                return saved && projectIoCoordinator_ != nullptr
+                       && !projectIoCoordinator_->isProjectDirty();
+            };
+            portablePreparationService_
+                = std::make_unique<portable_project::PortablePreparationService>(
+                    std::move(prepDeps));
+        }
+
         arrangementEventSelectionCoordinator_
             = std::make_unique<ArrangementEventSelectionCoordinator>(trackLanesView, *instrumentRuntimeCoordinator_);
         trackLanesView.setOnAudioClipMouseDownClearForeignSelections([this]() noexcept {
@@ -1212,6 +1323,7 @@ public:
                 }
             },
             [this] { showAudioMixdownDialog(); },
+            [this] { startPreparePortableProjectFlow(); },
             [this] { showAudioSettingsDialog(); },
             [this] { showHelpMenuPopup(); },
         });
@@ -1371,7 +1483,13 @@ public:
                 [this] { showSavingProjectToast(); },
                 // P1H onProjectAboutToBeReplaced: obsolete/cancel the OLD project's proxy work
                 // and drop the runtime-only policy timers before runtimes are cleared (§13.3).
+                // P1J: a running portable preparation belongs to the OLD project — bounded
+                // cancellation + staging cleanup before the replacement proceeds (§16.6).
                 [this] {
+                    if (portablePreparationService_ != nullptr)
+                    {
+                        portablePreparationService_->shutdownAndJoin();
+                    }
                     proxyRenderScheduler_.notifyProjectChanged();
                     if (proxyUpdatePolicyService_ != nullptr)
                     {
@@ -1591,6 +1709,15 @@ public:
 
     ~TransportControlsContent() override
     {
+        // P1J shutdown: bounded cancel + worker join + staging cleanup BEFORE the render
+        // scheduler/engine teardown (the preparation may own in-flight render requests).
+        portablePreparationWindow_.reset();
+        if (portablePreparationService_ != nullptr)
+        {
+            portablePreparationService_->shutdownAndJoin();
+            portablePreparationService_.reset();
+        }
+
         // P1H shutdown: the policy ticker dies FIRST so no timer callback runs into the
         // scheduler/engine teardown below. Every timer/pending flag is runtime-only (§20) —
         // dropping them loses nothing persisted; staleness is re-derived on next load.
@@ -2049,6 +2176,32 @@ public:
             }
         };
         cb.getProjectFile = [this] { return session.getCurrentProjectFile(); };
+        // P1J integration plan: drive the PRODUCTION portable-preparation service.
+        cb.portableStart = [this](const juce::File& dest) {
+            return portablePreparationService_ != nullptr
+                   && portablePreparationService_->start(dest);
+        };
+        cb.portablePhaseName = [this]() -> juce::String {
+            return portablePreparationService_ != nullptr
+                       ? juce::String(portable_project::preparationPhaseName(
+                             portablePreparationService_->status().phase))
+                       : juce::String("Idle");
+        };
+        cb.portableDetails = [this]() -> juce::String {
+            if (portablePreparationService_ == nullptr)
+            {
+                return {};
+            }
+            const auto st = portablePreparationService_->status();
+            return st.failureReason
+                   + (st.blockers.isEmpty() ? juce::String()
+                                            : " | " + st.blockers.joinIntoString(" | "));
+        };
+        cb.portableFinalFolder = [this]() -> juce::File {
+            return portablePreparationService_ != nullptr
+                       ? portablePreparationService_->status().finalFolder
+                       : juce::File();
+        };
         spike01StateCapturePanel_ = std::make_unique<Spike01StateCapturePanel>(std::move(cb),
                                                                                autoPlanId);
     }
@@ -2677,6 +2830,103 @@ private:
                                                      confirmSaveBeforeExport);
     }
 
+    // ---------------------------------------------------------------- P1J UI
+    // "Prepare Portable Project..." (§16.6): explicit user operation. The flow
+    // guarantees a coherent SAVED project before capture (never a mixture of
+    // saved and live state), asks for a destination, then starts the service.
+    void startPreparePortableProjectFlow()
+    {
+        if (portablePreparationService_ == nullptr)
+        {
+            return;
+        }
+        if (portablePreparationService_->running())
+        {
+            openPortablePreparationWindow(); // one operation at a time
+            return;
+        }
+        const bool needsSave = !session.hasKnownProjectFile()
+                               || (projectIoCoordinator_ != nullptr
+                                   && projectIoCoordinator_->isProjectDirty());
+        if (needsSave && projectIoCoordinator_ != nullptr)
+        {
+            // Explicit Save (with chooser on first save) — the portable package
+            // is prepared from the saved project state only.
+            projectIoCoordinator_->saveProjectThen([this](const bool saved) {
+                if (saved)
+                {
+                    choosePortableDestinationAndStart();
+                }
+            });
+            return;
+        }
+        choosePortableDestinationAndStart();
+    }
+
+    void choosePortableDestinationAndStart()
+    {
+        auto chooser = std::make_shared<juce::FileChooser>(
+            "Prepare Portable Project: choose where to create the portable folder",
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+        chooser->launchAsync(
+            juce::FileBrowserComponent::openMode
+                | juce::FileBrowserComponent::canSelectDirectories,
+            [this, chooser](const juce::FileChooser& fc) {
+                juce::ignoreUnused(chooser);
+                const juce::File parent = fc.getResult();
+                if (parent == juce::File())
+                {
+                    return; // user cancelled the chooser
+                }
+                const juce::String name
+                    = session.getCurrentProjectFile().getFileNameWithoutExtension()
+                      + " Portable";
+                startPortablePreparationInto(parent.getChildFile(name));
+            });
+    }
+
+    void startPortablePreparationInto(const juce::File& finalFolder)
+    {
+        if (portablePreparationService_ != nullptr
+            && portablePreparationService_->start(finalFolder))
+        {
+            openPortablePreparationWindow();
+        }
+    }
+
+    void openPortablePreparationWindow()
+    {
+        if (portablePreparationWindow_ == nullptr)
+        {
+            PortablePreparationWindow::Callbacks cb;
+            cb.getStatus = [this]() -> portable_project::PreparationStatus {
+                return portablePreparationService_ != nullptr
+                           ? portablePreparationService_->status()
+                           : portable_project::PreparationStatus{};
+            };
+            cb.cancelOperation = [this] {
+                if (portablePreparationService_ != nullptr)
+                {
+                    portablePreparationService_->cancel();
+                }
+            };
+            cb.restartOperation = [this] { startPreparePortableProjectFlow(); };
+            cb.onWindowClosed = [this] {
+                // View only: hiding the window never stops the operation (the
+                // service owns the lifetime; reopen via the File menu).
+                if (portablePreparationWindow_ != nullptr)
+                {
+                    portablePreparationWindow_->setVisible(false);
+                }
+            };
+            portablePreparationWindow_
+                = std::make_unique<PortablePreparationWindow>(std::move(cb));
+        }
+        portablePreparationWindow_->setVisible(true);
+        portablePreparationWindow_->toFront(true);
+        portablePreparationWindow_->refreshNow();
+    }
+
     void showAudioSettingsDialog()
     {
         mini_daw_app_dialogs::showAudioSettingsDialog(*this,
@@ -3247,6 +3497,12 @@ private:
     /// Test/integration clock skew added to the policy clock (0 in production; the automated
     /// P1H integration advances it to cross the five-minute boundary without waiting).
     double proxyPolicyTestClockOffsetMs_ = 0.0;
+    /// P1J: "Prepare Portable Project" operation owner (§16.6). App-runtime service — never
+    /// owned by the transient progress window below. Shut down (bounded cancel + worker join
+    /// + staging cleanup) on project replacement and in the destructor.
+    std::unique_ptr<portable_project::PortablePreparationService> portablePreparationService_;
+    /// P1J progress surface (view only; closing it never stops the operation).
+    std::unique_ptr<PortablePreparationWindow> portablePreparationWindow_;
 
     std::unique_ptr<InstrumentRuntimeCoordinator> instrumentRuntimeCoordinator_;
     /// Listed after IRC: reverse member destruction runs this dtor first while `instrumentRuntimeCoordinator_` still exists.
