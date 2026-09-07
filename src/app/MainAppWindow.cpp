@@ -544,15 +544,40 @@ public:
                 {
                     proxyPlaybackCoordinator_->refreshDestination(tid);
                 }
-                // P1H §18.3 (Recommended, Locked classification): publication metadata updates
-                // DIRTY the project (the file references changed and should be saved) but are
-                // excluded from musical undo (the undo snapshot strips proxy fields — §12.3
-                // precedent). This is what guarantees metadata published after the previous
-                // Save is not silently lost on close: close sees a dirty project and prompts,
-                // and autosave persists the reference without ever triggering rendering.
+                // P1 acceptance correction (§18.3/§18.4): after the WAV publication and the
+                // immediate runtime activation above, checkpoint the new metadata reference
+                // into the main `.dalproj` automatically WHEN SAFE (saved-generation guard:
+                // real saved project file, no unsaved user edits since the last successful
+                // Save/load, unchanged on-disk identity). The checkpoint re-reads the last
+                // saved representation and replaces only this destination's proxy metadata —
+                // it can never silently save unrelated user edits, creates no undo entry and
+                // never fires onSuccessfulUserSave (no On Save render recursion). One user
+                // Save in On Save mode therefore fully persists: Save → render → publish →
+                // automatic metadata checkpoint, no second Save.
+                //
+                // When the checkpoint is refused (e.g. unsaved user edits) or fails, the P1H
+                // §18.3 behavior remains: publication metadata DIRTIES the project (excluded
+                // from musical undo — §12.3 blob-stripping precedent), so close prompts and
+                // the next explicit Save persists the reference (the save DTO reads the
+                // controller's in-memory metadata); autosave persists it to the recovery
+                // artifact without ever triggering rendering.
                 if (projectIoCoordinator_ != nullptr)
                 {
-                    projectIoCoordinator_->markProjectDirtyFromEdit();
+                    bool persisted = false;
+                    InstrumentTrackController* const c
+                        = instrumentRuntimeCoordinator_ != nullptr
+                              ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                              : nullptr;
+                    ProjectFileProxyMetadataV20 stamped;
+                    if (c != nullptr && c->getProxyMetadataStampedForSaveNow(stamped))
+                    {
+                        persisted = projectIoCoordinator_->persistPublishedProxyMetadataIfSafe(
+                            tid, stamped);
+                    }
+                    if (!persisted)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
                 }
             };
             proxyRenderEngine_
@@ -2066,6 +2091,13 @@ public:
             {
                 return false;
             }
+            // Faithful to every REAL edit path (P1MC): a musical edit dirties the project.
+            // Real MIDI edits mark this through the undo/edit seam; this diagnostic seam must
+            // behave identically or the metadata-checkpoint guard would see a clean project.
+            if (projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->markProjectDirtyFromEdit();
+            }
             if (proxyPlaybackCoordinator_ != nullptr)
             {
                 proxyPlaybackCoordinator_->refreshDestination(tid);
@@ -2176,6 +2208,10 @@ public:
             }
         };
         cb.getProjectFile = [this] { return session.getCurrentProjectFile(); };
+        // P1MC integration plan: observe the REAL dirty flag (metadata-checkpoint guard proof).
+        cb.isProjectDirty = [this] {
+            return projectIoCoordinator_ != nullptr && projectIoCoordinator_->isProjectDirty();
+        };
         // P1J integration plan: drive the PRODUCTION portable-preparation service.
         cb.portableStart = [this](const juce::File& dest) {
             return portablePreparationService_ != nullptr

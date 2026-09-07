@@ -383,6 +383,10 @@ private:
         {
             buildP1jPlan();
         }
+        else if (autoPlanId_ == "P1MC") // P1MC: automatic proxy-metadata checkpoint end to end
+        {
+            buildP1mcPlan();
+        }
         else if (autoPlanId_ == "M2V") // Corrected M2: VB3-II "Organ" (trackId 7) driven by the
         {                              // project's REAL arranged MIDI (ch1 clip notes + CC11,
                                        // ch2 from "Organ Lower", ch3 from "Organ pedal"), with a
@@ -1900,6 +1904,414 @@ private:
         });
     }
 
+    //==========================================================================
+    // P1MC integration plan ("P1MC"): automatic proxy-metadata checkpoint end
+    // to end (P1 acceptance correction; steering §18.3/§18.4). Runs against a
+    // TEMPORARY project copy only (the launcher copies TSE_pt2 and cleans up).
+    // Proves with the REAL coordinator/scheduler/policy services:
+    //   * On Save: ONE user Save queues the render; publication automatically
+    //     checkpoints the new metadata into the `.dalproj` (no second Save),
+    //     the project stays clean, no recursive On Save render is queued, and
+    //     a plain reload selects the Current proxy;
+    //   * unsaved user edits (a MIDI edit; a post-boundary mute on another
+    //     track) BLOCK the automatic write — the runtime proxy is Current
+    //     immediately, the on-disk file is byte-unchanged, and the next
+    //     explicit Save persists the pending metadata;
+    //   * two destinations publishing close together preserve both references;
+    //   * an externally modified `.dalproj` refuses the checkpoint safely;
+    //   * ordinary whole-folder collaboration: copying the saved project
+    //     folder (no Prepare Portable Project) and loading the copy with
+    //     Primary forced unavailable yields ProxyCurrent, non-silent playback.
+    //==========================================================================
+
+    [[nodiscard]] static juce::String p1mcDiskGeneration(const juce::File& projectFile,
+                                                         const TrackId tid)
+    {
+        ProjectFileV1 data;
+        if (!readProjectFile(projectFile, data).wasOk())
+        {
+            return {};
+        }
+        for (const auto& et : data.experimentalInstrumentTracks)
+        {
+            if (et.trackId == tid)
+            {
+                return et.hasProxy ? et.proxy.generationId : juce::String();
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] juce::String p1mcRuntimeGeneration(const TrackId tid)
+    {
+        ProjectFileProxyMetadataV20 meta;
+        return callbacks_.getPublishedProxyMetadata(tid, meta) ? meta.generationId
+                                                               : juce::String();
+    }
+
+    /// One log line with the complete disk-vs-runtime evidence for a track.
+    [[nodiscard]] bool p1mcDiskMatchesRuntime(const juce::String& tag, const TrackId tid)
+    {
+        const juce::String diskGen = p1mcDiskGeneration(p1mcProjectFile_, tid);
+        const juce::String liveGen = p1mcRuntimeGeneration(tid);
+        const bool ok = diskGen.isNotEmpty() && diskGen == liveGen;
+        appendSessionLog("p1mc: " + tag + " trackId=" + juce::String((juce::int64)tid)
+                         + " diskGen=" + diskGen + " runtimeGen=" + liveGen + " -> "
+                         + (ok ? "PASS" : "FAIL"));
+        return ok;
+    }
+
+    void buildP1mcPlan()
+    {
+        using DestSt = proxy_render::ProxyDestinationState;
+        auto add = [this](int delayMs, juce::String desc, std::function<bool()> run) {
+            autoSteps_.push_back({ delayMs, std::move(desc), std::move(run) });
+        };
+        const auto fileSha
+            = [](const juce::File& f) { return portable_project::sha256HexOfFile(f); };
+
+        addWaitForTrackStep("Organ");
+
+        add(1000, "P1MC preflight: callbacks + temp project", [this] {
+            const bool ok = callbacks_.getProjectFile && callbacks_.isProjectDirty
+                            && callbacks_.saveProjectNow && callbacks_.loadProjectNow
+                            && callbacks_.setProxyUpdateMode && callbacks_.queryProxyPolicyStatus
+                            && callbacks_.policyRenderNow && callbacks_.appendStaleTestClip
+                            && callbacks_.queryProxyJobStatus
+                            && callbacks_.queryProxyDestinationState
+                            && callbacks_.getPublishedProxyMetadata
+                            && callbacks_.advanceProxyPolicyClockMs
+                            && callbacks_.setTrackMuted && callbacks_.listSoundProducingTracks
+                            && callbacks_.listInstrumentRuntimes
+                            && callbacks_.setProxyPrimaryForcedUnavailable
+                            && callbacks_.queryProxyPlaybackRuntimeState
+                            && callbacks_.startTransport && callbacks_.stopTransport
+                            && callbacks_.seekTransport;
+            p1mcProjectFile_ = callbacks_.getProjectFile ? callbacks_.getProjectFile()
+                                                         : juce::File();
+            appendSessionLog("p1mc: preflight callbacks=" + juce::String(ok ? "ok" : "MISSING")
+                             + " project=" + p1mcProjectFile_.getFullPathName());
+            return ok && p1mcProjectFile_.existsAsFile();
+        });
+
+        // ---------------- S1: On Save — ONE Save, automatic checkpoint --------
+        add(300, "P1MC S1: mode OnSave + render-relevant edit -> dirty", [this] {
+            (void)callbacks_.setProxyUpdateMode(selectedTrackId(), 1);
+            const bool onSave = p1hPolicy().mode == proxy_policy::ProxyUpdateMode::OnSave;
+            const bool edited = callbacks_.appendStaleTestClip(selectedTrackId());
+            const bool dirty = callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s1 modeOnSave=") + (onSave ? "PASS" : "FAIL")
+                             + " edited=" + (edited ? "PASS" : "FAIL")
+                             + " dirty=" + (dirty ? "PASS" : "FAIL"));
+            return onSave && edited && dirty;
+        });
+        add(200, "P1MC S1: ONE user Save queues the render", [this, fileSha] {
+            const bool saved = callbacks_.saveProjectNow();
+            p1mcHashMark_ = fileSha(p1mcProjectFile_);
+            const auto s = callbacks_.queryProxyJobStatus(selectedTrackId());
+            const bool clean = !callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s1 saved=") + (saved ? "PASS" : "FAIL")
+                             + " jobAfterSave=" + juce::String(proxy_render::toString(s.phase))
+                             + " cleanAfterSave=" + (clean ? "PASS" : "FAIL"));
+            return saved && s.exists && clean && p1mcHashMark_.isNotEmpty();
+        });
+        addP1hWaitJobSettledStep("P1MC S1 On Save publication");
+        add(300, "P1MC S1: publication checkpointed WITHOUT a second Save", [this, fileSha] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const bool diskMatches = p1mcDiskMatchesRuntime("s1 afterPublish", selectedTrackId());
+            const bool changedOnDisk = fileSha(p1mcProjectFile_) != p1mcHashMark_;
+            const bool clean = !callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s1 current=") + (current ? "PASS" : "FAIL")
+                             + " diskUpdated=" + (changedOnDisk ? "PASS" : "FAIL")
+                             + " stillClean(noSecondSaveNeeded)=" + (clean ? "PASS" : "FAIL"));
+            return current && diskMatches && changedOnDisk && clean;
+        });
+        add(200, "P1MC S1: checkpoint queued NO recursive On Save render", [this] {
+            callbacks_.advanceProxyPolicyClockMs(0.0);
+            const bool noNewJob = !p1hJobActive();
+            const auto ps = p1hPolicy();
+            appendSessionLog(juce::String("p1mc: s1 noRecursiveRender=")
+                             + (noNewJob ? "PASS" : "FAIL") + " policyState="
+                             + proxy_policy::proxyPolicyRuntimeStateName(ps.state));
+            return noNewJob;
+        });
+        add(200, "P1MC S1: plain reload of the checkpointed file", [this] {
+            callbacks_.loadProjectNow(p1mcProjectFile_);
+            return true;
+        });
+        addWaitForTrackStep("Organ");
+        add(800, "P1MC S1: reload selects Current proxy (no extra Save happened)", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const bool clean = !callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s1 afterReload current=")
+                             + (current ? "PASS" : "FAIL")
+                             + " clean=" + (clean ? "PASS" : "FAIL"));
+            return current && clean;
+        });
+
+        // ------- S2: unsaved MIDI edit blocks the automatic write (Manual) ----
+        add(300, "P1MC S2: mode Manual, save the mode change", [this, fileSha] {
+            (void)callbacks_.setProxyUpdateMode(selectedTrackId(), 2);
+            const bool manual = p1hPolicy().mode == proxy_policy::ProxyUpdateMode::Manual;
+            const bool saved = callbacks_.saveProjectNow();
+            p1mcHashMark_ = fileSha(p1mcProjectFile_);
+            appendSessionLog(juce::String("p1mc: s2 modeManual=") + (manual ? "PASS" : "FAIL")
+                             + " saved=" + (saved ? "PASS" : "FAIL"));
+            return manual && saved && p1mcHashMark_.isNotEmpty();
+        });
+        add(200, "P1MC S2: UNSAVED edit + Render now", [this] {
+            const bool edited = callbacks_.appendStaleTestClip(selectedTrackId());
+            const bool dirty = callbacks_.isProjectDirty();
+            const bool started = callbacks_.policyRenderNow(selectedTrackId());
+            appendSessionLog(juce::String("p1mc: s2 edited=") + (edited ? "PASS" : "FAIL")
+                             + " dirtyBeforePublish=" + (dirty ? "PASS" : "FAIL")
+                             + " renderNow=" + (started ? "PASS" : "FAIL"));
+            return edited && dirty && started;
+        });
+        addP1hWaitJobSettledStep("P1MC S2 publication with unsaved edits");
+        add(300, "P1MC S2: runtime Current immediately, disk byte-unchanged", [this, fileSha] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const juce::String diskGen
+                = p1mcDiskGeneration(p1mcProjectFile_, selectedTrackId());
+            const juce::String liveGen = p1mcRuntimeGeneration(selectedTrackId());
+            const bool diskUntouched = fileSha(p1mcProjectFile_) == p1mcHashMark_
+                                       && diskGen != liveGen;
+            const bool stillDirty = callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s2 runtimeCurrent=") + (current ? "PASS" : "FAIL")
+                             + " diskUntouched=" + (diskUntouched ? "PASS" : "FAIL")
+                             + " (diskGen=" + diskGen + " runtimeGen=" + liveGen + ")"
+                             + " pendingDirty=" + (stillDirty ? "PASS" : "FAIL"));
+            return current && diskUntouched && stillDirty;
+        });
+        add(200, "P1MC S2: the NEXT explicit Save persists the pending metadata", [this] {
+            const bool saved = callbacks_.saveProjectNow();
+            const bool diskMatches = p1mcDiskMatchesRuntime("s2 afterSave", selectedTrackId());
+            const bool clean = !callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s2 nextSave=") + (saved ? "PASS" : "FAIL")
+                             + " clean=" + (clean ? "PASS" : "FAIL"));
+            return saved && diskMatches && clean;
+        });
+
+        // ------ S3: post-boundary edit (mute) blocks silent full-project save --
+        add(300, "P1MC S3: stale edit SAVED, then post-boundary mute -> dirty", [this, fileSha] {
+            if (!callbacks_.appendStaleTestClip(selectedTrackId())
+                || !callbacks_.saveProjectNow())
+            {
+                return false;
+            }
+            p1mcHashMark_ = fileSha(p1mcProjectFile_);
+            p1mcMutedTrack_ = kInvalidTrackId;
+            for (const TrackId tid : callbacks_.listSoundProducingTracks())
+            {
+                if (tid != selectedTrackId())
+                {
+                    p1mcMutedTrack_ = tid;
+                    break;
+                }
+            }
+            if (p1mcMutedTrack_ == kInvalidTrackId)
+            {
+                appendSessionLog("p1mc: s3 no other track to mute");
+                return false;
+            }
+            callbacks_.setTrackMuted(p1mcMutedTrack_, true);
+            const bool dirty = callbacks_.isProjectDirty();
+            appendSessionLog("p1mc: s3 mutedTrack=" + juce::String((juce::int64)p1mcMutedTrack_)
+                             + " dirtyFromMute=" + (dirty ? "PASS" : "FAIL"));
+            return dirty;
+        });
+        add(200, "P1MC S3: Render now with the unsaved mute pending", [this] {
+            return callbacks_.policyRenderNow(selectedTrackId());
+        });
+        addP1hWaitJobSettledStep("P1MC S3 publication with post-boundary edit");
+        add(300, "P1MC S3: mute NOT silently saved; metadata pending", [this, fileSha] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const bool diskUntouched = fileSha(p1mcProjectFile_) == p1mcHashMark_;
+            const bool stillDirty = callbacks_.isProjectDirty();
+            callbacks_.setTrackMuted(p1mcMutedTrack_, false);
+            const bool saved = callbacks_.saveProjectNow();
+            const bool diskMatches = p1mcDiskMatchesRuntime("s3 afterSave", selectedTrackId());
+            appendSessionLog(juce::String("p1mc: s3 runtimeCurrent=") + (current ? "PASS" : "FAIL")
+                             + " diskUntouchedWhileMutePending=" + (diskUntouched ? "PASS" : "FAIL")
+                             + " pendingDirty=" + (stillDirty ? "PASS" : "FAIL")
+                             + " finalSave=" + (saved ? "PASS" : "FAIL"));
+            return current && diskUntouched && stillDirty && saved && diskMatches;
+        });
+
+        // ---------- S4: two destinations publishing close together ------------
+        add(300, "P1MC S4: second destination Manual + both stale + save", [this, fileSha] {
+            p1mcOtherInstrument_ = kInvalidTrackId;
+            for (const auto& c : callbacks_.listInstrumentRuntimes())
+            {
+                if (c.trackId != selectedTrackId())
+                {
+                    p1mcOtherInstrument_ = c.trackId;
+                    break;
+                }
+            }
+            if (p1mcOtherInstrument_ == kInvalidTrackId)
+            {
+                appendSessionLog("p1mc: s4 no second instrument runtime");
+                return false;
+            }
+            (void)callbacks_.setProxyUpdateMode(p1mcOtherInstrument_, 2);
+            const bool edited = callbacks_.appendStaleTestClip(selectedTrackId())
+                                && callbacks_.appendStaleTestClip(p1mcOtherInstrument_);
+            const bool saved = callbacks_.saveProjectNow();
+            p1mcHashMark_ = fileSha(p1mcProjectFile_);
+            appendSessionLog("p1mc: s4 other=" + juce::String((juce::int64)p1mcOtherInstrument_)
+                             + " edited=" + (edited ? "PASS" : "FAIL")
+                             + " saved=" + (saved ? "PASS" : "FAIL"));
+            return edited && saved;
+        });
+        add(200, "P1MC S4: render both destinations back to back", [this] {
+            const bool a = callbacks_.policyRenderNow(selectedTrackId());
+            const bool b = callbacks_.policyRenderNow(p1mcOtherInstrument_);
+            appendSessionLog(juce::String("p1mc: s4 renderNowA=") + (a ? "PASS" : "FAIL")
+                             + " renderNowB=" + (b ? "PASS" : "FAIL"));
+            return a && b;
+        });
+        autoSteps_.push_back({ 0, "wait: P1MC S4 both publications settle", [this] {
+                                  waitProbeDesc_ = "P1MC S4 both publications";
+                                  waitProbeDeadlineMs_
+                                      = juce::Time::getMillisecondCounterHiRes() + 600000.0;
+                                  waitProbe_ = [this] {
+                                      const auto active = [this](const TrackId t) {
+                                          const auto s = callbacks_.queryProxyJobStatus(t);
+                                          return s.exists
+                                                 && !(s.phase == proxy_render::ProxyJobPhase::Published
+                                                      || s.phase == proxy_render::ProxyJobPhase::Obsolete
+                                                      || s.phase == proxy_render::ProxyJobPhase::Cancelled
+                                                      || s.phase == proxy_render::ProxyJobPhase::Failed);
+                                      };
+                                      return (!active(selectedTrackId())
+                                              && !active(p1mcOtherInstrument_))
+                                                 ? 1
+                                                 : 0;
+                                  };
+                                  return true;
+                              } });
+        add(300, "P1MC S4: BOTH references checkpointed, still clean", [this, fileSha] {
+            const bool a = p1mcDiskMatchesRuntime("s4 organ", selectedTrackId());
+            const bool b = p1mcDiskMatchesRuntime("s4 other", p1mcOtherInstrument_);
+            const bool changed = fileSha(p1mcProjectFile_) != p1mcHashMark_;
+            const bool clean = !callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s4 bothOnDisk=") + (a && b ? "PASS" : "FAIL")
+                             + " diskUpdated=" + (changed ? "PASS" : "FAIL")
+                             + " clean=" + (clean ? "PASS" : "FAIL"));
+            return a && b && changed && clean;
+        });
+
+        // -------- S5: externally modified `.dalproj` refuses the checkpoint ----
+        add(300, "P1MC S5: stale edit + save, then EXTERNAL file modification", [this, fileSha] {
+            if (!callbacks_.appendStaleTestClip(selectedTrackId())
+                || !callbacks_.saveProjectNow())
+            {
+                return false;
+            }
+            if (!p1mcProjectFile_.appendText(" ")) // parse-compatible, identity-breaking
+            {
+                appendSessionLog("p1mc: s5 external modification failed");
+                return false;
+            }
+            p1mcHashMark_ = fileSha(p1mcProjectFile_);
+            appendSessionLog("p1mc: s5 externallyModified sha=" + p1mcHashMark_.substring(0, 12));
+            return p1mcHashMark_.isNotEmpty();
+        });
+        add(200, "P1MC S5: render after the external modification", [this] {
+            return callbacks_.policyRenderNow(selectedTrackId());
+        });
+        addP1hWaitJobSettledStep("P1MC S5 publication with foreign disk file");
+        add(300, "P1MC S5: checkpoint refused safely; next Save recovers", [this, fileSha] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            const bool diskUntouched = fileSha(p1mcProjectFile_) == p1mcHashMark_;
+            const bool pendingDirty = callbacks_.isProjectDirty();
+            const bool saved = callbacks_.saveProjectNow();
+            const bool diskMatches = p1mcDiskMatchesRuntime("s5 afterSave", selectedTrackId());
+            const bool clean = !callbacks_.isProjectDirty();
+            appendSessionLog(juce::String("p1mc: s5 runtimeCurrent=") + (current ? "PASS" : "FAIL")
+                             + " foreignFileUntouched=" + (diskUntouched ? "PASS" : "FAIL")
+                             + " pendingDirty=" + (pendingDirty ? "PASS" : "FAIL")
+                             + " recoverySave=" + (saved ? "PASS" : "FAIL")
+                             + " clean=" + (clean ? "PASS" : "FAIL"));
+            return current && diskUntouched && pendingDirty && saved && diskMatches && clean;
+        });
+
+        // ------ S6: ordinary whole-folder copy = sufficient collaboration ------
+        add(300, "P1MC S6: copy the WHOLE saved project folder (no portable op)", [this] {
+            const juce::File sourceFolder = p1mcProjectFile_.getParentDirectory();
+            p1mcCopyRoot_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getChildFile("MiniDAWLab-p1mc-e2e")
+                                .getChildFile(sourceFolder.getFileName() + "-copy");
+            (void)p1mcCopyRoot_.deleteRecursively();
+            (void)p1mcCopyRoot_.getParentDirectory().createDirectory();
+            const bool copied = sourceFolder.copyDirectoryTo(p1mcCopyRoot_);
+            p1mcCopyProjectFile_ = p1mcCopyRoot_.getChildFile(p1mcProjectFile_.getFileName());
+            appendSessionLog(juce::String("p1mc: s6 wholeFolderCopied=")
+                             + (copied ? "PASS" : "FAIL") + " -> "
+                             + p1mcCopyRoot_.getFullPathName());
+            return copied && p1mcCopyProjectFile_.existsAsFile();
+        });
+        add(200, "P1MC S6: load the copied folder's project", [this] {
+            callbacks_.loadProjectNow(p1mcCopyProjectFile_);
+            return true;
+        });
+        addWaitForTrackStep("Organ");
+        add(800, "P1MC S6: copy loads Current (references travelled in the folder)", [this] {
+            const bool current
+                = callbacks_.queryProxyDestinationState(selectedTrackId()) == DestSt::Current;
+            appendSessionLog(juce::String("p1mc: s6 copyCurrent=") + (current ? "PASS" : "FAIL"));
+            return current;
+        });
+        add(300, "P1MC S6: force Primary unavailable in the copy", [this] {
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), true);
+            const bool proxySel
+                = p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyCurrent)
+                  || p1gStateIs(proxy_playback::ProxyPlaybackSourceState::ProxyPreparing);
+            appendSessionLog(juce::String("p1mc: s6 primaryUnavailable state=") + p1gStateName()
+                             + " proxySelected=" + (proxySel ? "PASS" : "FAIL"));
+            return proxySel;
+        });
+        autoSteps_.push_back({ 0, "wait: P1MC S6 ProxyCurrent settled in the copy", [this] {
+                                  waitProbeDesc_ = "P1MC S6 ProxyCurrent settled";
+                                  waitProbeDeadlineMs_
+                                      = juce::Time::getMillisecondCounterHiRes() + 20000.0;
+                                  waitProbe_ = [this] {
+                                      return p1gStateIs(
+                                                 proxy_playback::ProxyPlaybackSourceState::ProxyCurrent)
+                                                 ? 1
+                                                 : 0;
+                                  };
+                                  return true;
+                              } });
+        add(300, "P1MC S6: seek 0 + start transport", [this] {
+            callbacks_.seekTransport(0);
+            p1mcBlocksMark_ = p1gProxyBlocksNow();
+            callbacks_.startTransport();
+            return true;
+        });
+        add(2500, "P1MC S6: non-silent proxy playback from the plain folder copy", [this] {
+            const std::uint64_t blocks = p1gProxyBlocksNow();
+            const float peak = p1gProxyPeakNow();
+            callbacks_.stopTransport();
+            callbacks_.setProxyPrimaryForcedUnavailable(selectedTrackId(), false);
+            const bool consumed = blocks > p1mcBlocksMark_;
+            const bool audible = peak > 0.0005f;
+            appendSessionLog("p1mc: s6 blocksDelta="
+                             + juce::String((juce::int64)(blocks - p1mcBlocksMark_))
+                             + " peak=" + juce::String(peak, 6)
+                             + " -> consumed=" + (consumed ? "PASS" : "FAIL")
+                             + " nonSilent=" + (audible ? "PASS" : "FAIL")
+                             + " (no Prepare Portable Project was involved)");
+            return consumed && audible;
+        });
+    }
+
     /// M2P: deterministically wiggle the first automatable non-bypass parameter through the
     /// same notify-host path the UI uses; the original value is stored for the revert step.
     [[nodiscard]] bool perturbFirstAutomatableParameter()
@@ -2585,6 +2997,14 @@ private:
     double p1jOriginalRate_ = 0.0;
     bool p1jRateSwitchSkipped_ = false;
     std::vector<TrackId> p1jOtherMuted_;
+
+    // P1MC metadata-checkpoint plan (plan "P1MC" only; see buildP1mcPlan): verification
+    // bookkeeping only — the checkpoint lives in ProjectIoCoordinator/ProxyMetadataCheckpoint.
+    juce::File p1mcProjectFile_, p1mcCopyRoot_, p1mcCopyProjectFile_;
+    juce::String p1mcHashMark_;
+    TrackId p1mcOtherInstrument_ = kInvalidTrackId;
+    TrackId p1mcMutedTrack_ = kInvalidTrackId;
+    std::uint64_t p1mcBlocksMark_ = 0;
 
     std::function<int()> waitProbe_; ///< 1 = satisfied, 0 = pending, -1 = failed
     double waitProbeDeadlineMs_ = 0.0;

@@ -12,6 +12,7 @@
 #include "engine/PlaybackEngine.h"
 #include "instruments/InstrumentTrackController.h"
 #include "io/ProjectFile.h"
+#include "io/ProxyMetadataCheckpoint.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
@@ -592,6 +593,9 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             writeLastOperationBreadcrumb("project save end ok");
             markProjectCleanNow();
+            // P1 acceptance correction: record the freshly written file's identity so a later
+            // automatic proxy-metadata checkpoint can prove the file is still this exact save.
+            refreshKnownProjectDiskIdentity();
             deleteAutosaveArtifactsAfterSuccessfulSave();
             warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
             // P1H §18.2: queue proxy work per destination update mode. Never waits.
@@ -719,6 +723,9 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             writeLastOperationBreadcrumb("project save end ok");
             markProjectCleanNow();
+            // P1 acceptance correction: the new project file's identity (Save As included —
+            // a later checkpoint must never write into a replaced/different project file).
+            refreshKnownProjectDiskIdentity();
             deleteAutosaveArtifactsAfterSuccessfulSave();
             warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
             // P1H §16.6 Save As: rehome referenced proxy generation assets into the new
@@ -1090,6 +1097,9 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         }
         appendProjectLoadDiagnosticLine("load: complete");
         markProjectCleanNow();
+        // P1 acceptance correction: a freshly loaded project counts as "saved" for the
+        // automatic proxy-metadata checkpoint guard; record the loaded file's identity.
+        refreshKnownProjectDiskIdentity();
         writeLastOperationBreadcrumb("project load end ok: " + f.getFullPathName());
         // Stability C3: verify runtime invariants right after the load completed.
         (void) stability_invariants::runRegisteredStabilityInvariantsCheck("project-load-end");
@@ -1157,6 +1167,78 @@ void ProjectIoCoordinator::markProjectCleanNow() noexcept
 void ProjectIoCoordinator::markProjectDirtyFromEdit() noexcept
 {
     instrumentOrPluginEditsSinceClean_ = true;
+}
+
+void ProjectIoCoordinator::refreshKnownProjectDiskIdentity()
+{
+    const juce::File f = session_.getCurrentProjectFile();
+    knownProjectDiskIdentity_ = f.existsAsFile()
+                                    ? proxy_checkpoint::sha256HexOfFileForCheckpoint(f)
+                                    : juce::String();
+}
+
+bool ProjectIoCoordinator::persistPublishedProxyMetadataIfSafe(
+    const TrackId trackId, const ProjectFileProxyMetadataV20& metadata)
+{
+    // P1 acceptance correction (§18.3/§18.4). Guard evidence, in order:
+    //  * `hasProjectFile`/`projectFileExists` — never-saved projects and autosave-recovered
+    //    sessions (save path detached) have no legitimate checkpoint target;
+    //  * `isProjectDirty()` — set by session-snapshot swaps (musical edits, mute/fader/track
+    //    edits) and by `markProjectDirtyFromEdit` (plugin edits, mode changes, recovery). The
+    //    publication path itself no longer marks dirty BEFORE this call, so a true value here
+    //    reliably means UNSAVED USER EDITS — exactly what must never be saved silently;
+    //  * disk identity — the file must still be byte-identical to what the last successful
+    //    Save/load/checkpoint produced (external modification / replacement detection).
+    // Refusal is not an error: the metadata stays in controller memory (the normal Save DTO
+    // reads it) and the caller marks the project dirty so close prompts + next Save persist it.
+    const juce::File projectFile = session_.getCurrentProjectFile();
+    proxy_checkpoint::CheckpointGuardState guard;
+    guard.hasProjectFile = projectFile.getFullPathName().isNotEmpty();
+    guard.projectFileExists = guard.hasProjectFile && projectFile.existsAsFile();
+    guard.projectDirty = isProjectDirty();
+    guard.knownDiskIdentity = knownProjectDiskIdentity_;
+    guard.actualDiskIdentity
+        = guard.projectFileExists
+              ? proxy_checkpoint::sha256HexOfFileForCheckpoint(projectFile)
+              : juce::String();
+    const juce::String logHead = "proxy-metadata checkpoint trackId="
+                                 + juce::String((juce::int64)trackId)
+                                 + " generation=" + metadata.generationId;
+
+    const juce::String refusal = proxy_checkpoint::checkpointRefusalReason(guard);
+    if (refusal.isNotEmpty())
+    {
+        appendProjectSaveDiagnosticLine(logHead + " REFUSED (kept pending for the next Save): "
+                                        + refusal);
+        juce::Logger::writeToLog("[proxy-metadata] checkpoint refused: " + refusal);
+        return false;
+    }
+
+    // The transaction re-reads the LAST SAVED representation and replaces only this track's
+    // proxy metadata — live-session edits cannot leak in. It never fires save callbacks, so
+    // `onSuccessfulUserSave` (the On Save render trigger) cannot recurse, and it never calls
+    // `markProjectCleanNow`, so the dirty state stays exactly as the guard proved it (clean).
+    const proxy_checkpoint::CheckpointOutcome outcome
+        = proxy_checkpoint::checkpointProxyMetadataOnDisk(projectFile,
+                                                          knownProjectDiskIdentity_,
+                                                          trackId,
+                                                          metadata);
+    if (!outcome.ok)
+    {
+        // Failure never damages the previous `.dalproj` (temp+rename discipline) and never
+        // touches the published WAV; the proxy stays usable in this session and the metadata
+        // stays pending for the next explicit Save. Not silent: diagnostics + app log.
+        appendProjectSaveDiagnosticLine(logHead + " FAILED (previous file intact; metadata "
+                                        "pending for the next Save): " + outcome.error);
+        juce::Logger::writeToLog("[proxy-metadata] checkpoint failed: " + outcome.error);
+        return false;
+    }
+
+    knownProjectDiskIdentity_ = outcome.newDiskIdentity;
+    appendProjectSaveDiagnosticLine(logHead + " ok (metadata-only atomic update)");
+    writeLastOperationBreadcrumb("proxy metadata checkpoint ok: "
+                                 + projectFile.getFullPathName());
+    return true;
 }
 
 void ProjectIoCoordinator::confirmUnsavedChangesThen(const UnsavedGuardKind kind,

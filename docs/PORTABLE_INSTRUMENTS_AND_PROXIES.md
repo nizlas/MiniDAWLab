@@ -1689,7 +1689,9 @@ Mode-specific Save behavior:
 * **Auto:** Save queues only work already eligible under the Auto idle policy — it does not force
   every stale Auto destination to render and creates no duplicate jobs (no render storm on Save).
 * **On Save:** an explicit user Save queues the latest stale eligible destinations (this is the
-  mode's trigger).
+  mode's trigger). **One** user Save is sufficient: when the queued render later publishes and the
+  saved-generation guard passes, the new proxy reference is checkpointed into the same `.dalproj`
+  automatically (§18.4) — the user never needs a second Save to persist it.
 * **Manual / Off:** Save queues no proxy rendering.
 
 **Autosave never starts proxy rendering in any mode** (Verified mechanism: message-thread timer,
@@ -1705,14 +1707,63 @@ the message thread.
   background state and MUST NOT create undo entries (PI-027).
 * The remaining Auto idle countdown and render progress are runtime-only (§20) and MUST NOT dirty
   the project or create undo steps.
-* Proxy metadata updates on publication (Recommended): dirty the project (the file references
-  changed and should be saved) but are excluded from musical-undo comparison — consistent with the
-  existing undo blob-stripping precedent (Verified §12.3).
+* Proxy metadata updates on publication (Recommended): first attempt the automatic metadata-only
+  checkpoint (§18.4). When the checkpoint writes, nothing is left pending and the project stays
+  clean. When it is refused or fails, the publication dirties the project (the file references
+  changed and should be saved) but is excluded from musical-undo comparison — consistent with the
+  existing undo blob-stripping precedent (Verified §12.3) — so close prompts and the next explicit
+  Save persists the reference.
 * `proxyUpdateMode` changes (Recommended): persisted setting; dirties the project; not part of
   musical undo.
 * User parameter edits inside the plugin editor follow existing dirty rules
   (`instrumentOrPluginEditsSinceClean_` — Verified, Audit §5.6); state capture itself adds nothing
   (§9.2 rule 6).
+
+### 18.4 Automatic proxy-metadata checkpoint after publication (P1 acceptance correction)
+
+After a proxy render succeeds, three things happen in order: (1) the immutable WAV generation is
+published atomically as before (§16.3); (2) the open session starts using the proxy immediately as
+before (controller metadata + playback refresh); (3) the metadata/reference is written to the main
+`.dalproj` **automatically** when — and only when — this can be done without silently saving
+unrelated user edits. This is a proxy-metadata persistence checkpoint, not an ordinary user Save.
+
+**Saved-generation guard.** The automatic write is allowed only when ALL of these hold:
+
+* the project has a real main `.dalproj` (never-saved projects and autosave-recovered sessions
+  with a detached save path are refused);
+* the project has **no unsaved user edit** since the last successful Save/load — musical edits,
+  mute/fader/track edits (session-snapshot swaps), plugin edits and mode changes all count;
+  publication itself does not;
+* the on-disk file's SHA-256 still equals the identity recorded at the last successful
+  Save/load/checkpoint (external modification and Save As/replacement detection);
+* the destination track still exists in the saved project.
+
+**Write mechanism (metadata-only, atomic).** The checkpoint never serializes the live session: it
+re-reads the last successfully saved on-disk representation, replaces ONLY the matching track's
+proxy metadata object (with the §12.3 save-pairing stamp applied the same way a user Save would),
+validates a temporary sibling copy by a full re-read, then atomically replaces the main file
+through the normal Windows-safe project writer. It creates no undo entry, never marks the project
+clean or dirty, and never fires the Save callbacks — so it structurally cannot trigger another On
+Save render or recurse. Publications are serialized on the message thread; a second checkpoint
+re-reads the file the first one just wrote, so near-simultaneous destination publications preserve
+both references.
+
+**Mode behavior.** On Save: one user Save is enough (§18.2). Auto/Manual: a publication on an
+otherwise clean project checkpoints automatically; when the proxy represents unsaved edits the
+runtime uses it immediately, the metadata stays in controller memory, and the next user Save
+persists it (§18.3). Off / portable preparation: unchanged semantics; the preparation transaction
+remains authoritative for its destination copy.
+
+**Failure behavior.** A refused or failed checkpoint never deletes/overwrites the published WAV,
+never damages the previous `.dalproj` (temp+rename discipline), and never loses the metadata: the
+proxy stays usable in the running session, the project is marked dirty (pending), the reason is
+logged to the save diagnostics, and the next explicit Save persists everything.
+
+**Collaboration consequence.** After a safe checkpoint, copying or synchronizing the complete
+project folder (`.dalproj` + `Audio/` + `InstrumentProxies/`) is sufficient for ordinary
+collaboration — the copy loads with Current proxies and plays them when the Primary is
+unavailable. `Prepare Portable Project…` (§16.6) remains an optional validated export, not a
+prerequisite.
 
 ## 19. Required UI contract (no pixel design)
 
@@ -1757,7 +1808,7 @@ State classification (Locked, task §16):
 | Derived/cache state | fingerprints (recomputable), Current/Stale/Failed verdicts, host-observed compatibility explanation (§9.4.5), queue eligibility |
 | Undoable | musical edits only |
 | Non-undoable background state | job states, progress, automatic source selection, idle-timer state (PI-027) |
-| Project-dirty effects | musical edits (existing rules); publication metadata updates; mode changes — **never** job progress or the Auto idle countdown (§18.3: countdown and render progress MUST NOT dirty the project or create undo steps) |
+| Project-dirty effects | musical edits (existing rules); publication metadata updates **only when the automatic §18.4 checkpoint could not write** (a safe checkpoint leaves the project clean); mode changes — **never** job progress or the Auto idle countdown (§18.3: countdown and render progress MUST NOT dirty the project or create undo steps) |
 
 Trust rules:
 

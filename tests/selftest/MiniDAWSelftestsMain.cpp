@@ -29,6 +29,7 @@
 #include "instruments/ProxyRenderSnapshot.h"
 #include "io/InstrumentMidiClipExport.h"
 #include "io/ProjectFile.h"
+#include "io/ProxyMetadataCheckpoint.h"
 #include "ui/experimental/ExperimentalMidiCcAutomation.h"
 
 // SPIKE-01 (P0/P1A validation spike) pure diagnostic helpers — see
@@ -7770,6 +7771,239 @@ namespace
 
         fx.cleanup();
     }
+
+    //==========================================================================
+    // P1 acceptance correction: automatic proxy-metadata checkpoint
+    // (io/ProxyMetadataCheckpoint.h — guard decision + atomic metadata-only
+    // transaction). Steering §18.3/§18.4.
+    //==========================================================================
+
+    void testProxyMetadataCheckpointGuard()
+    {
+        using namespace proxy_checkpoint;
+
+        CheckpointGuardState g;
+        g.hasProjectFile = true;
+        g.projectFileExists = true;
+        g.projectDirty = false;
+        g.knownDiskIdentity = "abc";
+        g.actualDiskIdentity = "abc";
+        expect(checkpointRefusalReason(g).isEmpty(), "mc-guard: clean saved project allowed");
+
+        {
+            CheckpointGuardState x = g;
+            x.hasProjectFile = false;
+            expect(checkpointRefusalReason(x).isNotEmpty(),
+                   "mc-guard: never-saved project refused (Save As pending)");
+        }
+        {
+            CheckpointGuardState x = g;
+            x.projectFileExists = false;
+            expect(checkpointRefusalReason(x).isNotEmpty(),
+                   "mc-guard: missing on-disk file refused");
+        }
+        {
+            // The load-bearing distinction: ANY unsaved user edit (musical, mute/fader via
+            // session-snapshot swap, plugin edit, mode change) refuses the automatic write.
+            CheckpointGuardState x = g;
+            x.projectDirty = true;
+            expect(checkpointRefusalReason(x).contains("unsaved user edits"),
+                   "mc-guard: unsaved user edits refuse the automatic write");
+        }
+        {
+            CheckpointGuardState x = g;
+            x.knownDiskIdentity.clear();
+            expect(checkpointRefusalReason(x).isNotEmpty(),
+                   "mc-guard: unknown recorded identity refused");
+        }
+        {
+            CheckpointGuardState x = g;
+            x.actualDiskIdentity.clear();
+            expect(checkpointRefusalReason(x).isNotEmpty(),
+                   "mc-guard: unreadable on-disk file refused");
+        }
+        {
+            CheckpointGuardState x = g;
+            x.actualDiskIdentity = "different";
+            expect(checkpointRefusalReason(x).contains("changed on disk"),
+                   "mc-guard: external modification / replaced file refused");
+        }
+    }
+
+    void testProxyMetadataCheckpointTransaction()
+    {
+        using namespace proxy_checkpoint;
+        PortableFixture fx;
+        expect(fx.build("mc-checkpoint"), "mc-txn: fixture built");
+        const juce::File file = fx.source.getChildFile(fx.projectFileName);
+
+        // Baseline sanity (required test 1): a proxy already Current at save time is included
+        // normally by the ordinary writer — the fixture's saved file carries fp7/fp8.
+        {
+            ProjectFileV1 before;
+            expect(readProjectFile(file, before).wasOk(), "mc-txn: baseline readable");
+            bool has7 = false;
+            for (const auto& et : before.experimentalInstrumentTracks)
+            {
+                has7 = has7 || (et.trackId == TrackId{ 7 } && et.hasProxy
+                                && et.proxy.generationId == "sha256:fp7");
+            }
+            expect(has7, "mc-txn: normal save already includes a Current proxy");
+        }
+        const juce::String sha0 = sha256HexOfFileForCheckpoint(file);
+        expect(sha0.isNotEmpty(), "mc-txn: baseline identity computed");
+
+        // New published generation for track 7, with the P1G recorded identity + pairing stamp
+        // exactly as the save DTO would carry them.
+        ProjectFileProxyMetadataV20 m7;
+        m7.generationId = "sha256:fp7-new";
+        m7.relativePath = proxy_store::generationRelativePath(TrackId{ 7 }, m7.generationId);
+        m7.sampleRate = 8000.0;
+        m7.lengthSamples = 4096;
+        m7.channels = 2;
+        m7.pluginFileOrIdentifier = "C:/Plugins/Organ.vst3";
+        m7.pluginFormatName = "VST3";
+        m7.pluginVersionAtRender = "1.2.3";
+        m7.primaryStateRevisionAtPublish = 42;
+        m7.primaryStateRevisionAtSave = 42; // stamped by the controller before the checkpoint
+        m7.timelineReferenceRate = 48000.0;
+
+        // ---- happy path: metadata-only atomic update -------------------------
+        const CheckpointOutcome ok1 = checkpointProxyMetadataOnDisk(file, sha0, TrackId{ 7 }, m7);
+        expect(ok1.ok, ("mc-txn: checkpoint succeeds (" + ok1.error + ")").toStdString());
+        expect(ok1.newDiskIdentity.isNotEmpty() && ok1.newDiskIdentity != sha0
+                   && ok1.newDiskIdentity == sha256HexOfFileForCheckpoint(file),
+               "mc-txn: new disk identity reported and matches the file");
+        {
+            ProjectFileV1 after;
+            expect(readProjectFile(file, after).wasOk(), "mc-txn: updated file loads");
+            const ProjectFileExperimentalInstrumentTrackV1* x7 = nullptr;
+            const ProjectFileExperimentalInstrumentTrackV1* x8 = nullptr;
+            for (const auto& et : after.experimentalInstrumentTracks)
+            {
+                if (et.trackId == TrackId{ 7 }) { x7 = &et; }
+                if (et.trackId == TrackId{ 8 }) { x8 = &et; }
+            }
+            expect(x7 != nullptr && x7->hasProxy && x7->proxy.generationId == "sha256:fp7-new"
+                       && x7->proxy.lengthSamples == 4096
+                       && x7->proxy.primaryStateRevisionAtPublish == 42
+                       && x7->proxy.primaryStateRevisionAtSave == 42
+                       && x7->proxy.pluginVersionAtRender == "1.2.3",
+                   "mc-txn: target track carries the new generation + pairing stamp");
+            expect(x7 != nullptr && x7->pluginStateBase64 == "T1JHQU4="
+                       && x7->proxyUpdateMode == "off",
+                   "mc-txn: target track's opaque plugin state and mode untouched");
+            expect(x8 != nullptr && x8->hasProxy && x8->proxy.generationId == "sha256:fp8"
+                       && x8->proxy.silentGeneration,
+                   "mc-txn: unrelated track's proxy entry preserved");
+            bool audioOk = false;
+            for (const auto& t : after.tracks)
+            {
+                if (t.id == TrackId{ 2 })
+                {
+                    audioOk = t.clips.size() == 3 && t.inserts.size() == 1
+                              && t.inserts[0].pluginStateBase64 == "AAECAw==";
+                }
+            }
+            expect(audioOk, "mc-txn: musical data and insert state preserved");
+            expect(after.hasAudioMixdown
+                       && after.audioMixdown.outputDirectory == "C:/Users/somebody/Mixdowns",
+                   "mc-txn: unrelated compatible fields preserved");
+        }
+        expect(!file.getSiblingFile("Proj.proxymeta-validate.tmp").exists()
+                   && !file.getSiblingFile("Proj.dalproj.tmp").exists(),
+               "mc-txn: no temporary files left behind");
+
+        // ---- serialized second publication (required test 8) -----------------
+        ProjectFileProxyMetadataV20 m8;
+        m8.generationId = "sha256:fp8-new";
+        m8.silentGeneration = true;
+        m8.sampleRate = 8000.0;
+        const CheckpointOutcome ok2
+            = checkpointProxyMetadataOnDisk(file, ok1.newDiskIdentity, TrackId{ 8 }, m8);
+        expect(ok2.ok, ("mc-txn: second checkpoint succeeds (" + ok2.error + ")").toStdString());
+        {
+            ProjectFileV1 after;
+            expect(readProjectFile(file, after).wasOk(), "mc-txn: file loads after 2nd checkpoint");
+            bool has7 = false, has8 = false;
+            for (const auto& et : after.experimentalInstrumentTracks)
+            {
+                has7 = has7 || (et.trackId == TrackId{ 7 }
+                                && et.proxy.generationId == "sha256:fp7-new");
+                has8 = has8 || (et.trackId == TrackId{ 8 }
+                                && et.proxy.generationId == "sha256:fp8-new"
+                                && et.proxy.silentGeneration);
+            }
+            expect(has7 && has8,
+                   "mc-txn: near-simultaneous publications preserve BOTH references");
+        }
+
+        // ---- refusals that must leave the file byte-identical ----------------
+        const juce::String shaNow = sha256HexOfFileForCheckpoint(file);
+        {
+            // External modification: identity recorded at the last save no longer matches.
+            expect(file.appendText(" "), "mc-txn: external modification simulated");
+            const juce::String shaExt = sha256HexOfFileForCheckpoint(file);
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, shaNow, TrackId{ 7 }, m7);
+            expect(!r.ok && r.error.contains("identity mismatch"),
+                   "mc-txn: externally changed file refused safely");
+            expect(sha256HexOfFileForCheckpoint(file) == shaExt,
+                   "mc-txn: refused checkpoint wrote nothing");
+        }
+        const juce::String sha3 = sha256HexOfFileForCheckpoint(file);
+        {
+            // Save As / replacement guard shape: a track that is not part of the saved
+            // project (wrong project on disk) can never receive metadata.
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, sha3, TrackId{ 99 }, m7);
+            expect(!r.ok && r.error.contains("not part of the saved project"),
+                   "mc-txn: unknown destination track refused");
+            expect(sha256HexOfFileForCheckpoint(file) == sha3,
+                   "mc-txn: unknown-track refusal wrote nothing");
+        }
+        {
+            ProjectFileProxyMetadataV20 bad;
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, sha3, TrackId{ 7 }, bad);
+            expect(!r.ok && sha256HexOfFileForCheckpoint(file) == sha3,
+                   "mc-txn: empty generation id refused, file intact");
+        }
+
+        // ---- failure injection: validation write blocked ----------------------
+        // A NON-empty directory at the validation path (juce moveFileTo silently
+        // removes an EMPTY directory target, so it must contain something).
+        {
+            const juce::File blocker = file.getSiblingFile("Proj.proxymeta-validate.tmp");
+            expect(blocker.createDirectory()
+                       && blocker.getChildFile("occupied.txt").replaceWithText("x"),
+                   "mc-txn: validation path blocked by a non-empty directory");
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, sha3, TrackId{ 7 }, m7);
+            expect(!r.ok, "mc-txn: blocked validation write fails");
+            expect(sha256HexOfFileForCheckpoint(file) == sha3,
+                   "mc-txn: main file intact after validation failure");
+            (void)blocker.deleteRecursively();
+        }
+
+        // ---- failure injection: atomic replace blocked (read-only target) -----
+        {
+            const juce::String shaRo = sha256HexOfFileForCheckpoint(file);
+            expect(file.setReadOnly(true), "mc-txn: target set read-only");
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, shaRo, TrackId{ 7 }, m7);
+            expect(!r.ok && r.error.contains("atomic replace failed"),
+                   "mc-txn: replace failure reported");
+            expect(file.setReadOnly(false), "mc-txn: target read-only cleared");
+            expect(sha256HexOfFileForCheckpoint(file) == shaRo,
+                   "mc-txn: previous project file intact after replace failure");
+            ProjectFileV1 after;
+            expect(readProjectFile(file, after).wasOk(),
+                   "mc-txn: previous project file still loads after replace failure");
+        }
+
+        fx.cleanup();
+    }
 } // namespace
 
 int main()
@@ -7865,6 +8099,9 @@ int main()
     testPortablePreparationBlockers();
     testPortablePreparationCancelAndClose();
     testPortablePackageValidatorBoundary();
+
+    testProxyMetadataCheckpointGuard();
+    testProxyMetadataCheckpointTransaction();
 
     std::printf("\n%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

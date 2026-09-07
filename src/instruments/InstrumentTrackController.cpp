@@ -1040,6 +1040,25 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     return dto;
 }
 
+bool InstrumentTrackController::getProxyMetadataStampedForSaveNow(
+    ProjectFileProxyMetadataV20& out) const
+{
+    if (!hasProxyMetadata_)
+    {
+        return false;
+    }
+    out = proxyMetadata_;
+    // Same §12.3 save-pairing rule as the save DTO builder above: with a loaded Primary, stamp
+    // its live semantic revision next to the generation. The automatic metadata checkpoint only
+    // writes when nothing changed since the last successful Save, so the plugin-state blob
+    // already on disk is the state this stamp pairs with.
+    if (host_ != nullptr && host_->hasInstrument())
+    {
+        out.primaryStateRevisionAtSave = (std::int64_t)host_->getPrimarySemanticRevision();
+    }
+    return true;
+}
+
 std::vector<ProjectFileExperimentalInstrumentTrackV1> InstrumentTrackController::buildExperimentalInstrumentMusicalUndoBlock() const
 {
     if (!trackActive_)

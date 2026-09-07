@@ -404,6 +404,13 @@ public:
         return proxyPublishedThisSession_;
     }
 
+    /// [Message thread] P1 acceptance correction: the proxy metadata exactly as an immediate
+    /// user Save would persist it — a copy carrying the §12.3 save-pairing stamp when the
+    /// Primary is loaded (same rule as the save DTO builder; the saved plugin-state blob on
+    /// disk is by guard construction the last-saved state, and the automatic checkpoint only
+    /// runs when no plugin edit happened since that save). False when no proxy is published.
+    [[nodiscard]] bool getProxyMetadataStampedForSaveNow(ProjectFileProxyMetadataV20& out) const;
+
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;
 

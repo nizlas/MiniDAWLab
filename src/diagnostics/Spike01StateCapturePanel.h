@@ -121,6 +121,10 @@ struct Spike01PanelCallbacks
     /// The current project FILE (invalid when unsaved).
     std::function<juce::File()> getProjectFile;
 
+    // --- P1MC proxy-metadata checkpoint end-to-end integration plan only ("P1MC") ---
+    /// The REAL ProjectIoCoordinator dirty flag (unsaved user edits / pending metadata).
+    std::function<bool()> isProjectDirty;
+
     // --- P1J Prepare Portable Project end-to-end integration plan only ("P1J") ---
     /// Start the production portable-preparation service into the given final
     /// folder (false = refused, e.g. already running).

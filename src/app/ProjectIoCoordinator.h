@@ -104,6 +104,18 @@ public:
     /// [Message thread] Flag an instrument/plugin-side edit that does not swap the session snapshot.
     void markProjectDirtyFromEdit() noexcept;
 
+    /// [Message thread] P1 acceptance correction (steering §18.3/§18.4): automatic metadata-only
+    /// checkpoint of a newly PUBLISHED proxy generation into the main `.dalproj`. Writes only
+    /// when the saved-generation guard passes (real saved project file, NO unsaved user edits
+    /// since the last successful Save/load, on-disk SHA-256 unchanged since then); the write
+    /// re-reads the last saved representation and replaces ONLY this track's proxy metadata —
+    /// it can never capture live-session edits. Creates no undo entry, never fires
+    /// `onSuccessfulUserSave` (no On Save recursion), never changes the dirty state. Returns
+    /// true when the file was updated; false = refused/failed (logged; the caller keeps the
+    /// metadata pending via `markProjectDirtyFromEdit`, and the next explicit Save persists it).
+    [[nodiscard]] bool persistPublishedProxyMetadataIfSafe(TrackId trackId,
+                                                           const ProjectFileProxyMetadataV20& metadata);
+
     enum class UnsavedGuardKind
     {
         LoadProject,
@@ -163,6 +175,10 @@ private:
     void launchLoadProjectChooser();
     [[nodiscard]] juce::File resolveAutosaveTargetFile() const;
     void deleteAutosaveArtifactsAfterSuccessfulSave();
+    /// Record the current project file's on-disk SHA-256 (empty when unsaved/unreadable).
+    /// Called after every successful user Save (normal + first-time Save As) and load; the
+    /// metadata checkpoint refreshes it itself after a successful atomic replace.
+    void refreshKnownProjectDiskIdentity();
     Transport& transport_;
     Session& session_;
     juce::AudioDeviceManager& deviceManager_;
@@ -177,6 +193,10 @@ private:
     std::shared_ptr<const SessionSnapshot> cleanSessionSnapshot_;
     /// Instrument/plugin edits do not swap the session snapshot; they set this flag instead.
     bool instrumentOrPluginEditsSinceClean_ = false;
+    /// P1 acceptance correction: SHA-256 of the main `.dalproj` as written/read by the last
+    /// successful Save/load/metadata-checkpoint. Empty = unknown (checkpoint refuses). Detects
+    /// external modification/replacement before an automatic metadata checkpoint may write.
+    juce::String knownProjectDiskIdentity_;
 
     /// Stability C5: app-level block states (recording, count-in, ...) for the periodic tick.
     std::function<juce::String()> getAutosaveBlockReason_;
