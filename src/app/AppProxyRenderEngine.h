@@ -33,6 +33,7 @@
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
 #include "instruments/ProxyFingerprint.h"
+#include "instruments/ProxyPlaybackSource.h"
 #include "instruments/ProxyRenderInstanceLifecycle.h"
 #include "instruments/ProxyRenderScheduler.h"
 #include "instruments/ProxyRenderSnapshot.h"
@@ -80,13 +81,36 @@ public:
     ProxyCurrentIdentity currentIdentity(const TrackId destination) override
     {
         ProxyCurrentIdentity id;
+        ExperimentalInstrumentHost* const host
+            = deps_.hostForTrack ? deps_.hostForTrack(destination) : nullptr;
+        if (host == nullptr)
+        {
+            id.primaryAvailable = false;
+            return id; // the destination TRACK itself is absent
+        }
+        if (!host->hasInstrument())
+        {
+            // Missing Primary: the destination TRACK still exists — a missing
+            // plugin must not force its published proxy to Stale. The expected
+            // fingerprint is derived UNDER THE GENERATION'S RECORDED CONFIGURATION
+            // (§12.3, same helpers the playback selector uses), so the derived
+            // destination state agrees with the playback-source verdict:
+            // pairing + matching recompute ⇒ Current; broken/unverifiable ⇒ Stale.
+            // `primaryAvailable=false` refuses render requests (nothing to render
+            // with) without disturbing that verdict.
+            id.destinationExists = true;
+            id.primaryAvailable = false;
+            id.expectedFingerprint = expectedFingerprintWithMissingPrimary(destination);
+            return id;
+        }
         proxy_snapshot::ProxyRenderSnapshot snap;
         std::uint64_t revision = 0;
         if (!buildIdentitySnapshot(destination, snap, revision))
         {
-            return id; // destination missing / no Primary ⇒ not renderable
+            return id; // no descriptor / no session snapshot ⇒ not derivable
         }
         id.destinationExists = true;
+        id.primaryAvailable = true;
         id.expectedFingerprint = proxy_fingerprint::computeFingerprint(snap);
         id.primarySemanticRevision = revision;
         return id;
@@ -326,6 +350,47 @@ private:
         in.renderConfig.noteOffGateMs = 100;
         // §15.7 conservative default: nothing is classified host-event-driven yet.
         in.instrumentClassifiedHostEventDriven = false;
+    }
+
+    /// §12.3 missing-Primary expected fingerprint: recomputed under the published
+    /// generation's RECORDED configuration (persisted plugin identity, revision at
+    /// publish, recorded rates — never the live host or current device rate), and
+    /// only when the persisted save/publish pairing holds and the fingerprint
+    /// schema/algorithm are comparable. Empty = not verifiable (destinationState
+    /// then honestly derives Stale for a published generation). Reuses the SAME
+    /// helpers as ProxyPlaybackCoordinator::evaluateMissingPrimaryCurrency — one
+    /// currency algorithm, two consumers.
+    [[nodiscard]] juce::String
+        expectedFingerprintWithMissingPrimary(const TrackId destination) const
+    {
+        auto* controller
+            = deps_.controllerForTrack ? deps_.controllerForTrack(destination) : nullptr;
+        const ProjectFileProxyMetadataV20* const meta
+            = controller != nullptr ? controller->getProxyMetadata() : nullptr;
+        if (meta == nullptr)
+        {
+            return {};
+        }
+        if (meta->fingerprintSchemaVersion
+                != (int)proxy_fingerprint::kFingerprintSchemaVersion
+            || meta->fingerprintAlgorithmId
+                   != (int)proxy_fingerprint::kFingerprintAlgorithmId)
+        {
+            return {};
+        }
+        if (!proxy_playback::proxyStatePairingHolds(
+                *meta, controller->wasProxyPublishedThisSession()))
+        {
+            return {};
+        }
+        const auto sessionSnap = deps_.session->loadSessionSnapshotForAudioThread();
+        if (sessionSnap == nullptr || !deps_.clipsForTrack)
+        {
+            return {};
+        }
+        return proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+            *sessionSnap, destination, deps_.clipsForTrack, *meta,
+            deps_.session->timelineSampleRateOr(48000.0));
     }
 
     /// Identity-only snapshot (EMPTY state blob — blob bytes are render content,

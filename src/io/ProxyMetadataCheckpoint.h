@@ -188,8 +188,25 @@ struct CheckpointOutcome
                     + " is not part of the saved project";
         return out;
     }
+
+    // Saved-state pairing preservation (§12.3): this transaction persists ONLY metadata — it
+    // never captures or saves a plugin-state blob. `primaryStateRevisionAtSave` must therefore
+    // keep describing the blob ALREADY in this file: the stamp the last full user Save wrote
+    // together with that blob. Restamping with a checkpoint-time live revision is wrong in
+    // both directions (a notification-volatile Primary bumps without user edits): it can
+    // destroy valid pairing evidence or forge pairing for an older blob. When the saved file
+    // carries no prior proxy record there is no provable save revision for the blob — refuse;
+    // the metadata stays pending and the next user Save persists blob + stamp together.
+    if (!target->hasProxy)
+    {
+        out.error = "cannot prove saved-state pairing (the saved project carries no prior "
+                    "proxy record for this track); metadata persists on the next Save";
+        return out;
+    }
+    ProjectFileProxyMetadataV20 stamped = metadata;
+    stamped.primaryStateRevisionAtSave = target->proxy.primaryStateRevisionAtSave;
     target->hasProxy = true;
-    target->proxy = metadata;
+    target->proxy = stamped;
 
     // Validation write: full write + full re-read of a sibling temp file BEFORE
     // touching the main file. Never reuses the writer's internal temp name.
@@ -220,7 +237,9 @@ struct CheckpointOutcome
             {
                 if (et.trackId == trackId)
                 {
-                    roundTripOk = et.hasProxy && et.proxy.generationId == metadata.generationId;
+                    roundTripOk = et.hasProxy && et.proxy.generationId == metadata.generationId
+                                  && et.proxy.primaryStateRevisionAtSave
+                                         == stamped.primaryStateRevisionAtSave;
                     break;
                 }
             }

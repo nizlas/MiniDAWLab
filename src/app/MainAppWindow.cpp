@@ -568,11 +568,11 @@ public:
                         = instrumentRuntimeCoordinator_ != nullptr
                               ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
                               : nullptr;
-                    ProjectFileProxyMetadataV20 stamped;
-                    if (c != nullptr && c->getProxyMetadataStampedForSaveNow(stamped))
+                    ProjectFileProxyMetadataV20 published;
+                    if (c != nullptr && c->getProxyMetadataForCheckpoint(published))
                     {
                         persisted = projectIoCoordinator_->persistPublishedProxyMetadataIfSafe(
-                            tid, stamped);
+                            tid, published);
                     }
                     if (!persisted)
                     {
@@ -713,7 +713,12 @@ public:
                 if (proxyRenderEngine_ != nullptr)
                 {
                     const auto cur = proxyRenderEngine_->currentIdentity(tid);
-                    id.exists = cur.destinationExists && cur.expectedFingerprint.isNotEmpty();
+                    // "exists" = present AND renderable (usable Primary). A missing
+                    // Primary keeps its honest derived status (Current under the
+                    // recorded configuration, otherwise Stale) but never arms policy
+                    // state — no impossible render is ever queued.
+                    id.exists = cur.destinationExists && cur.primaryAvailable
+                                && cur.expectedFingerprint.isNotEmpty();
                     id.fingerprint = cur.expectedFingerprint;
                     id.revision = cur.primarySemanticRevision;
                 }
@@ -881,7 +886,11 @@ public:
                 if (proxyRenderEngine_ != nullptr)
                 {
                     const auto cur = proxyRenderEngine_->currentIdentity(tid);
-                    id.exists = cur.destinationExists && cur.expectedFingerprint.isNotEmpty();
+                    // "exists" = renderable for the preparation's one-shot render.
+                    // A missing Primary with a Current proxy is Ready (collected
+                    // as-is); missing Primary with a non-current proxy is Blocked.
+                    id.exists = cur.destinationExists && cur.primaryAvailable
+                                && cur.expectedFingerprint.isNotEmpty();
                     id.fingerprint = cur.expectedFingerprint;
                     id.revision = cur.primarySemanticRevision;
                 }

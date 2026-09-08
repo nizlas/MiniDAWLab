@@ -1040,7 +1040,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     return dto;
 }
 
-bool InstrumentTrackController::getProxyMetadataStampedForSaveNow(
+bool InstrumentTrackController::getProxyMetadataForCheckpoint(
     ProjectFileProxyMetadataV20& out) const
 {
     if (!hasProxyMetadata_)
@@ -1048,14 +1048,13 @@ bool InstrumentTrackController::getProxyMetadataStampedForSaveNow(
         return false;
     }
     out = proxyMetadata_;
-    // Same §12.3 save-pairing rule as the save DTO builder above: with a loaded Primary, stamp
-    // its live semantic revision next to the generation. The automatic metadata checkpoint only
-    // writes when nothing changed since the last successful Save, so the plugin-state blob
-    // already on disk is the state this stamp pairs with.
-    if (host_ != nullptr && host_->hasInstrument())
-    {
-        out.primaryStateRevisionAtSave = (std::int64_t)host_->getPrimarySemanticRevision();
-    }
+    // NO live-revision stamping here (deliberate asymmetry with the save DTO builder above):
+    // the metadata-only checkpoint saves no plugin-state blob, and the live semantic revision
+    // may have moved since the last Save without any user edit (notification-volatile
+    // Primaries). Stamping it would forge or destroy §12.3 pairing evidence. The checkpoint
+    // transaction preserves the `primaryStateRevisionAtSave` recorded in the saved project
+    // file itself — the stamp written by the last full Save together with the blob it
+    // describes — or refuses when none exists.
     return true;
 }
 

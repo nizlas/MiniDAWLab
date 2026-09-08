@@ -3396,6 +3396,11 @@ namespace
             juce::String fp;
             std::uint64_t rev = 1;
             juce::String published; ///< generationId of "persisted metadata"
+            /// Appended so the existing aggregate initializers stay valid. False
+            /// models a missing Primary: the engine then reports the destination
+            /// as existing but not renderable, with `fp` playing the role of the
+            /// §12.3 recorded-configuration recompute ("" = not verifiable).
+            bool primaryAvailable = true;
         };
 
         std::mutex m;
@@ -3438,6 +3443,7 @@ namespace
             if (const auto it = dests.find(t); it != dests.end() && it->second.exists)
             {
                 id.destinationExists = true;
+                id.primaryAvailable = it->second.primaryAvailable;
                 id.expectedFingerprint = it->second.fp;
                 id.primarySemanticRevision = it->second.rev;
             }
@@ -3682,6 +3688,76 @@ namespace
         fx.engine.dests[TrackId{ 1 }].fp = "fpA-edited";
         expect(fx.sched->destinationState(TrackId{ 1 }) == ProxyDestinationState::Stale,
                "p1e-state: latest published generation is NOT Current after an edit (Stale)");
+    }
+
+    /// Fix 2 (§12.3/§13.1 agreement): a destination track whose Primary plugin is
+    /// unavailable still EXISTS. Its published generation is judged through the
+    /// engine's recorded-configuration recompute (the same §12.3 verdict the
+    /// playback selector reaches) — never forced to Stale — and it can never
+    /// queue an impossible render.
+    void testProxySchedulerMissingPrimaryCurrency()
+    {
+        SchedulerFixture fx;
+
+        // Missing Primary + valid pairing + matching recompute under the recorded
+        // configuration ⇒ Current (focused test: reload with Primary missing).
+        auto& d = fx.engine.dests[TrackId{ 21 }];
+        d.exists = true;
+        d.primaryAvailable = false;
+        d.fp = "sha256:recorded-recompute"; // §12.3 recompute the engine derives
+        d.published = "sha256:recorded-recompute";
+        expect(fx.sched->destinationState(TrackId{ 21 }) == ProxyDestinationState::Current,
+               "p1e-mp: missing Primary + matching recorded recompute = Current");
+
+        // The playback selector reaches the SAME verdict from the same currency
+        // (§7.3 selection on a Current generation with a valid asset).
+        const auto sel = proxy_playback::decideProxyPlaybackSource(
+            false, proxy_playback::ProxyCurrencyVerdict::Current,
+            proxy_playback::ProxyAssetAvailability::Available);
+        expect(sel.state == proxy_playback::ProxyPlaybackSourceState::ProxyCurrent
+                   && sel.useProxy,
+               "p1e-mp: destination status agrees with playback selection");
+
+        // Focused test: a missing Primary never queues a render.
+        const auto rq = fx.sched->requestRender(TrackId{ 21 });
+        expect(!rq.exists && rq.message.contains("not renderable"),
+               "p1e-mp: missing Primary never queues a render");
+        expect(!fx.sched->jobStatus(TrackId{ 21 }).exists,
+               "p1e-mp: no job exists after the refused request");
+
+        // Focused test: a genuine mismatch (edited musical content) stays Stale.
+        d.fp = "sha256:different-recompute";
+        expect(fx.sched->destinationState(TrackId{ 21 }) == ProxyDestinationState::Stale,
+               "p1e-mp: mismatching recorded recompute stays honestly Stale");
+
+        // Broken/unverifiable pairing: the engine reports no recompute ("") — the
+        // published generation cannot be trusted and stays Stale.
+        d.fp = "";
+        expect(fx.sched->destinationState(TrackId{ 21 }) == ProxyDestinationState::Stale,
+               "p1e-mp: unverifiable pairing stays honestly Stale");
+
+        // No published generation at all with a missing Primary: Absent, not Stale.
+        auto& e = fx.engine.dests[TrackId{ 22 }];
+        e.exists = true;
+        e.primaryAvailable = false;
+        expect(fx.sched->destinationState(TrackId{ 22 }) == ProxyDestinationState::Absent,
+               "p1e-mp: missing Primary without metadata is Absent");
+
+        // Focused test: available-Primary behavior is unchanged — identical
+        // fingerprint situations verdict exactly as before, and requests queue.
+        auto& a = fx.engine.dests[TrackId{ 23 }];
+        a.exists = true; // primaryAvailable stays default true
+        a.fp = "sha256:live";
+        a.published = "sha256:live";
+        expect(fx.sched->destinationState(TrackId{ 23 }) == ProxyDestinationState::Current,
+               "p1e-mp: available Primary + matching identity still Current");
+        a.published = "sha256:older";
+        expect(fx.sched->destinationState(TrackId{ 23 }) == ProxyDestinationState::Stale,
+               "p1e-mp: available Primary + mismatching identity still Stale");
+        const auto rq23 = fx.sched->requestRender(TrackId{ 23 });
+        expect(rq23.exists, "p1e-mp: available Primary still queues renders");
+        expect(fx.pumpUntilTerminal(TrackId{ 23 }),
+               "p1e-mp: available-Primary render terminalizes normally");
     }
 
     void testProxySchedulerCoalescingAndSupersession()
@@ -7837,6 +7913,16 @@ namespace
         expect(fx.build("mc-checkpoint"), "mc-txn: fixture built");
         const juce::File file = fx.source.getChildFile(fx.projectFileName);
 
+        // The last full user Save stamped the live semantic revision (42) together with the
+        // plugin-state blob it captured — the §12.3 pairing evidence the metadata-only
+        // checkpoint must PRESERVE (it saves no blob of its own). The plugin identity is
+        // required: the writer persists the recorded-identity group (including the stamp)
+        // only for metadata that carries it, exactly like every real publication does.
+        fx.dests[TrackId{ 7 }].meta.pluginFileOrIdentifier = "C:/Plugins/Organ.vst3";
+        fx.dests[TrackId{ 7 }].meta.pluginFormatName = "VST3";
+        fx.dests[TrackId{ 7 }].meta.primaryStateRevisionAtSave = 42;
+        expect(fx.writeProject(), "mc-txn: baseline save-pairing stamp written");
+
         // Baseline sanity (required test 1): a proxy already Current at save time is included
         // normally by the ordinary writer — the fixture's saved file carries fp7/fp8.
         {
@@ -7865,7 +7951,11 @@ namespace
         m7.pluginFormatName = "VST3";
         m7.pluginVersionAtRender = "1.2.3";
         m7.primaryStateRevisionAtPublish = 42;
-        m7.primaryStateRevisionAtSave = 42; // stamped by the controller before the checkpoint
+        // Focused test (Fix 1): the live semantic revision moved AFTER the Save but BEFORE
+        // this checkpoint (notification-volatile Primary). 99 is what naive checkpoint-time
+        // stamping would write — the transaction must IGNORE it and preserve the saved
+        // file's stamp (42), which is the revision that provably belongs to the blob on disk.
+        m7.primaryStateRevisionAtSave = 99;
         m7.timelineReferenceRate = 48000.0;
 
         // ---- happy path: metadata-only atomic update -------------------------
@@ -7887,9 +7977,16 @@ namespace
             expect(x7 != nullptr && x7->hasProxy && x7->proxy.generationId == "sha256:fp7-new"
                        && x7->proxy.lengthSamples == 4096
                        && x7->proxy.primaryStateRevisionAtPublish == 42
-                       && x7->proxy.primaryStateRevisionAtSave == 42
                        && x7->proxy.pluginVersionAtRender == "1.2.3",
-                   "mc-txn: target track carries the new generation + pairing stamp");
+                   "mc-txn: target track carries the new generation");
+            // Fix 1 focused test: the checkpoint preserved the SAVED file's pairing stamp
+            // (42, the blob's revision) and discarded the checkpoint-time live value (99).
+            // Pairing therefore still holds for a later missing-Primary load.
+            expect(x7 != nullptr && x7->proxy.primaryStateRevisionAtSave == 42,
+                   "mc-txn: saved-state pairing stamp preserved (live drift ignored)");
+            expect(x7 != nullptr
+                       && proxy_playback::proxyStatePairingHolds(x7->proxy, false),
+                   "mc-txn: persisted save/publish pairing holds after the checkpoint");
             expect(x7 != nullptr && x7->pluginStateBase64 == "T1JHQU4="
                        && x7->proxyUpdateMode == "off",
                    "mc-txn: target track's opaque plugin state and mode untouched");
@@ -7919,6 +8016,10 @@ namespace
         m8.generationId = "sha256:fp8-new";
         m8.silentGeneration = true;
         m8.sampleRate = 8000.0;
+        // Track 8's saved file never recorded a pairing stamp (AtSave = 0): the checkpoint
+        // must preserve that honest "unproven" record — NOT adopt this publication's claim.
+        m8.primaryStateRevisionAtPublish = 7;
+        m8.primaryStateRevisionAtSave = 7;
         const CheckpointOutcome ok2
             = checkpointProxyMetadataOnDisk(file, ok1.newDiskIdentity, TrackId{ 8 }, m8);
         expect(ok2.ok, ("mc-txn: second checkpoint succeeds (" + ok2.error + ")").toStdString());
@@ -7926,16 +8027,26 @@ namespace
             ProjectFileV1 after;
             expect(readProjectFile(file, after).wasOk(), "mc-txn: file loads after 2nd checkpoint");
             bool has7 = false, has8 = false;
+            const ProjectFileExperimentalInstrumentTrackV1* y8 = nullptr;
             for (const auto& et : after.experimentalInstrumentTracks)
             {
                 has7 = has7 || (et.trackId == TrackId{ 7 }
                                 && et.proxy.generationId == "sha256:fp7-new");
-                has8 = has8 || (et.trackId == TrackId{ 8 }
-                                && et.proxy.generationId == "sha256:fp8-new"
-                                && et.proxy.silentGeneration);
+                if (et.trackId == TrackId{ 8 } && et.proxy.generationId == "sha256:fp8-new"
+                    && et.proxy.silentGeneration)
+                {
+                    has8 = true;
+                    y8 = &et;
+                }
             }
             expect(has7 && has8,
                    "mc-txn: near-simultaneous publications preserve BOTH references");
+            // Focused test (Fix 1 honesty): a GENUINE save/publish mismatch stays broken —
+            // the file keeps AtSave=0 (nothing provable), so a missing-Primary load derives
+            // Stale instead of trusting a forged claim.
+            expect(y8 != nullptr && y8->proxy.primaryStateRevisionAtSave == 0
+                       && !proxy_playback::proxyStatePairingHolds(y8->proxy, false),
+                   "mc-txn: genuine pairing mismatch remains honestly broken");
         }
 
         // ---- refusals that must leave the file byte-identical ----------------
@@ -8002,6 +8113,32 @@ namespace
                    "mc-txn: previous project file still loads after replace failure");
         }
 
+        // ---- Fix 1 refusal: no prior proxy record ⇒ pairing unprovable ---------
+        // A saved file WITHOUT a proxy record for the destination carries no save-revision
+        // stamp for its blob: the metadata-only checkpoint cannot prove pairing and must
+        // refuse (metadata stays pending; the next full Save persists blob + stamp together).
+        {
+            ProjectFileV1 data;
+            expect(readProjectFile(file, data).wasOk(), "mc-txn: re-read for pairing fixture");
+            for (auto& et : data.experimentalInstrumentTracks)
+            {
+                if (et.trackId == TrackId{ 8 })
+                {
+                    et.hasProxy = false;
+                    et.proxy = ProjectFileProxyMetadataV20{};
+                }
+            }
+            expect(writeProjectFile(file, data).wasOk(),
+                   "mc-txn: fixture without prior proxy record written");
+            const juce::String shaNp = sha256HexOfFileForCheckpoint(file);
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, shaNp, TrackId{ 8 }, m8);
+            expect(!r.ok && r.error.contains("cannot prove saved-state pairing"),
+                   "mc-txn: checkpoint without a prior saved proxy record refused");
+            expect(sha256HexOfFileForCheckpoint(file) == shaNp,
+                   "mc-txn: pairing refusal wrote nothing");
+        }
+
         fx.cleanup();
     }
 } // namespace
@@ -8046,6 +8183,7 @@ int main()
         testProxyRenderExecutorEmptyDestination();
 
     testProxySchedulerFifoSerializationAndThreads();
+    testProxySchedulerMissingPrimaryCurrency();
     testProxySchedulerCoalescingAndSupersession();
     testProxySchedulerEditDuringRenderAndFinalizing();
     testProxySchedulerCancellationEveryPhase();

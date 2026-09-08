@@ -404,12 +404,17 @@ public:
         return proxyPublishedThisSession_;
     }
 
-    /// [Message thread] P1 acceptance correction: the proxy metadata exactly as an immediate
-    /// user Save would persist it — a copy carrying the §12.3 save-pairing stamp when the
-    /// Primary is loaded (same rule as the save DTO builder; the saved plugin-state blob on
-    /// disk is by guard construction the last-saved state, and the automatic checkpoint only
-    /// runs when no plugin edit happened since that save). False when no proxy is published.
-    [[nodiscard]] bool getProxyMetadataStampedForSaveNow(ProjectFileProxyMetadataV20& out) const;
+    /// [Message thread] P1 acceptance correction: the published proxy metadata for the
+    /// METADATA-ONLY checkpoint. Deliberately DISTINCT from ordinary-Save stamping: a normal
+    /// user Save stamps `primaryStateRevisionAtSave` with the live semantic revision because
+    /// that same Save captures the plugin-state blob the stamp pairs with. The checkpoint
+    /// saves NO blob, so this accessor never reads the checkpoint-time live revision (a
+    /// notification-volatile Primary may have bumped it since the last Save, which would
+    /// forge or destroy the §12.3 pairing evidence). The checkpoint transaction instead
+    /// preserves the `primaryStateRevisionAtSave` already recorded in the saved project file
+    /// — the revision that provably belongs to the blob on disk — and refuses when the saved
+    /// file carries no such record. False when no proxy is published.
+    [[nodiscard]] bool getProxyMetadataForCheckpoint(ProjectFileProxyMetadataV20& out) const;
 
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;

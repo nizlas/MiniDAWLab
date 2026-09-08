@@ -125,7 +125,15 @@ enum class ProxyDestinationState
 /// revision). This is the §9.4.2 currency comparison — never a fresh state-blob hash.
 struct ProxyCurrentIdentity
 {
+    /// The destination TRACK exists (a missing/unloadable Primary plugin does
+    /// NOT make the destination nonexistent — see `primaryAvailable`).
     bool destinationExists = false;
+    /// Live Primary loaded and renderable. False = the destination cannot render
+    /// (requests are refused), but its published generation can still be judged
+    /// Current/Stale through `expectedFingerprint`, which the engine then derives
+    /// under the generation's RECORDED configuration (§12.3) instead of the live
+    /// host — the same verdict the playback selector reaches.
+    bool primaryAvailable = true;
     juce::String expectedFingerprint;
     std::uint64_t primarySemanticRevision = 0;
 };
@@ -284,8 +292,10 @@ public:
                 return out;
             }
             const ProxyCurrentIdentity now = engine_->currentIdentity(destination);
-            if (!now.destinationExists)
+            if (!now.destinationExists || !now.primaryAvailable)
             {
+                // A missing Primary never queues an impossible render; its currency
+                // is still derived honestly through destinationState().
                 out.message = "destination does not exist / is not renderable";
                 return out;
             }
