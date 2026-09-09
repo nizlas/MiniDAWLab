@@ -117,6 +117,54 @@ struct CheckpointGuardState
 }
 
 //==============================================================================
+// First-generation saved-blob revision record (runtime; no schema field)
+//==============================================================================
+
+/// Revision that provably belongs to the Primary state blob inside the last
+/// successfully saved or load-restored main `.dalproj`. Independent of whether
+/// a proxy block already exists. Live semantic-revision bumps never write this
+/// record; only a confirmed full user Save promotes a capture-time candidate,
+/// and a successful project-load state restore initializes it. Failed Save and
+/// project replacement invalidate it. The equality
+/// `record.revision == publicationRevision` is the first-generation pairing
+/// proof (monotonic revisions make a stale record unable to match a later
+/// publication).
+struct SavedPrimaryBlobRevisionRecord
+{
+    std::uint64_t revision = 0;
+    bool known = false;
+    std::uint64_t candidate = 0;
+    bool candidateValid = false;
+
+    void recordCandidateFromBlobCapture(const std::uint64_t rev) noexcept
+    {
+        candidate = rev;
+        candidateValid = true;
+    }
+
+    void noteMainProjectSavePersisted() noexcept
+    {
+        if (candidateValid)
+        {
+            revision = candidate;
+            known = true;
+            candidateValid = false;
+        }
+    }
+
+    void invalidate() noexcept
+    {
+        known = false;
+        candidateValid = false;
+    }
+
+    [[nodiscard]] bool provesPublication(const std::int64_t publishRevision) const noexcept
+    {
+        return known && publishRevision > 0 && (std::int64_t)revision == publishRevision;
+    }
+};
+
+//==============================================================================
 // Atomic metadata-only transaction (message thread)
 //==============================================================================
 
@@ -144,11 +192,18 @@ struct CheckpointOutcome
 /// previous generation. This function creates no undo entry, never marks the
 /// project clean/dirty, and never fires save callbacks — recursion into On
 /// Save rendering is structurally impossible.
+/// `callerProvedSavedStatePairing` = the controller's first-generation proof:
+/// its runtime record of the last saved/loaded blob's revision equals the
+/// publication revision, and `metadata.primaryStateRevisionAtSave` is already
+/// stamped equal to `primaryStateRevisionAtPublish`. When true, a first-ever
+/// proxy (no prior proxy block in the saved file) may be written. When false,
+/// the transaction preserves the stamp already in the saved file, or refuses.
 [[nodiscard]] inline CheckpointOutcome checkpointProxyMetadataOnDisk(
     const juce::File& projectFile,
     const juce::String& expectedDiskIdentity,
     const TrackId trackId,
-    const ProjectFileProxyMetadataV20& metadata)
+    const ProjectFileProxyMetadataV20& metadata,
+    const bool callerProvedSavedStatePairing = false)
 {
     CheckpointOutcome out;
     if (metadata.generationId.isEmpty())
@@ -189,22 +244,32 @@ struct CheckpointOutcome
         return out;
     }
 
-    // Saved-state pairing preservation (§12.3): this transaction persists ONLY metadata — it
-    // never captures or saves a plugin-state blob. `primaryStateRevisionAtSave` must therefore
-    // keep describing the blob ALREADY in this file: the stamp the last full user Save wrote
-    // together with that blob. Restamping with a checkpoint-time live revision is wrong in
-    // both directions (a notification-volatile Primary bumps without user edits): it can
-    // destroy valid pairing evidence or forge pairing for an older blob. When the saved file
-    // carries no prior proxy record there is no provable save revision for the blob — refuse;
-    // the metadata stays pending and the next user Save persists blob + stamp together.
-    if (!target->hasProxy)
+    // Saved-state pairing (§12.3): this transaction persists ONLY metadata — it never
+    // captures or saves a plugin-state blob. A first-ever proxy has no prior proxy block,
+    // so pairing is proven by the caller's runtime record (the revision belonging to the
+    // blob the last full Save/load put on disk, equal to this publication revision). When
+    // that proof is absent, preserve the stamp already recorded in a prior proxy block, or
+    // refuse — never restamp from a checkpoint-time live revision.
+    ProjectFileProxyMetadataV20 stamped = metadata;
+    if (callerProvedSavedStatePairing)
     {
-        out.error = "cannot prove saved-state pairing (the saved project carries no prior "
-                    "proxy record for this track); metadata persists on the next Save";
+        if (metadata.primaryStateRevisionAtPublish == 0
+            || metadata.primaryStateRevisionAtSave != metadata.primaryStateRevisionAtPublish)
+        {
+            out.error = "caller claimed saved-state pairing but the metadata stamps do not match";
+            return out;
+        }
+    }
+    else if (target->hasProxy)
+    {
+        stamped.primaryStateRevisionAtSave = target->proxy.primaryStateRevisionAtSave;
+    }
+    else
+    {
+        out.error = "cannot prove saved-state pairing (no prior proxy record and no "
+                    "saved-blob revision association); metadata persists on the next Save";
         return out;
     }
-    ProjectFileProxyMetadataV20 stamped = metadata;
-    stamped.primaryStateRevisionAtSave = target->proxy.primaryStateRevisionAtSave;
     target->hasProxy = true;
     target->proxy = stamped;
 

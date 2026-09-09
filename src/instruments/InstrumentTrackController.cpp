@@ -834,6 +834,9 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     hasProxyMetadata_ = false;
     proxyMetadata_ = {};
     proxyUpdateMode_ = "auto";
+    // Project replacement: the incoming file's blob has no proven association yet (the
+    // load-restore path re-initializes the record when the restore succeeds).
+    savedPrimaryBlob_.invalidate();
     publishRenderSnapshot();
 }
 
@@ -852,6 +855,14 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         kind = (host_ == nullptr) ? "MidiContent" : "GrooveAgentSE";
     }
     dto.instrumentKind = kind;
+    // P1 first-generation pairing (§12.3/§18.4): read the semantic revision BEFORE any state
+    // capture below. If the plugin bumps concurrently (audio-thread notification) between this
+    // read and the capture, the recorded value is strictly older than the blob's true state, so
+    // a later equality proof can only FAIL (safe refusal) — it can never forge pairing for a
+    // blob that no longer matches. The candidate becomes authoritative only when the
+    // coordinator confirms the full user Save reached disk (`noteMainProjectSavePersisted`).
+    const std::uint64_t revisionReadBeforeStateCapture
+        = (host_ != nullptr && host_->hasInstrument()) ? host_->getPrimarySemanticRevision() : 0;
     if (kind == "GenericVst3" && host_ != nullptr)
     {
         dto.requiredKitName.clear();
@@ -966,6 +977,15 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     {
         dto.pluginVersion = persistedPluginVersion_;
     }
+    // P1 first-generation pairing: a live blob was captured into this DTO — remember the
+    // revision read together with it as the pairing candidate (promoted only after the
+    // coordinator confirms a successful full user Save; autosave/undo builds never promote).
+    const bool liveBlobCapturedThisBuild
+        = host_ != nullptr && host_->hasInstrument() && dto.pluginStateBase64.isNotEmpty();
+    if (liveBlobCapturedThisBuild)
+    {
+        savedPrimaryBlob_.recordCandidateFromBlobCapture(revisionReadBeforeStateCapture);
+    }
     dto.hasProxy = hasProxyMetadata_;
     if (hasProxyMetadata_)
     {
@@ -975,12 +995,13 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         // construction the state the generation rendered — a later missing-Primary load may
         // then treat the state component as current. Without a live Primary the loaded stamp
         // persists unchanged (a portable resave never destroys pairing evidence). Cache
-        // metadata only: no musical undo entry, no track-state rewrite.
+        // metadata only: no musical undo entry, no track-state rewrite. The stamp reuses the
+        // exact revision read alongside the captured blob (not a second, later read) so the
+        // stamp and the blob it describes can never straddle a concurrent bump.
         dto.proxy = proxyMetadata_;
-        if (host_ != nullptr && host_->hasInstrument())
+        if (liveBlobCapturedThisBuild)
         {
-            dto.proxy.primaryStateRevisionAtSave
-                = (std::int64_t)host_->getPrimarySemanticRevision();
+            dto.proxy.primaryStateRevisionAtSave = (std::int64_t)revisionReadBeforeStateCapture;
         }
     }
     dto.proxyUpdateMode = proxyUpdateMode_;
@@ -1041,8 +1062,9 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
 }
 
 bool InstrumentTrackController::getProxyMetadataForCheckpoint(
-    ProjectFileProxyMetadataV20& out) const
+    ProjectFileProxyMetadataV20& out, bool& outSavedStatePairingProven) const
 {
+    outSavedStatePairingProven = false;
     if (!hasProxyMetadata_)
     {
         return false;
@@ -1051,10 +1073,22 @@ bool InstrumentTrackController::getProxyMetadataForCheckpoint(
     // NO live-revision stamping here (deliberate asymmetry with the save DTO builder above):
     // the metadata-only checkpoint saves no plugin-state blob, and the live semantic revision
     // may have moved since the last Save without any user edit (notification-volatile
-    // Primaries). Stamping it would forge or destroy §12.3 pairing evidence. The checkpoint
-    // transaction preserves the `primaryStateRevisionAtSave` recorded in the saved project
-    // file itself — the stamp written by the last full Save together with the blob it
-    // describes — or refuses when none exists.
+    // Primaries). Stamping it would forge or destroy §12.3 pairing evidence.
+    //
+    // First-generation proof instead: `savedPrimaryBlob_` is the revision that provably
+    // belongs to the blob inside the last successfully saved/loaded main project file
+    // (promoted only on confirmed full Save / load restore). When the publication rendered
+    // at EXACTLY that revision, the on-disk blob is by construction the state the generation
+    // rendered — stamp save-pairing without requiring a prior proxy block. Monotonic
+    // revisions make the equality itself the proof: any plugin replacement, preset restore
+    // or later edit bumps past the record and the equality can never reoccur. When not
+    // proven, the checkpoint transaction preserves the stamp already recorded in the saved
+    // file, or refuses (metadata stays pending for the next Save).
+    if (savedPrimaryBlob_.provesPublication(out.primaryStateRevisionAtPublish))
+    {
+        out.primaryStateRevisionAtSave = out.primaryStateRevisionAtPublish;
+        outSavedStatePairingProven = true;
+    }
     return true;
 }
 
@@ -1921,6 +1955,13 @@ void InstrumentTrackController::runPendingGenericVst3ProjectAutoload(Experimenta
         appendProjectLoadDiagnosticLine(
             "load: GenericVst3 state restore ok trackId="
             + juce::String((juce::int64)experimentalDomainTrackId_));
+        // P1 first-generation pairing (§12.3/§18.4): the blob just restored IS the blob in the
+        // loaded main project file, so the post-restore revision is its in-session
+        // association. A concurrent notification bump after this read only makes the record
+        // stale (later equality proof fails safely); it can never forge pairing.
+        savedPrimaryBlob_.revision = host.getPrimarySemanticRevision();
+        savedPrimaryBlob_.known = true;
+        savedPrimaryBlob_.candidateValid = false;
     }
 
     appendProjectLoadDiagnosticLine(

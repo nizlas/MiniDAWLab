@@ -569,10 +569,12 @@ public:
                               ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
                               : nullptr;
                     ProjectFileProxyMetadataV20 published;
-                    if (c != nullptr && c->getProxyMetadataForCheckpoint(published))
+                    bool savedStatePairingProven = false;
+                    if (c != nullptr
+                        && c->getProxyMetadataForCheckpoint(published, savedStatePairingProven))
                     {
                         persisted = projectIoCoordinator_->persistPublishedProxyMetadataIfSafe(
-                            tid, published);
+                            tid, published, savedStatePairingProven);
                     }
                     if (!persisted)
                     {

@@ -7854,6 +7854,118 @@ namespace
     // transaction). Steering §18.3/§18.4.
     //==========================================================================
 
+    void testFirstGenerationProxyCheckpointPairing()
+    {
+        using namespace proxy_checkpoint;
+
+        // 1. First full Save with no previous proxy stores/retains the blob-revision association.
+        SavedPrimaryBlobRevisionRecord rec;
+        expect(!rec.known && !rec.provesPublication(7),
+               "p1a-fg: empty record proves nothing");
+        rec.recordCandidateFromBlobCapture(7);
+        expect(!rec.known && !rec.provesPublication(7),
+               "p1a-fg: candidate is not authoritative until the Save reaches disk");
+        rec.noteMainProjectSavePersisted();
+        expect(rec.known && rec.revision == 7 && rec.provesPublication(7) && !rec.candidateValid,
+               "p1a-fg: successful Save promotes the captured blob revision");
+
+        // 3. A later live revision bump does not change which revision belongs to the blob.
+        expect(rec.revision == 7 && !rec.provesPublication(99),
+               "p1a-fg: live revision bump is not written into the saved-blob record");
+        expect(rec.provesPublication(7),
+               "p1a-fg: original saved-blob revision still proves that publication");
+
+        // 4. Failed Save / project replacement invalidates the association.
+        rec.recordCandidateFromBlobCapture(100);
+        rec.invalidate();
+        expect(!rec.known && !rec.candidateValid && !rec.provesPublication(7)
+                   && !rec.provesPublication(100),
+               "p1a-fg: failed Save / replacement invalidates the association");
+
+        rec.recordCandidateFromBlobCapture(11);
+        rec.noteMainProjectSavePersisted();
+        expect(rec.provesPublication(11),
+               "p1a-fg: next successful Save re-proves pairing");
+
+        // 2 + 5: first proxy publication checkpoints without a prior proxy block when proven;
+        // genuine inability to prove pairing still refuses safely.
+        PortableFixture fx;
+        expect(fx.build("p1a-fg"), "p1a-fg: fixture built");
+        const juce::File file = fx.source.getChildFile(fx.projectFileName);
+        {
+            ProjectFileV1 data;
+            expect(readProjectFile(file, data).wasOk(), "p1a-fg: baseline readable");
+            for (auto& et : data.experimentalInstrumentTracks)
+            {
+                if (et.trackId == TrackId{ 7 })
+                {
+                    et.hasProxy = false;
+                    et.proxy = ProjectFileProxyMetadataV20{};
+                }
+            }
+            expect(writeProjectFile(file, data).wasOk(),
+                   "p1a-fg: first-generation source (no prior proxy block) written");
+        }
+        const juce::String sha0 = sha256HexOfFileForCheckpoint(file);
+        expect(sha0.isNotEmpty(), "p1a-fg: baseline identity computed");
+
+        ProjectFileProxyMetadataV20 m7;
+        m7.generationId = "sha256:fp7-first";
+        m7.relativePath = proxy_store::generationRelativePath(TrackId{ 7 }, m7.generationId);
+        m7.sampleRate = 8000.0;
+        m7.lengthSamples = 4096;
+        m7.channels = 2;
+        m7.pluginFileOrIdentifier = "C:/Plugins/Organ.vst3";
+        m7.pluginFormatName = "VST3";
+        m7.primaryStateRevisionAtPublish = 11;
+        m7.primaryStateRevisionAtSave = 11;
+
+        {
+            const CheckpointOutcome refused
+                = checkpointProxyMetadataOnDisk(file, sha0, TrackId{ 7 }, m7, false);
+            expect(!refused.ok && refused.error.contains("cannot prove saved-state pairing"),
+                   "p1a-fg: unproven first generation refused");
+            expect(sha256HexOfFileForCheckpoint(file) == sha0,
+                   "p1a-fg: refusal left the previous project file intact");
+        }
+        {
+            ProjectFileProxyMetadataV20 forged = m7;
+            forged.primaryStateRevisionAtSave = 99;
+            const CheckpointOutcome r
+                = checkpointProxyMetadataOnDisk(file, sha0, TrackId{ 7 }, forged, true);
+            expect(!r.ok && r.error.contains("stamps do not match"),
+                   "p1a-fg: forged pairing claim refused");
+            expect(sha256HexOfFileForCheckpoint(file) == sha0,
+                   "p1a-fg: forged-claim refusal wrote nothing");
+        }
+        {
+            const CheckpointOutcome ok
+                = checkpointProxyMetadataOnDisk(file, sha0, TrackId{ 7 }, m7, true);
+            expect(ok.ok,
+                   ("p1a-fg: proven first generation checkpoints (" + ok.error + ")").toStdString());
+            ProjectFileV1 after;
+            expect(readProjectFile(file, after).wasOk(),
+                   "p1a-fg: file loads after first-generation checkpoint");
+            bool found = false;
+            bool stateIntact = false;
+            for (const auto& et : after.experimentalInstrumentTracks)
+            {
+                if (et.trackId == TrackId{ 7 })
+                {
+                    found = et.hasProxy && et.proxy.generationId == "sha256:fp7-first"
+                            && et.proxy.primaryStateRevisionAtPublish == 11
+                            && et.proxy.primaryStateRevisionAtSave == 11
+                            && proxy_playback::proxyStatePairingHolds(et.proxy, false);
+                    stateIntact = et.pluginStateBase64 == "T1JHQU4=";
+                }
+            }
+            expect(found, "p1a-fg: first proxy persisted without a second Save");
+            expect(stateIntact, "p1a-fg: first-generation checkpoint captured no plugin state");
+        }
+
+        fx.cleanup();
+    }
+
     void testProxyMetadataCheckpointGuard()
     {
         using namespace proxy_checkpoint;
@@ -8113,9 +8225,8 @@ namespace
                    "mc-txn: previous project file still loads after replace failure");
         }
 
-        // ---- Fix 1 refusal: no prior proxy record ⇒ pairing unprovable ---------
-        // A saved file WITHOUT a proxy record for the destination carries no save-revision
-        // stamp for its blob: the metadata-only checkpoint cannot prove pairing and must
+        // Unproven first generation: no prior proxy record AND the caller did not prove
+        // pairing via the saved-blob revision record. The metadata-only checkpoint must
         // refuse (metadata stays pending; the next full Save persists blob + stamp together).
         {
             ProjectFileV1 data;
@@ -8238,6 +8349,7 @@ int main()
     testPortablePreparationCancelAndClose();
     testPortablePackageValidatorBoundary();
 
+    testFirstGenerationProxyCheckpointPairing();
     testProxyMetadataCheckpointGuard();
     testProxyMetadataCheckpointTransaction();
 

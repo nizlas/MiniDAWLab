@@ -113,8 +113,13 @@ public:
     /// `onSuccessfulUserSave` (no On Save recursion), never changes the dirty state. Returns
     /// true when the file was updated; false = refused/failed (logged; the caller keeps the
     /// metadata pending via `markProjectDirtyFromEdit`, and the next explicit Save persists it).
+    /// `callerProvedSavedStatePairing` = the controller's first-generation proof (its runtime
+    /// record of the last saved blob's revision equals the publication revision, and
+    /// `metadata.primaryStateRevisionAtSave` is already stamped accordingly). When false, the
+    /// transaction preserves the stamp in the saved file, or refuses without a prior proxy block.
     [[nodiscard]] bool persistPublishedProxyMetadataIfSafe(TrackId trackId,
-                                                           const ProjectFileProxyMetadataV20& metadata);
+                                                           const ProjectFileProxyMetadataV20& metadata,
+                                                           bool callerProvedSavedStatePairing);
 
     enum class UnsavedGuardKind
     {
@@ -179,6 +184,12 @@ private:
     /// Called after every successful user Save (normal + first-time Save As) and load; the
     /// metadata checkpoint refreshes it itself after a successful atomic replace.
     void refreshKnownProjectDiskIdentity();
+
+    /// [Message thread] P1 first-generation pairing: after every FULL user Save attempt
+    /// (normal Save and Save As — never autosave), tell each instrument controller whether the
+    /// blob its DTO build just captured actually reached the main `.dalproj` (promote the
+    /// pairing candidate) or not (invalidate the association).
+    void noteMainProjectSaveOutcomeForInstrumentControllers(bool savedOk);
     Transport& transport_;
     Session& session_;
     juce::AudioDeviceManager& deviceManager_;

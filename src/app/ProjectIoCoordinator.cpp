@@ -585,6 +585,9 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
+            // First-generation pairing: a failed Save makes the association between any
+            // captured candidate and the on-disk blob unprovable — invalidate it.
+            noteMainProjectSaveOutcomeForInstrumentControllers(false);
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
             reportDone(false);
@@ -593,6 +596,9 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             writeLastOperationBreadcrumb("project save end ok");
             markProjectCleanNow();
+            // P1 first-generation pairing: promote each controller's captured blob-revision
+            // candidate — the blob it describes is now provably inside the main `.dalproj`.
+            noteMainProjectSaveOutcomeForInstrumentControllers(true);
             // P1 acceptance correction: record the freshly written file's identity so a later
             // automatic proxy-metadata checkpoint can prove the file is still this exact save.
             refreshKnownProjectDiskIdentity();
@@ -715,6 +721,7 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
+            noteMainProjectSaveOutcomeForInstrumentControllers(false);
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Save project", r.getErrorMessage());
             reportDone(false);
@@ -723,6 +730,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             writeLastOperationBreadcrumb("project save end ok");
             markProjectCleanNow();
+            // First-time Save As also writes the captured blob into a real main `.dalproj`.
+            noteMainProjectSaveOutcomeForInstrumentControllers(true);
             // P1 acceptance correction: the new project file's identity (Save As included —
             // a later checkpoint must never write into a replaced/different project file).
             refreshKnownProjectDiskIdentity();
@@ -1177,8 +1186,43 @@ void ProjectIoCoordinator::refreshKnownProjectDiskIdentity()
                                     : juce::String();
 }
 
+void ProjectIoCoordinator::noteMainProjectSaveOutcomeForInstrumentControllers(const bool savedOk)
+{
+    if (callbacks_.instrumentCtlByTrackId == nullptr)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    for (int i = 0; i < snap->getNumTracks(); ++i)
+    {
+        const Track& tr = snap->getTrack(i);
+        if (tr.getKind() != TrackKind::Instrument && tr.getKind() != TrackKind::Midi)
+        {
+            continue;
+        }
+        InstrumentTrackController* const ctl = callbacks_.instrumentCtlByTrackId(tr.getId());
+        if (ctl == nullptr)
+        {
+            continue;
+        }
+        if (savedOk)
+        {
+            ctl->noteMainProjectSavePersisted();
+        }
+        else
+        {
+            ctl->invalidateSavedPrimaryBlobAssociation();
+        }
+    }
+}
+
 bool ProjectIoCoordinator::persistPublishedProxyMetadataIfSafe(
-    const TrackId trackId, const ProjectFileProxyMetadataV20& metadata)
+    const TrackId trackId, const ProjectFileProxyMetadataV20& metadata,
+    const bool callerProvedSavedStatePairing)
 {
     // P1 acceptance correction (§18.3/§18.4). Guard evidence, in order:
     //  * `hasProjectFile`/`projectFileExists` — never-saved projects and autosave-recovered
@@ -1222,7 +1266,8 @@ bool ProjectIoCoordinator::persistPublishedProxyMetadataIfSafe(
         = proxy_checkpoint::checkpointProxyMetadataOnDisk(projectFile,
                                                           knownProjectDiskIdentity_,
                                                           trackId,
-                                                          metadata);
+                                                          metadata,
+                                                          callerProvedSavedStatePairing);
     if (!outcome.ok)
     {
         // Failure never damages the previous `.dalproj` (temp+rename discipline) and never

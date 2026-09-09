@@ -12,6 +12,7 @@
 // =============================================================================
 
 #include "io/ProjectFile.h"
+#include "io/ProxyMetadataCheckpoint.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <array>
@@ -410,11 +411,41 @@ public:
     /// that same Save captures the plugin-state blob the stamp pairs with. The checkpoint
     /// saves NO blob, so this accessor never reads the checkpoint-time live revision (a
     /// notification-volatile Primary may have bumped it since the last Save, which would
-    /// forge or destroy the §12.3 pairing evidence). The checkpoint transaction instead
-    /// preserves the `primaryStateRevisionAtSave` already recorded in the saved project file
-    /// — the revision that provably belongs to the blob on disk — and refuses when the saved
-    /// file carries no such record. False when no proxy is published.
-    [[nodiscard]] bool getProxyMetadataForCheckpoint(ProjectFileProxyMetadataV20& out) const;
+    /// forge or destroy the §12.3 pairing evidence).
+    ///
+    /// `outSavedStatePairingProven` is the FIRST-GENERATION proof (steering §12.3/§18.4): true
+    /// only when this controller's runtime record of the revision belonging to the Primary
+    /// blob in the last successfully saved/loaded main project file EQUALS the publication's
+    /// `primaryStateRevisionAtPublish`. The record is promoted only after a successful full
+    /// Save (from the exact value captured together with the blob), initialized after a
+    /// successful load-time state restore, never replaced by later live bumps, and invalidated
+    /// on failed Save. Because the semantic revision is monotonic per session, a stale record
+    /// can never equal a later publication revision — the equality itself is the proof. When
+    /// proven, `out.primaryStateRevisionAtSave` is stamped equal to
+    /// `primaryStateRevisionAtPublish` so a first-ever proxy (no prior proxy block in the
+    /// saved file) checkpoints without a second user Save. When not proven, the checkpoint
+    /// transaction falls back to preserving the stamp already recorded in the saved file, or
+    /// refuses. False when no proxy is published.
+    [[nodiscard]] bool getProxyMetadataForCheckpoint(ProjectFileProxyMetadataV20& out,
+                                                     bool& outSavedStatePairingProven) const;
+
+    /// [Message thread] Called by ProjectIoCoordinator immediately after a SUCCESSFUL full
+    /// user Save (never autosave: the autosave file is not the main `.dalproj`, so its blob
+    /// must never become checkpoint pairing evidence). Promotes the candidate revision that
+    /// `buildExperimentalInstrumentProjectBlock` recorded together with the state blob it
+    /// captured into that save. No-op when the save captured no live blob (the on-disk blob —
+    /// and any existing association — round-tripped unchanged).
+    void noteMainProjectSavePersisted() noexcept
+    {
+        savedPrimaryBlob_.noteMainProjectSavePersisted();
+    }
+
+    /// [Message thread] Failed full Save or project replacement: drop both the record and any
+    /// pending candidate. Checkpoints then refuse until the next successful Save re-proves pairing.
+    void invalidateSavedPrimaryBlobAssociation() noexcept
+    {
+        savedPrimaryBlob_.invalidate();
+    }
 
     /// [Message thread] Piano roll / pattern edits: republish audio snapshot (note grid + gate).
     void notifyClipPatternMutated(InstrumentMidiClipId clipId) noexcept;
@@ -562,6 +593,12 @@ private:
     bool hasProxyMetadata_ = false;
     ProjectFileProxyMetadataV20 proxyMetadata_;
     bool proxyPublishedThisSession_ = false;
+    /// P1 first-generation pairing record (steering §12.3/§18.4). See
+    /// `proxy_checkpoint::SavedPrimaryBlobRevisionRecord`. `mutable` because the const save
+    /// DTO builder records the capture-time candidate; only `noteMainProjectSavePersisted`
+    /// promotes it after a confirmed full user Save. Live semantic-revision bumps never
+    /// write this record.
+    mutable proxy_checkpoint::SavedPrimaryBlobRevisionRecord savedPrimaryBlob_;
     /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
     juce::String proxyUpdateMode_ { "auto" };
     juce::File proxyAssetSourceHint_; ///< P1H Save As rehoming (runtime-only, see accessor)
