@@ -6467,6 +6467,7 @@ namespace
         std::map<TrackId, juce::String> modes;
         bool recording = false;
         std::map<TrackId, bool> quiescent; // absent = quiescent (eligible)
+        std::set<TrackId> primaryMissing;  // exists=false but derived identity available
         std::vector<TrackId> observedChanges;
         std::unique_ptr<proxy_policy::ProxyUpdatePolicyService> policy;
 
@@ -6494,7 +6495,9 @@ namespace
                 if (const auto it = fx.engine.dests.find(t);
                     it != fx.engine.dests.end() && it->second.exists)
                 {
-                    id.exists = true;
+                    // Missing Primary (production: primaryAvailable false): NOT renderable,
+                    // but the recorded-config recompute still yields the derived identity.
+                    id.exists = primaryMissing.count(t) == 0;
                     id.fingerprint = it->second.fp;
                     id.revision = it->second.rev;
                 }
@@ -6943,6 +6946,65 @@ namespace
                    && pf.fx.sched->destinationState(TrackId{ 1 })
                           == ProxyDestinationState::Current,
                "p1h-load: the load-stale destination renders after its full window");
+    }
+
+    //==========================================================================
+    // §12.3 playback honesty with a GENUINELY missing Primary: render-relevant
+    // invalidation must still be OBSERVED (playback-coordinator notification)
+    // even though the destination is not renderable — while never arming any
+    // policy state or queueing an impossible render (two-computer stale-proxy
+    // continuation fix).
+    //==========================================================================
+    void testProxyPolicyMissingPrimaryInvalidationObserved()
+    {
+        PolicyFixture pf;
+        pf.addCurrentDest(TrackId{ 1 }, "a");
+        pf.modes[TrackId{ 1 }] = "auto";
+        pf.policy->tick();
+        expect(pf.observedChanges.empty(),
+               "p1h-missing: first observation of a current destination fires nothing");
+
+        // Primary becomes unavailable (plugin cannot load): the transition itself
+        // is not a render-relevant change.
+        pf.primaryMissing.insert(TrackId{ 1 });
+        pf.policy->tick();
+        expect(pf.observedChanges.empty() && !pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-missing: losing the Primary fires no change and queues nothing");
+
+        // THE regression: a render-relevant MIDI edit with Primary absent MUST be
+        // observed (production: refreshDestination deselects the stale proxy) …
+        pf.edit(TrackId{ 1 }, "b");
+        expect(pf.observedChanges.size() == 1 && pf.observedChanges[0] == TrackId{ 1 },
+               "p1h-missing: an edit with Primary absent IS observed for playback honesty");
+        // … while policy state stays unarmed: no render even past the Auto window.
+        pf.advance(300001.0);
+        expect(!pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-missing: no impossible render is ever queued without a usable Primary");
+
+        // Undo analogue: the identity returns to the recorded content — observed
+        // again (production re-evaluates currency; Current must be proven fresh).
+        pf.edit(TrackId{ 1 }, "a");
+        expect(pf.observedChanges.size() == 2,
+               "p1h-missing: restoring the recorded content is observed again");
+
+        // Repeated polls without changes stay silent (no notification storm).
+        pf.advance(5000.0);
+        pf.advance(5000.0);
+        expect(pf.observedChanges.size() == 2,
+               "p1h-missing: unchanged identity fires no further observations");
+
+        // Primary returns: normal renderable tracking resumes without a spurious
+        // fire on the transition, and a subsequent edit arms Auto normally.
+        pf.primaryMissing.erase(TrackId{ 1 });
+        pf.policy->tick();
+        expect(pf.observedChanges.size() == 2,
+               "p1h-missing: regaining the Primary alone fires no change");
+        pf.edit(TrackId{ 1 }, "c");
+        expect(pf.observedChanges.size() == 3,
+               "p1h-missing: edits after Primary returns are observed normally");
+        pf.advance(300001.0);
+        expect(pf.hasActiveJob(TrackId{ 1 }),
+               "p1h-missing: Auto renders again once the Primary is usable");
     }
 
     //==========================================================================
@@ -8472,6 +8534,7 @@ int main()
     testProxyPolicySnapshotEligibilityDefersCapture();
     testProxyPolicyProjectCloseAndReplacementDropRuntimeState();
     testProxyPolicyLoadStaleArmsFullWindow();
+    testProxyPolicyMissingPrimaryInvalidationObserved();
     testProxySaveAsRehoming();
     testProxyStatusModelMapping();
 

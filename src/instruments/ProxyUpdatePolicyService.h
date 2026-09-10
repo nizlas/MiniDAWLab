@@ -251,6 +251,10 @@ public:
         {
             it = liveSet.count(it->first) == 0 ? states_.erase(it) : std::next(it);
         }
+        for (auto it = missingPrimary_.begin(); it != missingPrimary_.end();)
+        {
+            it = liveSet.count(it->first) == 0 ? missingPrimary_.erase(it) : std::next(it);
+        }
     }
 
     //==========================================================================
@@ -332,7 +336,11 @@ public:
 
     /// Project close/replacement: every timer/pending flag is runtime-only state
     /// of the OLD project (the scheduler's notifyProjectChanged handles jobs).
-    void noteProjectChanged() { states_.clear(); }
+    void noteProjectChanged()
+    {
+        states_.clear();
+        missingPrimary_.clear();
+    }
 
     //==========================================================================
     // Runtime status (message thread; immutable value for P1I)
@@ -404,6 +412,15 @@ private:
         juce::String suppressedFailureFingerprint; ///< Auto: no same-identity failure loop
     };
 
+    /// Derived-identity tracker for destinations WITHOUT a usable Primary (§12.3
+    /// playback honesty): observes invalidation only — never arms renders.
+    struct MissingPrimaryIdentity
+    {
+        bool known = false;
+        juce::String fingerprint;
+        std::uint64_t revision = 0;
+    };
+
     [[nodiscard]] static bool isTerminal(const proxy_render::ProxyJobPhase p) noexcept
     {
         return p == proxy_render::ProxyJobPhase::Published
@@ -445,11 +462,49 @@ private:
             = deps_.identityForTrack ? deps_.identityForTrack(tid) : DestinationIdentity{};
         if (!id.exists)
         {
-            // Not renderable (missing/unusable Primary): keep NO policy state.
-            // Playback honesty for this case is the P1G selector's job.
+            // Not renderable (missing/unusable Primary): keep NO policy state — no render
+            // is ever queued for an impossible Primary. Render-relevant INVALIDATION must
+            // still reach playback selection, though (§12.3 honesty): while the derived
+            // expected fingerprint is available (recorded-config recompute — the SAME
+            // identity the scheduler's Stale verdict uses; nothing new is fingerprinted),
+            // observe changes against it and notify exactly as for a renderable
+            // destination. Without this, a MIDI edit with Primary genuinely absent left
+            // the audio thread mixing the retained stale generation until some unrelated
+            // refresh (two-computer case).
+            if (id.fingerprint.isNotEmpty())
+            {
+                MissingPrimaryIdentity& mp = missingPrimary_[tid];
+                const bool changed = mp.known
+                                     && (mp.fingerprint != id.fingerprint
+                                         || mp.revision != id.revision);
+                if (changed)
+                {
+                    if (deps_.notifyIdentityChanged)
+                    {
+                        deps_.notifyIdentityChanged(tid); // in-flight job obsolescence (PI-028)
+                    }
+                    if (deps_.onRenderRelevantChangeObserved)
+                    {
+                        // Production: playback-coordinator refresh — currency re-evaluates
+                        // (existing rules) and a now-stale proxy view is deselected at the
+                        // next published-view boundary. Undo that restores the recorded
+                        // content changes the fingerprint BACK, lands here again, and the
+                        // same evaluation must prove Current before playback resumes.
+                        deps_.onRenderRelevantChangeObserved(tid);
+                    }
+                }
+                mp.known = true;
+                mp.fingerprint = id.fingerprint;
+                mp.revision = id.revision;
+            }
+            else
+            {
+                missingPrimary_.erase(tid);
+            }
             states_.erase(tid);
             return;
         }
+        missingPrimary_.erase(tid); // renderable again: normal DestState tracking resumes
         DestState& st = states_[tid];
         const bool changed = st.identityKnown
                              && (st.fingerprint != id.fingerprint || st.revision != id.revision);
@@ -576,6 +631,7 @@ private:
 
     Dependencies deps_;
     std::map<TrackId, DestState> states_;
+    std::map<TrackId, MissingPrimaryIdentity> missingPrimary_;
     std::unique_ptr<Ticker> ticker_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ProxyUpdatePolicyService)
