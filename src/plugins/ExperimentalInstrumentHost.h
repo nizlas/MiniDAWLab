@@ -286,6 +286,20 @@ public:
     /// Diagnostics: peak |sample| of the most recent proxy block (pre-strip). Relaxed.
     [[nodiscard]] float getProxyLastBlockPeakForDiagnostics() const noexcept;
 
+    /// Diagnostics: blocks in which the audio callback ENTERED the proxy branch (a published
+    /// useProxy view was latched), regardless of whether segments produced output. Relaxed.
+    [[nodiscard]] std::uint64_t getProxyBranchEnteredCountRelaxed() const noexcept
+    {
+        return rtProxyBranchBlocks_.load(std::memory_order_relaxed);
+    }
+
+    /// Diagnostics: proxy-branch bails because the stereo scratch was never sized for this
+    /// callback (prepareForDevice not run / undersized). Relaxed.
+    [[nodiscard]] std::uint64_t getProxyScratchSkipCountRelaxed() const noexcept
+    {
+        return rtDiag_skipScratchTooSmallForCallback_.load(std::memory_order_relaxed);
+    }
+
 public:
     /// Stability Slice 4: capture this guard in Timer::callAfterDelay / MessageManager::callAsync
     /// lambdas and check `isAlive()` before touching the host. Invalidated when the host is
@@ -391,6 +405,7 @@ private:
     proxy_playback::ProxyTimelineSegment proxySegments_[kMaxProxySegmentsPerBlock]; // audio thread only
     int proxySegmentCount_ = 0;                                     // audio thread only
     std::atomic<std::uint64_t> rtProxyBlocksMixed_{ 0 };
+    std::atomic<std::uint64_t> rtProxyBranchBlocks_{ 0 };
     std::atomic<std::uint64_t> rtProxySegmentsDropped_{ 0 };
     std::atomic<std::uint32_t> rtProxyLastPeakBits_{ 0 }; // bitwise float
     std::atomic<std::int64_t> rtProxyLoopStart_{ -1 };    // prepared transport cycle

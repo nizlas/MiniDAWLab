@@ -1185,6 +1185,18 @@ public:
             [this](const int ns) {
                 instrumentRuntimeCoordinator_->experimentalBeginAudioBlockAllHosts(static_cast<std::int64_t>(ns));
             });
+        // §12.2 missing-Primary correction: the audio device typically STARTS before these
+        // hooks exist, so the initial audioDeviceAboutToStart never reached
+        // prepareExperimentalInstrumentHostsForDevice — lastPreparedDevice* stayed unset and
+        // every host whose plugin failed to load (the genuine missing-Primary case) kept a
+        // 0x0 stereo scratch: the published proxy view was Current yet the proxy branch
+        // bailed on every block (silent playback on machines without the plugin). Stamp the
+        // already-running device spec now, exactly as audioDeviceAboutToStart would have.
+        if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
+        {
+            instrumentRuntimeCoordinator_->prepareExperimentalInstrumentHostsForDevice(
+                dev->getCurrentSampleRate(), dev->getCurrentBufferSizeSamples());
+        }
         trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
             // Power / delete / inserts are not realtime-safe paths: blocked while Playing (not mute).
             return recorder_.isRecording()

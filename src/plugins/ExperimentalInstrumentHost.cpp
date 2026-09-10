@@ -2592,8 +2592,33 @@ void ExperimentalInstrumentHost::unloadInstrument()
     }
 
     prev.reset();
-    scratch_.setSize(0, 0, false, true, false);
-    scratchPtrs_.clear();
+    // §12.2 missing-Primary correction: the proxy branch renders into this SAME stereo
+    // scratch even when NO instrument is loaded — and unload is exactly how a failed
+    // plugin restore ends (loadInstrument* unloads first, then fails to create the
+    // instance). Stranding the scratch at 0x0 here silenced every published proxy on
+    // machines where the Primary cannot load (two-computer case; measured:
+    // branchEntered == scratchSkips, blocksMixed == 0). Keep/restore the
+    // device-prepared no-instrument layout instead; never shrink below it. When the
+    // device was never prepared (blockSize_ == 0) the scratch stays empty — the proxy
+    // branch then bails exactly as before until prepareForDevice runs.
+    if (blockSize_ > 0)
+    {
+        if (scratch_.getNumChannels() < kStereoChannels || scratch_.getNumSamples() < blockSize_)
+        {
+            scratch_.setSize(kStereoChannels, blockSize_, false, true, true);
+            scratchPtrs_.clear();
+            scratchPtrs_.reserve((size_t)kStereoChannels);
+            for (int c = 0; c < kStereoChannels; ++c)
+            {
+                scratchPtrs_.push_back(scratch_.getWritePointer(c));
+            }
+        }
+    }
+    else
+    {
+        scratch_.setSize(0, 0, false, true, false);
+        scratchPtrs_.clear();
+    }
 
     juce::Logger::writeToLog("[experimental-instrument] unloaded (global slot)");
 
@@ -3623,6 +3648,7 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     if (const auto proxyView = proxyPlaybackView_.load(std::memory_order_acquire);
         proxyView != nullptr && proxyView->useProxy)
     {
+        rtProxyBranchBlocks_.fetch_add(1, std::memory_order_relaxed);
         // Live/UI MIDI is drained and DISCARDED: newly played MIDI can neither alter the
         // fixed proxy nor sound over Proxy transport (steering §12 monitoring policy).
         if (midiIo_ != nullptr)
