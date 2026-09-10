@@ -47,6 +47,7 @@
 #include "instruments/ProxyPlaybackReader.h"
 #include "app/PortableProjectService.h"
 #include "instruments/ProxyPlaybackSource.h"
+#include "playback/InstrumentPlaybackRegistryPolicy.h"
 #include "instruments/ProxyStatusModel.h"
 #include "domain/TrackStereoPan.h"
 #include "instruments/ProxyRenderExecutor.h"
@@ -5948,6 +5949,43 @@ namespace
                "p1g-select: unstamped metadata (0/0) never claims pairing");
     }
 
+    /// P1 two-computer missing-Primary correction: the playback-registry eligibility
+    /// rule must NOT consult plugin-load state. A generic-catalog (GenericVst3) lane
+    /// whose Primary failed to load keeps its registry entry — that entry is the ONLY
+    /// path through which a published Current proxy view can sound. The former rule
+    /// (skip generic lanes without a loaded plugin) silenced valid proxy playback on
+    /// every machine where the plugin was missing.
+    void testInstrumentPlaybackRegistryEligibility()
+    {
+        using instrument_playback::playbackEntryEligible;
+        constexpr TrackId organ = 7;
+
+        // THE regression case: generic VST3 lane, plugin NOT loaded -> still registered.
+        expect(playbackEntryEligible(true, true, false, organ),
+               "regpolicy: generic lane WITHOUT loaded plugin stays registered "
+               "(missing-Primary proxy playback)");
+        expect(playbackEntryEligible(true, true, true, organ),
+               "regpolicy: generic lane with loaded plugin registered (unchanged)");
+        expect(playbackEntryEligible(true, false, false, organ),
+               "regpolicy: non-generic lane without loaded plugin registered (unchanged)");
+        expect(playbackEntryEligible(true, false, true, organ),
+               "regpolicy: non-generic lane with loaded plugin registered (unchanged)");
+
+        // Structural requirements still refuse registration.
+        expect(!playbackEntryEligible(false, true, true, organ),
+               "regpolicy: no instrument track shell -> never registered");
+        expect(!playbackEntryEligible(true, true, true, kInvalidTrackId),
+               "regpolicy: invalid playback key -> never registered");
+
+        // Lock the contract: load state can NEVER regain influence over registration.
+        for (const bool generic : { false, true })
+        {
+            expect(playbackEntryEligible(true, generic, false, organ)
+                       == playbackEntryEligible(true, generic, true, organ),
+                   "regpolicy: eligibility is independent of plugin-load state");
+        }
+    }
+
     void testProxyCurrencyUnderRecordedConfig()
     {
         const ProxyFixture f = makeOrganFixture();
@@ -8417,6 +8455,7 @@ int main()
     testProxyPlaybackReaderPreparedLoop();
 
     testProxyPlaybackSourceSelectionMatrix();
+    testInstrumentPlaybackRegistryEligibility();
     testProxyCurrencyUnderRecordedConfig();
     testProxyPlaybackMixSubstitutionSeam();
     testProxyPlaybackCoordinatorEndToEnd();

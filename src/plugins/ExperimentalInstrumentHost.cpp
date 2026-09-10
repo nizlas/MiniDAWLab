@@ -3689,12 +3689,24 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         = owner != nullptr && owner->inst != nullptr && owner->layoutOk;
     if (!haveProcessableInstrument && captureSink == nullptr)
     {
+        // Missing Primary without a proxy view: the lane stays REGISTERED in the playback
+        // registry (InstrumentPlaybackRegistryPolicy.h), so transport MIDI is still scheduled
+        // into this block's buffer every callback. Discard it here — otherwise `rtBlockMidi_`
+        // would accumulate across blocks (unbounded growth + audio-thread allocation).
+        // `clear()` keeps capacity: allocation-free at steady state.
+        rtBlockMidi_.clear();
+        if (midiIo_ != nullptr)
+        {
+            const juce::ScopedLock sl(midiIo_->midiLock);
+            midiIo_->uiPendingMidi.clear();
+        }
         rtDiag_skipNoOwnerBadLayout_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     if (midiIo_ == nullptr && captureSink == nullptr)
     {
+        rtBlockMidi_.clear(); // same accumulation guard as above
         rtDiag_skipNoMidiIo_.fetch_add(1, std::memory_order_relaxed);
         return;
     }

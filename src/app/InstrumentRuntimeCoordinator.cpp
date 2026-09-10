@@ -9,6 +9,7 @@
 #include "domain/Track.h"
 #include "engine/PlaybackEngine.h"
 #include "instruments/InstrumentTrackController.h"
+#include "playback/InstrumentPlaybackRegistryPolicy.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
@@ -766,16 +767,18 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
     const auto appendPlaybackRuntimePair = [&](ExperimentalInstrumentHost* host,
                                                InstrumentTrackController* ctl) noexcept
     {
-        if (ctl == nullptr || host == nullptr || !ctl->hasInstrumentTrack())
-        {
-            return;
-        }
-        if (ctl->isGenericCatalogInstrument() && !host->hasInstrument())
+        if (ctl == nullptr || host == nullptr)
         {
             return;
         }
         const TrackId playbackKey = ctl->getExperimentalInstrumentDomainTrackId();
-        if (playbackKey == kInvalidTrackId)
+        // P1 missing-Primary: registration must NOT depend on a loaded plugin — the
+        // published proxy playback view can only sound through a registered entry
+        // (see InstrumentPlaybackRegistryPolicy.h).
+        if (!instrument_playback::playbackEntryEligible(ctl->hasInstrumentTrack(),
+                                                        ctl->isGenericCatalogInstrument(),
+                                                        host->hasInstrument(),
+                                                        playbackKey))
         {
             return;
         }
