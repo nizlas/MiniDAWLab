@@ -3324,6 +3324,99 @@ namespace
         expect(rev.current() == 1 + (std::uint64_t)kThreads * kBumpsPerThread,
                "p1d-preflight: concurrent bumps lose no revision (atomic counter)");
     }
+
+    // Fix B (§9.4.2): parameter notifications emitted synchronously from a host's own
+    // MIDI-bearing live processBlock are derived runtime activity and must not bump the
+    // semantic revision; EVERY other case keeps the conservative bump. Exercises the real
+    // production decision path (mini_daw::bumpForHostObservedParameterChange +
+    // PrimaryLiveProcessScope) — the juce listener in ExperimentalInstrumentHost is a
+    // one-line forwarder to it.
+    void testMidiDerivedParamNotificationSuppression()
+    {
+        using mini_daw::PrimaryLiveProcessScope;
+        using mini_daw::bumpForHostObservedParameterChange;
+
+        mini_daw::PrimarySemanticRevision rev;
+        const int hostObjectA = 0, hostObjectB = 0; // distinct addresses stand in for hosts
+        const void* tokenA = &hostObjectA;
+        const void* tokenB = &hostObjectB;
+
+        // (4) normal message-thread/user parameter change: no scope active -> bumps.
+        expect(bumpForHostObservedParameterChange(rev, tokenA) && rev.current() == 1,
+               "fixb: param change with no live-processBlock scope bumps (user edit path)");
+
+        {
+            const PrimaryLiveProcessScope scope(tokenA, true); // MIDI-bearing live block
+            // (1) synchronous re-entry from THIS host's MIDI-bearing processBlock: suppressed.
+            expect(!bumpForHostObservedParameterChange(rev, tokenA) && rev.current() == 1,
+                   "fixb: sync param notification inside own MIDI-bearing processBlock does not bump");
+            for (int i = 0; i < 1000; ++i)
+            {
+                (void)bumpForHostObservedParameterChange(rev, tokenA);
+            }
+            expect(rev.current() == 1,
+                   "fixb: 1000 repeated MIDI-derived notifications leave the revision unchanged");
+
+            // (3a) another HOST's notification on the same thread: token mismatch -> bumps.
+            expect(bumpForHostObservedParameterChange(rev, tokenB) && rev.current() == 2,
+                   "fixb: another host's param notification is never suppressed by this scope");
+
+            // (3b) a callback on another THREAD while this thread is processing: that thread's
+            // own thread_local context is empty -> bumps (a concurrent message-thread user
+            // edit can never be misclassified).
+            std::uint64_t revSeenByOtherThread = 0;
+            bool otherThreadBumped = false;
+            std::thread other([&] {
+                otherThreadBumped = bumpForHostObservedParameterChange(rev, tokenA);
+                revSeenByOtherThread = rev.current();
+            });
+            other.join();
+            expect(otherThreadBumped && revSeenByOtherThread == 3,
+                   "fixb: param change on another thread bumps while this thread is in scope");
+
+            // (5) audioProcessorChanged relays through an unconditional direct bump() —
+            // never suppressed, even during processing.
+            expect(rev.bump() == 4,
+                   "fixb: audioProcessorChanged-style direct bump is never suppressed in scope");
+
+            // (6) editor open/close and assignment/restore also call bump() directly; the
+            // suppression cannot leak into those explicit sites.
+            expect(rev.bump() == 5 && rev.bump() == 6,
+                   "fixb: explicit editor/assignment/restore bumps remain unconditional");
+
+            {
+                const PrimaryLiveProcessScope inner(tokenA, false); // same host, NO MIDI
+                // (2) the same callback during a block WITHOUT MIDI: conservative bump kept.
+                expect(bumpForHostObservedParameterChange(rev, tokenA) && rev.current() == 7,
+                       "fixb: param notification inside a NO-MIDI processBlock still bumps");
+            }
+            // Inner scope exit restored the outer MIDI-bearing context (nesting safety).
+            expect(!bumpForHostObservedParameterChange(rev, tokenA) && rev.current() == 7,
+                   "fixb: nested scope exit restores the previous thread-local context");
+        }
+        // Outer scope exit: normal conservative bumping resumes.
+        expect(bumpForHostObservedParameterChange(rev, tokenA) && rev.current() == 8,
+               "fixb: leaving the scope restores normal conservative bumping");
+
+        // (7) fingerprint proof: repeated MIDI-derived callbacks cannot turn a Current
+        // generation Stale, because the F2 revision component never moves. Current predicate
+        // is published == expectedFingerprint (§13.1), so identical fingerprints = Current.
+        proxy_snapshot::ProxyRenderSnapshot snap;
+        snap.stateIdentity.primaryStateRevision = rev.current();
+        snap.stateIdentity.pairedWithSavedState = true;
+        const juce::String publishedFingerprint = proxy_fingerprint::computeFingerprint(snap);
+        {
+            const PrimaryLiveProcessScope scope(tokenA, true);
+            for (int i = 0; i < 1000; ++i)
+            {
+                (void)bumpForHostObservedParameterChange(rev, tokenA);
+            }
+        }
+        snap.stateIdentity.primaryStateRevision = rev.current();
+        expect(proxy_fingerprint::computeFingerprint(snap) == publishedFingerprint,
+               "fixb: repeated MIDI-derived callbacks keep the expected fingerprint identical "
+               "(Current stays Current)");
+    }
 } // namespace
 
 //==============================================================================
@@ -8278,6 +8371,7 @@ int main()
     testSilentGenerationAndSpan();
     testCcNormalizationLastWins();
     testPrimarySemanticRevisionCounter();
+    testMidiDerivedParamNotificationSuppression();
     testAuditionDispatchIntegration();
     testToolbarLayoutAndVisibility();
     testCcLaneViewState();

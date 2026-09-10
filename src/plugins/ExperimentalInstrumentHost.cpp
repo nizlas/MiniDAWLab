@@ -3764,6 +3764,11 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         scratchPtrs_.empty() ? nullptr : scratchPtrs_.data(), scratchCh, n);
 
     {
+        // §9.4.2 Fix B: mark this thread as executing THIS host's live processBlock, and whether
+        // the block carries host-delivered MIDI/CC, so the revision-bump relay can classify
+        // synchronous parameter notifications as derived runtime activity (the MIDI/CC itself is
+        // already fingerprinted). RAII — restores the previous thread-local context on exit.
+        const mini_daw::PrimaryLiveProcessScope liveScope(this, !blockMidi.isEmpty());
         juce::ScopedNoDenormals noDenormals;
         inst.processBlock(view, blockMidi);
     }

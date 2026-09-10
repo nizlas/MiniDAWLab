@@ -401,25 +401,35 @@ private:
     /// notify from the audio thread) — the relay only performs one relaxed atomic increment.
     struct PrimaryRevisionBumpListener final : juce::AudioProcessorListener
     {
-        explicit PrimaryRevisionBumpListener(mini_daw::PrimarySemanticRevision& r) noexcept
-            : rev(r)
+        PrimaryRevisionBumpListener(mini_daw::PrimarySemanticRevision& r,
+                                    const void* hostToken) noexcept
+            : rev(r), hostToken_(hostToken)
         {
         }
         void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override
         {
-            (void)rev.bump(); // host-observed parameter change
+            // Host-observed parameter change — EXCEPT (§9.4.2 Fix B): a notification emitted
+            // synchronously from inside THIS host's own MIDI-bearing live processBlock is derived
+            // runtime activity (the plugin reacting to host-delivered MIDI/CC, which is already a
+            // fingerprint input as musical content), not a new project edit. Measured: VB3-II
+            // emitted 625/625 such callbacks in 20 s of plain playback, falsely turning a Current
+            // proxy Stale. All other cases keep the conservative bump — see
+            // mini_daw::bumpForHostObservedParameterChange (PrimarySemanticRevision.h).
+            (void)mini_daw::bumpForHostObservedParameterChange(rev, hostToken_);
         }
         void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override
         {
             // Covers nonParameterStateChanged (setDirty hints), programChanged and
-            // latencyChanged — all conservative §9.4 sound-state-change signals.
+            // latencyChanged — all conservative §9.4 sound-state-change signals. NEVER
+            // suppressed (the measured false-bump source was parameter notifications only).
             (void)rev.bump();
         }
         mini_daw::PrimarySemanticRevision& rev;
+        const void* hostToken_; ///< identity of the owning host for the Fix B scope check
     };
 
     mini_daw::PrimarySemanticRevision primarySemanticRevision_;
-    PrimaryRevisionBumpListener primaryRevisionBumpListener_{ primarySemanticRevision_ };
+    PrimaryRevisionBumpListener primaryRevisionBumpListener_{ primarySemanticRevision_, this };
 
     std::unique_ptr<juce::DocumentWindow> editorWindow_;
 
