@@ -834,6 +834,11 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     hasProxyMetadata_ = false;
     proxyMetadata_ = {};
     proxyUpdateMode_ = "auto";
+    hasSecondary_ = false;
+    secondaryDescriptor_ = {};
+    secondaryPluginBundlePath_.clear();
+    secondaryPluginStateBase64_.clear();
+    secondaryForcedMidiChannel_ = 0;
     // Project replacement: the incoming file's blob has no proven association yet (the
     // load-restore path re-initializes the record when the restore succeeds).
     savedPrimaryBlob_.invalidate();
@@ -1005,6 +1010,24 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
         }
     }
     dto.proxyUpdateMode = proxyUpdateMode_;
+    // v21 Secondary round-trip (P2): fully independent of every Primary field above. When the
+    // Secondary instance is loaded right now, capture its fresh state (same Save boundary as the
+    // Primary blob); otherwise the persisted blob survives unchanged — an unloadable Secondary
+    // never loses its saved configuration.
+    dto.hasSecondary = hasSecondary_;
+    if (hasSecondary_)
+    {
+        const juce::String freshSecondaryState
+            = secondaryLiveStateProvider_ ? secondaryLiveStateProvider_() : juce::String();
+        if (freshSecondaryState.isNotEmpty())
+        {
+            secondaryPluginStateBase64_ = freshSecondaryState;
+        }
+        dto.secondaryDescriptor = secondaryDescriptor_;
+        dto.secondaryPluginBundlePath = secondaryPluginBundlePath_;
+        dto.secondaryPluginStateBase64 = secondaryPluginStateBase64_;
+        dto.secondaryForcedMidiChannel = secondaryForcedMidiChannel_;
+    }
     for (const auto& kv : drumLabels_)
     {
         if (kv.second.manual.isNotEmpty())
@@ -1317,6 +1340,16 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
     hasProxyMetadata_ = chosen.hasProxy;
     proxyMetadata_ = chosen.hasProxy ? chosen.proxy : ProjectFileProxyMetadataV20{};
     proxyUpdateMode_ = chosen.proxyUpdateMode.isNotEmpty() ? chosen.proxyUpdateMode : juce::String("auto");
+    // v21 Secondary restore (P2): reader-validated values; absent ⇒ unassigned. Restoring these
+    // fields never touches the Primary restore state above.
+    hasSecondary_ = chosen.hasSecondary;
+    secondaryDescriptor_ = chosen.hasSecondary ? chosen.secondaryDescriptor
+                                               : ProjectFileGenericVst3DescriptorV1{};
+    secondaryPluginBundlePath_ = chosen.hasSecondary ? chosen.secondaryPluginBundlePath
+                                                     : juce::String();
+    secondaryPluginStateBase64_ = chosen.hasSecondary ? chosen.secondaryPluginStateBase64
+                                                      : juce::String();
+    secondaryForcedMidiChannel_ = chosen.hasSecondary ? chosen.secondaryForcedMidiChannel : 0;
     if (chosen.instrumentKind == "GenericVst3")
     {
         pendingProjectGrooveAutoload_ = false;

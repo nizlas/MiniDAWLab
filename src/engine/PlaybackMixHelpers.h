@@ -119,13 +119,18 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               int trackIndex) noexcept;
 
 /// Instrument synth → Pre → fader/mute/off → Post → pan into `stageL`/`stageR` (replaces stage segment).
+/// P2: `auditionHost` (nullable) is the track's Secondary AUDITION instance — mixed into the SAME
+/// generation stage (before inserts/fader/pan) so audition flows through the identical strip. The
+/// CALLER passes nullptr while the transport plays (audition is never layered over transport
+/// playback, PID-008) and during offline mixdown.
 void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               const Track& track,
                                               float* stageL,
                                               float* stageR,
                                               int destOutFrame0,
                                               int numSamples,
-                                              PluginInsertHost* pluginHost) noexcept;
+                                              PluginInsertHost* pluginHost,
+                                              ExperimentalInstrumentHost* auditionHost = nullptr) noexcept;
 
 /// Group bus input scratch → post-channel-strip in `stageL`/`stageR` (replaces stage for segment).
 void applyBusPostChannelStripFromInputToStage(const Track& busTrack,

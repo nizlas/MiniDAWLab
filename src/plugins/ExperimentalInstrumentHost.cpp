@@ -27,6 +27,7 @@
 #include "diagnostics/DiagnosticBuildFlags.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "diagnostics/DrumNameDiagnosticFileLog.h"
+#include "playback/SecondaryMidiMapping.h"
 #include "plugins/Vst3ChildProcessScan.h"
 #include "ui/experimental/DrumNoteNames.h"
 
@@ -1656,6 +1657,7 @@ void ExperimentalInstrumentHost::clearControllerWireCallbacks() noexcept
     onPluginPitchNamesCacheMayHaveChanged_ = {};
     onPluginDrumNamesDiscovered_ = {};
     drumNamePhaseCAudioProbeShouldSkip_ = {};
+    uiMidiSecondaryForwardResolver_ = {};
 }
 
 void ExperimentalInstrumentHost::closeNativeEditor()
@@ -1700,9 +1702,45 @@ void ExperimentalInstrumentHost::enqueueMidiMessageFromMessageThread(const juce:
     // (Phase B.1 — lets stability scenarios observe editor audition without a real VST3).
     if (!acceptsTransportMidi())
     {
+        // P2 Secondary audition split (steering §17, PID-008): this message would be DISCARDED
+        // (no Primary, no sink). The resolver may supply the track's Secondary host — it owns
+        // the gating (never layered over proxy transport playback) and may lazily load the
+        // Secondary. Message thread only; a nullptr result keeps the discard semantics.
+        if (uiMidiSecondaryForwardResolver_)
+        {
+            if (ExperimentalInstrumentHost* const target = uiMidiSecondaryForwardResolver_();
+                target != nullptr && target != this)
+            {
+                target->enqueueMidiMessageFromMessageThread(message);
+            }
+        }
         return;
     }
     queueMidiFromMessageThread(message);
+}
+
+void ExperimentalInstrumentHost::enqueueAllNotesOffFromMessageThread()
+{
+    if (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+        || !juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        return;
+    }
+    if (midiIo_ == nullptr)
+    {
+        return;
+    }
+    // P2 source-switch note hygiene: queued into the UI MIDI slot, so it is delivered at this
+    // host's next PROCESSED block (delivery order: UI queue first, then transport MIDI — the
+    // reset always precedes any new content in the same block). While the host is out of the
+    // playback snapshot the events simply wait; held state is then reset the moment the host
+    // re-enters processing, so notes can never replay on reactivation.
+    const juce::ScopedLock sl(midiIo_->midiLock);
+    for (int ch = 1; ch <= 16; ++ch)
+    {
+        midiIo_->uiPendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+        midiIo_->uiPendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
+    }
 }
 
 void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int numSamples) noexcept
@@ -3750,6 +3788,17 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     }
     blockMidi.addEvents(rtBlockMidi_, 0, numSamples, 0);
     rtBlockMidi_.clear();
+
+    // P2 Secondary channel mapping (steering §17, PID-009): applied ONLY at this host's delivery
+    // boundary — the remapped buffer is what the instance (and the capture sink) receives. Same
+    // per-block MidiBuffer pattern as the merge above; stored notes are never rewritten.
+    const int forcedCh = forcedMidiChannelForDelivery_.load(std::memory_order_relaxed);
+    if (secondary_midi::isForcedChannelValid(forcedCh) && !blockMidi.isEmpty())
+    {
+        juce::MidiBuffer remapped;
+        secondary_midi::applySecondaryChannelMapping(remapped, blockMidi, forcedCh);
+        blockMidi.swapWith(remapped);
+    }
 
     rtMidiDeliveryBoundaryBlocks_.fetch_add(1, std::memory_order_relaxed);
     if (!blockMidi.isEmpty())

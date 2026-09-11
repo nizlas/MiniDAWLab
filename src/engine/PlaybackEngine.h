@@ -78,6 +78,13 @@ struct ExperimentalInstrumentPlaybackEntry
     TrackId trackId = kInvalidTrackId;
     ExperimentalInstrumentHost* host = nullptr;
     InstrumentTrackController* midiController = nullptr;
+    /// P2 (steering §17, PID-008): optional Secondary AUDITION host. Non-null only when the
+    /// track's Primary is missing, a loaded Secondary exists, and the Secondary is NOT already
+    /// `host` (i.e. not the transport source). Processed through the SAME strip as `host`, but
+    /// ONLY while the transport is not playing — live audition is never layered over proxy
+    /// transport playback (the audio thread gates this per block; no message-thread hook races).
+    /// Never receives transport MIDI (scheduling targets `host` only).
+    ExperimentalInstrumentHost* auditionHost = nullptr;
 };
 
 /// One plugin-less `TrackKind::Midi` source lane (Phase B). Deliberately carries **no destination**:

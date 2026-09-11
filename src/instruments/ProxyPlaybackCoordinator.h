@@ -87,6 +87,16 @@ public:
         std::function<std::vector<const InstrumentMidiClip*>(TrackId)> clipsForTrack;
         /// Current engine/device sample rate; <= 0 while no device is running.
         std::function<double()> engineRateProvider;
+        /// P2 (steering §17): true when the destination has a CONFIGURED Secondary that is (or
+        /// can right now be) loaded. Consulted only when Primary is unavailable AND no proxy
+        /// selection is possible — the callee may lazily instantiate the Secondary at that
+        /// moment (message thread), so a Current proxy never triggers instantiation. Optional
+        /// (absent = no Secondary support).
+        std::function<bool(TrackId)> secondaryUsable;
+        /// P2: the Secondary becomes / stops being the destination's transport source
+        /// (InstrumentRuntimeCoordinator::setSecondaryTransportActive — idempotent; the swap
+        /// takes effect at the next audio-block boundary). Optional.
+        std::function<void(TrackId, bool)> setSecondaryTransportActive;
     };
 
     explicit ProxyPlaybackCoordinator(Dependencies deps) : deps_(std::move(deps)) {}
@@ -334,7 +344,22 @@ private:
             asset = evaluateAssetAvailability(destination, *meta, ev);
         }
 
-        ev.decision = decideProxyPlaybackSource(primaryOk, currency, asset);
+        // ---- P2 Secondary (steering §17): consulted ONLY when neither Primary nor a proxy
+        // selection is possible, so a Current proxy never instantiates the Secondary (the
+        // usability callback may lazily load it). ProxyPreparing is a runtime refinement of a
+        // useProxy decision and therefore never reaches this fallback.
+        bool secondaryOk = false;
+        if (!primaryOk && deps_.secondaryUsable)
+        {
+            const ProxySourceDecision withoutSecondary
+                = decideProxyPlaybackSource(primaryOk, currency, asset, false);
+            if (!withoutSecondary.useProxy)
+            {
+                secondaryOk = deps_.secondaryUsable(destination);
+            }
+        }
+
+        ev.decision = decideProxyPlaybackSource(primaryOk, currency, asset, secondaryOk);
         if (meta != nullptr)
         {
             ev.generationId = meta->generationId;
@@ -502,11 +527,27 @@ private:
             deps_.publishView(destination, next.view); // nullptr => live Primary semantics
         }
         published_[destination] = std::move(next);
+
+        // P2 (steering §17): activate/deactivate the Secondary as the transport source to match
+        // the published decision. Runs AFTER the view publish so the proxy view is already off
+        // the audio path when the Secondary takes over (and vice versa) — the runtime coordinator
+        // republishes the playback snapshot, so the swap lands on an audio-block boundary and the
+        // sources can never sound simultaneously.
+        if (deps_.setSecondaryTransportActive)
+        {
+            deps_.setSecondaryTransportActive(
+                destination, ev.decision.state == ProxyPlaybackSourceState::SecondaryLive);
+        }
     }
 
     /// Remove all runtime state for a destination (host view already cleared).
     void forget(const TrackId destination)
     {
+        // P2: a forgotten destination can no longer own the Secondary transport slot.
+        if (deps_.setSecondaryTransportActive)
+        {
+            deps_.setSecondaryTransportActive(destination, false);
+        }
         const auto it = published_.find(destination);
         if (it == published_.end())
         {

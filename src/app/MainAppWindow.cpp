@@ -671,6 +671,19 @@ public:
                 }
                 return 0.0;
             };
+            // P2 (steering §17): the Secondary fallback. Consulted only when neither Primary nor
+            // a usable Current proxy can play — the ensure call lazily instantiates the Secondary
+            // (message thread; existing safe load path) and latches per-descriptor failures.
+            pbDeps.secondaryUsable = [this](const TrackId tid) {
+                return instrumentRuntimeCoordinator_ != nullptr
+                       && instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid);
+            };
+            pbDeps.setSecondaryTransportActive = [this](const TrackId tid, const bool active) {
+                if (instrumentRuntimeCoordinator_ != nullptr)
+                {
+                    instrumentRuntimeCoordinator_->setSecondaryTransportActive(tid, active);
+                }
+            };
             proxyPlaybackCoordinator_
                 = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
         }
@@ -843,6 +856,161 @@ public:
                 }
             };
             inspectorView_.setInspectorProxyHost(std::move(proxyUi));
+        }
+
+        // P2: Inspector "Instrument alternatives" seams (steering §17/§19, PID-008/PID-009).
+        // Secondary configuration is persisted project state — every change dirties through the
+        // normal configuration-edit mechanism (§18.3) and is stripped from musical undo.
+        {
+            InspectorSecondaryHost secUi;
+            secUi.isInstrumentDestination = [this](const TrackId tid) {
+                return instrumentRuntimeCoordinator_ != nullptr
+                       && instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                              != nullptr;
+            };
+            secUi.getView = [this](const TrackId tid) {
+                InspectorSecondaryHost::View v;
+                if (instrumentRuntimeCoordinator_ == nullptr)
+                {
+                    return v;
+                }
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                ExperimentalInstrumentHost* const h
+                    = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid);
+                if (c == nullptr)
+                {
+                    return v;
+                }
+                if (h != nullptr && h->hasInstrument())
+                {
+                    v.primaryText = h->getInstrumentNameForUi();
+                }
+                else
+                {
+                    const juce::String name = c->getPrimaryIdentityNameForUi();
+                    v.primaryText = (name.isNotEmpty() ? name : juce::String("Primary"))
+                                    + " (missing)";
+                }
+                v.hasSecondary = c->hasSecondaryInstrument();
+                if (v.hasSecondary)
+                {
+                    v.secondaryText = c->getSecondaryDescriptor().name;
+                    ExperimentalInstrumentHost* const sh
+                        = instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid);
+                    if (sh == nullptr || !sh->hasInstrument())
+                    {
+                        v.secondaryText += " (not loaded)";
+                    }
+                }
+                v.forcedMidiChannel = c->getSecondaryForcedMidiChannel();
+                return v;
+            };
+            secUi.listCatalogInstrumentNames = [] {
+                juce::StringArray names;
+                std::vector<mini_daw::InstrumentCatalogEntry> entries;
+                if (mini_daw::loadInstrumentCatalogFromCache(entries))
+                {
+                    for (const auto& e : entries)
+                    {
+                        names.add(e.description.name);
+                    }
+                }
+                return names;
+            };
+            secUi.selectSecondaryFromCatalog = [this](const TrackId tid, const int catalogIndex) {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                if (c == nullptr || catalogIndex < 0)
+                {
+                    return;
+                }
+                std::vector<mini_daw::InstrumentCatalogEntry> entries;
+                if (!mini_daw::loadInstrumentCatalogFromCache(entries)
+                    || catalogIndex >= (int)entries.size())
+                {
+                    return;
+                }
+                const mini_daw::InstrumentCatalogEntry& entry = entries[(size_t)catalogIndex];
+                ProjectFileGenericVst3DescriptorV1 desc;
+                mini_daw::fillProjectGenericVst3DescriptorFromPluginDescription(
+                    desc, entry.description);
+                if (c->setSecondaryInstrumentFromUi(desc, entry.bundlePath))
+                {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                    instrumentRuntimeCoordinator_->noteSecondaryConfigurationChanged(tid);
+                    // Explicit configuration is an "actually needed" moment: instantiate now so
+                    // selection problems surface immediately (failure latches; honest silence
+                    // remains the fallback), then re-evaluate the playback source.
+                    (void)instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(
+                        tid);
+                    if (proxyPlaybackCoordinator_ != nullptr)
+                    {
+                        proxyPlaybackCoordinator_->refreshDestination(tid);
+                    }
+                }
+            };
+            secUi.removeSecondary = [this](const TrackId tid) {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                if (c == nullptr)
+                {
+                    return;
+                }
+                if (c->clearSecondaryInstrumentFromUi())
+                {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                    instrumentRuntimeCoordinator_->noteSecondaryConfigurationChanged(tid);
+                    if (proxyPlaybackCoordinator_ != nullptr)
+                    {
+                        proxyPlaybackCoordinator_->refreshDestination(tid);
+                    }
+                }
+            };
+            secUi.openSecondaryEditor = [this](const TrackId tid) {
+                if (instrumentRuntimeCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                if (!instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid))
+                {
+                    return;
+                }
+                if (ExperimentalInstrumentHost* const sh
+                    = instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid))
+                {
+                    sh->openNativeEditor();
+                }
+            };
+            secUi.setChannelMapping = [this](const TrackId tid, const int forcedChannel) {
+                InstrumentTrackController* const c
+                    = instrumentRuntimeCoordinator_ != nullptr
+                          ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
+                          : nullptr;
+                if (c == nullptr)
+                {
+                    return;
+                }
+                if (c->setSecondaryForcedMidiChannelFromUi(forcedChannel))
+                {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                    instrumentRuntimeCoordinator_->noteSecondaryConfigurationChanged(tid);
+                }
+            };
+            inspectorView_.setInspectorSecondaryHost(std::move(secUi));
         }
 
         // P1J: the "Prepare Portable Project" operation owner (§16.6, PID-011). Same
@@ -1197,6 +1365,17 @@ public:
             instrumentRuntimeCoordinator_->prepareExperimentalInstrumentHostsForDevice(
                 dev->getCurrentSampleRate(), dev->getCurrentBufferSizeSamples());
         }
+        // P2 audition gate (steering §17 audition split, PID-008): Secondary audition of
+        // UI/editor notes is allowed while the transport is stopped, or while the Secondary
+        // itself IS the transport source — never layered over proxy transport playback.
+        instrumentRuntimeCoordinator_->setSecondaryAuditionGate([this](const TrackId tid) {
+            if (transport.readPlaybackIntentForUi() != PlaybackIntent::Playing)
+            {
+                return true;
+            }
+            return instrumentRuntimeCoordinator_ != nullptr
+                   && instrumentRuntimeCoordinator_->isSecondaryTransportActive(tid);
+        });
         trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
             // Power / delete / inserts are not realtime-safe paths: blocked while Playing (not mute).
             return recorder_.isRecording()

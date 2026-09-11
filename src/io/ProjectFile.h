@@ -271,6 +271,23 @@ struct ProjectFileExperimentalInstrumentTrackV1
     /// v20+ optional (`proxyUpdateMode`): "auto" | "onSave" | "manual" | "off" (steering §18.1).
     /// Absent or unrecognized loads as "auto"; the key is omitted on save when it equals "auto".
     juce::String proxyUpdateMode { "auto" };
+    /// v21+ optional (`secondary` object, P2 — steering §17, PID-008/PID-009): the OPTIONAL
+    /// locally-available Secondary working instrument for machines where the Primary cannot
+    /// load. Stored completely separately from the Primary identity/state fields above and from
+    /// the proxy metadata — Secondary configuration is NEVER a proxy-fingerprint input and never
+    /// repurposes a Primary field. Absent object ⇒ no Secondary assigned (the default; DAL never
+    /// auto-chooses one). The whole object round-trips even when the Secondary plugin cannot be
+    /// loaded on the current machine.
+    bool hasSecondary = false;
+    ProjectFileGenericVst3DescriptorV1 secondaryDescriptor;
+    /// Local bundle-path hint for the Secondary (advisory; catalog resolution may still find it).
+    juce::String secondaryPluginBundlePath;
+    /// Base64 `getStateInformation` blob of the Secondary instance (independent of the Primary blob).
+    juce::String secondaryPluginStateBase64;
+    /// Secondary MIDI delivery mapping: 0 = Preserve channels (default); 1..16 = force every
+    /// Secondary-delivered channel message to that channel. Applied ONLY to Secondary delivery —
+    /// stored notes, Primary channel settings, and MIDI export are never rewritten.
+    int secondaryForcedMidiChannel = 0;
 };
 
 /// Optional main application window placement (root `mainWindow` object); omitted in older projects.
@@ -324,14 +341,17 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**20** adds the root `timelineSampleRate` timeline reference
+    /// Current JSON writer version (**21** adds the optional
+    /// `experimentalInstrumentTracks[].secondary` object — P2 Secondary instrument; additive with
+    /// absent-key defaults, never touching Primary fields).
+    /// **20** adds the root `timelineSampleRate` timeline reference
     /// rate — TLD-1, steering §10.1 — plus `experimentalInstrumentTracks[].pluginVersion`,
     /// optional `.proxy` metadata, and `.proxyUpdateMode`; all additive with absent-key defaults).
     /// **19** adds `experimentalInstrumentTracks[].clips[].ccPoints`
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 20;
+    static constexpr int kCurrentVersion = 21;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

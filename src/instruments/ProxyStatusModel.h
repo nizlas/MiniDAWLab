@@ -15,8 +15,9 @@
 //   * source  — what the transport is playing NOW (P1G selector verdict);
 //   * cache   — the proxy maintenance state (currency, policy, job).
 // A stale retained proxy is never labelled current or playable (PI-020); a
-// source change is always a visible status change (PI-021). Secondary does
-// not exist in P1 and never appears in any string.
+// source change is always a visible status change (PI-021). P2: the Secondary
+// working sound surfaces as its own source label ("Secondary — working
+// sound"), never presented as sonically identical to the Primary (PID-009).
 // =============================================================================
 
 #include "instruments/ProxyPlaybackSource.h"
@@ -172,6 +173,13 @@ struct ProxyStatusView
             v.sourceLabel = "Playback underrun";
             sourceTip = "Proxy playback could not read audio in time (disk starvation); "
                         "output was silence until recovery. This is not end-of-file.";
+            break;
+        case Src::SecondaryLive:
+            v.sourceLabel = "Secondary — working sound";
+            sourceTip = "Primary is unavailable and no current proxy is playable, so the "
+                        "configured Secondary instrument provides a working sound. It is an "
+                        "approximation, never presented as identical to the Primary; the "
+                        "Primary configuration and any retained proxy files stay untouched.";
             break;
     }
 

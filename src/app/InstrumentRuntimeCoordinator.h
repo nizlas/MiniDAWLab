@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <set>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -78,6 +79,42 @@ public:
 
     void clearRuntimesPreserveBridgeOnly() noexcept;
 
+    // --- P2 Secondary instrument runtime (steering §17, PID-008/PID-009) --------------------
+    // A second, independent host per destination for the OPTIONAL Secondary working instrument.
+    // Instantiated only when needed (playback, audition, explicit configuration); never wired
+    // into the Primary drum-name/template machinery; never renders the proxy. When the Secondary
+    // is the transport source, the playback snapshot carries the Secondary host for that track —
+    // one entry per track, so Primary/Proxy/Secondary can never feed the transport simultaneously.
+    [[nodiscard]] ExperimentalInstrumentHost*
+        getSecondaryInstrumentHostForTrack(TrackId tid) const noexcept;
+    /// [Message thread] Instantiate/load on demand from the controller's persisted Secondary
+    /// configuration (catalog resolution + saved state restore). Idempotent when already loaded
+    /// with the same identity; a failed load latches per descriptor identity and is retried only
+    /// after reconfiguration. Never touches the Primary host.
+    [[nodiscard]] bool ensureSecondaryInstrumentLoadedForTrack(TrackId tid);
+    /// [Message thread] Proxy-coordinator seam: the Secondary becomes / stops being the
+    /// transport source of `tid`. Idempotent; republishes the playback snapshot so the switch
+    /// takes effect at the next audio-block boundary. Deactivation queues an all-notes-off so
+    /// held notes can never replay on reactivation.
+    void setSecondaryTransportActive(TrackId tid, bool active);
+    [[nodiscard]] bool isSecondaryTransportActive(TrackId tid) const noexcept
+    {
+        return secondaryTransportActive_.count(tid) != 0;
+    }
+    /// [Message thread] Retire the Secondary runtime (publish-before-destroy). The persisted
+    /// Secondary CONFIGURATION on the controller is untouched — this only drops the instance.
+    void removeSecondaryRuntimeForTrack(TrackId tid) noexcept;
+    /// [Message thread] After UI select/replace/remove/mapping edits: clears the failure latch,
+    /// applies the channel mapping to a live instance, retires the instance when the Secondary
+    /// was removed. Reload-on-identity-change happens on the next ensure call.
+    void noteSecondaryConfigurationChanged(TrackId tid);
+    /// [Message thread] PID-008 audition gate wired from Main: true when Secondary audition may
+    /// sound for `tid` (transport stopped, or the Secondary IS the transport source).
+    void setSecondaryAuditionGate(std::function<bool(TrackId)> gate) noexcept
+    {
+        secondaryAuditionGate_ = std::move(gate);
+    }
+
     /// Audio thread hooks from `PlaybackEngine`.
     void experimentalBeginAudioBlockAllHosts(std::int64_t numSamples) noexcept;
 
@@ -132,6 +169,16 @@ private:
     std::unordered_map<TrackId, std::unique_ptr<InstrumentTrackController>> midiContentControllersByTrackId_;
     std::unique_ptr<ExperimentalInstrumentHost> instrumentStagingHost_;
     std::unique_ptr<InstrumentTrackController> instrumentStagingController_;
+    /// P2 Secondary hosts (independent of the Primary host map; created on demand only).
+    std::unordered_map<TrackId, std::unique_ptr<ExperimentalInstrumentHost>>
+        secondaryInstrumentHostsByTrackId_;
+    /// Descriptor identity currently loaded in the track's Secondary host (reload detection).
+    std::unordered_map<TrackId, juce::String> secondaryLoadedIdentityByTrackId_;
+    /// Descriptor identity whose load FAILED (no retry storms; cleared on reconfiguration).
+    std::unordered_map<TrackId, juce::String> secondaryLoadFailureLatchByTrackId_;
+    /// Tracks whose transport source is currently the Secondary host.
+    std::set<TrackId> secondaryTransportActive_;
+    std::function<bool(TrackId)> secondaryAuditionGate_;
     juce::String lastExperimentalPlaybackRoutingPublishFingerprint_;
 
     double lastPreparedDeviceSampleRate_ = 0.0;

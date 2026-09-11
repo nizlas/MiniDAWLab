@@ -654,7 +654,8 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               float* stageR,
                                               const int destOutFrame0,
                                               const int numSamples,
-                                              PluginInsertHost* pluginHost) noexcept
+                                              PluginInsertHost* pluginHost,
+                                              ExperimentalInstrumentHost* auditionHost) noexcept
 {
     if (host == nullptr || numSamples <= 0 || stageL == nullptr || stageR == nullptr)
     {
@@ -683,6 +684,12 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
         {
             mixExperimentalInstrumentAfterTracks(
                 host, scratch, 2, numSamples, 1.0f, kTrackStereoPanCenter);
+            if (auditionHost != nullptr && auditionHost != host)
+            {
+                // P2 Secondary audition: same generation stage, same strip downstream.
+                mixExperimentalInstrumentAfterTracks(
+                    auditionHost, scratch, 2, numSamples, 1.0f, kTrackStereoPanCenter);
+            }
             pluginHost->audioThread_processChainForTrack(trackId, InsertStage::Pre, numSamples);
             scaleStereoScratch(scratch, numSamples, effectiveGain);
             pluginHost->audioThread_processChainForTrack(trackId, InsertStage::Post, numSamples);
@@ -699,6 +706,12 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
     float* const stagePtrs[2] = { stageL, stageR };
     mixExperimentalInstrumentAfterTracks(
         host, stagePtrs, 2, numSamples, effectiveGain, track.getStereoPan());
+    if (auditionHost != nullptr && auditionHost != host)
+    {
+        // P2 Secondary audition (no inserts active): identical fader/mute/pan fold as `host`.
+        mixExperimentalInstrumentAfterTracks(
+            auditionHost, stagePtrs, 2, numSamples, effectiveGain, track.getStereoPan());
+    }
     juce::ignoreUnused(destOutFrame0);
 }
 

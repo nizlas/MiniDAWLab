@@ -48,6 +48,7 @@
 #include "app/PortableProjectService.h"
 #include "instruments/ProxyPlaybackSource.h"
 #include "playback/InstrumentPlaybackRegistryPolicy.h"
+#include "playback/SecondaryMidiMapping.h"
 #include "instruments/ProxyStatusModel.h"
 #include "domain/TrackStereoPan.h"
 #include "instruments/ProxyRenderExecutor.h"
@@ -1046,7 +1047,8 @@ namespace
             expect(wr.wasOk(), "p1b: v20 project with proxy metadata writes ok");
             ProjectFileV1 back;
             const auto rr = readProjectFile(v20File, back);
-            expect(rr.wasOk() && back.version == 20, "p1b: v20 project reads back as version 20");
+            expect(rr.wasOk() && back.version == ProjectFileV1::kCurrentVersion,
+                   "p1b: project reads back as the current writer version");
             expect(back.timelineSampleRate == 48000.0,
                    "p1b: timeline reference rate round-trips exactly");
             bool ok = back.experimentalInstrumentTracks.size() == 1U;
@@ -5930,7 +5932,52 @@ namespace
         const auto none = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::NoMetadata,
                                                     ProxyAssetAvailability::Missing);
         expect(none.state == ProxyPlaybackSourceState::MissingPrimary && !none.useProxy,
-               "p1g-select: no metadata + no Primary = MissingPrimary (no Secondary exists in P1)");
+               "p1g-select: no metadata + no Primary = MissingPrimary (no usable Secondary)");
+
+        // P2 (steering §17): Secondary priority — below Primary and below a usable Current
+        // proxy, above honest silence; a stale/missing/corrupt proxy row falls to Secondary.
+        for (const auto cur2 : { ProxyCurrencyVerdict::Current, ProxyCurrencyVerdict::Stale,
+                                 ProxyCurrencyVerdict::NoMetadata })
+        {
+            for (const auto asset2 :
+                 { ProxyAssetAvailability::SilentGeneration, ProxyAssetAvailability::Available,
+                   ProxyAssetAvailability::Missing, ProxyAssetAvailability::Corrupt })
+            {
+                const auto d = decideProxyPlaybackSource(true, cur2, asset2, true);
+                expect(d.state == ProxyPlaybackSourceState::Primary && !d.useProxy,
+                       "p2-select: Primary still wins over a usable Secondary");
+            }
+        }
+        const auto curSec = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                      ProxyAssetAvailability::Available, true);
+        expect(curSec.state == ProxyPlaybackSourceState::ProxyCurrent && curSec.useProxy,
+               "p2-select: a usable Current proxy wins over Secondary");
+        const auto silentSec
+            = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                        ProxyAssetAvailability::SilentGeneration, true);
+        expect(silentSec.state == ProxyPlaybackSourceState::ProxyCurrent && silentSec.useProxy,
+               "p2-select: a valid silent generation wins over Secondary (intentional silence)");
+        const auto staleSec = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Stale,
+                                                        ProxyAssetAvailability::Available, true);
+        expect(staleSec.state == ProxyPlaybackSourceState::SecondaryLive && !staleSec.useProxy,
+               "p2-select: stale proxy + usable Secondary = SecondaryLive (stale never plays)");
+        const auto noneSec = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::NoMetadata,
+                                                       ProxyAssetAvailability::Missing, true);
+        expect(noneSec.state == ProxyPlaybackSourceState::SecondaryLive && !noneSec.useProxy,
+               "p2-select: no metadata + usable Secondary = SecondaryLive");
+        const auto missingSec = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                          ProxyAssetAvailability::Missing, true);
+        expect(missingSec.state == ProxyPlaybackSourceState::SecondaryLive && !missingSec.useProxy,
+               "p2-select: missing asset + usable Secondary = SecondaryLive");
+        const auto corruptSec = decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Current,
+                                                          ProxyAssetAvailability::Corrupt, true);
+        expect(corruptSec.state == ProxyPlaybackSourceState::SecondaryLive && !corruptSec.useProxy,
+               "p2-select: corrupt asset + usable Secondary = SecondaryLive");
+        expect(decideProxyPlaybackSource(false, ProxyCurrencyVerdict::Stale,
+                                         ProxyAssetAvailability::Available, false)
+                       .state
+                   == ProxyPlaybackSourceState::ProxyStale,
+               "p2-select: without a usable Secondary every row keeps its P1 honest-silence state");
 
         // §12.3 persisted save-pairing gate.
         ProjectFileProxyMetadataV20 m;
@@ -5947,6 +5994,160 @@ namespace
         m.primaryStateRevisionAtSave = 0;
         expect(!proxy_playback::proxyStatePairingHolds(m, false),
                "p1g-select: unstamped metadata (0/0) never claims pairing");
+    }
+
+    /// P2 (steering §17, PID-008/PID-009): v21 Secondary persistence — independent of every
+    /// Primary/proxy field — plus the Secondary-only channel-mapping policy.
+    void testSecondaryInstrumentPersistenceAndMapping()
+    {
+        const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                   .getChildFile("MiniDAWSelftests");
+        (void)dir.createDirectory();
+        const juce::File f = dir.getChildFile("p2-secondary.dalproj");
+
+        // --- v21 round-trip with a Secondary assigned; Primary + proxy fields untouched.
+        ProjectFileV1 data = makeV20FixtureProject();
+        {
+            auto& et = data.experimentalInstrumentTracks[0];
+            et.hasSecondary = true;
+            et.secondaryDescriptor.name = "Replacement Organ";
+            et.secondaryDescriptor.manufacturerName = "OtherVendor";
+            et.secondaryDescriptor.pluginFormatName = "VST3";
+            et.secondaryDescriptor.fileOrIdentifier = "C:\\plugins\\ReplacementOrgan.vst3";
+            et.secondaryDescriptor.uniqueId = 424242;
+            et.secondaryDescriptor.isInstrument = true;
+            et.secondaryPluginBundlePath = "C:\\plugins\\ReplacementOrgan.vst3";
+            et.secondaryPluginStateBase64 = "c2Vjb25kYXJ5LXN0YXRl";
+            et.secondaryForcedMidiChannel = 1;
+        }
+        {
+            const auto wr = writeProjectFile(f, data);
+            expect(wr.wasOk(), "p2-io: v21 project with a Secondary writes ok");
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(f, back);
+            bool ok = rr.wasOk() && back.experimentalInstrumentTracks.size() == 1U;
+            if (ok)
+            {
+                const auto& et = back.experimentalInstrumentTracks[0];
+                ok = et.hasSecondary && et.secondaryDescriptor.name == "Replacement Organ"
+                     && et.secondaryDescriptor.manufacturerName == "OtherVendor"
+                     && et.secondaryDescriptor.fileOrIdentifier
+                            == "C:\\plugins\\ReplacementOrgan.vst3"
+                     && et.secondaryDescriptor.uniqueId == 424242
+                     && et.secondaryPluginBundlePath == "C:\\plugins\\ReplacementOrgan.vst3"
+                     && et.secondaryPluginStateBase64 == "c2Vjb25kYXJ5LXN0YXRl"
+                     && et.secondaryForcedMidiChannel == 1;
+                // Primary + proxy identity fields are byte-identical to the fixture values —
+                // Secondary never repurposes or disturbs them.
+                ok = ok && et.pluginVersion == "2.3.1" && et.hasProxy
+                     && et.proxy.generationId == "sha256:0011aabb"
+                     && et.proxyUpdateMode == "onSave";
+            }
+            expect(ok, "p2-io: Secondary round-trips fully; Primary/proxy fields unchanged");
+        }
+
+        // --- legacy/absent secondary: object omitted, loads unassigned.
+        {
+            ProjectFileV1 plain = makeV20FixtureProject();
+            const auto wr = writeProjectFile(f, plain);
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(f, back);
+            expect(wr.wasOk() && rr.wasOk() && back.experimentalInstrumentTracks.size() == 1U
+                       && !back.experimentalInstrumentTracks[0].hasSecondary
+                       && back.experimentalInstrumentTracks[0].secondaryForcedMidiChannel == 0,
+                   "p2-io: a project without a Secondary loads unassigned (absent key)");
+            expect(!f.loadFileAsString().contains("\"secondary\""),
+                   "p2-io: no `secondary` key is written when unassigned");
+        }
+
+        // --- malformed/out-of-range values degrade, never fail the load.
+        {
+            const auto wr = writeProjectFile(f, data);
+            juce::var root;
+            const auto pr = juce::JSON::parse(f.loadFileAsString(), root);
+            expect(wr.wasOk() && pr.wasOk() && root.getDynamicObject() != nullptr,
+                   "p2-io: surgery fixture parse ok");
+            if (auto* arr = root.getProperty("experimentalInstrumentTracks", {}).getArray())
+            {
+                for (auto& tv : *arr)
+                {
+                    if (auto* secObj = tv.getProperty("secondary", {}).getDynamicObject())
+                    {
+                        secObj->setProperty("forcedMidiChannel", 99); // out of range
+                    }
+                }
+            }
+            (void)f.replaceWithText(juce::JSON::toString(root, true));
+            ProjectFileV1 back;
+            const auto rr = readProjectFile(f, back);
+            expect(rr.wasOk() && back.experimentalInstrumentTracks.size() == 1U
+                       && back.experimentalInstrumentTracks[0].hasSecondary
+                       && back.experimentalInstrumentTracks[0].secondaryForcedMidiChannel == 0,
+                   "p2-io: out-of-range forcedMidiChannel repairs to Preserve (0)");
+        }
+
+        // --- undo classification: Secondary configuration is stripped from musical undo.
+        {
+            ProjectFileExperimentalInstrumentTrackV1 et = data.experimentalInstrumentTracks[0];
+            stripExperimentalInstrumentTrackPluginFieldsForUndo(et);
+            expect(!et.hasSecondary && et.secondaryDescriptor.name.isEmpty()
+                       && et.secondaryPluginBundlePath.isEmpty()
+                       && et.secondaryPluginStateBase64.isEmpty()
+                       && et.secondaryForcedMidiChannel == 0,
+                   "p2-undo: the musical-undo strip clears every Secondary field");
+            expect(et.clips.size() == 1U && et.clips[0].timelineNotes.size() == 1U,
+                   "p2-undo: musical clip content survives the strip unchanged");
+        }
+
+        // --- Secondary-only channel mapping (PID-009: preserve default; force keeps data bytes).
+        {
+            using secondary_midi::remapForSecondaryDelivery;
+            const juce::MidiMessage note = juce::MidiMessage::noteOn(3, 64, (juce::uint8)100);
+            const juce::MidiMessage cc11 = juce::MidiMessage::controllerEvent(2, 11, 64);
+
+            const juce::MidiMessage notePreserved = remapForSecondaryDelivery(note, 0);
+            expect(notePreserved.getChannel() == 3 && notePreserved.getNoteNumber() == 64
+                       && notePreserved.getVelocity() == 100,
+                   "p2-map: Preserve channels (0) passes notes through untouched");
+            const juce::MidiMessage noteForced = remapForSecondaryDelivery(note, 1);
+            expect(noteForced.getChannel() == 1 && noteForced.getNoteNumber() == 64
+                       && noteForced.getVelocity() == 100,
+                   "p2-map: Force channel 1 moves the note; note number/velocity unchanged");
+            const juce::MidiMessage ccForced = remapForSecondaryDelivery(cc11, 5);
+            expect(ccForced.getChannel() == 5 && ccForced.isController()
+                       && ccForced.getControllerNumber() == 11
+                       && ccForced.getControllerValue() == 64,
+                   "p2-map: CC11 keeps controller number and value under Force (PID-009)");
+            const juce::MidiMessage invalidForced = remapForSecondaryDelivery(note, 17);
+            expect(invalidForced.getChannel() == 3,
+                   "p2-map: an invalid Force value acts as Preserve");
+
+            // Buffer-level application preserves order and sample positions.
+            juce::MidiBuffer src;
+            src.addEvent(note, 10);
+            src.addEvent(cc11, 20);
+            juce::MidiBuffer dst;
+            secondary_midi::applySecondaryChannelMapping(dst, src, 7);
+            int count = 0;
+            bool orderOk = true;
+            for (const juce::MidiMessageMetadata meta : dst)
+            {
+                const juce::MidiMessage msg = meta.getMessage();
+                if (count == 0)
+                {
+                    orderOk = orderOk && meta.samplePosition == 10 && msg.isNoteOn()
+                              && msg.getChannel() == 7;
+                }
+                else if (count == 1)
+                {
+                    orderOk = orderOk && meta.samplePosition == 20 && msg.isController()
+                              && msg.getChannel() == 7 && msg.getControllerNumber() == 11;
+                }
+                ++count;
+            }
+            expect(count == 2 && orderOk,
+                   "p2-map: buffer mapping preserves event order and sample positions");
+        }
     }
 
     /// P1 two-computer missing-Primary correction: the playback-registry eligibility
@@ -8517,6 +8718,7 @@ int main()
     testProxyPlaybackReaderPreparedLoop();
 
     testProxyPlaybackSourceSelectionMatrix();
+    testSecondaryInstrumentPersistenceAndMapping();
     testInstrumentPlaybackRegistryEligibility();
     testProxyCurrencyUnderRecordedConfig();
     testProxyPlaybackMixSubstitutionSeam();

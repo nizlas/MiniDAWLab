@@ -11,6 +11,7 @@
 #include "instruments/InstrumentTrackController.h"
 #include "playback/InstrumentPlaybackRegistryPolicy.h"
 #include "plugins/ExperimentalInstrumentHost.h"
+#include "plugins/InstrumentCatalog.h"
 #include "plugins/Vst3ChildProcessScan.h"
 
 #include "diagnostics/DiagnosticBuildFlags.h"
@@ -39,6 +40,34 @@ void InstrumentRuntimeCoordinator::wireExperimentalInstrumentHost(ExperimentalIn
         ExperimentalInstrumentHost::appendInstrumentHostLogLine(
             "drum-track: mergeAutoPluginDrumLabels source=afterEditorOpen keys="
             + juce::String(static_cast<int>(discovered.size())));
+    });
+    // P2 audition split (steering §17, PID-008): when the PRIMARY host would discard UI/editor
+    // MIDI (no loaded instrument), the track's Secondary may audition it. The gate (wired from
+    // Main) refuses audition while a proxy supplies transport playback; the Secondary is loaded
+    // lazily on the first auditioned message. Message-thread only.
+    host.setUiMidiSecondaryForwardResolver([this, ctrlPtr = &ctrl]() -> ExperimentalInstrumentHost* {
+        const TrackId tid = ctrlPtr->getExperimentalInstrumentDomainTrackId();
+        if (tid == kInvalidTrackId || !ctrlPtr->hasSecondaryInstrument())
+        {
+            return nullptr;
+        }
+        if (secondaryAuditionGate_ && !secondaryAuditionGate_(tid))
+        {
+            return nullptr;
+        }
+        if (!ensureSecondaryInstrumentLoadedForTrack(tid))
+        {
+            return nullptr;
+        }
+        return getSecondaryInstrumentHostForTrack(tid);
+    });
+    // P2 save-time Secondary state capture: fresh `getStateInformation` from the live Secondary
+    // instance when loaded; empty keeps the persisted blob (unloadable Secondary loses nothing).
+    ctrl.setSecondaryLiveStateProvider([this, ctrlPtr = &ctrl]() -> juce::String {
+        const TrackId tid = ctrlPtr->getExperimentalInstrumentDomainTrackId();
+        ExperimentalInstrumentHost* const sh = getSecondaryInstrumentHostForTrack(tid);
+        return (sh != nullptr && sh->hasInstrument()) ? sh->getCurrentInstrumentStateBase64()
+                                                      : juce::String();
     });
 }
 
@@ -389,7 +418,209 @@ void InstrumentRuntimeCoordinator::removeInstrumentRuntimeForTrack(const TrackId
     // Controller references the host; destroy it first.
     retiredController.reset();
     retiredHost.reset();
+    // P2: the track's Secondary runtime shares the destination's lifetime.
+    removeSecondaryRuntimeForTrack(tid);
     runSyncInstrumentTimelineRowAttachmentCallback();
+}
+
+// --------------------------------------------------------------------------- P2 Secondary runtime
+
+namespace
+{
+    [[nodiscard]] juce::String
+        secondaryDescriptorIdentityKey(const ProjectFileGenericVst3DescriptorV1& d)
+    {
+        return d.fileOrIdentifier + "|" + juce::String(d.uniqueId) + "|" + d.name;
+    }
+} // namespace
+
+ExperimentalInstrumentHost*
+    InstrumentRuntimeCoordinator::getSecondaryInstrumentHostForTrack(const TrackId tid) const noexcept
+{
+    const auto it = secondaryInstrumentHostsByTrackId_.find(tid);
+    return it != secondaryInstrumentHostsByTrackId_.end() ? it->second.get() : nullptr;
+}
+
+bool InstrumentRuntimeCoordinator::ensureSecondaryInstrumentLoadedForTrack(const TrackId tid)
+{
+    if (tid == kInvalidTrackId)
+    {
+        return false;
+    }
+    InstrumentTrackController* const ctl = getInstrumentControllerForTrack(tid);
+    if (ctl == nullptr || !ctl->hasSecondaryInstrument())
+    {
+        return false;
+    }
+    const juce::String identityKey = secondaryDescriptorIdentityKey(ctl->getSecondaryDescriptor());
+
+    // Already loaded with the SAME identity: refresh the channel mapping and succeed.
+    if (ExperimentalInstrumentHost* const existing = getSecondaryInstrumentHostForTrack(tid);
+        existing != nullptr && existing->hasInstrument())
+    {
+        const auto itId = secondaryLoadedIdentityByTrackId_.find(tid);
+        if (itId != secondaryLoadedIdentityByTrackId_.end() && itId->second == identityKey)
+        {
+            existing->setForcedMidiChannelForDelivery(ctl->getSecondaryForcedMidiChannel());
+            return true;
+        }
+    }
+
+    // No retry storms: the same failed identity is attempted again only after reconfiguration
+    // (noteSecondaryConfigurationChanged clears the latch).
+    if (const auto itFail = secondaryLoadFailureLatchByTrackId_.find(tid);
+        itFail != secondaryLoadFailureLatchByTrackId_.end() && itFail->second == identityKey)
+    {
+        return false;
+    }
+
+    const mini_daw::GenericVst3ProjectLoadResolution res
+        = mini_daw::tryResolveGenericVst3ForProjectLoad(true,
+                                                        ctl->getSecondaryDescriptor(),
+                                                        ctl->getSecondaryPluginBundlePath(),
+                                                        ctl->getSecondaryDescriptor().name);
+    if (!res.resolved)
+    {
+        secondaryLoadFailureLatchByTrackId_[tid] = identityKey;
+        return false;
+    }
+
+    auto& slot = secondaryInstrumentHostsByTrackId_[tid];
+    if (slot == nullptr)
+    {
+        slot = std::make_unique<ExperimentalInstrumentHost>();
+        // Deliberately NOT wired via wireExperimentalInstrumentHost: the Secondary never feeds
+        // the Primary drum-name/template machinery and never bumps Primary semantics.
+        if (lastPreparedDeviceSampleRate_ > 0.0 && lastPreparedDeviceBlockSize_ > 0)
+        {
+            slot->prepareForDevice(lastPreparedDeviceSampleRate_, lastPreparedDeviceBlockSize_);
+        }
+    }
+
+    juce::MemoryBlock stateBlock;
+    bool haveState = false;
+    if (const juce::String stateB64 = ctl->getSecondaryPluginStateBase64(); stateB64.isNotEmpty())
+    {
+        juce::MemoryOutputStream mos;
+        if (juce::Base64::convertFromBase64(mos, stateB64) && mos.getDataSize() > 0)
+        {
+            stateBlock.replaceAll(mos.getData(), mos.getDataSize());
+            haveState = true;
+        }
+    }
+
+    juce::String stateWarning;
+    const juce::Result r = slot->loadInstrumentFromDescription(
+        res.description, res.bundle, "secondary", haveState ? &stateBlock : nullptr, &stateWarning);
+    if (r.failed())
+    {
+        secondaryLoadFailureLatchByTrackId_[tid] = identityKey;
+        secondaryLoadedIdentityByTrackId_.erase(tid);
+        return false;
+    }
+    secondaryLoadFailureLatchByTrackId_.erase(tid);
+    secondaryLoadedIdentityByTrackId_[tid] = identityKey;
+    slot->setForcedMidiChannelForDelivery(ctl->getSecondaryForcedMidiChannel());
+    ctl->noteSecondaryResolvedBundlePath(res.bundle.getFullPathName());
+    // Republish so the freshly loaded instance becomes visible to the audio thread (as the
+    // AUDITION host until/unless the source decision activates it for transport).
+    updateExperimentalPlaybackBridgeAfterRegistryChange();
+    return true;
+}
+
+void InstrumentRuntimeCoordinator::setSecondaryTransportActive(const TrackId tid, const bool active)
+{
+    const bool current = secondaryTransportActive_.count(tid) != 0;
+    if (current == active)
+    {
+        return;
+    }
+    if (active)
+    {
+        // Never activate an unloaded Secondary — the entry swap below requires a live instance.
+        if (!ensureSecondaryInstrumentLoadedForTrack(tid))
+        {
+            return;
+        }
+        secondaryTransportActive_.insert(tid);
+        // Reset any held state from a previous activation BEFORE new content arrives (the
+        // queued events are delivered in the same block, ahead of transport MIDI).
+        if (ExperimentalInstrumentHost* const sh = getSecondaryInstrumentHostForTrack(tid))
+        {
+            sh->enqueueAllNotesOffFromMessageThread();
+        }
+    }
+    else
+    {
+        secondaryTransportActive_.erase(tid);
+        // The host leaves the snapshot at the next block boundary (silent immediately); queue a
+        // reset so held notes never replay when it is processed again later.
+        if (ExperimentalInstrumentHost* const sh = getSecondaryInstrumentHostForTrack(tid))
+        {
+            sh->enqueueAllNotesOffFromMessageThread();
+        }
+    }
+    // Atomic snapshot republish: the source switch takes effect at the audio-block boundary.
+    updateExperimentalPlaybackBridgeAfterRegistryChange();
+}
+
+void InstrumentRuntimeCoordinator::removeSecondaryRuntimeForTrack(const TrackId tid) noexcept
+{
+    std::unique_ptr<ExperimentalInstrumentHost> retired;
+    if (const auto it = secondaryInstrumentHostsByTrackId_.find(tid);
+        it != secondaryInstrumentHostsByTrackId_.end())
+    {
+        retired = std::move(it->second);
+        secondaryInstrumentHostsByTrackId_.erase(it);
+    }
+    secondaryLoadedIdentityByTrackId_.erase(tid);
+    secondaryLoadFailureLatchByTrackId_.erase(tid);
+    const bool wasActive = secondaryTransportActive_.erase(tid) != 0;
+    if (retired == nullptr)
+    {
+        return;
+    }
+    if (wasActive)
+    {
+        // Publish-before-destroy (same F4 pattern as removeInstrumentRuntimeForTrack): retire
+        // the host out of the snapshot, drain the in-flight callback, then unload/destroy.
+        updateExperimentalPlaybackBridgeAfterRegistryChange();
+    }
+    double waitedMs = 0.0;
+    (void)playbackEngine_.waitForAudioCallbackExit(250.0, &waitedMs);
+    retired->closeNativeEditor();
+    retired->unloadInstrument();
+    retired.reset();
+}
+
+void InstrumentRuntimeCoordinator::noteSecondaryConfigurationChanged(const TrackId tid)
+{
+    InstrumentTrackController* const ctl = getInstrumentControllerForTrack(tid);
+    secondaryLoadFailureLatchByTrackId_.erase(tid);
+    if (ctl == nullptr || !ctl->hasSecondaryInstrument())
+    {
+        // Secondary removed: drop the runtime instance; persisted Primary/proxy state untouched.
+        removeSecondaryRuntimeForTrack(tid);
+        return;
+    }
+    if (ExperimentalInstrumentHost* const sh = getSecondaryInstrumentHostForTrack(tid);
+        sh != nullptr && sh->hasInstrument())
+    {
+        const auto itId = secondaryLoadedIdentityByTrackId_.find(tid);
+        const bool identityChanged
+            = itId == secondaryLoadedIdentityByTrackId_.end()
+              || itId->second != secondaryDescriptorIdentityKey(ctl->getSecondaryDescriptor());
+        if (identityChanged)
+        {
+            // Replacement: retire the old instance safely; the next ensure call (playback need,
+            // audition, or explicit editor open) loads the new identity.
+            removeSecondaryRuntimeForTrack(tid);
+        }
+        else
+        {
+            sh->setForcedMidiChannelForDelivery(ctl->getSecondaryForcedMidiChannel());
+        }
+    }
 }
 
 bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
@@ -489,18 +720,33 @@ void InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly() noexcept
     {
         detachAndUnloadHost(kv.second.get());
     }
+    for (auto& kv : secondaryInstrumentHostsByTrackId_)
+    {
+        detachAndUnloadHost(kv.second.get());
+    }
     detachAndUnloadHost(instrumentStagingHost_.get());
 
     instrumentStagingController_.reset();
     instrumentStagingHost_.reset();
     instrumentControllersByTrackId_.clear();
     instrumentHostsByTrackId_.clear();
+    secondaryInstrumentHostsByTrackId_.clear();
+    secondaryLoadedIdentityByTrackId_.clear();
+    secondaryLoadFailureLatchByTrackId_.clear();
+    secondaryTransportActive_.clear();
     midiContentControllersByTrackId_.clear();
 }
 
 void InstrumentRuntimeCoordinator::experimentalBeginAudioBlockAllHosts(const std::int64_t numSamples) noexcept
 {
     for (auto& kv : instrumentHostsByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->audioThread_beginAudioBlock((int)numSamples);
+        }
+    }
+    for (auto& kv : secondaryInstrumentHostsByTrackId_)
     {
         if (kv.second != nullptr)
         {
@@ -533,6 +779,13 @@ void InstrumentRuntimeCoordinator::prepareExperimentalInstrumentHostsForDevice(c
             kv.second->prepareForDevice(sampleRate, blockSamples);
         }
     }
+    for (auto& kv : secondaryInstrumentHostsByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->prepareForDevice(sampleRate, blockSamples);
+        }
+    }
     if (instrumentStagingHost_)
     {
         instrumentStagingHost_->prepareForDevice(sampleRate, blockSamples);
@@ -542,6 +795,13 @@ void InstrumentRuntimeCoordinator::prepareExperimentalInstrumentHostsForDevice(c
 void InstrumentRuntimeCoordinator::releaseExperimentalInstrumentHostsDeviceResources() noexcept
 {
     for (auto& kv : instrumentHostsByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->releaseResources();
+        }
+    }
+    for (auto& kv : secondaryInstrumentHostsByTrackId_)
     {
         if (kv.second != nullptr)
         {
@@ -765,7 +1025,8 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
     entries.reserve(instrumentControllersByTrackId_.size() + size_t { 2 });
 
     const auto appendPlaybackRuntimePair = [&](ExperimentalInstrumentHost* host,
-                                               InstrumentTrackController* ctl) noexcept
+                                               InstrumentTrackController* ctl,
+                                               ExperimentalInstrumentHost* auditionHost = nullptr) noexcept
     {
         if (ctl == nullptr || host == nullptr)
         {
@@ -789,7 +1050,8 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
                 return;
             }
         }
-        entries.push_back(ExperimentalInstrumentPlaybackEntry{ playbackKey, host, ctl });
+        entries.push_back(
+            ExperimentalInstrumentPlaybackEntry{ playbackKey, host, ctl, auditionHost });
     };
 
     for (const auto& kv : instrumentControllersByTrackId_)
@@ -804,7 +1066,28 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
         {
             continue;
         }
-        appendPlaybackRuntimePair(itHost->second.get(), ctl);
+        // P2 (steering §17): ONE entry per track — the transport host is the Secondary exactly
+        // when the published source decision selected it; otherwise the Primary host (whose
+        // published proxy view supplies Proxy playback). A loaded, non-transport Secondary rides
+        // along as the AUDITION host (processed only while the transport is stopped) so stopped
+        // audition works even when the proxy is Current. Primary/Proxy/Secondary can therefore
+        // never feed the transport simultaneously.
+        ExperimentalInstrumentHost* transportHost = itHost->second.get();
+        ExperimentalInstrumentHost* auditionHost = nullptr;
+        if (ExperimentalInstrumentHost* const secondaryHost
+            = getSecondaryInstrumentHostForTrack(kv.first);
+            secondaryHost != nullptr && secondaryHost->hasInstrument())
+        {
+            if (secondaryTransportActive_.count(kv.first) != 0)
+            {
+                transportHost = secondaryHost;
+            }
+            else if (!transportHost->hasInstrument())
+            {
+                auditionHost = secondaryHost;
+            }
+        }
+        appendPlaybackRuntimePair(transportHost, ctl, auditionHost);
     }
 
     if (instrumentStagingController_ != nullptr && instrumentStagingController_->hasInstrumentTrack()

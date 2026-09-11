@@ -55,6 +55,33 @@ struct InspectorProxyHost
     std::function<void(TrackId)> retryRender;
 };
 
+/// [Message thread] P2 "Instrument alternatives" section seams (steering §17/§19,
+/// PID-008/PID-009). Shows the Primary identity, lets the user assign an OPTIONAL Secondary
+/// working instrument from the existing instrument catalogue, open its editor, and choose the
+/// Secondary-only channel mapping. Dirty semantics live behind the seams. All optional
+/// (null = hidden section).
+struct InspectorSecondaryHost
+{
+    /// Precomputed compact view for one destination.
+    struct View
+    {
+        juce::String primaryText;   ///< Primary identity + availability, e.g. "VB3-II (missing)"
+        juce::String secondaryText; ///< assigned Secondary name, or "None"
+        bool hasSecondary = false;
+        int forcedMidiChannel = 0;  ///< 0 = Preserve channels; 1..16 = Force channel N
+    };
+    /// Same visibility rule as the proxy section (instrument destinations only).
+    std::function<bool(TrackId)> isInstrumentDestination;
+    std::function<View(TrackId)> getView;
+    /// Display names of the existing instrument catalogue (picker menu order == index).
+    std::function<juce::StringArray()> listCatalogInstrumentNames;
+    std::function<void(TrackId, int catalogIndex)> selectSecondaryFromCatalog;
+    std::function<void(TrackId)> removeSecondary;
+    std::function<void(TrackId)> openSecondaryEditor;
+    /// 0 = Preserve channels; 1..16 = Force channel N (Secondary delivery only).
+    std::function<void(TrackId, int forcedChannel)> setChannelMapping;
+};
+
 /// Active-track-only controls (Cubase-style Inspector), not repeated in every track header.
 
 class InspectorView final : public juce::Component,
@@ -76,6 +103,11 @@ public:
     void setInspectorPluginHost(InspectorPluginHost host) noexcept { pluginHost_ = std::move(host); }
 
     void setInspectorProxyHost(InspectorProxyHost host) noexcept { proxyHost_ = std::move(host); }
+
+    void setInspectorSecondaryHost(InspectorSecondaryHost host) noexcept
+    {
+        secondaryHost_ = std::move(host);
+    }
 
     /// [Message thread] Undoable rename (`TrackLanesEditCoordinator`). Empty default = inspector name field commits as no-op.
     void setRenameTrackHandler(std::function<bool(TrackId, juce::String)> fn) noexcept
@@ -164,6 +196,11 @@ private:
     void syncProxySectionForActiveTrack(TrackId active, const Track& track);
     void setProxySectionVisible(bool visible);
 
+    /// P2: show/refresh or hide the "Instrument alternatives" section for the active row.
+    void syncSecondarySectionForActiveTrack(TrackId active, const Track& track);
+    void setSecondarySectionVisible(bool visible);
+    void showSecondaryCatalogPickerMenu();
+
     void commitSendAmountField(int sendRowIndex);
     void setSendAmountEditorText(int sendRowIndex, float amountLinear);
     void populateSendDestCombo(int sendRowIndex, TrackId activeTrackId, const Track& track);
@@ -231,6 +268,23 @@ private:
     juce::TextButton proxyRetryButton_;
     bool proxyModeComboGuard_ = false;
     InspectorProxyHost proxyHost_;
+
+    // ------------------------------------------------------------------ P2
+    // "Instrument alternatives" (steering §17/§19, PID-008/PID-009): compact section for the
+    // optional Secondary working instrument. One track, one mixer strip — the Secondary plays
+    // through the same fader/pan/inserts/sends as Primary and Proxy.
+    juce::Label altSectionLabel_;
+    juce::Label altPrimaryCaptionLabel_;
+    juce::Label altPrimaryValueLabel_;
+    juce::Label altSecondaryCaptionLabel_;
+    juce::Label altSecondaryValueLabel_;
+    juce::TextButton altSelectSecondaryButton_;
+    juce::TextButton altEditorButton_;
+    juce::TextButton altRemoveButton_;
+    juce::Label altChannelCaptionLabel_;
+    juce::ComboBox altChannelComboBox_; ///< Preserve channels / Force channel 1..16
+    bool altChannelComboGuard_ = false;
+    InspectorSecondaryHost secondaryHost_;
 
     std::unique_ptr<StageDropTarget> preStageDrop_;
     std::unique_ptr<StageDropTarget> postStageDrop_;

@@ -1222,14 +1222,22 @@ checks; v19 files load into v20 code with all proxy fields defaulted to "no prox
 * Musical undo continues to strip plugin blobs (Verified) and MUST also strip proxy metadata from
   undo comparison where it would create meaningless entries (§18.3).
 
-### 12.4 Secondary naming discipline (PID-009 — reviewed, deliberately deferred to P2)
+### 12.4 Secondary persistence (PID-009 — resolved in P2: embedded block, schema v21)
 
-Human review explicitly accepted that PID-009 does not block P1. P1B MUST NOT add empty Secondary
-fields, placeholder objects, or speculative registry structures. The only P1 obligation is
-negative: schema naming merely avoids unnecessarily consuming an obvious future namespace (e.g. do
-not name an unrelated field `secondaryInstrument`). The actual embedded-block versus role-list
-decision is made during P2 design using then-current architecture evidence; it remains technically
-unresolved until then.
+P2 resolved the embedded-block versus role-list question in favor of an **optional embedded
+`secondary` object** on the experimental instrument track row (schema v21):
+
+* `secondary.descriptor` — the Secondary's own plugin descriptor (name, format,
+  fileOrIdentifier, uniqueId, deprecatedUid, isInstrument, …), fully independent of the Primary
+  descriptor; `secondary.pluginBundlePath` — last resolved bundle; `secondary.pluginStateBase64`
+  — the Secondary's own state blob (refreshed at Save while loaded, preserved verbatim
+  otherwise); `secondary.forcedMidiChannel` — 1..16 = Force, omitted/out-of-range = Preserve.
+* The key is **absent** when no Secondary is assigned (old projects load unchanged); a malformed
+  block degrades to "unassigned" and never fails the load; an unloadable descriptor is preserved
+  across load/Save exactly like the Primary's.
+* Secondary fields never touch the Primary descriptor/state, proxy metadata/assets, the Primary
+  semantic revision or the proxy fingerprint, and are stripped from musical undo snapshots as
+  configuration state (§18.3).
 
 ## 13. Track proxy state and render-job state machines
 
@@ -1600,7 +1608,15 @@ generation fingerprint == current fingerprint.
 
 Notes:
 
-* Until P2 ships, every "Secondary usable = yes" row collapses to its "no" sibling (PI-005).
+* **P2 (shipped):** "Secondary usable" means an optional Secondary instrument is configured for
+  the track (project schema v21, §12.4) AND resolvable/loadable on this machine. The Secondary is
+  unassigned by default and never auto-chosen; it is instantiated lazily only when a decision row
+  (or stopped audition) first needs it, and an unconfigured/unloadable Secondary collapses every
+  "yes" row to its "no" sibling. A **Current** proxy always outranks the Secondary, including
+  while Rendering keeps the previous Current generation published (ProxyPreparing never briefly
+  switches to Secondary). Channel mapping (Preserve, default, or Force 1–16) applies ONLY at the
+  Secondary delivery boundary — stored notes, Primary delivery, and MIDI export are never
+  rewritten.
 * A **Current** proxy whose recorded render rate differs from the engine rate plays through the
   derived playback representation (PI-030, §15.3) — a rate mismatch never demotes a row to silent.
 * **Audition split (Locked for the first P2 version — PID-008 reviewed):** transport playback and
@@ -1613,8 +1629,8 @@ Notes:
     transport playback (§19);
   * if a musical edit makes the Proxy stale, the source-priority table above may select Secondary
     as the working transport sound, at which point the track clearly shows Secondary as its
-    source. This avoids silently combining the authoritative Primary proxy sound with an
-    approximate Secondary sound. Proxy v1/P1 contains no Secondary implementation (PI-005).
+    source ("Secondary — working sound"). This avoids silently combining the authoritative
+    Primary proxy sound with an approximate Secondary sound. Implemented in P2.
 * Source changes MUST be surfaced, never silent (PI-021); the seam publishes a status event on
   every mode transition (R11).
 * Offline mixdown renders through the same selected source automatically at the host-level seam
@@ -1999,7 +2015,10 @@ speculative registry structures; the only P1 obligation is to avoid unnecessaril
 obvious future namespace (§12.4). The embedded-block versus role-list decision is made during P2
 design using then-current architecture evidence. *Consequences:* none for P1 beyond naming
 discipline. *Required validation:* none in P1 (P2 acceptance later). *Blocking slice:* none in P1
-(P2). *Status:* **Reviewed — deliberately deferred**; technically unresolved until P2.
+(P2). *Status:* **Resolved in P2** — embedded `secondary` block on the experimental track row
+(schema v21, §12.4); a separate per-track Secondary host registry, instantiated only when needed;
+Preserve default + Force 1–16 remap at the Secondary delivery boundary; CC (incl. CC11)
+forwarded unchanged.
 
 **PID-010 (Audit D10) — Dependency enumeration centralization.**
 *Question:* Centralize `sourcesForDestination()` before building fingerprint collection on top?

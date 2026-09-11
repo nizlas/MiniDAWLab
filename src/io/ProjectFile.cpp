@@ -833,6 +833,57 @@ namespace
                                          ? mode
                                          : juce::String("auto");
             }
+            // v21 additive: optional Secondary instrument (P2, steering §17/PID-009). Absent key
+            // ⇒ no Secondary. A malformed object (no descriptor identity) degrades to "no
+            // Secondary" and never fails the load; Primary fields are untouched either way.
+            const juce::var& secV = tv.getProperty("secondary", {});
+            if (secV.isObject())
+            {
+                const juce::var& sdesc = secV.getProperty("descriptor", {});
+                if (sdesc.isObject())
+                {
+                    ProjectFileGenericVst3DescriptorV1 d;
+                    d.name = sdesc.getProperty("name", {}).toString();
+                    d.descriptiveName = sdesc.getProperty("descriptiveName", {}).toString();
+                    d.manufacturerName = sdesc.getProperty("manufacturerName", {}).toString();
+                    d.pluginFormatName = sdesc.getProperty("pluginFormatName", {}).toString();
+                    d.category = sdesc.getProperty("category", {}).toString();
+                    d.fileOrIdentifier = sdesc.getProperty("fileOrIdentifier", {}).toString();
+                    const juce::var& suid = sdesc.getProperty("uniqueId", {});
+                    if (suid.isInt() || suid.isInt64() || suid.isDouble())
+                    {
+                        d.uniqueId = (int)static_cast<double>(suid);
+                    }
+                    const juce::var& sduid = sdesc.getProperty("deprecatedUid", {});
+                    if (sduid.isInt() || sduid.isInt64() || sduid.isDouble())
+                    {
+                        d.deprecatedUid = (int)static_cast<double>(sduid);
+                    }
+                    const juce::var& sIsInst = sdesc.getProperty("isInstrument", {});
+                    if (sIsInst.isBool())
+                    {
+                        d.isInstrument = (bool)sIsInst;
+                    }
+                    // Validity gate: a Secondary without any resolvable identity is useless —
+                    // treat the whole object as absent (degraded, never fatal).
+                    if (d.name.isNotEmpty() || d.fileOrIdentifier.isNotEmpty() || d.uniqueId != 0)
+                    {
+                        et.hasSecondary = true;
+                        et.secondaryDescriptor = std::move(d);
+                        et.secondaryPluginBundlePath
+                            = secV.getProperty("pluginBundlePath", {}).toString();
+                        et.secondaryPluginStateBase64
+                            = secV.getProperty("pluginStateBase64", {}).toString();
+                        const juce::var& fch = secV.getProperty("forcedMidiChannel", {});
+                        if (fch.isInt() || fch.isInt64() || fch.isDouble())
+                        {
+                            const int n = (int)static_cast<double>(fch);
+                            // 0 = Preserve; out-of-range repairs to Preserve.
+                            et.secondaryForcedMidiChannel = (n >= 1 && n <= 16) ? n : 0;
+                        }
+                    }
+                }
+            }
             const juce::var& clipsV = tv.getProperty("clips", {});
             if (clipsV.isArray())
             {
@@ -1264,6 +1315,30 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                 {
                     eo->setProperty("proxyUpdateMode", et.proxyUpdateMode);
                 }
+            }
+            if (data.version >= 21 && et.hasSecondary
+                && (et.secondaryDescriptor.name.isNotEmpty()
+                    || et.secondaryDescriptor.fileOrIdentifier.isNotEmpty()
+                    || et.secondaryDescriptor.uniqueId != 0))
+            {
+                // v21 additive: optional Secondary instrument (P2, steering §17/PID-009).
+                // Written only when assigned — a project without a Secondary serializes
+                // byte-identically to v20 apart from the version number.
+                juce::DynamicObject::Ptr so = new juce::DynamicObject();
+                so->setProperty("descriptor", genericVst3DescriptorToVar(et.secondaryDescriptor));
+                if (et.secondaryPluginBundlePath.isNotEmpty())
+                {
+                    so->setProperty("pluginBundlePath", et.secondaryPluginBundlePath);
+                }
+                if (et.secondaryPluginStateBase64.isNotEmpty())
+                {
+                    so->setProperty("pluginStateBase64", et.secondaryPluginStateBase64);
+                }
+                if (et.secondaryForcedMidiChannel >= 1 && et.secondaryForcedMidiChannel <= 16)
+                {
+                    so->setProperty("forcedMidiChannel", et.secondaryForcedMidiChannel);
+                }
+                eo->setProperty("secondary", juce::var(so.get()));
             }
             if (!et.powerOn)
             {
@@ -2063,6 +2138,14 @@ void stripExperimentalInstrumentTrackPluginFieldsForUndo(ProjectFileExperimental
     t.hasProxy = false;
     t.proxy = {};
     t.proxyUpdateMode = "auto";
+    // v21 (P2): Secondary configuration is configuration state, not musical state — selecting,
+    // replacing, or removing a Secondary dirties the project but never creates a musical-undo
+    // entry, and undo never rewrites it.
+    t.hasSecondary = false;
+    t.secondaryDescriptor = {};
+    t.secondaryPluginBundlePath.clear();
+    t.secondaryPluginStateBase64.clear();
+    t.secondaryForcedMidiChannel = 0;
 }
 
 namespace

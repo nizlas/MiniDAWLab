@@ -198,6 +198,39 @@ public:
     /// or no instrument is loaded. Does not touch the plugin on the message thread.
     void enqueueMidiMessageFromMessageThread(const juce::MidiMessage& message);
 
+    /// [Message thread] P2 Secondary audition split (steering §17, PID-008): when THIS host
+    /// would DISCARD a UI/editor MIDI message (no loaded instrument and no capture sink), the
+    /// resolver may supply the track's Secondary host to audition it instead. The resolver runs
+    /// on the message thread per message, owns the gating (never while a proxy supplies
+    /// transport playback, unless the Secondary IS the transport source), and may lazily load
+    /// the Secondary. Returns nullptr to keep the existing discard semantics. Never consulted
+    /// while this host has a loaded instrument or an installed capture sink.
+    void setUiMidiSecondaryForwardResolver(
+        std::function<ExperimentalInstrumentHost*()> resolver) noexcept
+    {
+        uiMidiSecondaryForwardResolver_ = std::move(resolver);
+    }
+
+    /// [Message thread] Queue all-notes-off + all-sound-off (all 16 channels) into the UI MIDI
+    /// queue; delivered at this host's next PROCESSED block. P2: called when the Secondary
+    /// leaves/enters the transport chain so held notes can never replay on reactivation.
+    void enqueueAllNotesOffFromMessageThread();
+
+    /// [Message thread] P2 Secondary channel mapping at THIS host's delivery boundary:
+    /// 0 = Preserve channels (default), 1..16 = force every delivered channel message to that
+    /// channel (data bytes — including CC numbers/values such as CC11 — unchanged). The audio
+    /// thread latches the value once per block. Out-of-range stores repair to Preserve.
+    void setForcedMidiChannelForDelivery(const int channel) noexcept
+    {
+        forcedMidiChannelForDelivery_.store((channel >= 1 && channel <= 16) ? channel : 0,
+                                            std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] int getForcedMidiChannelForDelivery() const noexcept
+    {
+        return forcedMidiChannelForDelivery_.load(std::memory_order_relaxed);
+    }
+
     /// [Audio thread] Must be called at the start of each device callback before any
     /// `audioThread_addMidiEventForCurrentBlock` (transport I3e scheduling). Sets the sample clamp
     /// window to match this block's `numSamples`.
@@ -394,6 +427,11 @@ private:
     /// Test-only capture sink for the MIDI delivery boundary (null in production).
     std::atomic<MidiDeliveryCaptureSink*> midiCaptureSink_{ nullptr };
     std::atomic<std::uint64_t> rtMidiDeliveryBoundaryBlocks_{ 0 };
+    /// P2 Secondary channel mapping (0 = Preserve; 1..16 = Force). Message thread stores,
+    /// audio thread latches once per block.
+    std::atomic<int> forcedMidiChannelForDelivery_{ 0 };
+    /// P2 Secondary audition forwarding (message thread only — set and invoked there).
+    std::function<ExperimentalInstrumentHost*()> uiMidiSecondaryForwardResolver_;
     /// P1H §9.4.4: millisecond stamp of the last non-empty MIDI delivery (0 = never; relaxed).
     std::atomic<juce::int64> rtLastMidiDeliveryMs_{ 0 };
 

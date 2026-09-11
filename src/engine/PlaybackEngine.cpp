@@ -1081,13 +1081,18 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 if (postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
                     && postStripStageCapacity_ >= numSamples)
                 {
-                    playback_mix_helpers::renderInstrumentPostStripToStereoScratch(entry->host,
-                                                                                   tr,
-                                                                                   postStripStagePtrs_[0],
-                                                                                   postStripStagePtrs_[1],
-                                                                                   0,
-                                                                                   numSamples,
-                                                                                   pluginHost_);
+                    playback_mix_helpers::renderInstrumentPostStripToStereoScratch(
+                        entry->host,
+                        tr,
+                        postStripStagePtrs_[0],
+                        postStripStagePtrs_[1],
+                        0,
+                        numSamples,
+                        pluginHost_,
+                        // P2 audition gate (PID-008): the Secondary audition instance sounds only
+                        // while the transport is NOT playing — never layered over transport
+                        // playback. Block-boundary decision on this thread; no republish races.
+                        playbackIntent != PlaybackIntent::Playing ? entry->auditionHost : nullptr);
                     if (rp != nullptr && srcStep != nullptr && srcStep->destBusIndex >= 0
                         && srcStep->destBusIndex < static_cast<int>(rp->busScratchL.size()))
                     {
@@ -1597,6 +1602,10 @@ void PlaybackEngine::invokeExperimentalInstrumentBeginBlocks(
             if (e.host != nullptr)
             {
                 e.host->audioThread_beginAudioBlock(numSamples);
+            }
+            if (e.auditionHost != nullptr && e.auditionHost != e.host)
+            {
+                e.auditionHost->audioThread_beginAudioBlock(numSamples);
             }
         }
     }

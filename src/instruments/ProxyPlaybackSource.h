@@ -7,8 +7,8 @@
 //
 // One authoritative per-destination selector with the canonical transport
 // priority: (1) Primary live when available and usable; (2) current Primary
-// proxy when Primary is unavailable; (3) Secondary live — reserved for P2,
-// structurally absent here; (4) missing/silent placeholder.
+// proxy when Primary is unavailable; (3) configured, usable Secondary live
+// (P2); (4) missing/silent placeholder.
 //
 // CURRENCY (never guessed): a generation is Current iff the freshly recomputed
 // expected fingerprint equals its `generationId`.
@@ -56,11 +56,12 @@ enum class ProxyPlaybackSourceState : int
     Primary = 0,      ///< live Primary selected (substitution branch not taken)
     ProxyPreparing,   ///< proxy selected; derived representation not resident yet
     ProxyCurrent,     ///< proxy selected and current (silent generation included)
-    ProxyStale,       ///< retained but NEVER selected in P1
+    ProxyStale,       ///< retained but NEVER selected
     ProxyMissing,     ///< current metadata but the asset file is missing
     ProxyCorrupt,     ///< invalid path / unreadable WAV / metadata mismatch / stream failure
     MissingPrimary,   ///< no Primary and no usable proxy — honest silence
     PlaybackUnderrun, ///< proxy selected; real pre-EOF underrun observed
+    SecondaryLive,    ///< P2: configured Secondary provides the working transport sound
 };
 
 [[nodiscard]] inline const char* proxyPlaybackSourceStateName(const ProxyPlaybackSourceState s)
@@ -75,6 +76,7 @@ enum class ProxyPlaybackSourceState : int
         case ProxyPlaybackSourceState::ProxyCorrupt: return "ProxyCorrupt";
         case ProxyPlaybackSourceState::MissingPrimary: return "MissingPrimary";
         case ProxyPlaybackSourceState::PlaybackUnderrun: return "PlaybackUnderrun";
+        case ProxyPlaybackSourceState::SecondaryLive: return "SecondaryLive";
     }
     return "?";
 }
@@ -176,13 +178,20 @@ struct ProxySourceDecision
     bool useProxy = false;
 };
 
-/// Canonical priority (steering §7.3). Secondary does not exist in P1 — there is
-/// deliberately NO fallback between (2) and (4). A stale/missing/corrupt proxy is
-/// never selected and never approximated.
+/// Canonical priority (steering §7.3 / §17, Locked PI-021):
+///   1. Primary live when available and usable.
+///   2. Current, usable Primary proxy when Primary is unavailable.
+///   3. Configured, usable Secondary (P2) when neither of the above is playable.
+///   4. Honest missing/silent placeholder.
+/// A stale/missing/corrupt proxy is never selected and never approximated; a
+/// Current proxy always wins over Secondary (`secondaryUsable` never demotes a
+/// useProxy row — including the priming/ProxyPreparing refinement of a Current
+/// generation, which stays a proxy selection by construction here).
 [[nodiscard]] inline ProxySourceDecision
     decideProxyPlaybackSource(const bool primaryUsable,
                               const ProxyCurrencyVerdict currency,
-                              const ProxyAssetAvailability asset) noexcept
+                              const ProxyAssetAvailability asset,
+                              const bool secondaryUsable = false) noexcept
 {
     if (primaryUsable)
     {
@@ -190,11 +199,15 @@ struct ProxySourceDecision
     }
     if (currency == ProxyCurrencyVerdict::NoMetadata)
     {
-        return { ProxyPlaybackSourceState::MissingPrimary, false };
+        return { secondaryUsable ? ProxyPlaybackSourceState::SecondaryLive
+                                 : ProxyPlaybackSourceState::MissingPrimary,
+                 false };
     }
     if (currency == ProxyCurrencyVerdict::Stale)
     {
-        return { ProxyPlaybackSourceState::ProxyStale, false };
+        return { secondaryUsable ? ProxyPlaybackSourceState::SecondaryLive
+                                 : ProxyPlaybackSourceState::ProxyStale,
+                 false };
     }
     // Current generation:
     switch (asset)
@@ -203,11 +216,17 @@ struct ProxySourceDecision
         case ProxyAssetAvailability::Available:
             return { ProxyPlaybackSourceState::ProxyCurrent, true };
         case ProxyAssetAvailability::Missing:
-            return { ProxyPlaybackSourceState::ProxyMissing, false };
+            return { secondaryUsable ? ProxyPlaybackSourceState::SecondaryLive
+                                     : ProxyPlaybackSourceState::ProxyMissing,
+                     false };
         case ProxyAssetAvailability::Corrupt:
-            return { ProxyPlaybackSourceState::ProxyCorrupt, false };
+            return { secondaryUsable ? ProxyPlaybackSourceState::SecondaryLive
+                                     : ProxyPlaybackSourceState::ProxyCorrupt,
+                     false };
     }
-    return { ProxyPlaybackSourceState::MissingPrimary, false };
+    return { secondaryUsable ? ProxyPlaybackSourceState::SecondaryLive
+                             : ProxyPlaybackSourceState::MissingPrimary,
+             false };
 }
 
 } // namespace proxy_playback

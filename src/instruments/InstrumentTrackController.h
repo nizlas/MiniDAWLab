@@ -372,6 +372,109 @@ public:
         return true;
     }
 
+    // --- v21 Secondary instrument (P2; steering §17, PID-008/PID-009) — message thread only ------
+    // Completely independent of the Primary fields: selecting/replacing/removing a Secondary
+    // never touches the Primary descriptor/state, the proxy metadata, or the Primary semantic
+    // revision. Configuration state, not musical state: callers mark the project dirty on a true
+    // return; the musical-undo DTO strips these fields.
+    [[nodiscard]] bool hasSecondaryInstrument() const noexcept { return hasSecondary_; }
+    [[nodiscard]] const ProjectFileGenericVst3DescriptorV1& getSecondaryDescriptor() const noexcept
+    {
+        return secondaryDescriptor_;
+    }
+    [[nodiscard]] juce::String getSecondaryPluginBundlePath() const noexcept
+    {
+        return secondaryPluginBundlePath_;
+    }
+    [[nodiscard]] juce::String getSecondaryPluginStateBase64() const noexcept
+    {
+        return secondaryPluginStateBase64_;
+    }
+    /// 0 = Preserve channels (default); 1..16 = force Secondary-delivered channel messages.
+    [[nodiscard]] int getSecondaryForcedMidiChannel() const noexcept
+    {
+        return secondaryForcedMidiChannel_;
+    }
+
+    /// Select or replace the Secondary. A changed identity clears the stored Secondary state
+    /// blob (it belonged to the previous plugin). Returns true when anything changed.
+    bool setSecondaryInstrumentFromUi(const ProjectFileGenericVst3DescriptorV1& descriptor,
+                                      const juce::String& bundlePath) noexcept
+    {
+        const bool sameIdentity
+            = hasSecondary_
+              && secondaryDescriptor_.fileOrIdentifier == descriptor.fileOrIdentifier
+              && secondaryDescriptor_.uniqueId == descriptor.uniqueId
+              && secondaryDescriptor_.name == descriptor.name;
+        if (sameIdentity && secondaryPluginBundlePath_ == bundlePath)
+        {
+            return false;
+        }
+        if (!sameIdentity)
+        {
+            secondaryPluginStateBase64_.clear();
+        }
+        hasSecondary_ = true;
+        secondaryDescriptor_ = descriptor;
+        secondaryPluginBundlePath_ = bundlePath;
+        return true;
+    }
+
+    /// Remove the Secondary entirely (descriptor, state, mapping). Returns true when changed.
+    bool clearSecondaryInstrumentFromUi() noexcept
+    {
+        if (!hasSecondary_)
+        {
+            return false;
+        }
+        hasSecondary_ = false;
+        secondaryDescriptor_ = {};
+        secondaryPluginBundlePath_.clear();
+        secondaryPluginStateBase64_.clear();
+        secondaryForcedMidiChannel_ = 0;
+        return true;
+    }
+
+    /// Channel mapping for Secondary delivery only (0 = Preserve; 1..16 = Force channel N).
+    /// Out-of-range repairs to Preserve. Returns true when changed.
+    bool setSecondaryForcedMidiChannelFromUi(const int channel) noexcept
+    {
+        const int valid = (channel >= 1 && channel <= 16) ? channel : 0;
+        if (valid == secondaryForcedMidiChannel_)
+        {
+            return false;
+        }
+        secondaryForcedMidiChannel_ = valid;
+        return true;
+    }
+
+    /// [Message thread] Runtime write-back after a successful Secondary load (advisory local
+    /// hint only — not a configuration edit; never dirties by itself).
+    void noteSecondaryResolvedBundlePath(const juce::String& bundlePath) noexcept
+    {
+        secondaryPluginBundlePath_ = bundlePath;
+    }
+
+    /// [Message thread] Fresh Secondary state capture seam for the save DTO build: returns the
+    /// live instance's Base64 state when the Secondary is loaded, empty otherwise. Wired by the
+    /// runtime coordinator; optional (persisted blob survives when unset or empty).
+    void setSecondaryLiveStateProvider(std::function<juce::String()> provider) noexcept
+    {
+        secondaryLiveStateProvider_ = std::move(provider);
+    }
+
+    /// [Message thread] Primary identity for UI display when the plugin is NOT loaded (the
+    /// persisted descriptor name; falls back to the instrument kind). Callers prefer the live
+    /// host name when the Primary is loaded.
+    [[nodiscard]] juce::String getPrimaryIdentityNameForUi() const noexcept
+    {
+        if (pendingGenericVst3DescriptorValid_ && pendingGenericVst3Descriptor_.name.isNotEmpty())
+        {
+            return pendingGenericVst3Descriptor_.name;
+        }
+        return experimentalInstrumentKind_;
+    }
+
     /// [Message thread] P1H Save As rehoming: last known ABSOLUTE file of the referenced
     /// generation asset (invalid File when unknown or silent generation). Runtime-only hint —
     /// never persisted; captured where the project folder is authoritatively known (project
@@ -602,6 +705,16 @@ private:
     /// Per-destination update mode (steering §18.1): "auto" | "onSave" | "manual" | "off".
     juce::String proxyUpdateMode_ { "auto" };
     juce::File proxyAssetSourceHint_; ///< P1H Save As rehoming (runtime-only, see accessor)
+    /// v21 Secondary instrument configuration (P2; steering §17, PID-009). Fully independent of
+    /// the Primary fields above and never a proxy-fingerprint input. The state blob is `mutable`
+    /// for the same reason as `savedPrimaryBlob_`: the const save DTO builder refreshes it from
+    /// the live Secondary instance (via `secondaryLiveStateProvider_`) at capture time.
+    bool hasSecondary_ = false;
+    ProjectFileGenericVst3DescriptorV1 secondaryDescriptor_;
+    juce::String secondaryPluginBundlePath_;
+    mutable juce::String secondaryPluginStateBase64_;
+    int secondaryForcedMidiChannel_ = 0;
+    std::function<juce::String()> secondaryLiveStateProvider_;
 
     double timelineSampleRate_ = 48000.0;
 
