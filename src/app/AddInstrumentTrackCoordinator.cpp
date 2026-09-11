@@ -352,6 +352,10 @@ void AddInstrumentTrackCoordinator::finishAddGrooveAgentInstrumentTrackAfterInst
         callbacks_.refreshInstrumentUi();
         return;
     }
+    // New-track CREATION default (distinct from the legacy load fallback "absent = auto"):
+    // proxy generation is an explicit per-track choice — fresh destinations start Off and
+    // are serialized explicitly, so save/reload preserves the default (steering §18.1).
+    (void)ctl->setProxyUpdateModeFromUi("off");
 
     if (registryWasEmpty && mh == instrumentRuntimeCoordinator.stagingInstrumentHostUnchecked()
         && ctl == instrumentRuntimeCoordinator.stagingInstrumentControllerUnchecked())
@@ -594,6 +598,8 @@ void AddInstrumentTrackCoordinator::finishAddHalionSonicInstrumentTrackAfterInst
         callbacks_.refreshInstrumentUi();
         return;
     }
+    // New-track CREATION default: fresh destinations start Off (see the Groove Agent path).
+    (void)ctl->setProxyUpdateModeFromUi("off");
 
     if (registryWasEmpty && mh == instrumentRuntimeCoordinator.stagingInstrumentHostUnchecked()
         && ctl == instrumentRuntimeCoordinator.stagingInstrumentControllerUnchecked())
@@ -850,6 +856,8 @@ void AddInstrumentTrackCoordinator::addGenericInstrumentTrackFromCatalog(
         callbacks_.refreshInstrumentUi();
         return;
     }
+    // New-track CREATION default: fresh destinations start Off (see the Groove Agent path).
+    (void)ctl->setProxyUpdateModeFromUi("off");
 
     ctl->syncShellWithHostState();
     instrumentRuntimeCoordinator.updateExperimentalPlaybackBridgeAfterRegistryChange();

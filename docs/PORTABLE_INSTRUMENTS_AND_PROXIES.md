@@ -1633,8 +1633,7 @@ Four selectable per-destination modes. In **every** mode, staleness detection re
 a render-relevant change marks the destination proxy **Stale immediately** (the status verdict is
 never delayed by the idle timer — only the start of rendering is).
 
-**Auto after idle (recommended default for portable-collaboration projects; selectable, not
-mandatory):**
+**Auto after idle (selectable, not mandatory):**
 
 * A render-relevant change marks the destination proxy Stale immediately **and starts or resets a
   per-destination five-minute idle timer**.
@@ -1678,6 +1677,12 @@ stale/missing proxies are current (§16.6).
 
 * Storage (Recommended): per-destination `proxyUpdateMode` persisted at v20 (§12.2), values
   `"auto" | "onSave" | "manual" | "off"`.
+* Default policy: **newly created** instrument destinations default to `"off"` — proxy
+  generation is an explicit per-track choice (most instruments exist on both collaborators'
+  computers), and the mode is serialized explicitly so save/reload preserves it. This creation
+  default is deliberately separate from the legacy load rule: an **absent** `proxyUpdateMode`
+  key in an existing project file keeps its historical meaning `"auto"` (earlier writers
+  omitted the field for Auto); explicitly stored values are always preserved.
 
 ### 18.2 Save and autosave (Locked)
 

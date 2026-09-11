@@ -103,47 +103,11 @@ namespace
         return {};
     }
 
-    void warnIfGenericCatalogInstrumentsUnloadedOnSave(
-        const Session& session,
-        const ProjectIoCoordinator::Callbacks& callbacks)
-    {
-        if (callbacks.instrumentCtlByTrackId == nullptr)
-        {
-            return;
-        }
-        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
-        if (snap == nullptr)
-        {
-            return;
-        }
-        int unloadedGenericCount = 0;
-        for (int i = 0; i < snap->getNumTracks(); ++i)
-        {
-            const Track& tr = snap->getTrack(i);
-            if (tr.getKind() != TrackKind::Instrument)
-            {
-                continue;
-            }
-            InstrumentTrackController* const ctl = callbacks.instrumentCtlByTrackId(tr.getId());
-            if (ctl != nullptr && ctl->hasInstrumentTrack() && ctl->isGenericCatalogInstrument()
-                && !ctl->isInstrumentLoaded())
-            {
-                ++unloadedGenericCount;
-            }
-        }
-        if (unloadedGenericCount <= 0)
-        {
-            return;
-        }
-        juce::String msg = "Note: ";
-        msg << juce::String(unloadedGenericCount) << " generic VST3 instrument track";
-        if (unloadedGenericCount != 1)
-        {
-            msg << "s";
-        }
-        msg << " had no loaded plugin at save time.\n\nMIDI clips are saved, but reload will use a placeholder unless the plugin can be resolved from the catalog.";
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Save project", msg);
-    }
+    // NOTE: successful Save intentionally shows NO informational dialog for generic VST3
+    // tracks without a loaded plugin — a missing Primary is an expected collaboration
+    // scenario (steering §12). Descriptors, saved state, MIDI and proxy metadata are
+    // persisted exactly as always; per-track status stays visible in the Inspector, and
+    // actual save FAILURES are still reported through the WarningIcon error dialogs below.
 
     [[nodiscard]] juce::String stripGenericVst3PlaceholderSuffix(juce::String name)
     {
@@ -603,7 +567,6 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             // automatic proxy-metadata checkpoint can prove the file is still this exact save.
             refreshKnownProjectDiskIdentity();
             deleteAutosaveArtifactsAfterSuccessfulSave();
-            warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
             // P1H §18.2: queue proxy work per destination update mode. Never waits.
             if (callbacks_.onSuccessfulUserSave != nullptr)
             {
@@ -736,7 +699,6 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             // a later checkpoint must never write into a replaced/different project file).
             refreshKnownProjectDiskIdentity();
             deleteAutosaveArtifactsAfterSuccessfulSave();
-            warnIfGenericCatalogInstrumentsUnloadedOnSave(session_, callbacks_);
             // P1H §16.6 Save As: rehome referenced proxy generation assets into the new
             // project layout (copy + validate only — never blocks on rendering, never
             // touches the original assets; failures degrade to honest ProxyMissing).
