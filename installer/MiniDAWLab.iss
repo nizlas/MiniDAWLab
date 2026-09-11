@@ -6,7 +6,12 @@
 
 #define AppName "Danielssons Audio Lab"
 ; Default matches CMake project(); override: /DAppVersion=x.y.z
-#define AppVersion "0.2.0"
+; #ifndef guard: an unconditional #define here would silently overwrite the /DAppVersion value
+; passed by scripts\package-windows.ps1 (ISPP runs script defines after command-line defines),
+; which once produced a stale 0.2.0 installer from a 0.9.0 build.
+#ifndef AppVersion
+#define AppVersion "0.9.0"
+#endif
 
 [Setup]
 AppId={{2F8C9A1B-0D3E-4F5A-8B2C-9E1D4A6F0B2C}
