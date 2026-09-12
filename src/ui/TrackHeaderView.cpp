@@ -636,11 +636,13 @@ juce::Rectangle<int> TrackHeaderView::getAlternativesButtonBounds() const noexce
         return {};
     }
     // Small discreet hit area (18 px square holding a ~13 px drawn glyph) anchored at the
-    // PHYSICAL bottom-left corner of the whole header with a small inset, just above the
-    // row-resize band. Deliberately separate from — and visibly smaller than — the 22 px
-    // Power/M/R strip cells, and it stays bottom-left as the row height changes.
-    const juce::Rectangle<int> r(kAlternativesButtonInsetPx,
-                                 getHeight() - kHeaderResizeBandPx - kAlternativesButtonInsetPx
+    // PHYSICAL bottom-left corner of the whole header: right of the active-selection stripe
+    // with a small clear gap, and a small bottom gap (the cell's lowest 1 px overlaps the
+    // resize band, which keeps hit priority there — mouseDown/mouseMove test the band first).
+    // Deliberately separate from — and visibly smaller than — the 22 px Power/M/R strip cells,
+    // and it stays bottom-left as the row height changes.
+    const juce::Rectangle<int> r(kAlternativesButtonLeftInsetPx,
+                                 getHeight() - kAlternativesButtonBottomGapPx
                                      - kAlternativesButtonHitPx,
                                  kAlternativesButtonHitPx,
                                  kAlternativesButtonHitPx);
@@ -933,7 +935,7 @@ void TrackHeaderView::paint(juce::Graphics& g)
     if (active)
     {
         g.setColour(juce::Colours::deepskyblue);
-        g.fillRect(b.getX(), b.getY(), 4, b.getHeight());
+        g.fillRect(b.getX(), b.getY(), kHeaderActiveStripeWidthPx, b.getHeight());
     }
 
     auto const layout = computeHeaderContentLayout();

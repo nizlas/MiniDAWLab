@@ -1010,7 +1010,16 @@ void InstrumentRuntimeCoordinator::syncAllKeyedAndStagingShellWithHostState() no
 
 void InstrumentRuntimeCoordinator::deactivateAllKeyedAndStagingControllers() noexcept
 {
+    // Plugin-less MIDI content rows carry the SAME UI-active header flag as instrument rows:
+    // omitting their map here latched their slate-blue selection paint forever once clicked.
     for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->setActive(false);
+        }
+    }
+    for (auto& kv : midiContentControllersByTrackId_)
     {
         if (kv.second != nullptr)
         {
@@ -1032,6 +1041,13 @@ bool InstrumentRuntimeCoordinator::hasAnyKeyedInstrumentControllerActive() const
             return true;
         }
     }
+    for (const auto& kv : midiContentControllersByTrackId_)
+    {
+        if (kv.second != nullptr && kv.second->isActive())
+        {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -1044,11 +1060,25 @@ void InstrumentRuntimeCoordinator::deactivateKeyedInstrumentControllersOnly() no
             kv.second->setActive(false);
         }
     }
+    for (auto& kv : midiContentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->setActive(false);
+        }
+    }
 }
 
 void InstrumentRuntimeCoordinator::setKeyedInstrumentControllersActiveExclusive(const TrackId tid) noexcept
 {
     for (auto& kv : instrumentControllersByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->setActive(kv.first == tid);
+        }
+    }
+    for (auto& kv : midiContentControllersByTrackId_)
     {
         if (kv.second != nullptr)
         {

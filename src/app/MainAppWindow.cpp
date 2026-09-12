@@ -2000,7 +2000,15 @@ public:
                     return 0.0;
                 },
                 [this] { return instrumentRuntimeCoordinator_->hasAnyKeyedInstrumentControllerActive(); },
-                [this] { instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly(); },
+                [this] {
+                    instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly();
+                    // The now-DESELECTED instrument/MIDI headers must repaint immediately —
+                    // their paint reads the controller flag lazily.
+                    if (instrumentTimelineRowCoordinator_ != nullptr)
+                    {
+                        instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+                    }
+                },
                 [this](const TrackId tid) {
                     if (recorder_.getArmedTrackId() == tid)
                     {

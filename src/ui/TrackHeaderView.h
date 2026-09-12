@@ -95,11 +95,16 @@ public:
     /// Horizontal strip: each M/R/power/instrument cell (`squareStripButtonBodyFromCell` insets inside).
     static constexpr int kStripControlCellWidthPx = 22;
     static constexpr int kStripSquareBodyInsetPx = 1;
+    /// Deep-sky-blue left-edge stripe painted when the row is the UI-active row.
+    static constexpr int kHeaderActiveStripeWidthPx = 4;
     /// P2 "Instrument alternatives" button: small standalone bottom-left button (NOT a strip
-    /// cell) — 18 px clickable square holding a ~13 px drawn glyph, inset from the header's
-    /// bottom-left corner above the resize band.
+    /// cell) — 18 px clickable square holding a ~13 px drawn glyph, anchored at the header's
+    /// bottom-left corner. Left inset clears the 4 px active-selection stripe plus a small gap;
+    /// the bottom gap lets the cell's lowest 1 px fall inside the resize band (the band keeps
+    /// hit priority there, and the centred 16 px face still paints fully above the band).
     static constexpr int kAlternativesButtonHitPx = 18;
-    static constexpr int kAlternativesButtonInsetPx = 2;
+    static constexpr int kAlternativesButtonLeftInsetPx = kHeaderActiveStripeWidthPx + 2;
+    static constexpr int kAlternativesButtonBottomGapPx = 4;
 
     /// Bottom-edge resize band inside the header (matches layout hit-testing).
     static constexpr int kHeaderResizeBandPx = 5;
