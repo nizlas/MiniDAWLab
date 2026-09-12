@@ -53,6 +53,9 @@ struct TrackHeaderModel
     bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;
+    /// P2: when true and `callbacks.onShowInstrumentAlternatives` set, the strip appends the small
+    /// "Instrument alternatives" cell (instrument destinations only; opens the anchored popup).
+    bool instrumentAlternativesAvailable = false;
     /// When false, double-click inline rename is disabled (`TrackKind::Master` / Stereo Out).
     bool trackNameRenameEnabled = true;
 };
@@ -69,6 +72,9 @@ struct TrackHeaderCallbacks
     std::function<void()> onToggleArm;
     /// Optional: opens native instrument / plugin UI (Groove Agent row). Omit for audio lanes.
     std::function<void()> onOpenInstrumentEditor;
+    /// P2: opens the "Instrument alternatives" popup anchored at the given SCREEN bounds (the
+    /// clicked strip cell). Omit for non-instrument rows.
+    std::function<void(juce::Rectangle<int> screenAnchorBounds)> onShowInstrumentAlternatives;
     /// Right-click; null = ignore context menu entirely.
     std::function<void(TrackHeaderView&, const juce::MouseEvent&)> onShowContextMenu;
     /// Bottom-edge row height drag; `startHeightPx` is header height at mouse-down (session thread).
@@ -80,6 +86,7 @@ struct TrackHeaderCallbacks
 };
 
 class TrackHeaderView : public juce::Component,
+                        public juce::TooltipClient,
                         private juce::TextEditor::Listener
 {
 public:
@@ -144,6 +151,13 @@ public:
     void patchRenameCallbacks(std::function<bool()> canBeginRenameTrack,
                               std::function<bool(juce::String trimmedNewName)> onCommitRenameTrack) noexcept;
 
+    /// Tooltip for the hovered strip cell (currently only the "Instrument alternatives" cell).
+    juce::String getTooltip() override;
+
+    /// Screen-independent bounds of the P2 "Instrument alternatives" strip cell (empty when the
+    /// cell is not present). Public: used as the popup's anchor rectangle.
+    [[nodiscard]] juce::Rectangle<int> getAlternativesButtonBounds() const noexcept;
+
 private:
     enum class DragBlocker : std::uint8_t
     {
@@ -161,6 +175,8 @@ private:
         Power,
         Mute,
         Arm,
+        /// P2: "Instrument alternatives" popup trigger (last cell; instrument destinations only).
+        Alternatives,
     };
 
     struct TrackHeaderStripButtonSpec
@@ -190,6 +206,10 @@ private:
     [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
+    [[nodiscard]] bool hasInstrumentEditorCell() const noexcept;
+    [[nodiscard]] bool hasAlternativesCell() const noexcept;
+    /// Bounds of the strip cell at left-to-right `index` (empty when the strip is empty).
+    [[nodiscard]] juce::Rectangle<int> stripCellBoundsAtIndex(int index) const noexcept;
 
     [[nodiscard]] juce::Rectangle<int>
     squareStripButtonBodyFromCell(juce::Rectangle<int> cell) const noexcept;

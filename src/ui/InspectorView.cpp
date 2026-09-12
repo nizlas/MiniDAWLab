@@ -1,4 +1,4 @@
-#include "ui/InspectorView.h"
+﻿#include "ui/InspectorView.h"
 
 #include "domain/Track.h"
 
@@ -746,217 +746,8 @@ InspectorView::InspectorView(Session& session)
     };
     addAndMakeVisible(addPostInsertButton_);
 
-    // ---------------------------------------------------------------- P1I
-    // Instrument proxy status + controls (visible only for proxy destinations;
-    // steering §19). Two distinct axes: what is PLAYING now (source) and the
-    // proxy cache/maintenance state — never merged (PI-021/PI-022). Progress is
-    // an unobtrusive label, never a modal dialog. No Secondary control exists.
-    proxySectionLabel_.setText("Instrument Proxy", juce::dontSendNotification);
-    proxySectionLabel_.setFont(juce::FontOptions(11.0f));
-    addAndMakeVisible(proxySectionLabel_);
-
-    proxySourceCaptionLabel_.setText("Playing", juce::dontSendNotification);
-    proxySourceCaptionLabel_.setFont(juce::FontOptions(10.0f));
-    proxySourceCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    addAndMakeVisible(proxySourceCaptionLabel_);
-
-    proxySourceValueLabel_.setFont(juce::FontOptions(12.0f));
-    proxySourceValueLabel_.setJustificationType(juce::Justification::centredLeft);
-    addAndMakeVisible(proxySourceValueLabel_);
-
-    proxyCacheCaptionLabel_.setText("Proxy", juce::dontSendNotification);
-    proxyCacheCaptionLabel_.setFont(juce::FontOptions(10.0f));
-    proxyCacheCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    addAndMakeVisible(proxyCacheCaptionLabel_);
-
-    proxyCacheValueLabel_.setFont(juce::FontOptions(12.0f));
-    proxyCacheValueLabel_.setJustificationType(juce::Justification::centredLeft);
-    addAndMakeVisible(proxyCacheValueLabel_);
-
-    proxyProgressLabel_.setFont(juce::Font(juce::FontOptions(10.0f)).italicised());
-    proxyProgressLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    proxyProgressLabel_.setJustificationType(juce::Justification::centredLeft);
-    proxyProgressLabel_.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(proxyProgressLabel_);
-
-    proxyModeCaptionLabel_.setText("Proxy updates", juce::dontSendNotification);
-    proxyModeCaptionLabel_.setFont(juce::FontOptions(10.0f));
-    proxyModeCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    addAndMakeVisible(proxyModeCaptionLabel_);
-
-    // Item ids are modeComboIndex + 1 (0 Auto / 1 On Save / 2 Manual / 3 Off).
-    proxyModeComboBox_.addItem("Auto after idle", 1);
-    proxyModeComboBox_.addItem("On Save", 2);
-    proxyModeComboBox_.addItem("Manual", 3);
-    proxyModeComboBox_.addItem("Off", 4);
-    proxyModeComboBox_.setTooltip(
-        "How this instrument's proxy (portable audio stand-in) is kept up to date.\n\n"
-        "Auto after idle: an edit marks the proxy stale immediately; rendering begins "
-        "after five minutes without further relevant edits. Saving never waits for "
-        "rendering, and playback can continue while it renders.\n"
-        "On Save: rendering is queued by an explicit Save (autosave never renders).\n"
-        "Manual: rendering starts only from Render now / Retry.\n"
-        "Off: no automatic updates; existing proxy files are kept safe.");
-    proxyModeComboBox_.onChange = [this] {
-        if (proxyModeComboGuard_ || !proxyHost_.setUpdateMode)
-        {
-            return;
-        }
-        const TrackId active = session_.getActiveTrackId();
-        const int pick = proxyModeComboBox_.getSelectedId();
-        if (active == kInvalidTrackId || pick <= 0)
-        {
-            return;
-        }
-        proxyHost_.setUpdateMode(active, pick - 1);
-        refreshFromSession();
-    };
-    addAndMakeVisible(proxyModeComboBox_);
-
-    proxyRenderNowButton_.setButtonText("Render now");
-    proxyRenderNowButton_.setTooltip("Render this instrument's proxy now (Manual mode).");
-    proxyRenderNowButton_.setWantsKeyboardFocus(false);
-    proxyRenderNowButton_.onClick = [this] {
-        const TrackId active = session_.getActiveTrackId();
-        if (active != kInvalidTrackId && proxyHost_.renderNow)
-        {
-            proxyHost_.renderNow(active);
-            refreshFromSession();
-        }
-    };
-    addAndMakeVisible(proxyRenderNowButton_);
-
-    proxyCancelButton_.setButtonText("Cancel");
-    proxyCancelButton_.setTooltip(
-        "Cancel the queued or running proxy render. The previous proxy is kept.");
-    proxyCancelButton_.setWantsKeyboardFocus(false);
-    proxyCancelButton_.onClick = [this] {
-        const TrackId active = session_.getActiveTrackId();
-        if (active != kInvalidTrackId && proxyHost_.cancelRender)
-        {
-            proxyHost_.cancelRender(active);
-            refreshFromSession();
-        }
-    };
-    addAndMakeVisible(proxyCancelButton_);
-
-    proxyRetryButton_.setButtonText("Retry");
-    proxyRetryButton_.setTooltip("Retry the failed proxy render.");
-    proxyRetryButton_.setWantsKeyboardFocus(false);
-    proxyRetryButton_.onClick = [this] {
-        const TrackId active = session_.getActiveTrackId();
-        if (active != kInvalidTrackId && proxyHost_.retryRender)
-        {
-            proxyHost_.retryRender(active);
-            refreshFromSession();
-        }
-    };
-    addAndMakeVisible(proxyRetryButton_);
-    setProxySectionVisible(false);
-
-    // ---------------------------------------------------------------- P2
-    // "Instrument alternatives" (steering §17/§19, PID-008/PID-009): the optional Secondary
-    // working instrument for machines where the Primary cannot load. Compact, never a dialog.
-    altSectionLabel_.setText("Instrument alternatives", juce::dontSendNotification);
-    altSectionLabel_.setFont(juce::FontOptions(11.0f));
-    addAndMakeVisible(altSectionLabel_);
-
-    altPrimaryCaptionLabel_.setText("Primary", juce::dontSendNotification);
-    altPrimaryCaptionLabel_.setFont(juce::FontOptions(10.0f));
-    altPrimaryCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    addAndMakeVisible(altPrimaryCaptionLabel_);
-
-    altPrimaryValueLabel_.setFont(juce::FontOptions(12.0f));
-    altPrimaryValueLabel_.setJustificationType(juce::Justification::centredLeft);
-    addAndMakeVisible(altPrimaryValueLabel_);
-
-    altSecondaryCaptionLabel_.setText("Secondary", juce::dontSendNotification);
-    altSecondaryCaptionLabel_.setFont(juce::FontOptions(10.0f));
-    altSecondaryCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    addAndMakeVisible(altSecondaryCaptionLabel_);
-
-    altSecondaryValueLabel_.setFont(juce::FontOptions(12.0f));
-    altSecondaryValueLabel_.setJustificationType(juce::Justification::centredLeft);
-    addAndMakeVisible(altSecondaryValueLabel_);
-
-    const juce::String altTooltip
-        = "Optional Secondary instrument: a locally available working sound used only when the "
-          "Primary cannot load AND no current proxy is playable. It never replaces the Primary "
-          "configuration or the proxy files, and is never presented as sounding identical.\n\n"
-          "With the transport stopped and the Primary missing, played notes audition through the "
-          "Secondary. While a current proxy supplies transport playback, live audition is "
-          "unavailable (the Secondary is never layered on top of the proxy).";
-    altSectionLabel_.setTooltip(altTooltip);
-    altPrimaryValueLabel_.setTooltip(altTooltip);
-    altSecondaryValueLabel_.setTooltip(altTooltip);
-
-    altSelectSecondaryButton_.setButtonText("Select...");
-    altSelectSecondaryButton_.setTooltip(
-        "Choose a Secondary instrument from the instrument catalogue. The Primary "
-        "configuration is kept untouched.");
-    altSelectSecondaryButton_.setWantsKeyboardFocus(false);
-    altSelectSecondaryButton_.onClick = [this] { showSecondaryCatalogPickerMenu(); };
-    addAndMakeVisible(altSelectSecondaryButton_);
-
-    altEditorButton_.setButtonText("Editor");
-    altEditorButton_.setTooltip("Open the Secondary instrument's editor (loads it if needed).");
-    altEditorButton_.setWantsKeyboardFocus(false);
-    altEditorButton_.onClick = [this] {
-        const TrackId active = session_.getActiveTrackId();
-        if (active != kInvalidTrackId && secondaryHost_.openSecondaryEditor)
-        {
-            secondaryHost_.openSecondaryEditor(active);
-        }
-    };
-    addAndMakeVisible(altEditorButton_);
-
-    altRemoveButton_.setButtonText("Remove");
-    altRemoveButton_.setTooltip(
-        "Remove the Secondary assignment. The Primary and any proxy files are untouched.");
-    altRemoveButton_.setWantsKeyboardFocus(false);
-    altRemoveButton_.onClick = [this] {
-        const TrackId active = session_.getActiveTrackId();
-        if (active != kInvalidTrackId && secondaryHost_.removeSecondary)
-        {
-            secondaryHost_.removeSecondary(active);
-            refreshFromSession();
-        }
-    };
-    addAndMakeVisible(altRemoveButton_);
-
-    altChannelCaptionLabel_.setText("MIDI to Secondary", juce::dontSendNotification);
-    altChannelCaptionLabel_.setFont(juce::FontOptions(10.0f));
-    altChannelCaptionLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
-    addAndMakeVisible(altChannelCaptionLabel_);
-
-    // Item ids: 1 = Preserve channels (default); 2..17 = Force channel 1..16. Applied ONLY to
-    // Secondary delivery — stored notes, Primary channels, and MIDI export are never rewritten.
-    altChannelComboBox_.addItem("Preserve channels", 1);
-    for (int ch = 1; ch <= 16; ++ch)
-    {
-        altChannelComboBox_.addItem("Force channel " + juce::String(ch), ch + 1);
-    }
-    altChannelComboBox_.setTooltip(
-        "How routed MIDI reaches the Secondary. Preserve channels (default) delivers events on "
-        "their original channels; Force channel N moves every event to one channel — useful when "
-        "a replacement instrument listens on a single channel. Only Secondary delivery is "
-        "affected; stored notes and the Primary configuration are never rewritten.");
-    altChannelComboBox_.onChange = [this] {
-        if (altChannelComboGuard_ || !secondaryHost_.setChannelMapping)
-        {
-            return;
-        }
-        const TrackId active = session_.getActiveTrackId();
-        const int pick = altChannelComboBox_.getSelectedId();
-        if (active == kInvalidTrackId || pick <= 0)
-        {
-            return;
-        }
-        secondaryHost_.setChannelMapping(active, pick - 1);
-        refreshFromSession();
-    };
-    addAndMakeVisible(altChannelComboBox_);
-    setSecondarySectionVisible(false);
+    // P2: the former "Instrument Proxy" and "Instrument alternatives" sections moved to the
+    // track-header "Instrument alternatives" popup (ui/InstrumentAlternativesPopup.cpp).
 
     sendsSectionLabel_.setText("Sends", juce::dontSendNotification);
     sendsSectionLabel_.setFont(juce::FontOptions(11.0f));
@@ -1816,139 +1607,6 @@ void InspectorView::commitVolumeField()
     }
 }
 
-void InspectorView::setProxySectionVisible(const bool visible)
-{
-    const bool changed = proxySectionLabel_.isVisible() != visible;
-    proxySectionLabel_.setVisible(visible);
-    proxySourceCaptionLabel_.setVisible(visible);
-    proxySourceValueLabel_.setVisible(visible);
-    proxyCacheCaptionLabel_.setVisible(visible);
-    proxyCacheValueLabel_.setVisible(visible);
-    proxyProgressLabel_.setVisible(visible);
-    proxyModeCaptionLabel_.setVisible(visible);
-    proxyModeComboBox_.setVisible(visible);
-    proxyRenderNowButton_.setVisible(visible);
-    proxyCancelButton_.setVisible(visible);
-    proxyRetryButton_.setVisible(visible);
-    if (changed)
-    {
-        resized(); // the section only claims vertical space while visible
-    }
-}
-
-void InspectorView::syncProxySectionForActiveTrack(const TrackId active, const Track& track)
-{
-    const bool isDestination = track.getKind() == TrackKind::Instrument
-                               && proxyHost_.isProxyDestination && proxyHost_.getStatusView
-                               && proxyHost_.isProxyDestination(active);
-    setProxySectionVisible(isDestination);
-    if (!isDestination)
-    {
-        return;
-    }
-    const proxy_status::ProxyStatusView view = proxyHost_.getStatusView(active);
-
-    proxySourceValueLabel_.setText(view.sourceLabel, juce::dontSendNotification);
-    proxyCacheValueLabel_.setText(view.cacheLabel, juce::dontSendNotification);
-    proxyProgressLabel_.setText(view.showProgress ? view.progressText : juce::String(),
-                                juce::dontSendNotification);
-    // One shared explanatory tooltip on the read-only status row (§19 accessible text).
-    proxySourceValueLabel_.setTooltip(view.tooltip);
-    proxyCacheValueLabel_.setTooltip(view.tooltip);
-    proxySourceCaptionLabel_.setTooltip(view.tooltip);
-    proxyCacheCaptionLabel_.setTooltip(view.tooltip);
-
-    proxyModeComboGuard_ = true;
-    proxyModeComboBox_.setSelectedId(view.modeComboIndex + 1, juce::dontSendNotification);
-    proxyModeComboGuard_ = false;
-
-    proxyRenderNowButton_.setEnabled(view.canRenderNow);
-    proxyCancelButton_.setEnabled(view.canCancel);
-    proxyRetryButton_.setEnabled(view.canRetry);
-}
-
-void InspectorView::setSecondarySectionVisible(const bool visible)
-{
-    const bool changed = altSectionLabel_.isVisible() != visible;
-    altSectionLabel_.setVisible(visible);
-    altPrimaryCaptionLabel_.setVisible(visible);
-    altPrimaryValueLabel_.setVisible(visible);
-    altSecondaryCaptionLabel_.setVisible(visible);
-    altSecondaryValueLabel_.setVisible(visible);
-    altSelectSecondaryButton_.setVisible(visible);
-    altEditorButton_.setVisible(visible);
-    altRemoveButton_.setVisible(visible);
-    altChannelCaptionLabel_.setVisible(visible);
-    altChannelComboBox_.setVisible(visible);
-    if (changed)
-    {
-        resized(); // the section only claims vertical space while visible
-    }
-}
-
-void InspectorView::syncSecondarySectionForActiveTrack(const TrackId active, const Track& track)
-{
-    const bool isDestination = track.getKind() == TrackKind::Instrument
-                               && secondaryHost_.isInstrumentDestination && secondaryHost_.getView
-                               && secondaryHost_.isInstrumentDestination(active);
-    setSecondarySectionVisible(isDestination);
-    if (!isDestination)
-    {
-        return;
-    }
-    const InspectorSecondaryHost::View view = secondaryHost_.getView(active);
-    altPrimaryValueLabel_.setText(view.primaryText, juce::dontSendNotification);
-    altSecondaryValueLabel_.setText(view.hasSecondary ? view.secondaryText
-                                                      : juce::String("None"),
-                                    juce::dontSendNotification);
-    altSelectSecondaryButton_.setEnabled(secondaryHost_.listCatalogInstrumentNames != nullptr
-                                         && secondaryHost_.selectSecondaryFromCatalog != nullptr);
-    altEditorButton_.setEnabled(view.hasSecondary
-                                && secondaryHost_.openSecondaryEditor != nullptr);
-    altRemoveButton_.setEnabled(view.hasSecondary && secondaryHost_.removeSecondary != nullptr);
-    altChannelComboBox_.setEnabled(view.hasSecondary
-                                   && secondaryHost_.setChannelMapping != nullptr);
-    altChannelComboGuard_ = true;
-    altChannelComboBox_.setSelectedId(juce::jlimit(0, 16, view.forcedMidiChannel) + 1,
-                                      juce::dontSendNotification);
-    altChannelComboGuard_ = false;
-}
-
-void InspectorView::showSecondaryCatalogPickerMenu()
-{
-    const TrackId active = session_.getActiveTrackId();
-    if (active == kInvalidTrackId || !secondaryHost_.listCatalogInstrumentNames
-        || !secondaryHost_.selectSecondaryFromCatalog)
-    {
-        return;
-    }
-    const juce::StringArray names = secondaryHost_.listCatalogInstrumentNames();
-    juce::PopupMenu menu;
-    if (names.isEmpty())
-    {
-        menu.addItem(1, "(no instruments in catalogue)", false);
-    }
-    else
-    {
-        for (int i = 0; i < names.size(); ++i)
-        {
-            menu.addItem(i + 1, names[i]); // itemId = catalogIndex + 1
-        }
-    }
-    juce::Component::SafePointer<InspectorView> self(this);
-    menu.showMenuAsync(
-        juce::PopupMenu::Options().withTargetComponent(&altSelectSecondaryButton_),
-        [self, active](const int result) {
-            if (self == nullptr || result <= 0
-                || !self->secondaryHost_.selectSecondaryFromCatalog)
-            {
-                return;
-            }
-            self->secondaryHost_.selectSecondaryFromCatalog(active, result - 1);
-            self->refreshFromSession();
-        });
-}
-
 void InspectorView::refreshFromSession()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -1964,8 +1622,6 @@ void InspectorView::refreshFromSession()
         panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
         syncSendsWhenInspectorDisabled();
-        setProxySectionVisible(false);
-        setSecondarySectionVisible(false);
         return;
     }
     setEnabled(true);
@@ -1987,8 +1643,6 @@ void InspectorView::refreshFromSession()
         outputComboDestIds_.clear();
         syncInsertsNoActiveTrack();
         syncSendsNoActiveTrack();
-        setProxySectionVisible(false);
-        setSecondarySectionVisible(false);
         return;
     }
     const Track& tr = snap->getTrack(idx);
@@ -2005,8 +1659,6 @@ void InspectorView::refreshFromSession()
 
     syncInsertsForActiveTrack(active);
     syncSendsForActiveTrack(active, tr);
-    syncProxySectionForActiveTrack(active, tr);
-    syncSecondarySectionForActiveTrack(active, tr);
 
     if (!panField_.isMouseButtonDown())
     {
@@ -2302,68 +1954,8 @@ void InspectorView::resized()
         area.removeFromTop(2);
     }
 
-    // P1I instrument-proxy section (bottom; only claims space while visible).
-    if (proxySectionLabel_.isVisible())
-    {
-        area.removeFromTop(10);
-        proxySectionLabel_.setBounds(area.removeFromTop(18));
-        area.removeFromTop(2);
-        {
-            auto row = area.removeFromTop(18);
-            proxySourceCaptionLabel_.setBounds(row.removeFromLeft(48));
-            proxySourceValueLabel_.setBounds(row);
-        }
-        {
-            auto row = area.removeFromTop(18);
-            proxyCacheCaptionLabel_.setBounds(row.removeFromLeft(48));
-            proxyCacheValueLabel_.setBounds(row);
-        }
-        proxyProgressLabel_.setBounds(area.removeFromTop(14));
-        area.removeFromTop(4);
-        proxyModeCaptionLabel_.setBounds(area.removeFromTop(14));
-        proxyModeComboBox_.setBounds(area.removeFromTop(24));
-        area.removeFromTop(4);
-        {
-            auto row = area.removeFromTop(22);
-            const int w = juce::jmax(60, row.getWidth() / 3 - 2);
-            proxyRenderNowButton_.setBounds(row.removeFromLeft(w + 20));
-            row.removeFromLeft(3);
-            proxyCancelButton_.setBounds(row.removeFromLeft(w - 10));
-            row.removeFromLeft(3);
-            proxyRetryButton_.setBounds(row);
-        }
-    }
-
-    // P2 "Instrument alternatives" section (bottom; only claims space while visible).
-    if (altSectionLabel_.isVisible())
-    {
-        area.removeFromTop(10);
-        altSectionLabel_.setBounds(area.removeFromTop(18));
-        area.removeFromTop(2);
-        {
-            auto row = area.removeFromTop(18);
-            altPrimaryCaptionLabel_.setBounds(row.removeFromLeft(60));
-            altPrimaryValueLabel_.setBounds(row);
-        }
-        {
-            auto row = area.removeFromTop(18);
-            altSecondaryCaptionLabel_.setBounds(row.removeFromLeft(60));
-            altSecondaryValueLabel_.setBounds(row);
-        }
-        area.removeFromTop(4);
-        {
-            auto row = area.removeFromTop(22);
-            const int w = juce::jmax(56, row.getWidth() / 3 - 2);
-            altSelectSecondaryButton_.setBounds(row.removeFromLeft(w));
-            row.removeFromLeft(3);
-            altEditorButton_.setBounds(row.removeFromLeft(w));
-            row.removeFromLeft(3);
-            altRemoveButton_.setBounds(row);
-        }
-        area.removeFromTop(4);
-        altChannelCaptionLabel_.setBounds(area.removeFromTop(14));
-        altChannelComboBox_.setBounds(area.removeFromTop(24));
-    }
+    // P2: the former "Instrument Proxy" / "Instrument alternatives" sections moved to the
+    // track-header "Instrument alternatives" popup — nothing to lay out here anymore.
 
     syncActiveTrackNameEditorDisplay();
 }

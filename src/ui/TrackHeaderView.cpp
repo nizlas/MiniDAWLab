@@ -165,6 +165,34 @@ namespace
         g.fillRect(bk2);
     }
 
+    /** P2 "Instrument alternatives" glyph: two overlapping rounded rectangles (layers/alternatives).
+        Fully drawn — no font-dependent Unicode. */
+    void drawAlternativesLayersGlyph(juce::Graphics& g, juce::Rectangle<float> glyphArea)
+    {
+        if (glyphArea.getWidth() < 5.0f || glyphArea.getHeight() < 6.0f)
+        {
+            return;
+        }
+        const auto a = glyphArea.reduced(1.0f);
+        // Back layer: top-left; front layer: bottom-right, each ~70% of the area.
+        const float w = a.getWidth() * 0.70f;
+        const float h = a.getHeight() * 0.70f;
+        if (w < 3.0f || h < 3.0f)
+        {
+            return;
+        }
+        const float rad = juce::jlimit(0.8f, 1.4f, juce::jmin(w, h) * 0.22f);
+        const juce::Rectangle<float> back(a.getX(), a.getY(), w, h);
+        const juce::Rectangle<float> front(a.getRight() - w, a.getBottom() - h, w, h);
+
+        g.setColour(juce::Colour(0xffb9c2cc));
+        g.drawRoundedRectangle(back, rad, 1.1f);
+        g.setColour(juce::Colour(0xff31363d));
+        g.fillRoundedRectangle(front, rad);
+        g.setColour(juce::Colour(0xfff2f6f9));
+        g.drawRoundedRectangle(front, rad, 1.1f);
+    }
+
     [[nodiscard]] int headerMinimumRowHeightPxForNameOnly(const bool hasSubtitle) noexcept
     {
         const int nameBlock = hasSubtitle ? kHeaderNameBlockWithSubtitlePx : kHeaderNameBlockTitleOnlyPx;
@@ -241,7 +269,7 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
 {
     const TrackHeaderModel m = modelProvider_();
     std::vector<TrackHeaderStripButtonSpec> specs;
-    specs.reserve(4);
+    specs.reserve(5);
 
     juce::Rectangle<int> inst = getInstrumentEditorButtonBounds();
     if (!inst.isEmpty())
@@ -285,6 +313,17 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
     a.armActive = m.armed;
     a.cellBounds = getArmButtonBounds();
     specs.push_back(std::move(a));
+
+    juce::Rectangle<int> alt = getAlternativesButtonBounds();
+    if (!alt.isEmpty())
+    {
+        TrackHeaderStripButtonSpec al{};
+        al.kind = TrackHeaderButtonKind::Alternatives;
+        al.enabled = callbacks_.onShowInstrumentAlternatives != nullptr
+                     && m.instrumentAlternativesAvailable;
+        al.cellBounds = alt;
+        specs.push_back(std::move(al));
+    }
 
     return specs;
 }
@@ -406,6 +445,15 @@ void TrackHeaderView::drawStripControlButton(juce::Graphics& g,
             g.drawFittedText("R", bodyPx, juce::Justification::centred, 1);
         }
         break;
+
+    case TrackHeaderButtonKind::Alternatives:
+        drawStandardStripButtonFace(g,
+                                    rf,
+                                    juce::Colour(0xff4f545c),
+                                    ctlEdgeNeutral,
+                                    showHoverBrighten);
+        drawAlternativesLayersGlyph(g, nonLetterGlyphAreaFromSquareBodyPx(bodyPx));
+        break;
     }
 }
 
@@ -426,6 +474,20 @@ void TrackHeaderView::repaintStripHoverCell(std::optional<TrackHeaderButtonKind>
     }
 }
 
+bool TrackHeaderView::hasInstrumentEditorCell() const noexcept
+{
+    const auto m = modelProvider_();
+    return m.showRecordAndPowerStripCells && callbacks_.onOpenInstrumentEditor != nullptr
+           && m.instrumentEditorAvailable;
+}
+
+bool TrackHeaderView::hasAlternativesCell() const noexcept
+{
+    const auto m = modelProvider_();
+    return m.showRecordAndPowerStripCells && callbacks_.onShowInstrumentAlternatives != nullptr
+           && m.instrumentAlternativesAvailable;
+}
+
 int TrackHeaderView::computeRightStripCellCount() const noexcept
 {
     const auto m = modelProvider_();
@@ -433,11 +495,9 @@ int TrackHeaderView::computeRightStripCellCount() const noexcept
     {
         return 1;
     }
-    if (callbacks_.onOpenInstrumentEditor == nullptr || !m.instrumentEditorAvailable)
-    {
-        return 3;
-    }
-    return 4;
+    // [Instrument?][Power][Mute][Arm][Alternatives?] — left-aligned strip at the header's
+    // bottom-left; optional cells only claim space when their action is wired + available.
+    return 3 + (hasInstrumentEditorCell() ? 1 : 0) + (hasAlternativesCell() ? 1 : 0);
 }
 
 TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout() const noexcept
@@ -517,81 +577,63 @@ juce::Rectangle<int> TrackHeaderView::getRightControlsStripBounds() const noexce
     return computeHeaderContentLayout().controlStripBounds;
 }
 
-juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
+// Strip cell order (left to right, all optional cells collapse without gaps):
+//   [InstrumentEditor?][Power][Mute][Arm][Alternatives?]     (showRecordAndPowerStripCells)
+//   [Mute]                                                   (otherwise)
+juce::Rectangle<int> TrackHeaderView::stripCellBoundsAtIndex(int const index) const noexcept
 {
     auto s = computeHeaderContentLayout().controlStripBounds;
-    if (s.isEmpty())
+    if (s.isEmpty() || index < 0)
     {
         return {};
     }
-    const int cell = kStripControlCellWidthPx;
-    const int n = computeRightStripCellCount();
-    if (n <= 1)
+    s.removeFromLeft(kStripControlCellWidthPx * index);
+    return s.removeFromLeft(kStripControlCellWidthPx);
+}
+
+juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
+{
+    if (!modelProvider_().showRecordAndPowerStripCells)
     {
         return {};
     }
-    if (n == 4)
-    {
-        s.removeFromLeft(cell);
-    }
-    s.removeFromLeft(cell);
-    s.removeFromLeft(cell);
-    return s.removeFromLeft(cell);
+    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 2);
 }
 
 juce::Rectangle<int> TrackHeaderView::getMuteButtonBounds() const noexcept
 {
-    auto s = computeHeaderContentLayout().controlStripBounds;
-    if (s.isEmpty())
+    if (!modelProvider_().showRecordAndPowerStripCells)
     {
-        return {};
+        return stripCellBoundsAtIndex(0);
     }
-    const int cell = kStripControlCellWidthPx;
-    const int n = computeRightStripCellCount();
-    if (n == 1)
-    {
-        return s.removeFromLeft(cell);
-    }
-    if (n == 4)
-    {
-        s.removeFromLeft(cell);
-    }
-    s.removeFromLeft(cell);
-    return s.removeFromLeft(cell);
+    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 1);
 }
 
 juce::Rectangle<int> TrackHeaderView::getPowerButtonBounds() const noexcept
 {
-    auto s = computeHeaderContentLayout().controlStripBounds;
-    if (s.isEmpty())
+    if (!modelProvider_().showRecordAndPowerStripCells)
     {
         return {};
     }
-    const int cell = kStripControlCellWidthPx;
-    const int n = computeRightStripCellCount();
-    if (n <= 1)
-    {
-        return {};
-    }
-    if (n == 4)
-    {
-        s.removeFromLeft(cell);
-    }
-    return s.removeFromLeft(cell);
+    return stripCellBoundsAtIndex(hasInstrumentEditorCell() ? 1 : 0);
 }
 
 juce::Rectangle<int> TrackHeaderView::getInstrumentEditorButtonBounds() const noexcept
 {
-    if (computeRightStripCellCount() < 4)
+    if (!hasInstrumentEditorCell())
     {
         return {};
     }
-    auto s = computeHeaderContentLayout().controlStripBounds;
-    if (s.isEmpty())
+    return stripCellBoundsAtIndex(0);
+}
+
+juce::Rectangle<int> TrackHeaderView::getAlternativesButtonBounds() const noexcept
+{
+    if (!hasAlternativesCell())
     {
         return {};
     }
-    return s.removeFromLeft(kStripControlCellWidthPx);
+    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 3);
 }
 
 void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) noexcept
@@ -599,7 +641,8 @@ void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) n
     auto const specs = buildStripControlSpecs();
     std::optional<TrackHeaderButtonKind> next;
 
-    constexpr std::array<TrackHeaderButtonKind, 4> hitPrioritiesRightToLeft{{
+    constexpr std::array<TrackHeaderButtonKind, 5> hitPrioritiesRightToLeft{{
+        TrackHeaderButtonKind::Alternatives,
         TrackHeaderButtonKind::Arm,
         TrackHeaderButtonKind::Mute,
         TrackHeaderButtonKind::Power,
@@ -702,6 +745,18 @@ void TrackHeaderView::patchRenameCallbacks(std::function<bool()> canBeginRenameT
 {
     callbacks_.canBeginRenameTrack = std::move(canBeginRenameTrack);
     callbacks_.onCommitRenameTrack = std::move(onCommitRenameTrack);
+}
+
+juce::String TrackHeaderView::getTooltip()
+{
+    // Only the P2 "Instrument alternatives" cell has a tooltip (hover state is kept current by
+    // mouseMove via updateStripHoverFromPosition).
+    if (stripHoveredButton_.has_value()
+        && *stripHoveredButton_ == TrackHeaderButtonKind::Alternatives)
+    {
+        return "Instrument alternatives";
+    }
+    return {};
 }
 
 void TrackHeaderView::ensureTrackNameEditor()
@@ -891,9 +946,10 @@ void TrackHeaderView::paint(juce::Graphics& g)
         juce::Graphics::ScopedSaveState const gs(g);
         g.reduceClipRegion(chrome);
 
-        constexpr std::array<TrackHeaderButtonKind, 4> paintOrderBottomToTop{{
+        constexpr std::array<TrackHeaderButtonKind, 5> paintOrderBottomToTop{{
             TrackHeaderButtonKind::Mute,
             TrackHeaderButtonKind::Arm,
+            TrackHeaderButtonKind::Alternatives,
             TrackHeaderButtonKind::InstrumentEditor,
             TrackHeaderButtonKind::Power,
         }};
@@ -915,7 +971,8 @@ void TrackHeaderView::paint(juce::Graphics& g)
 bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
                                          std::vector<TrackHeaderStripButtonSpec>&& specs) noexcept
 {
-    constexpr std::array<TrackHeaderButtonKind, 4> hitPrioritiesRightToLeft{{
+    constexpr std::array<TrackHeaderButtonKind, 5> hitPrioritiesRightToLeft{{
+        TrackHeaderButtonKind::Alternatives,
         TrackHeaderButtonKind::Arm,
         TrackHeaderButtonKind::Mute,
         TrackHeaderButtonKind::Power,
@@ -960,6 +1017,14 @@ bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
             {
                 dragBlocker_ = DragBlocker::Arm;
                 callbacks_.onToggleArm();
+            }
+            return true;
+
+        case TrackHeaderButtonKind::Alternatives:
+            if (callbacks_.onShowInstrumentAlternatives != nullptr)
+            {
+                // Anchor the popup to the clicked cell (screen coordinates).
+                callbacks_.onShowInstrumentAlternatives(localAreaToGlobal(spec->cellBounds));
             }
             return true;
 

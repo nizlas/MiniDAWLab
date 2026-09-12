@@ -2760,7 +2760,16 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     }
 
     const bool gap = (rtLastSegEndTimeline_ >= 0 && timelineSegStart != rtLastSegEndTimeline_);
-    const bool discontinuity = forceDiscontinuity || revBump || gap;
+    // P2: a transport-host swap (Primary/proxy <-> Secondary) invalidates per-host delivery
+    // memory — treat the first segment after the swap as a discontinuity so CC state is chased
+    // into the newly active host (notes are never chased, matching transport-start semantics).
+    const bool hostSwapChase = rtForceTransportChaseOnce_.exchange(false, std::memory_order_acq_rel);
+    if (hostSwapChase)
+    {
+        // The dedup memory tracks what the OLD host received — the new host has seen nothing.
+        rtCcLastSentValue_.fill(-1);
+    }
+    const bool discontinuity = forceDiscontinuity || revBump || gap || hostSwapChase;
 
     if (discontinuity)
     {

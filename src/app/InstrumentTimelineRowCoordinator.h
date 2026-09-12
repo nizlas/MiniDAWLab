@@ -31,6 +31,10 @@ public:
         std::function<void()> refreshMidiEditorInstrumentUiIfOpen;
         std::function<void(TrackId, InstrumentMidiClipId)> openMidiEditorForInstrumentClip;
         std::function<void(TrackId)> runInstrumentMidiFileImportForTrack;
+        /// P2: opens the "Instrument alternatives" popup for the track, anchored at the clicked
+        /// header-strip cell (SCREEN coordinates).
+        std::function<void(TrackId, juce::Rectangle<int> screenAnchorBounds)>
+            showInstrumentAlternativesForTrack;
         std::function<void(const juce::String& label, std::function<bool()> mutator)> executeUndoableInstrumentEdit;
         std::function<void(TrackId)> clearAudioAndOtherInstrumentSelectionsForMidiTrack;
         std::function<void()> clearAllArrangementEventSelections;

@@ -92,6 +92,13 @@ public:
     /// with the same identity; a failed load latches per descriptor identity and is retried only
     /// after reconfiguration. Never touches the Primary host.
     [[nodiscard]] bool ensureSecondaryInstrumentLoadedForTrack(TrackId tid);
+    /// [Message thread] Human-readable reason for the most recent failed Secondary load of `tid`
+    /// (empty = no failure recorded). Cleared by success, reconfiguration, and explicit retry.
+    [[nodiscard]] juce::String getSecondaryLoadFailureReasonForTrack(TrackId tid) const;
+    /// [Message thread] EXPLICIT user action (Editor click / Retry button): clears the automatic
+    /// failure latch + recorded reason, then attempts one fresh load. The latch only guards
+    /// automatic paths against retry storms — a deliberate click always gets a fresh attempt.
+    [[nodiscard]] bool retrySecondaryInstrumentLoadForTrack(TrackId tid);
     /// [Message thread] Proxy-coordinator seam: the Secondary becomes / stops being the
     /// transport source of `tid`. Idempotent; republishes the playback snapshot so the switch
     /// takes effect at the next audio-block boundary. Deactivation queues an all-notes-off so
@@ -176,6 +183,8 @@ private:
     std::unordered_map<TrackId, juce::String> secondaryLoadedIdentityByTrackId_;
     /// Descriptor identity whose load FAILED (no retry storms; cleared on reconfiguration).
     std::unordered_map<TrackId, juce::String> secondaryLoadFailureLatchByTrackId_;
+    /// Human-readable failure reason parallel to the latch (shown in the alternatives popup).
+    std::unordered_map<TrackId, juce::String> secondaryLoadFailureReasonByTrackId_;
     /// Tracks whose transport source is currently the Secondary host.
     std::set<TrackId> secondaryTransportActive_;
     std::function<bool(TrackId)> secondaryAuditionGate_;

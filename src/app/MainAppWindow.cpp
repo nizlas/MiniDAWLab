@@ -1,4 +1,4 @@
-﻿#include <JuceHeader.h>
+#include <JuceHeader.h>
 
 #include <cmath>
 #include <functional>
@@ -77,6 +77,7 @@
 #include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
+#include "ui/InstrumentAlternativesPopup.h"
 #include "ui/PortablePreparationWindow.h"
 #include "ui/SnapResolutionComboBox.h"
 #include "ui/SnapSettings.h"
@@ -818,11 +819,12 @@ public:
             proxyUpdatePolicyService_->startProductionTicker(1000);
         }
 
-        // P1I: Inspector proxy status/control seams (§19). The view displays the pure
-        // ProxyStatusModel output and invokes the narrow service actions; every wording
-        // and availability rule lives in the tested model, not in the component.
+        // P1I: proxy status/control seams (§19), shown in the track-header "Instrument
+        // alternatives" popup. The view displays the pure ProxyStatusModel output and invokes the
+        // narrow service actions; every wording and availability rule lives in the tested model,
+        // not in the component.
         {
-            InspectorProxyHost proxyUi;
+            InstrumentProxyUiHost proxyUi;
             proxyUi.isProxyDestination = [this](const TrackId tid) {
                 return instrumentRuntimeCoordinator_ != nullptr
                        && instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
@@ -895,21 +897,22 @@ public:
                     (void)proxyUpdatePolicyService_->retry(tid);
                 }
             };
-            inspectorView_.setInspectorProxyHost(std::move(proxyUi));
+            instrumentProxyUiHost_ = std::move(proxyUi);
         }
 
-        // P2: Inspector "Instrument alternatives" seams (steering §17/§19, PID-008/PID-009).
-        // Secondary configuration is persisted project state — every change dirties through the
-        // normal configuration-edit mechanism (§18.3) and is stripped from musical undo.
+        // P2: "Instrument alternatives" seams (steering §17/§19, PID-008/PID-009), shown in the
+        // track-header popup. Secondary configuration is persisted project state — every change
+        // dirties through the normal configuration-edit mechanism (§18.3) and is stripped from
+        // musical undo.
         {
-            InspectorSecondaryHost secUi;
+            InstrumentSecondaryUiHost secUi;
             secUi.isInstrumentDestination = [this](const TrackId tid) {
                 return instrumentRuntimeCoordinator_ != nullptr
                        && instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid)
                               != nullptr;
             };
             secUi.getView = [this](const TrackId tid) {
-                InspectorSecondaryHost::View v;
+                InstrumentSecondaryUiHost::View v;
                 if (instrumentRuntimeCoordinator_ == nullptr)
                 {
                     return v;
@@ -940,7 +943,12 @@ public:
                         = instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid);
                     if (sh == nullptr || !sh->hasInstrument())
                     {
-                        v.secondaryText += " (not loaded)";
+                        // Distinguish "not needed yet" (lazy) from a real recorded failure so the
+                        // popup can surface the reason + Retry (P2 fix 2).
+                        const bool failed = instrumentRuntimeCoordinator_
+                                                ->getSecondaryLoadFailureReasonForTrack(tid)
+                                                .isNotEmpty();
+                        v.secondaryText += failed ? " (load failed)" : " (not loaded)";
                     }
                 }
                 v.forcedMidiChannel = c->getSecondaryForcedMidiChannel();
@@ -1053,7 +1061,9 @@ public:
                 {
                     return;
                 }
-                if (!instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid))
+                // EXPLICIT user action: bypass the automatic failure latch (P2 fix 2) — a fresh
+                // load attempt runs even after earlier automatic attempts failed.
+                if (!instrumentRuntimeCoordinator_->retrySecondaryInstrumentLoadForTrack(tid))
                 {
                     return;
                 }
@@ -1081,7 +1091,21 @@ public:
                     instrumentRuntimeCoordinator_->noteSecondaryConfigurationChanged(tid);
                 }
             };
-            inspectorView_.setInspectorSecondaryHost(std::move(secUi));
+            secUi.getLoadFailureReason = [this](const TrackId tid) {
+                return instrumentRuntimeCoordinator_ != nullptr
+                           ? instrumentRuntimeCoordinator_->getSecondaryLoadFailureReasonForTrack(tid)
+                           : juce::String{};
+            };
+            secUi.retryLoad = [this](const TrackId tid) {
+                const bool ok = instrumentRuntimeCoordinator_ != nullptr
+                                && instrumentRuntimeCoordinator_->retrySecondaryInstrumentLoadForTrack(tid);
+                if (ok && proxyPlaybackCoordinator_ != nullptr)
+                {
+                    proxyPlaybackCoordinator_->refreshDestination(tid);
+                }
+                return ok;
+            };
+            instrumentSecondaryUiHost_ = std::move(secUi);
         }
 
         // P1J: the "Prepare Portable Project" operation owner (§16.6, PID-011). Same
@@ -1280,6 +1304,13 @@ public:
                     {
                         instrumentMidiImportCoordinator_->importMidiFileForInstrumentTrack(laneTid);
                     }
+                },
+                // P2: track-header "Instrument alternatives" popup (replaces Inspector sections).
+                [this](TrackId laneTid, juce::Rectangle<int> screenAnchor) {
+                    instrument_alternatives_popup::show(laneTid,
+                                                        screenAnchor,
+                                                        instrumentProxyUiHost_,
+                                                        instrumentSecondaryUiHost_);
                 },
                 [this](const juce::String& lab, std::function<bool()> mutator) {
                     if (undoRedoCoordinator_ != nullptr)
@@ -3909,6 +3940,12 @@ private:
     } };
     std::unique_ptr<PlayheadOverlay> lanePlayheadOverlay_;
     InspectorView inspectorView_;
+    /// P2: shared seams for the track-header "Instrument alternatives" popup (wired once in the
+    /// ctor; the popup copies them per launch, so an open callout stays safe across relaunches).
+    InstrumentProxyUiHost instrumentProxyUiHost_;
+    InstrumentSecondaryUiHost instrumentSecondaryUiHost_;
+    /// App-wide tooltip host (required for TooltipClient texts, e.g. the header alternatives cell).
+    juce::TooltipWindow tooltipWindow_{ nullptr, 700 };
     collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
     collapsible_side_strip::CollapsedKnob inspectorCollapsedKnob_;
     int inspectorCurrentWidth_ = kInspectorDefaultW;

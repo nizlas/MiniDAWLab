@@ -779,4 +779,19 @@ private:
                                           int* outMidiEventsEmitted) noexcept;
     /// [Audio thread] Destination the engine last delivered this Midi source's events to.
     TrackId rtLastRoutedDestTrackId_ = kInvalidTrackId;
+
+    /// P2: one-shot transport chase request (see `noteTransportHostSwappedForChase`). Set on the
+    /// message thread when the track's transport host was swapped (Primary/proxy <-> Secondary);
+    /// consumed by the next `audioThread_scheduleTransportMidiForSegment` as a discontinuity so
+    /// the newly active host receives the chased CC state instead of stale delivery memory.
+    std::atomic<bool> rtForceTransportChaseOnce_{ false };
+
+public:
+    /// [Message thread] The playback registry swapped this track's transport host (steering §17
+    /// Secondary activation/deactivation). The next scheduled transport segment re-chases CC
+    /// state and flushes pending note-off memory into the newly active host.
+    void noteTransportHostSwappedForChase() noexcept
+    {
+        rtForceTransportChaseOnce_.store(true, std::memory_order_release);
+    }
 };

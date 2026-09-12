@@ -119,6 +119,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/CollapsibleSideStrip.cpp
     src/ui/InspectorPanControl.cpp
     src/ui/InspectorView.cpp
+    src/ui/InstrumentAlternativesPopup.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
     src/ui/TrackHeaderView.cpp

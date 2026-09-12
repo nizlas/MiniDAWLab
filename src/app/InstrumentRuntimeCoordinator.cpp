@@ -482,6 +482,10 @@ bool InstrumentRuntimeCoordinator::ensureSecondaryInstrumentLoadedForTrack(const
     if (!res.resolved)
     {
         secondaryLoadFailureLatchByTrackId_[tid] = identityKey;
+        secondaryLoadFailureReasonByTrackId_[tid]
+            = "The plug-in could not be found (path/descriptor did not resolve). Bundle: "
+              + (ctl->getSecondaryPluginBundlePath().isNotEmpty() ? ctl->getSecondaryPluginBundlePath()
+                                                                  : juce::String("(none)"));
         return false;
     }
 
@@ -516,15 +520,30 @@ bool InstrumentRuntimeCoordinator::ensureSecondaryInstrumentLoadedForTrack(const
         = mini_daw::instrumentDisplayNameLooksLikeHalionSonic(res.description.name)
               ? "secondary-halion"
               : "secondary";
-    const juce::Result r = slot->loadInstrumentFromDescription(
+    juce::Result r = slot->loadInstrumentFromDescription(
         res.description, res.bundle, sourceTag, haveState ? &stateBlock : nullptr, &stateWarning);
+    if (r.failed() && haveState)
+    {
+        // A poisoned/incompatible saved state must never leave the Secondary permanently
+        // unloadable — degrade to a clean load (default patch) with a visible notice instead.
+        r = slot->loadInstrumentFromDescription(res.description, res.bundle, sourceTag, nullptr, nullptr);
+        if (!r.failed())
+        {
+            stateWarning = "The saved plug-in state could not be applied (loaded with the default "
+                           "state); reselect the sound in the plug-in editor if needed.";
+        }
+    }
     if (r.failed())
     {
         secondaryLoadFailureLatchByTrackId_[tid] = identityKey;
+        secondaryLoadFailureReasonByTrackId_[tid] = r.getErrorMessage().isNotEmpty()
+                                                        ? r.getErrorMessage()
+                                                        : juce::String("The plug-in failed to load.");
         secondaryLoadedIdentityByTrackId_.erase(tid);
         return false;
     }
     secondaryLoadFailureLatchByTrackId_.erase(tid);
+    secondaryLoadFailureReasonByTrackId_.erase(tid);
     secondaryLoadedIdentityByTrackId_[tid] = identityKey;
     slot->setForcedMidiChannelForDelivery(ctl->getSecondaryForcedMidiChannel());
     ctl->noteSecondaryResolvedBundlePath(res.bundle.getFullPathName());
@@ -532,6 +551,22 @@ bool InstrumentRuntimeCoordinator::ensureSecondaryInstrumentLoadedForTrack(const
     // AUDITION host until/unless the source decision activates it for transport).
     updateExperimentalPlaybackBridgeAfterRegistryChange();
     return true;
+}
+
+juce::String InstrumentRuntimeCoordinator::getSecondaryLoadFailureReasonForTrack(const TrackId tid) const
+{
+    const auto it = secondaryLoadFailureReasonByTrackId_.find(tid);
+    return it != secondaryLoadFailureReasonByTrackId_.end() ? it->second : juce::String{};
+}
+
+bool InstrumentRuntimeCoordinator::retrySecondaryInstrumentLoadForTrack(const TrackId tid)
+{
+    // Explicit user action (Editor click / Retry): never blocked by the automatic-retry latch.
+    // The latch only guards AUTOMATIC paths (transport decisions, audition forwards) against
+    // retry storms; a deliberate click is always allowed one fresh attempt.
+    secondaryLoadFailureLatchByTrackId_.erase(tid);
+    secondaryLoadFailureReasonByTrackId_.erase(tid);
+    return ensureSecondaryInstrumentLoadedForTrack(tid);
 }
 
 void InstrumentRuntimeCoordinator::setSecondaryTransportActive(const TrackId tid, const bool active)
@@ -566,6 +601,29 @@ void InstrumentRuntimeCoordinator::setSecondaryTransportActive(const TrackId tid
             sh->enqueueAllNotesOffFromMessageThread();
         }
     }
+    // P2 CC chase on host swap: the destination's own controller AND every Midi source routed to
+    // it must treat the next transport segment as a discontinuity, so the newly active host gets
+    // the chased CC state (delivery memory belongs to the previous host).
+    if (InstrumentTrackController* const destCtl = getInstrumentControllerForTrack(tid))
+    {
+        destCtl->noteTransportHostSwappedForChase();
+    }
+    if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+    {
+        for (int ti = 0; ti < snap->getNumTracks(); ++ti)
+        {
+            const Track& tr = snap->getTrack(ti);
+            if (tr.getKind() != TrackKind::Midi || tr.getMidiDestinationTrackId() != tid)
+            {
+                continue;
+            }
+            const auto it = midiContentControllersByTrackId_.find(tr.getId());
+            if (it != midiContentControllersByTrackId_.end() && it->second != nullptr)
+            {
+                it->second->noteTransportHostSwappedForChase();
+            }
+        }
+    }
     // Atomic snapshot republish: the source switch takes effect at the audio-block boundary.
     updateExperimentalPlaybackBridgeAfterRegistryChange();
 }
@@ -581,6 +639,7 @@ void InstrumentRuntimeCoordinator::removeSecondaryRuntimeForTrack(const TrackId 
     }
     secondaryLoadedIdentityByTrackId_.erase(tid);
     secondaryLoadFailureLatchByTrackId_.erase(tid);
+    secondaryLoadFailureReasonByTrackId_.erase(tid);
     const bool wasActive = secondaryTransportActive_.erase(tid) != 0;
     if (retired == nullptr)
     {
@@ -603,6 +662,7 @@ void InstrumentRuntimeCoordinator::noteSecondaryConfigurationChanged(const Track
 {
     InstrumentTrackController* const ctl = getInstrumentControllerForTrack(tid);
     secondaryLoadFailureLatchByTrackId_.erase(tid);
+    secondaryLoadFailureReasonByTrackId_.erase(tid);
     if (ctl == nullptr || !ctl->hasSecondaryInstrument())
     {
         // Secondary removed: drop the runtime instance; persisted Primary/proxy state untouched.
@@ -739,6 +799,7 @@ void InstrumentRuntimeCoordinator::clearRuntimesPreserveBridgeOnly() noexcept
     secondaryInstrumentHostsByTrackId_.clear();
     secondaryLoadedIdentityByTrackId_.clear();
     secondaryLoadFailureLatchByTrackId_.clear();
+    secondaryLoadFailureReasonByTrackId_.clear();
     secondaryTransportActive_.clear();
     midiContentControllersByTrackId_.clear();
 }

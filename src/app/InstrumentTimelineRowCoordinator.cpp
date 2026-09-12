@@ -1744,6 +1744,9 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             m.trackNameRenameEnabled = true;
         }
         m.instrumentEditorAvailable = mh != nullptr && mh->hasInstrument();
+        // Every row built here is an instrument destination → always offer the P2 alternatives
+        // popup button (its content shows Primary/Secondary/proxy state even when nothing loaded).
+        m.instrumentAlternativesAvailable = true;
         return m;
     };
 
@@ -1780,6 +1783,12 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         if (ExperimentalInstrumentHost* h = instrumentRuntime_.getInstrumentHostForTrack(laneTid))
         {
             h->openNativeEditor();
+        }
+    };
+    callbacks.onShowInstrumentAlternatives = [this, laneTid](juce::Rectangle<int> screenAnchor) {
+        if (callbacks_.showInstrumentAlternativesForTrack != nullptr)
+        {
+            callbacks_.showInstrumentAlternativesForTrack(laneTid, screenAnchor);
         }
     };
     callbacks.onShowContextMenu = [this, laneTid, repaintExtras](TrackHeaderView& self, const juce::MouseEvent&) {

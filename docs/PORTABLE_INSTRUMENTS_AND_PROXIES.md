@@ -1790,8 +1790,11 @@ prerequisite.
 
 * Every instrument destination exposes its status from the PI-022 vocabulary (Primary / Proxy
   current / Proxy rendering / Proxy stale / Secondary / Missing / Render failed), reachable from
-  the track context (existing seams: Inspector per-track controls, track-header rows,
-  coordinator/controller runtime status — Verified locations, Audit §9).
+  the track context. The per-destination instrument-alternatives and proxy controls (Secondary
+  select/editor/remove, channel mapping, load-failure Retry, proxy status/mode/render actions)
+  live in the "Instrument alternatives" popup opened from a small button at the bottom-left of
+  the instrument track header (anchored callout; fits the screen and scrolls internally). Other
+  seams: track-header rows, coordinator/controller runtime status — Verified locations, Audit §9.
 * Render progress and speed reporting for active jobs (PI-013 capabilities), plus queue length
   when multiple destinations are pending.
 * Explicit "Update Proxy"/"Retry" actions (Manual mode; Retry after failure in any maintaining
