@@ -890,7 +890,7 @@ InspectorView::InspectorView(Session& session)
     altPrimaryValueLabel_.setTooltip(altTooltip);
     altSecondaryValueLabel_.setTooltip(altTooltip);
 
-    altSelectSecondaryButton_.setButtonText("Select…");
+    altSelectSecondaryButton_.setButtonText("Select...");
     altSelectSecondaryButton_.setTooltip(
         "Choose a Secondary instrument from the instrument catalogue. The Primary "
         "configuration is kept untouched.");

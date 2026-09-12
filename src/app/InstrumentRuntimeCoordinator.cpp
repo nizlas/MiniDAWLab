@@ -510,8 +510,14 @@ bool InstrumentRuntimeCoordinator::ensureSecondaryInstrumentLoadedForTrack(const
     }
 
     juce::String stateWarning;
+    // HALion-family loads need the same description/path repair as every other HALion load
+    // site (the host applies `repairHalionPluginDescriptionForLoad` for "halion"-tagged loads).
+    const char* const sourceTag
+        = mini_daw::instrumentDisplayNameLooksLikeHalionSonic(res.description.name)
+              ? "secondary-halion"
+              : "secondary";
     const juce::Result r = slot->loadInstrumentFromDescription(
-        res.description, res.bundle, "secondary", haveState ? &stateBlock : nullptr, &stateWarning);
+        res.description, res.bundle, sourceTag, haveState ? &stateBlock : nullptr, &stateWarning);
     if (r.failed())
     {
         secondaryLoadFailureLatchByTrackId_[tid] = identityKey;

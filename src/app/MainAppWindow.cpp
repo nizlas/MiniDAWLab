@@ -28,6 +28,7 @@
 #include "app/TransportControlsShortcutTarget.h"
 #include "app/Vst3PluginPickerCoordinator.h"
 #include "plugins/InstrumentCatalog.h"
+#include "plugins/Vst3ChildProcessScan.h"
 #include "app/InstrumentMusicalUndoSnapshot.h"
 #include "app/ArrangementEventSelectionCoordinator.h"
 #include "app/InstrumentRuntimeCoordinator.h"
@@ -91,6 +92,45 @@
 
 namespace
 {
+/// P2 Secondary selector: dedicated-kind instruments (HALion Sonic family) resolved through the
+/// SAME cache path the Add Instrument Track menu uses (`tryLoadHalionSonicCacheCandidates`,
+/// experimental VST3 descriptions cache). These instruments are deliberately NOT part of the
+/// scanned GenericVst3 catalogue, so an empty scanned catalogue must not hide them here.
+struct DedicatedSecondaryChoice
+{
+    juce::PluginDescription description;
+    juce::File bundle;
+};
+
+[[nodiscard]] std::vector<DedicatedSecondaryChoice> listDedicatedSecondaryChoices()
+{
+    std::vector<DedicatedSecondaryChoice> out;
+    mini_daw::Vst3GrooveCacheLoadCandidate v2Cand;
+    mini_daw::Vst3GrooveCacheLoadCandidate v1Cand;
+    juce::String infoIgnored;
+    (void)mini_daw::tryLoadHalionSonicCacheCandidates({}, v2Cand, v1Cand, infoIgnored);
+    const mini_daw::Vst3GrooveCacheLoadCandidate& cand = v2Cand.valid ? v2Cand : v1Cand;
+    if (cand.valid && !cand.descriptions.empty() && cand.resolvedBundle.exists())
+    {
+        out.push_back({ cand.descriptions.front(), cand.resolvedBundle });
+    }
+    return out;
+}
+
+/// True when any scanned-catalogue name already covers the HALion Sonic family (no duplicate row).
+[[nodiscard]] bool scannedCatalogHasHalionSonic(
+    const std::vector<mini_daw::InstrumentCatalogEntry>& entries)
+{
+    for (const auto& e : entries)
+    {
+        if (mini_daw::instrumentDisplayNameLooksLikeHalionSonic(e.description.name))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Compact "+" control matching `TrackHeaderView` mute/arm idle strip geometry (grey fill, subtle edge).
 class AddTrackCornerGlyphButton final : public juce::Button
 {
@@ -916,6 +956,16 @@ public:
                         names.add(e.description.name);
                     }
                 }
+                // Dedicated-kind instruments (HALion Sonic family) resolve through their own
+                // cache path — append them AFTER the scanned entries so the itemId -> index
+                // contract stays intact (selectSecondaryFromCatalog maps indexes identically).
+                if (!scannedCatalogHasHalionSonic(entries))
+                {
+                    for (const auto& d : listDedicatedSecondaryChoices())
+                    {
+                        names.add(d.description.name);
+                    }
+                }
                 return names;
             };
             secUi.selectSecondaryFromCatalog = [this](const TrackId tid, const int catalogIndex) {
@@ -927,17 +977,38 @@ public:
                 {
                     return;
                 }
+                // Index contract mirrors listCatalogInstrumentNames exactly: scanned catalogue
+                // entries first (may be legitimately empty), then the dedicated-kind choices.
                 std::vector<mini_daw::InstrumentCatalogEntry> entries;
-                if (!mini_daw::loadInstrumentCatalogFromCache(entries)
-                    || catalogIndex >= (int)entries.size())
+                (void)mini_daw::loadInstrumentCatalogFromCache(entries);
+                juce::PluginDescription chosenDescription;
+                juce::String chosenBundlePath;
+                if (catalogIndex < (int)entries.size())
                 {
-                    return;
+                    const mini_daw::InstrumentCatalogEntry& entry = entries[(size_t)catalogIndex];
+                    chosenDescription = entry.description;
+                    chosenBundlePath = entry.bundlePath;
                 }
-                const mini_daw::InstrumentCatalogEntry& entry = entries[(size_t)catalogIndex];
+                else
+                {
+                    if (scannedCatalogHasHalionSonic(entries))
+                    {
+                        return; // no dedicated rows were appended for this list
+                    }
+                    const auto dedicated = listDedicatedSecondaryChoices();
+                    const int dedicatedIndex = catalogIndex - (int)entries.size();
+                    if (dedicatedIndex >= (int)dedicated.size())
+                    {
+                        return;
+                    }
+                    chosenDescription = dedicated[(size_t)dedicatedIndex].description;
+                    chosenBundlePath
+                        = dedicated[(size_t)dedicatedIndex].bundle.getFullPathName();
+                }
                 ProjectFileGenericVst3DescriptorV1 desc;
                 mini_daw::fillProjectGenericVst3DescriptorFromPluginDescription(
-                    desc, entry.description);
-                if (c->setSecondaryInstrumentFromUi(desc, entry.bundlePath))
+                    desc, chosenDescription);
+                if (c->setSecondaryInstrumentFromUi(desc, chosenBundlePath))
                 {
                     if (projectIoCoordinator_ != nullptr)
                     {
