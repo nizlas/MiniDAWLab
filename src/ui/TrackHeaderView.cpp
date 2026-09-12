@@ -495,9 +495,10 @@ int TrackHeaderView::computeRightStripCellCount() const noexcept
     {
         return 1;
     }
-    // [Instrument?][Power][Mute][Arm][Alternatives?] — left-aligned strip at the header's
-    // bottom-left; optional cells only claim space when their action is wired + available.
-    return 3 + (hasInstrumentEditorCell() ? 1 : 0) + (hasAlternativesCell() ? 1 : 0);
+    // [Instrument?][Power][Mute][Arm] — the P2 Alternatives button is NOT a strip cell: it is a
+    // smaller standalone button anchored at the header's physical bottom-left corner
+    // (getAlternativesButtonBounds).
+    return 3 + (hasInstrumentEditorCell() ? 1 : 0);
 }
 
 TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout() const noexcept
@@ -577,9 +578,10 @@ juce::Rectangle<int> TrackHeaderView::getRightControlsStripBounds() const noexce
     return computeHeaderContentLayout().controlStripBounds;
 }
 
-// Strip cell order (left to right, all optional cells collapse without gaps):
-//   [InstrumentEditor?][Power][Mute][Arm][Alternatives?]     (showRecordAndPowerStripCells)
-//   [Mute]                                                   (otherwise)
+// Strip cell order (left to right, the optional cell collapses without gaps):
+//   [InstrumentEditor?][Power][Mute][Arm]     (showRecordAndPowerStripCells)
+//   [Mute]                                    (otherwise)
+// (The P2 Alternatives button is standalone at the header's bottom-left — not a strip cell.)
 juce::Rectangle<int> TrackHeaderView::stripCellBoundsAtIndex(int const index) const noexcept
 {
     auto s = computeHeaderContentLayout().controlStripBounds;
@@ -633,7 +635,25 @@ juce::Rectangle<int> TrackHeaderView::getAlternativesButtonBounds() const noexce
     {
         return {};
     }
-    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 3);
+    // Small discreet hit area (18 px square holding a ~13 px drawn glyph) anchored at the
+    // PHYSICAL bottom-left corner of the whole header with a small inset, just above the
+    // row-resize band. Deliberately separate from — and visibly smaller than — the 22 px
+    // Power/M/R strip cells, and it stays bottom-left as the row height changes.
+    const juce::Rectangle<int> r(kAlternativesButtonInsetPx,
+                                 getHeight() - kHeaderResizeBandPx - kAlternativesButtonInsetPx
+                                     - kAlternativesButtonHitPx,
+                                 kAlternativesButtonHitPx,
+                                 kAlternativesButtonHitPx);
+    // Compact heights: rather than colliding with the name block or the control strip, the
+    // button hides entirely (no paint, no hit target, no tooltip) and reappears once the row is
+    // tall enough for the bottom-left anchor to clear them. It never relocates.
+    const HeaderContentLayout layout = computeHeaderContentLayout();
+    if (r.getY() < 0 || r.intersects(layout.nameTextBounds.expanded(1))
+        || r.intersects(layout.controlStripBounds.expanded(1)))
+    {
+        return {};
+    }
+    return r;
 }
 
 void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) noexcept

@@ -2436,13 +2436,14 @@ void InstrumentTrackController::publishRenderSnapshot()
         sr = 48000.0;
     }
     snap->gateSamples = juce::jmax(1, (int)std::llround(0.001 * 100.0 * sr));
-    // Transport MIDI must follow **host readiness** (`layoutOk` instrument). `instrumentLoaded_` mirrored
-    // that via a Groove-shaped name heuristic and could stay false while the plug-in actually processed
-    // audio — starving `audioThread_scheduleTransportMidiForSegment` even though clips paint from `clips_`.
-    // Plugin-less MIDI content lanes have no host readiness of their own: whether their events are
-    // audible is decided by the **destination** instrument, which the engine resolves per block.
-    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_
-                            && (host_ == nullptr || host_->acceptsTransportMidi());
+    // TRACK-state gate only (active / power / mute). Host readiness deliberately does NOT live in
+    // the snapshot: the engine resolves the delivery host PER BLOCK (Primary, or the Secondary
+    // when it is the transport source — steering §17), so `audioThread_scheduleTransportMidiForSegment`
+    // checks `host.acceptsTransportMidi()` on the host it actually delivers to. Gating on this
+    // controller's own (Primary) host here silenced the destination's OWN clips whenever the
+    // Primary was missing even though the loaded Secondary was the active transport host —
+    // while plugin-less routed MIDI sources (no host of their own) kept sounding.
+    snap->playbackEnabled = trackActive_ && powerOn_ && !muted_;
 
     for (const auto& cptr : clips_)
     {
@@ -2810,7 +2811,10 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
 
     rtLastSegEndTimeline_ = segEnd;
 
-    if (!snap->playbackEnabled)
+    // Track-state gate (snapshot) + host readiness of the host ACTUALLY delivered to this block
+    // (Primary, or the Secondary while it is the transport source). Pending note-offs above are
+    // always flushed so mute/off/host-swap never strands sounding notes.
+    if (!snap->playbackEnabled || !host.acceptsTransportMidi())
     {
         return;
     }

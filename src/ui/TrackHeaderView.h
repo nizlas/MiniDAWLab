@@ -53,8 +53,10 @@ struct TrackHeaderModel
     bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;
-    /// P2: when true and `callbacks.onShowInstrumentAlternatives` set, the strip appends the small
-    /// "Instrument alternatives" cell (instrument destinations only; opens the anchored popup).
+    /// P2: when true and `callbacks.onShowInstrumentAlternatives` set, a small standalone
+    /// "Instrument alternatives" button is anchored at the header's bottom-left corner
+    /// (instrument destination rows only; opens the anchored popup). Hidden at compact heights
+    /// where it would overlap the name block or the control strip.
     bool instrumentAlternativesAvailable = false;
     /// When false, double-click inline rename is disabled (`TrackKind::Master` / Stereo Out).
     bool trackNameRenameEnabled = true;
@@ -93,6 +95,11 @@ public:
     /// Horizontal strip: each M/R/power/instrument cell (`squareStripButtonBodyFromCell` insets inside).
     static constexpr int kStripControlCellWidthPx = 22;
     static constexpr int kStripSquareBodyInsetPx = 1;
+    /// P2 "Instrument alternatives" button: small standalone bottom-left button (NOT a strip
+    /// cell) — 18 px clickable square holding a ~13 px drawn glyph, inset from the header's
+    /// bottom-left corner above the resize band.
+    static constexpr int kAlternativesButtonHitPx = 18;
+    static constexpr int kAlternativesButtonInsetPx = 2;
 
     /// Bottom-edge resize band inside the header (matches layout hit-testing).
     static constexpr int kHeaderResizeBandPx = 5;
@@ -175,7 +182,8 @@ private:
         Power,
         Mute,
         Arm,
-        /// P2: "Instrument alternatives" popup trigger (last cell; instrument destinations only).
+        /// P2: "Instrument alternatives" popup trigger — small standalone button at the header's
+        /// bottom-left corner (instrument destinations only; not a strip cell).
         Alternatives,
     };
 

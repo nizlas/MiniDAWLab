@@ -1724,6 +1724,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         m.powerInteractable = !trackLanes_.isStructuralTimelineEditBlocked();
         m.muteInteractable = true;
         m.armInteractable = false;
+        bool isInstrumentDestinationRow = false;
         if (const auto sn = session_.loadSessionSnapshotForAudioThread())
         {
             const int idx = sn->findTrackIndexById(laneTid);
@@ -1731,6 +1732,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             {
                 m.name = sn->getTrack(idx).getName();
                 m.trackNameRenameEnabled = (sn->getTrack(idx).getKind() != TrackKind::Master);
+                isInstrumentDestinationRow = (sn->getTrack(idx).getKind() == TrackKind::Instrument);
             }
             else
             {
@@ -1744,9 +1746,11 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             m.trackNameRenameEnabled = true;
         }
         m.instrumentEditorAvailable = mh != nullptr && mh->hasInstrument();
-        // Every row built here is an instrument destination → always offer the P2 alternatives
-        // popup button (its content shows Primary/Secondary/proxy state even when nothing loaded).
-        m.instrumentAlternativesAvailable = true;
+        // P2 alternatives button: ONLY instrument destination rows own Primary/Secondary/proxy
+        // configuration (including when the Primary is missing). This builder also creates
+        // headers for plugin-less TrackKind::Midi content rows — those must never show the
+        // button (kind-checked here on every model poll, so there is no transient flash).
+        m.instrumentAlternativesAvailable = isInstrumentDestinationRow;
         return m;
     };
 
