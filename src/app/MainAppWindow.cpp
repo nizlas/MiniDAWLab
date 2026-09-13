@@ -1,4 +1,4 @@
-#include <JuceHeader.h>
+﻿#include <JuceHeader.h>
 
 #include <cmath>
 #include <functional>
@@ -943,12 +943,13 @@ public:
                         = instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid);
                     if (sh == nullptr || !sh->hasInstrument())
                     {
-                        // Distinguish "not needed yet" (lazy) from a real recorded failure so the
-                        // popup can surface the reason + Retry (P2 fix 2).
+                        // Distinguish "not needed yet" (lazy loading is normal and healthy) from
+                        // a real recorded failure so the popup can surface the reason + Retry
+                        // (P2 fix 2). Reading this NEVER instantiates the Secondary.
                         const bool failed = instrumentRuntimeCoordinator_
                                                 ->getSecondaryLoadFailureReasonForTrack(tid)
                                                 .isNotEmpty();
-                        v.secondaryText += failed ? " (load failed)" : " (not loaded)";
+                        v.secondaryText += failed ? " (load failed)" : " (loads when needed)";
                     }
                 }
                 v.forcedMidiChannel = c->getSecondaryForcedMidiChannel();

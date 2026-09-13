@@ -1047,13 +1047,17 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         appendProjectLoadDiagnosticLine("load: before syncMidiEditorInstrumentStateFromHost");
         callbacks_.syncMidiEditorInstrumentStateFromHost();
         appendProjectLoadDiagnosticLine("load: after syncMidiEditorInstrumentStateFromHost");
-        const juce::String instrumentAutoloadNote(instrumentAutoloadNoteAcc);
+        // Missing/unavailable Primary instruments are an EXPECTED portable-project state (proxy
+        // playback and the per-track status already communicate availability), so the per-track
+        // "could not be loaded / placeholder" notes are no longer surfaced as a blocking
+        // informational dialog after an otherwise successful load. They stay in the project-load
+        // diagnostic log; real load errors (sample-rate note in `infoNote`, skipped audio files)
+        // still show below.
+        if (instrumentAutoloadNoteAcc.isNotEmpty())
         {
-            if (infoNote.isNotEmpty())
-            {
-                infoNote << "\n\n";
-            }
-            infoNote << instrumentAutoloadNote;
+            appendProjectLoadDiagnosticLine(
+                "load: instrument availability notes (not shown as dialog): "
+                + instrumentAutoloadNoteAcc.replace("\n", " | "));
         }
         callbacks_.clearSessionHistory();
         appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject begin");
