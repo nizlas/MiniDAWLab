@@ -72,6 +72,13 @@ public:
         routedOutputHandler_ = std::move(fn);
     }
 
+    /// [Message thread] Undoable pre-gain edit in dB (`TrackLanesEditCoordinator`): applied before
+    /// the track's Pre inserts and fader — audio rows only (the control is hidden elsewhere).
+    void setPreGainHandler(std::function<void(TrackId, float)> fn) noexcept
+    {
+        preGainHandler_ = std::move(fn);
+    }
+
     /// [Message thread] Undoable **MIDI** output channel (`kTrackMidiOutputChannelAny` or 1 … 16).
     void setMidiOutputChannelHandler(std::function<void(TrackId, int)> fn) noexcept
     {
@@ -131,6 +138,13 @@ private:
     void textEditorEscapeKeyPressed(juce::TextEditor& editor) override;
     void textEditorFocusLost(juce::TextEditor& editor) override;
 
+    /// Ctrl/Cmd+click on the pre-gain field = reset to 0.0 dB (the established reset gesture,
+    /// same as the pan control). Received via `addMouseListener` on the editor.
+    void mouseDown(const juce::MouseEvent& e) override;
+
+    void commitPreGainField();
+    void setPreGainEditorTextFromDb(float preGainDb);
+
     void commitVolumeField();
     void commitActiveTrackNameField();
     void setVolumeEditorTextFromLinearGain(float linearGain);
@@ -154,6 +168,10 @@ private:
     InspectorPluginHost pluginHost_;
     juce::Label sectionTitleLabel_;
     juce::TextEditor activeTrackNameEditor_;
+    /// Pre-gain (audio rows only): dB before Pre inserts and fader; sits above Channel volume.
+    juce::Label preGainCaptionLabel_;
+    juce::TextEditor preGainDbEditor_;
+    juce::Label preGainDbUnitLabel_;
     juce::Label channelVolumeCaptionLabel_;
     juce::TextEditor channelVolumeDbEditor_;
     juce::Label channelVolumeDbUnitLabel_;
@@ -213,6 +231,7 @@ private:
     juce::String activeTrackPlainName_;
 
     std::function<bool(TrackId, juce::String)> renameTrackHandler_;
+    std::function<void(TrackId, float)> preGainHandler_;
     std::function<void(TrackId, TrackId)> routedOutputHandler_;
     std::function<void(TrackId, int)> midiOutputChannelHandler_;
     std::function<void(TrackId, TrackId)> midiDestinationHandler_;

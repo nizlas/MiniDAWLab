@@ -407,6 +407,9 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
         deviceSampleRateForDiagnostics_.store(sr, std::memory_order_relaxed);
         ensureMasterScratchCapacity(juce::jmax(bs, kOfflineMixdownBlockCapSamples));
+        // Pre-gain ramps start unprimed: the first block after prepare applies each track's
+        // saved pre-gain directly (no unintended fade-in at playback start).
+        preGainRampState_.reset();
         if (pluginHost_ != nullptr)
         {
             pluginHost_->prepareForDevice(sr, bs, nOut);
@@ -1315,7 +1318,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     pluginHost_,
                     omitClipPlaybackForTrack,
                     timelineEnd,
-                    step.trackIndex);
+                    step.trackIndex,
+                    &preGainRampState_);
                 playback_mix_helpers::fanPostStripStageToDryAndSends(postStripStagePtrs_[0],
                                                                        postStripStagePtrs_[1],
                                                                        destFrame,
@@ -1345,7 +1349,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                              pluginHost_,
                                                                              omitClipPlaybackForTrack,
                                                                              timelineEnd,
-                                                                             step.trackIndex);
+                                                                             step.trackIndex,
+                                                                             &preGainRampState_);
             }
         }
         else
@@ -1358,7 +1363,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                          mixSumTarget,
                                                                          pluginHost_,
                                                                          omitClipPlaybackForTrack,
-                                                                         timelineEnd);
+                                                                         timelineEnd,
+                                                                         -1,
+                                                                         &preGainRampState_);
         }
 
         // Timeline order: dispatch transport MIDI toward each Instrument row that has a playback entry.

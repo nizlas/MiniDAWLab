@@ -181,6 +181,12 @@ public:
         TrackId trackId,
         float channelFaderGainLinear) noexcept;
 
+    /// [Message thread] Replace one track's pre-gain (dB, sanitized to [-24,+24]); see `Track`.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackPreGainDb(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        float preGainDb) noexcept;
+
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackStereoPan(
         const SessionSnapshot& previous,
         TrackId trackId,

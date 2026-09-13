@@ -70,6 +70,43 @@ namespace
         return digits;
     }
 
+    /// Pre-gain field text: signed 1-decimal dB ("+6.0" / "-3.5" / "0.0"), unit label outside.
+    [[nodiscard]] juce::String formatPreGainDbToValueFieldOnly(const float preGainDb)
+    {
+        const double d = juce::jlimit(static_cast<double>(kTrackPreGainDbMin),
+                                      static_cast<double>(kTrackPreGainDbMax),
+                                      static_cast<double>(preGainDb));
+        if (std::fabs(d) <= 0.00005)
+            return juce::String("0.0");
+        if (d < 0.0)
+            return juce::String(d, 1);
+        return "+" + juce::String(d, 1);
+    }
+
+    /// Accepts "3", "+3", "-12.5", optional "dB" suffix; clamps to [-24, +24]. False = keep old.
+    [[nodiscard]] bool tryParsePreGainDbText(const juce::String raw, float& outPreGainDb)
+    {
+        const juce::String strippedUnit = stripDbUnitSuffix(raw);
+        if (strippedUnit.isEmpty())
+            return false;
+
+        const std::string buf = strippedUnit.toStdString();
+        char* endPtr = nullptr;
+        const double v = std::strtod(buf.c_str(), &endPtr);
+        if (endPtr == buf.c_str())
+            return false;
+        while (endPtr != buf.c_str() + buf.size()
+               && std::isspace(static_cast<unsigned char>(*endPtr)))
+        {
+            ++endPtr;
+        }
+        if (endPtr != buf.c_str() + buf.size())
+            return false;
+
+        outPreGainDb = sanitizeTrackPreGainDb(static_cast<float>(v));
+        return true;
+    }
+
     [[nodiscard]] bool tryParseCommittedText(const juce::String raw, float& outLinearGain)
     {
         const juce::String strippedUnit = stripDbUnitSuffix(raw);
@@ -554,6 +591,35 @@ InspectorView::InspectorView(Session& session)
     activeTrackNameEditor_.setCaretVisible(true);
     activeTrackNameEditor_.addListener(this);
     addAndMakeVisible(activeTrackNameEditor_);
+
+    // Pre-gain (audio rows only; hidden elsewhere in refreshFromSession). Same compact dB-field
+    // style as Channel volume; reset gesture = Ctrl/Cmd+click, like the pan control.
+    {
+        const juce::String preGainTip
+            = "Adjusts the level before track effects. Recorded audio is unchanged.";
+        preGainCaptionLabel_.setText("Pre-gain", juce::dontSendNotification);
+        preGainCaptionLabel_.setFont(juce::FontOptions(11.0f));
+        preGainCaptionLabel_.setTooltip(preGainTip);
+        addAndMakeVisible(preGainCaptionLabel_);
+
+        preGainDbUnitLabel_.setText("dB", juce::dontSendNotification);
+        preGainDbUnitLabel_.setFont(juce::FontOptions(12.0f));
+        preGainDbUnitLabel_.setJustificationType(juce::Justification::centredLeft);
+        preGainDbUnitLabel_.setInterceptsMouseClicks(false, false);
+        addAndMakeVisible(preGainDbUnitLabel_);
+
+        preGainDbEditor_.setMultiLine(false);
+        preGainDbEditor_.setReturnKeyStartsNewLine(false);
+        preGainDbEditor_.setFont(juce::FontOptions(12.0f));
+        preGainDbEditor_.setJustification(juce::Justification::centred);
+        preGainDbEditor_.setIndents(0, 4);
+        preGainDbEditor_.setCaretVisible(true);
+        preGainDbEditor_.setTooltip(preGainTip);
+        preGainDbEditor_.addListener(this);
+        // Ctrl/Cmd+click reset to 0.0 dB — handled in InspectorView::mouseDown.
+        preGainDbEditor_.addMouseListener(this, false);
+        addAndMakeVisible(preGainDbEditor_);
+    }
 
     channelVolumeCaptionLabel_.setText("Channel volume", juce::dontSendNotification);
     channelVolumeCaptionLabel_.setFont(juce::FontOptions(11.0f));
@@ -1573,6 +1639,57 @@ void InspectorView::syncInsertsForActiveTrack(const TrackId active)
     }
 }
 
+void InspectorView::setPreGainEditorTextFromDb(const float preGainDb)
+{
+    preGainDbEditor_.setText(formatPreGainDbToValueFieldOnly(preGainDb),
+                             juce::dontSendNotification);
+}
+
+void InspectorView::commitPreGainField()
+{
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr || snap->getNumTracks() <= 0)
+        return;
+
+    const TrackId active = session_.getActiveTrackId();
+    const int idx = snap->findTrackIndexById(active);
+    if (idx < 0 || snap->getTrack(idx).getKind() != TrackKind::Audio)
+        return;
+
+    const float snapDb = snap->getTrack(idx).getPreGainDb();
+
+    float parsedDb = snapDb;
+    if (!tryParsePreGainDbText(preGainDbEditor_.getText(), parsedDb))
+    {
+        setPreGainEditorTextFromDb(snapDb);
+        return;
+    }
+
+    if (preGainHandler_ != nullptr)
+    {
+        preGainHandler_(active, parsedDb); // undoable Session edit (TrackLanesEditCoordinator)
+    }
+
+    const std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
+    const int ix = (after != nullptr) ? after->findTrackIndexById(active) : -1;
+    setPreGainEditorTextFromDb(ix >= 0 ? after->getTrack(ix).getPreGainDb() : parsedDb);
+}
+
+void InspectorView::mouseDown(const juce::MouseEvent& e)
+{
+    // Ctrl/Cmd+click on the pre-gain field = reset to 0.0 dB (established reset gesture).
+    if (e.eventComponent == &preGainDbEditor_
+        && (e.mods.isCommandDown() || e.mods.isCtrlDown()))
+    {
+        const TrackId active = session_.getActiveTrackId();
+        if (active != kInvalidTrackId && preGainHandler_ != nullptr)
+        {
+            preGainHandler_(active, kTrackPreGainDbDefault);
+            setPreGainEditorTextFromDb(kTrackPreGainDbDefault);
+        }
+    }
+}
+
 void InspectorView::commitVolumeField()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -1619,6 +1736,7 @@ void InspectorView::refreshFromSession()
         activeTrackNameEditor_.setTooltip({});
         inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
+        preGainDbEditor_.setText({}, juce::dontSendNotification);
         panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
         syncSendsWhenInspectorDisabled();
@@ -1636,6 +1754,7 @@ void InspectorView::refreshFromSession()
         activeTrackNameEditor_.setTooltip({});
         inspectorNameEditorGuard_ = false;
         channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
+        preGainDbEditor_.setText({}, juce::dontSendNotification);
         panField_.setPan(0.f, juce::dontSendNotification);
         outputCaptionLabel_.setVisible(false);
         outputComboBox_.setVisible(false);
@@ -1663,6 +1782,26 @@ void InspectorView::refreshFromSession()
     if (!panField_.isMouseButtonDown())
     {
         panField_.setPan(tr.getStereoPan(), juce::dontSendNotification);
+    }
+
+    // Pre-gain is an Audio-lane control only (task scope: not MIDI/instrument/group/master rows).
+    const bool showPreGain = (tr.getKind() == TrackKind::Audio);
+    if (preGainDbEditor_.isVisible() != showPreGain)
+    {
+        preGainCaptionLabel_.setVisible(showPreGain);
+        preGainDbEditor_.setVisible(showPreGain);
+        preGainDbUnitLabel_.setVisible(showPreGain);
+        // The row only claims vertical space while visible, so re-flow on kind change.
+        resized();
+    }
+    if (showPreGain && (!preGainDbEditor_.hasKeyboardFocus(false) || switchedTrack))
+    {
+        // Editor text is always canonical when unfocused, so a plain compare detects drift.
+        const juce::String want = formatPreGainDbToValueFieldOnly(tr.getPreGainDb());
+        if (switchedTrack || preGainDbEditor_.getText() != want)
+        {
+            setPreGainEditorTextFromDb(tr.getPreGainDb());
+        }
     }
 
     // MIDI channel only concerns rows that emit MIDI. Audio, Group and Master rows have none.
@@ -1831,6 +1970,19 @@ void InspectorView::resized()
     activeTrackNameEditor_.setBounds(area.removeFromTop(22));
     area.removeFromTop(4);
 
+    // Pre-gain (audio rows only): claims a caption + field row above Channel volume when visible.
+    if (preGainDbEditor_.isVisible())
+    {
+        preGainCaptionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        auto preRow = area.removeFromTop(juce::jmax(26, kDbValueFieldHeight));
+        preGainDbEditor_.setBounds(preRow.getX(), preRow.getY(),
+                                   kDbValueFieldWidth, kDbValueFieldHeight);
+        preGainDbUnitLabel_.setBounds(preRow.getX() + kDbValueFieldWidth + kGapValueToDbSuffix,
+                                      preRow.getY(), kDbUnitLabelWidth, kDbValueFieldHeight);
+        area.removeFromTop(8);
+    }
+
     channelVolumeCaptionLabel_.setBounds(area.removeFromTop(18));
     area.removeFromTop(2);
     auto fieldRow = area.removeFromTop(juce::jmax(26, kDbValueFieldHeight));
@@ -1966,6 +2118,10 @@ void InspectorView::textEditorReturnKeyPressed(juce::TextEditor& editor)
     {
         commitVolumeField();
     }
+    else if (&editor == &preGainDbEditor_)
+    {
+        commitPreGainField();
+    }
     else if (&editor == &activeTrackNameEditor_)
     {
         commitActiveTrackNameField();
@@ -2010,6 +2166,23 @@ void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
         return;
     }
 
+    if (&editor == &preGainDbEditor_)
+    {
+        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+        if (snap == nullptr || snap->getNumTracks() <= 0)
+        {
+            return;
+        }
+        const TrackId active = session_.getActiveTrackId();
+        const int idx = snap->findTrackIndexById(active);
+        if (idx < 0)
+        {
+            return;
+        }
+        setPreGainEditorTextFromDb(snap->getTrack(idx).getPreGainDb());
+        return;
+    }
+
     for (int row = 0; row < kVisibleSendRows; ++row)
     {
         if (&editor == &sendRows_[row].amountEditor)
@@ -2039,6 +2212,10 @@ void InspectorView::textEditorFocusLost(juce::TextEditor& editor)
     if (&editor == &channelVolumeDbEditor_)
     {
         commitVolumeField();
+    }
+    else if (&editor == &preGainDbEditor_)
+    {
+        commitPreGainField();
     }
     else if (&editor == &activeTrackNameEditor_)
     {

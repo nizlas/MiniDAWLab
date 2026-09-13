@@ -96,6 +96,13 @@ Track Track::withChannelFaderGain(const float gain) const noexcept
     return out;
 }
 
+Track Track::withPreGainDb(const float preGainDb) const noexcept
+{
+    Track out(*this);
+    out.preGainDb_ = sanitizeTrackPreGainDb(preGainDb);
+    return out;
+}
+
 Track Track::withTrackOff(const bool off) const noexcept
 {
     Track out(*this);

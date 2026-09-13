@@ -68,6 +68,10 @@ struct ProjectFileTrackV1
     std::vector<ProjectFileClipV1> clips;
     // v5: linear gain at channel-fader point (mixer). Omitted in JSON when ~ unity (see writer).
     float channelFaderGain = kTrackChannelVolumeUnityGain;
+    /// v22: pre-gain in dB applied before Pre inserts and fader on Audio lanes (`preGainDb` JSON
+    /// key). Omitted when ~0; absent key (all pre-v22 files) loads as 0.0 = unity — those projects
+    /// keep their previous sound exactly. Clamped to [-24,+24] on load (non-finite repaired to 0).
+    float preGainDb = kTrackPreGainDbDefault;
     /// Optional stereo pan [-1,+1]; omitted when ~ center (`pan` JSON key).
     float stereoPan = 0.0f;
     /// Skipped entirely by playback (JSON key `"off"`). Omitted when false.
@@ -341,7 +345,9 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**21** adds the optional
+    /// Current JSON writer version (**22** adds the optional `tracks[].preGainDb` — per-audio-track
+    /// pre-gain in dB before inserts/fader; additive with absent-key default 0.0 = unity).
+    /// **21** adds the optional
     /// `experimentalInstrumentTracks[].secondary` object — P2 Secondary instrument; additive with
     /// absent-key defaults, never touching Primary fields).
     /// **20** adds the root `timelineSampleRate` timeline reference
@@ -351,7 +357,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 21;
+    static constexpr int kCurrentVersion = 22;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

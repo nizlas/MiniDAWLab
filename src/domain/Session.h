@@ -214,6 +214,12 @@ public:
     /// [Message thread] Stereo pan [-1,+1] (full left … full right); applied after fader in playback.
     void setTrackStereoPan(TrackId trackId, float stereoPan) noexcept;
 
+    /// [Message thread] Pre-gain in dB, sanitized to [-24,+24]: applied BEFORE Pre inserts and
+    /// fader on Audio lanes (see `Track`). Returns false (nothing published) when the row is
+    /// unknown or the sanitized value already matches — callers wrapping this in an undoable
+    /// edit then skip the empty undo entry.
+    [[nodiscard]] bool setTrackPreGainDb(TrackId trackId, float preGainDb) noexcept;
+
     // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.

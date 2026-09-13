@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "domain/Track.h"
+#include "engine/PlaybackMixHelpers.h"
 #include "engine/RoutingPlan.h"
 #include "transport/Transport.h"
 
@@ -344,4 +345,8 @@ private:
     float* postStripStagePtrs_[2] = { nullptr, nullptr };
     int postStripStageCapacity_ = 0;
     std::atomic<std::shared_ptr<const RoutingPlan>> routingPlan_;
+    /// [Audio thread only] Last-applied per-track pre-gain for click-free live adjustment;
+    /// reset (unprimed) in `audioDeviceAboutToStart` so a saved pre-gain never fades in at
+    /// playback start. Offline mixdown deliberately renders without it (constant target).
+    playback_mix_helpers::PreGainRampState preGainRampState_;
 };

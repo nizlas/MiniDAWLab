@@ -37,6 +37,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -47,6 +48,30 @@ inline constexpr TrackId kInvalidTrackId = 0;
 inline constexpr float kTrackChannelVolumeUnityGain = 1.0f;
 inline constexpr float kTrackChannelFaderGainMax = 8.0f;
 inline constexpr float kTrackStereoPanCenter = 0.0f;
+
+// ---------------------------------------------------------------------------
+// Pre-gain — input trim in dB applied BEFORE the track's inserts and fader
+// ---------------------------------------------------------------------------
+// The "optional input trim/pre-gain" slot from the CHANNEL FADER ordering comment above, now
+// implemented for **Audio** rows: clip playback (and future software input monitoring) is scaled by
+// this gain BEFORE the Pre inserts, the channel fader, Post inserts and pan. Equal on all channels
+// (stereo balance preserved). Stored in dB (0.0 = unity); nondestructive: source PCM files, the
+// recorded-WAV capture point (raw device input) and waveform data are unaffected. The field lives
+// on every Track like fader/pan, but the engine only applies it in the audio-lane renderers and
+// the UI only offers it on Audio rows.
+inline constexpr float kTrackPreGainDbMin = -24.0f;
+inline constexpr float kTrackPreGainDbMax = 24.0f;
+inline constexpr float kTrackPreGainDbDefault = 0.0f;
+
+/// Repairs any stored/serialized pre-gain to a finite value in [-24, +24] dB (non-finite → 0).
+[[nodiscard]] inline float sanitizeTrackPreGainDb(const float db) noexcept
+{
+    if (!std::isfinite(db))
+    {
+        return kTrackPreGainDbDefault;
+    }
+    return juce::jlimit(kTrackPreGainDbMin, kTrackPreGainDbMax, db);
+}
 
 enum class TrackKind : std::uint8_t
 {
@@ -232,6 +257,10 @@ public:
     }
     // Linear gain at the channel-fader point (see header block above). Not clip gain or pre-gain.
     [[nodiscard]] float getChannelFaderGain() const noexcept { return channelFaderGain_; }
+    /// Pre-gain in dB (0.0 = unity), applied before Pre inserts and fader on Audio lanes only —
+    /// see the Pre-gain block above. Not persisted in the constructor: fresh rows default to 0
+    /// and load/duplication go through `withPreGainDb` / the copy constructor.
+    [[nodiscard]] float getPreGainDb() const noexcept { return preGainDb_; }
     /// If true, `PlaybackEngine` skips this track entirely (not the same as mute).
     [[nodiscard]] bool isTrackOff() const noexcept { return trackOff_; }
     /// If true, effective output gain is zero; stored fader value is unchanged.
@@ -260,6 +289,7 @@ public:
     [[nodiscard]] Track withName(juce::String name) const noexcept;
     [[nodiscard]] Track withPlacedClips(std::vector<PlacedClip> clips) const noexcept;
     [[nodiscard]] Track withChannelFaderGain(float gain) const noexcept;
+    [[nodiscard]] Track withPreGainDb(float preGainDb) const noexcept;
     [[nodiscard]] Track withTrackOff(bool off) const noexcept;
     [[nodiscard]] Track withMuted(bool muted) const noexcept;
     [[nodiscard]] Track withKind(TrackKind kind) const noexcept;
@@ -274,6 +304,7 @@ private:
     juce::String name_;
     std::vector<PlacedClip> placedClips_;
     float channelFaderGain_ = kTrackChannelVolumeUnityGain;
+    float preGainDb_ = kTrackPreGainDbDefault;
     bool trackOff_ = false;
     bool trackMuted_ = false;
     TrackKind kind_ = TrackKind::Audio;

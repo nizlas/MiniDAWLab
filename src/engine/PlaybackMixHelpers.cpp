@@ -265,6 +265,132 @@ const ExperimentalInstrumentPlaybackEntry* findExperimentalInstrumentPlaybackEnt
     return nullptr;
 }
 
+namespace
+{
+    // -----------------------------------------------------------------------
+    // Pre-gain (dB on Track → linear here). Applied BEFORE Pre inserts on audio lanes;
+    // see PreGainRampState in the header for the ramp/priming contract.
+    // -----------------------------------------------------------------------
+
+    [[nodiscard]] float trackPreGainLinear(const Track& tr) noexcept
+    {
+        const float db = tr.getPreGainDb();
+        // Exact-default fast path: unity multiplies are skipped entirely at the call sites,
+        // so a 0.0 dB track renders through the identical code path as before this feature.
+        return db == 0.0f ? 1.0f : juce::Decibels::decibelsToGain(db);
+    }
+
+    /// Loads the last-applied linear pre-gain for `trackIndex` (target when unprimed/absent)
+    /// and stores the new target. Returns the value the current block should ramp FROM.
+    [[nodiscard]] float exchangePreGainRampStart(
+        playback_mix_helpers::PreGainRampState* const ramp,
+        const int trackIndex,
+        const float targetLinear) noexcept
+    {
+        if (ramp == nullptr || trackIndex < 0
+            || trackIndex >= playback_mix_helpers::PreGainRampState::kMaxTracks)
+        {
+            return targetLinear;
+        }
+        const float prev = ramp->lastAppliedLinear[(size_t)trackIndex];
+        ramp->lastAppliedLinear[(size_t)trackIndex] = targetLinear;
+        return prev >= 0.0f ? prev : targetLinear;
+    }
+
+    /// Per-sample linear gain ramp g0 → g1 on both scratch channels (only while a live
+    /// pre-gain adjustment is settling; steady state uses the vectorized constant path).
+    void scaleStereoScratchRamped(float* const* scratchPtrs,
+                                  const int run,
+                                  const float g0,
+                                  const float g1) noexcept
+    {
+        if (scratchPtrs == nullptr || run <= 0)
+        {
+            return;
+        }
+        const float step = (g1 - g0) / (float)run;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* const d = scratchPtrs[ch];
+            if (d == nullptr)
+            {
+                continue;
+            }
+            float g = g0;
+            for (int i = 0; i < run; ++i)
+            {
+                d[i] *= g;
+                g += step;
+            }
+        }
+    }
+
+    /// Dry-path (no active inserts) variant of `addClipRunToOutputs` with a per-sample
+    /// pre-gain ramp `pre0 → pre1` folded on top of the constant fader × pan gains.
+    void addClipRunToOutputsPreGainRamped(const AudioClip& clip,
+                                          const int offInMaterial,
+                                          const int run,
+                                          const int outFrame0,
+                                          const int numOutChannels,
+                                          float* const* outputChannelData,
+                                          const float trackGain,
+                                          const float stereoPan,
+                                          const float pre0,
+                                          const float pre1) noexcept
+    {
+        if (run <= 0)
+        {
+            return;
+        }
+        const int numSourceChannels = clip.getNumChannels();
+        const juce::AudioBuffer<float>& buf = clip.getAudio();
+        const float gL = trackPanLawGainLeft(stereoPan);
+        const float gR = trackPanLawGainRight(stereoPan);
+        const float preStep = (pre1 - pre0) / (float)run;
+
+        auto addRamped = [run, pre0, preStep](float* dest, const float* src,
+                                              const float constGain) noexcept {
+            float pre = pre0;
+            for (int i = 0; i < run; ++i)
+            {
+                dest[i] += src[i] * pre * constGain;
+                pre += preStep;
+            }
+        };
+
+        if (numOutChannels == 1 && numSourceChannels == 1)
+        {
+            if (float* d = outputChannelData[0])
+            {
+                addRamped(d + outFrame0, buf.getReadPointer(0) + offInMaterial,
+                          0.5f * (gL + gR) * trackGain);
+            }
+            return;
+        }
+        for (int outChannel = 0; outChannel < numOutChannels; ++outChannel)
+        {
+            float* d = outputChannelData[outChannel];
+            if (d == nullptr)
+            {
+                continue;
+            }
+            float* const dest = d + outFrame0;
+            const bool duplicateMono = (numSourceChannels == 1 && numOutChannels >= 2
+                                        && (outChannel == 0 || outChannel == 1));
+            if (duplicateMono)
+            {
+                addRamped(dest, buf.getReadPointer(0) + offInMaterial,
+                          trackGain * ((outChannel == 0) ? gL : gR));
+            }
+            else if (outChannel < numSourceChannels)
+            {
+                addRamped(dest, buf.getReadPointer(outChannel) + offInMaterial,
+                          trackGain * ((outChannel == 0) ? gL : gR));
+            }
+        }
+    }
+} // namespace
+
 void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             const std::int64_t timelineStartAudible,
                                             const int audibleRun,
@@ -274,7 +400,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             PluginInsertHost* pluginHost,
                                             const TrackId omitClipPlaybackForTrack,
                                             const std::int64_t timelineEnd,
-                                            const int onlyTrackIndex) noexcept
+                                            const int onlyTrackIndex,
+                                            PreGainRampState* const preGainRamp) noexcept
 {
     if (audibleRun <= 0)
     {
@@ -307,6 +434,11 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
         {
             continue;
         }
+        // Pre-gain: BEFORE Pre inserts (equal on all channels; stereo balance untouched).
+        // Ramped across this segment when a live adjustment changed the target (see header).
+        const float preGainTarget = trackPreGainLinear(tr);
+        const float preGainStart = exchangePreGainRampStart(preGainRamp, ti, preGainTarget);
+        const bool preGainRamping = std::fabs(preGainStart - preGainTarget) > 1.0e-6f;
         const std::vector<PlacedClip>& lane = tr.getPlacedClips();
         const bool useInsert = pluginHost != nullptr
                                && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
@@ -333,12 +465,30 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                 jassert(off + run <= c.getNumSamples());
                 const int destFrame = destOutFrame0 + out0;
 
+                // Segment-local pre-gain ramp endpoints (constant == target when not ramping).
+                const float pre0 = preGainRamping
+                                       ? preGainStart + (preGainTarget - preGainStart)
+                                                            * ((float)out0 / (float)audibleRun)
+                                       : preGainTarget;
+                const float pre1 = preGainRamping
+                                       ? preGainStart + (preGainTarget - preGainStart)
+                                                            * ((float)(out0 + run) / (float)audibleRun)
+                                       : preGainTarget;
+
                 if (useInsert && effectiveGain > 0.0f)
                 {
                     pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
                     if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
                     {
                         copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
+                        if (preGainRamping)
+                        {
+                            scaleStereoScratchRamped(scratch, run, pre0, pre1);
+                        }
+                        else if (preGainTarget != 1.0f)
+                        {
+                            scaleStereoScratch(scratch, run, preGainTarget);
+                        }
                         pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
                         scaleStereoScratch(scratch, run, effectiveGain);
                         pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
@@ -354,10 +504,18 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                                         1.0f);
                     }
                 }
+                else if (preGainRamping)
+                {
+                    addClipRunToOutputsPreGainRamped(c, off, run, destFrame, numOutputChannels,
+                                                     outputChannelData, effectiveGain,
+                                                     tr.getStereoPan(), pre0, pre1);
+                }
                 else
                 {
-                    addClipRunToOutputs(
-                        c, off, run, destFrame, numOutputChannels, outputChannelData, effectiveGain, tr.getStereoPan());
+                    // Dry path: pre-gain folds linearly with the fader (still exactly once).
+                    addClipRunToOutputs(c, off, run, destFrame, numOutputChannels,
+                                        outputChannelData, effectiveGain * preGainTarget,
+                                        tr.getStereoPan());
                 }
             }
             t += run;
@@ -565,7 +723,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               PluginInsertHost* pluginHost,
                                               const TrackId omitClipPlaybackForTrack,
                                               const std::int64_t timelineEnd,
-                                              const int trackIndex) noexcept
+                                              const int trackIndex,
+                                              PreGainRampState* const preGainRamp) noexcept
 {
     if (audibleRun <= 0 || stageL == nullptr || stageR == nullptr || trackIndex < 0
         || trackIndex >= sessionSnap.getNumTracks())
@@ -593,6 +752,12 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
         return;
     }
 
+    // Pre-gain: BEFORE Pre inserts (equal on all channels; stereo balance untouched).
+    // Ramped across this segment when a live adjustment changed the target (see header).
+    const float preGainTarget = trackPreGainLinear(tr);
+    const float preGainStart = exchangePreGainRampStart(preGainRamp, trackIndex, preGainTarget);
+    const bool preGainRamping = std::fabs(preGainStart - preGainTarget) > 1.0e-6f;
+
     const std::vector<PlacedClip>& lane = tr.getPlacedClips();
     const bool useInsert
         = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
@@ -619,12 +784,30 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
             jassert(off + run <= c.getNumSamples());
             const int destFrame = destOutFrame0 + out0;
 
+            // Segment-local pre-gain ramp endpoints (constant == target when not ramping).
+            const float pre0 = preGainRamping
+                                   ? preGainStart + (preGainTarget - preGainStart)
+                                                        * ((float)out0 / (float)audibleRun)
+                                   : preGainTarget;
+            const float pre1 = preGainRamping
+                                   ? preGainStart + (preGainTarget - preGainStart)
+                                                        * ((float)(out0 + run) / (float)audibleRun)
+                                   : preGainTarget;
+
             if (useInsert && effectiveGain > 0.0f)
             {
                 pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
                 if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
                 {
                     copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
+                    if (preGainRamping)
+                    {
+                        scaleStereoScratchRamped(scratch, run, pre0, pre1);
+                    }
+                    else if (preGainTarget != 1.0f)
+                    {
+                        scaleStereoScratch(scratch, run, preGainTarget);
+                    }
                     pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
                     scaleStereoScratch(scratch, run, effectiveGain);
                     pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
@@ -636,10 +819,17 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                         stageL, stageR, scratch[0], scratch[1], destFrame, run);
                 }
             }
+            else if (preGainRamping)
+            {
+                float* const stagePtrs[2] = { stageL, stageR };
+                addClipRunToOutputsPreGainRamped(c, off, run, destFrame, 2, stagePtrs,
+                                                 effectiveGain, tr.getStereoPan(), pre0, pre1);
+            }
             else
             {
-                addClipRunToStereoScratch(
-                    c, off, run, destFrame, stageL, stageR, effectiveGain, tr.getStereoPan());
+                // Dry path: pre-gain folds linearly with the fader (still exactly once).
+                addClipRunToStereoScratch(c, off, run, destFrame, stageL, stageR,
+                                          effectiveGain * preGainTarget, tr.getStereoPan());
             }
         }
         t += run;

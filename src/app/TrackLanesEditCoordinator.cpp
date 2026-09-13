@@ -680,6 +680,21 @@ void TrackLanesEditCoordinator::install()
             });
     });
 
+    // Pre-gain (audio rows): one text commit / one Ctrl+click reset = one undo step. A no-op
+    // value (setter returns false) records nothing, so repeated commits of the same number
+    // do not pollute the undo stack.
+    inspectorView_.setPreGainHandler([this](const TrackId trackId, const float preGainDb) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return;
+        }
+        callbacks_.executeUndoableSessionEdit(
+            "Set pre-gain",
+            [this, trackId, preGainDb]() -> bool {
+                return session_.setTrackPreGainDb(trackId, preGainDb);
+            });
+    });
+
     inspectorView_.setMidiOutputChannelHandler([this](const TrackId trackId, const int channel) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {

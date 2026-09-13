@@ -1209,6 +1209,34 @@ void Session::setTrackChannelFaderGain(const TrackId trackId, float linearGain) 
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+bool Session::setTrackPreGainDb(const TrackId trackId, const float preGainDb) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return false;
+    }
+    const float db = sanitizeTrackPreGainDb(preGainDb);
+    if (std::fabs((double)(db - current->getTrack(idx).getPreGainDb())) < 1.0e-6)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackPreGainDb(*current, trackId, db);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
 void Session::setTrackStereoPan(const TrackId trackId, const float stereoPan) noexcept
 {
     if (trackId == kInvalidTrackId)
@@ -1628,6 +1656,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.id = t.getId();
         tr.name = (t.getKind() == TrackKind::Master) ? juce::String(kMasterTrackDisplayName) : t.getName();
         tr.channelFaderGain = t.getChannelFaderGain();
+        tr.preGainDb = t.getPreGainDb();
         tr.stereoPan = t.getStereoPan();
         tr.off = (t.getKind() == TrackKind::Master) ? false : t.isTrackOff();
         tr.muted = t.isMuted();
@@ -2059,6 +2088,12 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             std::move(sends),
             trDto.midiOutputChannel,
             (tk == TrackKind::Midi) ? trDto.midiDestinationTrackId : kInvalidTrackId);
+        // Pre-gain (v22) travels via the sanitizing COW helper instead of a positional ctor arg —
+        // the ctor arg list has already silently dropped a new field once (see Track.h).
+        if (trDto.preGainDb != kTrackPreGainDbDefault)
+        {
+            built.back() = built.back().withPreGainDb(trDto.preGainDb);
+        }
         appendProjectLoadDiagnosticLine(
             "apply: built track id=" + juce::String((juce::int64)trDto.id) + " kind="
             + trDto.kind + " name=\"" + trackName + "\" clips=" + juce::String((int)trDto.clips.size())

@@ -3,6 +3,7 @@
 #include "domain/Track.h"
 #include "engine/RoutingPlan.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -17,6 +18,29 @@ struct ExperimentalInstrumentPlaybackSnapshot;
 
 namespace playback_mix_helpers
 {
+
+// ---------------------------------------------------------------------------
+// Pre-gain ramp state — click-free LIVE pre-gain adjustment (see Track::getPreGainDb)
+// ---------------------------------------------------------------------------
+// The audio-lane renderers scale the clip signal by the track's pre-gain (dB → linear) BEFORE the
+// Pre inserts. A live UI change would otherwise step the gain at a block boundary (audible click),
+// so the engine hands the renderers this fixed-size, allocation-free array of the LAST-APPLIED
+// linear pre-gain per track index. When the snapshot's target differs from the last-applied value,
+// the renderer ramps linearly across the current block segment and stores the target. `-1` marks
+// "not yet primed": the first render after prepare/restart applies the target directly — a saved
+// nonzero pre-gain therefore never fades in at playback start. Offline mixdown passes `nullptr`
+// (the value cannot change mid-render; the target applies as a constant from the first sample).
+// Audio-thread contract: plain float array, no locks, no allocation; owned by `PlaybackEngine`
+// and touched only from the audio callback (or the gated offline render).
+struct PreGainRampState
+{
+    static constexpr int kMaxTracks = 1024;
+    std::array<float, kMaxTracks> lastAppliedLinear;
+
+    PreGainRampState() noexcept { reset(); }
+    /// [Prepare/restart] All tracks back to "unprimed" (next render jumps straight to target).
+    void reset() noexcept { lastAppliedLinear.fill(-1.0f); }
+};
 
 /// Last `TrackKind::Master` row in timeline order (canonical Stereo Out bus).
 [[nodiscard]] const Track* findCanonicalMasterTrack(const SessionSnapshot& snap) noexcept;
@@ -73,7 +97,8 @@ void mixExperimentalInstrumentAfterTracks(ExperimentalInstrumentHost* host,
     TrackId trackId) noexcept;
 
 /// Same clip summing / insert path as `PlaybackEngine::audioDeviceIOCallbackWithContext` `renderRun`
-/// (timeline slice → device frames starting at `destOutFrame0`).
+/// (timeline slice → device frames starting at `destOutFrame0`). Audio lanes apply the track's
+/// pre-gain BEFORE Pre inserts (ramped via `preGainRamp` when non-null; see `PreGainRampState`).
 void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             std::int64_t timelineStartAudible,
                                             int audibleRun,
@@ -83,7 +108,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             PluginInsertHost* pluginHost,
                                             TrackId omitClipPlaybackForTrack,
                                             std::int64_t timelineEnd,
-                                            int onlyTrackIndex = -1) noexcept;
+                                            int onlyTrackIndex = -1,
+                                            PreGainRampState* preGainRamp = nullptr) noexcept;
 
 /// [Audio thread] Apply one bus row's channel strip (Pre → fader/mute/off → Post → pan) from stereo
 /// `busScratchStereo` (`[0]`/ `[1]` = L/R) into `outputChannelData` at `destOutFrame0` for `numSamples`.
@@ -106,7 +132,8 @@ void addPostStripStageToBus(float* stageL,
                             int numSamples,
                             float gain) noexcept;
 
-/// One audio lane: clips → Pre → fader/mute/off → Post → pan → `stageL`/`stageR` (accumulated).
+/// One audio lane: clips → pre-gain → Pre → fader/mute/off → Post → pan → `stageL`/`stageR`
+/// (accumulated). Pre-gain is ramped via `preGainRamp` when non-null (see `PreGainRampState`).
 void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,
                                               std::int64_t timelineStartAudible,
                                               int audibleRun,
@@ -116,7 +143,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               PluginInsertHost* pluginHost,
                                               TrackId omitClipPlaybackForTrack,
                                               std::int64_t timelineEnd,
-                                              int trackIndex) noexcept;
+                                              int trackIndex,
+                                              PreGainRampState* preGainRamp = nullptr) noexcept;
 
 /// Instrument synth → Pre → fader/mute/off → Post → pan into `stageL`/`stageR` (replaces stage segment).
 /// P2: `auditionHost` (nullable) is the track's Secondary AUDITION instance — mixed into the SAME

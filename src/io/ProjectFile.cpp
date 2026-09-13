@@ -158,6 +158,12 @@ namespace
         {
             to->setProperty("pan", (double)t.stereoPan);
         }
+        constexpr double kPreGainDbOmitEpsilon = 1.0e-6;
+        if (fileVersion >= 22 && std::fabs((double)t.preGainDb) > kPreGainDbOmitEpsilon)
+        {
+            // Absent key = unity (0.0 dB), so default-valued tracks keep pre-v22 byte layout.
+            to->setProperty("preGainDb", (double)t.preGainDb);
+        }
         if (t.off)
         {
             to->setProperty("off", true);
@@ -1926,6 +1932,17 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             if (pv.isDouble() || pv.isInt() || pv.isInt64())
             {
                 trk.stereoPan = sanitizeTrackStereoPan((double)pv);
+            }
+        }
+        trk.preGainDb = kTrackPreGainDbDefault;
+        if (ver >= 22)
+        {
+            // Absent key (and every pre-v22 file) = 0.0 dB unity, preserving the old sound.
+            // Present values are repaired like other mixer fields: non-finite → 0, else clamped.
+            const juce::var& pgv = tv.getProperty("preGainDb", {});
+            if (pgv.isDouble() || pgv.isInt() || pgv.isInt64())
+            {
+                trk.preGainDb = sanitizeTrackPreGainDb((float)(double)pgv);
             }
         }
         {
