@@ -831,6 +831,10 @@ void InstrumentTrackController::clearExperimentalInstrumentStateForProjectLoad()
     drumLabels_.clear();
     experimentalDomainTrackId_ = kInvalidTrackId;
     persistedPluginVersion_.clear();
+    persistedGenericVst3DescriptorValid_ = false;
+    persistedGenericVst3Descriptor_ = {};
+    persistedPrimaryBundlePath_.clear();
+    persistedPrimaryStateBase64_.clear();
     hasProxyMetadata_ = false;
     proxyMetadata_ = {};
     proxyUpdateMode_ = "auto";
@@ -868,6 +872,10 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     // coordinator confirms the full user Save reached disk (`noteMainProjectSavePersisted`).
     const std::uint64_t revisionReadBeforeStateCapture
         = (host_ != nullptr && host_->hasInstrument()) ? host_->getPrimarySemanticRevision() : 0;
+    // True only when the DTO's state blob is a fresh live capture from the loaded plugin (not the
+    // retained loaded-from-project fallback below) — pairing evidence must never be recorded for
+    // a blob the live plugin did not produce in this build.
+    bool primaryStateIsLiveCapture = false;
     if (kind == "GenericVst3" && host_ != nullptr)
     {
         dto.requiredKitName.clear();
@@ -911,6 +919,47 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
             {
                 stateCaptureFailure = "getStateInformation returned empty or zero bytes";
             }
+        }
+        // Missing-Primary preservation (steering §12): everything above came from the LIVE host,
+        // which knows nothing exactly when the Primary is unavailable on this machine (failed
+        // project autoload) or its state capture failed. Fall back per-field to the retained
+        // loaded-from-project copies so an unavailable host never replaces valid saved Primary
+        // identity/state with empty runtime values — the A→B→A collaboration round-trip. A loaded
+        // plugin still wins every field it actually provided; Secondary data is never consulted.
+        const bool liveStateCaptureNonEmpty = dto.pluginStateBase64.isNotEmpty();
+        juce::String retainedFallbackFields;
+        if (!dto.hasGenericVst3Descriptor && persistedGenericVst3DescriptorValid_)
+        {
+            dto.hasGenericVst3Descriptor = true;
+            dto.genericVst3Descriptor = persistedGenericVst3Descriptor_;
+            retainedFallbackFields << "descriptor ";
+        }
+        if (dto.pluginBundlePath.isEmpty() && persistedPrimaryBundlePath_.isNotEmpty())
+        {
+            dto.pluginBundlePath = persistedPrimaryBundlePath_;
+            retainedFallbackFields << "bundlePath ";
+        }
+        if (dto.pluginStateBase64.isEmpty() && persistedPrimaryStateBase64_.isNotEmpty())
+        {
+            dto.pluginStateBase64 = persistedPrimaryStateBase64_;
+            retainedFallbackFields << "stateBlob ";
+        }
+        primaryStateIsLiveCapture = liveStateCaptureNonEmpty;
+        if (retainedFallbackFields.isNotEmpty())
+        {
+            appendProjectSaveDiagnosticLine(
+                "save: GenericVst3 retained-Primary fallback trackId=" + juce::String((juce::int64)dto.trackId)
+                + " fields=[ " + retainedFallbackFields + "] (plugin unavailable or capture empty; "
+                + "loaded-from-project values preserved instead of empty runtime values)");
+        }
+        else if (dto.pluginWasLoadedOnSave && dto.hasGenericVst3Descriptor && liveStateCaptureNonEmpty)
+        {
+            // Fully live capture: refresh the retained copies so they always hold the last
+            // known-good Primary data for later saves in this same session.
+            persistedGenericVst3DescriptorValid_ = true;
+            persistedGenericVst3Descriptor_ = dto.genericVst3Descriptor;
+            persistedPrimaryBundlePath_ = dto.pluginBundlePath;
+            persistedPrimaryStateBase64_ = dto.pluginStateBase64;
         }
         appendProjectSaveDiagnosticLine(
             "save: GenericVst3 controller trackId=" + juce::String((juce::int64)dto.trackId) + " name=\""
@@ -967,7 +1016,13 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     }
     if (host_ != nullptr)
     {
-        dto.pluginBundlePath = host_->getLastLoadedVst3OriginalPath();
+        // GenericVst3 already resolved its bundle path above (live value plus the retained
+        // loaded-from-project fallback) — re-reading the live host here would clobber the
+        // fallback with an empty string exactly when the Primary is unavailable.
+        if (kind != "GenericVst3")
+        {
+            dto.pluginBundlePath = host_->getLastLoadedVst3OriginalPath();
+        }
         dto.pluginWasLoadedOnSave = host_->hasInstrument();
         if (kind != "GenericVst3" && dto.pluginWasLoadedOnSave)
         {
@@ -985,8 +1040,13 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     // P1 first-generation pairing: a live blob was captured into this DTO — remember the
     // revision read together with it as the pairing candidate (promoted only after the
     // coordinator confirms a successful full user Save; autosave/undo builds never promote).
+    // For GenericVst3 the blob must additionally be a fresh live capture: the retained
+    // loaded-from-project fallback above can place a nonempty blob in the DTO while the live
+    // plugin produced nothing this build (unavailable or capture failure) — recording pairing
+    // evidence for such a blob could forge a revision match it never had.
     const bool liveBlobCapturedThisBuild
-        = host_ != nullptr && host_->hasInstrument() && dto.pluginStateBase64.isNotEmpty();
+        = host_ != nullptr && host_->hasInstrument() && dto.pluginStateBase64.isNotEmpty()
+          && (kind != "GenericVst3" || primaryStateIsLiveCapture);
     if (liveBlobCapturedThisBuild)
     {
         savedPrimaryBlob_.recordCandidateFromBlobCapture(revisionReadBeforeStateCapture);
@@ -1359,6 +1419,16 @@ void InstrumentTrackController::restoreExperimentalInstrumentSingleProjectRow(
         pendingGenericVst3DescriptorValid_ = chosen.hasGenericVst3Descriptor;
         pendingProjectGenericVst3Autoload_
             = chosen.hasGenericVst3Descriptor || chosen.pluginWasLoadedOnSave || chosen.pluginBundlePath.isNotEmpty();
+        // Retain the saved Primary identity/state beyond the one-shot autoload attempt: the
+        // pending fields above are consumed (cleared) by `runPendingGenericVst3ProjectAutoload`
+        // even when instantiation fails, and the save DTO builder otherwise reads only the live
+        // host — which is empty exactly when the plugin is unavailable. Without these copies a
+        // Save on a machine lacking the plugin silently strips the descriptor, bundle path and
+        // state blob from the project file (the A→B→A collaboration round-trip fault).
+        persistedGenericVst3DescriptorValid_ = chosen.hasGenericVst3Descriptor;
+        persistedGenericVst3Descriptor_ = chosen.genericVst3Descriptor;
+        persistedPrimaryBundlePath_ = chosen.pluginBundlePath;
+        persistedPrimaryStateBase64_ = chosen.pluginStateBase64;
     }
 
     drumLabels_.clear();

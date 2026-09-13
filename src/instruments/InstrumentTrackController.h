@@ -691,6 +691,17 @@ private:
     /// plugin's fresh version and falls back to this when no plugin is loaded, so the persisted
     /// version survives save-without-plugin round-trips. Empty = unknown.
     juce::String persistedPluginVersion_;
+    /// Retained Primary identity/state as loaded from the project (missing-Primary round-trip,
+    /// steering §12): the save DTO builder falls back to these when the Primary is NOT loaded at
+    /// save time, so a machine without the plugin can edit and Save/Save As without replacing the
+    /// saved descriptor, bundle path or last successfully saved state blob with empty runtime
+    /// values. `mutable` for the same reason as `savedPrimaryBlob_`: the const save DTO builder
+    /// refreshes them from the live plugin at capture time, so they always hold the last
+    /// known-good Primary data. Cleared on project replacement; never populated from Secondary.
+    mutable bool persistedGenericVst3DescriptorValid_ = false;
+    mutable ProjectFileGenericVst3DescriptorV1 persistedGenericVst3Descriptor_;
+    mutable juce::String persistedPrimaryBundlePath_;
+    mutable juce::String persistedPrimaryStateBase64_;
     /// Published Primary proxy metadata (absent ⇒ no proxy). Opaque round-trip in P1B — no render
     /// engine consumes it yet; P1F publication will own updates.
     bool hasProxyMetadata_ = false;
