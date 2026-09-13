@@ -139,6 +139,25 @@ target_compile_definitions(MiniDAWLab
         JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:MiniDAWLab,JUCE_VERSION>"
 )
 
+# -----------------------------------------------------------------------------
+# Native ASIO backend (Windows). JUCE's ASIO device type needs the Steinberg ASIO SDK headers
+# (iasiodrv.h et al). The SDK's license does not allow redistributing it in this repository, so
+# it is expected locally at external_tools/asiosdk/ (gitignored) — see the README.txt there for
+# the download link. When the headers are absent the app still builds, just without the ASIO
+# entry in the audio-settings backend list (WASAPI/DirectSound remain). Only SDK *headers* are
+# used; the actual device drivers (RME/Behringer/…) are the user's own installed drivers and
+# are never bundled.
+set(MINIDAW_ASIO_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external_tools/asiosdk"
+    CACHE PATH "Directory holding the Steinberg ASIO SDK (must contain common/iasiodrv.h)")
+if (WIN32 AND EXISTS "${MINIDAW_ASIO_SDK_DIR}/common/iasiodrv.h")
+    target_compile_definitions(MiniDAWLab PRIVATE JUCE_ASIO=1)
+    target_include_directories(MiniDAWLab PRIVATE "${MINIDAW_ASIO_SDK_DIR}/common")
+    message(STATUS "MiniDAWLab: ASIO backend ENABLED (SDK: ${MINIDAW_ASIO_SDK_DIR})")
+elseif (WIN32)
+    message(STATUS "MiniDAWLab: ASIO backend DISABLED — Steinberg ASIO SDK not found at "
+                   "${MINIDAW_ASIO_SDK_DIR}/common/iasiodrv.h (see external_tools/asiosdk/README.txt)")
+endif()
+
 target_link_libraries(MiniDAWLab
     PRIVATE
         MiniDAWLabToolStripIcons

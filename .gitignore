@@ -5,6 +5,11 @@ dist/
 # Optional local LAME binary for MP3 post-build copy (see CMakeLists.txt + external_tools/lame/README.txt)
 external_tools/lame/lame.exe
 
+# Steinberg ASIO SDK: downloaded locally to enable the native ASIO backend; its license does not
+# allow redistribution here (see CMakeLists.txt + external_tools/asiosdk/README.txt, which stays).
+external_tools/asiosdk/**
+!external_tools/asiosdk/README.txt
+
 # Prerequisites
 *.d
 
