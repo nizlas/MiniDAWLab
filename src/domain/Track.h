@@ -73,6 +73,83 @@ inline constexpr float kTrackPreGainDbDefault = 0.0f;
     return juce::jlimit(kTrackPreGainDbMin, kTrackPreGainDbMax, db);
 }
 
+// ---------------------------------------------------------------------------
+// Audio input assignment — which device input(s) an Audio track records/monitors
+// ---------------------------------------------------------------------------
+// Stored per track in the project using PHYSICAL device input channel indices (the numbering the
+// user sees in the device's channel names), never positions in the audio callback's packed
+// active-channel array — the engine maps physical → active position per block. The assignment is
+// machine-portable data: when the referenced physical channel is not present/enabled on the
+// current device, the assignment is *unresolved* — the track records/monitors silence and the UI
+// shows the unavailability, but the stored channels are preserved so returning to the original
+// device resolves them again. Never silently substituted with a different physical input.
+enum class TrackInputKind : std::uint8_t
+{
+    /// Legacy-compatible default (missing field in pre-v23 projects and fresh tracks): resolves at
+    /// runtime to the FIRST active device input as a mono source — exactly the pre-input-selection
+    /// capture behavior (`inputChannelData[0]`). Physical channel fields are unused (-1).
+    DefaultFirstInput,
+    /// No input: the track records/monitors silence by explicit user choice.
+    None,
+    /// One physical input channel as a mono source (`physicalChannelA`).
+    Mono,
+    /// Adjacent physical pair (`physicalChannelA` = left, `physicalChannelB` = right).
+    StereoPair,
+};
+
+/// Upper bound for sanitizing stored physical channel indices (not a device capability claim).
+inline constexpr int kTrackInputPhysicalChannelMax = 255;
+
+struct TrackInputAssignment
+{
+    TrackInputKind kind = TrackInputKind::DefaultFirstInput;
+    /// Mono: the source channel. StereoPair: left channel. Unused (-1) otherwise.
+    int physicalChannelA = -1;
+    /// StereoPair: right channel. Unused (-1) otherwise.
+    int physicalChannelB = -1;
+
+    [[nodiscard]] bool operator==(const TrackInputAssignment& o) const noexcept
+    {
+        return kind == o.kind && physicalChannelA == o.physicalChannelA
+               && physicalChannelB == o.physicalChannelB;
+    }
+    [[nodiscard]] bool operator!=(const TrackInputAssignment& o) const noexcept
+    {
+        return !(*this == o);
+    }
+};
+
+/// Repairs any stored/serialized assignment: out-of-range or inconsistent channel indices fall
+/// back to the legacy-compatible default (never to a *different* concrete physical input).
+[[nodiscard]] inline TrackInputAssignment
+sanitizeTrackInputAssignment(TrackInputAssignment a) noexcept
+{
+    const auto channelOk = [](const int ch) noexcept {
+        return ch >= 0 && ch <= kTrackInputPhysicalChannelMax;
+    };
+    switch (a.kind)
+    {
+    case TrackInputKind::None:
+        return { TrackInputKind::None, -1, -1 };
+    case TrackInputKind::Mono:
+        if (!channelOk(a.physicalChannelA))
+        {
+            return {};
+        }
+        return { TrackInputKind::Mono, a.physicalChannelA, -1 };
+    case TrackInputKind::StereoPair:
+        if (!channelOk(a.physicalChannelA) || !channelOk(a.physicalChannelB)
+            || a.physicalChannelA == a.physicalChannelB)
+        {
+            return {};
+        }
+        return { TrackInputKind::StereoPair, a.physicalChannelA, a.physicalChannelB };
+    case TrackInputKind::DefaultFirstInput:
+    default:
+        return {};
+    }
+}
+
 enum class TrackKind : std::uint8_t
 {
     Audio,
@@ -261,6 +338,13 @@ public:
     /// see the Pre-gain block above. Not persisted in the constructor: fresh rows default to 0
     /// and load/duplication go through `withPreGainDb` / the copy constructor.
     [[nodiscard]] float getPreGainDb() const noexcept { return preGainDb_; }
+    /// Audio input assignment (recording + monitoring source) — see the block above `TrackKind`.
+    /// Like pre-gain, not a constructor parameter: fresh rows keep the legacy-compatible default
+    /// and load/duplication go through `withInputAssignment` / the copy constructor.
+    [[nodiscard]] const TrackInputAssignment& getInputAssignment() const noexcept
+    {
+        return inputAssignment_;
+    }
     /// If true, `PlaybackEngine` skips this track entirely (not the same as mute).
     [[nodiscard]] bool isTrackOff() const noexcept { return trackOff_; }
     /// If true, effective output gain is zero; stored fader value is unchanged.
@@ -290,6 +374,7 @@ public:
     [[nodiscard]] Track withPlacedClips(std::vector<PlacedClip> clips) const noexcept;
     [[nodiscard]] Track withChannelFaderGain(float gain) const noexcept;
     [[nodiscard]] Track withPreGainDb(float preGainDb) const noexcept;
+    [[nodiscard]] Track withInputAssignment(TrackInputAssignment assignment) const noexcept;
     [[nodiscard]] Track withTrackOff(bool off) const noexcept;
     [[nodiscard]] Track withMuted(bool muted) const noexcept;
     [[nodiscard]] Track withKind(TrackKind kind) const noexcept;
@@ -305,6 +390,7 @@ private:
     std::vector<PlacedClip> placedClips_;
     float channelFaderGain_ = kTrackChannelVolumeUnityGain;
     float preGainDb_ = kTrackPreGainDbDefault;
+    TrackInputAssignment inputAssignment_{};
     bool trackOff_ = false;
     bool trackMuted_ = false;
     TrackKind kind_ = TrackKind::Audio;

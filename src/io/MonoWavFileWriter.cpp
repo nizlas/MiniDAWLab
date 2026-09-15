@@ -66,3 +66,58 @@ juce::Result MonoWavFileWriter::writeMono24BitWavSegment(const juce::File& outpu
 
     return juce::Result::ok();
 }
+
+juce::Result MonoWavFileWriter::writeMulti24BitWavSegment(const juce::File& outputFile,
+                                                          const float* const* channels,
+                                                          const int numChannels,
+                                                          const int numFrames,
+                                                          const double sampleRate)
+{
+    if (outputFile == juce::File())
+        return juce::Result::fail("Invalid WAV path");
+    if (channels == nullptr || numChannels < 1 || numChannels > 2 || numFrames <= 0)
+        return juce::Result::fail("No samples to write");
+    for (int c = 0; c < numChannels; ++c)
+    {
+        if (channels[c] == nullptr)
+            return juce::Result::fail("No samples to write");
+    }
+    if (!std::isfinite(sampleRate) || sampleRate <= 0.0)
+        return juce::Result::fail("Invalid sample rate");
+
+    auto out = std::make_unique<juce::FileOutputStream>(outputFile);
+    if (out->failedToOpen())
+        return juce::Result::fail("Could not open file for writing: " + outputFile.getFullPathName());
+
+    std::unique_ptr<juce::AudioFormatWriter> wr(getWav().createWriterFor(out.release(),
+                                                                         sampleRate,
+                                                                         static_cast<unsigned int>(numChannels),
+                                                                         kBitsPerSample,
+                                                                         juce::StringPairArray(),
+                                                                         0));
+    if (wr == nullptr || wr->getBitsPerSample() != kBitsPerSample)
+        return juce::Result::fail("Could not create 24-bit WAV writer");
+
+    juce::AudioBuffer<float> scratch(numChannels, kChunk);
+    scratch.clear();
+    int offset = 0;
+    int remaining = numFrames;
+
+    while (remaining > 0)
+    {
+        const int chunk = juce::jmin(kChunk, remaining);
+        for (int c = 0; c < numChannels; ++c)
+        {
+            scratch.copyFrom(c, 0, channels[c] + offset, chunk);
+        }
+        if (!wr->writeFromAudioSampleBuffer(scratch, 0, chunk))
+            return juce::Result::fail("Disk write failed while writing WAV slice");
+        offset += chunk;
+        remaining -= chunk;
+    }
+
+    if (!wr->flush())
+        return juce::Result::fail("WAV flush failed");
+
+    return juce::Result::ok();
+}

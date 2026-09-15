@@ -193,6 +193,58 @@ namespace
         g.drawRoundedRectangle(front, rad, 1.1f);
     }
 
+    /** Input-monitoring speaker glyph: cabinet + cone triangle + one sound arc, fully drawn
+        (no font-dependent Unicode), tinted per enabled/on state by the caller. */
+    void drawMonitorSpeakerGlyph(juce::Graphics& g,
+                                 juce::Rectangle<float> glyphArea,
+                                 juce::Colour glyphColour)
+    {
+        if (glyphArea.getWidth() < 5.0f || glyphArea.getHeight() < 6.0f)
+        {
+            return;
+        }
+        const auto a = glyphArea.reduced(1.0f);
+        const float w = a.getWidth();
+        const float h = a.getHeight();
+        if (w < 4.0f || h < 4.0f)
+        {
+            return;
+        }
+
+        g.setColour(glyphColour);
+
+        // Cabinet (small rect, left) + cone (triangle opening right), drawn as one filled path.
+        const float boxW = w * 0.24f;
+        const float boxH = h * 0.38f;
+        const float boxX = a.getX();
+        const float boxY = a.getCentreY() - boxH * 0.5f;
+        const float coneX = boxX + boxW;
+        const float coneRight = a.getX() + w * 0.62f;
+        const float coneHalf = h * 0.42f;
+
+        juce::Path speaker;
+        speaker.addRectangle(boxX, boxY, boxW, boxH);
+        speaker.startNewSubPath(coneX, boxY);
+        speaker.lineTo(coneRight, a.getCentreY() - coneHalf);
+        speaker.lineTo(coneRight, a.getCentreY() + coneHalf);
+        speaker.lineTo(coneX, boxY + boxH);
+        speaker.closeSubPath();
+        g.fillPath(speaker);
+
+        // One sound arc to the right of the cone.
+        const float stroke = juce::jlimit(1.1f, 1.6f, w * 0.12f);
+        juce::Path arc;
+        arc.addCentredArc(coneRight + w * 0.10f,
+                          a.getCentreY(),
+                          w * 0.22f,
+                          h * 0.34f,
+                          0.0f,
+                          juce::degreesToRadians(20.0f),
+                          juce::degreesToRadians(160.0f),
+                          true);
+        g.strokePath(arc, juce::PathStrokeType(stroke));
+    }
+
     [[nodiscard]] int headerMinimumRowHeightPxForNameOnly(const bool hasSubtitle) noexcept
     {
         const int nameBlock = hasSubtitle ? kHeaderNameBlockWithSubtitlePx : kHeaderNameBlockTitleOnlyPx;
@@ -307,6 +359,16 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
     mu.cellBounds = getMuteButtonBounds();
     specs.push_back(std::move(mu));
 
+    if (hasMonitorCell())
+    {
+        TrackHeaderStripButtonSpec mo{};
+        mo.kind = TrackHeaderButtonKind::Monitor;
+        mo.enabled = callbacks_.onToggleMonitor != nullptr && m.monitorInteractable;
+        mo.monitorActive = m.monitorEnabled;
+        mo.cellBounds = getMonitorButtonBounds();
+        specs.push_back(std::move(mo));
+    }
+
     TrackHeaderStripButtonSpec a{};
     a.kind = TrackHeaderButtonKind::Arm;
     a.enabled = callbacks_.onToggleArm != nullptr && m.armInteractable;
@@ -409,6 +471,31 @@ void TrackHeaderView::drawStripControlButton(juce::Graphics& g,
         }
         break;
 
+    case TrackHeaderButtonKind::Monitor:
+        // Input monitoring: orange body while monitoring is ON; neutral grey (still clickable)
+        // while OFF — same face/hover conventions as the Mute/Arm cells.
+        if (spec.enabled)
+        {
+            drawStandardStripButtonFace(g,
+                                        rf,
+                                        spec.monitorActive ? juce::Colour(0xffe07b18)
+                                                           : juce::Colour(0xff5a5858),
+                                        ctlEdgeNeutral,
+                                        showHoverBrighten);
+            drawMonitorSpeakerGlyph(g,
+                                    nonLetterGlyphAreaFromSquareBodyPx(bodyPx),
+                                    spec.monitorActive ? juce::Colour(0xff141414)
+                                                       : juce::Colour(0xffeaeaea));
+        }
+        else
+        {
+            drawStandardStripButtonFace(g, rf, juce::Colour(0xff3e3e3e), edgeInactiveStroke, false);
+            drawMonitorSpeakerGlyph(g,
+                                    nonLetterGlyphAreaFromSquareBodyPx(bodyPx),
+                                    juce::Colour(0xff7a7a7a));
+        }
+        break;
+
     case TrackHeaderButtonKind::Arm:
         if (spec.enabled)
         {
@@ -488,6 +575,13 @@ bool TrackHeaderView::hasAlternativesCell() const noexcept
            && m.instrumentAlternativesAvailable;
 }
 
+bool TrackHeaderView::hasMonitorCell() const noexcept
+{
+    const auto m = modelProvider_();
+    return m.showRecordAndPowerStripCells && callbacks_.onToggleMonitor != nullptr
+           && m.monitorAvailable;
+}
+
 int TrackHeaderView::computeRightStripCellCount() const noexcept
 {
     const auto m = modelProvider_();
@@ -495,10 +589,10 @@ int TrackHeaderView::computeRightStripCellCount() const noexcept
     {
         return 1;
     }
-    // [Instrument?][Power][Mute][Arm] — the P2 Alternatives button is NOT a strip cell: it is a
-    // smaller standalone button anchored at the header's physical bottom-left corner
-    // (getAlternativesButtonBounds).
-    return 3 + (hasInstrumentEditorCell() ? 1 : 0);
+    // [Instrument?][Power][Mute][Monitor?][Arm] — the P2 Alternatives button is NOT a strip cell:
+    // it is a smaller standalone button anchored at the header's physical bottom-left corner
+    // (getAlternativesButtonBounds). Monitor appears on audio rows only (next to Arm).
+    return 3 + (hasInstrumentEditorCell() ? 1 : 0) + (hasMonitorCell() ? 1 : 0);
 }
 
 TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout() const noexcept
@@ -578,9 +672,9 @@ juce::Rectangle<int> TrackHeaderView::getRightControlsStripBounds() const noexce
     return computeHeaderContentLayout().controlStripBounds;
 }
 
-// Strip cell order (left to right, the optional cell collapses without gaps):
-//   [InstrumentEditor?][Power][Mute][Arm]     (showRecordAndPowerStripCells)
-//   [Mute]                                    (otherwise)
+// Strip cell order (left to right, optional cells collapse without gaps):
+//   [InstrumentEditor?][Power][Mute][Monitor?][Arm]   (showRecordAndPowerStripCells)
+//   [Mute]                                            (otherwise)
 // (The P2 Alternatives button is standalone at the header's bottom-left — not a strip cell.)
 juce::Rectangle<int> TrackHeaderView::stripCellBoundsAtIndex(int const index) const noexcept
 {
@@ -593,13 +687,23 @@ juce::Rectangle<int> TrackHeaderView::stripCellBoundsAtIndex(int const index) co
     return s.removeFromLeft(kStripControlCellWidthPx);
 }
 
+juce::Rectangle<int> TrackHeaderView::getMonitorButtonBounds() const noexcept
+{
+    if (!hasMonitorCell())
+    {
+        return {};
+    }
+    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 2);
+}
+
 juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
 {
     if (!modelProvider_().showRecordAndPowerStripCells)
     {
         return {};
     }
-    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 2);
+    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + (hasMonitorCell() ? 1 : 0)
+                                  + 2);
 }
 
 juce::Rectangle<int> TrackHeaderView::getMuteButtonBounds() const noexcept
@@ -663,9 +767,10 @@ void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) n
     auto const specs = buildStripControlSpecs();
     std::optional<TrackHeaderButtonKind> next;
 
-    constexpr std::array<TrackHeaderButtonKind, 5> hitPrioritiesRightToLeft{{
+    constexpr std::array<TrackHeaderButtonKind, 6> hitPrioritiesRightToLeft{{
         TrackHeaderButtonKind::Alternatives,
         TrackHeaderButtonKind::Arm,
+        TrackHeaderButtonKind::Monitor,
         TrackHeaderButtonKind::Mute,
         TrackHeaderButtonKind::Power,
         TrackHeaderButtonKind::InstrumentEditor,
@@ -771,12 +876,18 @@ void TrackHeaderView::patchRenameCallbacks(std::function<bool()> canBeginRenameT
 
 juce::String TrackHeaderView::getTooltip()
 {
-    // Only the P2 "Instrument alternatives" cell has a tooltip (hover state is kept current by
-    // mouseMove via updateStripHoverFromPosition).
+    // Strip-cell tooltips (hover state is kept current by mouseMove via
+    // updateStripHoverFromPosition).
     if (stripHoveredButton_.has_value()
         && *stripHoveredButton_ == TrackHeaderButtonKind::Alternatives)
     {
         return "Instrument alternatives";
+    }
+    if (stripHoveredButton_.has_value()
+        && *stripHoveredButton_ == TrackHeaderButtonKind::Monitor)
+    {
+        return "Input monitoring: hear this track's selected audio input through its effects and "
+               "mix routing. While on, the track's clips are not played. Recording is unaffected.";
     }
     return {};
 }
@@ -993,9 +1104,10 @@ void TrackHeaderView::paint(juce::Graphics& g)
 bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
                                          std::vector<TrackHeaderStripButtonSpec>&& specs) noexcept
 {
-    constexpr std::array<TrackHeaderButtonKind, 5> hitPrioritiesRightToLeft{{
+    constexpr std::array<TrackHeaderButtonKind, 6> hitPrioritiesRightToLeft{{
         TrackHeaderButtonKind::Alternatives,
         TrackHeaderButtonKind::Arm,
+        TrackHeaderButtonKind::Monitor,
         TrackHeaderButtonKind::Mute,
         TrackHeaderButtonKind::Power,
         TrackHeaderButtonKind::InstrumentEditor,
@@ -1031,6 +1143,14 @@ bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
             {
                 dragBlocker_ = DragBlocker::Mute;
                 callbacks_.onToggleMute();
+            }
+            return true;
+
+        case TrackHeaderButtonKind::Monitor:
+            if (callbacks_.onToggleMonitor != nullptr)
+            {
+                dragBlocker_ = DragBlocker::Monitor;
+                callbacks_.onToggleMonitor();
             }
             return true;
 

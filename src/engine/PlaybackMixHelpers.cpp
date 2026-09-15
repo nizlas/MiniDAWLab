@@ -401,7 +401,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             const TrackId omitClipPlaybackForTrack,
                                             const std::int64_t timelineEnd,
                                             const int onlyTrackIndex,
-                                            PreGainRampState* const preGainRamp) noexcept
+                                            PreGainRampState* const preGainRamp,
+                                            const LiveInputMonitorSnapshot* const monitored) noexcept
 {
     if (audibleRun <= 0)
     {
@@ -421,6 +422,13 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
             continue;
         }
         if (omitClipPlaybackForTrack != kInvalidTrackId && tr.getId() == omitClipPlaybackForTrack)
+        {
+            continue;
+        }
+        // Monitor ON suppresses this track's clip playback AND its insert processing here — the
+        // dedicated live-input monitoring pass runs the same insert chain on the live input
+        // exactly once per callback instead (never both: no double processing, no clip+input mix).
+        if (monitored != nullptr && monitored->contains(tr.getId()))
         {
             continue;
         }
@@ -836,6 +844,101 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
         out0 += run;
     }
     jassert(out0 == audibleRun);
+}
+
+void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
+                                                  const int trackIndex,
+                                                  const float* inA,
+                                                  const float* inB,
+                                                  const int numSamples,
+                                                  float* stageL,
+                                                  float* stageR,
+                                                  PluginInsertHost* pluginHost,
+                                                  PreGainRampState* const preGainRamp) noexcept
+{
+    if (numSamples <= 0 || stageL == nullptr || stageR == nullptr)
+    {
+        return;
+    }
+    if (tr.getKind() != TrackKind::Audio || tr.isTrackOff())
+    {
+        return;
+    }
+    const float storedFaderGain = tr.getChannelFaderGain();
+    const float effectiveGain = tr.isMuted() ? 0.0f : storedFaderGain;
+    if (!tr.isMuted() && storedFaderGain <= 0.0f)
+    {
+        return;
+    }
+
+    // Same pre-gain placement and ramp discipline as the clip renderers: BEFORE Pre inserts,
+    // equal on all channels, ramped across the block on live adjustment.
+    const float preGainTarget = trackPreGainLinear(tr);
+    const float preGainStart = exchangePreGainRampStart(preGainRamp, trackIndex, preGainTarget);
+    const bool preGainRamping = std::fabs(preGainStart - preGainTarget) > 1.0e-6f;
+
+    const bool useInsert
+        = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
+
+    if (useInsert && effectiveGain > 0.0f)
+    {
+        // Insert path — identical stage order to the clip insert path: source → pre-gain →
+        // Pre inserts → fader → Post inserts → pan → accumulate into stage. Unresolved/None input
+        // (`inA == nullptr`) keeps the cleared scratch as a silent source so insert tails ring out.
+        pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, numSamples);
+        if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+        {
+            if (inA != nullptr)
+            {
+                // Mono source: duplicate to L/R exactly like a mono clip; the pan law downstream
+                // keeps the level consistent (no unintended doubling).
+                juce::FloatVectorOperations::copy(scratch[0], inA, numSamples);
+                juce::FloatVectorOperations::copy(scratch[1], inB != nullptr ? inB : inA, numSamples);
+            }
+            if (preGainRamping)
+            {
+                scaleStereoScratchRamped(scratch, numSamples, preGainStart, preGainTarget);
+            }
+            else if (preGainTarget != 1.0f)
+            {
+                scaleStereoScratch(scratch, numSamples, preGainTarget);
+            }
+            pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, numSamples);
+            scaleStereoScratch(scratch, numSamples, effectiveGain);
+            pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, numSamples);
+            multiplyStereoScratchLR(scratch,
+                                    numSamples,
+                                    trackPanLawGainLeft(tr.getStereoPan()),
+                                    trackPanLawGainRight(tr.getStereoPan()));
+            addStereoScratchToStereoScratch(stageL, stageR, scratch[0], scratch[1], 0, numSamples);
+        }
+        return;
+    }
+
+    // Dry path (no active inserts, or muted): silence and zero gain contribute nothing.
+    if (effectiveGain <= 0.0f || inA == nullptr)
+    {
+        return;
+    }
+    const float gL = effectiveGain * trackPanLawGainLeft(tr.getStereoPan());
+    const float gR = effectiveGain * trackPanLawGainRight(tr.getStereoPan());
+    const float* const srcB = inB != nullptr ? inB : inA;
+    if (preGainRamping)
+    {
+        const float step = (preGainTarget - preGainStart) / (float)numSamples;
+        float pre = preGainStart;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            stageL[i] += inA[i] * pre * gL;
+            stageR[i] += srcB[i] * pre * gR;
+            pre += step;
+        }
+    }
+    else
+    {
+        juce::FloatVectorOperations::addWithMultiply(stageL, inA, preGainTarget * gL, numSamples);
+        juce::FloatVectorOperations::addWithMultiply(stageR, srcB, preGainTarget * gR, numSamples);
+    }
 }
 
 void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,

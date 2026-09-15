@@ -147,17 +147,22 @@ bool RecorderService::beginRecording(const BeginRecordingRequest& request)
         return false;
     }
 
+    if (request.numChannels < 1 || request.numChannels > 2)
+    {
+        lastError_ = "Unsupported capture channel count (1 or 2)";
+        return false;
+    }
+
     ensureWriterStopped();
 
+    // FIFO capacity is in SAMPLES; stereo takes store interleaved frames, so scale the frame
+    // budget by the channel count (power-of-two capacity stays even → frame alignment holds).
     std::uint32_t cap = request.sampleFifoCapacity;
     if (cap == 0u)
     {
         cap = defaultFifoSizeSamples(request.sampleRate);
     }
-    else
-    {
-        cap = nextPow2(cap);
-    }
+    cap = nextPow2(cap * static_cast<std::uint32_t>(request.numChannels));
 
     sampleBuffer_.assign(static_cast<size_t>(cap), 0.0f);
     sampleFifo_ = std::make_unique<juce::AbstractFifo>(static_cast<int>(cap));
@@ -182,7 +187,7 @@ bool RecorderService::beginRecording(const BeginRecordingRequest& request)
     // `AudioFormatWriter*` (raw). Wrap in `std::unique_ptr` — **24-bit PCM only**, no 16-bit fallback.
     takeWriter_.reset (wavFormat_.createWriterFor (out.release(),
                                                    request.sampleRate,
-                                                   1u,
+                                                   static_cast<unsigned int>(request.numChannels),
                                                    kRecordedTakeBitsPerSample,
                                                    juce::StringPairArray(),
                                                    0));
@@ -210,6 +215,9 @@ bool RecorderService::beginRecording(const BeginRecordingRequest& request)
     lastTakeFile_ = request.takeFile;
     activeRecordingStartSample_.store(request.recordingStartSample, std::memory_order_relaxed);
     activeSampleRate_.store(request.sampleRate, std::memory_order_relaxed);
+    recordingNumChannels_.store(request.numChannels, std::memory_order_relaxed);
+    recordingInputPhysA_.store(request.inputPhysicalChannelA, std::memory_order_relaxed);
+    recordingInputPhysB_.store(request.inputPhysicalChannelB, std::memory_order_relaxed);
     recordingTrackId_.store(static_cast<std::uint64_t>(request.targetTrackId), std::memory_order_relaxed);
 
     writerRun_.store(true, std::memory_order_release);
@@ -230,7 +238,9 @@ bool RecorderService::appendSilencePaddingToMeetIntendedCount(const std::int64_t
         return false;
     }
 
-    juce::AudioBuffer<float> zeroBlock(1, kWriterScratchCap);
+    // `numSilenceSamples` is in FRAMES; the zero block matches the take's channel count.
+    const int nch = juce::jlimit(1, 2, recordingNumChannels_.load(std::memory_order_relaxed));
+    juce::AudioBuffer<float> zeroBlock(nch, kWriterScratchCap);
     zeroBlock.clear();
 
     std::int64_t remaining = numSilenceSamples;
@@ -280,6 +290,7 @@ RecordedTakeResult RecorderService::stopRecordingAndFinalize()
     const auto dropped = droppedSampleTotal_.load(std::memory_order_relaxed);
     const auto written = samplesWrittenToFile_.load(std::memory_order_relaxed);
     const bool writeFailed = writerWriteFailed_.load(std::memory_order_relaxed);
+    const int takeNumChannels = recordingNumChannels_.load(std::memory_order_relaxed);
     const juce::File outFile = lastTakeFile_;
 
     const auto fail = [&](juce::String err) {
@@ -293,12 +304,16 @@ RecordedTakeResult RecorderService::stopRecordingAndFinalize()
         recordingTrackId_.store(0, std::memory_order_relaxed);
         activeRecordingStartSample_.store(0, std::memory_order_relaxed);
         activeSampleRate_.store(0.0, std::memory_order_relaxed);
+        recordingNumChannels_.store(1, std::memory_order_relaxed);
+        recordingInputPhysA_.store(-1, std::memory_order_relaxed);
+        recordingInputPhysB_.store(-1, std::memory_order_relaxed);
         RecordedTakeResult r;
         r.success = false;
         r.errorMessage = std::move(err);
         r.takeFile = outFile;
         r.targetTrackId = target;
         r.recordingStartSample = start;
+        r.numChannels = takeNumChannels;
         r.intendedSampleCount = intended;
         r.actuallyWrittenSampleCount = written;
         r.sampleRate = sr;
@@ -345,6 +360,9 @@ RecordedTakeResult RecorderService::stopRecordingAndFinalize()
     recordingTrackId_.store(0, std::memory_order_relaxed);
     activeRecordingStartSample_.store(0, std::memory_order_relaxed);
     activeSampleRate_.store(0.0, std::memory_order_relaxed);
+    recordingNumChannels_.store(1, std::memory_order_relaxed);
+    recordingInputPhysA_.store(-1, std::memory_order_relaxed);
+    recordingInputPhysB_.store(-1, std::memory_order_relaxed);
 
     RecordedTakeResult result;
     result.success = true;
@@ -352,6 +370,7 @@ RecordedTakeResult RecorderService::stopRecordingAndFinalize()
     result.takeFile = outFile;
     result.targetTrackId = target;
     result.recordingStartSample = start;
+    result.numChannels = takeNumChannels;
     result.intendedSampleCount = intended;
     result.actuallyWrittenSampleCount = written; // from FIFO only; `toPad` silence matches rest
     result.sampleRate = sr;
@@ -359,9 +378,11 @@ RecordedTakeResult RecorderService::stopRecordingAndFinalize()
     return result;
 }
 
-void RecorderService::tryPushPreviewFromBlock(const float* inputMono, int numSamples) noexcept
+void RecorderService::tryPushPreviewFromBlock(const float* inputA,
+                                              const float* inputB,
+                                              int numFrames) noexcept
 {
-    if (inputMono == nullptr || numSamples <= 0 || ! previewFifo_ || ! isRecording_.load(std::memory_order_relaxed))
+    if (inputA == nullptr || numFrames <= 0 || ! previewFifo_ || ! isRecording_.load(std::memory_order_relaxed))
     {
         return;
     }
@@ -369,12 +390,21 @@ void RecorderService::tryPushPreviewFromBlock(const float* inputMono, int numSam
     {
         return;
     }
-    float mn = inputMono[0], mx = inputMono[0];
-    for (int i = 1; i < numSamples; ++i)
+    float mn = inputA[0], mx = inputA[0];
+    for (int i = 1; i < numFrames; ++i)
     {
-        const float s = inputMono[i];
+        const float s = inputA[i];
         mn = juce::jmin(mn, s);
         mx = juce::jmax(mx, s);
+    }
+    if (inputB != nullptr)
+    {
+        for (int i = 0; i < numFrames; ++i)
+        {
+            const float s = inputB[i];
+            mn = juce::jmin(mn, s);
+            mx = juce::jmax(mx, s);
+        }
     }
     int a = 0, b = 0, c = 0, d = 0;
     previewFifo_->prepareToWrite(1, a, b, c, d);
@@ -384,13 +414,15 @@ void RecorderService::tryPushPreviewFromBlock(const float* inputMono, int numSam
         return;
     }
     const int index = b > 0 ? a : c;
-    previewBuffer_.data()[static_cast<size_t>(index)] = RecordingPreviewPeakBlock{mn, mx, numSamples};
+    previewBuffer_.data()[static_cast<size_t>(index)] = RecordingPreviewPeakBlock{mn, mx, numFrames};
     previewFifo_->finishedWrite(n);
 }
 
-void RecorderService::pushInputBlock(const float* inputMono, int numSamples) noexcept
+void RecorderService::pushInputBlock(const float* inputA,
+                                     const float* inputB,
+                                     int numFrames) noexcept
 {
-    if (numSamples <= 0)
+    if (numFrames <= 0)
     {
         return;
     }
@@ -398,113 +430,163 @@ void RecorderService::pushInputBlock(const float* inputMono, int numSamples) noe
     {
         return;
     }
-    if (inputMono == nullptr)
+    const int nch = juce::jlimit(1, 2, recordingNumChannels_.load(std::memory_order_relaxed));
+    if (inputA == nullptr)
     {
-        intendedSampleTotal_.fetch_add(numSamples, std::memory_order_relaxed);
-        droppedSampleTotal_.fetch_add(numSamples, std::memory_order_relaxed);
+        intendedSampleTotal_.fetch_add(numFrames, std::memory_order_relaxed);
+        droppedSampleTotal_.fetch_add(numFrames, std::memory_order_relaxed);
         return;
     }
 
-    intendedSampleTotal_.fetch_add(numSamples, std::memory_order_relaxed);
-    tryPushPreviewFromBlock(inputMono, numSamples);
+    intendedSampleTotal_.fetch_add(numFrames, std::memory_order_relaxed);
+    tryPushPreviewFromBlock(inputA, nch == 2 ? inputB : nullptr, numFrames);
 
     if (sampleFifo_ == nullptr)
     {
-        droppedSampleTotal_.fetch_add(numSamples, std::memory_order_relaxed);
+        droppedSampleTotal_.fetch_add(numFrames, std::memory_order_relaxed);
         return;
     }
 
-    const int free = sampleFifo_->getFreeSpace();
-    const int toWrite = juce::jmin(free, numSamples);
-    if (toWrite < numSamples)
+    // Whole-frame accounting: the ring stores interleaved samples for stereo takes, and every
+    // write/read is a multiple of `nch`, so ring positions stay frame-aligned (capacity is a
+    // power of two, hence even).
+    const int freeFrames = sampleFifo_->getFreeSpace() / nch;
+    const int framesToWrite = juce::jmin(freeFrames, numFrames);
+    if (framesToWrite < numFrames)
     {
-        const auto drop = static_cast<std::int64_t>(numSamples - toWrite);
-        droppedSampleTotal_.fetch_add(drop, std::memory_order_relaxed);
+        droppedSampleTotal_.fetch_add(static_cast<std::int64_t>(numFrames - framesToWrite),
+                                      std::memory_order_relaxed);
     }
-    if (toWrite == 0)
+    if (framesToWrite == 0)
     {
         return;
     }
 
     int s1, z1, s2, z2;
-    // `w` can be < `toWrite` (JUCE `AbstractFifo` may grant fewer than requested).
-    sampleFifo_->prepareToWrite(toWrite, s1, z1, s2, z2);
-    const int w = z1 + z2;
-    if (w <= 0)
+    // Granted size can be < requested (JUCE `AbstractFifo`); floor it to whole frames.
+    sampleFifo_->prepareToWrite(framesToWrite * nch, s1, z1, s2, z2);
+    const int grantedSamples = z1 + z2;
+    const int framesGranted = grantedSamples / nch;
+    if (framesGranted <= 0)
     {
-        droppedSampleTotal_.fetch_add(static_cast<std::int64_t>(toWrite), std::memory_order_relaxed);
+        droppedSampleTotal_.fetch_add(static_cast<std::int64_t>(framesToWrite),
+                                      std::memory_order_relaxed);
         return;
     }
-    if (w < toWrite)
+    if (framesGranted < framesToWrite)
     {
-        droppedSampleTotal_.fetch_add(static_cast<std::int64_t>(toWrite - w), std::memory_order_relaxed);
+        droppedSampleTotal_.fetch_add(static_cast<std::int64_t>(framesToWrite - framesGranted),
+                                      std::memory_order_relaxed);
     }
 
     float* const buf = sampleBuffer_.data();
+    if (nch == 1)
     {
         // Two-segment JUCE `AbstractFifo` write: first block may be the tail of the ring, then wrap.
         int done = 0;
         if (z1 > 0)
         {
-            const int n1 = juce::jmin(w, z1);
-            juce::FloatVectorOperations::copy(buf + s1, inputMono, n1);
+            const int n1 = juce::jmin(framesGranted, z1);
+            juce::FloatVectorOperations::copy(buf + s1, inputA, n1);
             done = n1;
         }
-        if (w > done)
+        if (framesGranted > done)
         {
-            juce::FloatVectorOperations::copy(buf + s2, inputMono + done, w - done);
+            juce::FloatVectorOperations::copy(buf + s2, inputA + done, framesGranted - done);
         }
     }
-    sampleFifo_->finishedWrite(w);
+    else
+    {
+        // Interleave L/R frames across the (up to) two ring segments. Null right channel is
+        // captured as silence (defensive; the callback passes both pointers for stereo takes).
+        int samplesDone = 0;
+        const int totalSamples = framesGranted * nch;
+        while (samplesDone < totalSamples)
+        {
+            const int frame = samplesDone / nch;
+            const bool right = (samplesDone % nch) != 0;
+            const float v = right ? (inputB != nullptr ? inputB[frame] : 0.0f) : inputA[frame];
+            const int idx = samplesDone < z1 ? (s1 + samplesDone) : (s2 + (samplesDone - z1));
+            buf[idx] = v;
+            ++samplesDone;
+        }
+    }
+    sampleFifo_->finishedWrite(framesGranted * nch);
 }
 
 void RecorderService::writerThreadMain() noexcept
 {
-    juce::AudioBuffer<float> scratch(1, kWriterScratchCap);
+    const int nch = juce::jlimit(1, 2, recordingNumChannels_.load(std::memory_order_relaxed));
+    juce::AudioBuffer<float> scratch(nch, kWriterScratchCap);
     for (;;)
     {
-        const int ready = sampleFifo_ != nullptr ? sampleFifo_->getNumReady() : 0;
+        // The ring holds interleaved samples for stereo takes; only whole frames are drained
+        // (pushes are frame-aligned, so `ready` is always a frame multiple once settled).
+        const int readyFrames = (sampleFifo_ != nullptr ? sampleFifo_->getNumReady() : 0) / nch;
         const bool run = writerRun_.load(std::memory_order_acquire);
-        if (! run && ready == 0)
+        if (! run && readyFrames == 0)
         {
             break;
         }
-        if (ready == 0)
+        if (readyFrames == 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
-        const int toRead = juce::jmin(ready, kWriterScratchCap);
+        const int framesToRead = juce::jmin(readyFrames, kWriterScratchCap);
         int s1, z1, s2, z2;
         if (sampleFifo_ == nullptr)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-        sampleFifo_->prepareToRead(toRead, s1, z1, s2, z2);
-        const int n = z1 + z2;
-        if (n <= 0)
+        sampleFifo_->prepareToRead(framesToRead * nch, s1, z1, s2, z2);
+        const int grantedSamples = z1 + z2;
+        const int frames = grantedSamples / nch;
+        if (frames <= 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
+        const int n = frames * nch;
 
         const float* const data = sampleBuffer_.data();
-        if (z1 > 0)
+        if (nch == 1)
         {
-            scratch.copyFrom(0, 0, data + s1, n <= z1 ? n : z1);
+            if (z1 > 0)
+            {
+                scratch.copyFrom(0, 0, data + s1, n <= z1 ? n : z1);
+            }
+            if (n > z1 && z2 > 0)
+            {
+                scratch.copyFrom(0, z1, data + s2, n - z1);
+            }
         }
-        if (n > z1 && z2 > 0)
+        else
         {
-            scratch.copyFrom(0, z1, data + s2, n - z1);
+            // Deinterleave the (up to) two ring segments into channel-planar scratch.
+            float* const outL = scratch.getWritePointer(0);
+            float* const outR = scratch.getWritePointer(1);
+            for (int i = 0; i < n; ++i)
+            {
+                const float v = i < z1 ? data[s1 + i] : data[s2 + (i - z1)];
+                if ((i & 1) == 0)
+                {
+                    outL[i / 2] = v;
+                }
+                else
+                {
+                    outR[i / 2] = v;
+                }
+            }
         }
 
         if (takeWriter_ != nullptr)
         {
-            if (takeWriter_->writeFromAudioSampleBuffer(scratch, 0, n))
+            if (takeWriter_->writeFromAudioSampleBuffer(scratch, 0, frames))
             {
-                samplesWrittenToFile_.fetch_add(static_cast<std::int64_t>(n), std::memory_order_relaxed);
+                samplesWrittenToFile_.fetch_add(static_cast<std::int64_t>(frames), std::memory_order_relaxed);
             }
             else
             {

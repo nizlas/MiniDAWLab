@@ -543,6 +543,13 @@ void TrackLanesView::setOnAudioHeaderActivated(std::function<void()> fn) noexcep
     onAudioHeaderActivated_ = std::move(fn);
 }
 
+void TrackLanesView::setInputMonitoringHooks(std::function<bool(TrackId)> isMonitored,
+                                             std::function<void(TrackId)> toggleMonitor) noexcept
+{
+    isTrackInputMonitoredFn_ = std::move(isMonitored);
+    toggleTrackInputMonitorFn_ = std::move(toggleMonitor);
+}
+
 void TrackLanesView::setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept
 {
     onAudioClipMouseDownClearForeignSelections_ = std::move(fn);
@@ -950,6 +957,12 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         m.powerInteractable = !isStructuralTimelineEditBlocked();
             m.muteInteractable = true;
             m.armInteractable = true;
+            // Monitor (audio rows only — this builder only runs for `TrackKind::Audio`): runtime
+            // engine state via the injected hooks; cell omitted when the hooks are not wired.
+            m.monitorAvailable = isTrackInputMonitoredFn_ != nullptr
+                                 && toggleTrackInputMonitorFn_ != nullptr;
+            m.monitorEnabled = m.monitorAvailable && isTrackInputMonitoredFn_(tid);
+            m.monitorInteractable = true;
             return m;
         };
 
@@ -986,6 +999,18 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 onAudioHeaderActivated_();
             }
             onActive();
+        };
+        callbacks.onToggleMonitor = [this, tid] {
+            // Runtime control: flips engine monitor state only — no session edit, no undo entry,
+            // no dirty flag. Repaint headers so the speaker reflects the new state immediately.
+            if (toggleTrackInputMonitorFn_ != nullptr)
+            {
+                toggleTrackInputMonitorFn_(tid);
+            }
+            for (auto& h : headers_)
+            {
+                h->repaint();
+            }
         };
         callbacks.onToggleMute = [this, tid, onActive, onArm] {
             bool nowMuted = true;

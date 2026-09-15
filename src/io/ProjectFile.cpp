@@ -164,6 +164,29 @@ namespace
             // Absent key = unity (0.0 dB), so default-valued tracks keep pre-v22 byte layout.
             to->setProperty("preGainDb", (double)t.preGainDb);
         }
+        if (fileVersion >= 23 && t.inputAssignment.kind != TrackInputKind::DefaultFirstInput)
+        {
+            // Absent keys = legacy default (first active device input, mono), so default-valued
+            // tracks keep the pre-v23 byte layout. Channels are PHYSICAL device input indices.
+            switch (t.inputAssignment.kind)
+            {
+            case TrackInputKind::None:
+                to->setProperty("inputKind", "none");
+                break;
+            case TrackInputKind::Mono:
+                to->setProperty("inputKind", "mono");
+                to->setProperty("inputChanA", t.inputAssignment.physicalChannelA);
+                break;
+            case TrackInputKind::StereoPair:
+                to->setProperty("inputKind", "stereo");
+                to->setProperty("inputChanA", t.inputAssignment.physicalChannelA);
+                to->setProperty("inputChanB", t.inputAssignment.physicalChannelB);
+                break;
+            case TrackInputKind::DefaultFirstInput:
+            default:
+                break;
+            }
+        }
         if (t.off)
         {
             to->setProperty("off", true);
@@ -1943,6 +1966,41 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             if (pgv.isDouble() || pgv.isInt() || pgv.isInt64())
             {
                 trk.preGainDb = sanitizeTrackPreGainDb((float)(double)pgv);
+            }
+        }
+        trk.inputAssignment = {};
+        if (ver >= 23)
+        {
+            // Absent keys (and every pre-v23 file) = legacy default: first active device input as
+            // a mono source — the established capture behavior. Inconsistent values repair to that
+            // default via `sanitizeTrackInputAssignment` (never to another concrete input).
+            const juce::var& ikV = tv.getProperty("inputKind", {});
+            if (ikV.isString())
+            {
+                const juce::String ik = ikV.toString();
+                const auto readChan = [&tv](const char* key) noexcept -> int {
+                    const juce::var& v = tv.getProperty(key, {});
+                    return (v.isInt() || v.isInt64() || v.isDouble())
+                               ? static_cast<int>(static_cast<double>(v) + 0.5)
+                               : -1;
+                };
+                TrackInputAssignment ia;
+                if (ik.equalsIgnoreCase("none"))
+                {
+                    ia.kind = TrackInputKind::None;
+                }
+                else if (ik.equalsIgnoreCase("mono"))
+                {
+                    ia.kind = TrackInputKind::Mono;
+                    ia.physicalChannelA = readChan("inputChanA");
+                }
+                else if (ik.equalsIgnoreCase("stereo"))
+                {
+                    ia.kind = TrackInputKind::StereoPair;
+                    ia.physicalChannelA = readChan("inputChanA");
+                    ia.physicalChannelB = readChan("inputChanB");
+                }
+                trk.inputAssignment = sanitizeTrackInputAssignment(ia);
             }
         }
         {

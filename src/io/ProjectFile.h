@@ -72,6 +72,12 @@ struct ProjectFileTrackV1
     /// key). Omitted when ~0; absent key (all pre-v22 files) loads as 0.0 = unity — those projects
     /// keep their previous sound exactly. Clamped to [-24,+24] on load (non-finite repaired to 0).
     float preGainDb = kTrackPreGainDbDefault;
+    /// v23: audio input assignment (`inputKind` = "none" | "mono" | "stereo" plus `inputChanA` /
+    /// `inputChanB` PHYSICAL device input indices). All keys omitted for the legacy-compatible
+    /// default (first active device input, mono) — absent keys (all pre-v23 files) load as that
+    /// default, so older projects keep their established recording source exactly. Sanitized on
+    /// load (inconsistent values repair to the default, never to a different concrete input).
+    TrackInputAssignment inputAssignment{};
     /// Optional stereo pan [-1,+1]; omitted when ~ center (`pan` JSON key).
     float stereoPan = 0.0f;
     /// Skipped entirely by playback (JSON key `"off"`). Omitted when false.
@@ -345,7 +351,11 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**22** adds the optional `tracks[].preGainDb` — per-audio-track
+    /// Current JSON writer version (**23** adds the optional `tracks[].inputKind` /
+    /// `inputChanA` / `inputChanB` — per-audio-track device input assignment for recording and
+    /// input monitoring; additive with absent-key default = first active input, mono — the
+    /// pre-v23 capture behavior).
+    /// **22** adds the optional `tracks[].preGainDb` — per-audio-track
     /// pre-gain in dB before inserts/fader; additive with absent-key default 0.0 = unity).
     /// **21** adds the optional
     /// `experimentalInstrumentTracks[].secondary` object — P2 Secondary instrument; additive with
@@ -357,7 +367,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 22;
+    static constexpr int kCurrentVersion = 23;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

@@ -40,6 +40,18 @@ struct InspectorPluginHost
 // P2: the former InspectorProxyHost / InspectorSecondaryHost sections moved to the track-header
 // "Instrument alternatives" popup (see ui/InstrumentAlternativesPopup.h).
 
+/// [Message thread] Snapshot of the ACTIVE audio device's input channels for the "Audio Input"
+/// selector (wired from Main; the Inspector never touches the device manager directly).
+/// `physicalInputNames` is indexed by PHYSICAL channel; `activeInputChannels` marks which of them
+/// are enabled in the current device configuration (only those are selectable — a disabled
+/// channel cannot be delivered by the audio callback).
+struct InspectorAudioInputDeviceSnapshot
+{
+    juce::StringArray physicalInputNames;
+    juce::BigInteger activeInputChannels;
+    bool deviceAvailable = false;
+};
+
 /// Active-track-only controls (Cubase-style Inspector), not repeated in every track header.
 
 class InspectorView final : public juce::Component,
@@ -77,6 +89,20 @@ public:
     void setPreGainHandler(std::function<void(TrackId, float)> fn) noexcept
     {
         preGainHandler_ = std::move(fn);
+    }
+
+    /// [Message thread] Undoable **audio input** assignment (`TrackLanesEditCoordinator`):
+    /// recording + monitoring source for audio rows only (the control is hidden elsewhere).
+    void setAudioInputHandler(std::function<void(TrackId, TrackInputAssignment)> fn) noexcept
+    {
+        audioInputHandler_ = std::move(fn);
+    }
+
+    /// [Message thread] Provider for the active device's input channels (wired from Main).
+    void setAudioInputDeviceSnapshotProvider(
+        std::function<InspectorAudioInputDeviceSnapshot()> fn) noexcept
+    {
+        audioInputDeviceSnapshotProvider_ = std::move(fn);
     }
 
     /// [Message thread] Undoable **MIDI** output channel (`kTrackMidiOutputChannelAny` or 1 … 16).
@@ -160,6 +186,9 @@ private:
     void commitSendAmountField(int sendRowIndex);
     void setSendAmountEditorText(int sendRowIndex, float amountLinear);
     void populateSendDestCombo(int sendRowIndex, TrackId activeTrackId, const Track& track);
+    /// Rebuild the "Audio Input" combo from the active device snapshot and the track's stored
+    /// assignment (unresolved assignments appear as an explicit "(unavailable)" entry).
+    void populateAudioInputCombo(const Track& track);
 
     void clearInsertRowStrips();
     void rebuildInsertRowStrips(TrackId active, const std::vector<InspectorInsertRow>& rows);
@@ -177,6 +206,9 @@ private:
     juce::Label channelVolumeDbUnitLabel_;
     juce::Label panCaptionLabel_;
     InspectorPanControl panField_;
+    /// Audio Input (audio rows only): which device input the track records/monitors.
+    juce::Label inputCaptionLabel_;
+    juce::ComboBox inputComboBox_;
     juce::Label outputCaptionLabel_;
     juce::ComboBox outputComboBox_;
     /// MIDI output channel (instrument rows only). Deliberately captioned "MIDI Channel" next to
@@ -232,6 +264,8 @@ private:
 
     std::function<bool(TrackId, juce::String)> renameTrackHandler_;
     std::function<void(TrackId, float)> preGainHandler_;
+    std::function<void(TrackId, TrackInputAssignment)> audioInputHandler_;
+    std::function<InspectorAudioInputDeviceSnapshot()> audioInputDeviceSnapshotProvider_;
     std::function<void(TrackId, TrackId)> routedOutputHandler_;
     std::function<void(TrackId, int)> midiOutputChannelHandler_;
     std::function<void(TrackId, TrackId)> midiDestinationHandler_;
@@ -241,6 +275,9 @@ private:
     bool inspectorNameEditorGuard_ = false;
     bool outputComboGuard_ = false;
     std::vector<TrackId> outputComboDestIds_;
+    bool inputComboGuard_ = false;
+    /// Parallel to the input combo's item ids (1-based).
+    std::vector<TrackInputAssignment> inputComboValues_;
     bool midiChannelComboGuard_ = false;
     /// Parallel to the combo's item ids (1-based): `kTrackMidiOutputChannelAny` then 1 … 16.
     std::vector<int> midiChannelComboValues_;

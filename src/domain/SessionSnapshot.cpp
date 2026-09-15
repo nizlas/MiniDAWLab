@@ -1294,6 +1294,42 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackPreGainDb(
                             previous.getProjectMusicalTime()));
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackInputAssignment(
+    const SessionSnapshot& previous,
+    const TrackId trackId,
+    const TrackInputAssignment assignment) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    const int tIdx = previous.findTrackIndexById(trackId);
+    if (tIdx < 0)
+    {
+        jassert(false);
+        return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+            previous.tracks_, previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+    }
+    const TrackInputAssignment sanitized = sanitizeTrackInputAssignment(assignment);
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks());
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        const Track& t = previous.getTrack(i);
+        out.push_back(i != tIdx ? duplicateTrackSameClips(t) : t.withInputAssignment(sanitized));
+    }
+    return std::shared_ptr<const SessionSnapshot>(
+        new SessionSnapshot(std::move(out),
+                            previous.arrangementExtentSamples_,
+                            previous.getLeftLocatorSamples(),
+                            previous.getRightLocatorSamples(),
+                            previous.getProjectMusicalTime()));
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackStereoPan(
     const SessionSnapshot& previous,
     const TrackId trackId,

@@ -220,6 +220,12 @@ public:
     /// edit then skip the empty undo entry.
     [[nodiscard]] bool setTrackPreGainDb(TrackId trackId, float preGainDb) noexcept;
 
+    /// [Message thread] Set an Audio track's input assignment (recording + monitoring source).
+    /// Sanitized; returns false (no snapshot publish) when the track is missing, not an Audio
+    /// lane, or the value is unchanged — callers use this for undo no-op suppression.
+    [[nodiscard]] bool setTrackInputAssignment(TrackId trackId,
+                                               TrackInputAssignment assignment) noexcept;
+
     // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.

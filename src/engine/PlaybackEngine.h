@@ -261,6 +261,26 @@ public:
     /// [Message thread] Rebuild `RoutingPlan` and bus scratch pool from the current session snapshot.
     void rebuildRoutingPlanFromSession() noexcept;
 
+    // -----------------------------------------------------------------------
+    // Live input monitoring (Monitor button) — runtime-only state, never persisted
+    // -----------------------------------------------------------------------
+    /// [Message thread] Toggle per-track input monitoring. Publishes a fresh immutable
+    /// `LiveInputMonitorSnapshot` (atomic shared_ptr, same discipline as the routing plan).
+    /// No-op beyond `LiveInputMonitorSnapshot::kMaxMonitoredTracks` concurrently monitored tracks.
+    void setTrackInputMonitoringEnabled(TrackId trackId, bool enabled) noexcept;
+    /// [Message thread] All monitoring off — called on project open/replace (Monitor defaults OFF).
+    void clearAllInputMonitoring() noexcept;
+    /// [Message thread] Current monitor state for UI (header button repaint).
+    [[nodiscard]] bool isTrackInputMonitoringEnabled(TrackId trackId) const noexcept;
+
+    /// [Message thread] Physical device input channels active at the last device start, as a bit
+    /// mask (bit N = physical input N enabled). Matches the callback's packed input array:
+    /// active-array position of physical channel N = popcount of lower set bits.
+    [[nodiscard]] std::uint64_t getActiveInputPhysicalMaskForUi() const noexcept
+    {
+        return activeInputPhysicalMask_.load(std::memory_order_acquire);
+    }
+
     /// [Message thread] One stereo offline block (`stereoOutputLR[0]` = L, `[1]` = R), matching realtime summing
     /// order for clips, inserts, instruments, mute/off/fader/pan. Does not advance transport.
     void renderOfflineMixdownBlock(const SessionSnapshot& sessionSnap,
@@ -349,4 +369,15 @@ private:
     /// reset (unprimed) in `audioDeviceAboutToStart` so a saved pre-gain never fades in at
     /// playback start. Offline mixdown deliberately renders without it (constant target).
     playback_mix_helpers::PreGainRampState preGainRampState_;
+
+    /// Physical→packed input mapping source of truth for the audio callback and recording push:
+    /// bit N set = physical device input N is enabled (packed active-array position = popcount of
+    /// lower set bits). Captured in `audioDeviceAboutToStart`; channels >= 64 are not addressable
+    /// by input assignment (beyond every currently supported interface here).
+    std::atomic<std::uint64_t> activeInputPhysicalMask_{ 0 };
+
+    /// Monitor state (see `LiveInputMonitorSnapshot`): published by the message thread, acquire-
+    /// loaded once per audio callback. Null = nothing monitored.
+    std::atomic<std::shared_ptr<const playback_mix_helpers::LiveInputMonitorSnapshot>>
+        liveInputMonitorSnapshot_;
 };

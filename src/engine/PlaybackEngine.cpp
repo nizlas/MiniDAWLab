@@ -54,6 +54,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -406,6 +407,21 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         const int bs = device->getCurrentBufferSizeSamples();
         const int nOut = device->getActiveOutputChannels().countNumberOfSetBits();
         deviceSampleRateForDiagnostics_.store(sr, std::memory_order_relaxed);
+        // Input-selection slice: capture which PHYSICAL input channels are enabled — the callback
+        // and the recording push map a track's physical input assignment to positions in the
+        // packed active-channel array with this mask (sparse enables shift packed positions).
+        {
+            const juce::BigInteger activeIn = device->getActiveInputChannels();
+            std::uint64_t mask = 0;
+            for (int i = 0; i < 64; ++i)
+            {
+                if (activeIn[i])
+                {
+                    mask |= (1ull << i);
+                }
+            }
+            activeInputPhysicalMask_.store(mask, std::memory_order_release);
+        }
         ensureMasterScratchCapacity(juce::jmax(bs, kOfflineMixdownBlockCapSamples));
         // Pre-gain ramps start unprimed: the first block after prepare applies each track's
         // saved pre-gain directly (no unintended fade-in at playback start).
@@ -420,6 +436,60 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         }
         rebuildRoutingPlanFromSession();
     }
+}
+
+void PlaybackEngine::setTrackInputMonitoringEnabled(const TrackId trackId, const bool enabled) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return;
+    }
+    using playback_mix_helpers::LiveInputMonitorSnapshot;
+    const std::shared_ptr<const LiveInputMonitorSnapshot> current
+        = liveInputMonitorSnapshot_.load(std::memory_order_acquire);
+    const bool currentlyOn = current != nullptr && current->contains(trackId);
+    if (currentlyOn == enabled)
+    {
+        return;
+    }
+    auto next = std::make_shared<LiveInputMonitorSnapshot>();
+    if (current != nullptr)
+    {
+        for (int i = 0; i < current->count; ++i)
+        {
+            const TrackId id = current->trackIds[(size_t)i];
+            if (id != trackId && next->count < LiveInputMonitorSnapshot::kMaxMonitoredTracks)
+            {
+                next->trackIds[(size_t)next->count++] = id;
+            }
+        }
+    }
+    if (enabled)
+    {
+        if (next->count >= LiveInputMonitorSnapshot::kMaxMonitoredTracks)
+        {
+            return; // capacity guard; existing state unchanged
+        }
+        next->trackIds[(size_t)next->count++] = trackId;
+    }
+    if (next->count == 0)
+    {
+        liveInputMonitorSnapshot_.store(nullptr, std::memory_order_release);
+        return;
+    }
+    liveInputMonitorSnapshot_.store(
+        std::shared_ptr<const LiveInputMonitorSnapshot>(std::move(next)), std::memory_order_release);
+}
+
+void PlaybackEngine::clearAllInputMonitoring() noexcept
+{
+    liveInputMonitorSnapshot_.store(nullptr, std::memory_order_release);
+}
+
+bool PlaybackEngine::isTrackInputMonitoringEnabled(const TrackId trackId) const noexcept
+{
+    const auto snap = liveInputMonitorSnapshot_.load(std::memory_order_acquire);
+    return snap != nullptr && snap->contains(trackId);
 }
 
 void PlaybackEngine::audioDeviceStopped()
@@ -553,18 +623,37 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     audioCallbackLastBlockSamples_.store(numSamples, std::memory_order_relaxed);
     audioCallbackEnterCount_.fetch_add(1, std::memory_order_relaxed);
 
-    // [Audio thread] Phase 4: route mono input[0] to the recorder SPSC path only while `isRecording()`
-    // and valid input pointers; does not access Session. `pushInputBlock` still no-ops if not recording
-    // — this call site avoids touching the recorder SPSC at all when idle.
-    if (recorder_ != nullptr
-        && recorder_->isRecording()
-        && numInputChannels > 0
-        && numSamples > 0
-        && inputChannelData != nullptr
-        && inputChannelData[0] != nullptr)
+    // [Audio thread] Input-selection slice: map the packed active-channel input array so both the
+    // recording push and the monitoring pass can resolve PHYSICAL input assignments per block.
+    // Positions in `inputChannelData` are packed enabled channels only — with sparse enables the
+    // packed position of physical channel N is the popcount of enabled channels below N.
+    const std::uint64_t activeInputMask = activeInputPhysicalMask_.load(std::memory_order_relaxed);
+    const auto activeInputPointerForPhysical
+        = [activeInputMask, inputChannelData, numInputChannels](const int physical) noexcept -> const float*
+    {
+        if (inputChannelData == nullptr)
+        {
+            return nullptr;
+        }
+        const int pos
+            = playback_mix_helpers::packedActiveInputPositionForPhysical(activeInputMask, physical);
+        return pos >= 0 && pos < numInputChannels ? inputChannelData[pos] : nullptr;
+    };
+
+    // [Audio thread] Route the take's SELECTED physical input channel(s) to the recorder SPSC path
+    // only while `isRecording()`; does not access Session (the coordinator resolved the armed
+    // track's assignment to concrete physical channels at record start). This is the RAW pre-strip
+    // capture point: pre-gain, inserts, fader, pan and Monitor never affect recorded samples.
+    if (recorder_ != nullptr && recorder_->isRecording() && numSamples > 0)
     {
         setCallbackPhase(AudioCallbackPhase::RecorderPush);
-        recorder_->pushInputBlock(inputChannelData[0], numSamples);
+        const float* const recInA
+            = activeInputPointerForPhysical(recorder_->getRecordingInputPhysicalChannelA());
+        const float* const recInB
+            = recorder_->getRecordingNumChannels() == 2
+                  ? activeInputPointerForPhysical(recorder_->getRecordingInputPhysicalChannelB())
+                  : nullptr;
+        recorder_->pushInputBlock(recInA, recInB, numSamples);
     }
 
     const int deviceBlockSizeInFrames = numSamples;
@@ -588,6 +677,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     setCallbackPhase(AudioCallbackPhase::LoadSnapshot);
     const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
     /// [Audio thread] Same publish discipline as Session: acquire-load retains a const view for this block only.
+    // Live input monitoring (Monitor button): one acquire-loaded immutable view per block. Used to
+    // (a) suppress monitored tracks' clip playback in the segment renderers and (b) drive the
+    // dedicated monitoring pass in `mixInstrumentsAndFinalizeMaster` (runs stopped or playing).
+    const std::shared_ptr<const playback_mix_helpers::LiveInputMonitorSnapshot> monitorSnap
+        = liveInputMonitorSnapshot_.load(std::memory_order_acquire);
+    const playback_mix_helpers::LiveInputMonitorSnapshot* const monitorPtr
+        = (monitorSnap != nullptr && monitorSnap->count > 0) ? monitorSnap.get() : nullptr;
     const bool allowInstrumentProcessing
         = !instrumentProcessingSuspended_.load(std::memory_order_acquire);
 
@@ -1185,8 +1281,127 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     };
 
+    // Live input monitoring pass — one full strip render per monitored Audio track, EVERY callback
+    // (transport stopped, playing or recording): selected input → pre-gain → Pre inserts →
+    // fader/mute → Post inserts → pan → the track's normal routing destination and sends. Runs
+    // inside `mixInstrumentsAndFinalizeMaster` so every callback exit path renders it exactly once
+    // (before bus finalize). The monitored track's clip playback is suppressed in the segment
+    // renderers via `monitorPtr`, so the strip (and its plugins) processes exactly one source.
+    // Unresolved/None assignments feed silence — never a substituted physical input.
+    const auto renderLiveInputMonitoringPass = [&]() noexcept
+    {
+        if (monitorPtr == nullptr || sessionSnap == nullptr || numSamples <= 0)
+        {
+            return;
+        }
+        if (postStripStagePtrs_[0] == nullptr || postStripStagePtrs_[1] == nullptr
+            || postStripStageCapacity_ < numSamples)
+        {
+            return;
+        }
+        setCallbackPhase(AudioCallbackPhase::MixPrep);
+        for (int mi = 0; mi < monitorPtr->count; ++mi)
+        {
+            const TrackId tid = monitorPtr->trackIds[(size_t)mi];
+            const int ti = sessionSnap->findTrackIndexById(tid);
+            if (ti < 0)
+            {
+                continue;
+            }
+            const Track& tr = sessionSnap->getTrack(ti);
+            if (tr.getKind() != TrackKind::Audio)
+            {
+                continue;
+            }
+            // Resolve the track's assignment to packed input pointers; any unresolved member of a
+            // pair makes the whole assignment unresolved (silence — no half-substitution).
+            const TrackInputAssignment& ia = tr.getInputAssignment();
+            const float* inA = nullptr;
+            const float* inB = nullptr;
+            switch (ia.kind)
+            {
+            case TrackInputKind::DefaultFirstInput:
+                inA = (inputChannelData != nullptr && numInputChannels > 0) ? inputChannelData[0]
+                                                                            : nullptr;
+                break;
+            case TrackInputKind::Mono:
+                inA = activeInputPointerForPhysical(ia.physicalChannelA);
+                break;
+            case TrackInputKind::StereoPair:
+                inA = activeInputPointerForPhysical(ia.physicalChannelA);
+                inB = activeInputPointerForPhysical(ia.physicalChannelB);
+                if (inA == nullptr || inB == nullptr)
+                {
+                    inA = nullptr;
+                    inB = nullptr;
+                }
+                break;
+            case TrackInputKind::None:
+            default:
+                break;
+            }
+
+            playback_mix_helpers::clearStereoScratch(
+                postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
+            playback_mix_helpers::renderLiveInputTrackPostStripToStereoScratch(
+                tr,
+                ti,
+                inA,
+                inB,
+                numSamples,
+                postStripStagePtrs_[0],
+                postStripStagePtrs_[1],
+                pluginHost_,
+                &preGainRampState_);
+
+            // Route to the same destination as the track's clip playback: its routing-plan source
+            // step (dry bus + sends) when a plan exists, otherwise the legacy direct mix target.
+            bool fannedViaPlan = false;
+            if (rp != nullptr && !rp->sourceSteps.empty())
+            {
+                for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+                {
+                    if (step.trackIndex != ti)
+                    {
+                        continue;
+                    }
+                    if (step.destBusIndex >= 0
+                        && step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
+                    {
+                        playback_mix_helpers::fanPostStripStageToDryAndSends(postStripStagePtrs_[0],
+                                                                             postStripStagePtrs_[1],
+                                                                             0,
+                                                                             numSamples,
+                                                                             step.destBusIndex,
+                                                                             step.sends,
+                                                                             *rp);
+                        fannedViaPlan = true;
+                    }
+                    break;
+                }
+                // Stale-plan block (C2B convention): skip this block; the rebuilt plan takes over.
+                if (!fannedViaPlan)
+                {
+                    continue;
+                }
+            }
+            else if (mixBusL != nullptr && mixBusR != nullptr)
+            {
+                juce::FloatVectorOperations::add(mixBusL, postStripStagePtrs_[0], numSamples);
+                juce::FloatVectorOperations::add(mixBusR, postStripStagePtrs_[1], numSamples);
+            }
+            else
+            {
+                float* const stageStereo[2] = { postStripStagePtrs_[0], postStripStagePtrs_[1] };
+                playback_mix_helpers::addPostStripStageToDeviceOutputs(
+                    stageStereo, 0, numSamples, numOutputChannels, outputChannelData);
+            }
+        }
+    };
+
     const auto mixInstrumentsAndFinalizeMaster = [&]() noexcept
     {
+        renderLiveInputMonitoringPass();
         mixKeyedInstrumentLanesIntoOutputsIfAny();
         finalizeRoutingToDevice();
     };
@@ -1306,6 +1521,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     continue;
                 }
+                // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
+                // the live-input monitoring pass in `mixInstrumentsAndFinalizeMaster`.
+                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+                {
+                    continue;
+                }
                 playback_mix_helpers::clearStereoScratch(
                     postStripStagePtrs_[0], postStripStagePtrs_[1], audibleRun);
                 playback_mix_helpers::renderAudioTrackPostStripToStereoScratch(
@@ -1350,7 +1571,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                              omitClipPlaybackForTrack,
                                                                              timelineEnd,
                                                                              step.trackIndex,
-                                                                             &preGainRampState_);
+                                                                             &preGainRampState_,
+                                                                             monitorPtr);
             }
         }
         else
@@ -1365,7 +1587,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                          omitClipPlaybackForTrack,
                                                                          timelineEnd,
                                                                          -1,
-                                                                         &preGainRampState_);
+                                                                         &preGainRampState_,
+                                                                         monitorPtr);
         }
 
         // Timeline order: dispatch transport MIDI toward each Instrument row that has a playback entry.

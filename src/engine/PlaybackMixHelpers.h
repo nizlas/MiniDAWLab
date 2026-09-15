@@ -4,6 +4,7 @@
 #include "engine/RoutingPlan.h"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <vector>
 
@@ -41,6 +42,53 @@ struct PreGainRampState
     /// [Prepare/restart] All tracks back to "unprimed" (next render jumps straight to target).
     void reset() noexcept { lastAppliedLinear.fill(-1.0f); }
 };
+
+// ---------------------------------------------------------------------------
+// Live input monitoring — runtime-only per-track monitor state (Monitor button)
+// ---------------------------------------------------------------------------
+// Published by `PlaybackEngine` on the message thread as an immutable snapshot (atomic
+// shared_ptr, same discipline as `RoutingPlan`); the audio callback holds one acquire-loaded view
+// per block. Deliberately OUTSIDE `SessionSnapshot`: Monitor is a runtime control — it is never
+// persisted, never enters musical undo history, and defaults to OFF on project open. A monitored
+// Audio track takes the selected live device input as its signal (through the normal strip:
+// pre-gain → Pre inserts → fader/mute → Post inserts → pan → routing/sends) and its timeline
+// clips are suppressed while monitoring; recording capture stays raw (pre-strip). Offline
+// mixdown never receives a monitor snapshot, so exports render clips regardless of Monitor.
+struct LiveInputMonitorSnapshot
+{
+    static constexpr int kMaxMonitoredTracks = 32;
+    int count = 0;
+    std::array<TrackId, kMaxMonitoredTracks> trackIds{};
+
+    [[nodiscard]] bool contains(const TrackId id) const noexcept
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            if (trackIds[(size_t)i] == id)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Physical → packed input-channel mapping (sparse enables)
+// ---------------------------------------------------------------------------
+// The device callback's `inputChannelData` contains packed ENABLED channels only. With sparse
+// enables (e.g. only physical inputs 2 and 5 on), the packed position of physical channel N is
+// the count of enabled channels below N. `-1` = channel invalid or not enabled (assignment
+// unresolved on this device — caller supplies silence, never a substitute input).
+[[nodiscard]] inline int packedActiveInputPositionForPhysical(const std::uint64_t activeInputMask,
+                                                              const int physical) noexcept
+{
+    if (physical < 0 || physical >= 64 || (activeInputMask & (1ull << physical)) == 0)
+    {
+        return -1;
+    }
+    return std::popcount(activeInputMask & ((1ull << physical) - 1ull));
+}
 
 /// Last `TrackKind::Master` row in timeline order (canonical Stereo Out bus).
 [[nodiscard]] const Track* findCanonicalMasterTrack(const SessionSnapshot& snap) noexcept;
@@ -109,7 +157,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             TrackId omitClipPlaybackForTrack,
                                             std::int64_t timelineEnd,
                                             int onlyTrackIndex = -1,
-                                            PreGainRampState* preGainRamp = nullptr) noexcept;
+                                            PreGainRampState* preGainRamp = nullptr,
+                                            const LiveInputMonitorSnapshot* monitored = nullptr) noexcept;
 
 /// [Audio thread] Apply one bus row's channel strip (Pre → fader/mute/off → Post → pan) from stereo
 /// `busScratchStereo` (`[0]`/ `[1]` = L/R) into `outputChannelData` at `destOutFrame0` for `numSamples`.
@@ -145,6 +194,25 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               std::int64_t timelineEnd,
                                               int trackIndex,
                                               PreGainRampState* preGainRamp = nullptr) noexcept;
+
+/// One MONITORED audio lane: selected live device input → pre-gain → Pre → fader/mute/off →
+/// Post → pan → `stageL`/`stageR` (accumulated) — the identical strip order as
+/// `renderAudioTrackPostStripToStereoScratch`, with the live input replacing clip playback as the
+/// source. Runs every callback (transport stopped, playing or recording); never gated on timeline
+/// segments or clips, so inserts (e.g. AmpliTube) process the live input while stopped. `inA` is
+/// required; `inB` selects stereo (nullptr = mono source duplicated to L/R like a mono clip, pan
+/// law applied downstream — no level doubling). Pass `inA == nullptr` for an unresolved/None
+/// assignment: the strip still runs on silence (insert tails keep ringing), producing no input
+/// signal. Never used by offline mixdown.
+void renderLiveInputTrackPostStripToStereoScratch(const Track& track,
+                                                  int trackIndex,
+                                                  const float* inA,
+                                                  const float* inB,
+                                                  int numSamples,
+                                                  float* stageL,
+                                                  float* stageR,
+                                                  PluginInsertHost* pluginHost,
+                                                  PreGainRampState* preGainRamp) noexcept;
 
 /// Instrument synth → Pre → fader/mute/off → Post → pan into `stageL`/`stageR` (replaces stage segment).
 /// P2: `auditionHost` (nullable) is the track's Secondary AUDITION instance — mixed into the SAME

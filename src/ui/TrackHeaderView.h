@@ -53,6 +53,13 @@ struct TrackHeaderModel
     bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;
+    /// Input-monitoring cell (speaker glyph next to Arm): Audio rows only — when false or
+    /// `callbacks.onToggleMonitor` unset, the cell is omitted entirely (MIDI / instrument /
+    /// group / master rows never show it).
+    bool monitorAvailable = false;
+    /// Speaker lights orange while live input monitoring is on (runtime state, not persisted).
+    bool monitorEnabled = false;
+    bool monitorInteractable = true;
     /// P2: when true and `callbacks.onShowInstrumentAlternatives` set, a small standalone
     /// "Instrument alternatives" button is anchored at the header's bottom-left corner
     /// (instrument destination rows only; opens the anchored popup). Hidden at compact heights
@@ -72,6 +79,8 @@ struct TrackHeaderCallbacks
     std::function<bool()> onTogglePower;
     std::function<void()> onToggleMute;
     std::function<void()> onToggleArm;
+    /// Input-monitoring toggle (audio rows; cell omitted when unset or `monitorAvailable` false).
+    std::function<void()> onToggleMonitor;
     /// Optional: opens native instrument / plugin UI (Groove Agent row). Omit for audio lanes.
     std::function<void()> onOpenInstrumentEditor;
     /// P2: opens the "Instrument alternatives" popup anchored at the given SCREEN bounds (the
@@ -177,6 +186,7 @@ private:
         Arm,
         Mute,
         Power,
+        Monitor,
         RowResize,
         InlineRename,
     };
@@ -186,6 +196,8 @@ private:
         InstrumentEditor,
         Power,
         Mute,
+        /// Input monitoring (speaker glyph, orange when on) — audio rows, left of Arm.
+        Monitor,
         Arm,
         /// P2: "Instrument alternatives" popup trigger — small standalone button at the header's
         /// bottom-left corner (instrument destinations only; not a strip cell).
@@ -200,6 +212,7 @@ private:
         bool powerStandby = false;
         bool muteActive = false;
         bool armActive = false;
+        bool monitorActive = false;
         juce::Rectangle<int> cellBounds;
     };
 
@@ -218,8 +231,10 @@ private:
     [[nodiscard]] juce::Rectangle<int> getRightControlsStripBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getMonitorButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
     [[nodiscard]] bool hasInstrumentEditorCell() const noexcept;
+    [[nodiscard]] bool hasMonitorCell() const noexcept;
     [[nodiscard]] bool hasAlternativesCell() const noexcept;
     /// Bounds of the strip cell at left-to-right `index` (empty when the strip is empty).
     [[nodiscard]] juce::Rectangle<int> stripCellBoundsAtIndex(int index) const noexcept;

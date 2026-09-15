@@ -70,6 +70,16 @@ struct BeginRecordingRequest
     // Non-zero = override (tests / future tuning). Must be a power of two; if not, it is
     // rounded up to a power of two in beginRecording.
     std::uint32_t sampleFifoCapacity = 0;
+
+    // Input-selection slice: capture layout resolved by the coordinator from the armed track's
+    // `TrackInputAssignment` at record start (stable for the whole take — later assignment edits
+    // do not retarget an in-flight recording). 1 = mono, 2 = stereo interleaved frames.
+    int numChannels = 1;
+    // PHYSICAL device input channel(s) to capture; the audio callback maps these to positions in
+    // its packed active-channel array per block (see `PlaybackEngine`). B is only used when
+    // `numChannels == 2`.
+    int inputPhysicalChannelA = -1;
+    int inputPhysicalChannelB = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -81,10 +91,12 @@ struct RecordedTakeResult
     bool success = false;
     juce::String errorMessage;
 
-    // On `success`, a mono **24-bit PCM WAV** at `sampleRate` (see `BeginRecordingRequest`).
+    // On `success`, a **24-bit PCM WAV** at `sampleRate` with `numChannels` channels (mono or
+    // stereo per the take's `BeginRecordingRequest`).
     juce::File takeFile;
     TrackId targetTrackId = kInvalidTrackId;
     std::int64_t recordingStartSample = 0;
+    int numChannels = 1;
 
     // Intended logical length: sum of all `numSamples` passed to `pushInputBlock` while
     // recording (includes overrun / drop accounting; the finalized WAV is padded with silence
@@ -155,12 +167,29 @@ public:
     [[nodiscard]] std::int64_t getActuallyWrittenSampleCount() const noexcept;
     [[nodiscard]] std::int64_t getDroppedSampleCount() const noexcept;
 
-    // [Audio / realtime] Push one mono block. **SPSC / realtime contract:** do not call from a
-    // thread that holds locks on Session/UI. Does not allocate, does not block, does not wait,
-    // does not touch `Session` / `SessionSnapshot` / components. If the FIFO is full, accepts a
-    // prefix, counts the remainder as dropped, and **does not** shorten the intended take length.
-    // No-op (cheap early out) if not recording.
-    void pushInputBlock(const float* inputMono, int numSamples) noexcept;
+    // [Audio / realtime] Push one block of the take's selected input. **SPSC / realtime
+    // contract:** do not call from a thread that holds locks on Session/UI. Does not allocate,
+    // does not block, does not wait, does not touch `Session` / `SessionSnapshot` / components.
+    // If the FIFO is full, accepts a prefix (whole frames), counts the remainder as dropped, and
+    // **does not** shorten the intended take length. No-op (cheap early out) if not recording.
+    // Mono take: `inputA` only (`inputB` ignored). Stereo take: `inputA` = left, `inputB` = right
+    // (null B is captured as silence). All counts are FRAMES.
+    void pushInputBlock(const float* inputA, const float* inputB, int numFrames) noexcept;
+
+    // [Audio, relaxed] Capture layout of the in-flight take (from `BeginRecordingRequest`); the
+    // audio callback uses these to route the selected physical channels into `pushInputBlock`.
+    [[nodiscard]] int getRecordingNumChannels() const noexcept
+    {
+        return recordingNumChannels_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] int getRecordingInputPhysicalChannelA() const noexcept
+    {
+        return recordingInputPhysA_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] int getRecordingInputPhysicalChannelB() const noexcept
+    {
+        return recordingInputPhysB_.load(std::memory_order_relaxed);
+    }
 
     // [Message thread] Drain at most one preview block for the **recording** lane. Returns false
     // if none available.
@@ -183,8 +212,9 @@ private:
     // [Any] Next power of two >= x (for x >= 1).
     static std::uint32_t nextPow2(std::uint32_t x) noexcept;
     static std::uint32_t defaultFifoSizeSamples(double sampleRate) noexcept;
-    // [Realtime] Enqueue one preview min/max; drops preview only if full.
-    void tryPushPreviewFromBlock(const float* inputMono, int numSamples) noexcept;
+    // [Realtime] Enqueue one preview min/max (spanning both channels for stereo takes); drops
+    // preview only if full.
+    void tryPushPreviewFromBlock(const float* inputA, const float* inputB, int numFrames) noexcept;
 
     juce::String lastError_;
     std::unique_ptr<std::thread> writerThread_;
@@ -209,6 +239,11 @@ private:
     // Active take parameters (read by getters; set in begin, cleared in stop)
     std::atomic<std::int64_t> activeRecordingStartSample_{0};
     std::atomic<double> activeSampleRate_{0.0};
+    // Capture layout for the in-flight take (input-selection slice). FIFO holds interleaved
+    // frames when `recordingNumChannels_ == 2`; all public counters remain in frames.
+    std::atomic<int> recordingNumChannels_{1};
+    std::atomic<int> recordingInputPhysA_{-1};
+    std::atomic<int> recordingInputPhysB_{-1};
 
     // Sample accounting (audio thread updates `intended` / `dropped` while recording; writer
     // thread updates `samplesWritten` on successful disk writes; read on message thread after join.

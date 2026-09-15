@@ -103,6 +103,13 @@ Track Track::withPreGainDb(const float preGainDb) const noexcept
     return out;
 }
 
+Track Track::withInputAssignment(const TrackInputAssignment assignment) const noexcept
+{
+    Track out(*this);
+    out.inputAssignment_ = sanitizeTrackInputAssignment(assignment);
+    return out;
+}
+
 Track Track::withTrackOff(const bool off) const noexcept
 {
     Track out(*this);

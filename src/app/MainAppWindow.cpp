@@ -2022,6 +2022,20 @@ public:
             });
         trackLanesEditCoordinator_->install();
 
+        // Audio Input selector (Inspector, audio rows): the combo lists the ACTIVE device's
+        // enabled physical input channels by name. Message-thread only.
+        inspectorView_.setAudioInputDeviceSnapshotProvider(
+            [this]() -> InspectorAudioInputDeviceSnapshot {
+                InspectorAudioInputDeviceSnapshot snap;
+                if (juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice())
+                {
+                    snap.deviceAvailable = true;
+                    snap.physicalInputNames = dev->getInputChannelNames();
+                    snap.activeInputChannels = dev->getActiveInputChannels();
+                }
+                return snap;
+            });
+
         if (instrumentTimelineRowCoordinator_ != nullptr)
         {
             instrumentTimelineRowCoordinator_->rewireInstrumentTrackRenameHandlers();
@@ -3151,6 +3165,9 @@ private:
         {
             proxyPlaybackCoordinator_->notifyEngineRateMaybeChanged();
         }
+        // Device/channel-set changes alter which inputs the Inspector's Audio Input combo can
+        // offer (and whether the current assignment shows "(unavailable)").
+        inspectorView_.refreshFromSession();
     }
 
     void showAudioMixdownDialog()

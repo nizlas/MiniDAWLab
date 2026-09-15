@@ -206,6 +206,12 @@ public:
     /// `Session::setActiveTrack` succeeds. `Main` uses this to clear the instrument-row active flag.
     void setOnAudioHeaderActivated(std::function<void()> fn) noexcept;
 
+    /// Input-monitoring hooks for audio-track headers (Monitor speaker cell). `isMonitored` feeds
+    /// the model (orange while on); `toggleMonitor` flips runtime engine state (no undo entry,
+    /// never persisted). Both unset ⇒ the Monitor cell is omitted entirely.
+    void setInputMonitoringHooks(std::function<bool(TrackId)> isMonitored,
+                                 std::function<void(TrackId)> toggleMonitor) noexcept;
+
     /// Optional: after an audio clip lane clears peer waveform selections on mouse-down, invoke this
     /// so MIDI clip selections can be cleared without threading instrument details into `ClipWaveformView`.
     void setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept;
@@ -391,6 +397,8 @@ private:
 
     TrackHeaderPluginHost trackHeaderPluginHost_{};
     std::function<void(TrackId)> onDeleteTrackRequested_;
+    std::function<bool(TrackId)> isTrackInputMonitoredFn_;
+    std::function<void(TrackId)> toggleTrackInputMonitorFn_;
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
     std::function<bool(PlacedClipId, juce::String)> onUndoableClipRenameRequested_;

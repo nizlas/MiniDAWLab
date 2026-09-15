@@ -655,6 +655,41 @@ InspectorView::InspectorView(Session& session)
     };
     addAndMakeVisible(panField_);
 
+    // Audio Input (audio rows only): which device input this track records and monitors —
+    // physical channels of the ACTIVE device via the injected snapshot provider.
+    {
+        const juce::String inputTip
+            = "Selects which audio-device input this track records and monitors.\n\n"
+              "Mono inputs feed both sides of the track; stereo pairs keep left/right. An input "
+              "saved on another computer that is unavailable here shows as \"(unavailable)\" and "
+              "supplies silence until it can be resolved again.";
+        inputCaptionLabel_.setText("Audio Input", juce::dontSendNotification);
+        inputCaptionLabel_.setFont(juce::FontOptions(11.0f));
+        inputCaptionLabel_.setTooltip(inputTip);
+        addAndMakeVisible(inputCaptionLabel_);
+
+        inputComboBox_.onChange = [this] {
+            if (inputComboGuard_ || audioInputHandler_ == nullptr)
+            {
+                return;
+            }
+            const TrackId active = session_.getActiveTrackId();
+            const int pick = inputComboBox_.getSelectedId();
+            if (active == kInvalidTrackId || pick <= 0)
+            {
+                return;
+            }
+            const size_t ix = static_cast<size_t>(pick - 1);
+            if (ix >= inputComboValues_.size())
+            {
+                return;
+            }
+            audioInputHandler_(active, inputComboValues_[ix]);
+        };
+        inputComboBox_.setTooltip(inputTip);
+        addAndMakeVisible(inputComboBox_);
+    }
+
     // "Audio Output", not "Output": instrument rows now also show a MIDI destination channel, and a
     // user must be able to tell the two apart at a glance.
     outputCaptionLabel_.setText("Audio Output", juce::dontSendNotification);
@@ -1370,6 +1405,97 @@ void InspectorView::setSendAmountEditorText(const int sendRowIndex, const float 
     ui.amountGuard = false;
 }
 
+void InspectorView::populateAudioInputCombo(const Track& track)
+{
+    inputComboGuard_ = true;
+    inputComboBox_.clear(juce::dontSendNotification);
+    inputComboValues_.clear();
+
+    InspectorAudioInputDeviceSnapshot dev;
+    if (audioInputDeviceSnapshotProvider_ != nullptr)
+    {
+        dev = audioInputDeviceSnapshotProvider_();
+    }
+
+    const TrackInputAssignment current = track.getInputAssignment();
+    int selectId = 0;
+    const auto addItem = [this, &current, &selectId](const TrackInputAssignment& value,
+                                                     const juce::String& label) {
+        inputComboValues_.push_back(value);
+        const int itemId = static_cast<int>(inputComboValues_.size());
+        inputComboBox_.addItem(label, itemId);
+        if (value == current)
+        {
+            selectId = itemId;
+        }
+    };
+    // Physical channel label: 1-based number plus the device's own channel name when known.
+    const auto physicalLabel = [&dev](const int phys) {
+        juce::String s = "In " + juce::String(phys + 1);
+        if (phys >= 0 && phys < dev.physicalInputNames.size()
+            && dev.physicalInputNames[phys].isNotEmpty())
+        {
+            s << ": " << dev.physicalInputNames[phys];
+        }
+        return s;
+    };
+
+    // The legacy-compatible default keeps older projects' established recording source: whatever
+    // the device's first enabled input is on THIS machine (mono).
+    addItem({ TrackInputKind::DefaultFirstInput, -1, -1 }, "Default (first available input)");
+    addItem({ TrackInputKind::None, -1, -1 }, "No input");
+
+    if (dev.deviceAvailable)
+    {
+        // Every ENABLED physical input as a mono source (packed callback positions are derived
+        // from the same enabled set in the engine).
+        for (int p = dev.activeInputChannels.findNextSetBit(0); p >= 0;
+             p = dev.activeInputChannels.findNextSetBit(p + 1))
+        {
+            addItem({ TrackInputKind::Mono, p, -1 }, "Mono — " + physicalLabel(p));
+        }
+        // Even-aligned adjacent pairs (1+2, 3+4, …) where BOTH channels are enabled, with both
+        // channel names spelled out.
+        const int highest = dev.activeInputChannels.getHighestBit();
+        for (int p = 0; p + 1 <= highest; p += 2)
+        {
+            if (dev.activeInputChannels[p] && dev.activeInputChannels[p + 1])
+            {
+                addItem({ TrackInputKind::StereoPair, p, p + 1 },
+                        "Stereo — " + physicalLabel(p) + " + " + physicalLabel(p + 1));
+            }
+        }
+    }
+
+    // A saved assignment whose channel(s) are not present/enabled on this device stays visible,
+    // selected and clearly marked — it supplies silence and is preserved verbatim so returning to
+    // the original device resolves it again (never silently replaced with another input).
+    if (selectId == 0)
+    {
+        juce::String label;
+        switch (current.kind)
+        {
+        case TrackInputKind::Mono:
+            label = "Mono — " + physicalLabel(current.physicalChannelA) + " (unavailable)";
+            break;
+        case TrackInputKind::StereoPair:
+            label = "Stereo — " + physicalLabel(current.physicalChannelA) + " + "
+                    + physicalLabel(current.physicalChannelB) + " (unavailable)";
+            break;
+        case TrackInputKind::DefaultFirstInput:
+        case TrackInputKind::None:
+        default:
+            label = "(unavailable)";
+            break;
+        }
+        addItem(current, label);
+        selectId = static_cast<int>(inputComboValues_.size());
+    }
+
+    inputComboBox_.setSelectedId(selectId, juce::dontSendNotification);
+    inputComboGuard_ = false;
+}
+
 void InspectorView::populateSendDestCombo(const int sendRowIndex,
                                           const TrackId activeTrackId,
                                           const Track& track)
@@ -1760,6 +1886,10 @@ void InspectorView::refreshFromSession()
         outputComboBox_.setVisible(false);
         outputComboBox_.clear(juce::dontSendNotification);
         outputComboDestIds_.clear();
+        inputCaptionLabel_.setVisible(false);
+        inputComboBox_.setVisible(false);
+        inputComboBox_.clear(juce::dontSendNotification);
+        inputComboValues_.clear();
         syncInsertsNoActiveTrack();
         syncSendsNoActiveTrack();
         return;
@@ -1802,6 +1932,25 @@ void InspectorView::refreshFromSession()
         {
             setPreGainEditorTextFromDb(tr.getPreGainDb());
         }
+    }
+
+    // Audio Input is an Audio-lane control only (recording + monitoring source selection).
+    const bool showAudioInput = (tr.getKind() == TrackKind::Audio);
+    if (inputComboBox_.isVisible() != showAudioInput)
+    {
+        inputCaptionLabel_.setVisible(showAudioInput);
+        inputComboBox_.setVisible(showAudioInput);
+        // The row only claims vertical space while visible, so re-flow on kind change.
+        resized();
+    }
+    if (showAudioInput)
+    {
+        populateAudioInputCombo(tr);
+    }
+    else
+    {
+        inputComboBox_.clear(juce::dontSendNotification);
+        inputComboValues_.clear();
     }
 
     // MIDI channel only concerns rows that emit MIDI. Audio, Group and Master rows have none.
@@ -2018,6 +2167,15 @@ void InspectorView::resized()
         midiDestCaptionLabel_.setBounds(area.removeFromTop(18));
         area.removeFromTop(2);
         midiDestComboBox_.setBounds(area.removeFromTop(24));
+    }
+
+    // Audio Input sits directly above Audio Output and only claims vertical space on audio rows.
+    if (inputComboBox_.isVisible())
+    {
+        area.removeFromTop(8);
+        inputCaptionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        inputComboBox_.setBounds(area.removeFromTop(24));
     }
 
     area.removeFromTop(8);

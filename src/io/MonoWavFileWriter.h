@@ -20,4 +20,12 @@ namespace MonoWavFileWriter
                                                   int numSamples,
                                                   double sampleRate);
 
+// Same convention, 1–2 planar channel pointers (`channels[0..numChannels)` each `numFrames`
+// long): input-selection slice — cycle-recording split of STEREO takes needs stereo slice files.
+[[nodiscard]] juce::Result writeMulti24BitWavSegment(const juce::File& outputFile,
+                                                     const float* const* channels,
+                                                     int numChannels,
+                                                     int numFrames,
+                                                     double sampleRate);
+
 } // namespace MonoWavFileWriter

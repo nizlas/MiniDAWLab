@@ -340,7 +340,12 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             return;
         }
 
-        const float* const pcmLive = loadedClip->getAudio().getReadPointer(0);
+        // Input-selection slice: the continuous cycle master may be mono OR stereo (selected
+        // stereo pair); slices keep the take's channel layout.
+        const int takeChans = juce::jlimit(1, 2, loadedClip->getNumChannels());
+        const float* const pcmLiveL = loadedClip->getAudio().getReadPointer(0);
+        const float* const pcmLiveR
+            = takeChans >= 2 ? loadedClip->getAudio().getReadPointer(1) : nullptr;
         const auto decoded = static_cast<std::int64_t>(loadedClip->getNumSamples());
         const std::int64_t totalAvail
             = juce::jmax<std::int64_t>(std::int64_t{ 0 }, juce::jmin(decoded, r.intendedSampleCount));
@@ -358,15 +363,17 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             return;
         }
 
-        std::vector<float> pcmStable(
-            static_cast<size_t>(juce::jmax<std::int64_t>(std::int64_t{ 0 }, totalAvail)));
+        std::vector<float> pcmStableL(static_cast<size_t>(totalAvail));
+        std::vector<float> pcmStableR(takeChans >= 2 ? static_cast<size_t>(totalAvail) : size_t{ 0 });
         for (std::int64_t i = 0; i < totalAvail; ++i)
         {
-            pcmStable[(size_t)i] = pcmLive[i];
+            pcmStableL[(size_t)i] = pcmLiveL[i];
+            if (pcmLiveR != nullptr)
+            {
+                pcmStableR[(size_t)i] = pcmLiveR[i];
+            }
         }
         loadedClip.reset();
-
-        const float* const pcm = pcmStable.data();
 
         const juce::String batchStamp = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
         bool allOk = true;
@@ -409,8 +416,10 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
 
             ++sliceFileIndex;
 
-            const juce::Result wrResult = MonoWavFileWriter::writeMono24BitWavSegment(
-                sliceWav, pcm + wavOff, sampleCount, cycleSr);
+            const float* sliceChannels[2] = { pcmStableL.data() + wavOff,
+                                              takeChans >= 2 ? pcmStableR.data() + wavOff : nullptr };
+            const juce::Result wrResult = MonoWavFileWriter::writeMulti24BitWavSegment(
+                sliceWav, sliceChannels, takeChans, sampleCount, cycleSr);
 
             if (!wrResult.wasOk())
             {
@@ -602,6 +611,99 @@ void RecordingCoordinator::numpadRecordToggled()
         return;
     }
 
+    // Input-selection slice: resolve the armed track's input assignment against the ACTIVE device
+    // configuration to concrete PHYSICAL channels for the whole take. An unresolved assignment
+    // blocks recording with a clear message — never a silent substitution of another input.
+    int takeNumChannels = 1;
+    int takePhysA = -1;
+    int takePhysB = -1;
+    {
+        TrackInputAssignment ia;
+        {
+            const std::shared_ptr<const SessionSnapshot> snap
+                = session_.loadSessionSnapshotForAudioThread();
+            const int armedIx = (snap != nullptr) ? snap->findTrackIndexById(armed) : -1;
+            if (armedIx >= 0)
+            {
+                ia = snap->getTrack(armedIx).getInputAssignment();
+            }
+        }
+        const juce::BigInteger activeIn = dev->getActiveInputChannels();
+        const juce::StringArray inNames = dev->getInputChannelNames();
+        const auto channelLabel = [&inNames](const int phys) {
+            juce::String s = "input " + juce::String(phys + 1);
+            if (phys >= 0 && phys < inNames.size() && inNames[phys].isNotEmpty())
+            {
+                s << " (" << inNames[phys] << ")";
+            }
+            return s;
+        };
+        switch (ia.kind)
+        {
+        case TrackInputKind::None:
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "Recording",
+                "The armed track's Audio Input is set to \"No input\". Choose an input in the "
+                "Inspector, then try again.");
+            juce::Logger::writeToLog("[Rec] start blocked: armed track input = None");
+            return;
+        case TrackInputKind::Mono:
+            if (ia.physicalChannelA < 0 || !activeIn[ia.physicalChannelA])
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Recording",
+                    "The armed track's selected input — " + channelLabel(ia.physicalChannelA)
+                        + " — is not available on the current audio device. Enable it in the "
+                          "audio settings or choose another input in the Inspector. The saved "
+                          "selection is kept unchanged.");
+                juce::Logger::writeToLog("[Rec] start blocked: mono input unresolved (physical "
+                                         + juce::String(ia.physicalChannelA) + ")");
+                return;
+            }
+            takePhysA = ia.physicalChannelA;
+            break;
+        case TrackInputKind::StereoPair:
+            if (ia.physicalChannelA < 0 || ia.physicalChannelB < 0
+                || !activeIn[ia.physicalChannelA] || !activeIn[ia.physicalChannelB])
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Recording",
+                    "The armed track's selected stereo input pair — "
+                        + channelLabel(ia.physicalChannelA) + " + " + channelLabel(ia.physicalChannelB)
+                        + " — is not fully available on the current audio device. Enable both "
+                          "channels or choose another input in the Inspector. The saved selection "
+                          "is kept unchanged.");
+                juce::Logger::writeToLog("[Rec] start blocked: stereo input unresolved (physical "
+                                         + juce::String(ia.physicalChannelA) + "+"
+                                         + juce::String(ia.physicalChannelB) + ")");
+                return;
+            }
+            takeNumChannels = 2;
+            takePhysA = ia.physicalChannelA;
+            takePhysB = ia.physicalChannelB;
+            break;
+        case TrackInputKind::DefaultFirstInput:
+        default:
+            // Legacy-compatible default: the first ACTIVE device input as mono — exactly the
+            // pre-input-selection capture source (packed position 0). Resolved here so the take
+            // keeps this concrete channel even if the device changes mid-take.
+            takePhysA = activeIn.findNextSetBit(0);
+            if (takePhysA < 0)
+            {
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::WarningIcon,
+                    "Audio",
+                    "No input channel is active. Enable an input in your audio device, then try again.");
+                juce::Logger::writeToLog("[Rec] start blocked: no active input for default assignment");
+                return;
+            }
+            break;
+        }
+    }
+
     cycleRecordingActive_ = false;
     const bool cycleOn = transport_.readCycleEnabledForUi();
     const std::int64_t locL = session_.getLeftLocatorSamples();
@@ -619,6 +721,9 @@ void RecordingCoordinator::numpadRecordToggled()
     req.targetTrackId = armed;
     req.recordingStartSample = 0;
     req.sampleRate = sr;
+    req.numChannels = takeNumChannels;
+    req.inputPhysicalChannelA = takePhysA;
+    req.inputPhysicalChannelB = takePhysB;
     startCountInAfterValidation(std::move(req));
 }
 

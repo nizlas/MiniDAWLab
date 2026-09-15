@@ -695,6 +695,27 @@ void TrackLanesEditCoordinator::install()
             });
     });
 
+    // Audio input assignment (audio rows): a normal undoable project edit. A no-op pick (setter
+    // returns false) records nothing. Blocked while recording so an active take's capture source
+    // cannot change mid-flight.
+    inspectorView_.setAudioInputHandler(
+        [this](const TrackId trackId, const TrackInputAssignment assignment) {
+            if (callbacks_.isRecording() || callbacks_.isCountInActive())
+            {
+                return;
+            }
+            callbacks_.executeUndoableSessionEdit(
+                "Set audio input",
+                [this, trackId, assignment]() -> bool {
+                    if (!session_.setTrackInputAssignment(trackId, assignment))
+                    {
+                        return false;
+                    }
+                    inspectorView_.refreshFromSession();
+                    return true;
+                });
+        });
+
     inspectorView_.setMidiOutputChannelHandler([this](const TrackId trackId, const int channel) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {
@@ -839,6 +860,15 @@ void TrackLanesEditCoordinator::install()
         callbacks_.deactivateKeyedInstrumentControllersOnly();
         inspectorView_.refreshFromSession();
     });
+
+    // Input monitoring (Monitor speaker cell on audio headers): runtime-only engine state —
+    // deliberately NOT an undoable session edit and never persisted (defaults OFF on open).
+    trackLanesView_.setInputMonitoringHooks(
+        [this](const TrackId tid) { return playbackEngine_.isTrackInputMonitoringEnabled(tid); },
+        [this](const TrackId tid) {
+            playbackEngine_.setTrackInputMonitoringEnabled(
+                tid, !playbackEngine_.isTrackInputMonitoringEnabled(tid));
+        });
 }
 
 void TrackLanesEditCoordinator::restoreDeletedInstrumentTrackForUndo(

@@ -187,6 +187,12 @@ public:
         TrackId trackId,
         float preGainDb) noexcept;
 
+    /// [Message thread] Replace one track's audio input assignment (sanitized); see `Track`.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackInputAssignment(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        TrackInputAssignment assignment) noexcept;
+
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackStereoPan(
         const SessionSnapshot& previous,
         TrackId trackId,

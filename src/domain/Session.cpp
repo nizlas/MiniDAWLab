@@ -1237,6 +1237,35 @@ bool Session::setTrackPreGainDb(const TrackId trackId, const float preGainDb) no
     return true;
 }
 
+bool Session::setTrackInputAssignment(const TrackId trackId,
+                                      const TrackInputAssignment assignment) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0 || current->getTrack(idx).getKind() != TrackKind::Audio)
+    {
+        return false;
+    }
+    const TrackInputAssignment sanitized = sanitizeTrackInputAssignment(assignment);
+    if (sanitized == current->getTrack(idx).getInputAssignment())
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackInputAssignment(*current, trackId, sanitized);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
 void Session::setTrackStereoPan(const TrackId trackId, const float stereoPan) noexcept
 {
     if (trackId == kInvalidTrackId)
@@ -1657,6 +1686,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.name = (t.getKind() == TrackKind::Master) ? juce::String(kMasterTrackDisplayName) : t.getName();
         tr.channelFaderGain = t.getChannelFaderGain();
         tr.preGainDb = t.getPreGainDb();
+        tr.inputAssignment = t.getInputAssignment();
         tr.stereoPan = t.getStereoPan();
         tr.off = (t.getKind() == TrackKind::Master) ? false : t.isTrackOff();
         tr.muted = t.isMuted();
@@ -2093,6 +2123,13 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         if (trDto.preGainDb != kTrackPreGainDbDefault)
         {
             built.back() = built.back().withPreGainDb(trDto.preGainDb);
+        }
+        // Input assignment (v23) travels the same sanitizing COW route; Audio lanes only (other
+        // kinds keep the default and never serialize the fields).
+        if (tk == TrackKind::Audio
+            && trDto.inputAssignment.kind != TrackInputKind::DefaultFirstInput)
+        {
+            built.back() = built.back().withInputAssignment(trDto.inputAssignment);
         }
         appendProjectLoadDiagnosticLine(
             "apply: built track id=" + juce::String((juce::int64)trDto.id) + " kind="

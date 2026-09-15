@@ -792,6 +792,10 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
         transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
         appendProjectLoadDiagnosticLine("load: transport stopped");
 
+        // Monitor is a runtime-only control and defaults OFF on project opening/restoration —
+        // never carry live input monitoring across a project replacement.
+        playbackEngine_.clearAllInputMonitoring();
+
         // P1H project replacement (§13.3): obsolete/cancel every proxy job of the OLD project
         // and drop the runtime-only policy timers BEFORE the runtimes they reference are
         // cleared. Queued work is re-derivable from fingerprints on reopen; nothing waits.

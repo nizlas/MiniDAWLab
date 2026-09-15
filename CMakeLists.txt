@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.0.1 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.0.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -200,6 +200,41 @@ target_link_libraries(MiniDAWSelftests
         juce::juce_audio_formats
         # P1C: proxy fingerprint hashing (juce::SHA256) in ProxyFingerprint.h tests.
         juce::juce_cryptography
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+
+# -----------------------------------------------------------------------------
+# InputRoutingFocusedTests (input-selection/monitoring slice): focused deterministic tests for
+# per-track input selection + software input monitoring — production mapping/domain/persistence/
+# recorder/mix-helper code, injected-input fixtures, no audio device, no UI, no VST3 hosting
+# (PlaybackMixHelpers' plugin-host entry points are satisfied by never-executed link stubs in the
+# test main). Run the exe: exit 0 = all green.
+# -----------------------------------------------------------------------------
+juce_add_console_app(InputRoutingFocusedTests PRODUCT_NAME "InputRoutingFocusedTests")
+target_sources(InputRoutingFocusedTests PRIVATE
+    tests/selftest/InputRoutingFocusedTestsMain.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/engine/RecorderService.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp)
+target_include_directories(InputRoutingFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(InputRoutingFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(InputRoutingFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        # PluginInsertHost.h / ExperimentalInstrumentHost.h compile-time deps (stubs at link).
+        juce::juce_audio_processors
+        juce::juce_gui_basics
         juce::juce_events
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
