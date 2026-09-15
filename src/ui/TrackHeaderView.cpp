@@ -577,9 +577,12 @@ bool TrackHeaderView::hasAlternativesCell() const noexcept
 
 bool TrackHeaderView::hasMonitorCell() const noexcept
 {
+    // Model-driven only (kind-checked by each row's provider on every poll): audio rows set
+    // `monitorAvailable` + interactable, Instrument destination rows set available but NOT
+    // interactable (disabled placeholder — no toggle callback exists there), and plain MIDI /
+    // group / master rows leave it false so no cell, hit target, or tooltip appears.
     const auto m = modelProvider_();
-    return m.showRecordAndPowerStripCells && callbacks_.onToggleMonitor != nullptr
-           && m.monitorAvailable;
+    return m.showRecordAndPowerStripCells && m.monitorAvailable;
 }
 
 int TrackHeaderView::computeRightStripCellCount() const noexcept
@@ -777,8 +780,13 @@ void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) n
     }};
     for (auto const pri : hitPrioritiesRightToLeft)
     {
+        // Disabled buttons take no hover — except Monitor: the Instrument rows' disabled
+        // placeholder must still hover so its explanatory tooltip can show. Painting ignores
+        // hover on disabled cells (`showHoverBrighten` requires `enabled`) and clicks stay
+        // inert (`dispatchStripClick` requires `enabled`), so this only feeds the tooltip.
         if (auto const* s = findStripControlSpec(specs, pri);
-            s != nullptr && s->enabled && stripCellHitIntersectsVisibleChrome(s->cellBounds, pos))
+            s != nullptr && (s->enabled || pri == TrackHeaderButtonKind::Monitor)
+            && stripCellHitIntersectsVisibleChrome(s->cellBounds, pos))
         {
             next = pri;
             break;
@@ -886,6 +894,12 @@ juce::String TrackHeaderView::getTooltip()
     if (stripHoveredButton_.has_value()
         && *stripHoveredButton_ == TrackHeaderButtonKind::Monitor)
     {
+        // Instrument destination rows show the Monitor cell as a disabled placeholder (always
+        // playback mode); the tooltip explains why it cannot be engaged there.
+        if (!modelProvider_().monitorInteractable)
+        {
+            return "Live MIDI monitoring is not available yet.";
+        }
         return "Input monitoring: hear this track's selected audio input through its effects and "
                "mix routing. While on, the track's clips are not played. Recording is unaffected.";
     }
@@ -1079,8 +1093,12 @@ void TrackHeaderView::paint(juce::Graphics& g)
         juce::Graphics::ScopedSaveState const gs(g);
         g.reduceClipRegion(chrome);
 
-        constexpr std::array<TrackHeaderButtonKind, 5> paintOrderBottomToTop{{
+        // EVERY strip button kind must appear here: hit testing/hover/tooltips work from
+        // `buildStripControlSpecs`, so a kind missing from this paint list is an invisible-but-
+        // clickable button (the original Monitor-button defect).
+        constexpr std::array<TrackHeaderButtonKind, 6> paintOrderBottomToTop{{
             TrackHeaderButtonKind::Mute,
+            TrackHeaderButtonKind::Monitor,
             TrackHeaderButtonKind::Arm,
             TrackHeaderButtonKind::Alternatives,
             TrackHeaderButtonKind::InstrumentEditor,

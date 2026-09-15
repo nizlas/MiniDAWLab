@@ -18,7 +18,13 @@ public:
     AudioSettingsDialogContent(juce::AudioDeviceManager& dm,
                                LatencySettingsStore& latencyStore,
                                PlaybackEngine& playbackEngine)
-        : selector_(dm, 0, 2, 2, 2, false, false, false, false)
+        // Inputs: 0 … 64 — the selector must expose EVERY input channel the active device offers
+        // (per-track recording/monitoring sources are chosen in the Inspector; a low max here made
+        // the channel list auto-disable one input when enabling another, capping the device at two
+        // active inputs globally). 64 matches the engine's physical-channel mask width; the actual
+        // list is always bounded by the device's real channel count. Outputs stay a fixed stereo
+        // pair — that is the product's output format and imposes no input limit.
+        : selector_(dm, 0, 64, 2, 2, false, false, false, false)
         , latencyView_(latencyStore, playbackEngine)
     {
         addAndMakeVisible(selector_);

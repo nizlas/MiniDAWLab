@@ -53,13 +53,15 @@ struct TrackHeaderModel
     bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;
-    /// Input-monitoring cell (speaker glyph next to Arm): Audio rows only — when false or
-    /// `callbacks.onToggleMonitor` unset, the cell is omitted entirely (MIDI / instrument /
-    /// group / master rows never show it).
+    /// Input-monitoring cell (speaker glyph next to Arm). Audio rows: available + interactable.
+    /// Instrument destination rows: available but NOT interactable — a visibly disabled
+    /// placeholder (always playback mode; live MIDI monitoring does not exist yet). Plain MIDI /
+    /// group / master rows: unavailable — no cell, hit target, or tooltip.
     bool monitorAvailable = false;
     /// Speaker lights orange while live input monitoring is on (runtime state, not persisted).
     bool monitorEnabled = false;
-    bool monitorInteractable = true;
+    /// False = disabled placeholder look + inert clicks + "not available yet" tooltip.
+    bool monitorInteractable = false;
     /// P2: when true and `callbacks.onShowInstrumentAlternatives` set, a small standalone
     /// "Instrument alternatives" button is anchored at the header's bottom-left corner
     /// (instrument destination rows only; opens the anchored popup). Hidden at compact heights
@@ -179,6 +181,13 @@ public:
     /// cell is not present). Public: used as the popup's anchor rectangle.
     [[nodiscard]] juce::Rectangle<int> getAlternativesButtonBounds() const noexcept;
 
+    /// Strip-cell geometry (empty when the cell is not present for the current model). Public for
+    /// layout verification (non-overlap / visibility checks in the focused UI render tests).
+    [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getMonitorButtonBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
+
 private:
     enum class DragBlocker : std::uint8_t
     {
@@ -229,10 +238,6 @@ private:
 
     /// Union of control cells (left-aligned strip); strip metrics / painting only (resize hit-test does not use this).
     [[nodiscard]] juce::Rectangle<int> getRightControlsStripBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getMonitorButtonBounds() const noexcept;
-    [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
     [[nodiscard]] bool hasInstrumentEditorCell() const noexcept;
     [[nodiscard]] bool hasMonitorCell() const noexcept;
     [[nodiscard]] bool hasAlternativesCell() const noexcept;

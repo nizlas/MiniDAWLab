@@ -224,7 +224,10 @@ target_sources(InputRoutingFocusedTests PRIVATE
     src/engine/RecorderService.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
-    src/diagnostics/ProjectLoadDiagnosticLog.cpp)
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    # Monitor-button UI render checks (offscreen snapshots of the production header paint path).
+    src/ui/TrackHeaderView.cpp
+    src/ui/ForbiddenCursor.cpp)
 target_include_directories(InputRoutingFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(InputRoutingFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
     JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)

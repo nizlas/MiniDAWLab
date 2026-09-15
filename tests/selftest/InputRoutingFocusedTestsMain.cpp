@@ -35,6 +35,9 @@
 #include "engine/RecorderService.h"
 #include "io/MonoWavFileWriter.h"
 #include "io/ProjectFile.h"
+#include "ui/TrackHeaderView.h"
+
+#include <juce_gui_basics/juce_gui_basics.h>
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -520,9 +523,211 @@ void testMultiChannelWavWriter()
     (void)dir.deleteRecursively();
 }
 
+// ---------------------------------------------------------------------------
+// 7. Monitor button UI render — real TrackHeaderView paint path (offscreen snapshots)
+// ---------------------------------------------------------------------------
+// Renders the PRODUCTION header component per track-type model and verifies the Monitor cell is
+// actually painted (the original defect was an invisible-but-clickable button: the paint order
+// list omitted Monitor while hit testing included it). Snapshots are written as PNGs for visual
+// confirmation when an output directory is passed as argv[1].
+
+[[nodiscard]] TrackHeaderModel makeAudioHeaderModel(const bool monitorOn)
+{
+    TrackHeaderModel m;
+    m.name = "Guitar";
+    m.monitorAvailable = true;
+    m.monitorInteractable = true;
+    m.monitorEnabled = monitorOn;
+    return m;
+}
+
+[[nodiscard]] TrackHeaderModel makeInstrumentHeaderModel()
+{
+    TrackHeaderModel m;
+    m.name = "Organ";
+    m.subtitle = "Kontakt 8";
+    m.instrumentEditorAvailable = true;
+    m.instrumentAlternativesAvailable = true;
+    m.monitorAvailable = true;      // visible …
+    m.monitorInteractable = false;  // … but a disabled placeholder (playback mode)
+    return m;
+}
+
+[[nodiscard]] TrackHeaderModel makeMidiHeaderModel()
+{
+    TrackHeaderModel m;
+    m.name = "MIDI 1";
+    m.monitorAvailable = false; // no cell, hit target, or tooltip
+    return m;
+}
+
+// Count opaque pixels inside `r` whose colour is within `tol` per channel of `want`.
+[[nodiscard]] int countPixelsNear(const juce::Image& img, const juce::Rectangle<int> r,
+                                  const juce::Colour want, const int tol = 6)
+{
+    int n = 0;
+    for (int y = r.getY(); y < r.getBottom(); ++y)
+    {
+        for (int x = r.getX(); x < r.getRight(); ++x)
+        {
+            const juce::Colour c = img.getPixelAt(x, y);
+            if (std::abs((int)c.getRed() - (int)want.getRed()) <= tol
+                && std::abs((int)c.getGreen() - (int)want.getGreen()) <= tol
+                && std::abs((int)c.getBlue() - (int)want.getBlue()) <= tol)
+            {
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
+void savePng(const juce::Image& img, const juce::File& outDir, const char* const name)
+{
+    if (outDir == juce::File{})
+    {
+        return;
+    }
+    (void)outDir.createDirectory();
+    const juce::File f = outDir.getChildFile(name);
+    (void)f.deleteFile();
+    juce::FileOutputStream os(f);
+    if (os.openedOk())
+    {
+        juce::PNGImageFormat png;
+        (void)png.writeImageToStream(img, os);
+    }
+}
+
+void testMonitorButtonRendering(const juce::File& shotDir)
+{
+    TrackHeaderCallbacks audioCallbacks;
+    audioCallbacks.onToggleMonitor = [] {};
+    audioCallbacks.onToggleMute = [] {};
+    audioCallbacks.onToggleArm = [] {};
+    audioCallbacks.onTogglePower = [] { return true; };
+
+    constexpr int kW = 240;
+    constexpr int kH = 64;
+
+    const auto renderHeader = [&](TrackHeaderModel model, TrackHeaderCallbacks cbs,
+                                  std::unique_ptr<TrackHeaderView>& outView) {
+        outView = std::make_unique<TrackHeaderView>(
+            [model] { return model; }, std::move(cbs), kInvalidTrackId, std::nullopt);
+        outView->setSize(kW, kH);
+        return outView->createComponentSnapshot(outView->getLocalBounds(), false, 1.0f);
+    };
+
+    // ---- Audio row, Monitor OFF: neutral grey face + light glyph, clearly present ----
+    std::unique_ptr<TrackHeaderView> vOff;
+    const juce::Image imgOff = renderHeader(makeAudioHeaderModel(false), audioCallbacks, vOff);
+    savePng(imgOff, shotDir, "monitor-audio-off.png");
+    const juce::Rectangle<int> cellOff = vOff->getMonitorButtonBounds();
+    expect(!cellOff.isEmpty(), "ui: audio row exposes a Monitor cell");
+    const juce::Colour offFace(0xff5a5858), offGlyph(0xffeaeaea), background(0xff333333);
+    expect(countPixelsNear(imgOff, cellOff, offFace) > 40,
+           "ui: Monitor OFF is painted (neutral clickable face visible)");
+    expect(countPixelsNear(imgOff, cellOff, offGlyph) > 8,
+           "ui: Monitor OFF shows a light speaker glyph");
+
+    // ---- Audio row, Monitor ON: orange face + dark glyph ----
+    std::unique_ptr<TrackHeaderView> vOn;
+    const juce::Image imgOn = renderHeader(makeAudioHeaderModel(true), audioCallbacks, vOn);
+    savePng(imgOn, shotDir, "monitor-audio-on.png");
+    const juce::Rectangle<int> cellOn = vOn->getMonitorButtonBounds();
+    expect(countPixelsNear(imgOn, cellOn, juce::Colour(0xffe07b18)) > 40,
+           "ui: Monitor ON is painted orange");
+    expect(countPixelsNear(imgOn, cellOn, juce::Colour(0xff141414)) > 8,
+           "ui: Monitor ON shows a dark speaker glyph");
+
+    // ---- Layout: no overlap with Power/Mute/Arm/Alternatives; fully inside visible chrome ----
+    expect(cellOff.getIntersection(vOff->getPowerButtonBounds()).isEmpty()
+               && cellOff.getIntersection(vOff->getMuteButtonBounds()).isEmpty()
+               && cellOff.getIntersection(vOff->getArmButtonBounds()).isEmpty()
+               && cellOff.getIntersection(vOff->getAlternativesButtonBounds()).isEmpty()
+               && cellOff.getIntersection(vOff->getInstrumentEditorButtonBounds()).isEmpty(),
+           "ui: Monitor cell does not overlap Power, Mute, Arm, Alternatives, or editor cells");
+    expect(vOff->getLocalBounds()
+               .withTrimmedBottom(TrackHeaderView::kHeaderResizeBandPx)
+               .contains(cellOff),
+           "ui: Monitor cell stays inside header chrome (clear of the resize band)");
+
+    // ---- Compact row height: probe the smallest full-strip height and re-verify ----
+    // The snap helper rounds a drag height to the name-only layout or to the smallest height
+    // that shows the full control strip. Heights below the name-only ideal also snap UP, so the
+    // full-strip minimum is the LARGEST up-snapped result over the probe range.
+    int minFullH = 0;
+    for (int h = 20; h <= kH; ++h)
+    {
+        const int snapped = TrackHeaderView::snapTrackHeaderRowHeightAfterResize(h, false, 10, 400);
+        if (snapped > h)
+        {
+            minFullH = juce::jmax(minFullH, snapped);
+        }
+    }
+    if (minFullH <= 0)
+    {
+        minFullH = kH;
+    }
+    std::unique_ptr<TrackHeaderView> vCompact;
+    TrackHeaderModel compactModel = makeAudioHeaderModel(true);
+    vCompact = std::make_unique<TrackHeaderView>(
+        [compactModel] { return compactModel; }, audioCallbacks, kInvalidTrackId, std::nullopt);
+    vCompact->setSize(kW, minFullH);
+    const juce::Image imgCompact
+        = vCompact->createComponentSnapshot(vCompact->getLocalBounds(), false, 1.0f);
+    savePng(imgCompact, shotDir, "monitor-audio-on-compact.png");
+    expect(countPixelsNear(imgCompact, vCompact->getMonitorButtonBounds(),
+                           juce::Colour(0xffe07b18))
+               > 20,
+           "ui: Monitor stays visible at the compact full-strip row height");
+
+    // ---- Instrument destination row: visible but DISABLED placeholder, distinct look ----
+    std::unique_ptr<TrackHeaderView> vInst;
+    TrackHeaderCallbacks instCallbacks; // deliberately NO onToggleMonitor (placeholder is inert)
+    instCallbacks.onOpenInstrumentEditor = [] {};
+    instCallbacks.onShowInstrumentAlternatives = [](juce::Rectangle<int>) {};
+    const juce::Image imgInst = renderHeader(makeInstrumentHeaderModel(),
+                                             std::move(instCallbacks), vInst);
+    savePng(imgInst, shotDir, "monitor-instrument-disabled.png");
+    const juce::Rectangle<int> cellInst = vInst->getMonitorButtonBounds();
+    expect(!cellInst.isEmpty(), "ui: instrument destination row exposes a Monitor cell");
+    const juce::Colour disabledFace(0xff3e3e3e);
+    const int instDisabledPx = countPixelsNear(imgInst, cellInst, disabledFace);
+    expect(instDisabledPx > 40,
+           "ui: instrument Monitor placeholder is painted with the disabled face");
+    // Distinctness: each cell's SOLID face colour must dominate (glyph anti-aliasing produces a
+    // few blend pixels near other greys, so compare dominant fills rather than demanding zero).
+    expect(instDisabledPx > 3 * countPixelsNear(imgInst, cellInst, offFace)
+               && countPixelsNear(imgOff, cellOff, offFace)
+                      > 3 * countPixelsNear(imgOff, cellOff, disabledFace),
+           "ui: disabled instrument Monitor is visually distinct from the clickable OFF face");
+    expect(countPixelsNear(imgInst, cellInst, juce::Colour(0xff7a7a7a)) > 6,
+           "ui: instrument Monitor placeholder still shows the speaker glyph (dimmed)");
+
+    // ---- Plain MIDI row: no Monitor cell at all ----
+    std::unique_ptr<TrackHeaderView> vMidi;
+    const juce::Image imgMidi = renderHeader(makeMidiHeaderModel(), TrackHeaderCallbacks{}, vMidi);
+    savePng(imgMidi, shotDir, "monitor-midi-none.png");
+    expect(vMidi->getMonitorButtonBounds().isEmpty(),
+           "ui: plain MIDI row has no Monitor cell or hit target");
+
+    // ---- Master/group chrome (mute-only strip): no Monitor cell ----
+    std::unique_ptr<TrackHeaderView> vBus;
+    TrackHeaderModel busModel;
+    busModel.name = "Stereo Out";
+    busModel.showRecordAndPowerStripCells = false;
+    busModel.monitorAvailable = false;
+    vBus = std::make_unique<TrackHeaderView>(
+        [busModel] { return busModel; }, TrackHeaderCallbacks{}, kInvalidTrackId, std::nullopt);
+    vBus->setSize(kW, kH);
+    expect(vBus->getMonitorButtonBounds().isEmpty(),
+           "ui: master/group rows have no Monitor cell");
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     testPackedActiveInputMapping();
     testDomainAssignmentRules();
@@ -532,6 +737,13 @@ int main()
     testMonitoringStripPass();
     testMonitoredClipSuppression();
     testMultiChannelWavWriter();
+
+    {
+        // GUI subsystem only for the offscreen header render; scoped so it tears down before exit.
+        juce::ScopedJuceInitialiser_GUI juceGui;
+        const juce::File shotDir = argc > 1 ? juce::File(juce::String(argv[1])) : juce::File{};
+        testMonitorButtonRendering(shotDir);
+    }
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
