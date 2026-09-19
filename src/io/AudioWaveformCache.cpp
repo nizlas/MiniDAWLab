@@ -290,6 +290,11 @@ void AudioWaveformCache::completeBackgroundPyramidBuild(
     {
         return;
     }
+    // `publishedNewPyramid` must be latched HERE: the store below moves `built` into the slot, so
+    // testing `built` afterwards always reads an empty pointer and the message-thread notify would
+    // never be sent — the UI would then keep showing whatever it rasterized before the pyramid
+    // existed (i.e. no peaks) until some unrelated repaint happened to rebuild it.
+    bool publishedNewPyramid = false;
     AudioWaveformCachePyramidReady callbackCopy;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -299,12 +304,13 @@ void AudioWaveformCache::completeBackgroundPyramidBuild(
             if (built != nullptr)
             {
                 it->second.ready = std::move(built);
+                publishedNewPyramid = true;
             }
             it->second.jobScheduled = false;
         }
         callbackCopy = onPyramidReady_;
     }
-    if (callbackCopy != nullptr && built != nullptr)
+    if (callbackCopy != nullptr && publishedNewPyramid)
     {
         const AudioClip* key = material.get();
         juce::MessageManager::callAsync(
@@ -337,7 +343,7 @@ std::shared_ptr<const WaveformPyramid> AudioWaveformCache::getOrEnqueue(
         if (!slot.jobScheduled)
         {
             slot.jobScheduled = true;
-            (void)pool_->addJob(new WaveformCacheBackgroundJob(*this, material), true);
+            pool_->addJob(new WaveformCacheBackgroundJob(*this, material), true);
         }
     }
     return nullptr;

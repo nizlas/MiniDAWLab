@@ -232,6 +232,11 @@ private:
     double waveRasterSpp_ = 0.0;
     std::uint64_t waveRasterStripFp_ = 0;
     std::uint64_t waveRasterPyramidFp_ = 0;
+    /// False when the raster was rasterized while at least one row's waveform pyramid was still
+    /// being generated (those rows carry no peaks in it). Read by the narrow-stripe fast path —
+    /// which skips fingerprinting for speed — to arm the deferred rebuild instead of blitting a
+    /// peak-less raster indefinitely.
+    bool waveRasterBuiltWithAllPyramidsReady_ = false;
     int waveRasterMarginPx_ = 0;
     WaveformRasterRebuildReason waveRasterLastRebuildReason_ = WaveformRasterRebuildReason::None;
 
@@ -256,7 +261,10 @@ private:
 
     [[nodiscard]] bool shouldBypassWaveformRasterCache() const noexcept;
     [[nodiscard]] bool visibleFitsWaveRaster(std::int64_t visStart, std::int64_t visLen) const noexcept;
-    [[nodiscard]] std::uint64_t computePyramidReadyFingerprint() const;
+    /// `outAllPyramidsReady` (optional) reports whether every row with material already has a ready
+    /// pyramid — computed here because this pass already takes the cache lock per strip.
+    [[nodiscard]] std::uint64_t
+    computePyramidReadyFingerprint(bool* outAllPyramidsReady = nullptr) const;
     void computeWaveRasterLayout(int viewWpx,
                                  std::int64_t visStart,
                                  std::int64_t visLen,

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.0.2 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.0.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -236,6 +236,51 @@ target_link_libraries(InputRoutingFocusedTests
         juce::juce_audio_basics
         juce::juce_audio_formats
         # PluginInsertHost.h / ExperimentalInstrumentHost.h compile-time deps (stubs at link).
+        juce::juce_audio_processors
+        juce::juce_gui_basics
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+
+# -----------------------------------------------------------------------------
+# WaveformReloadFocusedTests: waveform display after a real project save/reload. Drives the
+# PRODUCTION Session save/load path and the PRODUCTION ClipWaveformView paint pipeline (raster
+# cache + AudioWaveformCache pyramid) offscreen, asserting waveform pixels and writing PNG
+# evidence. No audio device, no window, no VST3 hosting (plugin/instrument entry points that
+# Session.cpp references are satisfied by never-executed link stubs in the test main).
+# -----------------------------------------------------------------------------
+juce_add_console_app(WaveformReloadFocusedTests PRODUCT_NAME "WaveformReloadFocusedTests")
+target_sources(WaveformReloadFocusedTests PRIVATE
+    tests/selftest/WaveformReloadFocusedTestsMain.cpp
+    src/domain/Session.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/AudioWaveformCache.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/transport/Transport.cpp
+    src/ui/ClipWaveformView.cpp
+    src/ui/TimelineViewportModel.cpp
+    src/ui/TimelineRulerView.cpp
+    src/ui/TimelineLocatorPainter.cpp
+    src/ui/UiPlayheadClock.cpp
+    src/ui/ForbiddenCursor.cpp)
+target_include_directories(WaveformReloadFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(WaveformReloadFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(WaveformReloadFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
         juce::juce_audio_processors
         juce::juce_gui_basics
         juce::juce_events

@@ -851,6 +851,7 @@ void ClipWaveformView::cancelInteractionStateForSnapshotRestore()
     waveRasterSpp_ = 0.0;
     waveRasterStripFp_ = 0;
     waveRasterPyramidFp_ = 0;
+    waveRasterBuiltWithAllPyramidsReady_ = false;
     waveRasterMarginPx_ = 0;
     waveRasterLastRebuildReason_ = WaveformRasterRebuildReason::None;
 
@@ -1740,9 +1741,10 @@ void ClipWaveformView::timerCallback()
     repaint();
 }
 
-std::uint64_t ClipWaveformView::computePyramidReadyFingerprint() const
+std::uint64_t ClipWaveformView::computePyramidReadyFingerprint(bool* const outAllPyramidsReady) const
 {
     std::uint64_t fp = 0;
+    bool allReady = true;
     for (const auto& s : clipStrips_)
     {
         if (s.material == nullptr)
@@ -1750,8 +1752,13 @@ std::uint64_t ClipWaveformView::computePyramidReadyFingerprint() const
             continue;
         }
         const bool ready = waveformCache_.isPyramidReady(s.material.get());
+        allReady = allReady && ready;
         fp ^= (std::uint64_t)(std::uintptr_t)s.material.get() * 0x9e3779b97f4a7c15ull;
         fp ^= ready ? 0x85ebca6b932f5c01ull : 0x1271fd5ce733fb7bull;
+    }
+    if (outAllPyramidsReady != nullptr)
+    {
+        *outAllPyramidsReady = allReady;
     }
     return fp;
 }
@@ -1791,7 +1798,8 @@ bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>
     }
 
     const std::uint64_t stripFp = lastPeaksFingerprint_;
-    const std::uint64_t pyrFp = computePyramidReadyFingerprint();
+    bool allPyramidsReady = true;
+    const std::uint64_t pyrFp = computePyramidReadyFingerprint(&allPyramidsReady);
 
     int marginPx = 0;
     std::int64_t coveredStart = 0;
@@ -1876,6 +1884,7 @@ bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>
     waveRasterSpp_ = spp;
     waveRasterStripFp_ = stripFp;
     waveRasterPyramidFp_ = pyrFp;
+    waveRasterBuiltWithAllPyramidsReady_ = allPyramidsReady;
     waveRasterMarginPx_ = marginPx;
     return true;
 }
@@ -2238,6 +2247,14 @@ void ClipWaveformView::paint(juce::Graphics& g)
         if (narrowStripePaint && !waveRaster_.isNull() && waveRasterSpp_ > 0.0
             && !shouldBypassWaveformRasterCache())
         {
+            // A raster rasterized while some pyramid was still building carries no peaks for those
+            // rows. Narrow paints deliberately skip strip/pyramid fingerprinting (mutex per strip at
+            // playhead cadence), so this O(1) flag is what keeps them from blitting a peak-less
+            // raster forever when a stripe paint is the only repaint that follows readiness.
+            if (!waveRasterBuiltWithAllPyramidsReady_)
+            {
+                scheduleDeferredRasterRebuild();
+            }
             blitWaveRasterApproximate(g, visStart, visLen, spp);
             paintDynamicChrome(g, bounds, visStart, visLen, spp);
             return;
