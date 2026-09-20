@@ -780,13 +780,8 @@ void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) n
     }};
     for (auto const pri : hitPrioritiesRightToLeft)
     {
-        // Disabled buttons take no hover — except Monitor: the Instrument rows' disabled
-        // placeholder must still hover so its explanatory tooltip can show. Painting ignores
-        // hover on disabled cells (`showHoverBrighten` requires `enabled`) and clicks stay
-        // inert (`dispatchStripClick` requires `enabled`), so this only feeds the tooltip.
         if (auto const* s = findStripControlSpec(specs, pri);
-            s != nullptr && (s->enabled || pri == TrackHeaderButtonKind::Monitor)
-            && stripCellHitIntersectsVisibleChrome(s->cellBounds, pos))
+            s != nullptr && s->enabled && stripCellHitIntersectsVisibleChrome(s->cellBounds, pos))
         {
             next = pri;
             break;
@@ -891,18 +886,8 @@ juce::String TrackHeaderView::getTooltip()
     {
         return "Instrument alternatives";
     }
-    if (stripHoveredButton_.has_value()
-        && *stripHoveredButton_ == TrackHeaderButtonKind::Monitor)
-    {
-        // Instrument destination rows show the Monitor cell as a disabled placeholder (always
-        // playback mode); the tooltip explains why it cannot be engaged there.
-        if (!modelProvider_().monitorInteractable)
-        {
-            return "Live MIDI monitoring is not available yet.";
-        }
-        return "Input monitoring: hear this track's selected audio input through its effects and "
-               "mix routing. While on, the track's clips are not played. Recording is unaffected.";
-    }
+    // No Monitor tooltip: a speaker toggle next to Mute/Record is self-explanatory, and no other
+    // strip button has one — a lone tooltip there reads as an inconsistency, not as help.
     return {};
 }
 

@@ -389,7 +389,86 @@ void testPyramidReadyNotificationIsSent()
     cache.shutdown();
 }
 
-// --- Regression 2: peak-less raster must not survive narrow (stripe) repaints ------------------
+// --- Regression 2: an EVEN number of clips per lane must still trigger a raster rebuild --------
+// The raster cache keys on a fingerprint of per-row pyramid readiness. Built with `^=` per row, the
+// contributions of two rows flipping the same way in one step cancel out, so a lane holding two
+// clips kept an identical fingerprint when both pyramids finished — the peak-less raster rasterized
+// during loading was never rebuilt. That is why a one-clip track (vocal soundbite) drew its
+// waveform after reload while a two-clip track (two guitar takes) stayed empty until a gesture
+// bypassed the cache, and went empty again on release.
+void testEvenClipCountLaneRebuildsWhenPyramidsBecomeReady()
+{
+    Fixture fx("two-clips");
+    fx.writeTakeWav();
+    const juce::File secondWav = fx.root.getChildFile("Audio").getChildFile("take_second.wav");
+    {
+        std::vector<float> pcm((size_t)kTakeFrames);
+        for (int i = 0; i < kTakeFrames; ++i)
+        {
+            const double t = (double)i / kRate;
+            pcm[(size_t)i] = (float)(0.7 * std::sin(2.0 * juce::MathConstants<double>::pi * 330.0 * t));
+        }
+        const float* chans[1] = { pcm.data() };
+        expect(MonoWavFileWriter::writeMulti24BitWavSegment(secondWav, chans, 1, kTakeFrames, kRate)
+                   .wasOk(),
+               "twoClips: second take written");
+    }
+
+    {
+        LaneHarness setup;
+        const TrackId tid = setup.session.getActiveTrackId();
+        const bool ok
+            = setup.session.addRecordedTakeAtSample(fx.wavFile, kRate, 0, tid, kTakeFrames).wasOk()
+              && setup.session
+                     .addRecordedTakeAtSample(secondWav, kRate, 2 * kTakeFrames, tid, kTakeFrames)
+                     .wasOk()
+              && setup.session.saveProjectToFile(setup.transport, fx.projectFile, kRate).wasOk();
+        expect(ok, "twoClips: project with two clips on one track saved");
+        if (!ok)
+        {
+            return;
+        }
+    }
+
+    LaneHarness h;
+    juce::StringArray skipped;
+    juce::String info;
+    expect(h.session.loadProjectFromFile(h.transport, fx.projectFile, kRate, skipped, info).wasOk(),
+           "twoClips: project reloaded");
+
+    const auto snap = h.session.loadSessionSnapshotForAudioThread();
+    TrackId laneId = kInvalidTrackId;
+    for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
+    {
+        if (snap->getTrack(i).getKind() == TrackKind::Audio
+            && snap->getTrack(i).getNumPlacedClips() == 2)
+        {
+            laneId = snap->getTrack(i).getId();
+            break;
+        }
+    }
+    expect(laneId != kInvalidTrackId, "twoClips: reloaded lane holds both clips");
+    if (laneId == kInvalidTrackId)
+    {
+        return;
+    }
+    h.createLaneForTrack(laneId);
+    h.viewport.setSamplesPerPixelIfUnset((double)(3 * kTakeFrames) / (double)kLaneW);
+
+    // First paint happens while both pyramids are still building (the post-load state).
+    savePng(h.render(), "twoclips-first-paint.png");
+    h.pumpMessages(1500);
+
+    // Same geometry, same clips — only pyramid readiness changed, for BOTH rows at once.
+    const juce::Image afterReady = h.render();
+    savePng(afterReady, "twoclips-after-ready.png");
+    const WaveformMetrics m = measureWaveform(afterReady);
+    std::printf("       two-clip lane after both pyramids ready: %s\n", describe(m).toRawUTF8());
+    expect(m.waveformColumns > 50,
+           "twoClips: lane rebuilds its raster when BOTH clips' pyramids become ready");
+}
+
+// --- Regression 3: peak-less raster must not survive narrow (stripe) repaints ------------------
 // After a reload the first paints happen while the pyramid is still building, so the cached raster
 // has no peaks. Narrow repaints (playhead stripe, small dirty regions after a click) take the fast
 // path that blits that raster and returns — without the fix they blit the peak-less raster
@@ -437,8 +516,10 @@ void testNarrowRepaintsRecoverWaveform()
     // Let the build finish (and the readiness notification land) with NO full repaint after it.
     h.pumpMessages(1200);
 
-    // From here on, only narrow-region paints — the playhead-stripe style fast path.
-    const juce::Rectangle<int> strip(kLaneW / 2, 0, 40, kLaneH);
+    // From here on, only narrow-region paints — the playhead-stripe style fast path (dirty width
+    // below `max(32, laneWidth/4)`). 200 px of a 900 px lane qualifies and spans loud material, so
+    // the check cannot be fooled by a quiet spot in the fixture's envelope.
+    const juce::Rectangle<int> strip(100, 0, 200, kLaneH);
     juce::Image narrow;
     for (int attempt = 0; attempt < 12; ++attempt)
     {
@@ -454,6 +535,105 @@ void testNarrowRepaintsRecoverWaveform()
     std::printf("       narrow stripe paints: %s\n", describe(mNarrow).toRawUTF8());
     expect(mNarrow.waveformColumns > 5,
            "narrow: waveform recovers through narrow (stripe) repaints alone");
+}
+
+/// `--probe <project.dalproj> [pngDir]`: loads an EXISTING project through the production path and
+/// reports, per audio track and clip, the material/pyramid state plus measured waveform pixels.
+/// Diagnostic tool for investigating a specific project copy (never the original).
+[[nodiscard]] int probeExistingProject(const juce::File& projectFile)
+{
+    LaneHarness h;
+    juce::StringArray skipped;
+    juce::String info;
+    const juce::Result loaded
+        = h.session.loadProjectFromFile(h.transport, projectFile, kRate, skipped, info);
+    std::printf("load ok=%d err=%s\n", loaded.wasOk() ? 1 : 0,
+                loaded.getErrorMessage().toRawUTF8());
+    for (const auto& s : skipped)
+    {
+        std::printf("  skipped: %s\n", s.toRawUTF8());
+    }
+    const auto snap = h.session.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return 1;
+    }
+    std::printf("arrangementExtent=%lld tracks=%d\n",
+                (long long)h.session.getArrangementExtentSamples(), snap->getNumTracks());
+
+    for (int i = 0; i < snap->getNumTracks(); ++i)
+    {
+        const Track& tr = snap->getTrack(i);
+        if (tr.getKind() != TrackKind::Audio || tr.getNumPlacedClips() == 0)
+        {
+            continue;
+        }
+        std::printf("--- track %d '%s' clips=%d\n", (int)tr.getId(), tr.getName().toRawUTF8(),
+                    tr.getNumPlacedClips());
+        for (int c = 0; c < tr.getNumPlacedClips(); ++c)
+        {
+            const PlacedClip& p = tr.getPlacedClip(c);
+            const auto mat = p.getMaterial();
+            std::printf("    clip id=%llu '%s' start=%lld effLen=%lld L=%lld win=[%lld,%lld) "
+                        "matSamples=%d ch=%d rate=%.1f src=%s\n",
+                        (unsigned long long)p.getId(), p.getDisplayName().toRawUTF8(),
+                        (long long)p.getStartSample(), (long long)p.getEffectiveLengthSamples(),
+                        (long long)p.getLeftTrimSamples(),
+                        (long long)p.getMaterialWindowStartSamples(),
+                        (long long)p.getMaterialWindowEndExclusiveSamples(),
+                        mat != nullptr ? mat->getNumSamples() : -1,
+                        mat != nullptr ? mat->getNumChannels() : -1,
+                        mat != nullptr ? mat->getSourceSampleRate() : 0.0,
+                        mat != nullptr ? mat->getSourceFilePath().toRawUTF8() : "(null)");
+        }
+
+        h.createLaneForTrack(tr.getId());
+        // Zoom like a user working on the take: first 60 s across the lane (clips are hundreds of
+        // pixels wide), instead of fitting a one-hour arrangement into 900 px.
+        h.viewport.setSamplesPerPixelIfUnset((60.0 * kRate) / (double)kLaneW);
+        (void)h.render();
+        h.pumpMessages(2500);
+        const juce::Image img = h.render();
+        savePng(img, (juce::String("probe-track-") + juce::String((int)tr.getId()) + ".png")
+                         .toRawUTF8());
+        const WaveformMetrics m = measureWaveform(img);
+        std::printf("    RENDER %s pyramidNotifies=%d\n", describe(m).toRawUTF8(), h.pyramidNotifies);
+        for (int c = 0; c < tr.getNumPlacedClips(); ++c)
+        {
+            const auto mat = tr.getPlacedClip(c).getMaterial();
+            if (mat == nullptr)
+            {
+                continue;
+            }
+            // Raw PCM extremes straight from the decoded clip.
+            float pcmMin = 0.0f;
+            float pcmMax = 0.0f;
+            const juce::AudioBuffer<float>& buf = mat->getAudio();
+            for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+            {
+                const auto r = buf.findMinMax(ch, 0, buf.getNumSamples());
+                pcmMin = juce::jmin(pcmMin, r.getStart());
+                pcmMax = juce::jmax(pcmMax, r.getEnd());
+            }
+            // What the pyramid reports for the same spans the painter asks about.
+            const auto pyr = h.cache.getOrEnqueue(mat);
+            float q0min = 0.0f, q0max = 0.0f, qMidMin = 0.0f, qMidMax = 0.0f;
+            int pyrSrc = -1;
+            if (pyr != nullptr)
+            {
+                pyrSrc = pyr->getNumSourceSamples();
+                pyr->queryMinMaxForFileRange(0, juce::jmin(2048, buf.getNumSamples()), q0min, q0max);
+                const std::int64_t mid = buf.getNumSamples() / 2;
+                pyr->queryMinMaxForFileRange(mid, mid + 2048, qMidMin, qMidMax);
+            }
+            std::printf("    clip %llu ready=%d pyrSrc=%d pcm[%.4f..%.4f] q@0[%.4f..%.4f] "
+                        "q@mid[%.4f..%.4f]\n",
+                        (unsigned long long)tr.getPlacedClip(c).getId(),
+                        h.cache.isPyramidReady(mat.get()) ? 1 : 0, pyrSrc, pcmMin, pcmMax, q0min,
+                        q0max, qMidMin, qMidMax);
+        }
+    }
+    return 0;
 }
 
 /// `--make-fixture <dir>`: writes a standalone temp project (take WAV under `Audio/`) that the real
@@ -505,12 +685,21 @@ int main(int argc, char** argv)
     {
         return makeStandaloneFixture(juce::File(juce::String(argv[2])));
     }
+    if (argc > 2 && juce::String(argv[1]) == "--probe")
+    {
+        if (argc > 3)
+        {
+            pngDir = juce::File(juce::String(argv[3]));
+        }
+        return probeExistingProject(juce::File(juce::String(argv[2])));
+    }
     if (argc > 1)
     {
         pngDir = juce::File(juce::String(argv[1]));
     }
 
     testPyramidReadyNotificationIsSent();
+    testEvenClipCountLaneRebuildsWhenPyramidsBecomeReady();
     testNarrowRepaintsRecoverWaveform();
     testWaveformAfterReload("first");
     // Second, independent reload in a fresh process-local cache: waveform generation with no

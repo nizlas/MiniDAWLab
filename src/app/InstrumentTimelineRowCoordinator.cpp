@@ -1752,7 +1752,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         // button (kind-checked here on every model poll, so there is no transient flash).
         m.instrumentAlternativesAvailable = isInstrumentDestinationRow;
         // Monitor cell: Instrument destination rows show it as a DISABLED placeholder (always
-        // playback mode — live MIDI monitoring is not available yet; tooltip explains). Plain
+        // playback mode — live MIDI monitoring is not available yet). Plain
         // TrackKind::Midi content rows from this same builder must never show it. Kind-checked
         // on every model poll, so row reuse / kind changes cannot flash a transient button.
         m.monitorAvailable = isInstrumentDestinationRow;

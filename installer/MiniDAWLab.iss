@@ -10,7 +10,7 @@
 ; passed by scripts\package-windows.ps1 (ISPP runs script defines after command-line defines),
 ; which once produced a stale 0.2.0 installer from a 0.9.0 build.
 #ifndef AppVersion
-#define AppVersion "1.0.3"
+#define AppVersion "1.0.4"
 #endif
 
 [Setup]

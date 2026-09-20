@@ -62,6 +62,21 @@ namespace
 {
 // Off by default: logs coarse `paint` timing + raster cache stats when enabled (developer-only).
     constexpr bool kClipWaveformPaintDiagnostics = false;
+
+// Cache-key fingerprints (strip content, pyramid readiness) MUST NOT be built by XOR-ing per-row
+// contributions: XOR is self-cancelling, so two rows changing the same way in one step — e.g. both
+// clips of a lane finishing their waveform pyramid between two paints, or two clips swapping
+// positions — leave the fingerprint identical and the cached raster is never rebuilt. This
+// order-dependent multiplicative/shift mix cannot cancel.
+constexpr std::uint64_t kFingerprintSeed = 0x9e3779b97f4a7c15ull;
+
+[[nodiscard]] constexpr std::uint64_t mixFingerprint(std::uint64_t h, const std::uint64_t value) noexcept
+{
+    h ^= value + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h *= 0xff51afd7ed558ccdull;
+    h ^= h >> 29;
+    return h;
+}
     // Vertical only for peak bar clamping; horizontal uses full `eventRect` width so adjacent split
     // segments share one timeline scale with no stacked side insets (avoids a visible waveform gap).
     constexpr float kWaveInset = 2.0f;
@@ -1536,7 +1551,7 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     const int w = juce::jmax(1, getWidth());
 
-    std::uint64_t fp = 0;
+    std::uint64_t fp = kFingerprintSeed;
     if (snap != nullptr)
     {
         const int tI = snap->findTrackIndexById(trackId_);
@@ -1546,14 +1561,11 @@ void ClipWaveformView::syncClipStripsFromSnapshotIfNeeded()
             for (int j = 0; j < t.getNumPlacedClips(); ++j)
             {
                 const PlacedClip& p = t.getPlacedClip(j);
-                fp ^= (std::uint64_t)p.getId() * 0x9e3779b9ull;
-                fp ^= (std::uint64_t)(p.getLeftTrimSamples() + 0x1e35) * 0xc6a4a7935bd1e995ull;
-                fp ^= (std::uint64_t)(p.getStartSample() + 0x9e37) * 0xc2b2ae3d27d4eb4full;
-                fp ^= (std::uint64_t)(p.getEffectiveLengthSamples() + 0xbf58) * 0x94d049bb133111ebull;
-                if (p.getMaterial() != nullptr)
-                {
-                    fp ^= (std::uint64_t)(std::uintptr_t)p.getMaterial().get() * 0x85ebca6bull;
-                }
+                fp = mixFingerprint(fp, (std::uint64_t)p.getId());
+                fp = mixFingerprint(fp, (std::uint64_t)p.getLeftTrimSamples());
+                fp = mixFingerprint(fp, (std::uint64_t)p.getStartSample());
+                fp = mixFingerprint(fp, (std::uint64_t)p.getEffectiveLengthSamples());
+                fp = mixFingerprint(fp, (std::uint64_t)(std::uintptr_t)p.getMaterial().get());
             }
         }
     }
@@ -1717,6 +1729,18 @@ void ClipWaveformView::scheduleDeferredRasterRebuild()
     startTimer(deferredRasterRebuildDelayMs_);
 }
 
+void ClipWaveformView::scheduleDeferredRasterRebuildWithoutRestart()
+{
+    // Content staleness (a pyramid finished after this raster was drawn) must not be restartable:
+    // narrow stripe paints arrive continuously during playback, and restarting the countdown on
+    // each one would starve the rebuild forever — the lane would keep blitting a peak-less raster
+    // for as long as the transport runs.
+    if (!isTimerRunning())
+    {
+        startTimer(deferredRasterRebuildDelayMs_);
+    }
+}
+
 void ClipWaveformView::timerCallback()
 {
     stopTimer();
@@ -1743,7 +1767,7 @@ void ClipWaveformView::timerCallback()
 
 std::uint64_t ClipWaveformView::computePyramidReadyFingerprint(bool* const outAllPyramidsReady) const
 {
-    std::uint64_t fp = 0;
+    std::uint64_t fp = kFingerprintSeed;
     bool allReady = true;
     for (const auto& s : clipStrips_)
     {
@@ -1753,8 +1777,8 @@ std::uint64_t ClipWaveformView::computePyramidReadyFingerprint(bool* const outAl
         }
         const bool ready = waveformCache_.isPyramidReady(s.material.get());
         allReady = allReady && ready;
-        fp ^= (std::uint64_t)(std::uintptr_t)s.material.get() * 0x9e3779b97f4a7c15ull;
-        fp ^= ready ? 0x85ebca6b932f5c01ull : 0x1271fd5ce733fb7bull;
+        fp = mixFingerprint(fp, (std::uint64_t)(std::uintptr_t)s.material.get());
+        fp = mixFingerprint(fp, ready ? 1ull : 0ull);
     }
     if (outAllPyramidsReady != nullptr)
     {
@@ -1810,7 +1834,11 @@ bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>
 
     bool needRebuild = waveRaster_.isNull() || waveRasterImageW_ != imageW || waveRasterImageH_ != vh
                        || waveRasterSpp_ != spp || waveRasterStripFp_ != stripFp
-                       || waveRasterPyramidFp_ != pyrFp;
+                       || waveRasterPyramidFp_ != pyrFp
+                       // Explicit (not fingerprint-derived) readiness transition: the cached image
+                       // was rasterized while pyramids were still building, so it carries no peaks
+                       // for those rows and must be redrawn now that they exist.
+                       || (!waveRasterBuiltWithAllPyramidsReady_ && allPyramidsReady);
 
     WaveformRasterRebuildReason reason = WaveformRasterRebuildReason::None;
     if (needRebuild)
@@ -2253,7 +2281,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
             // raster forever when a stripe paint is the only repaint that follows readiness.
             if (!waveRasterBuiltWithAllPyramidsReady_)
             {
-                scheduleDeferredRasterRebuild();
+                scheduleDeferredRasterRebuildWithoutRestart();
             }
             blitWaveRasterApproximate(g, visStart, visLen, spp);
             paintDynamicChrome(g, bounds, visStart, visLen, spp);

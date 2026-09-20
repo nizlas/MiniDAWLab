@@ -60,7 +60,8 @@ struct TrackHeaderModel
     bool monitorAvailable = false;
     /// Speaker lights orange while live input monitoring is on (runtime state, not persisted).
     bool monitorEnabled = false;
-    /// False = disabled placeholder look + inert clicks + "not available yet" tooltip.
+    /// False = disabled placeholder look + inert clicks (no tooltip: the speaker toggle next to
+    /// Mute/Record is self-explanatory, and the other strip buttons carry no tooltip either).
     bool monitorInteractable = false;
     /// P2: when true and `callbacks.onShowInstrumentAlternatives` set, a small standalone
     /// "Instrument alternatives" button is anchored at the header's bottom-left corner

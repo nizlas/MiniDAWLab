@@ -250,6 +250,9 @@ private:
     // *content* changes (strips/pyramid fingerprint) stays synchronous — rare and correctness-first.
     void timerCallback() override;
     void scheduleDeferredRasterRebuild();
+    /// Arms the deferred rebuild only when no countdown is pending — for *content* staleness
+    /// (pyramid became ready), which must not be pushed out by a stream of narrow stripe paints.
+    void scheduleDeferredRasterRebuildWithoutRestart();
     /// Maps the current visible range onto the cached raster's coverage; degenerates to the exact
     /// 1:1 blit when geometry matches, otherwise draws a clamped scaled approximation (uncovered
     /// regions stay unpainted). Used by both the narrow-stripe fast path and stale full paints.
