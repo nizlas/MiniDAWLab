@@ -87,7 +87,9 @@
 #include "ui/experimental/ExperimentalMidiEditorWindow.h"
 
 #include "io/AudioWaveformCache.h"
+#include "io/InstrumentMidiClipExport.h"
 #include "io/ProjectFile.h"
+#include "ui/experimental/ExperimentalMidiImport.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 
@@ -1303,7 +1305,7 @@ public:
                 [this](TrackId laneTid) {
                     if (instrumentMidiImportCoordinator_ != nullptr)
                     {
-                        instrumentMidiImportCoordinator_->importMidiFileForInstrumentTrack(laneTid);
+                        instrumentMidiImportCoordinator_->importMidiFileForTrack(laneTid);
                     }
                 },
                 // P2: track-header "Instrument alternatives" popup (replaces Inspector sections).
@@ -3046,6 +3048,211 @@ public:
             return true;
         };
 
+        // --- MIDI-clip parity: import + cross-track moves for a plain TrackKind::Midi row ---
+        // Runs the production paths a user reaches from the track header: the parse+append the MIDI
+        // import coordinator performs after its guard, and the cross-track clip move the arrangement
+        // drag commits. The FileChooser click and the mouse drag themselves stay manual checks.
+        hooks.midiTrackParityVerify = [this](juce::String& failReason) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                failReason = "no instrument runtime coordinator";
+                return false;
+            }
+            const TrackId midiTid = stabilityMidiRoutingMidiLowerTid_;
+            const TrackId instTid = stabilityMidiRoutingInstTid_;
+            InstrumentTrackController* const midiCtl
+                = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(midiTid);
+            InstrumentTrackController* const instCtl
+                = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(instTid);
+            if (midiCtl == nullptr || instCtl == nullptr)
+            {
+                failReason = "clip controller missing for the MIDI row or the instrument row";
+                return false;
+            }
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int midiIx = (snap != nullptr) ? snap->findTrackIndexById(midiTid) : -1;
+            if (midiIx < 0 || snap->getTrack(midiIx).getKind() != TrackKind::Midi)
+            {
+                failReason = "fixture MIDI row missing or not TrackKind::Midi";
+                return false;
+            }
+            const int midiClipsBefore = (int)midiCtl->getClips().size();
+            const int instClipsBefore = (int)instCtl->getClips().size();
+            if (midiClipsBefore <= 0 || midiCtl->getClips().front() == nullptr)
+            {
+                failReason = "fixture MIDI row has no clip to export";
+                return false;
+            }
+
+            // A) Write a real Standard MIDI File from the MIDI row's own clip, then import it back
+            //    onto that same MIDI row: exactly what "Import MIDI file..." does after its guard.
+            const double sr = midiCtl->getTimelineSampleRate();
+            const juce::File midFile
+                = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                      .getChildFile("MiniDAWLab-midi-parity-" + juce::String(juce::Time::currentTimeMillis())
+                                    + ".mid");
+            const InstrumentMidiClipExportResult exported = exportInstrumentMidiClipToMidiFile(
+                *midiCtl->getClips().front(),
+                snap->getTrack(midiIx).getMidiOutputChannel(),
+                midFile,
+                sr);
+            if (!exported.ok || exported.notesExported <= 0)
+            {
+                failReason = "could not export a fixture MIDI file: " + exported.errorMessage;
+                (void)midFile.deleteFile();
+                return false;
+            }
+            ExperimentalMidiImportResult parsed
+                = experimentalImportMidiFile(midFile, kDefaultExperimentalTicksPerQuarter);
+            (void)midFile.deleteFile();
+            if (!parsed.ok || parsed.notes.empty())
+            {
+                failReason = "production MIDI parse failed: " + parsed.combinedUserMessageLine();
+                return false;
+            }
+            std::vector<int> importedPitches;
+            importedPitches.reserve(parsed.notes.size());
+            for (const auto& n : parsed.notes)
+            {
+                importedPitches.push_back(n.midiNote);
+            }
+            std::sort(importedPitches.begin(), importedPitches.end());
+            const std::int64_t importStart = (std::int64_t)(sr * 4.0);
+            const InstrumentMidiClipId importedId = midiCtl->appendImportedTimelineMidiClipAtSamples(
+                std::move(parsed.notes), importStart, stabilityMidiParityClipName_);
+            if (importedId == 0)
+            {
+                failReason = "import append onto the TrackKind::Midi row was refused";
+                return false;
+            }
+            if ((int)midiCtl->getClips().size() != midiClipsBefore + 1)
+            {
+                failReason = "imported clip did not appear on the MIDI row";
+                return false;
+            }
+            stabilityMidiParityImportedPitches_ = importedPitches;
+
+            // Collects the sorted pitches of the clip named like the imported one.
+            const auto pitchesOfParityClip = [this](const InstrumentTrackController& ctl) {
+                std::vector<int> out;
+                for (const auto& cp : ctl.getClips())
+                {
+                    if (cp == nullptr || cp->name != stabilityMidiParityClipName_)
+                    {
+                        continue;
+                    }
+                    for (const auto& n : cp->pattern.timelineNotes)
+                    {
+                        out.push_back(n.midiNote);
+                    }
+                }
+                std::sort(out.begin(), out.end());
+                return out;
+            };
+            if (pitchesOfParityClip(*midiCtl) != importedPitches)
+            {
+                failReason = "imported notes did not land intact on the MIDI row";
+                return false;
+            }
+
+            // B) MIDI row -> instrument row through the production cross-track move.
+            midiCtl->setSelectedClipIdsExclusive(importedId);
+            if (!instrumentRuntimeCoordinator_->moveInstrumentMidiClipsBetweenTracks(
+                    midiTid, instTid, { importedId }, 0))
+            {
+                failReason = "move MIDI row -> instrument row was refused";
+                return false;
+            }
+            if ((int)midiCtl->getClips().size() != midiClipsBefore
+                || (int)instCtl->getClips().size() != instClipsBefore + 1)
+            {
+                failReason = "clip counts wrong after MIDI row -> instrument row move (source "
+                             + juce::String((int)midiCtl->getClips().size()) + ", dest "
+                             + juce::String((int)instCtl->getClips().size()) + ")";
+                return false;
+            }
+            if (pitchesOfParityClip(*instCtl) != importedPitches
+                || !pitchesOfParityClip(*midiCtl).empty())
+            {
+                failReason = "notes did not transfer cleanly to the instrument row";
+                return false;
+            }
+
+            // C) Instrument row -> MIDI row: the same move must work in the other direction.
+            const std::vector<InstrumentMidiClipId> backIds = instCtl->getSelectedClipIds();
+            if (backIds.empty())
+            {
+                failReason = "moved clip was not selected on the instrument row";
+                return false;
+            }
+            if (!instrumentRuntimeCoordinator_->moveInstrumentMidiClipsBetweenTracks(
+                    instTid, midiTid, backIds, 0))
+            {
+                failReason = "move instrument row -> MIDI row was refused";
+                return false;
+            }
+            if ((int)midiCtl->getClips().size() != midiClipsBefore + 1
+                || (int)instCtl->getClips().size() != instClipsBefore)
+            {
+                failReason = "clip counts wrong after instrument row -> MIDI row move";
+                return false;
+            }
+            if (pitchesOfParityClip(*midiCtl) != importedPitches
+                || !pitchesOfParityClip(*instCtl).empty())
+            {
+                failReason = "notes did not transfer cleanly back to the MIDI row";
+                return false;
+            }
+            appendStabilityRunLine(
+                "  parity: imported " + juce::String((int)importedPitches.size())
+                + " notes onto Midi row " + juce::String((juce::int64)midiTid)
+                + ", moved to instrument row " + juce::String((juce::int64)instTid) + " and back");
+            return true;
+        };
+
+        hooks.midiTrackParityVerifyAfterReload = [this](juce::String& failReason) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                failReason = "no instrument runtime coordinator";
+                return false;
+            }
+            InstrumentTrackController* const midiCtl
+                = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(
+                    stabilityMidiRoutingMidiLowerTid_);
+            if (midiCtl == nullptr)
+            {
+                failReason = "midi content controller missing after reload";
+                return false;
+            }
+            std::vector<int> pitches;
+            int matchingClips = 0;
+            for (const auto& cp : midiCtl->getClips())
+            {
+                if (cp == nullptr || cp->name != stabilityMidiParityClipName_)
+                {
+                    continue;
+                }
+                ++matchingClips;
+                for (const auto& n : cp->pattern.timelineNotes)
+                {
+                    pitches.push_back(n.midiNote);
+                }
+            }
+            if (matchingClips != 1)
+            {
+                failReason = "expected exactly one imported clip on the MIDI row after reload, found "
+                             + juce::String(matchingClips);
+                return false;
+            }
+            std::sort(pitches.begin(), pitches.end());
+            if (pitches != stabilityMidiParityImportedPitches_)
+            {
+                failReason = "imported notes on the MIDI row changed across save/reload";
+                return false;
+            }
+            return true;
+        };
+
         stabilityScenarioRunner_ = std::make_unique<StabilityScenarioRunner>(std::move(hooks));
         stabilityScenarioRunner_->start(request);
     }
@@ -4202,6 +4409,10 @@ private:
     int stabilityMidiRoutingExpectedLowerCc_ = 0;
     /// Destination host (installed sink) for boundary-count comparison in the verify hooks.
     ExperimentalInstrumentHost* stabilityMidiRoutingDestHost_ = nullptr;
+    /// midi-track-parity scenario: the imported clip is identified by this name across moves and
+    /// save/reload, and its sorted pitches are the expected content at every hop.
+    const juce::String stabilityMidiParityClipName_{ "ParityImport" };
+    std::vector<int> stabilityMidiParityImportedPitches_;
 
     /// Stability C2 only (`--stability-*` command line); null in normal use. Declared last:
     /// its hooks capture `this` and touch most members above, so it must be destroyed first.

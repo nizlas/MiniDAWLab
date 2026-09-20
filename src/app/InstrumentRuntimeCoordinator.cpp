@@ -712,14 +712,16 @@ bool InstrumentRuntimeCoordinator::moveInstrumentMidiClipsBetweenTracks(
     {
         return false;
     }
-    if (snap->getTrack(si).getKind() != TrackKind::Instrument
-        || snap->getTrack(di).getKind() != TrackKind::Instrument)
+    if (!trackKindOwnsTimelineMidiClips(snap->getTrack(si).getKind())
+        || !trackKindOwnsTimelineMidiClips(snap->getTrack(di).getKind()))
     {
         return false;
     }
 
-    InstrumentTrackController* const sourceCtl = getInstrumentControllerForTrack(sourceTrackId);
-    InstrumentTrackController* const destCtl = getInstrumentControllerForTrack(destTrackId);
+    // Either end may be an instrument row or a plain TrackKind::Midi row: both keep their clips in
+    // an InstrumentTrackController, so the move is the same deep copy + remove in both directions.
+    InstrumentTrackController* const sourceCtl = getMidiClipControllerForTrack(sourceTrackId);
+    InstrumentTrackController* const destCtl = getMidiClipControllerForTrack(destTrackId);
     if (sourceCtl == nullptr || destCtl == nullptr || !sourceCtl->hasInstrumentTrack()
         || !destCtl->hasInstrumentTrack())
     {

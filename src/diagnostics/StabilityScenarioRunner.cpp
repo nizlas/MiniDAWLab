@@ -155,6 +155,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-midi-track-parity")
+        {
+            if (!setKind(StabilityScenarioKind::MidiTrackParity)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-midi-track-parity requires a project path";
+                return {};
+            }
+        }
         else if (a == "--iterations")
         {
             if (i + 1 >= args.size())
@@ -226,6 +235,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::Autosave: scenarioName_ = "autosave"; break;
         case StabilityScenarioKind::RecoverAutosave: scenarioName_ = "recover-autosave"; break;
         case StabilityScenarioKind::MidiRouting: scenarioName_ = "midi-routing"; break;
+        case StabilityScenarioKind::MidiTrackParity: scenarioName_ = "midi-track-parity"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -278,6 +288,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::MidiRouting:
             appendMidiRoutingSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::MidiTrackParity:
+            appendMidiTrackParitySteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -1158,6 +1171,79 @@ void StabilityScenarioRunner::appendMidiRoutingSteps(const juce::File& project)
     steps_.push_back(Step{ "midi-routing: verify v18 roundtrip (Midi row + destination + clip)",
                            [this](juce::String& failReason) -> bool {
                                return hooks_.midiRoutingVerifyAfterReload(failReason);
+                           },
+                           kSettleDefaultMs });
+}
+
+void StabilityScenarioRunner::appendMidiTrackParitySteps(const juce::File& project)
+{
+    if (hooks_.midiRoutingFixtureSetup == nullptr || hooks_.midiTrackParityVerify == nullptr
+        || hooks_.midiTrackParityVerifyAfterReload == nullptr)
+    {
+        steps_.push_back(Step{ "midi-track-parity: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "midi-track-parity hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    // Sibling copy: the user's project is never modified and project-relative paths keep resolving.
+    steps_.push_back(Step{
+        "midi-track-parity: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(
+                project.getFileNameWithoutExtension() + "-midiparitytest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "midi-track-parity: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    // Reuses the routing fixture: one instrument row plus routed TrackKind::Midi rows with clips.
+    steps_.push_back(Step{ "midi-track-parity: build fixture (instrument row + routed MIDI rows)",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiRoutingFixtureSetup(failReason);
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "midi-track-parity: import onto MIDI row + move MIDI<->instrument",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiTrackParityVerify(failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "midi-track-parity: save (direct save to test copy)",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "midi-track-parity: reload test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    steps_.push_back(Step{ "midi-track-parity: verify imported clip survived on the MIDI row",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiTrackParityVerifyAfterReload(failReason);
                            },
                            kSettleDefaultMs });
 }

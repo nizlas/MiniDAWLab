@@ -35,6 +35,9 @@ enum class StabilityScenarioKind
     Autosave,        // C5: load, dirty edit, forced autosave, verify file/pointer/original.
     RecoverAutosave, // C5: as Autosave, then in-process recovery and post-recovery verification.
     MidiRouting,     // Phase B: MIDI track -> instrument routing, capture-seam delivery + v18 roundtrip.
+    /// MIDI-clip parity between `TrackKind::Midi` and instrument rows: file import onto a MIDI row
+    /// and cross-track clip moves in both directions, then a save/reload check.
+    MidiTrackParity,
 };
 
 struct StabilityScenarioRequest
@@ -121,6 +124,16 @@ struct StabilityRunnerHooks
     /// After save + reload: asserts both Midi rows, destinations, fixed channels, native channels
     /// and exact stored pitches survived (v18; pitches must be untouched by the full-range editor).
     std::function<bool(juce::String& failReason)> midiRoutingVerifyAfterReload;
+
+    // --- MIDI-clip parity for plain `TrackKind::Midi` rows ------------------
+    /// On the routing fixture: writes a Standard MIDI File from the MIDI row's clip, imports it
+    /// back onto that same MIDI row through the production parse+append path, then moves the
+    /// imported clip MIDI row -> instrument row and back through the production cross-track move.
+    /// Asserts note content survives every hop and that neither row keeps a stale copy.
+    std::function<bool(juce::String& failReason)> midiTrackParityVerify;
+    /// After save + reload: asserts the imported clip is still owned by the MIDI row with its
+    /// notes intact (MidiContent blocks persist clips exactly like instrument rows).
+    std::function<bool(juce::String& failReason)> midiTrackParityVerifyAfterReload;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -153,6 +166,8 @@ private:
     void appendAutosaveSteps(const juce::File& project, bool withRecovery);
     /// Phase B: MIDI routing fixture + capture-seam playback verification + v18 roundtrip.
     void appendMidiRoutingSteps(const juce::File& project);
+    /// MIDI-clip parity: import onto a `TrackKind::Midi` row + cross-track moves + save/reload.
+    void appendMidiTrackParitySteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

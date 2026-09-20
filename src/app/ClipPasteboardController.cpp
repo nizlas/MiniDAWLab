@@ -14,7 +14,9 @@
 
 namespace
 {
-    [[nodiscard]] bool sessionTrackIsInstrument(const Session& session, const TrackId tid) noexcept
+    /// Instrument rows and plain `TrackKind::Midi` rows both own timeline MIDI clips, so both are
+    /// valid sources and paste targets for the MIDI payload.
+    [[nodiscard]] bool sessionTrackOwnsTimelineMidiClips(const Session& session, const TrackId tid) noexcept
     {
         if (tid == kInvalidTrackId)
         {
@@ -30,7 +32,7 @@ namespace
         {
             return false;
         }
-        return snap->getTrack(ix).getKind() == TrackKind::Instrument;
+        return trackKindOwnsTimelineMidiClips(snap->getTrack(ix).getKind());
     }
 } // namespace
 
@@ -56,18 +58,18 @@ TrackId ClipPasteboardController::resolveInstrumentMidiPasteTargetTrack(
     if (midiSel.has_value())
     {
         const TrackId tid = midiSel->first;
-        if (sessionTrackIsInstrument(session_, tid))
+        if (sessionTrackOwnsTimelineMidiClips(session_, tid))
         {
             return tid;
         }
     }
     if (sourceTrackFromPasteboard != kInvalidTrackId
-        && sessionTrackIsInstrument(session_, sourceTrackFromPasteboard))
+        && sessionTrackOwnsTimelineMidiClips(session_, sourceTrackFromPasteboard))
     {
         return sourceTrackFromPasteboard;
     }
     const TrackId active = session_.getActiveTrackId();
-    if (sessionTrackIsInstrument(session_, active))
+    if (sessionTrackOwnsTimelineMidiClips(session_, active))
     {
         return active;
     }
@@ -84,7 +86,7 @@ void ClipPasteboardController::invokeDeleteSelectedPlacedClipFromWindowShortcut(
     if (midiSel.has_value())
     {
         const TrackId tid = midiSel->first;
-        if (!sessionTrackIsInstrument(session_, tid))
+        if (!sessionTrackOwnsTimelineMidiClips(session_, tid))
         {
             return;
         }
@@ -243,12 +245,12 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
             return;
         }
         const TrackId target = resolveInstrumentMidiPasteTargetTrack(pb.sourceTrackId);
-        if (target == kInvalidTrackId || !sessionTrackIsInstrument(session_, target))
+        if (target == kInvalidTrackId || !sessionTrackOwnsTimelineMidiClips(session_, target))
         {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon,
                 "Paste MIDI",
-                "No instrument track is available to paste MIDI clips onto.",
+                "No MIDI or instrument track is available to paste MIDI clips onto.",
                 "OK");
             return;
         }

@@ -30,7 +30,7 @@ InstrumentMidiImportCoordinator::InstrumentMidiImportCoordinator(Session& sessio
 {
 }
 
-void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const TrackId tid)
+void InstrumentMidiImportCoordinator::importMidiFileForTrack(const TrackId tid)
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     if (snap == nullptr)
@@ -42,12 +42,12 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
         return;
     }
     const int ix = snap->findTrackIndexById(tid);
-    if (ix < 0 || snap->getTrack(ix).getKind() != TrackKind::Instrument)
+    if (ix < 0 || !trackKindOwnsTimelineMidiClips(snap->getTrack(ix).getKind()))
     {
         juce::AlertWindow::showMessageBoxAsync(
             juce::AlertWindow::WarningIcon,
             "Import MIDI file",
-            "That track is not an instrument lane.");
+            "That track does not hold MIDI clips. Import onto a MIDI or instrument track.");
         return;
     }
 
@@ -57,7 +57,7 @@ void InstrumentMidiImportCoordinator::importMidiFileForInstrumentTrack(const Tra
         juce::AlertWindow::showMessageBoxAsync(
             juce::AlertWindow::WarningIcon,
             "Import MIDI file",
-            "Instrument controller is not available for this track.");
+            "The MIDI clip controller is not available for this track.");
         return;
     }
 

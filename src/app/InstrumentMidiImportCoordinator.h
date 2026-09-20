@@ -14,7 +14,10 @@ class TrackLanesView;
 class TimelineRulerView;
 class InspectorView;
 
-/// Arrangement-level MIDI import at the transport playhead (instrument track header → FileChooser).
+/// Arrangement-level MIDI import at the transport playhead (track header → FileChooser). Accepts
+/// every row that owns timeline MIDI clips (`trackKindOwnsTimelineMidiClips`): instrument rows and
+/// plain `TrackKind::Midi` rows, which store clips in the same plugin-less controller and only
+/// differ in where their notes are rendered (own plugin vs the "MIDI To" destination).
 class InstrumentMidiImportCoordinator final
 {
 public:
@@ -33,7 +36,7 @@ public:
                                     InspectorView& inspectorView,
                                     Callbacks callbacks);
 
-    void importMidiFileForInstrumentTrack(TrackId tid);
+    void importMidiFileForTrack(TrackId tid);
 
 private:
     Session& session_;

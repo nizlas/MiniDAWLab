@@ -1511,7 +1511,9 @@ std::optional<TrackId> InstrumentTimelineRowCoordinator::instrumentMidiLaneHitAt
     for (int ti = 0; ti < snap->getNumTracks(); ++ti)
     {
         const Track& tr = snap->getTrack(ti);
-        if (tr.getKind() != TrackKind::Instrument)
+        // Every row that owns timeline MIDI clips is a legal drop target, so a clip can be dragged
+        // between instrument rows and plain TrackKind::Midi rows in both directions.
+        if (!trackKindOwnsTimelineMidiClips(tr.getKind()))
         {
             continue;
         }
