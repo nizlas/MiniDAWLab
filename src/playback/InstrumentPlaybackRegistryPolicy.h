@@ -40,4 +40,41 @@ namespace instrument_playback
     return hasInstrumentTrack && playbackKey != kInvalidTrackId;
 }
 
+/// P2 Secondary audition (steering §17 audition split, PID-008): whether a loaded Secondary rides
+/// along in the track's playback entry as its AUDITION host — rendered through the same strip as
+/// the transport host, and only while the transport is not playing (the engine enforces that part
+/// per block, so live audition is never layered over transport playback).
+///
+/// Two situations qualify:
+/// * **Primary missing** — the documented fallback: stopped audition of newly played notes has no
+///   other instrument to sound through.
+/// * **Primary loaded, but the user has the Secondary's own plug-in editor open** — sound design in
+///   that editor must be audible, otherwise a Secondary can only ever be dialled in on a machine
+///   where the Primary happens to be unavailable. Exactly one instrument is auditioned either way:
+///   DAL's own UI/editor notes keep going to the Primary, so the authoritative and the approximate
+///   sound are never combined.
+///
+/// A Secondary that IS the transport source is never an audition host — it already renders as the
+/// entry's transport host, and rendering it twice would double its level.
+[[nodiscard]] constexpr bool secondaryAuditionHostEligible(const bool secondaryLoaded,
+                                                           const bool secondaryIsTransportSource,
+                                                           const bool primaryHasLoadedInstrument,
+                                                           const bool secondaryEditorOpen) noexcept
+{
+    if (!secondaryLoaded || secondaryIsTransportSource)
+    {
+        return false;
+    }
+    return !primaryHasLoadedInstrument || secondaryEditorOpen;
+}
+
+// Locks the rule above at compile time (pure predicate: a regression cannot reach a test run).
+static_assert(!secondaryAuditionHostEligible(false, false, false, true), "unloaded Secondary never auditions");
+static_assert(!secondaryAuditionHostEligible(true, true, false, true), "transport-source Secondary is not an audition host");
+static_assert(!secondaryAuditionHostEligible(true, true, true, false), "transport-source Secondary is not an audition host");
+static_assert(secondaryAuditionHostEligible(true, false, false, false), "Primary missing: stopped audition works without the editor");
+static_assert(secondaryAuditionHostEligible(true, false, false, true), "Primary missing + editor open still auditions");
+static_assert(secondaryAuditionHostEligible(true, false, true, true), "Primary loaded: the open Secondary editor is audible");
+static_assert(!secondaryAuditionHostEligible(true, false, true, false), "Primary loaded, editor closed: Primary alone sounds");
+
 } // namespace instrument_playback

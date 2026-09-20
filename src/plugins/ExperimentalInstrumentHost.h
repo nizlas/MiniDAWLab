@@ -194,6 +194,16 @@ public:
     void closeNativeEditor();
     void editorWindowClosing();
 
+    /// [Message thread] Whether this host's native plug-in editor window is currently open. Used by
+    /// the Secondary audition rule (`instrument_playback::secondaryAuditionHostEligible`): an open
+    /// editor is what makes a Secondary audible for sound design while the Primary still plays.
+    [[nodiscard]] bool isNativeEditorOpen() const noexcept { return editorWindow_ != nullptr; }
+
+    /// [Message thread] Invoked (asynchronously) after the native editor window opens or closes, so
+    /// an owner can republish state that depends on `isNativeEditorOpen()`. Deferred on purpose: the
+    /// listener may rebuild host registries, which must never run inside this host's own call stack.
+    void setOnNativeEditorOpenStateChanged(std::function<void()> callback);
+
     /// [Message thread] I2: enqueue MIDI for the next audio block. No-op if not on message thread
     /// or no instrument is loaded. Does not touch the plugin on the message thread.
     void enqueueMidiMessageFromMessageThread(const juce::MidiMessage& message);
@@ -395,7 +405,7 @@ public:
     /// [Message thread] SPIKE-01 ONLY: whether the native plugin editor window is currently open.
     [[nodiscard]] bool spike01IsNativeEditorOpenForDiagnostics() const noexcept
     {
-        return editorWindow_ != nullptr;
+        return isNativeEditorOpen();
     }
 
 private:
@@ -527,6 +537,7 @@ private:
     /// Stable key for v2 drum capability merge deduplication (cleared on unload).
     juce::String lastGrooveDrumCapabilityPersistKey_;
 
+    std::function<void()> onNativeEditorOpenStateChanged_;
     std::function<void()> onPluginPitchNamesCacheMayHaveChanged_;
     std::function<void(const std::map<int, juce::String>&)> onPluginDrumNamesDiscovered_;
     std::function<bool()> drumNamePhaseCAudioProbeShouldSkip_;
@@ -559,4 +570,8 @@ private:
     /// the loaded instance for track-local discovery (`setOnPluginDrumNamesDiscovered`). When `kDrumNamesDiag` is true,
     /// the transient host pitch-name caches are also rebuilt for diagnostics only.
     void schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
+
+    /// Notifies `setOnNativeEditorOpenStateChanged` listeners after the editor window opened or
+    /// closed. Always deferred to a later message-loop turn (see the setter's contract).
+    void notifyNativeEditorOpenStateChanged();
 };

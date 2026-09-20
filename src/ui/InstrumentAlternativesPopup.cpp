@@ -56,7 +56,11 @@ namespace
                   "identical.\n\n"
                   "With the transport stopped and the Primary missing, played notes audition "
                   "through the Secondary. While a current proxy supplies transport playback, live "
-                  "audition is unavailable (the Secondary is never layered on top of the proxy).";
+                  "audition is unavailable (the Secondary is never layered on top of the proxy).\n\n"
+                  "To dial in its sound while the Primary still plays: open the Secondary's own "
+                  "editor below. With the transport stopped, that editor is audible, so you can "
+                  "set the sound up before the Secondary is ever needed. Notes played in DAL's MIDI "
+                  "editor keep going to the Primary.";
             primaryValueLabel_.setTooltip(altTooltip);
             secondaryValueLabel_.setTooltip(altTooltip);
 
@@ -69,7 +73,10 @@ namespace
             addAndMakeVisible(selectSecondaryButton_);
 
             editorButton_.setButtonText("Editor");
-            editorButton_.setTooltip("Open the Secondary instrument's editor (loads it if needed).");
+            editorButton_.setTooltip(
+                "Open the Secondary instrument's editor (loads it if needed). While this editor is "
+                "open and the transport is stopped, the Secondary is audible so its sound can be "
+                "set up — even when the Primary is the track's current source.");
             editorButton_.setWantsKeyboardFocus(false);
             editorButton_.onClick = [this] {
                 if (!secondaryHost_.openSecondaryEditor)

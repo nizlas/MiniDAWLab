@@ -495,6 +495,10 @@ bool InstrumentRuntimeCoordinator::ensureSecondaryInstrumentLoadedForTrack(const
         slot = std::make_unique<ExperimentalInstrumentHost>();
         // Deliberately NOT wired via wireExperimentalInstrumentHost: the Secondary never feeds
         // the Primary drum-name/template machinery and never bumps Primary semantics.
+        // Opening/closing its editor changes whether it auditions (see the snapshot builder), so
+        // republish on that transition — the host defers the callback past its own call stack.
+        slot->setOnNativeEditorOpenStateChanged(
+            [this] { updateExperimentalPlaybackBridgeAfterRegistryChange(); });
         if (lastPreparedDeviceSampleRate_ > 0.0 && lastPreparedDeviceBlockSize_ > 0)
         {
             slot->prepareForDevice(lastPreparedDeviceSampleRate_, lastPreparedDeviceBlockSize_);
@@ -1168,20 +1172,27 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
         // P2 (steering §17): ONE entry per track — the transport host is the Secondary exactly
         // when the published source decision selected it; otherwise the Primary host (whose
         // published proxy view supplies Proxy playback). A loaded, non-transport Secondary rides
-        // along as the AUDITION host (processed only while the transport is stopped) so stopped
-        // audition works even when the proxy is Current. Primary/Proxy/Secondary can therefore
-        // never feed the transport simultaneously.
+        // along as the AUDITION host (processed only while the transport is stopped), so stopped
+        // audition works when the Primary is missing AND sound design in the Secondary's own
+        // plug-in editor is audible while the Primary still plays — see
+        // `secondaryAuditionHostEligible`. Primary/Proxy/Secondary can never feed the transport
+        // simultaneously.
         ExperimentalInstrumentHost* transportHost = itHost->second.get();
         ExperimentalInstrumentHost* auditionHost = nullptr;
         if (ExperimentalInstrumentHost* const secondaryHost
             = getSecondaryInstrumentHostForTrack(kv.first);
             secondaryHost != nullptr && secondaryHost->hasInstrument())
         {
-            if (secondaryTransportActive_.count(kv.first) != 0)
+            const bool secondaryIsTransportSource = secondaryTransportActive_.count(kv.first) != 0;
+            if (secondaryIsTransportSource)
             {
                 transportHost = secondaryHost;
             }
-            else if (!transportHost->hasInstrument())
+            else if (instrument_playback::secondaryAuditionHostEligible(
+                         /*secondaryLoaded*/ true,
+                         secondaryIsTransportSource,
+                         transportHost->hasInstrument(),
+                         secondaryHost->isNativeEditorOpen()))
             {
                 auditionHost = secondaryHost;
             }

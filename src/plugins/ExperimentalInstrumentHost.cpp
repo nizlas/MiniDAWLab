@@ -1668,6 +1668,7 @@ void ExperimentalInstrumentHost::closeNativeEditor()
         primarySemanticRevision_.bump();
     }
     editorWindow_.reset();
+    notifyNativeEditorOpenStateChanged();
 }
 
 void ExperimentalInstrumentHost::editorWindowClosing()
@@ -1679,6 +1680,33 @@ void ExperimentalInstrumentHost::editorWindowClosing()
         primarySemanticRevision_.bump();
     }
     editorWindow_.reset();
+    notifyNativeEditorOpenStateChanged();
+}
+
+void ExperimentalInstrumentHost::setOnNativeEditorOpenStateChanged(std::function<void()> callback)
+{
+    onNativeEditorOpenStateChanged_ = std::move(callback);
+}
+
+void ExperimentalInstrumentHost::notifyNativeEditorOpenStateChanged()
+{
+    if (!onNativeEditorOpenStateChanged_)
+    {
+        return;
+    }
+    // Deferred: a listener republishing the playback registry could retire hosts, and this one is
+    // still on the stack. Running after the stack unwinds keeps that safe.
+    juce::MessageManager::callAsync([this, guard = asyncAliveGuard()] {
+        if (!guard.isAlive())
+        {
+            juce::Logger::writeToLog("[stale-async] skipped: native editor open-state notify");
+            return;
+        }
+        if (onNativeEditorOpenStateChanged_)
+        {
+            onNativeEditorOpenStateChanged_();
+        }
+    });
 }
 
 void ExperimentalInstrumentHost::queueMidiFromMessageThread(const ::juce::MidiMessage& message)
@@ -3578,6 +3606,7 @@ void ExperimentalInstrumentHost::openNativeEditor()
     // Primary's sound state without any notification DAL can observe.
     primarySemanticRevision_.bump();
     writeExperimentalInstrumentLogLine("native editor: open succeeded");
+    notifyNativeEditorOpenStateChanged();
     schedulePluginPitchNamesRefreshAfterNativeEditorOpened();
 }
 

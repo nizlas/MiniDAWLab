@@ -1619,11 +1619,20 @@ Notes:
   rewritten.
 * A **Current** proxy whose recorded render rate differs from the engine rate plays through the
   derived playback representation (PI-030, §15.3) — a rate mismatch never demotes a row to silent.
-* **Audition split (Locked for the first P2 version — PID-008 reviewed):** transport playback and
-  live audition are separate concerns; audition (UI FIFO) requires a live instrument, and a proxy
-  cannot audition arbitrary new notes (Verified constraint, Audit §9). In the first P2 version:
+* **Audition split (Locked for the first P2 version — PID-008 reviewed; sound-design clause added
+  revision 17):** transport playback and live audition are separate concerns; audition (UI FIFO)
+  requires a live instrument, and a proxy cannot audition arbitrary new notes (Verified constraint,
+  Audit §9). In the first P2 version:
   * when transport is **stopped** and Primary is missing, Secondary MAY provide live audition of
     newly played notes;
+  * when transport is **stopped** and the user has the Secondary's **own plug-in editor open**, the
+    Secondary MUST be audible even though the Primary is loaded and remains the track's source —
+    otherwise a Secondary could only ever be configured on a machine where the Primary happens to
+    be unavailable, which defeats its purpose as a prepared fallback. This does not combine an
+    authoritative and an approximate sound: DAL's own UI/editor notes continue to go to the
+    Primary, so only one instrument sounds per played note. Transport playback, the source-priority
+    table, proxy rendering and offline mixdown are unaffected; closing the editor ends the
+    audition;
   * while a current Proxy is supplying transport playback, DAL MUST NOT mix live Secondary
     audition on top of that Proxy — the UI explains that live audition is unavailable during Proxy
     transport playback (§19);
@@ -1994,7 +2003,11 @@ position missing at the mix call), §9 (interaction table). *Decision:* priority
 (PI-021; table §17). Seam: **Recommended** host-level substitution (§7.3) with timeline plumbing
 placed in slice P1G. *Audition split (resolved by review — Locked for the first P2 version):*
 when transport is stopped and Primary is missing, Secondary MAY provide live audition of newly
-played notes; while a current Proxy supplies transport playback, DAL MUST NOT mix live Secondary
+played notes; **additionally (revision 17) when transport is stopped and the Secondary's own
+plug-in editor is open, the Secondary MUST be audible even with the Primary loaded, so its sound
+can be prepared before it is needed — DAL's own UI/editor notes still target the Primary, so a
+single instrument sounds per note and nothing about transport source, proxy rendering or mixdown
+changes;** while a current Proxy supplies transport playback, DAL MUST NOT mix live Secondary
 audition on top of that Proxy, and the UI explains that live audition is unavailable during Proxy
 transport playback; if a musical edit makes the Proxy stale, the source-priority policy may select
 Secondary as the working transport sound with the track clearly shown as using Secondary. Proxy
