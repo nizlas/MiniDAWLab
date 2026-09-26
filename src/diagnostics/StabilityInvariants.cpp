@@ -395,6 +395,10 @@ namespace
             if (editorTid != kInvalidTrackId)
             {
                 const int ti = snap.findTrackIndexById(editorTid);
+                const auto hasKeyedRuntime = [&](const TrackId tid) {
+                    return std::any_of(runtimes.begin(), runtimes.end(),
+                                       [&](const InstrumentRuntimeInfo& rt) { return rt.trackId == tid; });
+                };
                 if (ti < 0)
                 {
                     report.fail("midi-editor",
@@ -402,21 +406,45 @@ namespace
                                     + juce::String((juce::int64)(std::int64_t) editorTid)
                                     + " which has no session track");
                 }
-                else if (snap.getTrack(ti).getKind() != TrackKind::Instrument)
+                else if (snap.getTrack(ti).getKind() == TrackKind::Instrument)
+                {
+                    if (!hasKeyedRuntime(editorTid))
+                    {
+                        report.fail("midi-editor",
+                                    "MIDI editor open on trackId="
+                                        + juce::String((juce::int64)(std::int64_t) editorTid)
+                                        + " which has no keyed instrument runtime");
+                    }
+                }
+                else if (snap.getTrack(ti).getKind() == TrackKind::Midi)
+                {
+                    // Phase B: a MIDI row has no host of its own — its editor borrows the "MIDI To"
+                    // destination instrument's runtime (see MidiEditorPresenter). The editor can only
+                    // be open on a MIDI row that resolves to a destination with a keyed runtime.
+                    const TrackId dest = snap.getTrack(ti).getMidiDestinationTrackId();
+                    if (dest == kInvalidTrackId)
+                    {
+                        report.fail("midi-editor",
+                                    "MIDI editor open on Midi trackId="
+                                        + juce::String((juce::int64)(std::int64_t) editorTid)
+                                        + " which has no MIDI destination");
+                    }
+                    else if (!hasKeyedRuntime(dest))
+                    {
+                        report.fail("midi-editor",
+                                    "MIDI editor open on Midi trackId="
+                                        + juce::String((juce::int64)(std::int64_t) editorTid)
+                                        + " whose destination trackId="
+                                        + juce::String((juce::int64)(std::int64_t) dest)
+                                        + " has no keyed instrument runtime");
+                    }
+                }
+                else
                 {
                     report.fail("midi-editor",
                                 "MIDI editor open on trackId="
                                     + juce::String((juce::int64)(std::int64_t) editorTid)
                                     + " kind=" + trackKindName(snap.getTrack(ti).getKind()));
-                }
-                else if (!std::any_of(runtimes.begin(), runtimes.end(),
-                                      [&](const InstrumentRuntimeInfo& rt)
-                                      { return rt.trackId == editorTid; }))
-                {
-                    report.fail("midi-editor",
-                                "MIDI editor open on trackId="
-                                    + juce::String((juce::int64)(std::int64_t) editorTid)
-                                    + " which has no keyed instrument runtime");
                 }
             }
         }

@@ -104,6 +104,14 @@ public:
     // cycle playback is armed. Acquire-ordered vs audio-thread release increments.
     [[nodiscard]] std::uint32_t readCycleWrapCountForUi() const noexcept;
 
+    // [Any thread] Diagnostics only: total timeline samples the engine has consumed while Playing
+    // since construction (monotonic, relaxed). Unlike the playhead it never moves backwards on a
+    // cycle wrap or seek, so "did the transport advance during this window" is a plain difference.
+    [[nodiscard]] std::uint64_t readAdvancedSamplesTotalForDiagnostics() const noexcept
+    {
+        return advancedSamplesTotal_.load(std::memory_order_relaxed);
+    }
+
 private:
     friend class PlaybackEngine;
 
@@ -145,4 +153,5 @@ private:
     std::atomic<std::int64_t> seekTargetSamples_;
     std::atomic<bool> cycleEnabled_;
     std::atomic<std::uint32_t> wrapPassCount_;
+    std::atomic<std::uint64_t> advancedSamplesTotal_{ 0 };
 };

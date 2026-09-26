@@ -511,6 +511,13 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
         }
         return;
     }
+    // The clips vector has now been mutated. If that removed/moved the clip the MIDI editor is bound
+    // to, detach it here — synchronously, before the controller's queued change message runs — so no
+    // later callback dereferences a freed clip (the cross-track move use-after-free).
+    if (callbacks_.reconcileMidiEditorAfterInstrumentEdit)
+    {
+        callbacks_.reconcileMidiEditorAfterInstrumentEdit();
+    }
     std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical;
     if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
     {

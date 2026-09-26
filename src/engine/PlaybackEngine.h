@@ -241,6 +241,22 @@ public:
     /// [Message thread] Read and clear the accumulated audio callback load window.
     [[nodiscard]] AudioCallbackLoadSnapshot snapshotAudioCallbackLoadAndReset() noexcept;
 
+    /// [Any thread] Monotonic count of device-callback entries (relaxed). Two reads that differ
+    /// prove the callback is still cycling; equal reads across a wait mean it has stopped.
+    [[nodiscard]] std::uint64_t readAudioCallbackEnterCountForDiagnostics() const noexcept
+    {
+        return audioCallbackEnterCount_.load(std::memory_order_relaxed);
+    }
+
+    /// [Message thread] Largest absolute sample written to ANY device output channel since the
+    /// previous call (peak hold across blocks), then resets the hold to 0. Distinguishes "callback
+    /// runs but the mix is silent" from "sources render and reach the output". Diagnostics only:
+    /// the audio thread folds one SIMD min/max per channel into a lock-free max (relaxed).
+    [[nodiscard]] float readAndResetOutputPeakHoldForDiagnostics() noexcept
+    {
+        return outputPeakHold_.exchange(0.0f, std::memory_order_relaxed);
+    }
+
     /// [Any thread] Same acquire-load discipline as instrument snapshot reads inside the device callback.
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
@@ -331,6 +347,12 @@ private:
     /// Incremented at every callback entry; a frozen value across timeout logs = stuck callback,
     /// an advancing value = callbacks still cycling (flag observed true by unlucky sampling).
     std::atomic<std::uint64_t> audioCallbackEnterCount_{ 0 };
+    /// Peak-hold of the device output (see `readAndResetOutputPeakHoldForDiagnostics`). Relaxed.
+    std::atomic<float> outputPeakHold_{ 0.0f };
+    /// [Audio thread] Fold this block's output peak into `outputPeakHold_` (lock-free max).
+    void audioThread_foldOutputPeak(const float* const* outputChannelData,
+                                    int numOutputChannels,
+                                    int numSamples) noexcept;
 
     /// Load window (see `AudioCallbackLoadSnapshot`). Relaxed only; never used for synchronization.
     std::atomic<std::uint64_t> loadWindowBlocks_{ 0 };

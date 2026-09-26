@@ -234,6 +234,34 @@ void MidiEditorPresenter::rebindAfterInstrumentMusicalUndo()
     }
 }
 
+void MidiEditorPresenter::detachOpenEditorIfBoundClipMissing() noexcept
+{
+    if (midiEditorWindow_.get() == nullptr || !midiEditorOpenedForInstrumentTrackId_.has_value())
+    {
+        return;
+    }
+    const std::optional<std::uint64_t> boundId = midiEditorWindow_->getBoundInstrumentClipId();
+    if (!boundId.has_value() || *boundId == 0)
+    {
+        // Already in scratch mode (no clip bound) — nothing can dangle.
+        return;
+    }
+    if (callbacks_.getInstrumentControllerForTrack == nullptr)
+    {
+        return;
+    }
+    InstrumentTrackController* const ctl
+        = callbacks_.getInstrumentControllerForTrack(*midiEditorOpenedForInstrumentTrackId_);
+    // Controller gone (its track was deleted) is handled by resetWindowAndBookingIfOpenOnTrack; here
+    // we only guard the case where the controller lives but the bound clip was removed/moved away.
+    if (ctl != nullptr && ctl->getClipById(static_cast<InstrumentMidiClipId>(*boundId)) != nullptr)
+    {
+        return;
+    }
+    // No user-facing alert: a move/delete of the edited clip is a deliberate action, not an error.
+    detachToScratchAfterMissingInstrumentClip({});
+}
+
 void MidiEditorPresenter::openMidiEditorForInstrumentClip(const TrackId timelineInstrumentTrackId,
                                                           const InstrumentMidiClipId clipId)
 {

@@ -1841,6 +1841,17 @@ float ExperimentalInstrumentHost::getProxyLastBlockPeakForDiagnostics() const no
     return v;
 }
 
+ExperimentalInstrumentHost::RtActivitySnapshot
+ExperimentalInstrumentHost::readRtActivitySnapshotForDiagnostics() const noexcept
+{
+    RtActivitySnapshot s;
+    s.processOkBlocks = rtDiag_processOkBlocks_.load(std::memory_order_relaxed);
+    s.midiDeliveryBoundaryBlocks = rtMidiDeliveryBoundaryBlocks_.load(std::memory_order_relaxed);
+    const std::uint32_t bits = rtDiag_lastScratchPeakBits_.load(std::memory_order_relaxed);
+    std::memcpy(&s.lastProcessedBlockPeak, &bits, sizeof(float));
+    return s;
+}
+
 void ExperimentalInstrumentHost::audioThread_addMidiEventForCurrentBlock(int sampleOffsetInBlock,
                                                                       const juce::MidiMessage& message) noexcept
 {

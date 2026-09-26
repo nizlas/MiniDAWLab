@@ -57,6 +57,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace
@@ -553,6 +554,39 @@ void PlaybackEngine::audioThread_accumulateCallbackLoad(const int numSamples,
     }
 }
 
+void PlaybackEngine::audioThread_foldOutputPeak(const float* const* outputChannelData,
+                                                const int numOutputChannels,
+                                                const int numSamples) noexcept
+{
+    if (outputChannelData == nullptr || numSamples <= 0)
+    {
+        return;
+    }
+    float peak = 0.0f;
+    for (int ch = 0; ch < numOutputChannels; ++ch)
+    {
+        const float* const row = outputChannelData[ch];
+        if (row == nullptr)
+        {
+            continue;
+        }
+        const juce::Range<float> r = juce::FloatVectorOperations::findMinAndMax(row, numSamples);
+        if (!std::isfinite(r.getStart()) || !std::isfinite(r.getEnd()))
+        {
+            // NaN/inf never wins an ordinary max, so an invalid block would silently fold as "no
+            // peak"; report it as +inf instead — an invalid mix is a diagnosis in itself.
+            peak = std::numeric_limits<float>::infinity();
+            break;
+        }
+        peak = juce::jmax(peak, std::abs(r.getStart()), std::abs(r.getEnd()));
+    }
+    float current = outputPeakHold_.load(std::memory_order_relaxed);
+    while (peak > current
+           && !outputPeakHold_.compare_exchange_weak(current, peak, std::memory_order_relaxed))
+    {
+    }
+}
+
 PlaybackEngine::AudioCallbackLoadSnapshot PlaybackEngine::snapshotAudioCallbackLoadAndReset() noexcept
 {
     AudioCallbackLoadSnapshot s;
@@ -614,6 +648,24 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     };
     const AudioCallbackLoadScope loadScope { *this, numSamples, juce::Time::getHighResolutionTicks() };
+
+    // Output-peak diagnostics: runs on every return path (including the gate-silence path, where
+    // the cleared buffers correctly fold a peak of 0). Relaxed atomics; never for synchronization.
+    struct AudioCallbackOutputPeakScope
+    {
+        PlaybackEngine& engine_;
+        const float* const* outputs_;
+        const int numOutputs_;
+        const int numSamples_;
+        ~AudioCallbackOutputPeakScope() noexcept
+        {
+            engine_.audioThread_foldOutputPeak(outputs_, numOutputs_, numSamples_);
+        }
+    };
+    const AudioCallbackOutputPeakScope outputPeakScope { *this,
+                                                         outputChannelData,
+                                                         numOutputChannels,
+                                                         numSamples };
 
     // Stability C2B diagnostics: coarse phase marker (relaxed; never used for synchronization).
     const auto setCallbackPhase = [this](const AudioCallbackPhase p) noexcept {

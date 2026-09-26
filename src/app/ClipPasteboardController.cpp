@@ -304,11 +304,11 @@ void ClipPasteboardController::invokePasteClipFromWindowShortcut()
                 rulerView_.repaint();
                 trackLanesView_.repaint();
                 inspectorView_.refreshFromSession();
-                const InstrumentMidiClipId active = c->getSelectedClipId();
-                if (active != 0)
-                {
-                    callbacks_.openMidiEditorForInstrumentClip(target, active);
-                }
+                // Paste creates and selects the clip only. It must NOT open the MIDI editor:
+                // double-click is the explicit "open editor" gesture, and auto-opening here both
+                // surprised the user and left the editor bound to a clip that a following
+                // cross-track drag would free under it (the move crash). Selection is enough for a
+                // subsequent double-click or drag.
                 return true;
             });
         return;

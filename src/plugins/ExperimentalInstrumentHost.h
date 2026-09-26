@@ -329,6 +329,17 @@ public:
     /// Diagnostics: peak |sample| of the most recent proxy block (pre-strip). Relaxed.
     [[nodiscard]] float getProxyLastBlockPeakForDiagnostics() const noexcept;
 
+    /// [Any thread] Relaxed counters from the live processing boundary, for health probes: blocks
+    /// the plug-in instance actually processed, blocks that reached the MIDI delivery boundary,
+    /// and the peak of the most recent processed block (pre-strip). Never for synchronization.
+    struct RtActivitySnapshot
+    {
+        std::uint64_t processOkBlocks = 0;
+        std::uint64_t midiDeliveryBoundaryBlocks = 0;
+        float lastProcessedBlockPeak = 0.0f;
+    };
+    [[nodiscard]] RtActivitySnapshot readRtActivitySnapshotForDiagnostics() const noexcept;
+
     /// Diagnostics: blocks in which the audio callback ENTERED the proxy branch (a published
     /// useProxy view was latched), regardless of whether segments produced output. Relaxed.
     [[nodiscard]] std::uint64_t getProxyBranchEnteredCountRelaxed() const noexcept

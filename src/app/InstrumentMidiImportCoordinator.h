@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "domain/Track.h"
+#include "instruments/InstrumentTrackController.h"
 #include "util/AsyncLifetimeToken.h"
 
 class Session;
@@ -36,7 +37,23 @@ public:
                                     InspectorView& inspectorView,
                                     Callbacks callbacks);
 
+    /// Header menu entry: validates the row, then opens the file chooser and imports the picked file
+    /// via `importMidiFileOntoTrackNow`.
     void importMidiFileForTrack(TrackId tid);
+
+    struct ImportOutcome
+    {
+        bool ok = false;
+        InstrumentMidiClipId createdClipId = 0;
+        int notesParsed = 0;
+        juce::String userMessage; ///< Parse/import failure text shown to the user (empty on success).
+    };
+
+    /// [Message thread] The import itself, without the chooser: parse `file` with the production
+    /// parser, append one clip at the transport playhead as an undoable instrument edit, sync the
+    /// arrangement/inspector. Used by the chooser callback and by the stability scenarios, so tests
+    /// exercise exactly the path a user's import takes.
+    ImportOutcome importMidiFileOntoTrackNow(TrackId tid, const juce::File& file);
 
 private:
     Session& session_;

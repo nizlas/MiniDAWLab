@@ -1813,8 +1813,19 @@ void ExperimentalMidiEditorWindow::Body::pushRowsModeToRoll()
     {
         rv->setRowLabelMode(midiRollRowLabelMode_);
         rv->setSideStripTotalWidthForUiOnly(midiRollActiveSideStripTotal());
+        // Defense-in-depth: never hand a possibly-freed clip pointer to the controller. A cross-track
+        // move/delete frees the bound clip object; the presenter detaches the editor synchronously
+        // (detachOpenEditorIfBoundClipMissing), but re-resolving by the stored id here means even a
+        // stray change callback in between cannot dereference freed memory. A missing clip resolves to
+        // nullptr, which pluginNoteNameQueryChannel treats as "use the selected clip".
+        const InstrumentMidiClip* safeContextClip = nullptr;
+        if (instrumentTrackForClipBind_ != nullptr && persistentInstrumentClipIdForRebind_ != std::uint64_t{ 0 })
+        {
+            safeContextClip = instrumentTrackForClipBind_->getClipById(
+                static_cast<InstrumentMidiClipId>(persistentInstrumentClipIdForRebind_));
+        }
         const int pluginCh = instrumentTrackForClipBind_ != nullptr
-                                 ? instrumentTrackForClipBind_->pluginNoteNameQueryChannel(boundTimelineClip_)
+                                 ? instrumentTrackForClipBind_->pluginNoteNameQueryChannel(safeContextClip)
                                  : 10;
         rv->setRowLabelProvider([this, pluginCh](const int note) {
             return resolveDrumRowDisplayName(note, pluginCh);

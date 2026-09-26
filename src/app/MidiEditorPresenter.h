@@ -69,6 +69,14 @@ public:
                                          InstrumentMidiClipId clipId);
     void detachToScratchAfterMissingInstrumentClip(const juce::String& reasonForUser);
     void rebindAfterInstrumentMusicalUndo();
+
+    /// [Message thread] Called synchronously after any instrument clip edit that can remove or move
+    /// clips (cross-track move, delete, paste). If the editor's bound clip no longer exists on its
+    /// opened track, its raw `boundTimelineClip_`/pattern pointers dangle, so the editor is detached
+    /// to scratch here — before the controller's async change message can re-enter and dereference
+    /// the freed clip (the "crash when moving the copied event" use-after-free). A no-op when no
+    /// editor is open or the bound clip is still present, so ordinary note edits are unaffected.
+    void detachOpenEditorIfBoundClipMissing() noexcept;
     void refreshInstrumentUiIfOpen();
     void syncInstrumentClipTimelineFromDevice();
 

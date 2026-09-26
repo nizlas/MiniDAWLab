@@ -1,7 +1,9 @@
 ﻿#include <JuceHeader.h>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -443,6 +445,12 @@ public:
                     if (midiEditorPresenter_ != nullptr)
                     {
                         midiEditorPresenter_->rebindAfterInstrumentMusicalUndo();
+                    }
+                },
+                [this] {
+                    if (midiEditorPresenter_ != nullptr)
+                    {
+                        midiEditorPresenter_->detachOpenEditorIfBoundClipMissing();
                     }
                 },
                 [this](bool isRedoStep) {
@@ -1574,19 +1582,7 @@ public:
                     }
                     if (result == 4)
                     {
-                        const auto newMidiId = safeThis->session.addMidiTrack();
-                        if (newMidiId.has_value()
-                            && safeThis->instrumentRuntimeCoordinator_ != nullptr)
-                        {
-                            // The controller is what gives the row its MIDI event lane and lets
-                            // the engine publish it as a MIDI source.
-                            (void)safeThis->instrumentRuntimeCoordinator_
-                                ->getOrCreateMidiContentControllerForTrack(*newMidiId);
-                        }
-                        safeThis->syncViewportFromSession();
-                        safeThis->trackLanesView.syncTracksFromSession();
-                        safeThis->refreshInstrumentUi();
-                        safeThis->inspectorView_.refreshFromSession();
+                        (void)safeThis->addMidiTrackFromUi();
                         return;
                     }
                     if (result == 99)
@@ -3253,6 +3249,203 @@ public:
             return true;
         };
 
+        // --- Global audio health probe (midi-import-audio and follow-up scenarios) ---
+        hooks.audioHealthProbeBegin = [this] {
+            (void)playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
+            stabilityAudioProbeCallbackBaseline_ = playbackEngine_.readAudioCallbackEnterCountForDiagnostics();
+            stabilityAudioProbeAdvancedBaseline_ = transport.readAdvancedSamplesTotalForDiagnostics();
+            stabilityAudioProbeHostBlocksBaseline_.clear();
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                instrumentRuntimeCoordinator_->forEachInstrumentController(
+                    [this](const TrackId tid, InstrumentTrackController&) {
+                        if (ExperimentalInstrumentHost* const h
+                            = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid))
+                        {
+                            stabilityAudioProbeHostBlocksBaseline_[tid]
+                                = h->readRtActivitySnapshotForDiagnostics().processOkBlocks;
+                        }
+                    });
+            }
+        };
+        hooks.audioHealthProbeVerify = [this](const juce::String& label, juce::String& failReason) -> bool {
+            const std::uint64_t callbacksDelta = playbackEngine_.readAudioCallbackEnterCountForDiagnostics()
+                                                 - stabilityAudioProbeCallbackBaseline_;
+            const float peak = playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
+            // Monotonic consumed-sample counter: immune to cycle wraps and seeks, unlike the playhead.
+            const std::uint64_t advancedDelta = transport.readAdvancedSamplesTotalForDiagnostics()
+                                                - stabilityAudioProbeAdvancedBaseline_;
+            const bool playing = transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+            // -80 dBFS: well below any real programme material, well above float noise.
+            constexpr float kAudibleFloor = 1.0e-4f;
+            juce::String hostsLine;
+            std::map<TrackId, std::uint64_t> hostDeltas;
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                instrumentRuntimeCoordinator_->forEachInstrumentController(
+                    [&](const TrackId tid, InstrumentTrackController&) {
+                        ExperimentalInstrumentHost* const h
+                            = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid);
+                        if (h == nullptr)
+                        {
+                            return;
+                        }
+                        const auto s = h->readRtActivitySnapshotForDiagnostics();
+                        const auto itB = stabilityAudioProbeHostBlocksBaseline_.find(tid);
+                        const std::uint64_t delta
+                            = itB != stabilityAudioProbeHostBlocksBaseline_.end() ? s.processOkBlocks - itB->second
+                                                                                  : s.processOkBlocks;
+                        hostDeltas[tid] = delta;
+                        hostsLine << " inst[" << juce::String((juce::int64)tid) << "]{blocks+="
+                                  << juce::String((juce::int64)delta) << " lastPeak="
+                                  << juce::String(s.lastProcessedBlockPeak, 4)
+                                  << " loaded=" << (h->hasInstrument() ? "yes" : "no") << "}";
+                    });
+            }
+            appendStabilityRunLine("  audio-health[" + label + "]: callbacks+=" + juce::String((juce::int64)callbacksDelta)
+                                   + " advanced+=" + juce::String((juce::int64)advancedDelta)
+                                   + " outputPeak=" + juce::String(peak, 6)
+                                   + " playhead=" + juce::String((juce::int64)transport.readPlayheadSamplesForUi())
+                                   + " intent=" + (playing ? "playing" : "not-playing")
+                                   + " engine={" + playbackEngine_.describeAudioCallbackStateForDiagnostics() + "}"
+                                   + hostsLine);
+            if (callbacksDelta == 0)
+            {
+                failReason = label + ": audio callback stopped (no callbacks during the window)";
+                return false;
+            }
+            if (playing && advancedDelta == 0)
+            {
+                failReason = label + ": callback runs but the transport did not advance";
+                return false;
+            }
+            if (!std::isfinite(peak))
+            {
+                failReason = label + ": device output contained NaN/inf";
+                return false;
+            }
+            if (peak < kAudibleFloor)
+            {
+                failReason = label + ": device output silent (peak " + juce::String(peak, 6) + ")";
+                return false;
+            }
+            // An instrument that rendered in the previous window must still be rendering now:
+            // "audio tracks play but every instrument went quiet" is exactly the failure a
+            // device-output peak alone cannot see.
+            for (const auto& [tid, prev] : stabilityAudioProbeHostBlocksPrevWindow_)
+            {
+                const auto it = hostDeltas.find(tid);
+                if (prev > 0 && it != hostDeltas.end() && it->second == 0)
+                {
+                    failReason = label + ": instrument track " + juce::String((juce::int64)tid)
+                                 + " stopped processing blocks (rendered " + juce::String((juce::int64)prev)
+                                 + " in the previous window)";
+                    return false;
+                }
+            }
+            stabilityAudioProbeHostBlocksPrevWindow_ = std::move(hostDeltas);
+            return true;
+        };
+        hooks.addMidiTrackLikeUi = [this]() -> std::optional<TrackId> { return addMidiTrackFromUi(); };
+        hooks.isMidiEditorOpen = [this]() -> bool {
+            return midiEditorPresenter_ != nullptr && midiEditorPresenter_->midiEditorWindow() != nullptr
+                   && midiEditorPresenter_->midiEditorWindow()->isVisible();
+        };
+        hooks.clipCountOnTrack = [this](const TrackId tid) -> int {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return 0;
+            }
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+            return c != nullptr ? (int)c->getClips().size() : 0;
+        };
+        hooks.selectFirstClipOnTrack = [this](const TrackId tid) -> InstrumentMidiClipId {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return 0;
+            }
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+            if (c == nullptr || c->getClips().empty() || c->getClips().front() == nullptr)
+            {
+                return 0;
+            }
+            const InstrumentMidiClipId id = c->getClips().front()->id;
+            c->setSelectedClipIdsExclusive(id);
+            return id;
+        };
+        hooks.openMidiEditorOnFirstClipOfTrack = [this](const TrackId tid) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr || midiEditorPresenter_ == nullptr)
+            {
+                return false;
+            }
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+            if (c == nullptr || c->getClips().empty() || c->getClips().front() == nullptr)
+            {
+                return false;
+            }
+            midiEditorPresenter_->openMidiEditorForInstrumentClip(tid, c->getClips().front()->id);
+            return midiEditorPresenter_->midiEditorWindow() != nullptr;
+        };
+        hooks.copyThenPasteSelectedMidiClipLikeUi = [this] {
+            if (clipPasteboardController_ != nullptr)
+            {
+                clipPasteboardController_->invokeCopySelectedClipFromWindowShortcut();
+                clipPasteboardController_->invokePasteClipFromWindowShortcut();
+            }
+        };
+        hooks.moveMidiClipCrossTrackLikeUi
+            = [this](const TrackId src, const TrackId dst, const InstrumentMidiClipId clipId) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr || undoRedoCoordinator_ == nullptr)
+            {
+                return false;
+            }
+            bool moved = false;
+            // Same wrapping the arrangement drag commits: the reconcile hook fires inside this call.
+            undoRedoCoordinator_->executeUndoableInstrumentEdit(
+                "Move MIDI clip", [this, src, dst, clipId, &moved]() -> bool {
+                    moved = instrumentRuntimeCoordinator_->moveInstrumentMidiClipsBetweenTracks(
+                        src, dst, { clipId }, 0);
+                    if (moved)
+                    {
+                        trackLanesView.repaint();
+                        inspectorView_.refreshFromSession();
+                    }
+                    return moved;
+                });
+            return moved;
+        };
+        hooks.fixtureInstrumentTrackId = [this]() -> TrackId { return stabilityMidiRoutingInstTid_; };
+        hooks.fixtureMidiTrackId = [this]() -> TrackId { return stabilityMidiRoutingMidiLowerTid_; };
+        hooks.refreshInstrumentEditorUi = [this] {
+            if (midiEditorPresenter_ != nullptr)
+            {
+                midiEditorPresenter_->refreshInstrumentUiIfOpen();
+            }
+        };
+        hooks.importMidiFileOntoTrack
+            = [this](const TrackId tid, const juce::File& midi, juce::String& failReason) -> bool {
+            if (instrumentMidiImportCoordinator_ == nullptr)
+            {
+                failReason = "no MIDI import coordinator";
+                return false;
+            }
+            const auto outcome = instrumentMidiImportCoordinator_->importMidiFileOntoTrackNow(tid, midi);
+            appendStabilityRunLine("  import: ok=" + juce::String(outcome.ok ? "yes" : "no")
+                                   + " notes=" + juce::String(outcome.notesParsed)
+                                   + " clipId=" + juce::String((juce::int64)outcome.createdClipId)
+                                   + (outcome.userMessage.isNotEmpty() ? " msg=\"" + outcome.userMessage + "\""
+                                                                       : juce::String{}));
+            if (!outcome.ok)
+            {
+                failReason = "MIDI import did not create a clip: " + outcome.userMessage;
+                return false;
+            }
+            return true;
+        };
+
         stabilityScenarioRunner_ = std::make_unique<StabilityScenarioRunner>(std::move(hooks));
         stabilityScenarioRunner_->start(request);
     }
@@ -3680,6 +3873,24 @@ private:
 
     // [Message thread] Seed default arrangement + samples-per-pixel once sample rate is known;
     // clamp the pan window to the current arrangement extent (when ruler width is known).
+    /// [Message thread] "Add MIDI Track" (transport add menu and stability scenarios): appends the
+    /// TrackKind::Midi row, gives it its plugin-less MIDI content controller — which is what
+    /// creates the row's MIDI event lane and lets the engine publish it as a MIDI source — and
+    /// runs the same post-add UI sync as every other add-track entry.
+    std::optional<TrackId> addMidiTrackFromUi()
+    {
+        const std::optional<TrackId> newMidiId = session.addMidiTrack();
+        if (newMidiId.has_value() && instrumentRuntimeCoordinator_ != nullptr)
+        {
+            (void)instrumentRuntimeCoordinator_->getOrCreateMidiContentControllerForTrack(*newMidiId);
+        }
+        syncViewportFromSession();
+        trackLanesView.syncTracksFromSession();
+        refreshInstrumentUi();
+        inspectorView_.refreshFromSession();
+        return newMidiId;
+    }
+
     void syncViewportFromSession()
     {
         juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
@@ -4413,6 +4624,11 @@ private:
     /// save/reload, and its sorted pitches are the expected content at every hop.
     const juce::String stabilityMidiParityClipName_{ "ParityImport" };
     std::vector<int> stabilityMidiParityImportedPitches_;
+    /// Audio health probe baselines (`audioHealthProbeBegin` / `audioHealthProbeVerify`).
+    std::uint64_t stabilityAudioProbeCallbackBaseline_ = 0;
+    std::uint64_t stabilityAudioProbeAdvancedBaseline_ = 0;
+    std::map<TrackId, std::uint64_t> stabilityAudioProbeHostBlocksBaseline_;
+    std::map<TrackId, std::uint64_t> stabilityAudioProbeHostBlocksPrevWindow_;
 
     /// Stability C2 only (`--stability-*` command line); null in normal use. Declared last:
     /// its hooks capture `this` and touch most members above, so it must be destroyed first.

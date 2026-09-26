@@ -52,6 +52,11 @@ public:
 
         std::function<void()> rebindMidiEditorAfterInstrumentMusicalUndo;
 
+        /// Invoked synchronously after every applied instrument edit (before this call returns to the
+        /// message loop). Lets the MIDI editor detach if the edit removed/moved the clip it was bound
+        /// to, so the controller's later async change message cannot dereference a freed clip.
+        std::function<void()> reconcileMidiEditorAfterInstrumentEdit;
+
         /// When `undo_diagnostic::kUndoDiag` is enabled, logs pre-apply instrument bundle context.
         std::function<void(bool isRedoStep)> logInstrumentMusicalUndoPreApplyDiag;
 

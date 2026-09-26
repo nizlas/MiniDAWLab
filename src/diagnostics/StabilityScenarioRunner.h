@@ -18,9 +18,11 @@
 #include <JuceHeader.h>
 
 #include "domain/Track.h"
+#include "instruments/InstrumentTrackController.h" // InstrumentMidiClipId in hook signatures
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 enum class StabilityScenarioKind
@@ -38,6 +40,14 @@ enum class StabilityScenarioKind
     /// MIDI-clip parity between `TrackKind::Midi` and instrument rows: file import onto a MIDI row
     /// and cross-track clip moves in both directions, then a save/reload check.
     MidiTrackParity,
+    /// Global audio health across "add MIDI track -> import a MIDI file": device-output peak,
+    /// callback count and playhead advance are probed while playing before and after the import.
+    MidiImportAudio,
+    /// Copy/paste must not open the MIDI editor, and moving a clip whose editor is open must not
+    /// crash (use-after-free on the freed clip). Reproduces the user's B+C sequence through the
+    /// production paste, editor-open and cross-track move paths, with a settle between move and
+    /// the controller's async change callback.
+    MidiEditorMoveCrash,
 };
 
 struct StabilityScenarioRequest
@@ -45,6 +55,7 @@ struct StabilityScenarioRequest
     StabilityScenarioKind kind = StabilityScenarioKind::None;
     juce::File projectA;
     juce::File projectB; // LoadAlternate only.
+    juce::File midiFile; // MidiImportAudio (`--midi <file>`); a built-in fixture when absent.
     int iterations = 1;
     bool mixdownMp3 = false; // Mixdown only (`--format mp3`).
 
@@ -134,6 +145,39 @@ struct StabilityRunnerHooks
     /// After save + reload: asserts the imported clip is still owned by the MIDI row with its
     /// notes intact (MidiContent blocks persist clips exactly like instrument rows).
     std::function<bool(juce::String& failReason)> midiTrackParityVerifyAfterReload;
+
+    // --- Global audio health probe ---------------------------------------------
+    /// Arms the probe: resets the engine's output peak hold and remembers callback count/playhead.
+    std::function<void()> audioHealthProbeBegin;
+    /// Reads the probe after a playing window and asserts: callbacks advanced, playhead advanced,
+    /// device output peak above the audible floor and finite. Logs every value under `label`.
+    std::function<bool(const juce::String& label, juce::String& failReason)> audioHealthProbeVerify;
+    /// Same entry the transport "add track" menu uses for a MIDI track; returns the new row id.
+    std::function<std::optional<TrackId>()> addMidiTrackLikeUi;
+    /// Production import (parse + undoable append + UI sync) onto `tid`, without the file chooser.
+    std::function<bool(TrackId tid, const juce::File& midiFile, juce::String& failReason)>
+        importMidiFileOntoTrack;
+
+    // --- Editor / paste / move crash reproduction ------------------------------
+    /// True while the MIDI editor window is open and visible.
+    std::function<bool()> isMidiEditorOpen;
+    /// Number of clips currently on the track's controller (instrument or MIDI content).
+    std::function<int(TrackId)> clipCountOnTrack;
+    /// Selects the track's first clip on its controller; returns its id (0 if none).
+    std::function<InstrumentMidiClipId(TrackId)> selectFirstClipOnTrack;
+    /// Opens the MIDI editor on the track's first clip (production open path); false if none.
+    std::function<bool(TrackId)> openMidiEditorOnFirstClipOfTrack;
+    /// Runs the production clipboard copy then paste of the current MIDI selection.
+    std::function<void()> copyThenPasteSelectedMidiClipLikeUi;
+    /// Moves `clipId` from `src` to `dst` through the production cross-track move, wrapped as the
+    /// same undoable instrument edit the arrangement drag commits.
+    std::function<bool(TrackId src, TrackId dst, InstrumentMidiClipId clipId)> moveMidiClipCrossTrackLikeUi;
+    /// Fixture ids created by `midiRoutingFixtureSetup` (destination instrument row / a routed MIDI row).
+    std::function<TrackId()> fixtureInstrumentTrackId;
+    std::function<TrackId()> fixtureMidiTrackId;
+    /// Production "refresh the open MIDI editor from its host" (syncInstrumentStateFromHost). Used
+    /// after a move to exercise the roll rebuild that dereferences the editor's bound clip.
+    std::function<void()> refreshInstrumentEditorUi;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -168,6 +212,10 @@ private:
     void appendMidiRoutingSteps(const juce::File& project);
     /// MIDI-clip parity: import onto a `TrackKind::Midi` row + cross-track moves + save/reload.
     void appendMidiTrackParitySteps(const juce::File& project);
+    /// Audio health before/after "add MIDI track -> import MIDI file" while playing.
+    void appendMidiImportAudioSteps(const juce::File& project, const juce::File& midiFile);
+    /// Paste-opens-editor (B) and move-with-open-editor crash (C) reproduction.
+    void appendMidiEditorMoveCrashSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -188,6 +236,8 @@ private:
     juce::String scenarioName_;
     bool finished_ = false;
     juce::File openSaveCloseCopy_; // Temp project copy; deleted at scenario end.
+    /// MidiImportAudio: the MIDI row created by the scenario (target of the import step).
+    TrackId scenarioMidiTrackId_ = kInvalidTrackId;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };

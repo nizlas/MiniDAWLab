@@ -98,79 +98,88 @@ void InstrumentMidiImportCoordinator::importMidiFileForTrack(const TrackId tid)
         {
             return;
         }
-
-        const std::int64_t startSamples = transport_.readPlayheadSamplesForUi();
-
-        ExperimentalMidiImportResult parseResult
-            = experimentalImportMidiFile(file, kDefaultExperimentalTicksPerQuarter);
-        if (!parseResult.ok)
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "MIDI import failed",
-                parseResult.combinedUserMessageLine());
-            return;
-        }
-
-        juce::String suggestedName = file.getFileNameWithoutExtension();
-        if (suggestedName.length() > 48)
-        {
-            suggestedName = suggestedName.substring(0, 48);
-        }
-
-        const juce::String warningCopy = parseResult.warningMessage;
-        std::vector<TimelineMidiNote> notes = std::move(parseResult.notes);
-
-        auto execute = callbacks_.executeUndoableInstrumentEdit;
-        auto syncVp = callbacks_.syncViewportFromSession;
-        auto refreshInstr = callbacks_.refreshInstrumentUi;
-        if (execute == nullptr)
-        {
-            return;
-        }
-
-        execute("Import MIDI file", [this,
-                                     tid,
-                                     startSamples,
-                                     suggestedName,
-                                     notes = std::move(notes),
-                                     syncVp,
-                                     refreshInstr]() mutable -> bool {
-            InstrumentTrackController* c = instrumentRuntime_.getMidiClipControllerForTrack(tid);
-            if (c == nullptr || !c->hasInstrumentTrack())
-            {
-                return false;
-            }
-
-            const InstrumentMidiClipId newId = c->appendImportedTimelineMidiClipAtSamples(
-                std::move(notes), startSamples, suggestedName);
-            if (newId == 0)
-            {
-                return false;
-            }
-            c->setSelectedClipIdsExclusive(newId);
-
-            if (syncVp != nullptr)
-            {
-                syncVp();
-            }
-            trackLanesView_.syncTracksFromSession();
-            rulerView_.repaint();
-            trackLanesView_.repaint();
-            inspectorView_.refreshFromSession();
-            if (refreshInstr != nullptr)
-            {
-                refreshInstr();
-            }
-            return true;
-        });
-
-        if (warningCopy.isNotEmpty())
-        {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon,
-                "MIDI import",
-                warningCopy);
-        }
+        (void)importMidiFileOntoTrackNow(tid, file);
     });
+}
+
+InstrumentMidiImportCoordinator::ImportOutcome
+InstrumentMidiImportCoordinator::importMidiFileOntoTrackNow(const TrackId tid, const juce::File& file)
+{
+    ImportOutcome outcome;
+    const std::int64_t startSamples = transport_.readPlayheadSamplesForUi();
+
+    ExperimentalMidiImportResult parseResult
+        = experimentalImportMidiFile(file, kDefaultExperimentalTicksPerQuarter);
+    if (!parseResult.ok)
+    {
+        outcome.userMessage = parseResult.combinedUserMessageLine();
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "MIDI import failed", outcome.userMessage);
+        return outcome;
+    }
+
+    juce::String suggestedName = file.getFileNameWithoutExtension();
+    if (suggestedName.length() > 48)
+    {
+        suggestedName = suggestedName.substring(0, 48);
+    }
+
+    const juce::String warningCopy = parseResult.warningMessage;
+    outcome.notesParsed = static_cast<int>(parseResult.notes.size());
+    std::vector<TimelineMidiNote> notes = std::move(parseResult.notes);
+
+    auto execute = callbacks_.executeUndoableInstrumentEdit;
+    auto syncVp = callbacks_.syncViewportFromSession;
+    auto refreshInstr = callbacks_.refreshInstrumentUi;
+    if (execute == nullptr)
+    {
+        outcome.userMessage = "Undo service unavailable.";
+        return outcome;
+    }
+
+    InstrumentMidiClipId* const createdIdOut = &outcome.createdClipId;
+    execute("Import MIDI file", [this,
+                                 tid,
+                                 startSamples,
+                                 suggestedName,
+                                 notes = std::move(notes),
+                                 syncVp,
+                                 refreshInstr,
+                                 createdIdOut]() mutable -> bool {
+        InstrumentTrackController* c = instrumentRuntime_.getMidiClipControllerForTrack(tid);
+        if (c == nullptr || !c->hasInstrumentTrack())
+        {
+            return false;
+        }
+
+        const InstrumentMidiClipId newId = c->appendImportedTimelineMidiClipAtSamples(
+            std::move(notes), startSamples, suggestedName);
+        if (newId == 0)
+        {
+            return false;
+        }
+        *createdIdOut = newId;
+        c->setSelectedClipIdsExclusive(newId);
+
+        if (syncVp != nullptr)
+        {
+            syncVp();
+        }
+        trackLanesView_.syncTracksFromSession();
+        rulerView_.repaint();
+        trackLanesView_.repaint();
+        inspectorView_.refreshFromSession();
+        if (refreshInstr != nullptr)
+        {
+            refreshInstr();
+        }
+        return true;
+    });
+    outcome.ok = outcome.createdClipId != 0;
+
+    if (warningCopy.isNotEmpty())
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "MIDI import", warningCopy);
+    }
+    return outcome;
 }

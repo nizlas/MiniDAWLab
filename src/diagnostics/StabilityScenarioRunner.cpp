@@ -164,6 +164,32 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-midi-import-audio")
+        {
+            if (!setKind(StabilityScenarioKind::MidiImportAudio)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-midi-import-audio requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-midi-editor-move")
+        {
+            if (!setKind(StabilityScenarioKind::MidiEditorMoveCrash)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-midi-editor-move requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--midi")
+        {
+            if (!nextProjectArg(i, req.midiFile))
+            {
+                errorOut = "--midi requires a .mid file path";
+                return {};
+            }
+        }
         else if (a == "--iterations")
         {
             if (i + 1 >= args.size())
@@ -236,6 +262,8 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::RecoverAutosave: scenarioName_ = "recover-autosave"; break;
         case StabilityScenarioKind::MidiRouting: scenarioName_ = "midi-routing"; break;
         case StabilityScenarioKind::MidiTrackParity: scenarioName_ = "midi-track-parity"; break;
+        case StabilityScenarioKind::MidiImportAudio: scenarioName_ = "midi-import-audio"; break;
+        case StabilityScenarioKind::MidiEditorMoveCrash: scenarioName_ = "midi-editor-move"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -291,6 +319,12 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::MidiTrackParity:
             appendMidiTrackParitySteps(request.projectA);
+            break;
+        case StabilityScenarioKind::MidiImportAudio:
+            appendMidiImportAudioSteps(request.projectA, request.midiFile);
+            break;
+        case StabilityScenarioKind::MidiEditorMoveCrash:
+            appendMidiEditorMoveCrashSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -1246,4 +1280,316 @@ void StabilityScenarioRunner::appendMidiTrackParitySteps(const juce::File& proje
                                return hooks_.midiTrackParityVerifyAfterReload(failReason);
                            },
                            kSettleDefaultMs });
+}
+
+namespace
+{
+    /// Built-in import fixture when `--midi` is absent: a format-0 SMF (480 PPQ) with eight quarter
+    /// notes on channel 1 — the same shape as a typical single-track export.
+    [[nodiscard]] bool writeFixtureMidiFile(const juce::File& target)
+    {
+        constexpr int kPpq = 480;
+        juce::MidiMessageSequence seq;
+        for (int i = 0; i < 8; ++i)
+        {
+            const double t = static_cast<double>(i) * kPpq;
+            seq.addEvent(juce::MidiMessage::noteOn(1, 60 + (i % 5) * 2, (juce::uint8)100), t);
+            seq.addEvent(juce::MidiMessage::noteOff(1, 60 + (i % 5) * 2), t + kPpq / 2);
+        }
+        seq.updateMatchedPairs();
+        juce::MidiFile mf;
+        mf.setTicksPerQuarterNote(kPpq);
+        mf.addTrack(seq);
+        (void)target.deleteFile();
+        juce::FileOutputStream os(target);
+        return os.openedOk() && mf.writeTo(os, 0);
+    }
+} // namespace
+
+void StabilityScenarioRunner::appendMidiImportAudioSteps(const juce::File& project,
+                                                         const juce::File& midiFileArg)
+{
+    if (hooks_.audioHealthProbeBegin == nullptr || hooks_.audioHealthProbeVerify == nullptr
+        || hooks_.addMidiTrackLikeUi == nullptr || hooks_.importMidiFileOntoTrack == nullptr)
+    {
+        steps_.push_back(Step{ "midi-import-audio: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "midi-import-audio hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    steps_.push_back(Step{
+        "midi-import-audio: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(
+                project.getFileNameWithoutExtension() + "-midiimportaudiotest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "midi-import-audio: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    // Baseline: the project must be audibly playing BEFORE anything is imported, otherwise a
+    // silent "after" proves nothing.
+    steps_.push_back(Step{ "midi-import-audio: baseline start playback (probe armed)",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(true);
+                               hooks_.audioHealthProbeBegin();
+                               return true;
+                           },
+                           2500 });
+    steps_.push_back(Step{ "midi-import-audio: baseline verify audio health",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.audioHealthProbeVerify("baseline-playing", failReason);
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "midi-import-audio: baseline stop playback",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "midi-import-audio: add MIDI track (transport menu path)",
+                           [this](juce::String& failReason) -> bool {
+                               const std::optional<TrackId> tid = hooks_.addMidiTrackLikeUi();
+                               if (!tid.has_value() || *tid == kInvalidTrackId)
+                               {
+                                   failReason = "add MIDI track returned no row id";
+                                   return false;
+                               }
+                               scenarioMidiTrackId_ = *tid;
+                               appendStabilityRunLine("  midi row id=" + juce::String((juce::int64)*tid));
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{
+        "midi-import-audio: import MIDI file onto the MIDI track",
+        [this, midiFileArg](juce::String& failReason) -> bool {
+            juce::File midi = midiFileArg;
+            if (midi == juce::File{} || !midi.existsAsFile())
+            {
+                midi = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                           .getChildFile("MiniDAWLab-midi-import-audio-fixture.mid");
+                if (!writeFixtureMidiFile(midi))
+                {
+                    failReason = "could not write the built-in MIDI fixture";
+                    return false;
+                }
+                appendStabilityRunLine("  using built-in MIDI fixture: " + midi.getFullPathName());
+            }
+            else
+            {
+                appendStabilityRunLine("  importing: " + midi.getFullPathName() + " ("
+                                       + juce::String((juce::int64)midi.getSize()) + " bytes)");
+            }
+            return hooks_.importMidiFileOntoTrack(scenarioMidiTrackId_, midi, failReason);
+        },
+        800 });
+
+    steps_.push_back(Step{ "midi-import-audio: after import start playback (probe armed)",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(true);
+                               hooks_.audioHealthProbeBegin();
+                               return true;
+                           },
+                           2500 });
+    steps_.push_back(Step{ "midi-import-audio: after import verify audio health",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.audioHealthProbeVerify("after-import-playing", failReason);
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "midi-import-audio: stop playback",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               return true;
+                           },
+                           600 });
+}
+
+void StabilityScenarioRunner::appendMidiEditorMoveCrashSteps(const juce::File& project)
+{
+    if (hooks_.midiRoutingFixtureSetup == nullptr || hooks_.isMidiEditorOpen == nullptr
+        || hooks_.clipCountOnTrack == nullptr || hooks_.selectFirstClipOnTrack == nullptr
+        || hooks_.openMidiEditorOnFirstClipOfTrack == nullptr
+        || hooks_.copyThenPasteSelectedMidiClipLikeUi == nullptr
+        || hooks_.moveMidiClipCrossTrackLikeUi == nullptr || hooks_.audioHealthProbeBegin == nullptr
+        || hooks_.audioHealthProbeVerify == nullptr)
+    {
+        steps_.push_back(Step{ "midi-editor-move: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "midi-editor-move hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    steps_.push_back(Step{
+        "midi-editor-move: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(
+                project.getFileNameWithoutExtension() + "-midieditormovetest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "midi-editor-move: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    // Fixture: one instrument row (destination) plus two routed MIDI rows ("Lower"/"Pedal") that
+    // each own a clip. `midiRoutingInstTid_` / `midiRoutingMidiLowerTid_` are remembered by the hook.
+    steps_.push_back(Step{ "midi-editor-move: build fixture (instrument row + routed MIDI rows)",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.midiRoutingFixtureSetup(failReason);
+                           },
+                           600 });
+
+    // --- Symptom B: copy/paste must not open the MIDI editor ---
+    steps_.push_back(Step{
+        "midi-editor-move: select then copy+paste the MIDI clip (must NOT open editor)",
+        [this](juce::String& failReason) -> bool {
+            if (hooks_.isMidiEditorOpen())
+            {
+                failReason = "editor already open before paste (unexpected initial state)";
+                return false;
+            }
+            if (hooks_.selectFirstClipOnTrack(hooks_.fixtureMidiTrackId()) == 0)
+            {
+                failReason = "no clip to select on the MIDI row";
+                return false;
+            }
+            hooks_.copyThenPasteSelectedMidiClipLikeUi();
+            return true;
+        },
+        kSettleDefaultMs });
+    steps_.push_back(Step{ "midi-editor-move: assert paste did not open the editor",
+                           [this](juce::String& failReason) -> bool {
+                               if (hooks_.isMidiEditorOpen())
+                               {
+                                   failReason = "paste opened the MIDI editor (symptom B)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    // --- Symptom C: open the editor on the clip, then move it cross-track ---
+    steps_.push_back(Step{ "midi-editor-move: open editor on the MIDI row's clip",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.openMidiEditorOnFirstClipOfTrack(hooks_.fixtureMidiTrackId()))
+                               {
+                                   failReason = "could not open the MIDI editor on the clip";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           800 });
+    steps_.push_back(Step{ "midi-editor-move: verify editor open",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.isMidiEditorOpen())
+                               {
+                                   failReason = "editor did not open";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{
+        "midi-editor-move: move the open clip cross-track to the instrument row",
+        [this](juce::String& failReason) -> bool {
+            const InstrumentMidiClipId clipId = hooks_.selectFirstClipOnTrack(hooks_.fixtureMidiTrackId());
+            if (clipId == 0)
+            {
+                failReason = "clip vanished before the move";
+                return false;
+            }
+            if (!hooks_.moveMidiClipCrossTrackLikeUi(
+                    hooks_.fixtureMidiTrackId(), hooks_.fixtureInstrumentTrackId(), clipId))
+            {
+                failReason = "cross-track move refused";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+    // The settle above and this extra window let the controller's ASYNC change message dispatch —
+    // this is exactly where the pre-fix use-after-free crashed. Reaching the next step proves the
+    // process survived it.
+    steps_.push_back(Step{ "midi-editor-move: settle after move (async change dispatch)",
+                           [](juce::String&) -> bool { return true; },
+                           800 });
+    // Force the roll rebuild that reads the editor's bound clip (syncInstrumentStateFromHost ->
+    // pushRowsModeToRoll / setSessionTimelineContext). Pre-fix, the clip was freed by the move and
+    // this dereferenced it (the crash); post-fix the editor detached, so it is safe.
+    steps_.push_back(Step{ "midi-editor-move: refresh open editor after move (crash trigger)",
+                           [this](juce::String&) -> bool {
+                               if (hooks_.refreshInstrumentEditorUi != nullptr)
+                               {
+                                   hooks_.refreshInstrumentEditorUi();
+                               }
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "midi-editor-move: verify survived + editor detached from moved clip",
+                           [this](juce::String& failReason) -> bool {
+                               // The edited clip left this track, so the editor must have detached
+                               // (its bound clip id no longer resolves here).
+                               if (hooks_.clipCountOnTrack(hooks_.fixtureInstrumentTrackId()) < 1)
+                               {
+                                   failReason = "moved clip did not arrive on the instrument row";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    // Audio must still be healthy after the whole sequence.
+    steps_.push_back(Step{ "midi-editor-move: start playback (probe armed)",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(true);
+                               hooks_.audioHealthProbeBegin();
+                               return true;
+                           },
+                           2500 });
+    steps_.push_back(Step{ "midi-editor-move: verify audio health after sequence",
+                           [this](juce::String& failReason) -> bool {
+                               return hooks_.audioHealthProbeVerify("after-move-playing", failReason);
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "midi-editor-move: stop playback",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               return true;
+                           },
+                           600 });
 }

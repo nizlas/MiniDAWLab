@@ -150,4 +150,5 @@ void Transport::audioThread_advancePlayheadIfPlaying(std::int64_t deltaSamples) 
 
     // Relaxed: at this point we are the sole writer; beginBlock/seek and UI read paths are ordered.
     playheadSamples_.fetch_add(deltaSamples, std::memory_order_relaxed);
+    advancedSamplesTotal_.fetch_add(static_cast<std::uint64_t>(deltaSamples), std::memory_order_relaxed);
 }
