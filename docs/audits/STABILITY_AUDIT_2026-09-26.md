@@ -1,9 +1,10 @@
 # Stability audit 2026-09-26 — MIDI paste/move crash and broad stability review
 
-**Status: PARTIAL.** The three user-reported symptoms were investigated and two were fixed
-(shipped in 1.1.3, commit `26814d4`). The broad application-wide stability audit requested in
-the same task was only partly carried out; the unfinished areas are listed in §4 and are
-unfinished parts of the original request, not new scope.
+**Status: PARTIAL — PAUSED.** The three user-reported symptoms were investigated and two were
+fixed (shipped in 1.1.3, commit `26814d4`). The broad application-wide stability audit requested
+in the same task was only partly carried out; the unfinished areas are listed in §4 and are
+unfinished parts of the original request, not new scope. No continuation work has started after
+this report was recorded.
 
 | | |
 |---|---|
@@ -51,8 +52,9 @@ What was done:
 
 Not tested: import while the transport is playing; import onto a MIDI row whose MIDI To is
 already set; import onto an instrument row. Working hypothesis (unproven): A was a downstream
-effect of the use-after-free in C corrupting state before the visible crash. **A stays open
-until either reproduced or the variants above are exhausted.**
+effect of the use-after-free in C corrupting state before the visible crash. **A remains
+unresolved even if further bounded reproduction attempts also fail; absence of reproduction is
+not proof that the user-observed global audio loss did not occur.**
 
 ### 1.2 B — paste opened the MIDI editor (fixed)
 
@@ -101,7 +103,8 @@ until either reproduced or the variants above are exhausted.**
 The first AmpliTube dump (23:19:21) followed a scenario that quit while the transport was
 playing; the last (23:56:10, last-operation "app startup begin") occurred inside a delete-loop
 iteration. A plain load → quit (`--stability-load-loop`, 23:21) did not crash. That is all that
-is established.
+is established. The crashes must **not** be classified as third-party-only or as a DAL teardown
+defect without further evidence; their cause remains undetermined.
 
 ---
 
@@ -181,13 +184,53 @@ Zero new `INVARIANT FAIL` lines. Crash dumps during the battery: AmpliTube only 
 6. **Project load/save/autosave failure paths and preservation of unavailable-plugin state** —
    scenario PASS only.
 7. **Waveform / background jobs against replaced or destroyed UI objects** — not inspected here.
+   The earlier waveform-cache fix did **not** assess this lifetime risk.
 8. **Undo/redo of a move with the editor bound to the moved clip** — not scenario-tested.
 9. **Realtime data-race review** (UI edits vs. audio-thread snapshot reads) — only the paths
    touched by import/move were read.
 
 ---
 
-## 5. Changed files (commit `26814d4`)
+## 5. Continuation plan — NOT STARTED, no time budget
+
+**Work is paused.** This is a prioritized, bounded continuation of the original request, not
+newly requested scope. It intentionally has **no time budget**: before resuming, the owner must
+choose a stopping condition appropriate to the evidence gathered in the first block.
+
+### First proposed work: Block 1 — lifecycle/crash evidence
+
+1. **Plugin teardown at shutdown and repeated load/unload.** Map the actual order of project
+   replacement, audio-device callback stop, callback drain, host/editor retirement and process
+   shutdown. Add bounded non-realtime breadcrumbs only where necessary. Exercise quit while
+   stopped and while playing; preserve matching dumps and symbols. Keep the AmpliTube cause
+   **undetermined** unless the evidence distinguishes a DAL ordering defect from plug-in failure.
+2. **Project replacement while the audio engine is active.** Use disposable project copies while
+   playback is running to exercise project replacement, track/controller retirement and pending
+   UI callbacks. Verify callback continuity, clean drain/retirement and no stale editor/host
+   references. This is part of Block 1 even if no AmpliTube instance is involved.
+3. **Symptom A variants, without closing A on non-reproduction.** Exercise import while playing,
+   import onto a MIDI row with MIDI To set, and import onto an instrument row. Retain the
+   audio-health evidence. Regardless of their outcome, A remains **unresolved** until a root
+   cause is positively established or the user explicitly retires the report.
+4. **Undo/redo after moving an editor-bound clip.** Extend the retained move scenario through
+   undo and redo with the editor open, validating its scratch/rebind behavior.
+
+### Later continuation blocks
+
+- **Audio device and recording lifecycle:** device changes; prepare/suspend/resume and error
+  recovery; recording start/stop/finalization; Monitor transitions.
+- **Instrument lifecycle:** Primary/proxy/Secondary switching; failed instantiation; unavailable
+  plug-in preservation across load/save/autosave failure paths.
+- **UI/background lifetime:** waveform/cache/background jobs during project replacement and UI
+  destruction; this lifetime risk has not been assessed by the prior waveform-cache fix.
+- **Realtime synchronization:** targeted review of UI/session edits versus audio-thread snapshot
+  reads beyond the import/move paths already covered.
+
+No test, audit, production change, rebuild or packaging action is authorized by this plan alone.
+
+---
+
+## 6. Changed files (commit `26814d4`)
 
 `CMakeLists.txt`, `installer/MiniDAWLab.iss`, `docs/releases/1.1.3.md`,
 `src/app/ClipPasteboardController.cpp`, `src/app/InstrumentMidiImportCoordinator.{h,cpp}`,
