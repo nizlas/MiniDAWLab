@@ -1,6 +1,7 @@
 #include "app/MainAppDialogs.h"
 
 #include "app/AudioMixdownExporter.h"
+#include "app/AudioMixdownProgressWindow.h"
 
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/AudioMixdownProjectSettings.h"
@@ -107,92 +108,10 @@ struct MixdownStartPlan
     mini_daw_audio_mixdown::MixdownWaveBits wavBits = mini_daw_audio_mixdown::MixdownWaveBits::Pcm24;
 };
 
-/// Small always-on-top desktop window with a status line and a progress bar. Export is blocking
-/// on the message thread (Slice 2 safety: no message dispatch runs concurrently with the offline
-/// render), so updates are painted synchronously via `ComponentPeer::performAnyPendingRepaintsNow`
-/// instead of pumping the event loop.
-class MixdownProgressWindow final : public juce::Component,
-                                    public mini_daw_audio_mixdown::MixdownProgressSink
-{
-public:
-    MixdownProgressWindow()
-    {
-        setOpaque(true);
-        setSize(440, 104);
-        setAlwaysOnTop(true);
-        addToDesktop(juce::ComponentPeer::windowHasDropShadow);
-        if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
-        {
-            setCentrePosition(display->userArea.getCentre());
-        }
-        setVisible(true);
-        toFront(false);
-        appendMixdownDiagnosticLine("progress ui shown");
-        flushPaintNow();
-    }
-
-    ~MixdownProgressWindow() override
-    {
-        appendMixdownDiagnosticLine("progress ui closed");
-    }
-
-    void setMixdownProgress(const juce::String& statusText, const double fraction01) override
-    {
-        statusText_ = statusText;
-        fraction_ = fraction01;
-        ++pulseCounter_;
-        repaint();
-        flushPaintNow();
-    }
-
-    void paint(juce::Graphics& g) override
-    {
-        g.fillAll(juce::Colour(0xff2a2a33));
-        g.setColour(juce::Colours::white.withAlpha(0.25f));
-        g.drawRect(getLocalBounds(), 1);
-
-        g.setColour(juce::Colours::white);
-        g.setFont(juce::FontOptions(15.0f));
-        g.drawText(statusText_, 16, 14, getWidth() - 32, 22, juce::Justification::centredLeft);
-
-        const juce::Rectangle<int> barArea(16, 52, getWidth() - 32, 22);
-        g.setColour(juce::Colours::black.withAlpha(0.35f));
-        g.fillRect(barArea);
-        g.setColour(mp3EncoderReadyLabelColour());
-        if (fraction_ >= 0.0)
-        {
-            const int w = juce::roundToInt(barArea.getWidth() * juce::jlimit(0.0, 1.0, fraction_));
-            g.fillRect(barArea.withWidth(w));
-        }
-        else
-        {
-            // Indeterminate: a segment bouncing left-right, advanced by each progress pulse.
-            const int segW = juce::jmax(24, barArea.getWidth() / 4);
-            const int span = juce::jmax(1, barArea.getWidth() - segW);
-            const int offset = static_cast<int>((pulseCounter_ * 10) % (2 * span));
-            const int x = offset <= span ? offset : (2 * span - offset);
-            g.fillRect(barArea.getX() + x, barArea.getY(), segW, barArea.getHeight());
-        }
-        g.setColour(juce::Colours::white.withAlpha(0.4f));
-        g.drawRect(barArea, 1);
-    }
-
-private:
-    void flushPaintNow()
-    {
-        if (auto* peer = getPeer())
-        {
-            peer->performAnyPendingRepaintsNow();
-        }
-    }
-
-    juce::String statusText_ { "Preparing..." };
-    double fraction_ = -1.0;
-    std::uint64_t pulseCounter_ = 0;
-};
-
-/// Runs the confirmed export (dialog already closed). Blocking on the message thread; live
-/// feedback comes from `MixdownProgressWindow`. Shows the final success/failure alert.
+/// Runs the confirmed export (settings dialog already closed). Blocking on the message thread;
+/// live feedback and Cancel come from `AudioMixdownProgressWindow`, which lives exactly as long
+/// as the export call. The window is destroyed *before* any completion alert is queued, so there
+/// is a single completion path and nothing can call back into a closed progress window.
 void runConfirmedMixdownExport(Transport& transport,
                                Session& session,
                                PlaybackEngine& playbackEngine,
@@ -212,34 +131,50 @@ void runConfirmedMixdownExport(Transport& transport,
         return;
     }
 
-    MixdownProgressWindow progress;
     juce::Result result = juce::Result::ok();
-    if (plan.mp3)
+    bool cancelled = false;
     {
-        result = mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(transport,
-                                                                        session,
-                                                                        playbackEngine,
-                                                                        deviceManager,
-                                                                        syncTransportUiFromDomain,
-                                                                        plan.outputFile,
-                                                                        plan.mp3BitrateKbps,
-                                                                        &progress,
-                                                                        true);
-    }
-    else
+        AudioMixdownProgressWindow progress;
+        if (plan.mp3)
+        {
+            result = mini_daw_audio_mixdown::exportStereoMixdownMp3Blocking(transport,
+                                                                            session,
+                                                                            playbackEngine,
+                                                                            deviceManager,
+                                                                            syncTransportUiFromDomain,
+                                                                            plan.outputFile,
+                                                                            plan.mp3BitrateKbps,
+                                                                            &progress,
+                                                                            true);
+        }
+        else
+        {
+            mini_daw_audio_mixdown::MixdownExportRequest request;
+            request.outputFile = plan.outputFile;
+            request.sampleRate = dev->getCurrentSampleRate();
+            request.bits = plan.wavBits;
+            request.progressSink = &progress;
+            request.overwriteConfirmed = true;
+            result = mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(transport,
+                                                                            session,
+                                                                            playbackEngine,
+                                                                            deviceManager,
+                                                                            syncTransportUiFromDomain,
+                                                                            request);
+        }
+        cancelled = progress.wasCancelRequested() && mini_daw_audio_mixdown::isMixdownCancelledResult(result);
+    } // progress window closed here, before any alert is queued
+
+    if (cancelled)
     {
-        mini_daw_audio_mixdown::MixdownExportRequest request;
-        request.outputFile = plan.outputFile;
-        request.sampleRate = dev->getCurrentSampleRate();
-        request.bits = plan.wavBits;
-        request.progressSink = &progress;
-        request.overwriteConfirmed = true;
-        result = mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(transport,
-                                                                        session,
-                                                                        playbackEngine,
-                                                                        deviceManager,
-                                                                        syncTransportUiFromDomain,
-                                                                        request);
+        // A cancel is an outcome the user asked for, not a failure: no working files remain and
+        // the destination was never touched, so the message says exactly that.
+        appendMixdownDiagnosticLine(juce::String("FINAL ") + fmt + " export cancelled by user");
+        writeLastOperationBreadcrumb(juce::String("mixdown ") + fmt + " cancelled");
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                                               "Audio Mixdown",
+                                               "Export cancelled. No file was written.");
+        return;
     }
 
     if (result.failed())

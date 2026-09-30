@@ -1798,7 +1798,31 @@ void InspectorView::commitPreGainField()
 
     const std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
     const int ix = (after != nullptr) ? after->findTrackIndexById(active) : -1;
-    setPreGainEditorTextFromDb(ix >= 0 ? after->getTrack(ix).getPreGainDb() : parsedDb);
+    const float appliedDb = ix >= 0 ? after->getTrack(ix).getPreGainDb() : parsedDb;
+    setPreGainEditorTextFromDb(appliedDb);
+
+    // The undoable edit path refuses every session edit while a take is recording or the count-in
+    // runs (an undo step recorded mid-take could later restore a snapshot without the take). A
+    // typed value that comes back unchanged therefore means "refused", not "applied" — say so,
+    // instead of silently snapping the field back and leaving the user to wonder why the sound
+    // did not change. Pre-gain, unlike the direct fader/pan controls, cannot be changed mid-take.
+    const bool userAskedForChange = std::fabs(parsedDb - snapDb) > 1.0e-4f;
+    const bool nothingChanged = std::fabs(appliedDb - snapDb) <= 1.0e-4f;
+    if (userAskedForChange && nothingChanged)
+    {
+        juce::AttributedString why;
+        why.append("Pre-gain can't be changed while recording or during count-in.",
+                   juce::FontOptions(13.0f), juce::Colours::white);
+        // JUCE: a BubbleMessageComponent only positions itself inside a parent, so it is parented
+        // to the top-level content (not this narrow side panel) to avoid being clipped; it hides
+        // itself after the timeout and stays owned by this view.
+        if (auto* top = getTopLevelComponent(); top != nullptr && top != &preGainRefusedBubble_)
+        {
+            top->addChildComponent(preGainRefusedBubble_);
+        }
+        preGainRefusedBubble_.setAlwaysOnTop(true);
+        preGainRefusedBubble_.showAt(&preGainDbEditor_, why, 3000, true, false);
+    }
 }
 
 void InspectorView::mouseDown(const juce::MouseEvent& e)

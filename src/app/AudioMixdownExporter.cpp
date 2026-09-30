@@ -1,5 +1,25 @@
+// =============================================================================
+// AudioMixdownExporter.cpp — blocking offline WAV / MP3 export of the active loop range
+// =============================================================================
+//
+// LIFECYCLE (the export owns the message thread from start to finish)
+//   render blocks → (MP3 only: encode with LAME) → finalize (close writer, replace destination).
+//   Everything runs synchronously on the message thread behind the realtime render gate, so no
+//   session edit, plugin lifecycle or device change can interleave with the offline render. The
+//   only UI that runs meanwhile is the progress window, which services just its own window (see
+//   `AudioMixdownProgressWindow`). Cancel is cooperative: polled between render blocks and during
+//   the encoder wait; it removes the working files and never touches the destination.
+//
+// WORKING FILES vs RESULTS
+//   The user's export folder receives exactly one file: the chosen WAV or MP3. Working files are
+//   (a) the render temp beside the destination (same-volume rename on success) and (b) for MP3 the
+//   intermediate WAV in the system temp folder. Both carry unique DAL-tagged names and are removed
+//   on every exit path; nothing else in either folder is ever deleted.
+// =============================================================================
+
 #include "app/AudioMixdownExporter.h"
 
+#include "app/Mp3LameEncoder.h"
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/MixdownWavProbe.h"
 #include "domain/Session.h"
@@ -17,10 +37,61 @@
 namespace mini_daw_audio_mixdown
 {
 
+bool isMixdownCancelledResult(const juce::Result& result) noexcept
+{
+    return result.failed() && result.getErrorMessage().startsWith("Export cancelled");
+}
+
 namespace
 {
 
-constexpr int kMp3EncodeTimeoutMs = 600000; // 10 minutes
+constexpr int kMp3EncodeTimeoutMs = 600000; // 10 minutes (safety net; see Mp3LameEncoder.h)
+constexpr const char* kCancelledMessage = "Export cancelled.";
+
+/// Owns one working file for the duration of an export step and deletes it on scope exit unless
+/// `dismiss()` was called (the file was moved into place and is now the user's result). This is
+/// what guarantees "no leftover WAV/MP3" on error, timeout, cancel or an early return.
+class ScopedWorkingFile final
+{
+public:
+    explicit ScopedWorkingFile(juce::File file) noexcept : file_(std::move(file)) {}
+    ~ScopedWorkingFile()
+    {
+        if (!dismissed_ && file_ != juce::File{} && file_.existsAsFile())
+        {
+            (void)file_.deleteFile();
+        }
+    }
+    ScopedWorkingFile(const ScopedWorkingFile&) = delete;
+    ScopedWorkingFile& operator=(const ScopedWorkingFile&) = delete;
+
+    [[nodiscard]] const juce::File& file() const noexcept { return file_; }
+    void dismiss() noexcept { dismissed_ = true; }
+
+private:
+    juce::File file_;
+    bool dismissed_ = false;
+};
+
+/// A non-existing, uniquely named working file in the system temp folder (never in the user's
+/// export folder). Returns an invalid File if no free name could be found.
+[[nodiscard]] juce::File allocateUniqueSystemTempWorkingFile(const juce::String& tag,
+                                                             const juce::String& extension)
+{
+    const juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
+    for (int attempt = 0; attempt < 16; ++attempt)
+    {
+        (void)attempt;
+        const juce::String unique
+            = juce::String::toHexString(juce::Random::getSystemRandom().nextInt64());
+        const juce::File candidate = tempDir.getChildFile(tag + unique + extension);
+        if (!candidate.exists())
+        {
+            return candidate;
+        }
+    }
+    return {};
+}
 
 [[nodiscard]] bool isAllowedMp3BitrateKbps(const int kbps) noexcept
 {
@@ -298,11 +369,15 @@ juce::Result exportStereoMixdownWavBlocking(
     }
 
     // Closes the writer (releasing the file handle) and removes the temp; the destination is
-    // untouched on every one of these failure paths.
+    // untouched on every one of these failure paths — including a user cancel, which therefore
+    // never leaves a half-written file that could be mistaken for a finished export.
     const auto failAndDiscardTemp = [&writer, &renderTempFile](const juce::String& message) {
         writer.reset();
         (void)renderTempFile.deleteFile();
         return juce::Result::fail(message);
+    };
+    const auto cancelRequested = [&request]() noexcept {
+        return request.progressSink != nullptr && request.progressSink->isMixdownCancelRequested();
     };
 
     if (request.bits == MixdownWaveBits::IeeeFloat32)
@@ -338,7 +413,12 @@ juce::Result exportStereoMixdownWavBlocking(
     if (request.progressSink != nullptr)
     {
         appendMixdownDiagnosticLine("progress phase: render (determinate)");
-        request.progressSink->setMixdownProgress("Mixing down... 0%", 0.0);
+        request.progressSink->setMixdownProgress("Rendering... 0%", 0.0);
+    }
+    if (cancelRequested())
+    {
+        appendMixdownDiagnosticLine("cancelled before render start");
+        return failAndDiscardTemp(kCancelledMessage);
     }
 
     bool firstBlock = true;
@@ -365,6 +445,8 @@ juce::Result exportStereoMixdownWavBlocking(
 
         if (request.progressSink != nullptr)
         {
+            // Throttled to ~20 updates/s: each update paints the progress window synchronously and
+            // services its input, which is also how a Cancel click reaches `cancelRequested()`.
             const double nowMs = juce::Time::getMillisecondCounterHiRes();
             if (nowMs - lastProgressUpdateMs >= 50.0 || pos >= loopSpan.lengthSamples)
             {
@@ -372,13 +454,25 @@ juce::Result exportStereoMixdownWavBlocking(
                 const double frac = static_cast<double>(pos)
                                     / static_cast<double>(loopSpan.lengthSamples);
                 request.progressSink->setMixdownProgress(
-                    "Mixing down... " + juce::String(static_cast<int>(frac * 100.0 + 0.5)) + "%",
+                    "Rendering... " + juce::String(static_cast<int>(frac * 100.0 + 0.5)) + "%",
                     frac);
+            }
+            if (cancelRequested())
+            {
+                appendMixdownDiagnosticLine("cancelled during render at pos="
+                                            + juce::String((juce::int64)pos));
+                return failAndDiscardTemp(kCancelledMessage);
             }
         }
     }
 
     appendMixdownDiagnosticLine("render complete samples=" + juce::String((juce::int64)pos));
+    if (request.progressSink != nullptr && !request.isIntermediateStep)
+    {
+        // "Finalizing" is deliberately shown before the writer closes: the file is not a result
+        // until the WAV header is complete and the destination has been replaced.
+        request.progressSink->setMixdownProgress("Finalizing...", -1.0);
+    }
     appendMixdownDiagnosticLine("writer close begin");
     writer.reset();
     appendMixdownDiagnosticLine("writer close end");
@@ -480,35 +574,38 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
         }
     }
 
-    // Outer gate: keeps realtime suspended through the *entire* MP3 pipeline (temp WAV render,
-    // writer close, LAME encode, temp cleanup), not just the inner WAV render. The nested gate
-    // inside exportStereoMixdownWavBlocking only bumps the depth.
+    // Outer gate: keeps realtime suspended through the *entire* MP3 pipeline (working WAV render,
+    // writer close, LAME encode, cleanup), not just the inner WAV render. The nested gate inside
+    // exportStereoMixdownWavBlocking only bumps the depth.
     appendMixdownDiagnosticLine("mp3 outer gate: hold realtime through render + LAME");
     ScopedOfflineRenderGate mp3OuterGate(playbackEngine);
 
-    const juce::File tempWav
-        = allocateUniqueSiblingTempFile(mp3OutputFile, ".__dal_mp3_source_", ".wav");
-    if (tempWav == juce::File{})
+    // Working WAV: a private file in the system temp folder, so the user's export folder never
+    // shows (or keeps) an intermediate WAV. Removed on every exit path by the scope guard.
+    ScopedWorkingFile workingWav(allocateUniqueSystemTempWorkingFile("DAL-mixdown-", ".wav"));
+    if (workingWav.file() == juce::File{})
     {
         return juce::Result::fail("Could not allocate a temporary WAV file path.");
     }
-    // LAME encodes into a temp MP3 too; the real destination is only replaced after a successful
-    // encode, so a LAME failure can never leave the old MP3 half-overwritten or deleted.
-    const juce::File tempMp3
-        = allocateUniqueSiblingTempFile(mp3OutputFile, ".__dal_mp3_encode_", ".mp3");
-    if (tempMp3 == juce::File{})
+    // LAME encodes into a working MP3 beside the destination (same-volume rename); the real
+    // destination is only replaced after a successful encode, so a LAME failure can never leave
+    // the old MP3 half-overwritten or deleted. Also removed on every non-success exit path.
+    ScopedWorkingFile workingMp3(
+        allocateUniqueSiblingTempFile(mp3OutputFile, ".__dal_mp3_encode_", ".mp3"));
+    if (workingMp3.file() == juce::File{})
     {
         return juce::Result::fail("Could not allocate a temporary MP3 file path.");
     }
-    appendMixdownDiagnosticLine("mp3 temps wav=\"" + tempWav.getFullPathName() + "\" mp3=\""
-                                + tempMp3.getFullPathName() + "\"");
+    appendMixdownDiagnosticLine("mp3 working files wav=\"" + workingWav.file().getFullPathName()
+                                + "\" mp3=\"" + workingMp3.file().getFullPathName() + "\"");
 
     MixdownExportRequest wavRequest;
-    wavRequest.outputFile = tempWav;
+    wavRequest.outputFile = workingWav.file();
     wavRequest.sampleRate = sampleRate;
     wavRequest.bits = mixdownIntermediateWavBitsForLame(sampleRate);
     wavRequest.progressSink = progressSink;
-    wavRequest.overwriteConfirmed = true; // temp file was verified non-existent above
+    wavRequest.overwriteConfirmed = true; // working file was verified non-existent above
+    wavRequest.isIntermediateStep = true;
 
     const juce::Result wavResult = exportStereoMixdownWavBlocking(
         transport,
@@ -520,105 +617,63 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
 
     if (wavResult.failed())
     {
-        appendMixdownDiagnosticLine("FAIL mp3 temp wav render: " + wavResult.getErrorMessage());
-        (void)tempWav.deleteFile();
-        const juce::String msg = wavResult.getErrorMessage();
-        if (msg == "Export cancelled." || msg.startsWith("Export cancelled"))
+        appendMixdownDiagnosticLine("FAIL mp3 working wav render: " + wavResult.getErrorMessage());
+        if (isMixdownCancelledResult(wavResult))
         {
             return wavResult;
         }
-        return juce::Result::fail("Temporary WAV creation failed.\n\n" + msg);
+        return juce::Result::fail("Temporary WAV creation failed.\n\n" + wavResult.getErrorMessage());
     }
 
-    juce::ChildProcess lameProcess;
-    juce::StringArray args;
-    args.add(lameExe.getFullPathName());
-    args.add("-b");
-    args.add(juce::String(bitrateKbps));
-    args.add(tempWav.getFullPathName());
-    args.add(tempMp3.getFullPathName());
+    // The loop span is known here, so the encoder gets the duration for its size-based progress
+    // fallback (LAME's own percentage takes over as soon as it prints one).
+    ActiveLoopMixdownSpan loopSpan;
+    double loopSeconds = 0.0;
+    {
+        const std::shared_ptr<const SessionSnapshot> snap = session.loadSessionSnapshotForAudioThread();
+        if (snap != nullptr
+            && resolveActiveLoopMixdownSpan(transport.readCycleEnabledForUi(),
+                                            snap->getLeftLocatorSamples(),
+                                            snap->getRightLocatorSamples(),
+                                            loopSpan)
+                   .wasOk())
+        {
+            loopSeconds = static_cast<double>(loopSpan.lengthSamples) / sampleRate;
+        }
+    }
 
-    appendMixdownDiagnosticLine("lame start exe=\"" + lameExe.getFullPathName() + "\"");
+    appendMixdownDiagnosticLine("progress phase: mp3 encode");
+    Mp3LameEncodeRequest encodeRequest;
+    encodeRequest.lameExecutable = lameExe;
+    encodeRequest.inputWav = workingWav.file();
+    encodeRequest.outputMp3 = workingMp3.file();
+    encodeRequest.bitrateKbps = bitrateKbps;
+    encodeRequest.expectedDurationSeconds = loopSeconds;
+    encodeRequest.timeoutMs = kMp3EncodeTimeoutMs;
+    Mp3LameEncodeOutcome encodeOutcome;
+    const juce::Result encodeResult = runLameMp3EncodeBlocking(encodeRequest, progressSink, encodeOutcome);
+    if (encodeResult.failed())
+    {
+        appendMixdownDiagnosticLine(juce::String(encodeOutcome.cancelled ? "cancelled" : "FAIL")
+                                    + " mp3 encode: " + encodeResult.getErrorMessage().replaceCharacter('\n', ' '));
+        return encodeResult; // both working files are removed by the scope guards
+    }
+
     if (progressSink != nullptr)
     {
-        appendMixdownDiagnosticLine("progress phase: mp3 encode (indeterminate)");
-        progressSink->setMixdownProgress("Encoding MP3...", -1.0);
+        progressSink->setMixdownProgress("Finalizing...", -1.0);
     }
-    if (!lameProcess.start(args, juce::ChildProcess::wantStdErr))
-    {
-        appendMixdownDiagnosticLine("FAIL lame could not start");
-        const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
-        return juce::Result::fail("MP3 encoding failed (could not start LAME)." + kept);
-    }
+    // The working WAV has served its purpose; free the space before the final move.
+    (void)workingWav.file().deleteFile();
 
-    // Wait in short slices so the indeterminate progress indicator keeps animating (LAME itself
-    // reports no usable progress); total wait is still bounded by kMp3EncodeTimeoutMs.
-    bool lameFinished = false;
-    {
-        const double lameWaitStartMs = juce::Time::getMillisecondCounterHiRes();
-        for (;;)
-        {
-            if (lameProcess.waitForProcessToFinish(100))
-            {
-                lameFinished = true;
-                break;
-            }
-            if (juce::Time::getMillisecondCounterHiRes() - lameWaitStartMs
-                >= static_cast<double>(kMp3EncodeTimeoutMs))
-            {
-                break;
-            }
-            if (progressSink != nullptr)
-            {
-                progressSink->setMixdownProgress("Encoding MP3...", -1.0);
-            }
-        }
-    }
-    if (!lameFinished)
-    {
-        appendMixdownDiagnosticLine("FAIL lame timed out");
-        (void)lameProcess.kill();
-        (void)tempMp3.deleteFile();
-        const juce::String kept = "\n\nTemporary WAV kept for debugging:\n" + tempWav.getFullPathName();
-        return juce::Result::fail("MP3 encoding timed out." + kept);
-    }
-
-    const auto exitCode = static_cast<int>(lameProcess.getExitCode());
-    const juce::String lameStderr = lameProcess.readAllProcessOutput().trim();
-    appendMixdownDiagnosticLine("lame complete exitCode=" + juce::String(exitCode));
-
-    if (exitCode != 0)
-    {
-        (void)tempMp3.deleteFile();
-        juce::String msg = "MP3 encoding failed.";
-        if (lameStderr.isNotEmpty())
-        {
-            msg << "\n\n" << lameStderr;
-        }
-        msg << "\n\nTemporary WAV kept for debugging:\n" << tempWav.getFullPathName();
-        return juce::Result::fail(msg);
-    }
-
-    if (!tempMp3.existsAsFile() || tempMp3.getSize() == 0)
-    {
-        (void)tempMp3.deleteFile();
-        juce::String msg = "MP3 output file was not created.";
-        if (lameStderr.isNotEmpty())
-        {
-            msg << "\n\n" << lameStderr;
-        }
-        msg << "\n\nTemporary WAV kept for debugging:\n" << tempWav.getFullPathName();
-        return juce::Result::fail(msg);
-    }
-
-    (void)tempWav.deleteFile();
-
-    // Encode fully succeeded; only now is the old destination replaced (see WAV path).
-    const juce::Result replaceResult = replaceDestinationWithRenderedTemp(tempMp3, mp3OutputFile);
+    // Encode fully succeeded; only now is the old destination replaced (see WAV path). On success
+    // the working MP3 *is* the destination, so its guard must not delete it.
+    const juce::Result replaceResult = replaceDestinationWithRenderedTemp(workingMp3.file(), mp3OutputFile);
     if (replaceResult.failed())
     {
         return replaceResult;
     }
+    workingMp3.dismiss();
     appendMixdownDiagnosticLine("mp3 export ok path=\"" + mp3OutputFile.getFullPathName() + "\"");
     return juce::Result::ok();
 }

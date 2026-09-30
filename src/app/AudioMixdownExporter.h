@@ -23,16 +23,25 @@ enum class MixdownWaveBits : int
     IeeeFloat32 = 32,
 };
 
-/// [Message thread] Progress feedback during blocking export. `fraction01` is 0..1 for determinate
-/// progress; pass a negative value for an indeterminate phase (e.g. LAME encoding). The exporter
-/// calls this from inside the blocking render loop; implementations should repaint synchronously
-/// (message dispatch is not pumped during export).
+/// [Message thread] Progress feedback during the blocking export. `statusText` names the current
+/// phase ("Rendering... 42%", "Encoding MP3... 80%", "Finalizing..."); `fraction01` is 0..1 for
+/// determinate progress and negative for an indeterminate phase. The exporter calls both methods
+/// from inside its blocking loops (render blocks, encoder wait), so an implementation must paint
+/// synchronously and may service only its own window's input there — the export owns the message
+/// thread and no other DAL code may run until it returns (see `AudioMixdownProgressWindow`).
 class MixdownProgressSink
 {
 public:
     virtual ~MixdownProgressSink() = default;
     virtual void setMixdownProgress(const juce::String& statusText, double fraction01) = 0;
+    /// Cooperative cancel: polled between render blocks and during encoding. A true return makes
+    /// the exporter stop, remove its own working files and report "Export cancelled." — the
+    /// destination file is never touched on that path. Default: never cancels (headless callers).
+    [[nodiscard]] virtual bool isMixdownCancelRequested() const noexcept { return false; }
 };
+
+/// True when `result` is the exporter's cooperative-cancel outcome (not an error).
+[[nodiscard]] bool isMixdownCancelledResult(const juce::Result& result) noexcept;
 
 struct MixdownExportRequest
 {
@@ -44,6 +53,9 @@ struct MixdownExportRequest
     /// True when the caller already asked the user about overwriting `outputFile` (skips the
     /// exporter's own overwrite prompt).
     bool overwriteConfirmed = false;
+    /// True when this WAV is only the intermediate step of a larger export (MP3): the render phase
+    /// still reports "Rendering... NN%", but the "Finalizing..." phase is left to the outer export.
+    bool isIntermediateStep = false;
 };
 
 /// Half-open timeline span **[startSample, startSample + lengthSamples)** used for mixdown.
@@ -77,9 +89,13 @@ struct ActiveLoopMixdownSpan
 
 [[nodiscard]] bool isBundledLameEncoderAvailable() noexcept;
 
-/// MP3 mixdown v1: render active loop to a **temporary** 32-bit float or 24-bit PCM WAV, then run bundled LAME.
-/// Bitrate must be one of 128, 160, 192, 224, 256, 320.
-/// On LAME failure or timeout, the temporary WAV is **kept** and its path is included in the error message for debugging.
+/// MP3 mixdown: renders the active loop to a **private working WAV in the system temp folder**
+/// (32-bit float or 24-bit PCM), encodes it with the bundled LAME into a sibling working MP3 next
+/// to the destination, and only then replaces the destination. Bitrate must be one of
+/// 128, 160, 192, 224, 256, 320. Every exit path — success, error, timeout, cancel — removes the
+/// working WAV and the working MP3; the user's export folder receives exactly the final MP3.
+/// Only files this export created are ever deleted (unique tagged names), never a pre-existing
+/// user file that happens to share the base name.
 [[nodiscard]] juce::Result exportStereoMixdownMp3Blocking(
     Transport& transport,
     Session& session,

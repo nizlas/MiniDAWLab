@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_gui_extra/juce_gui_extra.h> // juce::BubbleMessageComponent
 
 class Session;
 
@@ -201,6 +202,9 @@ private:
     juce::Label preGainCaptionLabel_;
     juce::TextEditor preGainDbEditor_;
     juce::Label preGainDbUnitLabel_;
+    /// Transient "why did nothing happen" bubble for a refused pre-gain commit (see
+    /// `commitPreGainField`): undoable session edits are refused while recording / count-in.
+    juce::BubbleMessageComponent preGainRefusedBubble_;
     juce::Label channelVolumeCaptionLabel_;
     juce::TextEditor channelVolumeDbEditor_;
     juce::Label channelVolumeDbUnitLabel_;

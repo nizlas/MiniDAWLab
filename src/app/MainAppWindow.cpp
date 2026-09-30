@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <functional>
 #include <map>
 #include <memory>
@@ -3250,6 +3251,20 @@ public:
         };
 
         // --- Global audio health probe (midi-import-audio and follow-up scenarios) ---
+        // Pre-gain scenario: the same Session setter the Inspector's undoable edit ends in, the
+        // stored value from the published snapshot, and the engine's device-output peak hold.
+        hooks.setTrackPreGainDb = [this](const TrackId tid, const float dB) -> bool {
+            return session.setTrackPreGainDb(tid, dB);
+        };
+        hooks.getTrackPreGainDb = [this](const TrackId tid) -> float {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int idx = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            return idx >= 0 ? snap->getTrack(idx).getPreGainDb() : std::numeric_limits<float>::quiet_NaN();
+        };
+        hooks.readOutputPeakHoldAndReset = [this]() -> float {
+            return playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
+        };
+
         hooks.audioHealthProbeBegin = [this] {
             (void)playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
             stabilityAudioProbeCallbackBaseline_ = playbackEngine_.readAudioCallbackEnterCountForDiagnostics();

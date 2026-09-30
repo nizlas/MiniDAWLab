@@ -101,7 +101,8 @@ Run **only** when preparing a tester/release build. See `docs/RELEASE_CERTIFICAT
 | MIDI note model/editing | Debug build + manual note edit test | MIDI-specific scenario if implemented; full matrix only if note model/persistence changed broadly |
 | Project save/load schema | Debug build + load-loop (2–3) + manual save/reload of a real project | autosave/recover; full matrix before commit batch |
 | Autosave/recovery | Debug build + `--stability-autosave` + `--stability-recover-autosave` | full matrix before release |
-| Mixdown/export | Debug build + `--stability-mixdown` wav/mp3 + manual dialog click | full matrix before release |
+| Mixdown/export | Debug build + `--stability-mixdown` wav/mp3 (asserts exact file set, temp cleanliness, controlled failure, playback health) + `MixdownPreGainFocusedTests` (LAME runner, progress window on screen) + manual dialog click | full matrix before release |
+| Audio-track pre-gain / mix helpers | Debug build + `MixdownPreGainFocusedTests` + `--stability-pregain` on the audio-only fixture (`--make-fixture`) | InputRoutingFocusedTests; smoke |
 | Routing/master/groups/sends | Debug build + smoke + delete-loop | mixdown wav/mp3; full matrix |
 | Instrument/plugin hosting | Debug build + smoke + manual plugin load/edit | delete-loop; ASan delete-loop |
 | Track delete/undo/redo | Debug build + delete-loop | smoke; full matrix |

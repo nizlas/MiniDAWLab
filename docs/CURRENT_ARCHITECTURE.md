@@ -364,6 +364,17 @@ PDC, sidechain, send automation, pre/post tap toggle, multi-output instruments, 
 
 ---
 
+## Audio mixdown export lifecycle (WAV / MP3)
+
+- **Blocking on the message thread, by design.** `exportStereoMixdownWavBlocking` / `exportStereoMixdownMp3Blocking` ([AudioMixdownExporter.cpp](../src/app/AudioMixdownExporter.cpp)) render the active loop through `PlaybackEngine::renderOfflineMixdownBlock` behind the depth-counted offline render gate and return only when the result file is in place. Nothing else on the message thread — session edits, plugin lifecycle, autosave, device changes, project switch, quit — can interleave with the offline render, because the message loop is not spinning. Project switch / quit *during* an export is therefore impossible by construction; that is the established policy, not an omission.
+- **The only UI alive during an export is [`AudioMixdownProgressWindow`](../src/app/AudioMixdownProgressWindow.h).** It paints synchronously and services **only its own HWND's** queued messages (`PeekMessage` with an explicit window handle): paint, mouse, keyboard, activation. JUCE's internal message window (timers, `callAsync`) and every other DAL window stay queued until the export returns. The window pins JUCE's **software renderer** for itself: JUCE 8's default Direct2D peer only defers `WM_PAINT` and draws on a vblank message that cannot arrive while the export owns the thread (and its `performAnyPendingRepaintsNow()` is a no-op) — that was the pre-1.1.5 "white box".
+- **Phases and progress.** `MixdownProgressSink::setMixdownProgress(text, fraction)` reports `Rendering... NN%` (measured from the render loop), `Encoding MP3... NN%` (LAME's own console percentage, drained by [`Mp3LameEncoder`](../src/app/Mp3LameEncoder.h); CBR size estimate before the first status line) and `Finalizing...` (indeterminate: writer close + destination replace). "Complete" is only reported after the destination has been replaced.
+- **Cancel is cooperative.** The sink's `isMixdownCancelRequested()` is polled between render blocks and during the encoder wait; a cancel terminates LAME, removes the export's own working files and returns `Export cancelled.` — the destination is never touched. The dialog shows an info alert, not an error.
+- **Working files vs results.** The user's export folder receives exactly one file. The WAV render temp is a uniquely tagged sibling of the destination (same-volume rename on success); the MP3 pipeline's intermediate WAV lives in the **system temp folder** (`DAL-mixdown-<hex>.wav`) and the LAME output is a tagged sibling (`.__dal_mp3_encode_<hex>.mp3`). All are removed on every exit path by scope guards; nothing else is ever deleted (no sweeping of foreign files).
+- **LAME child process.** Its console pipe is drained continuously on a small helper thread (`LameConsoleDrain`) so LAME can never block on a full pipe — the pre-1.1.5 hang; the drained text also feeds progress and error messages. Timeout (10 min) is a safety net only. `--stability-mixdown` asserts the exact result file set and the absence of DAL working files in temp; `--stability-pregain` measures pre-gain on the realtime and offline paths.
+
+---
+
 ## Explicit non-goals (this document)
 
 - Does not define **HALion** or broad third-party instrument policy (future work).

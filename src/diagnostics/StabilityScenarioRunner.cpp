@@ -4,7 +4,9 @@
 #include "diagnostics/StabilityInvariants.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
+#include <memory>
 #include <thread>
 
 #if JUCE_WINDOWS
@@ -182,6 +184,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-pregain")
+        {
+            if (!setKind(StabilityScenarioKind::PreGain)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-pregain requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -264,6 +275,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::MidiTrackParity: scenarioName_ = "midi-track-parity"; break;
         case StabilityScenarioKind::MidiImportAudio: scenarioName_ = "midi-import-audio"; break;
         case StabilityScenarioKind::MidiEditorMoveCrash: scenarioName_ = "midi-editor-move"; break;
+        case StabilityScenarioKind::PreGain: scenarioName_ = "pregain"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -325,6 +337,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::MidiEditorMoveCrash:
             appendMidiEditorMoveCrashSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::PreGain:
+            appendPreGainSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -404,6 +419,12 @@ void StabilityScenarioRunner::finish(const bool pass, const juce::String& reason
         (void)openSaveCloseCopy_.deleteFile();
         appendStabilityRunLine("cleanup: deleted temp project copy "
                                + openSaveCloseCopy_.getFullPathName());
+    }
+    if (scenarioOutputDir_ != juce::File{} && scenarioOutputDir_.isDirectory())
+    {
+        (void)scenarioOutputDir_.deleteRecursively();
+        appendStabilityRunLine("cleanup: deleted scenario output folder "
+                               + scenarioOutputDir_.getFullPathName());
     }
 
     const juce::int64 totalMs = nowMs() - runStartMs_;
@@ -1034,18 +1055,94 @@ void StabilityScenarioRunner::appendAutosaveSteps(const juce::File& project,
     }
 }
 
+namespace
+{
+    /// Names of every file directly inside `dir`, sorted, for exact result-set assertions.
+    [[nodiscard]] juce::StringArray listFileNames(const juce::File& dir)
+    {
+        juce::StringArray names;
+        for (const auto& entry : juce::RangedDirectoryIterator(dir, false, "*", juce::File::findFiles))
+        {
+            names.add(entry.getFile().getFileName());
+        }
+        names.sort(true);
+        return names;
+    }
+
+    /// DAL's own working files carry these tags; anything else in a folder is never ours to judge.
+    [[nodiscard]] juce::StringArray listDalWorkingFileLeftovers(const juce::File& dir)
+    {
+        juce::StringArray leftovers;
+        for (const auto& name : listFileNames(dir))
+        {
+            if (name.contains(".__dal_") || name.startsWith("DAL-mixdown-"))
+            {
+                leftovers.add(name);
+            }
+        }
+        return leftovers;
+    }
+
+    /// RMS over all channels of a WAV via the production reader stack (juce_audio_formats).
+    [[nodiscard]] bool measureWavRms(const juce::File& wav, double& rmsOut, juce::String& err)
+    {
+        juce::WavAudioFormat format;
+        std::unique_ptr<juce::AudioFormatReader> reader(format.createReaderFor(wav.createInputStream().release(), true));
+        if (reader == nullptr || reader->lengthInSamples <= 0)
+        {
+            err = "could not read WAV: " + wav.getFullPathName();
+            return false;
+        }
+        const int numChannels = static_cast<int>(reader->numChannels);
+        const juce::int64 total = reader->lengthInSamples;
+        juce::AudioBuffer<float> block(numChannels, 8192);
+        double sumSquares = 0.0;
+        juce::int64 pos = 0;
+        while (pos < total)
+        {
+            const int n = static_cast<int>(juce::jmin<juce::int64>(block.getNumSamples(), total - pos));
+            if (!reader->read(&block, 0, n, pos, true, true))
+            {
+                err = "WAV read failed at " + juce::String(pos);
+                return false;
+            }
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                const float* const d = block.getReadPointer(ch);
+                for (int i = 0; i < n; ++i)
+                {
+                    sumSquares += static_cast<double>(d[i]) * static_cast<double>(d[i]);
+                }
+            }
+            pos += n;
+        }
+        rmsOut = std::sqrt(sumSquares / static_cast<double>(total * juce::jmax(1, numChannels)));
+        return true;
+    }
+} // namespace
+
 void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, const bool mp3)
 {
     appendLoadAndVerifySteps(project, "mixdown setup");
 
+    // A dedicated, initially empty folder: the export's visible result must be exactly one file,
+    // so the whole folder content is asserted, not just the expected path.
+    scenarioOutputDir_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getChildFile("dal-stability-mixdown-out");
     const juce::File out
-        = juce::File::getSpecialLocation(juce::File::tempDirectory)
-              .getChildFile(mp3 ? "dal-stability-mixdown.mp3" : "dal-stability-mixdown.wav");
+        = scenarioOutputDir_.getChildFile(mp3 ? "dal-stability-mixdown.mp3" : "dal-stability-mixdown.wav");
+    const juce::File systemTemp = juce::File::getSpecialLocation(juce::File::tempDirectory);
 
     steps_.push_back(Step{
-        juce::String("mixdown: export ") + (mp3 ? "mp3" : "wav") + " to temp",
-        [this, out, mp3](juce::String& failReason) -> bool {
-            (void)out.deleteFile();
+        juce::String("mixdown: export ") + (mp3 ? "mp3" : "wav") + " to an empty folder",
+        [this, out, mp3, systemTemp](juce::String& failReason) -> bool {
+            (void)scenarioOutputDir_.deleteRecursively();
+            if (!scenarioOutputDir_.createDirectory())
+            {
+                failReason = "could not create " + scenarioOutputDir_.getFullPathName();
+                return false;
+            }
+            const juce::StringArray tempLeftoversBefore = listDalWorkingFileLeftovers(systemTemp);
             const juce::Result r = hooks_.runMixdownBlocking(out, mp3);
             if (!r.wasOk())
             {
@@ -1057,8 +1154,26 @@ void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, cons
                 failReason = "output missing or empty: " + out.getFullPathName();
                 return false;
             }
+            // Exactly the chosen file, nothing else: no intermediate WAV beside an MP3, no MP3
+            // beside a WAV, no render temp.
+            const juce::StringArray produced = listFileNames(scenarioOutputDir_);
+            if (produced.size() != 1 || produced[0] != out.getFileName())
+            {
+                failReason = "export folder does not contain exactly the result file: "
+                             + produced.joinIntoString(", ");
+                return false;
+            }
+            // The MP3 path's working WAV lives in the system temp folder and must be gone again.
+            const juce::StringArray tempLeftoversAfter = listDalWorkingFileLeftovers(systemTemp);
+            if (tempLeftoversAfter.size() > tempLeftoversBefore.size())
+            {
+                failReason = "working files left in the system temp folder: "
+                             + tempLeftoversAfter.joinIntoString(", ");
+                return false;
+            }
             appendStabilityRunLine("  mixdown output ok: " + out.getFullPathName() + " ("
-                                   + juce::String(out.getSize()) + " bytes)");
+                                   + juce::String(out.getSize()) + " bytes); folder contains only "
+                                   + produced[0] + "; no DAL working files left in temp");
             return true;
         },
         kSettleDefaultMs });
@@ -1107,6 +1222,303 @@ void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, cons
             return true;
         },
         kSettleDefaultMs });
+
+    // Controlled failure: a destination name Windows cannot create makes the render temp's
+    // FileOutputStream fail *after* the offline gate was entered. The exporter must report the
+    // error, leave the folder untouched, and release the gate so the app keeps working.
+    steps_.push_back(Step{
+        juce::String("mixdown: controlled write failure (") + (mp3 ? "mp3" : "wav") + ") reports an error and leaves no file",
+        [this, mp3](juce::String& failReason) -> bool {
+            const juce::StringArray before = listFileNames(scenarioOutputDir_);
+            const juce::File bad = scenarioOutputDir_.getChildFile(mp3 ? "bad<>name.mp3" : "bad<>name.wav");
+            const juce::Result r = hooks_.runMixdownBlocking(bad, mp3);
+            if (r.wasOk())
+            {
+                failReason = "export to an invalid file name unexpectedly succeeded";
+                return false;
+            }
+            appendStabilityRunLine("  controlled failure reported: "
+                                   + r.getErrorMessage().replaceCharacter('\n', ' '));
+            const juce::StringArray after = listFileNames(scenarioOutputDir_);
+            if (after != before)
+            {
+                failReason = "failed export left files behind: " + after.joinIntoString(", ");
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // The app must be fully usable afterwards: playback runs, the device output is audible and
+    // the callback keeps advancing (gate released, no wedged state).
+    if (hooks_.audioHealthProbeBegin != nullptr && hooks_.audioHealthProbeVerify != nullptr
+        && hooks_.setPlaybackActive != nullptr)
+    {
+        steps_.push_back(Step{ "mixdown: playback after exports - start (probe armed)",
+                               [this](juce::String&) -> bool {
+                                   hooks_.setPlaybackActive(true);
+                                   hooks_.audioHealthProbeBegin();
+                                   return true;
+                               },
+                               1200 });
+        steps_.push_back(Step{ "mixdown: playback after exports - verify audio health",
+                               [this](juce::String& failReason) -> bool {
+                                   const bool ok = hooks_.audioHealthProbeVerify("after-exports", failReason);
+                                   hooks_.setPlaybackActive(false);
+                                   return ok;
+                               },
+                               kSettleDefaultMs });
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Pre-gain through the real engine (device callback + offline mixdown)
+// -----------------------------------------------------------------------------
+// The user's report was "−24 dB pre-gain changes nothing". This scenario measures the two
+// production signal paths a listener can hear or export, on a copy of an audio-only fixture:
+//   realtime  — device-output peak hold while the transport plays a steady tone, 0 dB vs −24 dB,
+//               with the −24 dB value set WHILE PLAYING (live update + ramp must both work);
+//   offline   — RMS of the mixdown WAV at 0 dB vs −24 dB.
+// Both ratios must equal 10^(−24/20) ≈ 0.06310 (±3 % realtime, ±1 % offline): "applied once".
+// A ratio near 1.0 would reproduce the report; a ratio near 0.004 would mean "applied twice".
+void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
+{
+    if (hooks_.setTrackPreGainDb == nullptr || hooks_.getTrackPreGainDb == nullptr
+        || hooks_.readOutputPeakHoldAndReset == nullptr || hooks_.runMixdownBlocking == nullptr
+        || hooks_.setPlaybackActive == nullptr || hooks_.saveProject == nullptr)
+    {
+        steps_.push_back(Step{ "pregain: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "pregain hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    constexpr float kTestDb = -24.0f;
+    const double expectedRatio = std::pow(10.0, kTestDb / 20.0); // 0.0630957...
+
+    // Work on a sibling copy: the save/reload step writes the project.
+    steps_.push_back(Step{
+        "pregain: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(
+                project.getFileNameWithoutExtension() + "-pregaintest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+    steps_.push_back(Step{ "pregain: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    const auto audioTrackIds = [this]() {
+        std::vector<TrackId> ids;
+        for (const StabilityTrackInfo& t : hooks_.listDeletableTracks())
+        {
+            if (t.kindName == "audio")
+            {
+                ids.push_back(t.id);
+            }
+        }
+        return ids;
+    };
+    const auto setAllAudioPreGain = [this, audioTrackIds](const float dB, juce::String& failReason) {
+        const std::vector<TrackId> ids = audioTrackIds();
+        if (ids.empty())
+        {
+            failReason = "fixture has no audio tracks";
+            return false;
+        }
+        for (const TrackId id : ids)
+        {
+            (void)hooks_.setTrackPreGainDb(id, dB); // false = already at this value (fine)
+            const float stored = hooks_.getTrackPreGainDb(id);
+            if (std::fabs(stored - dB) > 1.0e-4f)
+            {
+                failReason = "track " + juce::String((juce::int64)id) + " stored pre-gain "
+                             + juce::String(stored, 3) + " dB, expected " + juce::String(dB, 3);
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // ---- Realtime: play, then measure the peak hold over a 1 s window at 0 dB. ----
+    steps_.push_back(Step{ "pregain: realtime baseline 0 dB - start playback",
+                           [this, setAllAudioPreGain](juce::String& failReason) -> bool {
+                               if (!setAllAudioPreGain(0.0f, failReason))
+                               {
+                                   return false;
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           600 }); // let playback settle before the measurement window opens
+    steps_.push_back(Step{ "pregain: realtime baseline 0 dB - arm peak window",
+                           [this](juce::String&) -> bool {
+                               (void)hooks_.readOutputPeakHoldAndReset();
+                               return true;
+                           },
+                           1000 });
+    steps_.push_back(Step{ "pregain: realtime baseline 0 dB - read peak",
+                           [this](juce::String& failReason) -> bool {
+                               preGainPeakAt0dB_ = hooks_.readOutputPeakHoldAndReset();
+                               appendStabilityRunLine("  realtime peak at 0 dB: "
+                                                      + juce::String(preGainPeakAt0dB_, 5));
+                               if (!(preGainPeakAt0dB_ > 1.0e-3f))
+                               {
+                                   failReason = "no audible output at 0 dB (fixture silent?)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    // The −24 dB value is set WHILE PLAYING: this is the live-update path (Inspector edit during
+    // playback). The ramp completes within one block; the 400 ms settle keeps its first samples
+    // out of the measurement window.
+    steps_.push_back(Step{ "pregain: realtime -24 dB - set while playing",
+                           [setAllAudioPreGain](juce::String& failReason) -> bool {
+                               return setAllAudioPreGain(-24.0f, failReason);
+                           },
+                           400 });
+    steps_.push_back(Step{ "pregain: realtime -24 dB - arm peak window",
+                           [this](juce::String&) -> bool {
+                               (void)hooks_.readOutputPeakHoldAndReset();
+                               return true;
+                           },
+                           1000 });
+    steps_.push_back(Step{
+        "pregain: realtime -24 dB - read peak and compare",
+        [this, expectedRatio](juce::String& failReason) -> bool {
+            preGainPeakAtMinus24dB_ = hooks_.readOutputPeakHoldAndReset();
+            hooks_.setPlaybackActive(false);
+            const double ratio = preGainPeakAt0dB_ > 0.0f
+                                     ? static_cast<double>(preGainPeakAtMinus24dB_) / static_cast<double>(preGainPeakAt0dB_)
+                                     : 0.0;
+            appendStabilityRunLine("  realtime peak at -24 dB: " + juce::String(preGainPeakAtMinus24dB_, 5)
+                                   + " ratio=" + juce::String(ratio, 5) + " expected="
+                                   + juce::String(expectedRatio, 5));
+            if (std::fabs(ratio - expectedRatio) > expectedRatio * 0.03)
+            {
+                failReason = "realtime pre-gain ratio " + juce::String(ratio, 5) + " deviates from "
+                             + juce::String(expectedRatio, 5) + " by more than 3%";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // ---- Offline: mixdown WAV RMS at 0 dB vs −24 dB (same fixture, transport stopped). ----
+    scenarioOutputDir_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getChildFile("dal-stability-pregain-out");
+    const juce::File out0 = scenarioOutputDir_.getChildFile("pregain-0dB.wav");
+    const juce::File out24 = scenarioOutputDir_.getChildFile("pregain-minus24dB.wav");
+    steps_.push_back(Step{ "pregain: offline export at 0 dB",
+                           [this, setAllAudioPreGain, out0](juce::String& failReason) -> bool {
+                               (void)scenarioOutputDir_.deleteRecursively();
+                               if (!scenarioOutputDir_.createDirectory())
+                               {
+                                   failReason = "could not create " + scenarioOutputDir_.getFullPathName();
+                                   return false;
+                               }
+                               if (!setAllAudioPreGain(0.0f, failReason))
+                               {
+                                   return false;
+                               }
+                               const juce::Result r = hooks_.runMixdownBlocking(out0, false);
+                               if (!r.wasOk())
+                               {
+                                   failReason = "export at 0 dB failed: " + r.getErrorMessage();
+                                   return false;
+                               }
+                               return measureWavRms(out0, preGainRmsAt0dB_, failReason);
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{
+        "pregain: offline export at -24 dB and compare RMS",
+        [this, setAllAudioPreGain, out24, expectedRatio](juce::String& failReason) -> bool {
+            if (!setAllAudioPreGain(-24.0f, failReason))
+            {
+                return false;
+            }
+            const juce::Result r = hooks_.runMixdownBlocking(out24, false);
+            if (!r.wasOk())
+            {
+                failReason = "export at -24 dB failed: " + r.getErrorMessage();
+                return false;
+            }
+            if (!measureWavRms(out24, preGainRmsAtMinus24dB_, failReason))
+            {
+                return false;
+            }
+            const double ratio = preGainRmsAt0dB_ > 0.0 ? preGainRmsAtMinus24dB_ / preGainRmsAt0dB_ : 0.0;
+            appendStabilityRunLine("  offline RMS 0 dB=" + juce::String(preGainRmsAt0dB_, 6)
+                                   + " -24 dB=" + juce::String(preGainRmsAtMinus24dB_, 6)
+                                   + " ratio=" + juce::String(ratio, 5) + " expected="
+                                   + juce::String(expectedRatio, 5));
+            if (!(preGainRmsAt0dB_ > 1.0e-3))
+            {
+                failReason = "offline export at 0 dB is silent (fixture/loop range?)";
+                return false;
+            }
+            if (std::fabs(ratio - expectedRatio) > expectedRatio * 0.01)
+            {
+                failReason = "offline pre-gain ratio " + juce::String(ratio, 5) + " deviates from "
+                             + juce::String(expectedRatio, 5) + " by more than 1%";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // ---- Persistence: save the copy at −24 dB, reload, read the value back. ----
+    steps_.push_back(Step{ "pregain: save test copy at -24 dB",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "pregain: reload test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "pregain: verify -24 dB survived save/reload",
+                           [this, audioTrackIds](juce::String& failReason) -> bool {
+                               const std::vector<TrackId> ids = audioTrackIds();
+                               if (ids.empty())
+                               {
+                                   failReason = "no audio tracks after reload";
+                                   return false;
+                               }
+                               for (const TrackId id : ids)
+                               {
+                                   const float stored = hooks_.getTrackPreGainDb(id);
+                                   if (std::fabs(stored + 24.0f) > 1.0e-4f)
+                                   {
+                                       failReason = "track " + juce::String((juce::int64)id)
+                                                    + " reloaded with pre-gain " + juce::String(stored, 3);
+                                       return false;
+                                   }
+                               }
+                               appendStabilityRunLine("  pre-gain -24 dB survived save/reload on "
+                                                      + juce::String((int)ids.size()) + " track(s)");
+                               return true;
+                           },
+                           kSettleDefaultMs });
 }
 
 void StabilityScenarioRunner::appendMidiRoutingSteps(const juce::File& project)

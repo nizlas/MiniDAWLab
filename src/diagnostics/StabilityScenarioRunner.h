@@ -48,6 +48,12 @@ enum class StabilityScenarioKind
     /// production paste, editor-open and cross-track move paths, with a settle between move and
     /// the controller's async change callback.
     MidiEditorMoveCrash,
+    /// Audio-track pre-gain through the REAL engine: device-output peak while playing and the RMS
+    /// of an offline WAV export at 0 dB vs −24 dB must both scale by 10^(−24/20) ≈ 0.0631 — i.e.
+    /// pre-gain is applied, exactly once, on the realtime clip path and the mixdown path. Also
+    /// checks that the value survives save/reload. Expects an audio-only fixture project whose
+    /// active loop contains a steady tone (see MixdownPreGainFocusedTests --make-fixture).
+    PreGain,
 };
 
 struct StabilityScenarioRequest
@@ -178,6 +184,15 @@ struct StabilityRunnerHooks
     /// Production "refresh the open MIDI editor from its host" (syncInstrumentStateFromHost). Used
     /// after a move to exercise the roll rebuild that dereferences the editor's bound clip.
     std::function<void()> refreshInstrumentEditorUi;
+
+    // --- Pre-gain scenario -------------------------------------------------------
+    /// Same session setter the Inspector's undoable "Set pre-gain" edit ends in
+    /// (`Session::setTrackPreGainDb`); returns false when the row is unknown or the value is a no-op.
+    std::function<bool(TrackId, float dB)> setTrackPreGainDb;
+    /// Current stored pre-gain of a row from the published snapshot (NaN when the row is unknown).
+    std::function<float(TrackId)> getTrackPreGainDb;
+    /// Device-output peak hold since the previous call (see PlaybackEngine diagnostics), then reset.
+    std::function<float()> readOutputPeakHoldAndReset;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -216,6 +231,8 @@ private:
     void appendMidiImportAudioSteps(const juce::File& project, const juce::File& midiFile);
     /// Paste-opens-editor (B) and move-with-open-editor crash (C) reproduction.
     void appendMidiEditorMoveCrashSteps(const juce::File& project);
+    /// Pre-gain through the real engine: realtime peak ratio, offline RMS ratio, save/reload.
+    void appendPreGainSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -238,6 +255,13 @@ private:
     juce::File openSaveCloseCopy_; // Temp project copy; deleted at scenario end.
     /// MidiImportAudio: the MIDI row created by the scenario (target of the import step).
     TrackId scenarioMidiTrackId_ = kInvalidTrackId;
+    /// PreGain: measurements carried between steps (realtime peaks and offline RMS at 0 / −24 dB).
+    float preGainPeakAt0dB_ = 0.0f;
+    float preGainPeakAtMinus24dB_ = 0.0f;
+    double preGainRmsAt0dB_ = 0.0;
+    double preGainRmsAtMinus24dB_ = 0.0;
+    /// PreGain / Mixdown: dedicated empty output folder so the exact result file set can be asserted.
+    juce::File scenarioOutputDir_;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };

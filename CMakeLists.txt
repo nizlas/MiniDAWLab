@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.4 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -105,6 +105,8 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
     src/app/AudioMixdownExporter.cpp
+    src/app/AudioMixdownProgressWindow.cpp
+    src/app/Mp3LameEncoder.cpp
     src/app/AudioMixdownDialog.cpp
     src/engine/RecorderService.cpp
     src/ui/ClipWaveformView.cpp
@@ -264,6 +266,55 @@ target_link_libraries(PluginInsertTempoFocusedTests
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+# -----------------------------------------------------------------------------
+# MixdownPreGainFocusedTests: pre-gain through the PRODUCTION domain/session/mix-helper/VST3-insert
+# code (DAL Mono Delay and optionally AmpliTube loaded through the real PluginInsertHost), the
+# pre-fix LAME pipe hang reproduced and the production Mp3LameEncoder verified (decode back with
+# lame --decode), and the production AudioMixdownProgressWindow captured from the SCREEN while the
+# message thread is blocked, with Cancel delivered as a real OS click. Also writes the audio-only
+# fixture project for `MiniDAWLab.exe --stability-pregain` (--make-fixture <dir>).
+# -----------------------------------------------------------------------------
+juce_add_console_app(MixdownPreGainFocusedTests PRODUCT_NAME "MixdownPreGainFocusedTests")
+target_sources(MixdownPreGainFocusedTests PRIVATE
+    tests/selftest/MixdownPreGainFocusedTestsMain.cpp
+    src/app/AudioMixdownProgressWindow.cpp
+    src/app/Mp3LameEncoder.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp)
+target_include_directories(MixdownPreGainFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(MixdownPreGainFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(MixdownPreGainFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(MixdownPreGainFocusedTests PRIVATE /wd4458)
+endif()
 
 # -----------------------------------------------------------------------------
 # WaveformReloadFocusedTests: waveform display after a real project save/reload. Drives the
