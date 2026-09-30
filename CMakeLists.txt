@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.3 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -238,6 +238,28 @@ target_link_libraries(InputRoutingFocusedTests
         # PluginInsertHost.h / ExperimentalInstrumentHost.h compile-time deps (stubs at link).
         juce::juce_audio_processors
         juce::juce_gui_basics
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+
+# -----------------------------------------------------------------------------
+# PluginInsertTempoFocusedTests: regression coverage for the real DAL VST3 insert host's
+# AudioPlayHead → JUCE VST3 ProcessContext bridge. Loads a supplied built VST3 bundle, so it
+# exercises the production PluginInsertHost rather than a parallel test host or global install.
+# -----------------------------------------------------------------------------
+juce_add_console_app(PluginInsertTempoFocusedTests PRODUCT_NAME "PluginInsertTempoFocusedTests")
+target_sources(PluginInsertTempoFocusedTests PRIVATE
+    tests/selftest/PluginInsertTempoFocusedTestsMain.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp)
+target_include_directories(PluginInsertTempoFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(PluginInsertTempoFocusedTests PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(PluginInsertTempoFocusedTests
+    PRIVATE
+        juce::juce_audio_processors
+        juce::juce_gui_extra
         juce::juce_events
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags

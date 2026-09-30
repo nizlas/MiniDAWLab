@@ -779,6 +779,34 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
     const std::int64_t t0 = transport_.audioThread_loadPlayhead();
+    const bool cycleOn = transport_.audioThread_loadCycleEnabled();
+    const std::int64_t locL = sessionSnap != nullptr ? sessionSnap->getLeftLocatorSamples() : 0;
+    const std::int64_t locR = sessionSnap != nullptr ? sessionSnap->getRightLocatorSamples() : 0;
+    const bool validCycle = cycleOn && locR > locL && locR > 0;
+
+    // Every insert chain reads the same host-owned playhead during its synchronous processBlock.
+    // Keep that context at the exact timeline segment for clip rendering, and at this callback's
+    // transport position for full-block monitoring, instrument and bus processing.
+    const auto setInsertProcessContext = [&](const std::int64_t segmentStartSample) noexcept {
+        if (pluginHost_ == nullptr || sessionSnap == nullptr)
+        {
+            return;
+        }
+
+        const ProjectMusicalTime musicalTime = sessionSnap->getProjectMusicalTime();
+        PluginProcessTransportContext insertContext;
+        insertContext.timelineSample = segmentStartSample;
+        insertContext.sampleRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        insertContext.bpm = musicalTime.bpm;
+        insertContext.timeSignatureNumerator = musicalTime.numerator;
+        insertContext.timeSignatureDenominator = musicalTime.denominator;
+        insertContext.isPlaying = playbackIntent == PlaybackIntent::Playing;
+        insertContext.isRecording = recorder_ != nullptr && recorder_->isRecording();
+        insertContext.isLooping = validCycle;
+        insertContext.loopStartSample = locL;
+        insertContext.loopEndSample = locR;
+        pluginHost_->audioThread_setProcessTransportContext(insertContext);
+    };
 
     struct StoreIntentAtScopeExit
     {
@@ -994,6 +1022,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const auto finalizeRoutingToDevice = [&]() noexcept
     {
+        // Buses process a complete device block after source accumulation, so their VST3 context
+        // is the callback's transport position rather than the last clip sub-segment.
+        setInsertProcessContext(t0);
         setCallbackPhase(AudioCallbackPhase::FinalizeRouting);
 #if !defined(NDEBUG)
         if constexpr (shortcut_diagnostics::kShowMasterRoutingDiag)
@@ -1134,6 +1165,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     /// (tear / edge), mix every snapshot entry once so staged-only playback still audible.
     const auto mixKeyedInstrumentLanesIntoOutputsIfAny = [&]()
     {
+        // Instrument inserts process their host's complete block at this callback's position.
+        setInsertProcessContext(t0);
         setCallbackPhase(AudioCallbackPhase::InstrumentMix);
         if (instrumentSnap == nullptr || instrumentSnap->entries.empty())
         {
@@ -1395,6 +1428,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
             playback_mix_helpers::clearStereoScratch(
                 postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
+            // Monitoring has no timeline slice, but effects must still receive the project's
+            // current tempo while stopped so tempo-synced processing remains usable.
+            setInsertProcessContext(t0);
             playback_mix_helpers::renderLiveInputTrackPostStripToStereoScratch(
                 tr,
                 ti,
@@ -1479,11 +1515,6 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         return x < 0 ? std::int64_t{ 0 } : x;
     };
 
-    const bool cycleOn = transport_.audioThread_loadCycleEnabled();
-    const std::int64_t locL = sessionSnap->getLeftLocatorSamples();
-    const std::int64_t locR = sessionSnap->getRightLocatorSamples();
-    const bool validCycle = cycleOn && locR > locL && locR > 0;
-
 #if !defined(NDEBUG)
     {
         static bool s_loggedPastRlinearMode = false;
@@ -1545,6 +1576,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         const std::int64_t timelineStartAudible = renderBase + silenceFrames;
         jassert(timelineStartAudible >= 0);
         const int silencePrefix = static_cast<int>(silenceFrames);
+
+        // Clip sources can be split at cycle boundaries. Refresh before their Pre/Post chains so
+        // a plug-in sees the actual sub-block start, never a stale prior loop position.
+        setInsertProcessContext(timelineStartAudible);
 
         TrackId omitClipPlaybackForTrack = kInvalidTrackId;
         if (recorder_ != nullptr && recorder_->isRecording())
@@ -2005,6 +2040,22 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
 {
     jassert(numSamples > 0);
     jassert(stereoOutputLR != nullptr && stereoOutputLR[0] != nullptr && stereoOutputLR[1] != nullptr);
+
+    // Offline export is gated against the device callback, so this is the sole processor caller.
+    // Publish the export timeline position and project tempo rather than borrowing live Transport:
+    // a stopped or separately positioned UI playhead must not leak into the rendered VST3 context.
+    if (pluginHost_ != nullptr)
+    {
+        const ProjectMusicalTime musicalTime = sessionSnap.getProjectMusicalTime();
+        PluginProcessTransportContext insertContext;
+        insertContext.timelineSample = timelineSegStartSample;
+        insertContext.sampleRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+        insertContext.bpm = musicalTime.bpm;
+        insertContext.timeSignatureNumerator = musicalTime.numerator;
+        insertContext.timeSignatureDenominator = musicalTime.denominator;
+        insertContext.isPlaying = true;
+        pluginHost_->audioThread_setProcessTransportContext(insertContext);
+    }
 
     if (!instrumentProcessingSuspended_.load(std::memory_order_acquire))
     {

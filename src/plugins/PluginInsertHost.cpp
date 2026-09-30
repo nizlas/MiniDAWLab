@@ -9,6 +9,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -74,6 +75,61 @@ PluginInsertHost::~PluginInsertHost()
     editorWindows_.clear();
     paramsWindows_.clear();
     chains_.clear();
+}
+
+void PluginInsertHost::InsertProcessPlayHead::setContext(
+    const PluginProcessTransportContext& context) noexcept
+{
+    // This playhead is a synchronous handoff: JUCE asks it for PositionInfo only while the
+    // immediately following hosted processBlock is executing. Keep optional fields disengaged
+    // unless DAL can describe them from the current render segment.
+    position_ = {};
+
+    const double validSampleRate = std::isfinite(context.sampleRate) && context.sampleRate > 0.0
+                                       ? context.sampleRate
+                                       : 48000.0;
+    const double validBpm = std::isfinite(context.bpm) && context.bpm > 0.0 ? context.bpm : 120.0;
+    const std::int64_t timelineSample = juce::jmax<std::int64_t>(0, context.timelineSample);
+    const double elapsedSeconds = static_cast<double>(timelineSample) / validSampleRate;
+    const double ppqPosition = elapsedSeconds * validBpm / 60.0;
+
+    // VST3 requires projectTimeSamples when a ProcessContext exists. JUCE maps these engaged
+    // values directly to kTempoValid, kTimeSigValid and kProjectTimeMusicValid.
+    position_.setTimeInSamples(timelineSample);
+    position_.setTimeInSeconds(elapsedSeconds);
+    position_.setBpm(validBpm);
+    position_.setTimeSignature(
+        juce::AudioPlayHead::TimeSignature{ context.timeSignatureNumerator,
+                                             context.timeSignatureDenominator });
+    position_.setPpqPosition(ppqPosition);
+
+    const double quartersPerBar = static_cast<double>(context.timeSignatureNumerator) * 4.0
+                                  / static_cast<double>(context.timeSignatureDenominator);
+    if (std::isfinite(quartersPerBar) && quartersPerBar > 0.0)
+    {
+        position_.setPpqPositionOfLastBarStart(
+            std::floor(ppqPosition / quartersPerBar) * quartersPerBar);
+    }
+
+    if (context.isLooping && context.loopEndSample > context.loopStartSample)
+    {
+        const auto toPpq = [validSampleRate, validBpm](const std::int64_t sample) noexcept {
+            return static_cast<double>(juce::jmax<std::int64_t>(0, sample)) / validSampleRate
+                   * validBpm / 60.0;
+        };
+        position_.setLoopPoints(
+            juce::AudioPlayHead::LoopPoints{ toPpq(context.loopStartSample), toPpq(context.loopEndSample) });
+    }
+
+    position_.setIsPlaying(context.isPlaying);
+    position_.setIsRecording(context.isRecording);
+    position_.setIsLooping(context.isLooping && context.loopEndSample > context.loopStartSample);
+}
+
+juce::Optional<juce::AudioPlayHead::PositionInfo>
+PluginInsertHost::InsertProcessPlayHead::getPosition() const
+{
+    return position_;
 }
 
 void PluginInsertHost::recordPluginSlotUndo(const juce::String& label, const PluginUndoStepSides& sides)
@@ -276,6 +332,9 @@ void PluginInsertHost::logStereoLayoutFailure(const TrackId trackId) const
 
 bool PluginInsertHost::tryPrepareStereoInsert(juce::AudioPluginInstance& inst, const double sr, const int bs)
 {
+    // AudioProcessor stores this raw pointer. `processPlayHead_` belongs to PluginInsertHost and
+    // outlives every instance, so the VST3 wrapper can safely query it during processBlock.
+    inst.setPlayHead(&processPlayHead_);
     inst.releaseResources();
     const double srU = sr > 0.0 ? sr : 48000.0;
     const int bsU = bs > 0 ? bs : 512;
@@ -1237,6 +1296,12 @@ void PluginInsertHost::audioThread_clearScratch(const int numChannels, const int
             juce::FloatVectorOperations::clear(p, n);
         }
     }
+}
+
+void PluginInsertHost::audioThread_setProcessTransportContext(
+    const PluginProcessTransportContext& context) noexcept
+{
+    processPlayHead_.setContext(context);
 }
 
 float* const* PluginInsertHost::audioThread_getScratchWritePointers() noexcept

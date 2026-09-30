@@ -42,6 +42,24 @@ struct InsertRowView
     juce::String displayName;
 };
 
+/// A complete, block-start transport description for hosted effect processors.
+/// `PlaybackEngine` creates this from the immutable session snapshot plus the current live or
+/// offline render position. It is passed only on the processing thread immediately before an
+/// insert chain runs; it is not session state and it is never shared with the message thread.
+struct PluginProcessTransportContext
+{
+    std::int64_t timelineSample = 0;
+    double sampleRate = 0.0;
+    double bpm = 120.0;
+    int timeSignatureNumerator = 4;
+    int timeSignatureDenominator = 4;
+    bool isPlaying = false;
+    bool isRecording = false;
+    bool isLooping = false;
+    std::int64_t loopStartSample = 0;
+    std::int64_t loopEndSample = 0;
+};
+
 // Immutable view exchanged with the audio callback (release-store / acquire-load).
 struct PluginAudioThreadMap
 {
@@ -147,6 +165,12 @@ public:
     /// [Audio thread] Runs `layoutOk` slots for one stage in published order (Pre / Post).
     void audioThread_processChainForTrack(TrackId trackId, InsertStage stage, int numSamples) noexcept;
 
+    /// [Audio thread, or offline render while the callback gate is held] Sets the context returned
+    /// by the host-owned JUCE `AudioPlayHead` during the immediately following insert processing.
+    /// The caller must refresh this before every timeline segment, including stopped monitoring;
+    /// this only writes pre-existing scalar storage and never allocates, locks or touches Session.
+    void audioThread_setProcessTransportContext(const PluginProcessTransportContext& context) noexcept;
+
     /// [Audio thread] Acquire-loads the published map; true iff any insert on this track is stereo-ready.
     [[nodiscard]] bool audioThread_hasActivePluginForTrack(TrackId trackId) const noexcept;
 
@@ -187,6 +211,24 @@ public:
 
 private:
     using EditorKey = std::pair<TrackId, InsertSlotId>;
+
+    /// Non-owning `AudioProcessor::setPlayHead` target, owned by this host for longer than every
+    /// live plugin instance. The audio callback and gated offline renderer update it immediately
+    /// before `processBlock`; message-thread lifecycle code never mutates its position state.
+    class InsertProcessPlayHead final : public juce::AudioPlayHead
+    {
+    public:
+        /// [Audio/offline processing thread] Materialize only facts DAL knows for this block.
+        /// JUCE turns the engaged fields into the VST3 ProcessContext validity flags.
+        void setContext(const PluginProcessTransportContext& context) noexcept;
+
+        /// [Audio/offline processing thread] JUCE calls this synchronously from hosted
+        /// `processBlock`. It returns a value copy, so processors cannot retain mutable host state.
+        [[nodiscard]] juce::Optional<PositionInfo> getPosition() const override;
+
+    private:
+        juce::AudioPlayHead::PositionInfo position_;
+    };
 
     struct LiveInsertSlot
     {
@@ -242,6 +284,9 @@ private:
 
     juce::AudioBuffer<float> scratch_;
     std::vector<float*> scratchPtrs_;
+    /// Stable playhead pointer installed in every instance before that instance is published to
+    /// the audio thread. Its lifetime exceeds all `LiveInsertSlot::instance` lifetimes.
+    InsertProcessPlayHead processPlayHead_;
     /// Reused empty MIDI buffer for `processBlock`; cleared after each call — avoids constructing
     /// `MidiBuffer` on the audio thread (default construction is cheap; `clear` does not grow).
     juce::MidiBuffer midiScratch_;
