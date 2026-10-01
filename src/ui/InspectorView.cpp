@@ -1825,6 +1825,21 @@ void InspectorView::commitPreGainField()
     }
 }
 
+void InspectorView::typePreGainTextLikeKeyboardForStabilityTest(const juce::String& text)
+{
+    // Same entry point the peer uses for real keystrokes: focus the field (a user clicks into it,
+    // which is also what keeps the periodic refresh from overwriting half-typed text), select the
+    // current contents, type the characters, press Return. Nothing here bypasses the editor or its
+    // listener contract.
+    preGainDbEditor_.grabKeyboardFocus();
+    (void)preGainDbEditor_.keyPressed(juce::KeyPress('a', juce::ModifierKeys::ctrlModifier, 0));
+    for (const auto ch : text)
+    {
+        (void)preGainDbEditor_.keyPressed(juce::KeyPress(static_cast<int>(ch), juce::ModifierKeys(), ch));
+    }
+    (void)preGainDbEditor_.keyPressed(juce::KeyPress(juce::KeyPress::returnKey, juce::ModifierKeys(), 0));
+}
+
 void InspectorView::mouseDown(const juce::MouseEvent& e)
 {
     // Ctrl/Cmd+click on the pre-gain field = reset to 0.0 dB (established reset gesture).

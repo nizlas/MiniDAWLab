@@ -3265,6 +3265,105 @@ public:
             return playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
         };
 
+        // Pre-gain through the REAL Inspector (user-flow reproduction on a real project). Each hook
+        // reuses the exact production objects the UI uses; none of them bypasses the Inspector's
+        // commit path or the header's mute/activate semantics.
+        hooks.activateTrackLikeHeaderClick = [this](const TrackId tid) {
+            // Same sequence as an audio header's name-strip click (TrackLanesView → onActivateName):
+            // session active track, then the header-activated callback that refreshes the Inspector.
+            session.setActiveTrack(tid);
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly();
+            }
+            inspectorView_.refreshFromSession();
+            trackLanesView.repaint();
+        };
+        hooks.inspectorTypePreGainAndReturn = [this](const juce::String& text) {
+            inspectorView_.typePreGainTextLikeKeyboardForStabilityTest(text);
+        };
+        hooks.inspectorPreGainFieldText = [this]() -> juce::String {
+            return inspectorView_.getPreGainFieldTextForStabilityTest();
+        };
+        hooks.inspectorPreGainFieldVisible = [this]() -> bool {
+            return inspectorView_.isPreGainFieldVisibleForStabilityTest();
+        };
+        hooks.setTrackMutedLikeHeader = [this](const TrackId tid, const bool muted) {
+            session.setTrackMuted(tid, muted);
+            trackLanesView.syncTracksFromSession();
+            trackLanesView.repaint();
+            inspectorView_.refreshFromSession();
+        };
+        hooks.describeTrackForDiagnostics = [this](const TrackId tid) -> juce::String {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int idx = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            if (idx < 0)
+            {
+                return "track " + juce::String((juce::int64)tid) + ": not in snapshot";
+            }
+            const Track& tr = snap->getTrack(idx);
+            juce::String kind;
+            switch (tr.getKind())
+            {
+                case TrackKind::Audio: kind = "audio"; break;
+                case TrackKind::Instrument: kind = "instrument"; break;
+                case TrackKind::Group: kind = "group"; break;
+                case TrackKind::Master: kind = "master"; break;
+                case TrackKind::Midi: kind = "midi"; break;
+            }
+            juce::String inserts;
+            for (const InsertRowView& row : pluginHost_.getInsertRowsForTrack(tid))
+            {
+                inserts << (row.stage == InsertStage::Pre ? "Pre:" : "Post:") << row.displayName << " ";
+            }
+            juce::String s;
+            s << "track " << juce::String((juce::int64)tid) << " kind=" << kind << " name=\"" << tr.getName()
+              << "\" muted=" << (tr.isMuted() ? "YES" : "no") << " off=" << (tr.isTrackOff() ? "YES" : "no")
+              << " fader=" << juce::String(tr.getChannelFaderGain(), 3) << " preGainDb=" << juce::String(tr.getPreGainDb(), 2)
+              << " pan=" << juce::String(tr.getStereoPan(), 2) << " output=" << juce::String((juce::int64)tr.getRoutedOutputTrackId())
+              << " monitor=" << (playbackEngine_.isTrackInputMonitoringEnabled(tid) ? "ON" : "off")
+              << " inserts=[" << inserts.trim() << "] chainActiveForAudioThread="
+              << (pluginHost_.audioThread_hasActivePluginForTrack(tid) ? "yes" : "no");
+            return s;
+        };
+        hooks.findAudioTrackWithInsertNamed = [this](const juce::String& fragment) -> TrackId {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr)
+            {
+                return kInvalidTrackId;
+            }
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                if (tr.getKind() != TrackKind::Audio)
+                {
+                    continue;
+                }
+                for (const InsertRowView& row : pluginHost_.getInsertRowsForTrack(tr.getId()))
+                {
+                    if (row.displayName.containsIgnoreCase(fragment))
+                    {
+                        return tr.getId();
+                    }
+                }
+            }
+            return kInvalidTrackId;
+        };
+        hooks.setInsertLevelTapTrack = [this](const TrackId tid) {
+            pluginHost_.setInsertLevelTapTrackForDiagnostics(tid);
+        };
+        hooks.readAndResetInsertLevelTap = [this](float& before, float& after, double& rmsBefore, double& rmsAfter,
+                                                  std::uint32_t& pre, std::uint32_t& post) {
+            const PluginInsertHost::InsertLevelTapSnapshot s = pluginHost_.readAndResetInsertLevelTapForDiagnostics();
+            before = s.peakBeforeFirstInsert;
+            after = s.peakAfterLastInsert;
+            rmsBefore = s.rmsBeforeFirstInsert;
+            rmsAfter = s.rmsAfterLastInsert;
+            pre = s.preStageBlocks;
+            post = s.postStageBlocks;
+        };
+        hooks.seekTransportTo = [this](const std::int64_t sample) { transport.requestSeek(sample); };
+
         hooks.audioHealthProbeBegin = [this] {
             (void)playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
             stabilityAudioProbeCallbackBaseline_ = playbackEngine_.readAudioCallbackEnterCountForDiagnostics();

@@ -54,6 +54,12 @@ enum class StabilityScenarioKind
     /// checks that the value survives save/reload. Expects an audio-only fixture project whose
     /// active loop contains a steady tone (see MixdownPreGainFocusedTests --make-fixture).
     PreGain,
+    /// The user's flow on a real project: activate the audio track that hosts AmpliTube (or any
+    /// insert) like a header click, type 0 → −24 dB into the REAL Inspector field (TextEditor key
+    /// path + Return), and compare displayed vs committed value and track id; then measure, with
+    /// the insert level tap, the signal entering the first insert and leaving the last one while
+    /// the transport plays — first with the project's own mute state, then with the track unmuted.
+    PreGainInspector,
 };
 
 struct StabilityScenarioRequest
@@ -193,6 +199,31 @@ struct StabilityRunnerHooks
     std::function<float(TrackId)> getTrackPreGainDb;
     /// Device-output peak hold since the previous call (see PlaybackEngine diagnostics), then reset.
     std::function<float()> readOutputPeakHoldAndReset;
+
+    // --- Pre-gain through the REAL Inspector (user-flow reproduction) --------------
+    /// Activates `tid` exactly like a click on its header name strip (Session active track plus the
+    /// header-activated callback that refreshes the Inspector).
+    std::function<void(TrackId)> activateTrackLikeHeaderClick;
+    /// Types `text` into the Inspector's pre-gain field through the TextEditor key path + Return.
+    std::function<void(const juce::String&)> inspectorTypePreGainAndReturn;
+    /// Current text of the Inspector's pre-gain field, and whether the field is visible.
+    std::function<juce::String()> inspectorPreGainFieldText;
+    std::function<bool()> inspectorPreGainFieldVisible;
+    /// Mute/unmute exactly like the header Mute button (Session mute + header refresh).
+    std::function<void(TrackId, bool)> setTrackMutedLikeHeader;
+    /// One line describing a track as the engine sees it: kind, name, muted, off, fader, pre-gain,
+    /// output, monitor, insert rows and whether the chain is active for the audio thread.
+    std::function<juce::String(TrackId)> describeTrackForDiagnostics;
+    /// First audio track whose insert chain has a plug-in whose name contains `fragment` (or invalid).
+    std::function<TrackId(const juce::String& fragment)> findAudioTrackWithInsertNamed;
+    /// PluginInsertHost level tap: select the tapped track; read+reset "before first insert" /
+    /// "after last insert" peak holds and the processed-block counters.
+    std::function<void(TrackId)> setInsertLevelTapTrack;
+    std::function<void(float& peakBefore, float& peakAfter, double& rmsBefore, double& rmsAfter,
+                       std::uint32_t& preBlocks, std::uint32_t& postBlocks)>
+        readAndResetInsertLevelTap;
+    /// Transport seek request (consumed by the audio callback at the next block).
+    std::function<void(std::int64_t)> seekTransportTo;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -233,6 +264,8 @@ private:
     void appendMidiEditorMoveCrashSteps(const juce::File& project);
     /// Pre-gain through the real engine: realtime peak ratio, offline RMS ratio, save/reload.
     void appendPreGainSteps(const juce::File& project);
+    /// Pre-gain through the real Inspector on a real project (see `PreGainInspector`).
+    void appendPreGainInspectorSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -262,6 +295,12 @@ private:
     double preGainRmsAtMinus24dB_ = 0.0;
     /// PreGain / Mixdown: dedicated empty output folder so the exact result file set can be asserted.
     juce::File scenarioOutputDir_;
+    /// PreGainInspector: the audio track hosting the insert under test and its measurements.
+    TrackId inspectorTargetTrackId_ = kInvalidTrackId;
+    float inspectorPeakBefore0dB_ = 0.0f;
+    float inspectorPeakAfter0dB_ = 0.0f;
+    double inspectorRmsBefore0dB_ = 0.0;
+    double inspectorRmsAfter0dB_ = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };

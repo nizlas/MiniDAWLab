@@ -1388,6 +1388,17 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
         return;
     }
 
+    // Diagnostics tap: level entering the chain (Pre stage = right after pre-gain). Relaxed atomics,
+    // only for the one tapped track, so untapped tracks pay a single compare per call.
+    const bool tapped = insertLevelTapTrackId_.load(std::memory_order_relaxed)
+                        == static_cast<std::int64_t>(trackId);
+    if (tapped && stage == InsertStage::Pre)
+    {
+        audioThread_foldScratchLevelsInto(insertLevelTapPeakBefore_, insertLevelTapSumSqBefore_,
+                                          insertLevelTapSamplesBefore_, n);
+        insertLevelTapPreBlocks_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     juce::AudioBuffer<float> view(scratchPtrs_.data(), kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
     int slotIndex = -1;
@@ -1410,6 +1421,68 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
         audioThreadInsertStage_.store(-1, std::memory_order_relaxed);
         midiScratch_.clear();
     }
+
+    // Diagnostics tap: level leaving the chain (after the last Post insert, before pan).
+    if (tapped && stage == InsertStage::Post)
+    {
+        audioThread_foldScratchLevelsInto(insertLevelTapPeakAfter_, insertLevelTapSumSqAfter_,
+                                          insertLevelTapSamplesAfter_, n);
+        insertLevelTapPostBlocks_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void PluginInsertHost::audioThread_foldScratchLevelsInto(std::atomic<float>& peakHold,
+                                                         std::atomic<double>& sumSquares,
+                                                         std::atomic<std::uint64_t>& sampleCount,
+                                                         const int numSamples) noexcept
+{
+    float peak = 0.0f;
+    double sumSq = 0.0;
+    std::uint64_t counted = 0;
+    for (int c = 0; c < kInsertChannels && c < scratch_.getNumChannels(); ++c)
+    {
+        const float* const row = scratch_.getReadPointer(c);
+        if (row == nullptr || numSamples <= 0)
+        {
+            continue;
+        }
+        const juce::Range<float> r = juce::FloatVectorOperations::findMinAndMax(row, numSamples);
+        peak = juce::jmax(peak, std::abs(r.getStart()), std::abs(r.getEnd()));
+        for (int i = 0; i < numSamples; ++i)
+        {
+            sumSq += static_cast<double>(row[i]) * static_cast<double>(row[i]);
+        }
+        counted += static_cast<std::uint64_t>(numSamples);
+    }
+    float current = peakHold.load(std::memory_order_relaxed);
+    while (peak > current && !peakHold.compare_exchange_weak(current, peak, std::memory_order_relaxed))
+    {
+    }
+    sumSquares.fetch_add(sumSq, std::memory_order_relaxed);
+    sampleCount.fetch_add(counted, std::memory_order_relaxed);
+}
+
+void PluginInsertHost::setInsertLevelTapTrackForDiagnostics(const TrackId trackId) noexcept
+{
+    insertLevelTapTrackId_.store(trackId == kInvalidTrackId ? -1 : static_cast<std::int64_t>(trackId),
+                                 std::memory_order_relaxed);
+    (void)readAndResetInsertLevelTapForDiagnostics();
+}
+
+PluginInsertHost::InsertLevelTapSnapshot PluginInsertHost::readAndResetInsertLevelTapForDiagnostics() noexcept
+{
+    InsertLevelTapSnapshot s;
+    s.peakBeforeFirstInsert = insertLevelTapPeakBefore_.exchange(0.0f, std::memory_order_relaxed);
+    s.peakAfterLastInsert = insertLevelTapPeakAfter_.exchange(0.0f, std::memory_order_relaxed);
+    s.preStageBlocks = insertLevelTapPreBlocks_.exchange(0, std::memory_order_relaxed);
+    s.postStageBlocks = insertLevelTapPostBlocks_.exchange(0, std::memory_order_relaxed);
+    const double sumBefore = insertLevelTapSumSqBefore_.exchange(0.0, std::memory_order_relaxed);
+    const double sumAfter = insertLevelTapSumSqAfter_.exchange(0.0, std::memory_order_relaxed);
+    const std::uint64_t nBefore = insertLevelTapSamplesBefore_.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t nAfter = insertLevelTapSamplesAfter_.exchange(0, std::memory_order_relaxed);
+    s.rmsBeforeFirstInsert = nBefore > 0 ? std::sqrt(sumBefore / static_cast<double>(nBefore)) : 0.0;
+    s.rmsAfterLastInsert = nAfter > 0 ? std::sqrt(sumAfter / static_cast<double>(nAfter)) : 0.0;
+    return s;
 }
 
 std::vector<std::pair<TrackId, std::vector<const void*>>>

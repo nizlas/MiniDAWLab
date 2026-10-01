@@ -56,6 +56,67 @@ is **unconfirmed**. 1.1.5 does not change that policy (an undo step recorded mid
 restore a snapshot without the take) but makes the refusal visible: a bubble on the pre-gain field
 says "Pre-gain can't be changed while recording or during count-in."
 
+## 3b. Follow-up 2026-10-01: the user's project, through the real Inspector (status: not a software defect)
+
+The user confirmed the −24 dB edit was made **during playback of recorded guitar, with no
+recording or count-in**, so §3's refusal path is not the explanation. Investigation continued on a
+temporary copy of the user's project (`TSE_pt2.dalproj`, saved AmpliTube 4 state included; the
+original and its autosave were only read). Running exe at the time: the 1.1.4 Debug build
+(`build\ninja-debug\…\MiniDAWLab.exe`, built 2026-09-30 20:01; installed Release 1.1.3) — same
+pre-gain signal code as `main`.
+
+**Session evidence (read-only):** the saved project (2026-09-30 20:27) has the AmpliTube track
+(id 4, `Pre:AmpliTube 4`) **muted**, pre-gain 0. Every autosave of the live session on 2026-10-01
+(latest 19:03, the project dirty and autosaving every 2 min) has track 4 **muted** and
+**`preGainDb = -24.0`** — i.e. the Inspector commit *did* land, on the right track, in the live
+session the user was looking at. The other audio track (id 1, an mp3 soundbite) is muted too;
+the audible rows are the instrument tracks (VB3-II, Track 3, Track 8).
+
+**Reproduction (`MiniDAWLab.exe --stability-pregain-inspector <copy>`, 1.1.6 alt-Debug):** the
+track is activated like a header click, "-24" + Return is typed into the **real Inspector field**
+through `TextEditor::keyPressed` (the production listener → handler → undoable Session edit
+follows asynchronously, as for a user), and a new bounded `PluginInsertHost` level tap reports the
+signal **entering the first insert** and **leaving the last one** for that track while playing.
+
+| | Inspector shows / committed | AmpliTube chain blocks | level before first insert | after AmpliTube | device peak |
+|---|---|---|---|---|---|
+| Phase A — project state (track 4 **muted**), 0 dB, playing | `0.0` / 0.00 on track 4 | **0** | — | — | 0.236 (instruments) |
+| Phase A — typed `-24` + Return while playing | `-24.0` / **−24.00 on track 4**, track 1 unchanged | **0** | — | — | 0.949 (instruments) |
+| Phase B — track 4 unmuted like the header, typed `0`, same passage from 0 | `0.0` / 0.00 | 578 | RMS 0.019778 (peak 0.183) | RMS 0.193 (peak 0.792) | 0.920 |
+| Phase B — typed `-24` + Return while playing, same passage from 0 | `-24.0` / −24.00 | 572 | RMS **0.001227 → ratio 0.06205** (expected 0.06310) | RMS 0.109 (**−4.96 dB** vs 0 dB) | 0.654 |
+
+**Where the chain does and does not break:** displayed value, committed value and target track
+agree at every step; the published snapshot carries the value; the realtime path applies it live
+(ratio 0.062 after typing while playing). Two facts explain the "no change" the user heard:
+
+1. In the user's session state the AmpliTube track is **muted**: a muted audio track renders
+   nothing — its insert chain is not processed at all (0 blocks) — so no pre-gain value can be
+   heard from it. Whatever guitar was audible then did not come from track 4 through AmpliTube.
+2. Even unmuted, the user's saved AmpliTube preset compresses a **−24 dB input change into a
+   ≈ −5 dB output change** (RMS 0.193 → 0.109). The input *is* 16× quieter; the amp model's gain
+   staging hides most of it.
+
+Status for the original observation: **not reproduced as a software defect**; explained by the
+session state (mute) and the preset's compression. Conditions exercised: the user's project copy
+with its saved AmpliTube state; 1.1.6 alt-Debug build; default audio output of this machine (the
+user's ASIO device was held by the running DAL); typed input through the Inspector editor's key
+path (OS keyboard events were not injected); Track 4 muted as saved, then unmuted like the header;
+0 → −24 dB typed while the transport played. Not exercised: the user's own running 1.1.4 process
+and its live mute state at the moment of the observation (only the 2-minute autosaves are visible),
+and listening.
+
+Recommendation for the user: check the Mute button on the AmpliTube track (header strip) before
+judging pre-gain, and compare with the fader at −24 dB — with this preset the audible difference
+of a −24 dB *input* change is a ≈5 dB level drop plus less drive, not a 24 dB drop.
+
+**Side observation (outside this task's scope, recorded for the paused stability audit):** the
+same scenario run on the **Release** 1.1.6 binary passed and then crashed during application
+shutdown inside `AmpliTube 4.vpa` at module offset `0x7675E` — the identical module and offset
+as the 2026-09-26 dumps (`crash-dumps\MiniDAWLab-crash-20261001-192759-pid44620.*`, breadcrumb
+"app shutdown begin"). The Debug run of the same scenario exited cleanly. This is the known
+"AmpliTube teardown — cause undetermined" item of `docs/audits/STABILITY_AUDIT_2026-09-26.md`,
+now with a deterministic reproduction recipe (load this project copy, play, quit, Release build).
+
 ## 4. Tests run (Level 1–2 per `docs/DEVELOPMENT_TEST_POLICY.md`)
 
 ```powershell
@@ -67,6 +128,8 @@ MixdownPreGainFocusedTests.exe --make-fixture %TEMP%\dal-pregain-fixture
 MiniDAWLab.exe --stability-mixdown %TEMP%\dal-pregain-fixture\pregain-fixture.dalproj --format wav
 MiniDAWLab.exe --stability-mixdown %TEMP%\dal-pregain-fixture\pregain-fixture.dalproj --format mp3
 MiniDAWLab.exe --stability-pregain %TEMP%\dal-pregain-fixture\pregain-fixture.dalproj
+# 2026-10-01: user flow through the real Inspector on a copy of a real project (§3b), PASS
+MiniDAWLab.exe --stability-pregain-inspector <copy-of-project>.dalproj
 # BPM fix preserved
 PluginInsertTempoFocusedTests.exe "C:\Program Files\Common Files\VST3\DALMonoDelay.vst3"
 ```

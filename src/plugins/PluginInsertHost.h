@@ -178,6 +178,27 @@ public:
     /// currently inside, or "insert=idle". Read by gate-timeout logging only.
     [[nodiscard]] juce::String describeAudioThreadInsertStateForDiagnostics() const noexcept;
 
+    /// Peak-hold levels of ONE track's insert chain as the audio thread processed it: the scratch
+    /// BEFORE the first Pre insert (i.e. after pre-gain) and AFTER the last Post insert (before
+    /// pan). Block counters show whether the chain was processed at all — a muted or silent track
+    /// never reaches `audioThread_processChainForTrack`, so its counters stay 0.
+    struct InsertLevelTapSnapshot
+    {
+        float peakBeforeFirstInsert = 0.0f;
+        float peakAfterLastInsert = 0.0f;
+        /// RMS over all tapped samples of the window (both channels) — stable across musical
+        /// material where a peak hold is not.
+        double rmsBeforeFirstInsert = 0.0;
+        double rmsAfterLastInsert = 0.0;
+        std::uint32_t preStageBlocks = 0;
+        std::uint32_t postStageBlocks = 0;
+    };
+    /// [Message thread] Diagnostics only: selects the tapped track (`kInvalidTrackId` = off).
+    void setInsertLevelTapTrackForDiagnostics(TrackId trackId) noexcept;
+    /// [Message thread] Diagnostics only: returns the peak holds since the previous call and resets
+    /// them. The audio thread folds one SIMD min/max per tapped stage into relaxed atomics.
+    [[nodiscard]] InsertLevelTapSnapshot readAndResetInsertLevelTapForDiagnostics() noexcept;
+
     /// [Message thread] Stability C3 introspection: `{trackId, live AudioPluginInstance pointers}`
     /// per chain in the message-thread registry. Diagnostics only; no locks.
     [[nodiscard]] std::vector<std::pair<TrackId, std::vector<const void*>>>
@@ -299,6 +320,23 @@ private:
     std::atomic<int> audioThreadInsertStage_{ -1 };
     /// At most one stereo-layout warning while re-preparing instances for a device (message thread).
     std::atomic<bool> stereoPrepareFailureOneShot_{ false };
+    /// Insert level tap (diagnostics, see `InsertLevelTapSnapshot`): relaxed atomics only; the audio
+    /// thread folds peaks, the message thread reads and resets. Never used for synchronization.
+    std::atomic<std::int64_t> insertLevelTapTrackId_{ -1 };
+    std::atomic<float> insertLevelTapPeakBefore_{ 0.0f };
+    std::atomic<float> insertLevelTapPeakAfter_{ 0.0f };
+    std::atomic<std::uint32_t> insertLevelTapPreBlocks_{ 0 };
+    std::atomic<std::uint32_t> insertLevelTapPostBlocks_{ 0 };
+    std::atomic<double> insertLevelTapSumSqBefore_{ 0.0 };
+    std::atomic<double> insertLevelTapSumSqAfter_{ 0.0 };
+    std::atomic<std::uint64_t> insertLevelTapSamplesBefore_{ 0 };
+    std::atomic<std::uint64_t> insertLevelTapSamplesAfter_{ 0 };
+    /// [Audio thread] Fold the scratch peak and sum of squares of the first `numSamples` into the
+    /// tap accumulators (relaxed CAS max / fetch_add; no locks, no allocation).
+    void audioThread_foldScratchLevelsInto(std::atomic<float>& peakHold,
+                                           std::atomic<double>& sumSquares,
+                                           std::atomic<std::uint64_t>& sampleCount,
+                                           int numSamples) noexcept;
 
     std::atomic<std::shared_ptr<const PluginAudioThreadMap>> audioThreadMap_;
 

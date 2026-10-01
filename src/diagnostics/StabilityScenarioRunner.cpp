@@ -193,6 +193,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-pregain-inspector")
+        {
+            if (!setKind(StabilityScenarioKind::PreGainInspector)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-pregain-inspector requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -276,6 +285,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::MidiImportAudio: scenarioName_ = "midi-import-audio"; break;
         case StabilityScenarioKind::MidiEditorMoveCrash: scenarioName_ = "midi-editor-move"; break;
         case StabilityScenarioKind::PreGain: scenarioName_ = "pregain"; break;
+        case StabilityScenarioKind::PreGainInspector: scenarioName_ = "pregain-inspector"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -340,6 +350,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::PreGain:
             appendPreGainSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::PreGainInspector:
+            appendPreGainInspectorSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -1519,6 +1532,295 @@ void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
                                return true;
                            },
                            kSettleDefaultMs });
+}
+
+// -----------------------------------------------------------------------------
+// Pre-gain through the REAL Inspector on a real project (user-flow reproduction)
+// -----------------------------------------------------------------------------
+// Report under test: "pre-gain 0 → -24 dB on the AmpliTube audio track changed nothing while the
+// recorded guitar played". Every step below goes through the production UI / session objects of
+// the running app (no direct session setter for the edit):
+//   activate the track like a header click → type "-24" + Return into the Inspector field →
+//   compare displayed text, committed snapshot value and the track id it landed on →
+//   measure, while the transport plays, the level entering the first insert and leaving the last
+//   one (PluginInsertHost level tap) — first in the project's own state, then with the track
+//   unmuted — so "which audio path is actually heard" is answered by numbers, not assumptions.
+void StabilityScenarioRunner::appendPreGainInspectorSteps(const juce::File& project)
+{
+    if (hooks_.activateTrackLikeHeaderClick == nullptr || hooks_.inspectorTypePreGainAndReturn == nullptr
+        || hooks_.inspectorPreGainFieldText == nullptr || hooks_.describeTrackForDiagnostics == nullptr
+        || hooks_.findAudioTrackWithInsertNamed == nullptr || hooks_.setInsertLevelTapTrack == nullptr
+        || hooks_.readAndResetInsertLevelTap == nullptr || hooks_.getTrackPreGainDb == nullptr
+        || hooks_.setTrackMutedLikeHeader == nullptr || hooks_.seekTransportTo == nullptr
+        || hooks_.readOutputPeakHoldAndReset == nullptr || hooks_.setPlaybackActive == nullptr)
+    {
+        steps_.push_back(Step{ "pregain-inspector: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "pregain-inspector hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    appendLoadAndVerifySteps(project, "pregain-inspector");
+
+    steps_.push_back(Step{ "pregain-inspector: describe every track as the engine sees it",
+                           [this](juce::String& failReason) -> bool {
+                               for (const StabilityTrackInfo& t : hooks_.listDeletableTracks())
+                               {
+                                   appendStabilityRunLine("  " + hooks_.describeTrackForDiagnostics(t.id));
+                               }
+                               inspectorTargetTrackId_ = hooks_.findAudioTrackWithInsertNamed("AmpliTube");
+                               if (inspectorTargetTrackId_ == kInvalidTrackId)
+                               {
+                                   failReason = "no audio track with an AmpliTube insert in this project";
+                                   return false;
+                               }
+                               appendStabilityRunLine("  target (AmpliTube) track id="
+                                                      + juce::String((juce::int64)inspectorTargetTrackId_));
+                               hooks_.setInsertLevelTapTrack(inspectorTargetTrackId_);
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{
+        "pregain-inspector: activate the AmpliTube track like a header click",
+        [this](juce::String& failReason) -> bool {
+            hooks_.activateTrackLikeHeaderClick(inspectorTargetTrackId_);
+            const bool visible = hooks_.inspectorPreGainFieldVisible != nullptr && hooks_.inspectorPreGainFieldVisible();
+            appendStabilityRunLine("  Inspector pre-gain field visible=" + juce::String(visible ? "yes" : "no")
+                                   + " shows=\"" + hooks_.inspectorPreGainFieldText() + "\" stored="
+                                   + juce::String(hooks_.getTrackPreGainDb(inspectorTargetTrackId_), 2) + " dB");
+            if (!visible)
+            {
+                failReason = "Inspector does not show the pre-gain field for the active audio track";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // ---- Phase A: the project's own state (mute as saved), transport playing from the take. ----
+    steps_.push_back(Step{ "pregain-inspector: phase A (project state) - seek 0 and play",
+                           [this](juce::String&) -> bool {
+                               hooks_.seekTransportTo(0);
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           600 });
+    const auto armTap = [this]() {
+        (void)hooks_.readOutputPeakHoldAndReset();
+        float b = 0.0f, a = 0.0f;
+        double rb = 0.0, ra = 0.0;
+        std::uint32_t pre = 0, post = 0;
+        hooks_.readAndResetInsertLevelTap(b, a, rb, ra, pre, post);
+    };
+    steps_.push_back(Step{ "pregain-inspector: phase A - arm measurement window",
+                           [armTap](juce::String&) -> bool {
+                               armTap();
+                               return true;
+                           },
+                           1200 });
+    steps_.push_back(Step{
+        "pregain-inspector: phase A - what is audible at the project's own settings",
+        [this](juce::String&) -> bool {
+            float before = 0.0f, after = 0.0f;
+            double rmsBefore = 0.0, rmsAfter = 0.0;
+            std::uint32_t preBlocks = 0, postBlocks = 0;
+            hooks_.readAndResetInsertLevelTap(before, after, rmsBefore, rmsAfter, preBlocks, postBlocks);
+            const float devicePeak = hooks_.readOutputPeakHoldAndReset();
+            appendStabilityRunLine("  phase A: device output peak=" + juce::String(devicePeak, 5)
+                                   + " | AmpliTube track chain processed blocks pre=" + juce::String((int)preBlocks)
+                                   + " post=" + juce::String((int)postBlocks) + " level before first insert="
+                                   + juce::String(before, 5) + " after last insert=" + juce::String(after, 5));
+            appendStabilityRunLine("  phase A: " + hooks_.describeTrackForDiagnostics(inspectorTargetTrackId_));
+            if (preBlocks == 0)
+            {
+                appendStabilityRunLine("  phase A: the AmpliTube track's insert chain is NOT processed - the "
+                                       "track contributes nothing to what is heard (device output above comes "
+                                       "from other rows)");
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // The user's edit, through the real Inspector, WHILE playing.
+    steps_.push_back(Step{ "pregain-inspector: type \"-24\" + Return into the Inspector field (playing)",
+                           [this](juce::String&) -> bool {
+                               hooks_.inspectorTypePreGainAndReturn("-24");
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{
+        "pregain-inspector: displayed vs committed value and track id",
+        [this](juce::String& failReason) -> bool {
+            const juce::String shown = hooks_.inspectorPreGainFieldText();
+            const float stored = hooks_.getTrackPreGainDb(inspectorTargetTrackId_);
+            juce::String others;
+            for (const StabilityTrackInfo& t : hooks_.listDeletableTracks())
+            {
+                if (t.kindName == "audio" && t.id != inspectorTargetTrackId_)
+                {
+                    others << " track" << juce::String((juce::int64)t.id) << "=" << juce::String(hooks_.getTrackPreGainDb(t.id), 2);
+                }
+            }
+            appendStabilityRunLine("  Inspector shows \"" + shown + "\" | committed on track "
+                                   + juce::String((juce::int64)inspectorTargetTrackId_) + " = " + juce::String(stored, 2)
+                                   + " dB | other audio tracks:" + others);
+            if (shown != "-24.0")
+            {
+                failReason = "Inspector field shows \"" + shown + "\" instead of -24.0";
+                return false;
+            }
+            if (std::fabs(stored + 24.0f) > 1.0e-4f)
+            {
+                failReason = "committed value on the AmpliTube track is " + juce::String(stored, 2) + " dB, not -24";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+    steps_.push_back(Step{ "pregain-inspector: phase A at -24 dB - arm measurement window",
+                           [armTap](juce::String&) -> bool {
+                               armTap();
+                               return true;
+                           },
+                           1200 });
+    steps_.push_back(Step{
+        "pregain-inspector: phase A at -24 dB - what changed audibly",
+        [this](juce::String&) -> bool {
+            float before = 0.0f, after = 0.0f;
+            double rmsBefore = 0.0, rmsAfter = 0.0;
+            std::uint32_t preBlocks = 0, postBlocks = 0;
+            hooks_.readAndResetInsertLevelTap(before, after, rmsBefore, rmsAfter, preBlocks, postBlocks);
+            const float devicePeak = hooks_.readOutputPeakHoldAndReset();
+            appendStabilityRunLine("  phase A (-24 dB): device output peak=" + juce::String(devicePeak, 5)
+                                   + " | chain blocks pre=" + juce::String((int)preBlocks) + " post=" + juce::String((int)postBlocks)
+                                   + " level before first insert=" + juce::String(before, 5) + " after last insert="
+                                   + juce::String(after, 5));
+            hooks_.setPlaybackActive(false);
+            return true;
+        },
+        kSettleDefaultMs });
+
+    // ---- Phase B: the same flow with the AmpliTube track audible (unmuted like the header). ----
+    // Both measurement windows play the SAME passage of the take (seek 0, fixed lead-in, fixed
+    // window) and compare RMS, so the ratio reflects the gain change and not the music.
+    steps_.push_back(Step{ "pregain-inspector: phase B - unmute the AmpliTube track like the header",
+                           [this](juce::String&) -> bool {
+                               hooks_.setTrackMutedLikeHeader(inspectorTargetTrackId_, false);
+                               hooks_.activateTrackLikeHeaderClick(inspectorTargetTrackId_);
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "pregain-inspector: phase B - type \"0\" + Return into the Inspector field",
+                           [this](juce::String&) -> bool {
+                               hooks_.inspectorTypePreGainAndReturn("0");
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "pregain-inspector: phase B at 0 dB - seek 0 and play (lead-in)",
+                           [this](juce::String& failReason) -> bool {
+                               if (std::fabs(hooks_.getTrackPreGainDb(inspectorTargetTrackId_)) > 1.0e-4f)
+                               {
+                                   failReason = "typing 0 did not commit 0 dB";
+                                   return false;
+                               }
+                               hooks_.seekTransportTo(0);
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "pregain-inspector: phase B at 0 dB - arm measurement window",
+                           [armTap](juce::String&) -> bool {
+                               armTap();
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{
+        "pregain-inspector: phase B at 0 dB - levels",
+        [this](juce::String& failReason) -> bool {
+            std::uint32_t preBlocks = 0, postBlocks = 0;
+            hooks_.readAndResetInsertLevelTap(inspectorPeakBefore0dB_, inspectorPeakAfter0dB_, inspectorRmsBefore0dB_,
+                                              inspectorRmsAfter0dB_, preBlocks, postBlocks);
+            const float devicePeak = hooks_.readOutputPeakHoldAndReset();
+            hooks_.setPlaybackActive(false);
+            appendStabilityRunLine("  phase B (0 dB): device output peak=" + juce::String(devicePeak, 5)
+                                   + " | chain blocks pre=" + juce::String((int)preBlocks) + " post=" + juce::String((int)postBlocks)
+                                   + " | before first insert peak=" + juce::String(inspectorPeakBefore0dB_, 5)
+                                   + " rms=" + juce::String(inspectorRmsBefore0dB_, 6) + " | after AmpliTube peak="
+                                   + juce::String(inspectorPeakAfter0dB_, 5) + " rms=" + juce::String(inspectorRmsAfter0dB_, 6));
+            appendStabilityRunLine("  phase B: " + hooks_.describeTrackForDiagnostics(inspectorTargetTrackId_));
+            if (preBlocks == 0 || !(inspectorRmsBefore0dB_ > 1.0e-5))
+            {
+                failReason = "unmuted AmpliTube track still renders nothing into its insert chain";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
+    // The user's edit while playing (live update), then the same passage is re-measured from 0.
+    steps_.push_back(Step{ "pregain-inspector: phase B - play, then type \"-24\" + Return while playing",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(true);
+                               hooks_.inspectorTypePreGainAndReturn("-24");
+                               return true;
+                           },
+                           500 });
+    steps_.push_back(Step{ "pregain-inspector: phase B at -24 dB - stop, seek 0 and play (lead-in)",
+                           [this](juce::String& failReason) -> bool {
+                               if (std::fabs(hooks_.getTrackPreGainDb(inspectorTargetTrackId_) + 24.0f) > 1.0e-4f)
+                               {
+                                   failReason = "typing -24 did not commit -24 dB";
+                                   return false;
+                               }
+                               hooks_.setPlaybackActive(false);
+                               hooks_.seekTransportTo(0);
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "pregain-inspector: phase B at -24 dB - arm measurement window",
+                           [armTap](juce::String&) -> bool {
+                               armTap();
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{
+        "pregain-inspector: phase B at -24 dB - levels and ratios (same passage as 0 dB)",
+        [this](juce::String& failReason) -> bool {
+            float before = 0.0f, after = 0.0f;
+            double rmsBefore = 0.0, rmsAfter = 0.0;
+            std::uint32_t preBlocks = 0, postBlocks = 0;
+            hooks_.readAndResetInsertLevelTap(before, after, rmsBefore, rmsAfter, preBlocks, postBlocks);
+            const float devicePeak = hooks_.readOutputPeakHoldAndReset();
+            hooks_.setPlaybackActive(false);
+            const double expected = std::pow(10.0, -24.0 / 20.0);
+            const double ratioBeforeRms = inspectorRmsBefore0dB_ > 0.0 ? rmsBefore / inspectorRmsBefore0dB_ : 0.0;
+            const double afterDb = (rmsAfter > 0.0 && inspectorRmsAfter0dB_ > 0.0)
+                                       ? 20.0 * std::log10(rmsAfter / inspectorRmsAfter0dB_)
+                                       : -999.0;
+            appendStabilityRunLine("  phase B (-24 dB): device output peak=" + juce::String(devicePeak, 5)
+                                   + " | chain blocks pre=" + juce::String((int)preBlocks) + " post=" + juce::String((int)postBlocks)
+                                   + " | before first insert peak=" + juce::String(before, 5) + " rms=" + juce::String(rmsBefore, 6)
+                                   + " (rms ratio vs 0 dB=" + juce::String(ratioBeforeRms, 5) + ", expected " + juce::String(expected, 5)
+                                   + ") | after AmpliTube peak=" + juce::String(after, 5) + " rms=" + juce::String(rmsAfter, 6)
+                                   + " (" + juce::String(afterDb, 2) + " dB vs 0 dB)");
+            if (std::fabs(ratioBeforeRms - expected) > expected * 0.05)
+            {
+                failReason = "RMS entering the first insert did not scale by -24 dB (ratio "
+                             + juce::String(ratioBeforeRms, 5) + ")";
+                return false;
+            }
+            if (!(rmsAfter < inspectorRmsAfter0dB_ * 0.9))
+            {
+                failReason = "AmpliTube output did not drop measurably at -24 dB input";
+                return false;
+            }
+            return true;
+        },
+        kSettleDefaultMs });
 }
 
 void StabilityScenarioRunner::appendMidiRoutingSteps(const juce::File& project)

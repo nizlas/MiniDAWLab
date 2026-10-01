@@ -92,6 +92,15 @@ public:
         preGainHandler_ = std::move(fn);
     }
 
+    /// [Message thread] Stability-scenario surface for the real user flow: feeds `text` to the
+    /// pre-gain field through `TextEditor::keyPressed` (Ctrl+A, the characters, Return) exactly as
+    /// typed keys arrive from the peer. Return is delivered by the editor as an asynchronous
+    /// command message, so the commit (listener → handler → undoable Session edit) lands on a later
+    /// message-loop turn; read `getPreGainFieldTextForStabilityTest()` after a settle.
+    void typePreGainTextLikeKeyboardForStabilityTest(const juce::String& text);
+    [[nodiscard]] juce::String getPreGainFieldTextForStabilityTest() const { return preGainDbEditor_.getText(); }
+    [[nodiscard]] bool isPreGainFieldVisibleForStabilityTest() const { return preGainDbEditor_.isVisible(); }
+
     /// [Message thread] Undoable **audio input** assignment (`TrackLanesEditCoordinator`):
     /// recording + monitoring source for audio rows only (the control is hidden elsewhere).
     void setAudioInputHandler(std::function<void(TrackId, TrackInputAssignment)> fn) noexcept
