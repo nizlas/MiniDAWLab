@@ -585,6 +585,22 @@ void PlaybackEngine::audioThread_foldOutputPeak(const float* const* outputChanne
            && !outputPeakHold_.compare_exchange_weak(current, peak, std::memory_order_relaxed))
     {
     }
+    // Stereo Out meter: the final device output (channels 0/1) — see the measuring-point note in
+    // the header. A mono device folds one channel.
+    if (numOutputChannels >= 1 && outputChannelData[0] != nullptr)
+    {
+        const level_meter::BlockStats stats = level_meter::analyzeBlock(
+            outputChannelData[0], numOutputChannels >= 2 ? outputChannelData[1] : nullptr, numSamples);
+        masterMeter_.audioThread_foldStats(stats);
+        masterMeterDiag_.audioThread_foldStats(stats);
+    }
+}
+
+void PlaybackEngine::setMeteredTrackForUi(const TrackId trackId) noexcept
+{
+    meteredTrackId_.store(static_cast<std::int64_t>(trackId), std::memory_order_relaxed);
+    trackMeter_.reset();
+    trackMeterDiag_.reset();
 }
 
 PlaybackEngine::AudioCallbackLoadSnapshot PlaybackEngine::snapshotAudioCallbackLoadAndReset() noexcept
@@ -1084,6 +1100,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                0,
                                                                                numSamples,
                                                                                pluginHost_);
+                // Group rows meter their bus strip output here; the Master row's meter is the
+                // device-output Stereo Out meter (folded once per callback), never duplicated.
+                if (busTr.getKind() == TrackKind::Group)
+                {
+                    audioThread_foldTrackMeterIfMetered(
+                        busTr.getId(), postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
+                }
                 if (step.destBusIndex < 0)
                 {
                     playback_mix_helpers::addPostStripStageToDeviceOutputs(stageStereo,
@@ -1277,6 +1300,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                         // while the transport is NOT playing — never layered over transport
                         // playback. Block-boundary decision on this thread; no republish races.
                         playbackIntent != PlaybackIntent::Playing ? entry->auditionHost : nullptr);
+                    audioThread_foldTrackMeterIfMetered(
+                        tr.getId(), postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
                     if (rp != nullptr && srcStep != nullptr && srcStep->destBusIndex >= 0
                         && srcStep->destBusIndex < static_cast<int>(rp->busScratchL.size()))
                     {
@@ -1441,6 +1466,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 postStripStagePtrs_[1],
                 pluginHost_,
                 &preGainRampState_);
+            audioThread_foldTrackMeterIfMetered(
+                tr.getId(), postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
 
             // Route to the same destination as the track's clip playback: its routing-plan source
             // step (dry bus + sends) when a plan exists, otherwise the legacy direct mix target.
@@ -1628,6 +1655,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     timelineEnd,
                     step.trackIndex,
                     &preGainRampState_);
+                audioThread_foldTrackMeterIfMetered(srcTr.getId(),
+                                                    postStripStagePtrs_[0] + destFrame,
+                                                    postStripStagePtrs_[1] + destFrame,
+                                                    audibleRun);
                 playback_mix_helpers::fanPostStripStageToDryAndSends(postStripStagePtrs_[0],
                                                                        postStripStagePtrs_[1],
                                                                        destFrame,

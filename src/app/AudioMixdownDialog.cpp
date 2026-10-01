@@ -133,6 +133,7 @@ void runConfirmedMixdownExport(Transport& transport,
 
     juce::Result result = juce::Result::ok();
     bool cancelled = false;
+    mini_daw_audio_mixdown::MixdownExportLevelReport levelReport;
     {
         AudioMixdownProgressWindow progress;
         if (plan.mp3)
@@ -145,7 +146,8 @@ void runConfirmedMixdownExport(Transport& transport,
                                                                             plan.outputFile,
                                                                             plan.mp3BitrateKbps,
                                                                             &progress,
-                                                                            true);
+                                                                            true,
+                                                                            &levelReport);
         }
         else
         {
@@ -155,6 +157,7 @@ void runConfirmedMixdownExport(Transport& transport,
             request.bits = plan.wavBits;
             request.progressSink = &progress;
             request.overwriteConfirmed = true;
+            request.levelReportOut = &levelReport;
             result = mini_daw_audio_mixdown::exportStereoMixdownWavBlocking(transport,
                                                                             session,
                                                                             playbackEngine,
@@ -189,9 +192,18 @@ void runConfirmedMixdownExport(Transport& transport,
 
     appendMixdownDiagnosticLine(juce::String("FINAL ") + fmt + " export ok");
     writeLastOperationBreadcrumb(juce::String("mixdown ") + fmt + " end ok");
-    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+    // The measured result travels with the completion message: a transient overload or a DC
+    // offset must not disappear just because the animated meter has already fallen.
+    juce::String message = "Export complete:\n" + plan.outputFile.getFullPathName();
+    const juce::String levels = levelReport.summaryText();
+    if (levels.isNotEmpty())
+    {
+        message << "\n\n" << levels;
+    }
+    const bool warn = levelReport.valid && (levelReport.hasOverload() || levelReport.hasSignificantDcOffset());
+    juce::AlertWindow::showMessageBoxAsync(warn ? juce::AlertWindow::WarningIcon : juce::AlertWindow::InfoIcon,
                                            "Audio Mixdown",
-                                           "Export complete:\n" + plan.outputFile.getFullPathName());
+                                           message);
 }
 
 [[nodiscard]] int mp3BitrateComboIdFromKbps(const int kbps) noexcept

@@ -220,6 +220,24 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-export-levels")
+        {
+            if (!setKind(StabilityScenarioKind::ExportLevels)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-export-levels requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-inspector-panel")
+        {
+            if (!setKind(StabilityScenarioKind::InspectorPanel)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-inspector-panel requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -306,6 +324,8 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::PreGainInspector: scenarioName_ = "pregain-inspector"; break;
         case StabilityScenarioKind::Inserts: scenarioName_ = "inserts"; break;
         case StabilityScenarioKind::HeaderColumn: scenarioName_ = "header-column"; break;
+        case StabilityScenarioKind::ExportLevels: scenarioName_ = "export-levels"; break;
+        case StabilityScenarioKind::InspectorPanel: scenarioName_ = "inspector-panel"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -380,6 +400,12 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::HeaderColumn:
             appendHeaderColumnSteps(request.projectA);
             break;
+        case StabilityScenarioKind::ExportLevels:
+            appendExportLevelsSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::InspectorPanel:
+            appendInspectorPanelSteps(request.projectA);
+            break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
             return;
@@ -441,7 +467,11 @@ void StabilityScenarioRunner::timerCallback()
     }
 
     appendStabilityRunLine("step end ok: " + step.name + " elapsedMs=" + juce::String(elapsed));
-    resumeAtMs_ = nowMs() + step.settleMsAfter;
+    // A step may choose its own settle at run time (e.g. "play the whole loop", whose length is
+    // only known after the project loaded) — see `settleOverrideMsForCurrentStep_`.
+    const int settleMs = settleOverrideMsForCurrentStep_ > 0 ? settleOverrideMsForCurrentStep_ : step.settleMsAfter;
+    settleOverrideMsForCurrentStep_ = -1;
+    resumeAtMs_ = nowMs() + settleMs;
 }
 
 void StabilityScenarioRunner::finish(const bool pass, const juce::String& reason)
@@ -2311,6 +2341,620 @@ void StabilityScenarioRunner::appendHeaderColumnSteps(const juce::File& project)
                                    return false;
                                }
                                return true;
+                           },
+                           kSettleDefaultMs });
+}
+
+// -----------------------------------------------------------------------------
+// Export levels: realtime Stereo Out vs offline export (float / 24-bit / MP3) on a project copy
+// -----------------------------------------------------------------------------
+namespace
+{
+    [[nodiscard]] juce::String dbfs(const float linear)
+    {
+        if (!std::isfinite(linear))
+        {
+            return "NaN";
+        }
+        if (linear <= 1.0e-6f)
+        {
+            return "-inf";
+        }
+        const double db = 20.0 * std::log10((double)linear);
+        return (db > 0.0 ? "+" : "") + juce::String(db, 2);
+    }
+
+    [[nodiscard]] juce::String describeLevelStats(const StabilityLevelStats& s)
+    {
+        return "frames=" + juce::String((juce::int64)s.frames)
+               + " peakL=" + juce::String(s.peak[0], 4) + " (" + dbfs(s.peak[0]) + " dBFS)"
+               + " peakR=" + juce::String(s.peak[1], 4) + " (" + dbfs(s.peak[1]) + " dBFS)"
+               + " rmsL=" + juce::String(s.rms[0], 4) + " (" + dbfs((float)s.rms[0]) + ")"
+               + " rmsR=" + juce::String(s.rms[1], 4) + " (" + dbfs((float)s.rms[1]) + ")"
+               + " dcL=" + juce::String(s.dcOffset[0], 5) + " dcR=" + juce::String(s.dcOffset[1], 5)
+               + " oversL=" + juce::String((juce::int64)s.overs[0]) + " oversR=" + juce::String((juce::int64)s.overs[1])
+               + " nonFinite=" + juce::String((juce::int64)s.nonFinite)
+               + " first=[" + juce::String(s.firstSample[0], 5) + "," + juce::String(s.firstSample[1], 5) + "]"
+               + " last=[" + juce::String(s.lastSample[0], 5) + "," + juce::String(s.lastSample[1], 5) + "]";
+    }
+
+    [[nodiscard]] double ratioDb(const double a, const double b)
+    {
+        if (a <= 0.0 || b <= 0.0)
+        {
+            return 0.0;
+        }
+        return 20.0 * std::log10(a / b);
+    }
+} // namespace
+
+void StabilityScenarioRunner::appendExportLevelsSteps(const juce::File& project)
+{
+    if (hooks_.drainMasterMeter == nullptr || hooks_.runMixdownWithLevelReport == nullptr
+        || hooks_.getTrackChannelFaderGain == nullptr || hooks_.setTrackChannelFaderGain == nullptr
+        || hooks_.getActiveLoopSpan == nullptr || hooks_.listAllTracks == nullptr || hooks_.seekTransportTo == nullptr
+        || hooks_.setPlaybackActive == nullptr || hooks_.describeTrackForDiagnostics == nullptr)
+    {
+        steps_.push_back(Step{ "export-levels: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "export-levels hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    // Kept for the offline analyzer (ExportLevelFocusedTests --analyze): deliberately NOT
+    // `scenarioOutputDir_` (which `finish` deletes).
+    auto outDir = std::make_shared<juce::File>(
+        juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-export-levels"));
+    (void)outDir->deleteRecursively();
+    (void)outDir->createDirectory();
+
+    appendLoadAndVerifySteps(project, "export-levels");
+
+    steps_.push_back(Step{ "export-levels: describe tracks, resolve the active loop and the master row",
+                           [this, outDir](juce::String& failReason) -> bool {
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   appendStabilityRunLine("  " + hooks_.describeTrackForDiagnostics(t.id)
+                                                          + " fader=" + juce::String(hooks_.getTrackChannelFaderGain(t.id), 4));
+                                   if (t.kindName == "master")
+                                   {
+                                       exportMasterTrackId_ = t.id;
+                                   }
+                               }
+                               std::int64_t start = 0;
+                               if (!hooks_.getActiveLoopSpan(start, exportLoopLengthSamples_, exportSampleRate_))
+                               {
+                                   failReason = "no active loop range (cycle must be on with R > L)";
+                                   return false;
+                               }
+                               exportMasterFaderAtStart_ = exportMasterTrackId_ != kInvalidTrackId
+                                                               ? hooks_.getTrackChannelFaderGain(exportMasterTrackId_)
+                                                               : 1.0f;
+                               appendStabilityRunLine("  loop start=" + juce::String((juce::int64)start) + " length="
+                                                      + juce::String((juce::int64)exportLoopLengthSamples_) + " samples ("
+                                                      + juce::String((double)exportLoopLengthSamples_ / exportSampleRate_, 2)
+                                                      + " s) sampleRate=" + juce::String(exportSampleRate_)
+                                                      + " master id=" + juce::String((juce::int64)exportMasterTrackId_)
+                                                      + " master fader=" + juce::String(exportMasterFaderAtStart_, 4) + " ("
+                                                      + dbfs(exportMasterFaderAtStart_) + " dB)" + " out=" + outDir->getFullPathName());
+                               return exportMasterTrackId_ != kInvalidTrackId;
+                           },
+                           kSettleDefaultMs });
+
+    // Realtime pass: play the whole loop once from its start and fold the device output.
+    const auto realtimePassSteps = [this](const juce::String& label, StabilityLevelStats* into) {
+        steps_.push_back(Step{ "export-levels: " + label + " realtime - seek loop start and play",
+                               [this](juce::String&) -> bool {
+                                   std::int64_t start = 0, len = 0;
+                                   double sr = 0.0;
+                                   (void)hooks_.getActiveLoopSpan(start, len, sr);
+                                   hooks_.seekTransportTo(start);
+                                   hooks_.setPlaybackActive(true);
+                                   (void)hooks_.drainMasterMeter(); // discard the pre-roll block(s)
+                                   return true;
+                               },
+                               250 });
+        steps_.push_back(Step{ "export-levels: " + label + " realtime - arm measurement window (whole loop)",
+                               [this](juce::String&) -> bool {
+                                   (void)hooks_.drainMasterMeter();
+                                   // Whole loop, capped at 40 s so long projects stay practical.
+                                   settleOverrideMsForCurrentStep_ = static_cast<int>(juce::jlimit(
+                                       2000.0, 40000.0,
+                                       1000.0 * (double)exportLoopLengthSamples_ / juce::jmax(1.0, exportSampleRate_)));
+                                   appendStabilityRunLine("  measuring for " + juce::String(settleOverrideMsForCurrentStep_) + " ms");
+                                   return true;
+                               },
+                               2000 });
+        steps_.push_back(Step{ "export-levels: " + label + " realtime - read Stereo Out meter and stop",
+                               [this, into, label](juce::String& failReason) -> bool {
+                                   *into = hooks_.drainMasterMeter();
+                                   hooks_.setPlaybackActive(false);
+                                   appendStabilityRunLine("  " + label + " REALTIME Stereo Out: " + describeLevelStats(*into));
+                                   if (into->frames == 0)
+                                   {
+                                       failReason = "no audio blocks were measured (device callback not running?)";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               600 });
+    };
+
+    realtimePassSteps("A (project state)", &exportRealtimeA_);
+
+    // Per-track sweep: which row carries level / DC. Each row is metered for 3 s of playback from
+    // the loop start (post-strip stage: after fader, mute and pan, before its output bus).
+    if (hooks_.setMeteredTrack != nullptr && hooks_.drainTrackMeter != nullptr)
+    {
+        steps_.push_back(Step{ "export-levels: per-track sweep - plan",
+                               [this](juce::String&) -> bool {
+                                   const std::vector<StabilityTrackInfo> tracks = hooks_.listAllTracks();
+                                   size_t insertAt = nextStepIndex_;
+                                   for (const StabilityTrackInfo& t : tracks)
+                                   {
+                                       if (t.kindName == "midi")
+                                       {
+                                           continue; // no audio path
+                                       }
+                                       const TrackId tid = t.id;
+                                       const juce::String who = t.kindName + " track " + juce::String((juce::int64)tid) + " \"" + t.name + "\"";
+                                       steps_.insert(steps_.begin() + (long)insertAt++,
+                                                     Step{ "export-levels: sweep " + who + " - meter + play 3 s",
+                                                           [this, tid](juce::String&) -> bool {
+                                                               std::int64_t start = 0, len = 0;
+                                                               double sr = 0.0;
+                                                               (void)hooks_.getActiveLoopSpan(start, len, sr);
+                                                               // Select the row like a header click so the Inspector
+                                                               // panel follows (it owns the live meter tap), then
+                                                               // point the tap explicitly for the diagnostics window.
+                                                               if (hooks_.activateTrackLikeHeaderClick != nullptr)
+                                                               {
+                                                                   hooks_.activateTrackLikeHeaderClick(tid);
+                                                               }
+                                                               hooks_.setMeteredTrack(tid);
+                                                               hooks_.seekTransportTo(start);
+                                                               hooks_.setPlaybackActive(true);
+                                                               (void)hooks_.drainTrackMeter();
+                                                               (void)hooks_.drainMasterMeter();
+                                                               return true;
+                                                           },
+                                                           3000 });
+                                       steps_.insert(steps_.begin() + (long)insertAt++,
+                                                     Step{ "export-levels: sweep " + who + " - read",
+                                                           [this, who](juce::String&) -> bool {
+                                                               const StabilityLevelStats s = hooks_.drainTrackMeter();
+                                                               const StabilityLevelStats m = hooks_.drainMasterMeter();
+                                                               hooks_.setPlaybackActive(false);
+                                                               appendStabilityRunLine("  " + who + " post-strip: " + describeLevelStats(s));
+                                                               appendStabilityRunLine("  (Stereo Out during the same 3 s: " + describeLevelStats(m) + ")");
+                                                               return true;
+                                                           },
+                                                           500 });
+                                   }
+                                   steps_.insert(steps_.begin() + (long)insertAt++,
+                                                 Step{ "export-levels: sweep done - meter off",
+                                                       [this](juce::String&) -> bool {
+                                                           hooks_.setMeteredTrack(kInvalidTrackId);
+                                                           return true;
+                                                       },
+                                                       kSettleDefaultMs });
+                                   return true;
+                               },
+                               0 });
+    }
+
+    const auto exportStep = [this, outDir](const juce::String& label, const juce::String& fileName, const bool mp3,
+                                           const int bits, StabilityLevelStats* into) {
+        steps_.push_back(Step{ "export-levels: " + label,
+                               [this, outDir, fileName, mp3, bits, into, label](juce::String& failReason) -> bool {
+                                   StabilityLevelStats report;
+                                   const juce::File out = outDir->getChildFile(fileName);
+                                   const juce::Result r = hooks_.runMixdownWithLevelReport(out, mp3, bits, report);
+                                   if (r.failed())
+                                   {
+                                       failReason = "export failed: " + r.getErrorMessage();
+                                       return false;
+                                   }
+                                   if (!out.existsAsFile() || out.getSize() <= 0)
+                                   {
+                                       failReason = "export produced no file: " + out.getFullPathName();
+                                       return false;
+                                   }
+                                   appendStabilityRunLine("  " + label + " -> " + out.getFullPathName() + " (" + juce::String(out.getSize())
+                                                          + " bytes) OFFLINE render: " + describeLevelStats(report));
+                                   if (into != nullptr)
+                                   {
+                                       *into = report;
+                                   }
+                                   return true;
+                               },
+                               600 });
+    };
+
+    exportStep("A export WAV float32", "A-master-float32.wav", false, 32, &exportFloatA_);
+    exportStep("A export WAV 24-bit", "A-master-pcm24.wav", false, 24, nullptr);
+    exportStep("A export MP3 192 kbps", "A-master-192.mp3", true, 0, nullptr);
+
+    steps_.push_back(Step{ "export-levels: compare realtime A vs offline float A",
+                           [this](juce::String&) -> bool {
+                               const double dPeakL = ratioDb(exportFloatA_.peak[0], exportRealtimeA_.peak[0]);
+                               const double dPeakR = ratioDb(exportFloatA_.peak[1], exportRealtimeA_.peak[1]);
+                               const double dRmsL = ratioDb(exportFloatA_.rms[0], exportRealtimeA_.rms[0]);
+                               const double dRmsR = ratioDb(exportFloatA_.rms[1], exportRealtimeA_.rms[1]);
+                               appendStabilityRunLine("  offline/realtime delta: peakL=" + juce::String(dPeakL, 2) + " dB peakR="
+                                                      + juce::String(dPeakR, 2) + " dB rmsL=" + juce::String(dRmsL, 2) + " dB rmsR="
+                                                      + juce::String(dRmsR, 2) + " dB (positive = export louder)");
+                               return true; // informational: plug-ins with modulation make exact equality meaningless here
+                           },
+                           kSettleDefaultMs });
+
+    // Diagnostic: master fader 12 dB lower, both paths again.
+    steps_.push_back(Step{ "export-levels: B - set Stereo Out fader 12 dB lower (diagnostic, restored later)",
+                           [this](juce::String&) -> bool {
+                               const float target = exportMasterFaderAtStart_ * 0.251189f;
+                               hooks_.setTrackChannelFaderGain(exportMasterTrackId_, target);
+                               appendStabilityRunLine("  master fader " + juce::String(exportMasterFaderAtStart_, 4) + " -> "
+                                                      + juce::String(hooks_.getTrackChannelFaderGain(exportMasterTrackId_), 4));
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    exportStep("B export WAV float32 (-12 dB master)", "B-master-minus12-float32.wav", false, 32, &exportFloatB_);
+    exportStep("B export MP3 192 kbps (-12 dB master)", "B-master-minus12-192.mp3", true, 0, nullptr);
+    realtimePassSteps("B (-12 dB master)", &exportRealtimeB_);
+
+    steps_.push_back(Step{ "export-levels: master fader reaches both paths (B vs A)",
+                           [this](juce::String& failReason) -> bool {
+                               const double offL = ratioDb(exportFloatB_.rms[0], exportFloatA_.rms[0]);
+                               const double offR = ratioDb(exportFloatB_.rms[1], exportFloatA_.rms[1]);
+                               const double rtL = ratioDb(exportRealtimeB_.rms[0], exportRealtimeA_.rms[0]);
+                               const double rtR = ratioDb(exportRealtimeB_.rms[1], exportRealtimeA_.rms[1]);
+                               const double offPk = ratioDb(juce::jmax(exportFloatB_.peak[0], exportFloatB_.peak[1]),
+                                                            juce::jmax(exportFloatA_.peak[0], exportFloatA_.peak[1]));
+                               const double rtPk = ratioDb(juce::jmax(exportRealtimeB_.peak[0], exportRealtimeB_.peak[1]),
+                                                           juce::jmax(exportRealtimeA_.peak[0], exportRealtimeA_.peak[1]));
+                               appendStabilityRunLine("  RMS change B-A: offline L=" + juce::String(offL, 2) + " R=" + juce::String(offR, 2)
+                                                      + " dB | realtime L=" + juce::String(rtL, 2) + " R=" + juce::String(rtR, 2)
+                                                      + " dB | peak change offline=" + juce::String(offPk, 2) + " dB realtime="
+                                                      + juce::String(rtPk, 2) + " dB (expected -12.0)");
+                               // Offline renders the same loop twice: only plug-in modulation can differ (1 dB).
+                               if (std::fabs(offL + 12.0) > 1.0 || std::fabs(offR + 12.0) > 1.0)
+                               {
+                                   failReason = "offline export did not follow the master fader by -12 dB";
+                                   return false;
+                               }
+                               // Realtime passes are two separate live performances of the loop (plug-in
+                               // modulation, DC-offset presence of a plug-in varies with its history), so
+                               // the RMS is only informational; the peak must follow within 3 dB.
+                               if (std::fabs(rtPk + 12.0) > 3.0)
+                               {
+                                   failReason = "realtime output peak did not follow the master fader by -12 dB (within 3 dB)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "export-levels: restore the Stereo Out fader",
+                           [this](juce::String&) -> bool {
+                               hooks_.setTrackChannelFaderGain(exportMasterTrackId_, exportMasterFaderAtStart_);
+                               appendStabilityRunLine("  master fader restored to "
+                                                      + juce::String(hooks_.getTrackChannelFaderGain(exportMasterTrackId_), 4));
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    if (hooks_.audioHealthProbeBegin != nullptr && hooks_.audioHealthProbeVerify != nullptr)
+    {
+        steps_.push_back(Step{ "export-levels: playback after exports - start (probe armed)",
+                               [this](juce::String&) -> bool {
+                                   std::int64_t start = 0, len = 0;
+                                   double sr = 0.0;
+                                   (void)hooks_.getActiveLoopSpan(start, len, sr);
+                                   hooks_.seekTransportTo(start);
+                                   hooks_.audioHealthProbeBegin();
+                                   hooks_.setPlaybackActive(true);
+                                   return true;
+                               },
+                               2500 });
+        steps_.push_back(Step{ "export-levels: playback after exports - verify audio health",
+                               [this](juce::String& failReason) -> bool {
+                                   const bool ok = hooks_.audioHealthProbeVerify("after exports", failReason);
+                                   hooks_.setPlaybackActive(false);
+                                   return ok;
+                               },
+                               600 });
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Inspector channel panel in the real app
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& project)
+{
+    if (hooks_.verifyInspectorPanelLayout == nullptr || hooks_.captureInspectorPng == nullptr
+        || hooks_.describeInspectorMeters == nullptr || hooks_.isInspectorMasterMeterOverloadLatched == nullptr
+        || hooks_.inspectorMasterMeterShowsSignal == nullptr || hooks_.inspectorTrackMeterShowsSignal == nullptr
+        || hooks_.resetInspectorOverloadLatches == nullptr || hooks_.inspectorFaderTypeValue == nullptr
+        || hooks_.inspectorFaderResetGesture == nullptr || hooks_.inspectorFaderValueText == nullptr
+        || hooks_.inspectorScrollToBottomAndVerify == nullptr || hooks_.getMainWindowBounds == nullptr
+        || hooks_.setMainWindowSize == nullptr || hooks_.activateTrackLikeHeaderClick == nullptr
+        || hooks_.listAllTracks == nullptr || hooks_.getTrackChannelFaderGain == nullptr
+        || hooks_.setTrackChannelFaderGain == nullptr || hooks_.seekTransportTo == nullptr
+        || hooks_.setPlaybackActive == nullptr)
+    {
+        steps_.push_back(Step{ "inspector-panel: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "inspector-panel hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    auto evidenceDir = std::make_shared<juce::File>(
+        juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-inspector-panel"));
+    (void)evidenceDir->deleteRecursively();
+    (void)evidenceDir->createDirectory();
+
+    appendLoadAndVerifySteps(project, "inspector-panel");
+
+    const auto verifyAndCapture = [this, evidenceDir](const juce::String& label, juce::String& failReason) -> bool {
+        juce::String report;
+        const bool ok = hooks_.verifyInspectorPanelLayout(report, failReason);
+        for (const auto& line : juce::StringArray::fromLines(report))
+        {
+            if (line.isNotEmpty())
+            {
+                appendStabilityRunLine("    " + line);
+            }
+        }
+        appendStabilityRunLine("    meters: " + hooks_.describeInspectorMeters());
+        const juce::File png = evidenceDir->getChildFile("inspector-" + label + ".png");
+        if (hooks_.captureInspectorPng(png))
+        {
+            appendStabilityRunLine("  evidence: " + png.getFullPathName());
+        }
+        return ok;
+    };
+
+    steps_.push_back(Step{ "inspector-panel: remember window bounds; layout at startup",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               inspectorWindowBoundsAtStart_ = hooks_.getMainWindowBounds();
+                               appendStabilityRunLine("  main window " + inspectorWindowBoundsAtStart_.toString());
+                               return verifyAndCapture("startup", failReason);
+                           },
+                           kSettleDefaultMs });
+
+    // One activation + check per row kind present in the project.
+    steps_.push_back(Step{ "inspector-panel: plan per-kind activations",
+                           [this, verifyAndCapture](juce::String&) -> bool {
+                               size_t insertAt = nextStepIndex_;
+                               juce::StringArray seenKinds;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (seenKinds.contains(t.kindName))
+                                   {
+                                       continue;
+                                   }
+                                   seenKinds.add(t.kindName);
+                                   const TrackId tid = t.id;
+                                   const juce::String kind = t.kindName;
+                                   if (kind == "audio" && inspectorAudioTrackId_ == kInvalidTrackId)
+                                   {
+                                       inspectorAudioTrackId_ = tid;
+                                   }
+                                   steps_.insert(steps_.begin() + (long)insertAt++,
+                                                 Step{ "inspector-panel: activate " + kind + " track " + juce::String((juce::int64)tid)
+                                                           + " like a header click",
+                                                       [this, tid](juce::String&) -> bool {
+                                                           hooks_.activateTrackLikeHeaderClick(tid);
+                                                           return true;
+                                                       },
+                                                       400 });
+                                   steps_.insert(steps_.begin() + (long)insertAt++,
+                                                 Step{ "inspector-panel: verify channel panel for " + kind,
+                                                       [verifyAndCapture, kind](juce::String& failReason) -> bool {
+                                                           return verifyAndCapture(kind, failReason);
+                                                       },
+                                                       kSettleDefaultMs });
+                               }
+                               return true;
+                           },
+                           0 });
+
+    // Meters while playing (instrument row selected so the track meter has a source).
+    steps_.push_back(Step{ "inspector-panel: select the instrument row with content and play from 24 s",
+                           [this](juce::String& failReason) -> bool {
+                               TrackId inst = kInvalidTrackId;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "instrument" && t.name.containsIgnoreCase("VB3"))
+                                   {
+                                       inst = t.id;
+                                   }
+                               }
+                               if (inst == kInvalidTrackId)
+                               {
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                                   {
+                                       if (t.kindName == "instrument")
+                                       {
+                                           inst = t.id;
+                                           break;
+                                       }
+                                   }
+                               }
+                               if (inst == kInvalidTrackId)
+                               {
+                                   failReason = "no instrument row in this project";
+                                   return false;
+                               }
+                               hooks_.activateTrackLikeHeaderClick(inst);
+                               hooks_.resetInspectorOverloadLatches();
+                               std::int64_t start = 0, len = 0;
+                               double sr = 48000.0;
+                               if (hooks_.getActiveLoopSpan != nullptr && hooks_.getActiveLoopSpan(start, len, sr))
+                               {
+                                   hooks_.seekTransportTo(start + (std::int64_t)(24.0 * sr));
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "inspector-panel: meters show signal while playing",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               const bool master = hooks_.inspectorMasterMeterShowsSignal();
+                               const bool track = hooks_.inspectorTrackMeterShowsSignal();
+                               const bool ok = verifyAndCapture("playing", failReason);
+                               hooks_.setPlaybackActive(false);
+                               if (!ok)
+                               {
+                                   return false;
+                               }
+                               if (!master)
+                               {
+                                   failReason = "Stereo Out meter shows no signal while the project plays";
+                                   return false;
+                               }
+                               if (!track)
+                               {
+                                   failReason = "track meter shows no signal for the playing instrument row";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+
+    // Overload latch: master +6 dB makes this project exceed 0 dBFS.
+    steps_.push_back(Step{ "inspector-panel: Stereo Out fader +6 dB, play 3 s (forces an overload)",
+                           [this](juce::String& failReason) -> bool {
+                               TrackId master = kInvalidTrackId;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "master")
+                                   {
+                                       master = t.id;
+                                   }
+                               }
+                               if (master == kInvalidTrackId)
+                               {
+                                   failReason = "no master row";
+                                   return false;
+                               }
+                               exportMasterTrackId_ = master;
+                               exportMasterFaderAtStart_ = hooks_.getTrackChannelFaderGain(master);
+                               hooks_.setTrackChannelFaderGain(master, 1.99526f);
+                               hooks_.resetInspectorOverloadLatches();
+                               std::int64_t start = 0, len = 0;
+                               double sr = 48000.0;
+                               if (hooks_.getActiveLoopSpan != nullptr && hooks_.getActiveLoopSpan(start, len, sr))
+                               {
+                                   hooks_.seekTransportTo(start + (std::int64_t)(24.0 * sr));
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           3000 });
+    steps_.push_back(Step{ "inspector-panel: overload latch set, then reset by the user gesture",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               const bool latched = hooks_.isInspectorMasterMeterOverloadLatched();
+                               appendStabilityRunLine("  after +6 dB playback: " + hooks_.describeInspectorMeters());
+                               (void)verifyAndCapture("overload", failReason);
+                               hooks_.setTrackChannelFaderGain(exportMasterTrackId_, exportMasterFaderAtStart_);
+                               if (!latched)
+                               {
+                                   failReason = "Stereo Out overload lamp did not latch although the mix exceeded 0 dBFS";
+                                   return false;
+                               }
+                               hooks_.resetInspectorOverloadLatches();
+                               if (hooks_.isInspectorMasterMeterOverloadLatched())
+                               {
+                                   failReason = "overload lamp stayed latched after reset";
+                                   return false;
+                               }
+                               appendStabilityRunLine("  latch reset ok; master fader restored to "
+                                                      + juce::String(hooks_.getTrackChannelFaderGain(exportMasterTrackId_), 4));
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    // Fader paths on the audio row: typed values and the reset gesture reach the session.
+    steps_.push_back(Step{ "inspector-panel: fader typed values + reset gesture reach the session",
+                           [this](juce::String& failReason) -> bool {
+                               if (inspectorAudioTrackId_ == kInvalidTrackId)
+                               {
+                                   failReason = "no audio row";
+                                   return false;
+                               }
+                               hooks_.activateTrackLikeHeaderClick(inspectorAudioTrackId_);
+                               inspectorAudioFaderAtStart_ = hooks_.getTrackChannelFaderGain(inspectorAudioTrackId_);
+                               struct Case { const char* text; float expected; };
+                               const Case cases[] = { { "-6", 0.501187f }, { "+3", 1.412538f }, { "-inf", 0.0f }, { "12", 1.995262f } };
+                               for (const Case& c : cases)
+                               {
+                                   hooks_.inspectorFaderTypeValue(c.text);
+                                   const float got = hooks_.getTrackChannelFaderGain(inspectorAudioTrackId_);
+                                   appendStabilityRunLine("  typed \"" + juce::String(c.text) + "\" -> session gain " + juce::String(got, 5)
+                                                          + " (field shows \"" + hooks_.inspectorFaderValueText() + "\")");
+                                   if (std::fabs(got - c.expected) > 1.0e-3f)
+                                   {
+                                       failReason = "typed \"" + juce::String(c.text) + "\" did not reach the session (expected "
+                                                    + juce::String(c.expected, 4) + ")";
+                                       return false;
+                                   }
+                               }
+                               hooks_.inspectorFaderResetGesture();
+                               const float reset = hooks_.getTrackChannelFaderGain(inspectorAudioTrackId_);
+                               appendStabilityRunLine("  reset gesture -> session gain " + juce::String(reset, 5) + " (field \""
+                                                      + hooks_.inspectorFaderValueText() + "\")");
+                               hooks_.setTrackChannelFaderGain(inspectorAudioTrackId_, inspectorAudioFaderAtStart_);
+                               if (std::fabs(reset - 1.0f) > 1.0e-6f)
+                               {
+                                   failReason = "reset gesture did not return the fader to 0 dB";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "inspector-panel: low window (height 640) keeps the panel usable and the scroll area alive",
+                           [this](juce::String&) -> bool {
+                               hooks_.setMainWindowSize(juce::jmax(900, inspectorWindowBoundsAtStart_.getWidth()), 640);
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "inspector-panel: verify layout at the low window",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               return verifyAndCapture("low-window", failReason);
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "inspector-panel: every Inspector control reachable by scrolling (low window)",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               juce::String detail;
+                               const bool ok = hooks_.inspectorScrollToBottomAndVerify(detail);
+                               appendStabilityRunLine("  " + detail);
+                               const bool layoutOk = verifyAndCapture("low-window-scrolled", failReason);
+                               hooks_.setMainWindowSize(inspectorWindowBoundsAtStart_.getWidth(), inspectorWindowBoundsAtStart_.getHeight());
+                               if (!layoutOk)
+                               {
+                                   return false;
+                               }
+                               if (!ok)
+                               {
+                                   failReason = "Inspector content is not fully reachable by scrolling: " + detail;
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "inspector-panel: window restored",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               appendStabilityRunLine("  main window now " + hooks_.getMainWindowBounds().toString());
+                               return verifyAndCapture("restored", failReason);
                            },
                            kSettleDefaultMs });
 }

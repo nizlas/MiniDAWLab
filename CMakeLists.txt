@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.7 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.8 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -121,6 +121,10 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/CollapsibleSideStrip.cpp
     src/ui/InspectorPanControl.cpp
     src/ui/InspectorView.cpp
+    src/ui/InspectorPanel.cpp
+    src/ui/ChannelStripPanel.cpp
+    src/ui/ChannelFaderComponent.cpp
+    src/ui/LevelMeterComponent.cpp
     src/ui/InstrumentAlternativesPopup.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
@@ -362,6 +366,61 @@ target_link_libraries(InsertPersistenceFocusedTests
 if (MSVC)
     target_compile_options(InsertPersistenceFocusedTests PRIVATE /wd4458)
 endif()
+
+# -----------------------------------------------------------------------------
+# ExportLevelFocusedTests: export level / click diagnosis + level-meter regression. `--analyze <dir>`
+# measures the WAV/MP3 files written by `MiniDAWLab.exe --stability-export-levels` (JUCE WAV reader
+# + JUCE MP3 decoder to float, 4x oversampled peak estimate, edge transients, MP3-vs-WAV alignment).
+# Default mode: the PRODUCTION PlaybackEngine's realtime callback (stub device) vs
+# `renderOfflineMixdownBlock` sample-identity on a deterministic tone session (fader / pan / mute /
+# master), the LevelMeterAccumulator, the ChannelFaderScale mapping and the -inf/0/+6 dB project round trip.
+# -----------------------------------------------------------------------------
+juce_add_console_app(ExportLevelFocusedTests PRODUCT_NAME "ExportLevelFocusedTests")
+target_sources(ExportLevelFocusedTests PRIVATE
+    tests/selftest/ExportLevelFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/diagnostics/PlaybackUiLoadLog.cpp
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/PlaybackEngine.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/engine/RoutingPlanBuilder.cpp
+    src/engine/RecorderService.cpp
+    src/engine/CountInClickOutput.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp)
+target_include_directories(ExportLevelFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ExportLevelFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_MP3AUDIOFORMAT=1)
+target_link_libraries(ExportLevelFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(ExportLevelFocusedTests PRIVATE /wd4458)
+endif()
+# PlaybackEngine.cpp includes app/ShortcutDiagnostics.h, which uses the generated JuceHeader.h.
+juce_generate_juce_header(ExportLevelFocusedTests)
 
 # -----------------------------------------------------------------------------
 # TrackHeaderColumnFocusedTests: the shared track-header column width. Drives the PRODUCTION

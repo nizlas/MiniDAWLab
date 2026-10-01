@@ -72,6 +72,33 @@ enum class StabilityScenarioKind
     /// through the same path the drag handle uses), that adding/removing a track keeps the width,
     /// that the width is persisted app-wide, and writes PNG evidence of the arrangement.
     HeaderColumn,
+    /// Export level diagnosis on a real project copy: measures the REALTIME Stereo Out (device
+    /// output, via the engine's master meter accumulator) over the active loop, then exports the
+    /// same loop as float WAV, 24-bit WAV and MP3 through the production exporter (files kept in
+    /// `%TEMP%\dal-export-levels` for the offline analyzer) with each render's level report, then
+    /// repeats float WAV + realtime with the Stereo Out fader 12 dB lower (diagnostic, restored
+    /// afterwards) to prove the master fader reaches both paths identically. Nothing is saved.
+    ExportLevels,
+    /// Inspector channel panel in the real app: per row kind (audio / instrument / MIDI / master)
+    /// the fixed bottom panel shows the right controls, meters move while playing, the overload
+    /// latch sets and resets, typed fader values and the reset gesture reach the session, every
+    /// Inspector control is reachable by scrolling, and the layout survives a low window. PNG
+    /// evidence of the real Inspector column is written for the report.
+    InspectorPanel,
+};
+
+/// Mirror of the exporter's level report / the engine's meter reading for scenario logging.
+struct StabilityLevelStats
+{
+    float peak[2] = { 0.0f, 0.0f };
+    std::uint32_t overs[2] = { 0, 0 };
+    double rms[2] = { 0.0, 0.0 };
+    double dcOffset[2] = { 0.0, 0.0 };
+    std::uint32_t nonFinite = 0;
+    std::uint64_t frames = 0;
+    float firstSample[2] = { 0.0f, 0.0f };
+    float lastSample[2] = { 0.0f, 0.0f };
+    bool valid = false;
 };
 
 /// One insert row as the runner sees it (mirrors `InsertRowView`).
@@ -267,6 +294,43 @@ struct StabilityRunnerHooks
     std::function<bool(juce::String& report, juce::String& failReason)> verifyHeaderColumnLayout;
     /// Writes a PNG snapshot of the whole arrangement window content to `png`.
     std::function<bool(const juce::File& png)> captureArrangementPng;
+
+    // --- Export levels scenario -------------------------------------------------------
+    /// Drains the engine's Stereo Out meter accumulator (everything since the previous drain).
+    std::function<StabilityLevelStats()> drainMasterMeter;
+    /// Selects the row the engine's track meter follows (post-strip stage) / drains it.
+    std::function<void(TrackId)> setMeteredTrack;
+    std::function<StabilityLevelStats()> drainTrackMeter;
+    /// Production export with the level report returned. `bits` 16 / 24 / 32 (float); `mp3` uses
+    /// the MP3 pipeline (bits ignored). Overwrite auto-confirmed, no progress window.
+    std::function<juce::Result(const juce::File& out, bool mp3, int bits, StabilityLevelStats& report)>
+        runMixdownWithLevelReport;
+    /// Channel fader (linear) of a row, read / set through the Session setter the Inspector uses.
+    std::function<float(TrackId)> getTrackChannelFaderGain;
+    std::function<void(TrackId, float)> setTrackChannelFaderGain;
+    /// Active loop span as the exporter resolves it (false when no valid cycle range).
+    std::function<bool(std::int64_t& startSample, std::int64_t& lengthSamples, double& sampleRate)> getActiveLoopSpan;
+
+    // --- Inspector panel scenario -------------------------------------------------------
+    /// Geometry + mode check of the real Inspector column for the active row; appends a report.
+    std::function<bool(juce::String& report, juce::String& failReason)> verifyInspectorPanelLayout;
+    /// PNG of the Inspector column (scroll area + channel panel) as rendered.
+    std::function<bool(const juce::File& png)> captureInspectorPng;
+    /// Meter state line: displayed dB, held peak text, overload latch, DC tag — track and Stereo Out.
+    std::function<juce::String()> describeInspectorMeters;
+    std::function<bool()> isInspectorMasterMeterOverloadLatched;
+    std::function<bool()> inspectorMasterMeterShowsSignal;
+    std::function<bool()> inspectorTrackMeterShowsSignal;
+    std::function<void()> resetInspectorOverloadLatches;
+    /// Same handlers the fader's value field (Return) and Ctrl/Cmd+click use.
+    std::function<void(const juce::String&)> inspectorFaderTypeValue;
+    std::function<void()> inspectorFaderResetGesture;
+    std::function<juce::String()> inspectorFaderValueText;
+    /// Scrolls the Inspector content to its bottom; true when the whole content is reachable.
+    std::function<bool(juce::String& detail)> inspectorScrollToBottomAndVerify;
+    /// Main window size (restored by the scenario).
+    std::function<juce::Rectangle<int>()> getMainWindowBounds;
+    std::function<void(int w, int h)> setMainWindowSize;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -313,6 +377,10 @@ private:
     void appendInsertsSteps(const juce::File& project);
     /// Shared header column geometry, resize path, persistence and PNG evidence.
     void appendHeaderColumnSteps(const juce::File& project);
+    /// Realtime Stereo Out vs offline export levels (float / 24-bit / MP3) + master fader check.
+    void appendExportLevelsSteps(const juce::File& project);
+    /// Inspector channel panel: modes per row kind, meters, latch, fader paths, scrolling, low window.
+    void appendInspectorPanelSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -326,6 +394,8 @@ private:
     StabilityRunnerHooks hooks_;
     std::vector<Step> steps_;
     size_t nextStepIndex_ = 0;
+    /// Set by a step action to replace its static `settleMsAfter` for this run (-1 = not set).
+    int settleOverrideMsForCurrentStep_ = -1;
     /// Stability C3: failure-count baseline at `start`; any increase during a step fails the run.
     int invariantFailuresAtStart_ = 0;
     juce::int64 resumeAtMs_ = 0;
@@ -355,6 +425,19 @@ private:
     juce::File insertsMissingPluginCopy_;
     /// HeaderColumn: the user's preference at scenario start (restored at the end).
     int headerColumnWidthAtStart_ = 0;
+    /// ExportLevels: measurements carried between steps.
+    StabilityLevelStats exportRealtimeA_;
+    StabilityLevelStats exportRealtimeB_;
+    StabilityLevelStats exportFloatA_;
+    StabilityLevelStats exportFloatB_;
+    TrackId exportMasterTrackId_ = kInvalidTrackId;
+    float exportMasterFaderAtStart_ = 1.0f;
+    std::int64_t exportLoopLengthSamples_ = 0;
+    double exportSampleRate_ = 0.0;
+    /// InspectorPanel: window bounds / fader values restored at the end.
+    juce::Rectangle<int> inspectorWindowBoundsAtStart_;
+    float inspectorAudioFaderAtStart_ = 1.0f;
+    TrackId inspectorAudioTrackId_ = kInvalidTrackId;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };

@@ -19,10 +19,6 @@ namespace
     constexpr int kGapValueToDbSuffix = 4;
     constexpr int kDbUnitLabelWidth = 22;
     constexpr int kDbValueFieldHeight = 24;
-    constexpr double kVolumeMinDb = -60.0;
-    constexpr double kVolumeMaxDb = 6.0;
-    constexpr float kGainDriftEps = 5.0e-5f;
-
     [[nodiscard]] juce::String utf8InfinityChar()
     {
         return juce::String(juce::CharPointer_UTF8("\xe2\x88\x9e"));
@@ -45,29 +41,6 @@ namespace
             return true;
         const juce::String inf = utf8InfinityChar();
         return t == (juce::String("-") + inf);
-    }
-
-    [[nodiscard]] juce::String formatLinearGainToValueFieldOnly(const float linearGain)
-    {
-        if (linearGain <= 0.f)
-        {
-            return juce::String("-Inf");
-        }
-        const float db = juce::Decibels::gainToDecibels(
-            linearGain, static_cast<float>(kVolumeMinDb));
-        const double d = juce::jlimit(kVolumeMinDb, kVolumeMaxDb, static_cast<double>(db));
-
-        const bool zeroish = std::fabs(d) <= 0.00005;
-
-        juce::String digits;
-        if (zeroish)
-            digits = juce::String("0.0");
-        else if (d < -0.00005)
-            digits = juce::String(d, 1);
-        else
-            digits << "+" << juce::String(d, 1);
-
-        return digits;
     }
 
     /// Pre-gain field text: signed 1-decimal dB ("+6.0" / "-3.5" / "0.0"), unit label outside.
@@ -105,56 +78,6 @@ namespace
 
         outPreGainDb = sanitizeTrackPreGainDb(static_cast<float>(v));
         return true;
-    }
-
-    [[nodiscard]] bool tryParseCommittedText(const juce::String raw, float& outLinearGain)
-    {
-        const juce::String strippedUnit = stripDbUnitSuffix(raw);
-        if (strippedUnit.isEmpty())
-            return false;
-
-        if (isNegativeInfinityText(strippedUnit))
-        {
-            outLinearGain = 0.f;
-            return true;
-        }
-
-        const std::string buf = strippedUnit.toStdString();
-        char* endPtr = nullptr;
-        const double v = std::strtod(buf.c_str(), &endPtr);
-        if (endPtr == buf.c_str())
-            return false;
-        while (endPtr != buf.c_str() + buf.size()
-               && std::isspace(static_cast<unsigned char>(*endPtr)))
-        {
-            ++endPtr;
-        }
-        if (endPtr != buf.c_str() + buf.size())
-            return false;
-
-        double db = v;
-        if (db < kVolumeMinDb)
-            db = kVolumeMinDb;
-        if (db > kVolumeMaxDb)
-            db = kVolumeMaxDb;
-
-        if (db <= kVolumeMinDb + 1.0e-9)
-        {
-            outLinearGain = 0.f;
-            return true;
-        }
-
-        outLinearGain = juce::Decibels::decibelsToGain(static_cast<float>(db),
-                                                        static_cast<float>(kVolumeMinDb));
-        return true;
-    }
-
-    [[nodiscard]] float linearGainImpliedByEditorText(juce::String raw)
-    {
-        float lin = -1.f;
-        if (!tryParseCommittedText(std::move(raw), lin))
-            return -1.f;
-        return lin;
     }
 
     constexpr double kSendAmountMinDb = -60.0;
@@ -621,24 +544,8 @@ InspectorView::InspectorView(Session& session)
         addAndMakeVisible(preGainDbEditor_);
     }
 
-    channelVolumeCaptionLabel_.setText("Channel volume", juce::dontSendNotification);
-    channelVolumeCaptionLabel_.setFont(juce::FontOptions(11.0f));
-    addAndMakeVisible(channelVolumeCaptionLabel_);
-
-    channelVolumeDbUnitLabel_.setText("dB", juce::dontSendNotification);
-    channelVolumeDbUnitLabel_.setFont(juce::FontOptions(12.0f));
-    channelVolumeDbUnitLabel_.setJustificationType(juce::Justification::centredLeft);
-    channelVolumeDbUnitLabel_.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(channelVolumeDbUnitLabel_);
-
-    channelVolumeDbEditor_.setMultiLine(false);
-    channelVolumeDbEditor_.setReturnKeyStartsNewLine(false);
-    channelVolumeDbEditor_.setFont(juce::FontOptions(12.0f));
-    channelVolumeDbEditor_.setJustification(juce::Justification::centred);
-    channelVolumeDbEditor_.setIndents(0, 4);
-    channelVolumeDbEditor_.setCaretVisible(true);
-    channelVolumeDbEditor_.addListener(this);
-    addAndMakeVisible(channelVolumeDbEditor_);
+    // Channel volume moved to the fixed channel panel below the scroll area (vertical fader +
+    // value field in `ChannelStripPanel`) — one coherent control instead of a text field here.
 
     panCaptionLabel_.setText("Pan", juce::dontSendNotification);
     panCaptionLabel_.setFont(juce::FontOptions(11.0f));
@@ -1336,12 +1243,6 @@ void InspectorView::rebuildInsertRowStrips(const TrackId active, const std::vect
     repaint();
 }
 
-void InspectorView::setVolumeEditorTextFromLinearGain(const float linearGain)
-{
-    channelVolumeDbEditor_.setText(formatLinearGainToValueFieldOnly(linearGain),
-                                   juce::dontSendNotification);
-}
-
 void InspectorView::syncActiveTrackNameEditorDisplay()
 {
     if (inspectorNameEditorGuard_)
@@ -1855,40 +1756,6 @@ void InspectorView::mouseDown(const juce::MouseEvent& e)
     }
 }
 
-void InspectorView::commitVolumeField()
-{
-    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
-    if (snap == nullptr || snap->getNumTracks() <= 0)
-        return;
-
-    const TrackId active = session_.getActiveTrackId();
-    const int idx = snap->findTrackIndexById(active);
-    if (idx < 0)
-        return;
-
-    const float snapGain = snap->getTrack(idx).getChannelFaderGain();
-
-    float parsedLinear = snapGain;
-    if (!tryParseCommittedText(channelVolumeDbEditor_.getText(), parsedLinear))
-    {
-        setVolumeEditorTextFromLinearGain(snapGain);
-        return;
-    }
-
-    session_.setTrackChannelFaderGain(active, parsedLinear);
-
-    const std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
-    if (after != nullptr && after->findTrackIndexById(active) >= 0)
-    {
-        const int ix = after->findTrackIndexById(active);
-        setVolumeEditorTextFromLinearGain(after->getTrack(ix).getChannelFaderGain());
-    }
-    else
-    {
-        setVolumeEditorTextFromLinearGain(parsedLinear);
-    }
-}
-
 void InspectorView::refreshFromSession()
 {
     const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
@@ -1900,7 +1767,6 @@ void InspectorView::refreshFromSession()
         activeTrackNameEditor_.setText("—", juce::dontSendNotification);
         activeTrackNameEditor_.setTooltip({});
         inspectorNameEditorGuard_ = false;
-        channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
         preGainDbEditor_.setText({}, juce::dontSendNotification);
         panField_.setPan(0.f, juce::dontSendNotification);
         syncInsertsWhenInspectorDisabled();
@@ -1918,7 +1784,6 @@ void InspectorView::refreshFromSession()
         activeTrackNameEditor_.setText("(no active track)", juce::dontSendNotification);
         activeTrackNameEditor_.setTooltip({});
         inspectorNameEditorGuard_ = false;
-        channelVolumeDbEditor_.setText({}, juce::dontSendNotification);
         preGainDbEditor_.setText({}, juce::dontSendNotification);
         panField_.setPan(0.f, juce::dontSendNotification);
         outputCaptionLabel_.setVisible(false);
@@ -1941,7 +1806,6 @@ void InspectorView::refreshFromSession()
     activeTrackNameEditor_.setEnabled(true);
     activeTrackNameEditor_.setInterceptsMouseClicks(!masterLane, !masterLane);
 
-    const float snapGain = tr.getChannelFaderGain();
     const bool switchedTrack = (lastShownTrackId_ != active);
     lastShownTrackId_ = active;
 
@@ -2132,23 +1996,6 @@ void InspectorView::refreshFromSession()
     {
         syncActiveTrackNameEditorDisplay();
     }
-
-    if (channelVolumeDbEditor_.hasKeyboardFocus(false) && !switchedTrack)
-        return;
-
-    if (switchedTrack)
-    {
-        setVolumeEditorTextFromLinearGain(snapGain);
-        return;
-    }
-
-    const float implied = linearGainImpliedByEditorText(channelVolumeDbEditor_.getText());
-    if (implied < 0.f
-        || std::fabs((double)implied - (double)snapGain)
-               > static_cast<double>(kGainDriftEps))
-    {
-        setVolumeEditorTextFromLinearGain(snapGain);
-    }
 }
 
 void InspectorView::resized()
@@ -2158,7 +2005,8 @@ void InspectorView::resized()
     activeTrackNameEditor_.setBounds(area.removeFromTop(22));
     area.removeFromTop(4);
 
-    // Pre-gain (audio rows only): claims a caption + field row above Channel volume when visible.
+    // Pre-gain (audio rows only): claims a caption + field row above Pan when visible. (Channel
+    // volume lives in the fixed channel panel below the scroll area.)
     if (preGainDbEditor_.isVisible())
     {
         preGainCaptionLabel_.setBounds(area.removeFromTop(18));
@@ -2171,17 +2019,6 @@ void InspectorView::resized()
         area.removeFromTop(8);
     }
 
-    channelVolumeCaptionLabel_.setBounds(area.removeFromTop(18));
-    area.removeFromTop(2);
-    auto fieldRow = area.removeFromTop(juce::jmax(26, kDbValueFieldHeight));
-    const int xStart = fieldRow.getX();
-    const int yy = fieldRow.getY();
-
-    channelVolumeDbEditor_.setBounds(xStart, yy, kDbValueFieldWidth, kDbValueFieldHeight);
-    channelVolumeDbUnitLabel_.setBounds(xStart + kDbValueFieldWidth + kGapValueToDbSuffix, yy,
-                                        kDbUnitLabelWidth, kDbValueFieldHeight);
-
-    area.removeFromTop(8);
     panCaptionLabel_.setBounds(area.removeFromTop(18));
     area.removeFromTop(2);
     {
@@ -2307,15 +2144,41 @@ void InspectorView::resized()
     // track-header "Instrument alternatives" popup — nothing to lay out here anymore.
 
     syncActiveTrackNameEditorDisplay();
+
+    // Content height for the owning scroll panel: sections stack top-down and never stretch, so
+    // the y reached here (plus the bottom pad) is the preferred height for the current kind /
+    // insert rows / sends. Report changes asynchronously (we are inside a layout pass).
+    const int usedHeight = (area.getY() - getLocalBounds().getY()) + 4;
+    if (usedHeight != lastLayoutUsedHeight_)
+    {
+        lastLayoutUsedHeight_ = usedHeight;
+        if (onPreferredHeightChanged_ != nullptr)
+        {
+            juce::Component::SafePointer<InspectorView> safeThis(this);
+            juce::MessageManager::callAsync([safeThis] {
+                if (safeThis != nullptr && safeThis->onPreferredHeightChanged_ != nullptr)
+                {
+                    safeThis->onPreferredHeightChanged_();
+                }
+            });
+        }
+    }
+}
+
+int InspectorView::getPreferredContentHeight(const int widthPx) const noexcept
+{
+    juce::ignoreUnused(widthPx); // sections are fixed-height rows; width never changes the stack
+    return lastLayoutUsedHeight_ > 0 ? lastLayoutUsedHeight_ : 640;
+}
+
+void InspectorView::setOnPreferredHeightChanged(std::function<void()> fn) noexcept
+{
+    onPreferredHeightChanged_ = std::move(fn);
 }
 
 void InspectorView::textEditorReturnKeyPressed(juce::TextEditor& editor)
 {
-    if (&editor == &channelVolumeDbEditor_)
-    {
-        commitVolumeField();
-    }
-    else if (&editor == &preGainDbEditor_)
+    if (&editor == &preGainDbEditor_)
     {
         commitPreGainField();
     }
@@ -2343,23 +2206,6 @@ void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
         inspectorNameEditorGuard_ = true;
         activeTrackNameEditor_.setText(activeTrackPlainName_, juce::dontSendNotification);
         inspectorNameEditorGuard_ = false;
-        return;
-    }
-
-    if (&editor == &channelVolumeDbEditor_)
-    {
-        const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
-        if (snap == nullptr || snap->getNumTracks() <= 0)
-        {
-            return;
-        }
-        const TrackId active = session_.getActiveTrackId();
-        const int idx = snap->findTrackIndexById(active);
-        if (idx < 0)
-        {
-            return;
-        }
-        setVolumeEditorTextFromLinearGain(snap->getTrack(idx).getChannelFaderGain());
         return;
     }
 
@@ -2406,11 +2252,7 @@ void InspectorView::textEditorEscapeKeyPressed(juce::TextEditor& editor)
 
 void InspectorView::textEditorFocusLost(juce::TextEditor& editor)
 {
-    if (&editor == &channelVolumeDbEditor_)
-    {
-        commitVolumeField();
-    }
-    else if (&editor == &preGainDbEditor_)
+    if (&editor == &preGainDbEditor_)
     {
         commitPreGainField();
     }

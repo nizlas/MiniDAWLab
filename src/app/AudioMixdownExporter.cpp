@@ -115,6 +115,89 @@ private:
                                                              : MixdownWaveBits::Pcm24;
 }
 
+/// Accumulates one rendered float block into the export level report (message thread, plain
+/// arithmetic): per-channel sample peak, overs (|x| > 1), sum of squares, non-finite count and
+/// the first / last sample of the whole render.
+struct ExportLevelFold
+{
+    MixdownExportLevelReport report;
+    double sumSquares[2] = { 0.0, 0.0 };
+    double sum[2] = { 0.0, 0.0 };
+
+    void fold(const float* const* stereo, const int n) noexcept
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const float* const data = stereo[ch];
+            if (report.frames == 0 && n > 0)
+            {
+                report.firstSample[ch] = data[0];
+            }
+            if (n > 0)
+            {
+                report.lastSample[ch] = data[n - 1];
+            }
+            for (int i = 0; i < n; ++i)
+            {
+                const float v = data[i];
+                if (!std::isfinite(v))
+                {
+                    ++report.nonFinite;
+                    continue;
+                }
+                const float a = std::abs(v);
+                report.peak[ch] = juce::jmax(report.peak[ch], a);
+                if (a > 1.0f)
+                {
+                    ++report.overs[ch];
+                }
+                sumSquares[ch] += static_cast<double>(v) * static_cast<double>(v);
+                sum[ch] += static_cast<double>(v);
+            }
+        }
+        report.frames += n;
+    }
+
+    [[nodiscard]] MixdownExportLevelReport finish() noexcept
+    {
+        MixdownExportLevelReport r = report;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            r.rms[ch] = r.frames > 0 ? std::sqrt(sumSquares[ch] / static_cast<double>(r.frames)) : 0.0;
+            r.dcOffset[ch] = r.frames > 0 ? sum[ch] / static_cast<double>(r.frames) : 0.0;
+        }
+        r.valid = true;
+        return r;
+    }
+};
+
+[[nodiscard]] juce::String dbfsText(const float linear)
+{
+    if (!std::isfinite(linear))
+    {
+        return "NaN";
+    }
+    if (linear <= 1.0e-6f)
+    {
+        return juce::String(juce::CharPointer_UTF8("-\xe2\x88\x9e dBFS"));
+    }
+    const double db = 20.0 * std::log10(static_cast<double>(linear));
+    return (db > 0.0 ? "+" : "") + juce::String(db, 1) + " dBFS";
+}
+
+[[nodiscard]] juce::String describeExportLevelReportForLog(const MixdownExportLevelReport& r)
+{
+    return "level report frames=" + juce::String((juce::int64)r.frames)
+           + " peakL=" + juce::String(r.peak[0], 4) + " (" + dbfsText(r.peak[0]) + ")"
+           + " peakR=" + juce::String(r.peak[1], 4) + " (" + dbfsText(r.peak[1]) + ")"
+           + " rmsL=" + juce::String(r.rms[0], 4) + " rmsR=" + juce::String(r.rms[1], 4)
+           + " dcL=" + juce::String(r.dcOffset[0], 5) + " dcR=" + juce::String(r.dcOffset[1], 5)
+           + " oversL=" + juce::String((juce::int64)r.overs[0]) + " oversR=" + juce::String((juce::int64)r.overs[1])
+           + " nonFinite=" + juce::String((juce::int64)r.nonFinite)
+           + " first=[" + juce::String(r.firstSample[0], 5) + "," + juce::String(r.firstSample[1], 5) + "]"
+           + " last=[" + juce::String(r.lastSample[0], 5) + "," + juce::String(r.lastSample[1], 5) + "]";
+}
+
 /// A non-existing unique sibling of `destination` (same folder, so the final move is a cheap
 /// same-volume rename). Returns an invalid File if no free name could be found.
 [[nodiscard]] juce::File allocateUniqueSiblingTempFile(const juce::File& destination,
@@ -226,6 +309,37 @@ private:
 };
 
 } // namespace
+
+juce::String MixdownExportLevelReport::summaryText() const
+{
+    if (!valid)
+    {
+        return {};
+    }
+    juce::String s;
+    s << "Peak L " << dbfsText(peak[0]) << ", R " << dbfsText(peak[1]) << " (sample peak, before file conversion)";
+    if (nonFinite > 0)
+    {
+        s << "\nWARNING: " << juce::String((juce::int64)nonFinite) << " non-finite samples (NaN/Inf) in the mix.";
+    }
+    const std::uint32_t totalOvers = overs[0] + overs[1];
+    if (totalOvers > 0)
+    {
+        s << "\nOVERLOAD: the mix exceeded 0 dBFS in " << juce::String((juce::int64)totalOvers)
+          << " samples (L " << juce::String((juce::int64)overs[0]) << ", R " << juce::String((juce::int64)overs[1])
+          << "). A PCM WAV is hard-clipped there and an MP3 will distort on playback. Lower the Stereo Out "
+             "fader (or the loud tracks) and export again.";
+    }
+    if (hasSignificantDcOffset())
+    {
+        s << "\nDC OFFSET: the rendered signal sits on a constant offset of " << juce::String(dcOffset[0], 3) << " (L) / "
+          << juce::String(dcOffset[1], 3) << " (R) — " << dbfsText(static_cast<float>(std::abs(dcOffset[0])))
+          << ". A plug-in on one of the tracks is emitting DC: it wastes headroom and clicks at the start and end of the "
+             "file. Find the track whose meter shows DC, then reload or change that plug-in's preset (or add a "
+             "high-pass insert).";
+    }
+    return s;
+}
 
 juce::Result resolveActiveLoopMixdownSpan(const bool cycleEnabledFromTransport,
                                           const std::int64_t leftLocatorSamples,
@@ -424,6 +538,7 @@ juce::Result exportStereoMixdownWavBlocking(
     bool firstBlock = true;
     std::int64_t pos = 0;
     double lastProgressUpdateMs = juce::Time::getMillisecondCounterHiRes();
+    ExportLevelFold levelFold;
     while (pos < loopSpan.lengthSamples)
     {
         const int n = static_cast<int>(
@@ -435,6 +550,8 @@ juce::Result exportStereoMixdownWavBlocking(
                                                  stereoPtrs,
                                                  firstBlock);
         firstBlock = false;
+        // Measured on the float block BEFORE the writer converts it (the Stereo Out point).
+        levelFold.fold(stereoPtrs, n);
 
         if (!writer->writeFromAudioSampleBuffer(stereoBlock, 0, n))
         {
@@ -467,6 +584,12 @@ juce::Result exportStereoMixdownWavBlocking(
     }
 
     appendMixdownDiagnosticLine("render complete samples=" + juce::String((juce::int64)pos));
+    const MixdownExportLevelReport levelReport = levelFold.finish();
+    appendMixdownDiagnosticLine(describeExportLevelReportForLog(levelReport));
+    if (request.levelReportOut != nullptr)
+    {
+        *request.levelReportOut = levelReport;
+    }
     if (request.progressSink != nullptr && !request.isIntermediateStep)
     {
         // "Finalizing" is deliberately shown before the writer closes: the file is not a result
@@ -519,7 +642,8 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
                                            const juce::File& mp3OutputFile,
                                            const int bitrateKbps,
                                            MixdownProgressSink* const progressSink,
-                                           const bool overwriteConfirmed)
+                                           const bool overwriteConfirmed,
+                                           MixdownExportLevelReport* const levelReportOut)
 {
     appendMixdownDiagnosticLine("mp3 export requested path=\"" + mp3OutputFile.getFullPathName()
                                 + "\" kbps=" + juce::String(bitrateKbps));
@@ -606,6 +730,7 @@ juce::Result exportStereoMixdownMp3Blocking(Transport& transport,
     wavRequest.progressSink = progressSink;
     wavRequest.overwriteConfirmed = true; // working file was verified non-existent above
     wavRequest.isIntermediateStep = true;
+    wavRequest.levelReportOut = levelReportOut; // the MP3 carries exactly this rendered signal
 
     const juce::Result wavResult = exportStereoMixdownWavBlocking(
         transport,

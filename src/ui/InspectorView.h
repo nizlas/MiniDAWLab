@@ -134,6 +134,12 @@ public:
         std::function<void(TrackId, int sendUiSlotIndex, float amountLinear)> amount,
         std::function<void(TrackId, int sendUiSlotIndex, bool enabled)> enabled) noexcept;
 
+    /// Height the stacked sections currently need (`InspectorPanel` sizes this view to it inside
+    /// its scroll viewport). Measured by the last layout pass; sections never stretch with height.
+    [[nodiscard]] int getPreferredContentHeight(int widthPx) const noexcept;
+    /// Fired (asynchronously, after a layout pass) whenever the preferred height changed.
+    void setOnPreferredHeightChanged(std::function<void()> fn) noexcept;
+
     void resized() override;
     void paintOverChildren(juce::Graphics& g) override;
     void dragOperationEnded(const juce::DragAndDropTarget::SourceDetails& details) override;
@@ -181,9 +187,7 @@ private:
     void commitPreGainField();
     void setPreGainEditorTextFromDb(float preGainDb);
 
-    void commitVolumeField();
     void commitActiveTrackNameField();
-    void setVolumeEditorTextFromLinearGain(float linearGain);
     void syncActiveTrackNameEditorDisplay();
     void syncInsertsWhenInspectorDisabled();
     void syncInsertsNoActiveTrack();
@@ -214,9 +218,6 @@ private:
     /// Transient "why did nothing happen" bubble for a refused pre-gain commit (see
     /// `commitPreGainField`): undoable session edits are refused while recording / count-in.
     juce::BubbleMessageComponent preGainRefusedBubble_;
-    juce::Label channelVolumeCaptionLabel_;
-    juce::TextEditor channelVolumeDbEditor_;
-    juce::Label channelVolumeDbUnitLabel_;
     juce::Label panCaptionLabel_;
     InspectorPanControl panField_;
     /// Audio Input (audio rows only): which device input the track records/monitors.
@@ -300,6 +301,10 @@ private:
 
     TrackId lastShownInsertRowsTrackId_ = kInvalidTrackId;
     TrackId lastShownTrackId_ = kInvalidTrackId;
+
+    /// Preferred content height measured by the last `resized()` (see `getPreferredContentHeight`).
+    int lastLayoutUsedHeight_ = 0;
+    std::function<void()> onPreferredHeightChanged_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(InspectorView)
 };

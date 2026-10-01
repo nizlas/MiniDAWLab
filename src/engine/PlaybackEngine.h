@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "domain/Track.h"
+#include "engine/LevelMeterAccumulator.h"
 #include "engine/PlaybackMixHelpers.h"
 #include "engine/RoutingPlan.h"
 #include "transport/Transport.h"
@@ -257,6 +258,42 @@ public:
         return outputPeakHold_.exchange(0.0f, std::memory_order_relaxed);
     }
 
+    // -----------------------------------------------------------------------
+    // Level meters (Inspector channel panel) — realtime-safe accumulators, UI drains
+    // -----------------------------------------------------------------------
+    // MEASURING POINTS
+    //   * Stereo Out ("master") meter: the final device output of every callback — channels 0/1
+    //     after the master bus strip (fader / mute / inserts / pan), i.e. the last float signal
+    //     before the device driver converts it. Folded on every return path, including the
+    //     offline-gate silence path, so the meter falls to silence while an export runs. The
+    //     offline export measures its own output separately (`MixdownExportLevelReport`) —
+    //     the live meter never shows export blocks.
+    //   * Track meter: the selected track's post-channel-strip stage — after pre-gain, Pre
+    //     inserts, fader / mute, Post inserts and pan, BEFORE it is fanned to its output bus and
+    //     sends. For audio rows this is the clip path or, when Monitor is on, the live-input
+    //     monitoring pass (exactly the source the user hears); instrument rows measure the
+    //     host's actual source (Primary / proxy / Secondary audition) through the same strip;
+    //     group rows measure their bus strip output. A muted track measures 0; a track that is
+    //     off (or not rendered this block) folds nothing and reads as silence.
+    // Only ONE track is metered at a time (`setMeteredTrackForUi`); the audio thread compares
+    // the row id against a relaxed atomic — no per-track arrays, no allocation.
+
+    /// [Message thread] Select the row the track meter follows (`kInvalidTrackId` = none). Resets
+    /// the accumulator so the next drain never carries the previous row's data.
+    void setMeteredTrackForUi(TrackId trackId) noexcept;
+    [[nodiscard]] TrackId getMeteredTrackForUi() const noexcept
+    {
+        return static_cast<TrackId>(meteredTrackId_.load(std::memory_order_relaxed));
+    }
+    /// [Message thread] Everything folded since the previous drain (peak hold across all blocks).
+    /// These are the UI meters' windows (drained ~30 Hz by the Inspector channel panel).
+    [[nodiscard]] level_meter::Reading drainMeteredTrackLevels() noexcept { return trackMeter_.drainAndReset(); }
+    [[nodiscard]] level_meter::Reading drainMasterOutputLevels() noexcept { return masterMeter_.drainAndReset(); }
+    /// [Message thread] Independent diagnostics windows fed from the SAME block statistics, so a
+    /// stability scenario can measure over many seconds while the UI keeps draining its own copy.
+    [[nodiscard]] level_meter::Reading drainMeteredTrackLevelsForDiagnostics() noexcept { return trackMeterDiag_.drainAndReset(); }
+    [[nodiscard]] level_meter::Reading drainMasterOutputLevelsForDiagnostics() noexcept { return masterMeterDiag_.drainAndReset(); }
+
     /// [Any thread] Same acquire-load discipline as instrument snapshot reads inside the device callback.
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
@@ -349,10 +386,32 @@ private:
     std::atomic<std::uint64_t> audioCallbackEnterCount_{ 0 };
     /// Peak-hold of the device output (see `readAndResetOutputPeakHoldForDiagnostics`). Relaxed.
     std::atomic<float> outputPeakHold_{ 0.0f };
-    /// [Audio thread] Fold this block's output peak into `outputPeakHold_` (lock-free max).
+    /// [Audio thread] Fold this block's output peak into `outputPeakHold_` (lock-free max) and
+    /// the Stereo Out meter accumulator (channels 0/1 of the device output).
     void audioThread_foldOutputPeak(const float* const* outputChannelData,
                                     int numOutputChannels,
                                     int numSamples) noexcept;
+
+    /// Level meters (see the public section): the Stereo Out accumulator and the single metered
+    /// track's accumulator. `meteredTrackId_` is compared on the audio thread per rendered stage.
+    level_meter::Accumulator masterMeter_;
+    level_meter::Accumulator trackMeter_;
+    level_meter::Accumulator masterMeterDiag_;
+    level_meter::Accumulator trackMeterDiag_;
+    std::atomic<std::int64_t> meteredTrackId_{ static_cast<std::int64_t>(kInvalidTrackId) };
+    /// [Audio thread] Fold a track's post-strip stage when it is the metered row (no-op otherwise).
+    void audioThread_foldTrackMeterIfMetered(TrackId trackId,
+                                             const float* stageL,
+                                             const float* stageR,
+                                             int numSamples) noexcept
+    {
+        if (static_cast<std::int64_t>(trackId) == meteredTrackId_.load(std::memory_order_relaxed))
+        {
+            const level_meter::BlockStats stats = level_meter::analyzeBlock(stageL, stageR, numSamples);
+            trackMeter_.audioThread_foldStats(stats);
+            trackMeterDiag_.audioThread_foldStats(stats);
+        }
+    }
 
     /// Load window (see `AudioCallbackLoadSnapshot`). Relaxed only; never used for synchronization.
     std::atomic<std::uint64_t> loadWindowBlocks_{ 0 };

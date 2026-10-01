@@ -2,6 +2,8 @@
 
 #include <juce_core/juce_core.h>
 
+#include <cmath>
+#include <cstdint>
 #include <functional>
 
 namespace juce
@@ -43,6 +45,36 @@ public:
 /// True when `result` is the exporter's cooperative-cancel outcome (not an error).
 [[nodiscard]] bool isMixdownCancelledResult(const juce::Result& result) noexcept;
 
+/// Level statistics of the rendered export, measured on the exporter's float stereo block **after
+/// the complete master strip and before any file conversion** (the same point the live Stereo Out
+/// meter measures). Sample peak — not true / inter-sample peak. `overs` = samples with |x| > 1.0:
+/// the float mix exceeded 0 dBFS there; a 16/24-bit WAV is hard-clipped at those samples by the
+/// writer, a float WAV keeps them, and an MP3 overshoots on decode. Returned to the caller so a
+/// transient overload stays visible in the export result after any animated meter has fallen.
+struct MixdownExportLevelReport
+{
+    float peak[2] = { 0.0f, 0.0f };
+    std::uint32_t overs[2] = { 0, 0 };
+    double rms[2] = { 0.0, 0.0 };
+    /// Mean sample value per channel: a constant offset wastes headroom and clicks at file edges.
+    double dcOffset[2] = { 0.0, 0.0 };
+    std::uint32_t nonFinite = 0;
+    std::int64_t frames = 0;
+    float firstSample[2] = { 0.0f, 0.0f };
+    float lastSample[2] = { 0.0f, 0.0f };
+    bool valid = false;
+
+    [[nodiscard]] bool hasOverload() const noexcept { return overs[0] + overs[1] > 0 || nonFinite > 0; }
+    /// |DC| above −40 dBFS (0.01): large enough to eat headroom and click at the file edges.
+    static constexpr double kSignificantDcOffset = 0.01;
+    [[nodiscard]] bool hasSignificantDcOffset() const noexcept
+    {
+        return std::abs(dcOffset[0]) > kSignificantDcOffset || std::abs(dcOffset[1]) > kSignificantDcOffset;
+    }
+    /// "Peak L -1.2 dBFS, R -0.8 dBFS" plus explicit overload / DC-offset lines when they apply.
+    [[nodiscard]] juce::String summaryText() const;
+};
+
 struct MixdownExportRequest
 {
     juce::File outputFile;
@@ -56,6 +88,8 @@ struct MixdownExportRequest
     /// True when this WAV is only the intermediate step of a larger export (MP3): the render phase
     /// still reports "Rendering... NN%", but the "Finalizing..." phase is left to the outer export.
     bool isIntermediateStep = false;
+    /// Optional: receives the rendered float output's level statistics (filled on success).
+    MixdownExportLevelReport* levelReportOut = nullptr;
 };
 
 /// Half-open timeline span **[startSample, startSample + lengthSamples)** used for mixdown.
@@ -105,6 +139,7 @@ struct ActiveLoopMixdownSpan
     const juce::File& mp3OutputFile,
     int bitrateKbps,
     MixdownProgressSink* progressSink = nullptr,
-    bool overwriteConfirmed = false);
+    bool overwriteConfirmed = false,
+    MixdownExportLevelReport* levelReportOut = nullptr);
 
 } // namespace mini_daw_audio_mixdown

@@ -21,7 +21,8 @@ struct TransportLayoutRefs
 
     TimelineRulerView& rulerView;
     TrackLanesView& trackLanesView;
-    InspectorView& inspectorView;
+    /// The whole Inspector column (`InspectorPanel`: scrollable content + fixed channel panel).
+    juce::Component& inspectorView;
 
     juce::MenuBarComponent& menuBar;
 
