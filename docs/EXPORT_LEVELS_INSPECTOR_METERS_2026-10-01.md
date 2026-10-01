@@ -132,6 +132,17 @@ listening.
 
 ---
 
+## 5b. Build / artifacts / commit
+
+| | |
+|---|---|
+| Version | **1.1.8** (schema 23 unchanged) |
+| Commit | `976871c34740a1af72c66ce60b8ce055139e6891` on `main` (+ this hash note) |
+| Release exe | `build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe` (FileVersion 1.1.8) |
+| Installer / portable | `dist\DanielssonsAudioLab-1.1.8-Setup.exe`, `dist\DanielssonsAudioLab-1.1.8.zip` (symbols `dist\symbols\DanielssonsAudioLab-1.1.8\`) |
+| Debug exe **with the changes** | `build\ninja-debug-alt\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` — the normal Debug location (`build\ninja-debug\...`) was locked by the user's running 1.1.7 Debug instance, which was left running |
+| Focused test exe | `build\ninja-debug-alt\ExportLevelFocusedTests_artefacts\Debug\ExportLevelFocusedTests.exe` |
+
 ## 6. Remaining uncertainties / not done
 
 * **Listening** was not possible here; the measured chain is fully consistent with the report, but
