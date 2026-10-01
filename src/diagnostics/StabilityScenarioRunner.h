@@ -60,6 +60,26 @@ enum class StabilityScenarioKind
     /// the insert level tap, the signal entering the first insert and leaving the last one while
     /// the transport plays — first with the project's own mute state, then with the track unmuted.
     PreGainInspector,
+    /// VST3 inserts across save / reload in the REAL app (ProjectIoCoordinator Save, reload,
+    /// forced autosave + recovery): builds an instrument shell row in the loaded project, adds DAL
+    /// Mono Delay as a Post insert there, as a Pre insert on the audio row and as a Post insert on
+    /// the master through the picker's call, verifies every row after each round trip, then
+    /// simulates an uninstalled plugin by re-pointing the saved path (user plugins untouched) and
+    /// asserts the insert survives as an "(unavailable)" row through load → save → load.
+    Inserts,
+    /// Shared track-header column: on a real project, verifies every header/lane/ruler/overlay sits
+    /// on one boundary at the startup width, the default, the minimum and a wide setting (set
+    /// through the same path the drag handle uses), that adding/removing a track keeps the width,
+    /// that the width is persisted app-wide, and writes PNG evidence of the arrangement.
+    HeaderColumn,
+};
+
+/// One insert row as the runner sees it (mirrors `InsertRowView`).
+struct StabilityInsertRowInfo
+{
+    bool pre = false;
+    juce::String displayName;
+    bool unavailable = false;
 };
 
 struct StabilityScenarioRequest
@@ -224,6 +244,29 @@ struct StabilityRunnerHooks
         readAndResetInsertLevelTap;
     /// Transport seek request (consumed by the audio callback at the next block).
     std::function<void(std::int64_t)> seekTransportTo;
+
+    // --- Inserts scenario ----------------------------------------------------------
+    /// Every session row including Master (the delete-list hook excludes it).
+    std::function<std::vector<StabilityTrackInfo>()> listAllTracks;
+    /// The exact `PluginInsertHost::addInsertFromVst3File` call the VST3 picker makes on a pick.
+    std::function<juce::Result(TrackId, bool pre, const juce::File& vst3)> addInsertLikePicker;
+    /// Rows of a track's insert chain as the Inspector lists them.
+    std::function<std::vector<StabilityInsertRowInfo>(TrackId)> listInsertRows;
+
+    // --- Header column scenario --------------------------------------------------------
+    /// Same calls the boundary handle makes: anchor at the effective width, apply `deltaPx`,
+    /// then the drag-ended notification (owner re-layout + app-wide persistence).
+    std::function<void(int deltaPx)> dragHeaderColumnLikeHandle;
+    /// Stored preference / effective width of the shared header column.
+    std::function<int()> getHeaderColumnWidthPreference;
+    std::function<int()> getHeaderColumnEffectiveWidth;
+    /// Re-reads the persisted app-wide value from disk (nullopt when absent/invalid).
+    std::function<std::optional<int>()> readPersistedHeaderColumnWidth;
+    /// Geometry check across headers, lanes, ruler, add-track corner and playhead overlay; appends a
+    /// human-readable report. False with `failReason` on the first violation.
+    std::function<bool(juce::String& report, juce::String& failReason)> verifyHeaderColumnLayout;
+    /// Writes a PNG snapshot of the whole arrangement window content to `png`.
+    std::function<bool(const juce::File& png)> captureArrangementPng;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -266,6 +309,10 @@ private:
     void appendPreGainSteps(const juce::File& project);
     /// Pre-gain through the real Inspector on a real project (see `PreGainInspector`).
     void appendPreGainInspectorSteps(const juce::File& project);
+    /// VST3 inserts across Save / reload / autosave-recovery + the unavailable-plugin placeholder.
+    void appendInsertsSteps(const juce::File& project);
+    /// Shared header column geometry, resize path, persistence and PNG evidence.
+    void appendHeaderColumnSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -301,6 +348,13 @@ private:
     float inspectorPeakAfter0dB_ = 0.0f;
     double inspectorRmsBefore0dB_ = 0.0;
     double inspectorRmsAfter0dB_ = 0.0;
+    /// Inserts: fixture rows (instrument shell / audio / master) and the files produced.
+    TrackId insertsInstrumentTrackId_ = kInvalidTrackId;
+    TrackId insertsAudioTrackId_ = kInvalidTrackId;
+    TrackId insertsMasterTrackId_ = kInvalidTrackId;
+    juce::File insertsMissingPluginCopy_;
+    /// HeaderColumn: the user's preference at scenario start (restored at the end).
+    int headerColumnWidthAtStart_ = 0;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };

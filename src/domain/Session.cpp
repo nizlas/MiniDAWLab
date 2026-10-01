@@ -1795,7 +1795,11 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                 "Internal error: instrument lane carries timeline audio clips; save aborted.");
         }
 
-        if (pluginHost != nullptr && timelineAudioLane)
+        // Insert chains live in `PluginInsertHost` keyed by TrackId for every row kind the
+        // Inspector offers Pre/Post inserts on and the engine processes (Audio, Instrument, Group,
+        // Master). Persistence must cover exactly that set: until 1.1.7 only Audio rows were
+        // exported, so inserts on instrument / group / master rows vanished on save+reload.
+        if (pluginHost != nullptr)
         {
             const PluginTrackChain ch = pluginHost->exportChain(tr.id);
             for (const auto& d : ch.slots)
@@ -2246,11 +2250,9 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         appendProjectLoadDiagnosticLine("apply: collect plugin insert restore rows");
         for (const auto& trDto : parsed.tracks)
         {
-            if (trDto.kind.equalsIgnoreCase("instrument"))
-            {
-                continue;
-            }
-
+            // Every row kind may carry `inserts[]` (same set the writer exports — see
+            // `saveProjectToFile`); the instrument plugin itself is restored separately by the
+            // instrument controller and never appears in this array.
             PluginTrackChain chain;
             for (const auto& ins : trDto.inserts)
             {

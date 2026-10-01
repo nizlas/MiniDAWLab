@@ -218,8 +218,209 @@ TrackLanesView::TrackLanesView(
     setBufferedToImage(true);
     // Middle-drag hand-pan across the whole lanes band, including over child lanes/headers.
     addMouseListener(&middlePanListener_, true);
+    addAndMakeVisible(headerColumnResizeHandle_);
     syncTracksFromSession();
     startTimerHz(kRecordingPreviewTimerHz);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Header column width (shared boundary) + drag handle
+// ---------------------------------------------------------------------------------------------
+int TrackLanesView::effectiveTrackHeaderColumnWidthPxForTotalWidth(const int totalWidthPx) const noexcept
+{
+    return clampHeaderColumnWidthForTotalWidth(trackHeaderColumnWidthPx_, totalWidthPx);
+}
+
+void TrackLanesView::setTrackHeaderColumnWidthPx(const int widthPx, const bool notifyOwner) noexcept
+{
+    const int clamped = juce::jlimit(kTrackHeaderColumnMinWidthPx, kTrackHeaderColumnMaxWidthPx, widthPx);
+    if (clamped == trackHeaderColumnWidthPx_)
+    {
+        return;
+    }
+    trackHeaderColumnWidthPx_ = clamped;
+    // Own layout first (headers, lanes, MIDI lanes, handle), then the owner moves the ruler corner,
+    // the add-track button and the playhead overlay to the same boundary.
+    resized();
+    repaint();
+    if (notifyOwner && onTrackHeaderColumnWidthChanged_ != nullptr)
+    {
+        onTrackHeaderColumnWidthChanged_(trackHeaderColumnWidthPx_, false);
+    }
+}
+
+void TrackLanesView::setOnTrackHeaderColumnWidthChanged(std::function<void(int, bool)> fn) noexcept
+{
+    onTrackHeaderColumnWidthChanged_ = std::move(fn);
+}
+
+void TrackLanesView::notifyTrackHeaderColumnWidthDragEnded() noexcept
+{
+    if (onTrackHeaderColumnWidthChanged_ != nullptr)
+    {
+        onTrackHeaderColumnWidthChanged_(trackHeaderColumnWidthPx_, true);
+    }
+}
+
+juce::Rectangle<int> TrackLanesView::getHeaderColumnResizeHandleBoundsForDiagnostics() const noexcept
+{
+    return headerColumnResizeHandle_.getBounds();
+}
+
+void TrackLanesView::simulateHeaderColumnHandleDragForStabilityTest(const int deltaPx) noexcept
+{
+    const int anchor = headerColumnWidthPx();
+    setTrackHeaderColumnWidthPx(anchor + deltaPx);
+    notifyTrackHeaderColumnWidthDragEnded();
+}
+
+bool TrackLanesView::verifyHeaderColumnLayoutForDiagnostics(juce::String& report, juce::String& failReason) const
+{
+    const int headerW = headerColumnWidthPx();
+    const int boundaryX = getLocalBounds().getX() + juce::jmin(headerW, getWidth());
+    report << "header column: preference=" << trackHeaderColumnWidthPx_ << " effective=" << headerW
+           << " view width=" << getWidth() << " boundaryX=" << boundaryX
+           << " handle=" << headerColumnResizeHandle_.getBounds().toString() << "\n";
+
+    const auto checkHeader = [&](const juce::String& kind, const TrackHeaderView& h, const juce::Component* lane) -> bool {
+        if (!h.isVisible() || h.getBounds().isEmpty())
+        {
+            return true;
+        }
+        const juce::Rectangle<int> hb = h.getBounds();
+        const juce::Rectangle<int> local = h.getLocalBounds();
+        struct Cell { const char* name; juce::Rectangle<int> r; };
+        const Cell cells[] = {
+            { "instrument", h.getInstrumentEditorButtonBounds() },
+            { "power", h.getPowerButtonBounds() },
+            { "mute", h.getMuteButtonBounds() },
+            { "monitor", h.getMonitorButtonBounds() },
+            { "arm", h.getArmButtonBounds() },
+            { "alternatives", h.getAlternativesButtonBounds() },
+        };
+        juce::String cellText;
+        int rightMost = 0;
+        for (const Cell& c : cells)
+        {
+            if (c.r.isEmpty())
+            {
+                continue;
+            }
+            cellText << " " << c.name << "=" << c.r.toString();
+            rightMost = juce::jmax(rightMost, c.r.getRight());
+            if (!local.contains(c.r))
+            {
+                failReason = kind + " header \"" + h.getName() + "\" (track " + juce::String((juce::int64)h.getTrackId())
+                             + "): " + c.name + " cell " + c.r.toString() + " is not fully inside the header "
+                             + local.toString() + " at column width " + juce::String(headerW);
+                return false;
+            }
+        }
+        report << "  " << kind << " track " << juce::String((juce::int64)h.getTrackId()) << " header=" << hb.toString()
+               << " rightmostCellEdge=" << rightMost << " margin=" << (hb.getWidth() - rightMost) << cellText;
+        if (lane != nullptr && lane->isVisible())
+        {
+            report << " lane=" << lane->getBounds().toString();
+        }
+        report << "\n";
+        if (hb.getX() != getLocalBounds().getX() || hb.getWidth() != juce::jmin(headerW, getWidth()))
+        {
+            failReason = kind + " header (track " + juce::String((juce::int64)h.getTrackId()) + ") spans "
+                         + hb.toString() + " but the shared column is " + juce::String(headerW) + " px";
+            return false;
+        }
+        if (lane != nullptr && lane->isVisible() && lane->getX() != boundaryX)
+        {
+            failReason = kind + " lane (track " + juce::String((juce::int64)h.getTrackId()) + ") starts at x="
+                         + juce::String(lane->getX()) + " but the boundary is x=" + juce::String(boundaryX);
+            return false;
+        }
+        return true;
+    };
+
+    for (size_t i = 0; i < headers_.size(); ++i)
+    {
+        const TrackHeaderView* h = headers_[i].get();
+        const juce::Component* lane = i < lanes_.size() ? lanes_[i].get() : nullptr;
+        if (h != nullptr && !checkHeader("audio", *h, lane))
+        {
+            return false;
+        }
+    }
+    for (const auto& [tid, att] : instrumentTimelineAttachments_)
+    {
+        juce::ignoreUnused(tid);
+        if (att.header != nullptr && !checkHeader("instrument", *att.header, att.midiLane))
+        {
+            return false;
+        }
+    }
+    for (const auto& [tid, gh] : groupHeaders_)
+    {
+        juce::ignoreUnused(tid);
+        if (gh != nullptr && !checkHeader("group", *gh, nullptr))
+        {
+            return false;
+        }
+    }
+    for (const auto& mh : masterHeaders_)
+    {
+        if (mh != nullptr && !checkHeader("master", *mh, nullptr))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+TrackLanesView::HeaderColumnResizeHandle::HeaderColumnResizeHandle(TrackLanesView& owner) noexcept
+    : owner_(owner)
+{
+    setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+    setRepaintsOnMouseActivity(true);
+    // Opaque to clicks so nothing underneath (header resize band, lane clips) can start a gesture
+    // from the same press; the middle-pan listener still sees these events via the parent.
+    setInterceptsMouseClicks(true, false);
+}
+
+void TrackLanesView::HeaderColumnResizeHandle::mouseDown(const juce::MouseEvent& e)
+{
+    if (!e.mods.isLeftButtonDown())
+    {
+        return;
+    }
+    dragging_ = true;
+    anchorWidthPx_ = owner_.headerColumnWidthPx();
+}
+
+void TrackLanesView::HeaderColumnResizeHandle::mouseDrag(const juce::MouseEvent& e)
+{
+    if (!dragging_)
+    {
+        return;
+    }
+    owner_.setTrackHeaderColumnWidthPx(anchorWidthPx_ + e.getDistanceFromDragStartX());
+}
+
+void TrackLanesView::HeaderColumnResizeHandle::mouseUp(const juce::MouseEvent&)
+{
+    if (!dragging_)
+    {
+        return;
+    }
+    dragging_ = false;
+    owner_.notifyTrackHeaderColumnWidthDragEnded();
+}
+
+void TrackLanesView::HeaderColumnResizeHandle::paint(juce::Graphics& g)
+{
+    if (!isMouseOverOrDragging())
+    {
+        return;
+    }
+    const auto b = getLocalBounds();
+    g.setColour(juce::Colours::white.withAlpha(dragging_ ? 0.45f : 0.22f));
+    g.fillRect(b.getCentreX() - 1, b.getY(), 2, b.getHeight());
 }
 
 TrackLanesView::~TrackLanesView()
@@ -1637,6 +1838,16 @@ void TrackLanesView::resized()
     auto area = getLocalBounds();
     const int vr = static_cast<int>(visibleTrackEntries_.size());
 
+    // Shared boundary handle: full height (gutter included), centred on the header/lane edge. Kept
+    // on top of every row child below (rows call `toFront` while laying out, so re-raise at the end).
+    {
+        const int hx = area.getX() + juce::jmin(headerColumnWidthPx(), area.getWidth());
+        const int half = kHeaderColumnResizeHandleWidthPx / 2;
+        headerColumnResizeHandle_.setBounds(hx - half, area.getY(), kHeaderColumnResizeHandleWidthPx, area.getHeight());
+        headerColumnResizeHandle_.setVisible(area.getWidth() > kTrackHeaderColumnMinWidthPx);
+    }
+    const juce::ScopeGuard raiseHandleAtExit{ [this] { headerColumnResizeHandle_.toFront(false); } };
+
     std::unordered_set<TrackId> instrumentVisibleTids;
     for (const VisibleTrackEntry& ve : visibleTrackEntries_)
         if (ve.kind == VisibleTrackKind::Instrument)
@@ -1682,7 +1893,7 @@ void TrackLanesView::resized()
         = juce::jlimit(0, juce::jmax(0, contentH - viewportH), verticalScrollOffsetPx_);
 
     const int w = area.getWidth();
-    const int leftW = juce::jmin(kTrackHeaderWidth, w);
+    const int leftW = juce::jmin(headerColumnWidthPx(), w);
 
     int y = scrollViewport.getY() - verticalScrollOffsetPx_;
     for (int vi = 0; vi < vr; ++vi)
@@ -1771,7 +1982,7 @@ void TrackLanesView::resized()
         y += rowH;
     }
 
-    const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+    const int tw = juce::jmax(0, getWidth() - headerColumnWidthPx());
     if (tw > 0)
     {
         timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
@@ -1792,7 +2003,7 @@ void TrackLanesView::paint(juce::Graphics& g)
 
     constexpr int gutter = kArrangementTimelineHeaderGutterPx;
     const int ay = bounds.getY();
-    const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
+    const int headerW = juce::jmin(headerColumnWidthPx(), bounds.getWidth());
     const int hx = bounds.getX() + headerW;
     const int gutterBottom = ay + gutter;
     const auto laneSepColour
@@ -2068,7 +2279,7 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
         return;
     }
     const juce::Point<int> local = getLocalPoint(nullptr, screenPos);
-    if (!getLocalBounds().contains(local) || local.x >= kTrackHeaderWidth)
+    if (!getLocalBounds().contains(local) || local.x >= headerColumnWidthPx())
     {
         headerTrackDragInvalidArea_ = true;
         headerTrackDragInsertGapK_ = -1;
@@ -2192,7 +2403,7 @@ void TrackLanesView::endHeaderTrackDrag(const TrackId movedId)
         {
             committedHeaderDragTrackReorder_(movedId, destSessionIndex);
         }
-        const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+        const int tw = juce::jmax(0, getWidth() - headerColumnWidthPx());
         if (tw > 0)
         {
             timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
@@ -2231,7 +2442,7 @@ void TrackLanesView::paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g)
         return;
     }
 
-    const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
+    const int headerW = juce::jmin(headerColumnWidthPx(), bounds.getWidth());
     const int hx = bounds.getX() + headerW;
     if (hx <= bounds.getX())
     {
@@ -2288,7 +2499,7 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
     const auto bounds = getLocalBounds();
     if (!bounds.isEmpty())
     {
-        const int headerW = juce::jmin(kTrackHeaderWidth, bounds.getWidth());
+        const int headerW = juce::jmin(headerColumnWidthPx(), bounds.getWidth());
         if (headerW > 0 && headerW < bounds.getWidth())
         {
             const float vx = (float)(bounds.getX() + headerW) - 0.5f;
@@ -2340,7 +2551,7 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
         const int y = yForVisibleInsertGapK(headerTrackDragInsertGapK_);
         yy = juce::jlimit(0, juce::jmax(0, h - 2), y - 1);
     }
-    const int lineW = juce::jmin(kTrackHeaderWidth, getWidth());
+    const int lineW = juce::jmin(headerColumnWidthPx(), getWidth());
     g.fillRect(0, yy, lineW, 2);
 }
 
@@ -2393,7 +2604,7 @@ void TrackLanesView::updateMiddlePan(const float xInLanes) noexcept
     {
         return;
     }
-    const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+    const int tw = juce::jmax(0, getWidth() - headerColumnWidthPx());
     if (tw <= 0)
     {
         return;
@@ -2444,17 +2655,18 @@ void TrackLanesView::mouseWheelMove(
         {
             return;
         }
-        if (e.position.x < (float)kTrackHeaderWidth)
+        const int headerW = headerColumnWidthPx();
+        if (e.position.x < (float)headerW)
         {
             return;
         }
-        const int tw = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+        const int tw = juce::jmax(0, getWidth() - headerW);
         if (tw <= 0)
         {
             return;
         }
         const double w = (double)tw;
-        const double x = (double)e.position.x - (double)kTrackHeaderWidth;
+        const double x = (double)e.position.x - (double)headerW;
         const double factor = std::pow(0.85, d);
         const double sppMax
             = juce::jmax(1.0, (double)juce::jmax(std::int64_t{1}, arr) / w);
@@ -2474,7 +2686,7 @@ void TrackLanesView::mouseWheelMove(
         {
             return;
         }
-        const int twPan = juce::jmax(0, getWidth() - kTrackHeaderWidth);
+        const int twPan = juce::jmax(0, getWidth() - headerColumnWidthPx());
         if (twPan <= 0)
         {
             return;

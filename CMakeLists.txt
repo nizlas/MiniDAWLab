@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.6 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.7 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -125,6 +125,7 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
     src/ui/TrackHeaderView.cpp
+    src/ui/UiLayoutSettingsStore.cpp
     src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
     src/ui/experimental/ExperimentalMidiPatternPlayerHostBinding.cpp
     src/ui/experimental/ExperimentalMidiImport.cpp
@@ -315,6 +316,81 @@ target_link_libraries(MixdownPreGainFocusedTests
 if (MSVC)
     target_compile_options(MixdownPreGainFocusedTests PRIVATE /wd4458)
 endif()
+
+# -----------------------------------------------------------------------------
+# InsertPersistenceFocusedTests: VST3 insert chains across project save / reload through the
+# PRODUCTION Session save/load entry points (the same ones Save, Save As and autosave call), the
+# production ProjectFile JSON and the real PluginInsertHost hosting the real DAL Mono Delay plus one
+# other installed VST3 effect on Audio, Instrument, Group and Master rows. Also covers the
+# "temporarily unavailable plugin" placeholder (identity + state preserved across reload + save,
+# identity mismatch never applies a foreign state) and explicit removal staying removed.
+# -----------------------------------------------------------------------------
+juce_add_console_app(InsertPersistenceFocusedTests PRODUCT_NAME "InsertPersistenceFocusedTests")
+target_sources(InsertPersistenceFocusedTests PRIVATE
+    tests/selftest/InsertPersistenceFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp)
+target_include_directories(InsertPersistenceFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(InsertPersistenceFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(InsertPersistenceFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(InsertPersistenceFocusedTests PRIVATE /wd4458)
+endif()
+
+# -----------------------------------------------------------------------------
+# TrackHeaderColumnFocusedTests: the shared track-header column width. Drives the PRODUCTION
+# TrackHeaderView geometry + offscreen paint per row-kind model at the old 120 px (negative control:
+# the clipped Arm cell the user reported), the new minimum (132) and default (144), the pure clamp
+# formula every boundary-sharing view uses, and the app-wide UiLayoutSettingsStore round trip.
+# No audio device, no window, no VST3 hosting.
+# -----------------------------------------------------------------------------
+juce_add_console_app(TrackHeaderColumnFocusedTests PRODUCT_NAME "TrackHeaderColumnFocusedTests")
+target_sources(TrackHeaderColumnFocusedTests PRIVATE
+    tests/selftest/TrackHeaderColumnFocusedTestsMain.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/ForbiddenCursor.cpp
+    src/ui/UiLayoutSettingsStore.cpp)
+target_include_directories(TrackHeaderColumnFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(TrackHeaderColumnFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(TrackHeaderColumnFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        # TrackLanesView.h compile-time deps (PluginInsertHost.h / instrument headers).
+        juce::juce_audio_processors
+        juce::juce_gui_basics
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
 
 # -----------------------------------------------------------------------------
 # WaveformReloadFocusedTests: waveform display after a real project save/reload. Drives the

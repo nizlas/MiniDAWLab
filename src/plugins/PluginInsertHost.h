@@ -40,6 +40,11 @@ struct InsertRowView
     InsertSlotId slotId = kInvalidInsertSlotId;
     InsertStage stage = InsertStage::Post;
     juce::String displayName;
+    /// True for a slot whose plugin could not be instantiated on project load (bundle missing,
+    /// scan/instantiation failure, or identity mismatch). The slot still occupies its chain
+    /// position and keeps the saved identity + state (see `PluginInsertHost::importChain`); it is
+    /// silent in the audio path and has no editor until the user removes it or the plugin returns.
+    bool unavailable = false;
 };
 
 /// A complete, block-start transport description for hosted effect processors.
@@ -118,9 +123,18 @@ public:
     /// in [0, stageCount]. No-op if gap is same position (gap == srcIndex or gap == srcIndex + 1).
     void reorderInsertWithinStage(TrackId trackId, InsertSlotId slotId, int gapIndexInStage);
 
+    /// Live rows export their current `getStateInformation`; unavailable placeholder rows (see
+    /// `importChain`) re-emit the saved identity + state byte-for-byte, so saving a project while a
+    /// plugin is temporarily missing never erases that insert's configuration.
     [[nodiscard]] PluginTrackChain exportChain(TrackId trackId) const;
 
     /// Replace chain from project or undo — clears or loads rows + `setStateInformation` when occupied.
+    /// A row whose plugin cannot be instantiated (bundle missing, scan/instantiation failure, or the
+    /// plugin found at the path is a different identity than the saved `pluginIdentifier`) is kept as
+    /// an **unavailable placeholder**: same slot id / stage / chain position, saved identity and
+    /// opaque state preserved, no processor published, shown as "<name> (unavailable)". A saved state
+    /// is never applied to a plugin of another identity. Explicit `removeInsert` on a placeholder
+    /// removes it for good (the next save drops it) — only the user removes inserts.
     void importChain(TrackId trackId, const PluginTrackChain& chain);
 
     [[nodiscard]] std::vector<InsertRowView> getInsertRowsForTrack(TrackId trackId) const;
@@ -257,7 +271,27 @@ private:
         InsertStage stage = InsertStage::Post;
         std::unique_ptr<juce::AudioPluginInstance> instance;
         bool layoutOk = false;
+        /// Unavailable placeholder (see `importChain`): `instance == nullptr` and this descriptor
+        /// (`occupied == true`) carries the saved path / identifier / opaque state untouched so
+        /// `exportChain` can re-emit it. Default (`occupied == false`) for live rows.
+        PluginInsertDescriptor unavailableDescriptor;
+
+        [[nodiscard]] bool isUnavailablePlaceholder() const noexcept
+        {
+            return instance == nullptr && unavailableDescriptor.occupied;
+        }
     };
+
+    /// Among the plugin types found in `vst3File`, pick the one matching `savedIdentifier` (exact
+    /// JUCE identifier string, or same format/name/uid when only the bundle path hash differs —
+    /// a relocated copy of the same plugin). Empty `savedIdentifier` = first type (legacy rows).
+    /// Returns an empty description (and `err`) when nothing matches — the saved state then stays
+    /// on an unavailable placeholder instead of being applied to a different plugin.
+    [[nodiscard]] static juce::PluginDescription pickDescriptionForSavedIdentity(
+        const juce::File& vst3File,
+        juce::AudioPluginFormatManager& fm,
+        const juce::String& savedIdentifier,
+        juce::String& err);
 
     void rebuildAudioThreadMapAndPublish();
     void closeEditorsForTrack(TrackId trackId);

@@ -77,6 +77,7 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
+#include "ui/UiLayoutSettingsStore.h"
 #include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
@@ -354,6 +355,22 @@ public:
         , inspectorResizeSplitter_(*this)
         , inspectorCollapsedKnob_(*this)
     {
+        // Shared track-header column width: app-wide preference (`%APPDATA%\MiniDAWLab\ui-layout.xml`),
+        // restored before the first layout; absent/invalid ⇒ the view's default. Persisted once per
+        // completed drag of the header/timeline boundary handle (no I/O per mouse move, no undo step).
+        uiLayoutSettings_.loadFromFile();
+        trackLanesView.setTrackHeaderColumnWidthPx(
+            uiLayoutSettings_.getTrackHeaderColumnWidthPx().value_or(TrackLanesView::kTrackHeaderColumnDefaultWidthPx),
+            /*notifyOwner*/ false);
+        trackLanesView.setOnTrackHeaderColumnWidthChanged([this](const int widthPx, const bool dragEnded) {
+            resized(); // ruler corner, add-track button and playhead overlay move to the same boundary
+            if (dragEnded)
+            {
+                uiLayoutSettings_.setTrackHeaderColumnWidthPx(widthPx);
+                uiLayoutSettings_.save();
+            }
+        });
+
         recordingCoordinator_ = std::make_unique<RecordingCoordinator>(
             transport,
             session,
@@ -3364,6 +3381,104 @@ public:
         };
         hooks.seekTransportTo = [this](const std::int64_t sample) { transport.requestSeek(sample); };
 
+        // --- Inserts scenario (same entry points as the VST3 picker / Inspector rows) -------------
+        hooks.listAllTracks = [this]() -> std::vector<StabilityTrackInfo> {
+            std::vector<StabilityTrackInfo> out;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                StabilityTrackInfo info;
+                info.id = tr.getId();
+                info.name = tr.getName();
+                info.isInstrument = tr.getKind() == TrackKind::Instrument;
+                switch (tr.getKind())
+                {
+                    case TrackKind::Audio: info.kindName = "audio"; break;
+                    case TrackKind::Instrument: info.kindName = "instrument"; break;
+                    case TrackKind::Group: info.kindName = "group"; break;
+                    case TrackKind::Master: info.kindName = "master"; break;
+                    case TrackKind::Midi: info.kindName = "midi"; break;
+                }
+                out.push_back(std::move(info));
+            }
+            return out;
+        };
+        hooks.addInsertLikePicker = [this](const TrackId tid, const bool pre, const juce::File& vst3) -> juce::Result {
+            // Exactly what `Vst3PluginPickerCoordinator` does once the user picked an entry.
+            const juce::Result r = pluginHost_.addInsertFromVst3File(tid, pre ? InsertStage::Pre : InsertStage::Post, vst3);
+            inspectorView_.refreshFromSession();
+            return r;
+        };
+        hooks.listInsertRows = [this](const TrackId tid) -> std::vector<StabilityInsertRowInfo> {
+            std::vector<StabilityInsertRowInfo> out;
+            for (const InsertRowView& row : pluginHost_.getInsertRowsForTrack(tid))
+            {
+                out.push_back(StabilityInsertRowInfo{ row.stage == InsertStage::Pre, row.displayName, row.unavailable });
+            }
+            return out;
+        };
+
+        // --- Header column scenario ---------------------------------------------------------------
+        hooks.dragHeaderColumnLikeHandle = [this](const int deltaPx) {
+            trackLanesView.simulateHeaderColumnHandleDragForStabilityTest(deltaPx);
+        };
+        hooks.getHeaderColumnWidthPreference = [this]() -> int { return trackLanesView.getTrackHeaderColumnWidthPx(); };
+        hooks.getHeaderColumnEffectiveWidth = [this]() -> int { return trackLanesView.headerColumnWidthPx(); };
+        hooks.readPersistedHeaderColumnWidth = [this]() -> std::optional<int> {
+            UiLayoutSettingsStore fresh(uiLayoutSettings_.getFile());
+            fresh.loadFromFile();
+            return fresh.getTrackHeaderColumnWidthPx();
+        };
+        hooks.verifyHeaderColumnLayout = [this](juce::String& report, juce::String& failReason) -> bool {
+            if (!trackLanesView.verifyHeaderColumnLayoutForDiagnostics(report, failReason))
+            {
+                return false;
+            }
+            // Siblings laid out by `applyTransportControlsLayout` must sit on the very same boundary.
+            const int boundaryX = trackLanesView.getX() + trackLanesView.headerColumnWidthPx();
+            report << "  ruler=" << rulerView.getBounds().toString() << " addTrackButton="
+                   << addTrackCornerPlusButton_.getBounds().toString();
+            if (lanePlayheadOverlay_ != nullptr)
+            {
+                report << " playheadOverlay=" << lanePlayheadOverlay_->getBounds().toString();
+            }
+            report << " boundaryX=" << boundaryX << "\n";
+            if (rulerView.getX() != boundaryX)
+            {
+                failReason = "ruler starts at x=" + juce::String(rulerView.getX()) + " but the header boundary is x="
+                             + juce::String(boundaryX);
+                return false;
+            }
+            if (lanePlayheadOverlay_ != nullptr && lanePlayheadOverlay_->isVisible()
+                && lanePlayheadOverlay_->getX() != boundaryX)
+            {
+                failReason = "playhead overlay starts at x=" + juce::String(lanePlayheadOverlay_->getX())
+                             + " but the header boundary is x=" + juce::String(boundaryX);
+                return false;
+            }
+            if (addTrackCornerPlusButton_.getRight() > boundaryX)
+            {
+                failReason = "add-track corner button crosses the header boundary";
+                return false;
+            }
+            return true;
+        };
+        hooks.captureArrangementPng = [this](const juce::File& png) -> bool {
+            const juce::Image img = createComponentSnapshot(getLocalBounds(), true, 1.0f);
+            if (!img.isValid())
+            {
+                return false;
+            }
+            juce::FileOutputStream out(png);
+            if (!out.openedOk())
+            {
+                return false;
+            }
+            juce::PNGImageFormat fmt;
+            return fmt.writeImageToStream(img, out);
+        };
+
         hooks.audioHealthProbeBegin = [this] {
             (void)playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
             stabilityAudioProbeCallbackBaseline_ = playbackEngine_.readAudioCallbackEnterCountForDiagnostics();
@@ -4507,6 +4622,9 @@ private:
     collapsible_side_strip::ResizeSplitter inspectorResizeSplitter_;
     collapsible_side_strip::CollapsedKnob inspectorCollapsedKnob_;
     int inspectorCurrentWidth_ = kInspectorDefaultW;
+    /// App-wide (machine-local) layout preferences: the shared track-header column width. Loaded in
+    /// the ctor before the first layout; written once per completed boundary drag.
+    UiLayoutSettingsStore uiLayoutSettings_{ UiLayoutSettingsStore::defaultFile() };
 
     /// Destroyed before `trackLanesView` / `instrumentRuntimeCoordinator_` reverse dtors run (non-owning refs).
     std::unique_ptr<ArrangementEventSelectionCoordinator> arrangementEventSelectionCoordinator_;

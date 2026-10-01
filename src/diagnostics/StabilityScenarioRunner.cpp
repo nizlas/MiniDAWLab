@@ -202,6 +202,24 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-inserts")
+        {
+            if (!setKind(StabilityScenarioKind::Inserts)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-inserts requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-header-column")
+        {
+            if (!setKind(StabilityScenarioKind::HeaderColumn)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-header-column requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -286,6 +304,8 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::MidiEditorMoveCrash: scenarioName_ = "midi-editor-move"; break;
         case StabilityScenarioKind::PreGain: scenarioName_ = "pregain"; break;
         case StabilityScenarioKind::PreGainInspector: scenarioName_ = "pregain-inspector"; break;
+        case StabilityScenarioKind::Inserts: scenarioName_ = "inserts"; break;
+        case StabilityScenarioKind::HeaderColumn: scenarioName_ = "header-column"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -353,6 +373,12 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::PreGainInspector:
             appendPreGainInspectorSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::Inserts:
+            appendInsertsSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::HeaderColumn:
+            appendHeaderColumnSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -432,6 +458,16 @@ void StabilityScenarioRunner::finish(const bool pass, const juce::String& reason
         (void)openSaveCloseCopy_.deleteFile();
         appendStabilityRunLine("cleanup: deleted temp project copy "
                                + openSaveCloseCopy_.getFullPathName());
+        if (scenarioName_ == "inserts")
+        {
+            (void)openSaveCloseCopy_.getSiblingFile(openSaveCloseCopy_.getFileNameWithoutExtension() + "_autosave.dalproj").deleteFile();
+        }
+    }
+    if (insertsMissingPluginCopy_ != juce::File{} && insertsMissingPluginCopy_.existsAsFile())
+    {
+        (void)insertsMissingPluginCopy_.deleteFile();
+        (void)insertsMissingPluginCopy_.getSiblingFile(insertsMissingPluginCopy_.getFileNameWithoutExtension() + "_autosave.dalproj").deleteFile();
+        appendStabilityRunLine("cleanup: deleted missing-plugin test copy " + insertsMissingPluginCopy_.getFullPathName());
     }
     if (scenarioOutputDir_ != juce::File{} && scenarioOutputDir_.isDirectory())
     {
@@ -1821,6 +1857,462 @@ void StabilityScenarioRunner::appendPreGainInspectorSteps(const juce::File& proj
             return true;
         },
         kSettleDefaultMs });
+}
+
+// -----------------------------------------------------------------------------
+// Inserts: Save / reload / autosave-recovery + unavailable-plugin placeholder, in the real app
+// -----------------------------------------------------------------------------
+namespace
+{
+    [[nodiscard]] juce::String describeInsertRows(const std::vector<StabilityInsertRowInfo>& rows)
+    {
+        juce::String s;
+        for (const auto& r : rows)
+        {
+            s << "[" << (r.pre ? "pre" : "post") << " \"" << r.displayName << "\"" << (r.unavailable ? " UNAVAILABLE" : "")
+              << "] ";
+        }
+        return s.isEmpty() ? juce::String("(none)") : s;
+    }
+
+    /// Expected rows for one track: `pre` + name fragment + unavailable flag, in chain order.
+    struct ExpectedInsertRow
+    {
+        bool pre = false;
+        juce::String nameFragment;
+        bool unavailable = false;
+    };
+
+    [[nodiscard]] bool rowsMatch(const std::vector<StabilityInsertRowInfo>& rows,
+                                 const std::vector<ExpectedInsertRow>& expected,
+                                 juce::String& why)
+    {
+        if (rows.size() != expected.size())
+        {
+            why = "expected " + juce::String((int)expected.size()) + " insert row(s), found "
+                  + juce::String((int)rows.size()) + ": " + describeInsertRows(rows);
+            return false;
+        }
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            const auto& r = rows[i];
+            const auto& e = expected[i];
+            if (r.pre != e.pre || !r.displayName.containsIgnoreCase(e.nameFragment) || r.unavailable != e.unavailable)
+            {
+                why = "row " + juce::String((int)i) + " is [" + (r.pre ? "pre" : "post") + " \"" + r.displayName + "\""
+                      + (r.unavailable ? " UNAVAILABLE" : "") + "], expected [" + (e.pre ? "pre" : "post") + " ~\""
+                      + e.nameFragment + "\"" + (e.unavailable ? " UNAVAILABLE" : "") + "]";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Re-points `pluginVst3Path` of every insert on `trackId` in `src` to `newPath`, written to `dest`.
+    [[nodiscard]] bool rewriteInsertPathsForTrack(const juce::File& src,
+                                                  const juce::File& dest,
+                                                  const TrackId trackId,
+                                                  const juce::String& newPath)
+    {
+        juce::var root = juce::JSON::parse(src);
+        const juce::var tracks = root.getProperty("tracks", {});
+        if (!tracks.isArray())
+        {
+            return false;
+        }
+        bool done = false;
+        for (const juce::var& t : *tracks.getArray())
+        {
+            if (static_cast<juce::int64>(t.getProperty("id", 0)) != static_cast<juce::int64>(trackId))
+            {
+                continue;
+            }
+            const juce::var ins = t.getProperty("inserts", {});
+            if (!ins.isArray())
+            {
+                continue;
+            }
+            for (const juce::var& iv : *ins.getArray())
+            {
+                if (auto* obj = iv.getDynamicObject())
+                {
+                    obj->setProperty("pluginVst3Path", newPath);
+                    done = true;
+                }
+            }
+        }
+        return done && dest.replaceWithText(juce::JSON::toString(root));
+    }
+} // namespace
+
+void StabilityScenarioRunner::appendInsertsSteps(const juce::File& project)
+{
+    if (hooks_.midiRoutingFixtureSetup == nullptr || hooks_.fixtureInstrumentTrackId == nullptr
+        || hooks_.listAllTracks == nullptr || hooks_.addInsertLikePicker == nullptr || hooks_.listInsertRows == nullptr
+        || hooks_.saveProject == nullptr || hooks_.renameTrackUndoable == nullptr || hooks_.forceAutosaveNow == nullptr
+        || hooks_.recoverAutosaveNow == nullptr || hooks_.describeTrackForDiagnostics == nullptr)
+    {
+        steps_.push_back(Step{ "inserts: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "inserts hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    const juce::File delayBundle("C:\\Program Files\\Common Files\\VST3\\DALMonoDelay.vst3");
+
+    steps_.push_back(Step{
+        "inserts: copy project to sibling test file",
+        [this, project](juce::String& failReason) -> bool {
+            const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-insertstest.dalproj");
+            (void)copy.deleteFile();
+            if (!project.copyFileTo(copy))
+            {
+                failReason = "could not copy project to " + copy.getFullPathName();
+                return false;
+            }
+            openSaveCloseCopy_ = copy;
+            appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "inserts: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+
+    steps_.push_back(Step{ "inserts: build an instrument shell row (same fixture as midi-routing)",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.midiRoutingFixtureSetup(failReason))
+                               {
+                                   return false;
+                               }
+                               insertsInstrumentTrackId_ = hooks_.fixtureInstrumentTrackId();
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "audio" && insertsAudioTrackId_ == kInvalidTrackId)
+                                   {
+                                       insertsAudioTrackId_ = t.id;
+                                   }
+                                   if (t.kindName == "master")
+                                   {
+                                       insertsMasterTrackId_ = t.id;
+                                   }
+                               }
+                               appendStabilityRunLine("  instrument row id=" + juce::String((juce::int64)insertsInstrumentTrackId_)
+                                                      + " audio row id=" + juce::String((juce::int64)insertsAudioTrackId_)
+                                                      + " master id=" + juce::String((juce::int64)insertsMasterTrackId_));
+                               if (insertsInstrumentTrackId_ == kInvalidTrackId || insertsAudioTrackId_ == kInvalidTrackId
+                                   || insertsMasterTrackId_ == kInvalidTrackId)
+                               {
+                                   failReason = "fixture rows missing (need instrument + audio + master)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{
+        "inserts: add DAL Mono Delay — Post on instrument, Pre on audio, Post on master (picker path)",
+        [this, delayBundle](juce::String& failReason) -> bool {
+            if (!delayBundle.exists())
+            {
+                failReason = "DAL Mono Delay bundle not installed: " + delayBundle.getFullPathName();
+                return false;
+            }
+            for (const auto& [tid, pre] : std::vector<std::pair<TrackId, bool>>{
+                     { insertsInstrumentTrackId_, false }, { insertsAudioTrackId_, true }, { insertsMasterTrackId_, false } })
+            {
+                const juce::Result r = hooks_.addInsertLikePicker(tid, pre, delayBundle);
+                if (r.failed())
+                {
+                    failReason = "addInsert on track " + juce::String((juce::int64)tid) + " failed: " + r.getErrorMessage();
+                    return false;
+                }
+            }
+            if (hooks_.isProjectDirty && !hooks_.isProjectDirty())
+            {
+                failReason = "project not marked dirty after adding inserts";
+                return false;
+            }
+            for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+            {
+                appendStabilityRunLine("  " + hooks_.describeTrackForDiagnostics(t.id));
+            }
+            return true;
+        },
+        600 });
+
+    const auto verifyRows = [this](const juce::String& phase, juce::String& failReason) -> bool {
+        struct Row { TrackId id; const char* kind; std::vector<ExpectedInsertRow> expected; };
+        const Row rows[] = {
+            { insertsInstrumentTrackId_, "instrument", { { false, "DAL Mono Delay", false } } },
+            { insertsAudioTrackId_, "audio", { { true, "DAL Mono Delay", false } } },
+            { insertsMasterTrackId_, "master", { { false, "DAL Mono Delay", false } } },
+        };
+        for (const Row& r : rows)
+        {
+            const auto got = hooks_.listInsertRows(r.id);
+            appendStabilityRunLine("  " + phase + ": " + r.kind + " track " + juce::String((juce::int64)r.id) + " rows "
+                                   + describeInsertRows(got));
+            juce::String why;
+            if (!rowsMatch(got, r.expected, why))
+            {
+                failReason = phase + ": " + r.kind + " track " + juce::String((juce::int64)r.id) + ": " + why;
+                return false;
+            }
+        }
+        return true;
+    };
+
+    steps_.push_back(Step{ "inserts: save (production Save to the test copy)",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "inserts: reload test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs + 800 });
+
+    steps_.push_back(Step{ "inserts: verify every row after Save -> reload",
+                           [verifyRows](juce::String& failReason) -> bool { return verifyRows("after reload", failReason); },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "inserts: dirty edit (rename the audio row) + forced autosave",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.renameTrackUndoable(insertsAudioTrackId_, "InsertsAutosave "
+                                                                                          + juce::Time::getCurrentTime().formatted("%H%M%S")))
+                               {
+                                   failReason = "rename refused";
+                                   return false;
+                               }
+                               return hooks_.forceAutosaveNow(failReason);
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "inserts: recover the autosave in-process",
+                           [this](juce::String& failReason) -> bool { return hooks_.recoverAutosaveNow(failReason); },
+                           kSettleAfterLoadMs + 800 });
+
+    steps_.push_back(Step{ "inserts: verify every row after autosave recovery",
+                           [verifyRows](juce::String& failReason) -> bool { return verifyRows("after recovery", failReason); },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{
+        "inserts: simulate an uninstalled plugin (re-point the instrument row's saved path; user plugins untouched)",
+        [this](juce::String& failReason) -> bool {
+            insertsMissingPluginCopy_ = openSaveCloseCopy_.getSiblingFile(
+                openSaveCloseCopy_.getFileNameWithoutExtension() + "-missingplugin.dalproj");
+            (void)insertsMissingPluginCopy_.deleteFile();
+            const juce::String fake = "C:\\Program Files\\Common Files\\VST3\\__DAL_not_installed__\\DALMonoDelay.vst3";
+            if (!rewriteInsertPathsForTrack(openSaveCloseCopy_, insertsMissingPluginCopy_, insertsInstrumentTrackId_, fake))
+            {
+                failReason = "could not rewrite the saved insert path";
+                return false;
+            }
+            appendStabilityRunLine("  missing-plugin copy: " + insertsMissingPluginCopy_.getFullPathName());
+            return true;
+        },
+        kSettleDefaultMs });
+
+    steps_.push_back(Step{ "inserts: load the missing-plugin copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(insertsMissingPluginCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs + 800 });
+
+    const auto verifyUnavailable = [this](const juce::String& phase, juce::String& failReason) -> bool {
+        const auto inst = hooks_.listInsertRows(insertsInstrumentTrackId_);
+        const auto audio = hooks_.listInsertRows(insertsAudioTrackId_);
+        appendStabilityRunLine("  " + phase + ": instrument rows " + describeInsertRows(inst) + " | audio rows "
+                               + describeInsertRows(audio));
+        juce::String why;
+        if (!rowsMatch(inst, { { false, "DAL Mono Delay", true } }, why))
+        {
+            failReason = phase + ": instrument row: " + why;
+            return false;
+        }
+        if (!rowsMatch(audio, { { true, "DAL Mono Delay", false } }, why))
+        {
+            failReason = phase + ": audio row: " + why;
+            return false;
+        }
+        return true;
+    };
+
+    steps_.push_back(Step{ "inserts: verify the insert is kept as \"(unavailable)\" (others live)",
+                           [verifyUnavailable](juce::String& failReason) -> bool {
+                               return verifyUnavailable("missing plugin", failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "inserts: save while the plugin is missing, then reload",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "inserts: reload the missing-plugin copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(insertsMissingPluginCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs + 800 });
+
+    steps_.push_back(Step{ "inserts: verify the unavailable insert survived save -> reload (no data loss)",
+                           [verifyUnavailable](juce::String& failReason) -> bool {
+                               return verifyUnavailable("after re-save", failReason);
+                           },
+                           kSettleDefaultMs });
+}
+
+// -----------------------------------------------------------------------------
+// Header column: shared boundary geometry, resize path, persistence, PNG evidence
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendHeaderColumnSteps(const juce::File& project)
+{
+    if (hooks_.dragHeaderColumnLikeHandle == nullptr || hooks_.getHeaderColumnWidthPreference == nullptr
+        || hooks_.getHeaderColumnEffectiveWidth == nullptr || hooks_.readPersistedHeaderColumnWidth == nullptr
+        || hooks_.verifyHeaderColumnLayout == nullptr || hooks_.captureArrangementPng == nullptr
+        || hooks_.addMidiTrackLikeUi == nullptr || hooks_.requestDeleteTrack == nullptr)
+    {
+        steps_.push_back(Step{ "header-column: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "header-column hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    // Evidence folder is deliberately NOT `scenarioOutputDir_` (which `finish` deletes): the PNGs
+    // are the deliverable of this scenario and stay for the report.
+    auto evidenceDir = std::make_shared<juce::File>(
+        juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-header-column"));
+    (void)evidenceDir->deleteRecursively();
+    (void)evidenceDir->createDirectory();
+
+    appendLoadAndVerifySteps(project, "header-column");
+
+    const auto verifyAndCapture = [this, evidenceDir](const juce::String& label, const int expectedEffective,
+                                                      juce::String& failReason) -> bool {
+        const int pref = hooks_.getHeaderColumnWidthPreference();
+        const int eff = hooks_.getHeaderColumnEffectiveWidth();
+        appendStabilityRunLine("  " + label + ": preference=" + juce::String(pref) + " effective=" + juce::String(eff));
+        if (expectedEffective > 0 && eff != expectedEffective)
+        {
+            failReason = label + ": effective width " + juce::String(eff) + " != expected " + juce::String(expectedEffective);
+            return false;
+        }
+        juce::String report;
+        const bool ok = hooks_.verifyHeaderColumnLayout(report, failReason);
+        for (const auto& line : juce::StringArray::fromLines(report))
+        {
+            if (line.isNotEmpty())
+            {
+                appendStabilityRunLine("    " + line);
+            }
+        }
+        const juce::File png = evidenceDir->getChildFile("header-column-" + label + ".png");
+        if (hooks_.captureArrangementPng(png))
+        {
+            appendStabilityRunLine("  evidence: " + png.getFullPathName());
+        }
+        return ok;
+    };
+
+    steps_.push_back(Step{ "header-column: geometry at the startup width (persisted preference)",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               headerColumnWidthAtStart_ = hooks_.getHeaderColumnWidthPreference();
+                               appendStabilityRunLine("  persisted on disk: "
+                                                      + (hooks_.readPersistedHeaderColumnWidth().has_value()
+                                                             ? juce::String(*hooks_.readPersistedHeaderColumnWidth())
+                                                             : juce::String("(absent -> default)")));
+                               return verifyAndCapture("startup", 0, failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "header-column: drag to the default width (144)",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               hooks_.dragHeaderColumnLikeHandle(144 - hooks_.getHeaderColumnEffectiveWidth());
+                               return verifyAndCapture("default-144", 144, failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "header-column: drag far left -> clamps at the minimum (132), every button inside",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               hooks_.dragHeaderColumnLikeHandle(-600);
+                               return verifyAndCapture("minimum-132", 132, failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "header-column: drag to a wide setting (240) for long names",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               hooks_.dragHeaderColumnLikeHandle(240 - hooks_.getHeaderColumnEffectiveWidth());
+                               return verifyAndCapture("wide-240", 240, failReason);
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "header-column: persisted app-wide after the drag ended",
+                           [this](juce::String& failReason) -> bool {
+                               const std::optional<int> onDisk = hooks_.readPersistedHeaderColumnWidth();
+                               appendStabilityRunLine("  persisted on disk: "
+                                                      + (onDisk.has_value() ? juce::String(*onDisk) : juce::String("(absent)")));
+                               if (!onDisk.has_value() || *onDisk != 240)
+                               {
+                                   failReason = "ui-layout.xml does not carry 240 after the drag";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+
+    steps_.push_back(Step{ "header-column: add a MIDI track -> width unchanged, new row on the same boundary",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               const std::optional<TrackId> tid = hooks_.addMidiTrackLikeUi();
+                               if (!tid.has_value())
+                               {
+                                   failReason = "add MIDI track refused";
+                                   return false;
+                               }
+                               scenarioMidiTrackId_ = *tid;
+                               return verifyAndCapture("after-add-track", 240, failReason);
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "header-column: delete that track -> width unchanged",
+                           [this, verifyAndCapture](juce::String& failReason) -> bool {
+                               hooks_.requestDeleteTrack(scenarioMidiTrackId_);
+                               return verifyAndCapture("after-delete-track", 240, failReason);
+                           },
+                           kSettleAfterDeleteOpMs });
+
+    steps_.push_back(Step{ "header-column: restore the user's preference and persist it",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.dragHeaderColumnLikeHandle(headerColumnWidthAtStart_ - hooks_.getHeaderColumnEffectiveWidth());
+                               const std::optional<int> onDisk = hooks_.readPersistedHeaderColumnWidth();
+                               appendStabilityRunLine("  restored preference=" + juce::String(hooks_.getHeaderColumnWidthPreference())
+                                                      + " on disk=" + (onDisk.has_value() ? juce::String(*onDisk) : juce::String("(absent)")));
+                               if (hooks_.getHeaderColumnWidthPreference() != headerColumnWidthAtStart_)
+                               {
+                                   failReason = "could not restore the startup preference";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
 }
 
 void StabilityScenarioRunner::appendMidiRoutingSteps(const juce::File& project)

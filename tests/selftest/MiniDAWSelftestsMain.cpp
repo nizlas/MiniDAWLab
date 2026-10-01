@@ -1204,11 +1204,13 @@ namespace
             juce::var root;
             const auto pr = juce::JSON::parse(v20File.loadFileAsString(), root);
             expect(pr.wasOk() && root.getDynamicObject() != nullptr, "p1b: newer-version parse ok");
-            root.getDynamicObject()->setProperty("version", 21);
+            // One past whatever the current schema is (was hard-coded to 21 when v20 was current,
+            // which silently turned into "accepted" once v21+ shipped).
+            root.getDynamicObject()->setProperty("version", ProjectFileV1::kCurrentVersion + 1);
             (void)malformedFile.replaceWithText(juce::JSON::toString(root, true));
             ProjectFileV1 back;
             const auto rr = readProjectFile(malformedFile, back);
-            expect(!rr.wasOk(), "p1b: files newer than v20 are still rejected");
+            expect(!rr.wasOk(), "p1b: files newer than the current schema version are still rejected");
         }
 
         // Musical-undo strip removes the v20 proxy/identity fields.

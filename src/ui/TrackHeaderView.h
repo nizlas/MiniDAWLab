@@ -107,6 +107,24 @@ public:
     /// Horizontal strip: each M/R/power/instrument cell (`squareStripButtonBodyFromCell` insets inside).
     static constexpr int kStripControlCellWidthPx = 22;
     static constexpr int kStripSquareBodyInsetPx = 1;
+    /// Outer padding from the header edges (name + strip share it), and the extra left trim that
+    /// keeps content clear of the active-row accent stripe (4 px) / inactive edge.
+    static constexpr int kHeaderOuterPadXPx = 8;
+    static constexpr int kHeaderNameTrimLeftActivePx = 6;
+    static constexpr int kHeaderNameTrimLeftInactivePx = 4;
+    /// Widest control row any row kind can show: [Instrument][Power][Mute][Monitor][Arm] on an
+    /// instrument destination row (audio rows show 4, group/master 1).
+    static constexpr int kMaxStripControlCellCount = 5;
+    /// Minimum header-column width at which that widest row still ends inside the chrome with the
+    /// standard right pad — in logical (DPI-independent) px: 8 + 6 + 5 × 22 + 8 = 132. Below this
+    /// the right-most strip cell would be clipped (the 1.1.6 report: Monitor pushed Arm off-edge at
+    /// the old fixed 120 px column).
+    static constexpr int kMinimumHeaderColumnWidthPx
+        = kHeaderOuterPadXPx + kHeaderNameTrimLeftActivePx + kMaxStripControlCellCount * kStripControlCellWidthPx
+          + kHeaderOuterPadXPx;
+    /// Default column width: the minimum plus a 12 px visual margin (144 px) so the strip never
+    /// hugs the boundary / drag handle and the name has a little more room.
+    static constexpr int kDefaultHeaderColumnWidthPx = kMinimumHeaderColumnWidthPx + 12;
     /// Deep-sky-blue left-edge stripe painted when the row is the UI-active row.
     static constexpr int kHeaderActiveStripeWidthPx = 4;
     /// P2 "Instrument alternatives" button: small standalone bottom-left button (NOT a strip

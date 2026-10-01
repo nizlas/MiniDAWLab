@@ -38,6 +38,58 @@ namespace
         return *list.getFirst();
     }
 
+    /// JUCE identifier strings are `<format>-<name>-<hex(bundle path hash)>-<hex(uid)>`. Plugin
+    /// identity for restore purposes is format + name + uid; the path hash only says where the
+    /// bundle lived when saved, so a relocated copy of the same plugin still matches.
+    [[nodiscard]] bool descriptionMatchesSavedIdentity(const juce::PluginDescription& pd,
+                                                       const juce::String& savedIdentifier) noexcept
+    {
+        if (savedIdentifier.isEmpty())
+        {
+            return true;
+        }
+        const juce::String prefix = pd.pluginFormatName + "-" + pd.name + "-";
+        if (!savedIdentifier.startsWith(prefix))
+        {
+            return false;
+        }
+        const juce::String savedUidHex = savedIdentifier.fromLastOccurrenceOf("-", false, false);
+        if (savedUidHex.isEmpty())
+        {
+            return false;
+        }
+        if (savedUidHex.equalsIgnoreCase(juce::String::toHexString(pd.uniqueId)))
+        {
+            return true;
+        }
+        return pd.deprecatedUid != 0
+               && savedUidHex.equalsIgnoreCase(juce::String::toHexString(pd.deprecatedUid));
+    }
+
+    /// Human-readable name for an unavailable placeholder: the `<name>` part of the saved JUCE
+    /// identifier string, else the bundle file stem.
+    [[nodiscard]] juce::String unavailableInsertDisplayName(const PluginInsertDescriptor& d)
+    {
+        juce::String name;
+        const juce::String id = d.pluginIdentifier;
+        // "<format>-<name>-<hash>-<uid>": drop the format prefix and the two trailing segments.
+        const int firstDash = id.indexOfChar('-');
+        const int lastDash = id.lastIndexOfChar('-');
+        if (firstDash >= 0 && lastDash > firstDash)
+        {
+            const int secondLastDash = id.substring(0, lastDash).lastIndexOfChar('-');
+            if (secondLastDash > firstDash)
+            {
+                name = id.substring(firstDash + 1, secondLastDash).trim();
+            }
+        }
+        if (name.isEmpty())
+        {
+            name = juce::File::createFileWithoutCheckingPath(d.vst3AbsolutePath).getFileNameWithoutExtension();
+        }
+        return name.isEmpty() ? juce::String("VST3 insert") : name;
+    }
+
     [[nodiscard]] double effectiveSr(const double sr) noexcept
     {
         return sr > 0.0 ? sr : 48000.0;
@@ -61,6 +113,43 @@ namespace
     }
 
 } // namespace
+
+juce::PluginDescription PluginInsertHost::pickDescriptionForSavedIdentity(const juce::File& vst3File,
+                                                                         juce::AudioPluginFormatManager& fm,
+                                                                         const juce::String& savedIdentifier,
+                                                                         juce::String& err)
+{
+    err.clear();
+    const juce::String pathOrId = vst3File.getFullPathName();
+    juce::OwnedArray<juce::PluginDescription> list;
+    for (int i = 0; i < fm.getNumFormats(); ++i)
+    {
+        juce::AudioPluginFormat* const f = fm.getFormat(i);
+        if (f != nullptr && f->fileMightContainThisPluginType(pathOrId))
+        {
+            f->findAllTypesForFile(list, pathOrId);
+        }
+    }
+    if (list.isEmpty())
+    {
+        err = "No plugin types found in file (not a VST3 or scan failed).";
+        return {};
+    }
+    if (savedIdentifier.isEmpty())
+    {
+        return *list.getFirst();
+    }
+    for (const juce::PluginDescription* pd : list)
+    {
+        if (pd != nullptr && descriptionMatchesSavedIdentity(*pd, savedIdentifier))
+        {
+            return *pd;
+        }
+    }
+    err = "The plugin found at the saved path is not the saved plugin (" + savedIdentifier
+          + "); the saved state is kept but not applied.";
+    return {};
+}
 
 PluginInsertHost::PluginInsertHost()
 {
@@ -746,6 +835,17 @@ PluginTrackChain PluginInsertHost::exportChain(const TrackId trackId) const
     }
     for (const auto& live : it->second)
     {
+        if (live.isUnavailablePlaceholder())
+        {
+            // Re-emit the saved identity + state untouched (only slot id / stage follow the live
+            // row, which the user may have moved between Pre and Post while it was unavailable).
+            PluginInsertDescriptor d = live.unavailableDescriptor;
+            d.slotId = live.slotId;
+            d.stage = live.stage;
+            d.occupied = true;
+            out.slots.push_back(std::move(d));
+            continue;
+        }
         if (live.instance == nullptr)
         {
             continue;
@@ -778,6 +878,26 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
     std::vector<LiveInsertSlot> built;
     built.reserve(chain.slots.size());
 
+    // Primary data-loss rule: a saved insert whose plugin cannot be brought back right now keeps
+    // its chain position, identity and opaque state as an unavailable placeholder. Saving the
+    // project afterwards re-emits it unchanged; only an explicit user removal drops it.
+    const auto keepAsUnavailablePlaceholder = [&](const PluginInsertDescriptor& desc, const juce::String& why) {
+        LiveInsertSlot placeholder;
+        placeholder.slotId = desc.slotId != kInvalidInsertSlotId ? desc.slotId : allocateSlotId();
+        placeholder.stage = desc.stage;
+        placeholder.unavailableDescriptor = desc;
+        placeholder.unavailableDescriptor.slotId = placeholder.slotId;
+        placeholder.unavailableDescriptor.occupied = true;
+        juce::Logger::writeToLog("[plugin] insert kept as unavailable placeholder: track "
+                                 + juce::String((juce::int64)trackId) + " slot "
+                                 + juce::String((juce::int64)placeholder.slotId) + " ("
+                                 + (desc.stage == InsertStage::Pre ? "pre" : "post") + ") path=\""
+                                 + desc.vst3AbsolutePath + "\" identifier=\"" + desc.pluginIdentifier
+                                 + "\" stateBytes=" + juce::String((juce::int64)desc.opaqueState.getSize())
+                                 + " reason: " + why);
+        built.push_back(std::move(placeholder));
+    };
+
     for (const auto& desc : chain.slots)
     {
         if (!desc.occupied)
@@ -792,28 +912,24 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
 
         if (desc.vst3AbsolutePath.isEmpty())
         {
+            // Nothing identifies this row (not produced by any DAL writer) — nothing to preserve.
             continue;
         }
 
         const juce::File f(desc.vst3AbsolutePath);
         if (!f.exists())
         {
-            juce::Logger::writeToLog("[plugin] Missing VST3 path: " + desc.vst3AbsolutePath);
+            keepAsUnavailablePlaceholder(desc, "VST3 bundle missing at saved path");
             continue;
         }
 
         juce::String err;
-        const juce::PluginDescription pd = pickPrimaryDescription(f, formatManager_, err);
+        const juce::PluginDescription pd
+            = pickDescriptionForSavedIdentity(f, formatManager_, desc.pluginIdentifier, err);
         if (pd.name.isEmpty())
         {
-            juce::Logger::writeToLog("[plugin] Could not restore plugin: " + err);
+            keepAsUnavailablePlaceholder(desc, err);
             continue;
-        }
-        if (desc.pluginIdentifier.isNotEmpty()
-            && pd.createIdentifierString() != desc.pluginIdentifier)
-        {
-            juce::Logger::writeToLog(
-                "[plugin] Identifier mismatch for track " + juce::String((juce::int64)trackId));
         }
 
         const double srU = effectiveSr(sampleRate_);
@@ -822,7 +938,7 @@ void PluginInsertHost::importChainNoUndo(const TrackId trackId, const PluginTrac
             formatManager_.createPluginInstance(pd, srU, bsU, err));
         if (inst == nullptr)
         {
-            juce::Logger::writeToLog("[plugin] createPluginInstance failed: " + err);
+            keepAsUnavailablePlaceholder(desc, "createPluginInstance failed: " + err);
             continue;
         }
         bool layoutOk = tryPrepareStereoInsert(*inst, srU, bsU);
@@ -876,12 +992,21 @@ std::vector<InsertRowView> PluginInsertHost::getInsertRowsForTrack(const TrackId
     rows.reserve(it->second.size());
     for (const auto& live : it->second)
     {
+        if (live.isUnavailablePlaceholder())
+        {
+            rows.push_back(InsertRowView{ live.slotId,
+                                          live.stage,
+                                          unavailableInsertDisplayName(live.unavailableDescriptor)
+                                              + " (unavailable)",
+                                          true });
+            continue;
+        }
         if (live.instance == nullptr)
         {
             continue;
         }
         rows.push_back(
-            InsertRowView{ live.slotId, live.stage, live.instance->getName() });
+            InsertRowView{ live.slotId, live.stage, live.instance->getName(), false });
     }
     return rows;
 }
@@ -1213,8 +1338,11 @@ bool PluginInsertHost::hasAnyInsertOnTrack(const TrackId trackId) const noexcept
     {
         return false;
     }
-    return std::any_of(
-        it->second.begin(), it->second.end(), [](const LiveInsertSlot& s) { return s.instance != nullptr; });
+    // Unavailable placeholders count: they are user configuration the Inspector lists and track
+    // deletion must capture for undo, even though they publish no processor.
+    return std::any_of(it->second.begin(), it->second.end(), [](const LiveInsertSlot& s) {
+        return s.instance != nullptr || s.isUnavailablePlaceholder();
+    });
 }
 
 juce::String PluginInsertHost::getPluginDisplayNameForTrack(const TrackId trackId) const

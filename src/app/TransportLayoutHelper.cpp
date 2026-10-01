@@ -128,7 +128,11 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
     }
     const int timelineBandTop = area.getY();
     auto timelineRow = area.removeFromTop(gutter);
-    auto rulerLaneCorner = timelineRow.removeFromLeft(TrackLanesView::kTrackHeaderWidth);
+    // ONE shared boundary: the lanes view computes its effective header-column width from the very
+    // same total width it is about to receive below, so ruler inset, add-track corner, lane area
+    // origin and playhead overlay all start at the identical x.
+    const int headerColumnW = r.trackLanesView.effectiveTrackHeaderColumnWidthPxForTotalWidth(area.getWidth());
+    auto rulerLaneCorner = timelineRow.removeFromLeft(headerColumnW);
     {
         const int cellSide = TrackHeaderView::kStripControlCellWidthPx;
         const int maxSide = rulerLaneCorner.getWidth() - 2 * kAddTrackPlusPad;
@@ -146,7 +150,7 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
     if (r.lanePlayheadOverlay != nullptr)
     {
         const int tw = r.trackLanesView.getWidth();
-        const int leftStrip = juce::jmin(TrackLanesView::kTrackHeaderWidth, tw);
+        const int leftStrip = juce::jmin(headerColumnW, tw);
         const int laneContentLeft = r.trackLanesView.getX() + leftStrip;
         const int laneW = juce::jmax(0, tw - leftStrip);
         static constexpr bool kLogTransportLaneLayout = false;
@@ -154,7 +158,7 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         {
             juce::Logger::writeToLog(
                 "Transport layout: trackLanes=" + r.trackLanesView.getBounds().toString()
-                + " kTrackHeaderWidth=" + juce::String(TrackLanesView::kTrackHeaderWidth)
+                + " headerColumnW=" + juce::String(headerColumnW)
                 + " laneContentLeft=" + juce::String(laneContentLeft)
                 + " instrumentRowVisible="
                 + juce::String(r.trackLanesView.isInstrumentTimelineRowVisible() ? 1 : 0)

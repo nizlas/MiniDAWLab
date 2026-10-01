@@ -15,7 +15,7 @@
 //   clear ghosts — **no** track-type predicate; “valid lane” is geometric only (the header strip
 //   is not a lane — pointer over a header is not a valid drop). **Header drag** (track reorder) is
 //   a separate gesture: `TrackHeaderView` past-threshold drags are coordinated here (insert line in
-//   `paintOverChildren` only in the **header column** width (same as `kTrackHeaderWidth` cap in
+//   `paintOverChildren` only in the **header column** width (same `headerColumnWidthPx()` as in
 //   `resized`), `Main` publishes `Session::moveTrack` inside undo via a single-row move on commit —
 //   **including** the experimental Instrument lane (`TrackKind::Instrument` in `SessionSnapshot`).
 //   No-op drag: red line follows pointer y; valid reorder: green line at snapped gap. **Delete track:**
@@ -88,9 +88,69 @@ struct InstrumentTimelineAttachment
 class TrackLanesView : public juce::Component, private juce::Timer
 {
 public:
-    // Width of the left name/active strip. `Main` insets the timeline ruler by the same value so
-    // the ruler’s x <-> session-sample map matches the lane area.
-    static constexpr int kTrackHeaderWidth = 120;
+    // -------------------------------------------------------------------------------------------
+    // Header column width — ONE shared boundary for every row kind (audio, instrument, MIDI, group,
+    // master), the lane-area x-origin, the ruler inset and the playhead overlay (`Main` reads
+    // `effectiveTrackHeaderColumnWidthPxForTotalWidth` in `applyTransportControlsLayout`). Runtime
+    // state, user-resizable with the drag handle on the header/timeline boundary; the owner
+    // persists it app-wide (`UiLayoutSettingsStore`). Never per track, never changed by names.
+    // Limits are logical (DPI-independent) px derived from the real control-strip layout.
+    // -------------------------------------------------------------------------------------------
+    /// 132 px: the widest button row ([Instrument][Power][Mute][Monitor][Arm]) fully inside the chrome.
+    static constexpr int kTrackHeaderColumnMinWidthPx = TrackHeaderView::kMinimumHeaderColumnWidthPx;
+    /// 144 px: minimum + 12 px margin.
+    static constexpr int kTrackHeaderColumnDefaultWidthPx = TrackHeaderView::kDefaultHeaderColumnWidthPx;
+    static constexpr int kTrackHeaderColumnMaxWidthPx = 480;
+    /// Lane area kept visible right of the column on narrow windows (effective width clamps to it).
+    static constexpr int kMinimumLaneAreaWidthPx = 160;
+    /// Drag handle: a band centred on the boundary (3 px on each side) that owns its mouse events,
+    /// so a width drag can never start a clip move, a row-height drag or a header reorder.
+    static constexpr int kHeaderColumnResizeHandleWidthPx = 6;
+
+    /// [Message thread] Stored preference, clamped to [min, max].
+    [[nodiscard]] int getTrackHeaderColumnWidthPx() const noexcept { return trackHeaderColumnWidthPx_; }
+    /// [Message thread] Clamps, re-lays out this view and (when `notifyOwner`) fires
+    /// `onTrackHeaderColumnWidthChanged(width, dragEnded=false)` so the owner re-lays out ruler/overlay.
+    void setTrackHeaderColumnWidthPx(int widthPx, bool notifyOwner = true) noexcept;
+    /// The one clamp formula (pure, testable): the preference, but never leaving less than
+    /// `kMinimumLaneAreaWidthPx` of lane area, never below the minimum unless the whole view is
+    /// narrower than that, never wider than the view.
+    [[nodiscard]] static constexpr int clampHeaderColumnWidthForTotalWidth(const int preferredWidthPx,
+                                                                           const int totalWidthPx) noexcept
+    {
+        if (totalWidthPx <= 0)
+        {
+            return 0;
+        }
+        const int roomForColumn = totalWidthPx - kMinimumLaneAreaWidthPx > kTrackHeaderColumnMinWidthPx
+                                      ? totalWidthPx - kMinimumLaneAreaWidthPx
+                                      : kTrackHeaderColumnMinWidthPx;
+        const int clamped = preferredWidthPx < kTrackHeaderColumnMinWidthPx ? kTrackHeaderColumnMinWidthPx
+                            : preferredWidthPx > roomForColumn              ? roomForColumn
+                                                                            : preferredWidthPx;
+        return clamped < totalWidthPx ? clamped : totalWidthPx;
+    }
+    /// Effective width for a view of `totalWidthPx` (`clampHeaderColumnWidthForTotalWidth` of the
+    /// stored preference). Same formula everywhere: this view, the transport layout, the overlay.
+    [[nodiscard]] int effectiveTrackHeaderColumnWidthPxForTotalWidth(int totalWidthPx) const noexcept;
+    /// Effective width for the current bounds (what `resized()` / paint / hit-testing use).
+    [[nodiscard]] int headerColumnWidthPx() const noexcept
+    {
+        return effectiveTrackHeaderColumnWidthPxForTotalWidth(getWidth());
+    }
+    /// [Message thread] Owner hook: every change (`dragEnded == false`) + once on handle release
+    /// (`dragEnded == true`, the moment to persist — no disk I/O per mouse move).
+    void setOnTrackHeaderColumnWidthChanged(std::function<void(int widthPx, bool dragEnded)> fn) noexcept;
+    /// Diagnostics / UI tests: bounds of the resize handle in this view's coordinates.
+    [[nodiscard]] juce::Rectangle<int> getHeaderColumnResizeHandleBoundsForDiagnostics() const noexcept;
+    /// Stability runner: the exact sequence the handle performs for one drag — anchor at the
+    /// current effective width, apply `deltaPx`, then the drag-ended notification (persist).
+    void simulateHeaderColumnHandleDragForStabilityTest(int deltaPx) noexcept;
+    /// Diagnostics (stability runner): checks every visible header of every row kind against the
+    /// shared boundary — header width == effective column width, every present strip cell /
+    /// alternatives button fully inside the header, and every lane starting exactly at the boundary.
+    /// Appends one line per header to `report`; returns false with `failReason` on the first violation.
+    [[nodiscard]] bool verifyHeaderColumnLayoutForDiagnostics(juce::String& report, juce::String& failReason) const;
 
     /// Height of the timeline row band shared with `TimelineRulerView` / transport layout (px).
     /// Track rows scroll only below this; the header-column gutter above the first row matches this.
@@ -283,6 +343,25 @@ public:
 private:
     void timerCallback() override;
 
+    /// Vertical drag handle on the header/timeline boundary (see `kHeaderColumnResizeHandleWidthPx`).
+    /// Left-button drag resizes the shared header column; other buttons fall through to the
+    /// middle-pan listener. Paints a faint boundary highlight only while hovered or dragging.
+    class HeaderColumnResizeHandle final : public juce::Component
+    {
+    public:
+        explicit HeaderColumnResizeHandle(TrackLanesView& owner) noexcept;
+        void mouseDown(const juce::MouseEvent& e) override;
+        void mouseDrag(const juce::MouseEvent& e) override;
+        void mouseUp(const juce::MouseEvent& e) override;
+        void paint(juce::Graphics& g) override;
+
+    private:
+        TrackLanesView& owner_;
+        int anchorWidthPx_ = 0;
+        bool dragging_ = false;
+    };
+    void notifyTrackHeaderColumnWidthDragEnded() noexcept;
+
     /// Middle-button drag = horizontal hand-pan (grab-style: content follows the mouse). Registered
     /// with `addMouseListener(..., true)` so the gesture works over child lanes/headers too; the
     /// children themselves ignore middle-button events (see `ClipWaveformView` / `MidiEventLane`).
@@ -357,6 +436,10 @@ private:
     int defaultRowHeightPx_ = 96;
     int maxRowHeightPx_ = 480;
     int verticalScrollOffsetPx_ = 0;
+
+    int trackHeaderColumnWidthPx_ = kTrackHeaderColumnDefaultWidthPx;
+    HeaderColumnResizeHandle headerColumnResizeHandle_{ *this };
+    std::function<void(int, bool)> onTrackHeaderColumnWidthChanged_;
 
     MiddlePanMouseListener middlePanListener_{ *this };
     bool middlePanActive_ = false;

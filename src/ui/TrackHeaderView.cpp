@@ -16,12 +16,9 @@ namespace
 
     constexpr float kCubaseCtlCornerRadMax = 2.85f;
 
-    /// Outer padding from header edges (matches prior name insets).
-    constexpr int kHeaderOuterPadXPx = 8;
+    /// Vertical outer padding (horizontal pad / name trims are public class constants: the header
+    /// column width limits in `TrackHeaderView.h` are derived from them).
     constexpr int kHeaderOuterPadYPx = 4;
-    /// Extra trim after horizontal outer pad (active-state accent eats ~4px blue bar).
-    constexpr int kHeaderNameTrimLeftActivePx = 6;
-    constexpr int kHeaderNameTrimLeftInactivePx = 4;
     /// Vertical gap between name block and control strip.
     constexpr int kHeaderNameToButtonsGapPx = 3;
     /// Default title-only block height (~one line at 14pt).
