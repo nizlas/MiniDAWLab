@@ -165,7 +165,7 @@ Covered by code review only: a real mouse drag on the handle (the scenario drive
 | Installer / portable | `dist\DanielssonsAudioLab-1.1.7-Setup.exe`, `dist\DanielssonsAudioLab-1.1.7.zip`; symbols `dist\symbols\DanielssonsAudioLab-1.1.7\` |
 | Debug exe **with the changes** | `build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` (the normal Debug location was free this time; the user's running DAL is the **alt** Debug exe `build\ninja-debug-alt\...\MiniDAWLab.exe`, still 1.1.6 and left untouched/running) |
 | Focused test exes | `build\ninja-debug-alt\InsertPersistenceFocusedTests_artefacts\Debug\InsertPersistenceFocusedTests.exe`, `build\ninja-debug\TrackHeaderColumnFocusedTests_artefacts\Debug\TrackHeaderColumnFocusedTests.exe` |
-| Commit | see `git log -1` on `main` (release notes `docs/releases/1.1.7.md`) |
+| Commit | `9832abee32a5ff07fb5a4bfd2f24b73f22e9d172` on `main` (pushed to `origin/main`; release notes `docs/releases/1.1.7.md`) |
 
 Preserved and re-verified: ASIO device path untouched; BPM transfer (`PluginInsertTempoFocusedTests`
 pass); export fixes (`MixdownPreGainFocusedTests` pass). Real music projects were not modified
