@@ -756,8 +756,13 @@ void TrackLanesEditCoordinator::install()
                 {
                     return false;
                 }
-                // The live-MIDI coordinator follows the session on its own tick (device open /
-                // routing republish); refresh the Inspector now so the new choice shows at once.
+                // Runtime follows the UI immediately: devices (re)opened and routing republished
+                // for this very pick (the coordinator's 30 Hz tick would also catch it, but the
+                // user must never see a configured row that is not yet routed).
+                if (callbacks_.onMidiInputAssignmentChanged)
+                {
+                    callbacks_.onMidiInputAssignmentChanged();
+                }
                 inspectorView_.refreshFromSession();
                 return true;
             });

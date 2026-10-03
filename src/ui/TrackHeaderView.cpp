@@ -1190,6 +1190,23 @@ bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
     return false;
 }
 
+bool TrackHeaderView::clickStripCellLikeMouse(const TrackHeaderButtonKind kind)
+{
+    auto specs = buildStripControlSpecs();
+    TrackHeaderStripButtonSpec const* const spec = findStripControlSpec(specs, kind);
+    if (spec == nullptr || !spec->enabled || spec->cellBounds.isEmpty())
+    {
+        return false;
+    }
+    const juce::Point<int> centre = spec->cellBounds.getCentre();
+    return dispatchStripClick(centre, std::move(specs));
+}
+
+bool TrackHeaderView::clickMonitorCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Monitor); }
+bool TrackHeaderView::clickArmCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Arm); }
+bool TrackHeaderView::clickMuteCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Mute); }
+bool TrackHeaderView::clickPowerCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Power); }
+
 void TrackHeaderView::mouseDown(juce::MouseEvent const& e)
 {
     if (e.mods.isPopupMenu())

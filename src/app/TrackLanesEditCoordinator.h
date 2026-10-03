@@ -72,7 +72,15 @@ public:
         /// Phase B: Delete-Track undo restore for `TrackKind::Midi` rows — recreates the
         /// plugin-less MIDI content controller (never an instrument host).
         std::function<InstrumentTrackController*(TrackId)> getOrCreateMidiContentControllerForTrack;
+
+        /// Live MIDI: a row's MIDI Input assignment changed through the Inspector — the live-MIDI
+        /// coordinator re-opens devices and republishes its routing NOW (not on its next tick), so
+        /// the runtime matches the UI the moment the pick is made. Optional.
+        std::function<void()> onMidiInputAssignmentChanged;
     };
+
+    /// Install the optional live-MIDI notification after construction (composition root).
+    void setOnMidiInputAssignmentChanged(std::function<void()> fn) { callbacks_.onMidiInputAssignmentChanged = std::move(fn); }
 
     TrackLanesEditCoordinator(Session& session,
                               PlaybackEngine& playbackEngine,

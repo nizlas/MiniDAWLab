@@ -811,8 +811,48 @@ void testExportPitchBend()
 }
 } // namespace
 
-int main()
+namespace
 {
+/// `--hold-midi-input <name-substring> <seconds>`: opens a physical MIDI input exclusively (as
+/// another DAW would) and keeps it for the given time, so the app's "device could not be opened"
+/// explanation path can be verified against a really busy port. Exit 0 when held, 2 when no
+/// such device exists.
+int holdMidiInput(const juce::String& nameSubstring, const int seconds)
+{
+    struct NullCallback final : juce::MidiInputCallback
+    {
+        void handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage&) override {}
+    } cb;
+    for (const auto& d : juce::MidiInput::getAvailableDevices())
+    {
+        if (!d.name.containsIgnoreCase(nameSubstring))
+        {
+            continue;
+        }
+        std::unique_ptr<juce::MidiInput> in = juce::MidiInput::openDevice(d.identifier, &cb);
+        if (in == nullptr)
+        {
+            std::printf("could not open \"%s\" (already busy?)\n", d.name.toRawUTF8());
+            return 3;
+        }
+        in->start();
+        std::printf("holding \"%s\" for %d s\n", d.name.toRawUTF8(), seconds);
+        std::fflush(stdout);
+        juce::Thread::sleep(seconds * 1000);
+        in->stop();
+        return 0;
+    }
+    std::printf("no MIDI input matching \"%s\"\n", nameSubstring.toRawUTF8());
+    return 2;
+}
+} // namespace
+
+int main(int argc, char** argv)
+{
+    if (argc >= 4 && juce::String(argv[1]) == "--hold-midi-input")
+    {
+        return holdMidiInput(juce::String(argv[2]), juce::String(argv[3]).getIntValue());
+    }
     testTimeMappings();
     testRoutingAndDelivery();
     testOverflowAndDiscard();

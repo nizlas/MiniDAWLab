@@ -3049,18 +3049,256 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                return true;
                            },
                            600 });
+    const auto inject = [this](const juce::MidiMessage& m) { hooks_.liveMidiInject(m); };
+    const auto on = [](const int ch, const int note, const int vel) {
+        return juce::MidiMessage::noteOn(ch, note, (juce::uint8)vel);
+    };
+    const auto off = [](const int ch, const int note) { return juce::MidiMessage::noteOff(ch, note, (juce::uint8)0); };
+
+    // ---- 0. The user's real control path (the 1.1.10 failure): another row is active, the user
+    //         clicks R + Monitor on the instrument row, then picks "All MIDI inputs" in the
+    //         Inspector and presses Record. The R / Monitor click must make THAT row the one the
+    //         Inspector edits; the refusal (while no input is chosen) must name the row and the
+    //         real reason; the pick must land on the clicked row and be published as a route.
+    if (hooks_.clickHeaderCellLikeMouse && hooks_.inspectorChooseMidiInput && hooks_.getActiveTrackId
+        && hooks_.describeTrackMidiInputFromSession && hooks_.describePublishedRouteForTrack && hooks_.lastRecordStartRefusal
+        && hooks_.activateTrackLikeHeaderClick)
+    {
+        steps_.push_back(Step{ "user-flow: another row (Pedal) is active; click R and Monitor on the INSTRUMENT row's header cells",
+                               [this](juce::String& failReason) -> bool {
+                                   hooks_.activateTrackLikeHeaderClick(liveMidiPedalTid_);
+                                   if (hooks_.getActiveTrackId() != liveMidiPedalTid_)
+                                   {
+                                       failReason = "could not make the Pedal row active";
+                                       return false;
+                                   }
+                                   if (!hooks_.clickHeaderCellLikeMouse(liveMidiInstTid_, "arm")
+                                       || !hooks_.clickHeaderCellLikeMouse(liveMidiInstTid_, "monitor"))
+                                   {
+                                       failReason = "R / Monitor cell on the instrument row could not be clicked (absent or disabled)";
+                                       return false;
+                                   }
+                                   const TrackId active = hooks_.getActiveTrackId();
+                                   appendStabilityRunLine("  after clicking R + Monitor on inst=" + juce::String((juce::int64)liveMidiInstTid_)
+                                                          + ": active row=" + juce::String((juce::int64)active));
+                                   if (active != liveMidiInstTid_)
+                                   {
+                                       failReason = "clicking R / Monitor did not make the instrument row the active (Inspector) row - a MIDI "
+                                                    "Input chosen now would land on the Pedal row";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               400 });
+        steps_.push_back(Step{ "user-flow: R + Monitor on, no MIDI Input yet -> Inspector says so; Record names the row and the reason",
+                               [this](juce::String& failReason) -> bool {
+                                   if (hooks_.inspectorMidiInputTexts)
+                                   {
+                                       const juce::String texts = hooks_.inspectorMidiInputTexts();
+                                       appendStabilityRunLine("  inspector: " + texts);
+                                       if (!texts.contains("input=\"None\"") || !texts.containsIgnoreCase("no MIDI Input"))
+                                       {
+                                           failReason = "Inspector does not explain that R/Monitor are on without a MIDI Input: " + texts;
+                                           return false;
+                                       }
+                                   }
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(150);
+                                   const juce::String refusal = hooks_.lastRecordStartRefusal();
+                                   appendStabilityRunLine("  record refusal: " + refusal.replace("\n", " / "));
+                                   if (hooks_.isCountInActive())
+                                   {
+                                       failReason = "Record started although the armed row has no MIDI Input";
+                                       return false;
+                                   }
+                                   if (refusal.isEmpty() || !refusal.contains("LiveMidiDest") || !refusal.containsIgnoreCase("no MIDI Input")
+                                       || refusal.startsWith("Arm a track"))
+                                   {
+                                       failReason = "the refusal must name the armed row and say that it has no MIDI Input (not 'arm a track')";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "user-flow: pick \"All MIDI inputs\" + Input Channel 1 in the Inspector -> lands on the instrument row, route published",
+                               [this](juce::String& failReason) -> bool {
+                                   if (!hooks_.inspectorChooseMidiInput("All MIDI inputs"))
+                                   {
+                                       failReason = "Inspector has no \"All MIDI inputs\" item";
+                                       return false;
+                                   }
+                                   if (hooks_.inspectorChooseMidiInputChannel && !hooks_.inspectorChooseMidiInputChannel(1))
+                                   {
+                                       failReason = "Input Channel combo not enabled after choosing an input";
+                                       return false;
+                                   }
+                                   juce::Thread::sleep(250); // the coordinator follows the session on its 30 Hz tick
+                                   const juce::String instInput = hooks_.describeTrackMidiInputFromSession(liveMidiInstTid_);
+                                   const juce::String pedalInput = hooks_.describeTrackMidiInputFromSession(liveMidiPedalTid_);
+                                   const juce::String route = hooks_.describePublishedRouteForTrack(liveMidiInstTid_);
+                                   appendStabilityRunLine("  session: inst=" + instInput + " pedal=" + pedalInput + "; published route (inst): " + route);
+                                   if (!instInput.startsWith("all ch=1"))
+                                   {
+                                       failReason = "the Inspector pick did not reach the instrument row's session state: " + instInput;
+                                       return false;
+                                   }
+                                   if (!pedalInput.startsWith("all ch=6"))
+                                   {
+                                       failReason = "the Pedal row's input changed although it was not the edited row: " + pedalInput;
+                                       return false;
+                                   }
+                                   if (!route.contains("monitor=yes") || !route.contains("capture=yes") || !route.contains("slot=-1"))
+                                   {
+                                       failReason = "the runtime routing does not match the UI (monitor/capture/All): " + route;
+                                       return false;
+                                   }
+                                   if (hooks_.inspectorMidiInputTexts)
+                                   {
+                                       const juce::String texts = hooks_.inspectorMidiInputTexts();
+                                       appendStabilityRunLine("  inspector now: " + texts);
+                                       if (!texts.contains("All MIDI inputs"))
+                                       {
+                                           failReason = "Inspector does not show the picked input";
+                                           return false;
+                                       }
+                                   }
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "user-flow: Record now starts (count-in) - then cancel it; switch R + Monitor off again via the header cells",
+                               [this](juce::String& failReason) -> bool {
+                                   // A project saved with Cycle on would be refused for the documented reason
+                                   // (linear MIDI takes); the user-flow check is about the input, so switch it off.
+                                   if (hooks_.setCycleEnabled)
+                                   {
+                                       hooks_.setCycleEnabled(false);
+                                   }
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(150);
+                                   const bool countIn = hooks_.isCountInActive();
+                                   appendStabilityRunLine(juce::String("  count-in started: ") + (countIn ? "yes" : "no")
+                                                          + (hooks_.lastRecordStartRefusal().isEmpty() ? "" : " refusal=" + hooks_.lastRecordStartRefusal().replace("\n", " / ")));
+                                   if (!countIn)
+                                   {
+                                       failReason = "Record still refused after choosing All MIDI inputs on the armed row";
+                                       return false;
+                                   }
+                                   hooks_.recordToggleLikeKey(); // Record during count-in = cancel
+                                   juce::Thread::sleep(100);
+                                   (void)hooks_.clickHeaderCellLikeMouse(liveMidiInstTid_, "arm");
+                                   (void)hooks_.clickHeaderCellLikeMouse(liveMidiInstTid_, "monitor");
+                                   return !hooks_.isCountInActive();
+                               },
+                               400 });
+    }
+    else
+    {
+        steps_.push_back(Step{ "live-midi: configure the instrument row's input (hooks for the UI path missing - direct session edit)",
+                               [this](juce::String& failReason) -> bool {
+                                   if (!hooks_.liveMidiSetTrackInputDevice || !hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, {}, {}))
+                                   {
+                                       failReason = "could not configure the instrument row";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+    }
+
+    // ---- 0b. Audible check when this project has a LOADED instrument: live MIDI through the
+    //          Inspector + header path must produce AUDIO on that row (not just a delivered event).
+    if (hooks_.firstLoadedInstrumentRow && hooks_.setMeteredTrack && hooks_.drainTrackMeter && hooks_.clickHeaderCellLikeMouse
+        && hooks_.inspectorChooseMidiInput && hooks_.activateTrackLikeHeaderClick)
+    {
+        auto loaded = std::make_shared<TrackId>(kInvalidTrackId);
+        steps_.push_back(Step{ "audible: find a row with a loaded instrument, give it All MIDI inputs via the Inspector, Monitor on via the header",
+                               [this, loaded](juce::String& failReason) -> bool {
+                                   *loaded = hooks_.firstLoadedInstrumentRow();
+                                   if (*loaded == kInvalidTrackId)
+                                   {
+                                       appendStabilityRunLine("  no loaded instrument in this project - audible check skipped (MIDI delivery only)");
+                                       return true;
+                                   }
+                                   hooks_.activateTrackLikeHeaderClick(*loaded);
+                                   if (!hooks_.inspectorChooseMidiInput("All MIDI inputs"))
+                                   {
+                                       failReason = "Inspector pick failed on the loaded instrument row";
+                                       return false;
+                                   }
+                                   if (!hooks_.clickHeaderCellLikeMouse(*loaded, "monitor"))
+                                   {
+                                       failReason = "Monitor cell could not be clicked on the loaded instrument row";
+                                       return false;
+                                   }
+                                   hooks_.setMeteredTrack(*loaded);
+                                   (void)hooks_.drainTrackMeter();
+                                   appendStabilityRunLine("  loaded instrument row " + juce::String((juce::int64)*loaded) + ": "
+                                                          + (hooks_.describeTrackForDiagnostics ? hooks_.describeTrackForDiagnostics(*loaded) : juce::String()));
+                                   return true;
+                               },
+                               400 });
+        steps_.push_back(Step{ "audible: silence before the key press (post-strip meter of the row)",
+                               [this, loaded](juce::String&) -> bool {
+                                   if (*loaded == kInvalidTrackId)
+                                   {
+                                       return true;
+                                   }
+                                   const StabilityLevelStats s = hooks_.drainTrackMeter();
+                                   appendStabilityRunLine("  before: frames=" + juce::String((juce::int64)s.frames) + " peak=[" + juce::String(s.peak[0], 4) + ","
+                                                          + juce::String(s.peak[1], 4) + "]");
+                                   return true;
+                               },
+                               600 });
+        steps_.push_back(Step{ "audible: play ch1 note 60 live (transport stopped) - the row's audio output must rise",
+                               [this, loaded, inject, on, off](juce::String& failReason) -> bool {
+                                   if (*loaded == kInvalidTrackId)
+                                   {
+                                       return true;
+                                   }
+                                   (void)hooks_.drainTrackMeter();
+                                   inject(on(1, 60, 110));
+                                   inject(on(1, 38, 110)); // a GM snare too, in case the row hosts a drum kit
+                                   juce::Thread::sleep(700);
+                                   const StabilityLevelStats s = hooks_.drainTrackMeter();
+                                   inject(off(1, 60));
+                                   inject(off(1, 38));
+                                   const float peak = juce::jmax(s.peak[0], s.peak[1]);
+                                   appendStabilityRunLine("  during live note: frames=" + juce::String((juce::int64)s.frames) + " peak=[" + juce::String(s.peak[0], 4)
+                                                          + "," + juce::String(s.peak[1], 4) + "] (" + dbfs(peak) + " dBFS)");
+                                   if (s.frames == 0)
+                                   {
+                                       failReason = "the loaded instrument row produced no blocks while stopped";
+                                       return false;
+                                   }
+                                   if (peak < 1.0e-3f)
+                                   {
+                                       failReason = "live MIDI reached the row but no audio came out of the instrument (peak " + dbfs(peak) + " dBFS)";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "audible: Monitor off via the header, MIDI Input back to None via the Inspector, release the meter",
+                               [this, loaded](juce::String&) -> bool {
+                                   if (*loaded == kInvalidTrackId)
+                                   {
+                                       return true;
+                                   }
+                                   (void)hooks_.clickHeaderCellLikeMouse(*loaded, "monitor");
+                                   hooks_.activateTrackLikeHeaderClick(*loaded);
+                                   (void)hooks_.inspectorChooseMidiInput("None");
+                                   hooks_.setMeteredTrack(kInvalidTrackId);
+                                   return true;
+                               },
+                               300 });
+    }
+
     steps_.push_back(Step{ "live-midi: save fixture (direct save to the test copy) and clear the dirty flag",
                            [this](juce::String&) -> bool {
                                hooks_.saveProject();
                                return true;
                            },
                            600 });
-
-    const auto inject = [this](const juce::MidiMessage& m) { hooks_.liveMidiInject(m); };
-    const auto on = [](const int ch, const int note, const int vel) {
-        return juce::MidiMessage::noteOn(ch, note, (juce::uint8)vel);
-    };
-    const auto off = [](const int ch, const int note) { return juce::MidiMessage::noteOff(ch, note, (juce::uint8)0); };
 
     // ---- 1. Monitor on, transport stopped: live MIDI reaches the destination; project not dirty.
     steps_.push_back(Step{ "live-midi: Inspector shows MIDI Input / Input Channel for the instrument row",
@@ -3222,21 +3460,117 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
     {
         auto devId = std::make_shared<juce::String>();
         auto devName = std::make_shared<juce::String>();
-        steps_.push_back(Step{ "live-midi: real device - assign the first physical MIDI input to the instrument row (Device mode)",
+        steps_.push_back(Step{ "live-midi: real device - pick the first physical MIDI input for the instrument row in the Inspector (Device mode)",
                                [this, devId, devName](juce::String& failReason) -> bool {
                                    if (!hooks_.liveMidiFirstRealInputDevice(*devId, *devName))
                                    {
                                        appendStabilityRunLine("  no physical MIDI input on this machine - device-open check skipped");
                                        return true;
                                    }
-                                   if (!hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, *devId, *devName))
+                                   // The user's path: activate the row, pick the device by its name in the combo.
+                                   if (hooks_.activateTrackLikeHeaderClick && hooks_.inspectorChooseMidiInput)
+                                   {
+                                       hooks_.activateTrackLikeHeaderClick(liveMidiInstTid_);
+                                       if (!hooks_.inspectorChooseMidiInput(*devName))
+                                       {
+                                           failReason = "the Inspector lists no item for device \"" + *devName + "\"";
+                                           return false;
+                                       }
+                                   }
+                                   else if (!hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, *devId, *devName))
                                    {
                                        failReason = "could not assign device \"" + *devName + "\"";
                                        return false;
                                    }
+                                   if (hooks_.describeTrackMidiInputFromSession)
+                                   {
+                                       const juce::String s = hooks_.describeTrackMidiInputFromSession(liveMidiInstTid_);
+                                       appendStabilityRunLine("  session after the pick: " + s);
+                                       if (!s.startsWith("device:" + *devName))
+                                       {
+                                           failReason = "the device pick did not reach the session: " + s;
+                                           return false;
+                                       }
+                                   }
                                    return true;
                                },
                                500 });
+        steps_.push_back(Step{ "live-midi: missing device - a saved device that is not connected is explained and kept; Record refuses with the reason",
+                               [this, devId](juce::String& failReason) -> bool {
+                                   if (devId->isEmpty() || !hooks_.liveMidiSetTrackInputDevice)
+                                   {
+                                       return true;
+                                   }
+                                   // Simulate a project saved on another machine: an identifier no device here has.
+                                   if (!hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, "dal-test-missing-device-id", "Ghost Keyboard"))
+                                   {
+                                       failReason = "could not assign the ghost device";
+                                       return false;
+                                   }
+                                   juce::String texts;
+                                   if (hooks_.selectTrackLikeHeaderClick && hooks_.inspectorMidiInputTexts)
+                                   {
+                                       hooks_.selectTrackLikeHeaderClick(liveMidiInstTid_);
+                                       texts = hooks_.inspectorMidiInputTexts();
+                                       appendStabilityRunLine("  inspector with a missing device: " + texts);
+                                       if (!texts.contains("Ghost Keyboard (missing)") || !texts.contains("not connected"))
+                                       {
+                                           failReason = "Inspector does not show the missing device as missing + kept";
+                                           return false;
+                                       }
+                                   }
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   if (hooks_.setCycleEnabled)
+                                   {
+                                       hooks_.setCycleEnabled(false);
+                                   }
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(150);
+                                   const juce::String refusal = hooks_.lastRecordStartRefusal ? hooks_.lastRecordStartRefusal() : juce::String();
+                                   appendStabilityRunLine("  record refusal: " + refusal.replace("\n", " / "));
+                                   const bool countIn = hooks_.isCountInActive();
+                                   if (countIn)
+                                   {
+                                       hooks_.recordToggleLikeKey();
+                                   }
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                   if (countIn || !refusal.contains("Ghost Keyboard") || !refusal.contains("not connected"))
+                                   {
+                                       failReason = "Record must refuse and name the missing device";
+                                       return false;
+                                   }
+                                   const juce::String s = hooks_.describeTrackMidiInputFromSession ? hooks_.describeTrackMidiInputFromSession(liveMidiInstTid_) : juce::String();
+                                   if (!s.startsWith("device:Ghost Keyboard"))
+                                   {
+                                       failReason = "the missing device assignment was not kept: " + s;
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "live-midi: real device - re-pick the physical device in the Inspector (back from the ghost)",
+                               [this, devId, devName](juce::String& failReason) -> bool {
+                                   if (devId->isEmpty())
+                                   {
+                                       return true;
+                                   }
+                                   if (hooks_.activateTrackLikeHeaderClick && hooks_.inspectorChooseMidiInput)
+                                   {
+                                       hooks_.activateTrackLikeHeaderClick(liveMidiInstTid_);
+                                       if (!hooks_.inspectorChooseMidiInput(*devName))
+                                       {
+                                           failReason = "could not re-pick \"" + *devName + "\"";
+                                           return false;
+                                       }
+                                   }
+                                   else if (!hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, *devId, *devName))
+                                   {
+                                       failReason = "could not re-assign the device";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               400 });
         steps_.push_back(Step{ "live-midi: real device - opened on the device manager, slot callback registered, Inspector shows it",
                                [this, devId, devName, inject, on, off](juce::String& failReason) -> bool {
                                    if (devId->isEmpty())
@@ -3248,8 +3582,38 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                    appendStabilityRunLine("  device \"" + *devName + "\": " + detail);
                                    if (!open)
                                    {
-                                       failReason = "physical MIDI input was not opened / registered: " + detail;
-                                       return false;
+                                       // The port is held by another application (verified by running
+                                       // `LiveMidiRecordingFocusedTests --hold-midi-input <name> <s>` alongside):
+                                       // the UI must say so and Record must refuse with that reason.
+                                       juce::String texts;
+                                       if (hooks_.selectTrackLikeHeaderClick && hooks_.inspectorMidiInputTexts)
+                                       {
+                                           hooks_.selectTrackLikeHeaderClick(liveMidiInstTid_);
+                                           texts = hooks_.inspectorMidiInputTexts();
+                                           appendStabilityRunLine("  inspector (busy port): " + texts);
+                                       }
+                                       hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                       if (hooks_.setCycleEnabled)
+                                       {
+                                           hooks_.setCycleEnabled(false);
+                                       }
+                                       hooks_.recordToggleLikeKey();
+                                       juce::Thread::sleep(150);
+                                       const juce::String refusal = hooks_.lastRecordStartRefusal ? hooks_.lastRecordStartRefusal() : juce::String();
+                                       appendStabilityRunLine("  record refusal (busy port): " + refusal.replace("\n", " / "));
+                                       if (hooks_.isCountInActive())
+                                       {
+                                           hooks_.recordToggleLikeKey();
+                                       }
+                                       hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                       if (!texts.contains("could not be opened") || !refusal.contains("could not be opened"))
+                                       {
+                                           failReason = "physical MIDI input could not be opened and the UI / Record did not explain it: " + detail;
+                                           return false;
+                                       }
+                                       appendStabilityRunLine("  BUSY-PORT PATH VERIFIED: device held elsewhere, explanation shown, Record refused with the reason; "
+                                                              "delivery checks skipped for this run");
+                                       return true;
                                    }
                                    if (hooks_.selectTrackLikeHeaderClick && hooks_.inspectorMidiInputTexts)
                                    {

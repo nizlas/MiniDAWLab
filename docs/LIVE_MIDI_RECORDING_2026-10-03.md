@@ -4,8 +4,8 @@
 |---|---|
 | Date | 2026-10-03 |
 | Baseline | 1.1.9 (`639b2e2`) |
-| Delivered as | 1.1.10, commit `aeafa90` on `origin/main` |
-| Build with the changes | `build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` (Debug), `build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe` + `dist\DanielssonsAudioLab-1.1.10-Setup.exe` / `dist\DanielssonsAudioLab-1.1.10.zip` (Release) |
+| Delivered as | 1.1.10, commit `aeafa90` on `origin/main`; fix release 1.1.11 (see the section "1.1.11 — field failure and fix") |
+| Build with the changes | `build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` (Debug, FileVersion 1.1.11), `build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe` + `dist\DanielssonsAudioLab-1.1.11-Setup.exe` / `dist\DanielssonsAudioLab-1.1.11.zip` (Release, 1.1.11; the 1.1.10 artifacts carry the original feature without the fixes below) |
 | Evidence | `docs/evidence/live-midi-2026-10-03/` |
 | Test material | sibling copies of `%TEMP%\dal-tse-copy\TSE_pt2.dalproj` (180 BPM, VB3-II, AmpliTube) and `%TEMP%\dal-pregain-fixture\pregain-fixture.dalproj` (120 BPM, audio-only). The user's projects were never opened for writing. |
 
@@ -173,6 +173,72 @@ sink, so "delivered Note On" is proven, audible sound is not.
   project are opened when it loads and closed when no row references them.
 - The pitch-bend data has no editor lane (playback, persistence, export, proxy and undo only).
 
+## 1.1.11 — field failure and fix
+
+**Report:** VB3-II instrument row, Power on, Mute off, Monitor orange, R red, "All MIDI inputs"
+selected; playing gives no sound; Record answers *"Arm a track for recording first … also needs a
+MIDI Input selected"*.
+
+**Where the state went (established from the user's saved project and the code path).** The
+user's project file, saved at the end of that session, carries `"midiInput": "all"` on **Track 8**
+(another instrument row) and nothing on the VB3-II row — the Monitor / R flags are runtime-only
+and were on the VB3-II row, the input assignment was not. The Inspector edits
+`Session::getActiveTrackId()`. In 1.1.10 the instrument / MIDI row's Monitor and R cells toggled
+their runtime flags but — unlike Mute, Power and the audio rows' R / speaker — did **not** activate
+the row. Clicking Monitor + R on VB3-II therefore left the previously active row (Track 8) in the
+Inspector; the pick "All MIDI inputs" was applied to that row. Both symptoms follow from this one
+state transfer:
+
+| Symptom | Mechanism |
+|---|---|
+| Monitor on, "All MIDI inputs" shown, keyboard silent | VB3-II's session assignment was still `None`, so the live-MIDI routing snapshot contained no route for it; the opened device's events matched nothing. Track 8 (the row that actually received "All") was neither monitored nor armed. |
+| R red, Record refuses with "Arm a track …" | `armedTracksReadyToRecord()` found the armed VB3-II row but required a configured input (`None` → not ready); with no audio track armed the start fell into the generic "arm a track" message, which was wrong while R was on. |
+
+The audio / routing chain itself was intact: with the assignment on the right row the same build
+delivers live MIDI to the host and the host produces audio (measured below).
+
+**Changes (1.1.11).**
+
+- `InstrumentTimelineRowCoordinator`: the Monitor and R cells of Instrument / MIDI rows call
+  `Session::setActiveTrack(laneTid)` like Mute, Power and the audio rows — the Inspector always
+  shows the row whose buttons were just pressed.
+- `TrackLanesEditCoordinator` → `LiveMidiInputCoordinator::refreshDevicesAndRouting()` right after
+  a MIDI Input pick (devices opened, routing published at once, not on the next tick).
+- `LiveMidiInputCoordinator`: per-row readiness (`inputAvailabilityForTrack`, `armedRowsStatus`)
+  distinguishing *no input selected*, *device not connected (assignment kept)*, *device could not
+  be opened (in use by another application?)* and *All MIDI inputs but no device connected*; open
+  failures are logged and retried every 2 s while the device is wanted; the Inspector status says
+  "Monitor / R is on, but this track has no MIDI Input", "Ready — no MIDI received yet on this
+  track's input" / "MIDI received: N events", or the problem above.
+- `RecordingCoordinator`: the refusal names the armed rows and their reasons; "Arm a track" only
+  when nothing is armed. Ready rows record even if other armed rows are not ready (logged). The
+  Cycle and device refusals are recorded for diagnostics (`getLastRecordStartRefusalForDiagnostics`).
+- Validation is not more permissive: a row with no usable input still cannot start a MIDI take.
+  Instrument availability is still irrelevant for capture (recording works into a plugin-less row).
+
+**Verification through the previously failing workflow** (`--stability-live-midi`, now driving
+the real controls: `TrackHeaderView::click…CellLikeMouseForStabilityTest` runs the header's own hit
+test + callback; `InspectorView::chooseMidiInputByTextForStabilityTest` fires the combo's own
+`onChange`):
+
+| Step (user's real control path) | Result |
+|---|---|
+| Another row (Pedal) active; click R + Monitor on the instrument row's header cells | active row becomes the instrument row |
+| Inspector status with R + Monitor on and no input | "Monitor and R are on, but this track has no MIDI Input - choose a device or All MIDI inputs above" |
+| Record with R on, no input | refused: "LiveMidiDest: no MIDI Input selected (Inspector > MIDI Input) … The track stays armed" — not "Arm a track" |
+| Pick "All MIDI inputs" + Input Channel 1 in the Inspector | session `inst = all ch=1`, Pedal unchanged; published route `slot=-1 (All) filter=1 monitor=yes capture=yes` immediately |
+| Record | count-in starts |
+| Pick the physical device ("Babyface Midi Port 1") by name in the Inspector | session `device:Babyface Midi Port 1`; device opened on the manager, slot callback registered; a message entering its slot is delivered |
+| Ghost device (identifier no device here has) | Inspector "Ghost Keyboard (missing)" + "not connected (assignment kept)"; Record refused naming it; assignment kept; re-pick works |
+| **Audible** (TSE copy, VB3-II loaded): All MIDI inputs via the Inspector, Monitor via the header cell, ch1 note 60 injected with the transport **stopped** | row post-strip meter 0.0000 before → **0.3126 / 0.3269 (−9.7 dBFS)** during the note |
+| The rest of the scenario (filters, 1/1/1 to one host, Monitor-off release, MIDI-only take, undo/redo, save/reload, SMF export, editor, offline export without leak, playback, empty take, audio + MIDI combined take) | PASS on the fixture and on the TSE copy |
+| Busy port: `LiveMidiRecordingFocusedTests --hold-midi-input Babyface 90` running alongside | the RME driver is multi-client — DAL still opened the port, so the "could not be opened" explanation path could not be provoked here (verified by code only) |
+
+**Still open.** No key was pressed on a physical keyboard (no loopback driver on this machine);
+the physical port is enumerated, opened and callback-registered, and audio from live MIDI is
+measured through the whole chain from the bus's device-thread entry. The user's keyboard test is
+the remaining confirmation.
+
 ## 8. User guide
 
 1. Select the instrument row (e.g. VB3-II) or a MIDI row routed to it (`MIDI To`).
@@ -180,7 +246,8 @@ sink, so "delivered Note On" is proven, audible sound is not.
    or the channel the keyboard sends on. For VB3-II Lower / Pedal use MIDI rows with `MIDI To` =
    VB3-II and `MIDI Channel` = 2 / 3.
 3. Click the **speaker** (Monitor) on the row header to hear the instrument while you play — with
-   the transport stopped or playing.
+   the transport stopped or playing. (Clicking the speaker or R also selects the row, so the
+   Inspector shows the track you are configuring; its status line tells you when MIDI arrives.)
 4. Click **R** on every row you want to record (several at once is fine; an audio track may be
    armed at the same time).
 5. Press **Record** (numpad `*`): 8 count-in clicks, then the take starts at the playhead. Keys

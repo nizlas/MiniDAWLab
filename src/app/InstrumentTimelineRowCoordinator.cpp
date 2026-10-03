@@ -1837,11 +1837,16 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         return true;
     };
     // Arm / Monitor: runtime flags in the live-MIDI coordinator. Selecting a row never arms it
-    // and arming never switches monitoring on — the two are independent by design.
+    // and arming never switches monitoring on — the two are independent by design. Like Mute,
+    // Power and the audio rows' R / speaker, clicking the cell also ACTIVATES the row so the
+    // Inspector (MIDI Input / Input Channel, status) shows the row whose buttons were just
+    // pressed — the 1.1.10 cells left the previously active row in the Inspector, so a MIDI
+    // Input chosen right after clicking R landed on another track.
     callbacks.onToggleArm = [this, laneTid, repaintExtras] {
         if (callbacks_.toggleLiveMidiRecordArm != nullptr)
         {
             callbacks_.toggleLiveMidiRecordArm(laneTid);
+            session_.setActiveTrack(laneTid);
             repaintExtras();
         }
     };
@@ -1849,6 +1854,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         if (callbacks_.toggleLiveMidiMonitor != nullptr)
         {
             callbacks_.toggleLiveMidiMonitor(laneTid);
+            session_.setActiveTrack(laneTid);
             repaintExtras();
         }
     };

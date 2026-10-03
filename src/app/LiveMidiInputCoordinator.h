@@ -116,8 +116,23 @@ public:
     [[nodiscard]] bool liveMonitorRequestedForDestination(TrackId destination) const;
 
     // ------------------------------------------------------------------ status for the UI
-    /// Rows that are armed AND have a MIDI input configured (the rows a Record will capture).
+    /// Rows that are armed AND have a MIDI input that can deliver right now (the rows a Record
+    /// will capture): input configured, and — for Device mode — the device present and opened;
+    /// for All — at least one input device opened. Instrument availability is NOT a condition.
     [[nodiscard]] std::vector<TrackId> armedTracksReadyToRecord() const;
+
+    /// One armed Instrument / Midi row as the Record validation sees it.
+    struct ArmedRowStatus
+    {
+        TrackId trackId = kInvalidTrackId;
+        juce::String trackName;
+        bool ready = false;
+        /// Human reason when not ready: no input selected / device missing / device could not be
+        /// opened / All but no device connected.
+        juce::String reason;
+    };
+    /// Every armed Instrument / Midi row with its readiness and reason (for the Record message).
+    [[nodiscard]] std::vector<ArmedRowStatus> armedRowsStatus() const;
     /// MIDI arrived for this row within the last ~150 ms (header activity dot).
     [[nodiscard]] bool isTrackMidiActive(TrackId trackId) const noexcept;
     /// One-line human status for the Inspector: device missing / no playable instrument /
@@ -152,10 +167,22 @@ private:
         juce::String name;
         bool present = false;
         bool enabledOnManager = false;
+        /// The last open attempt failed although the device is present (typically: the port is
+        /// held exclusively by another application). Retried periodically while still wanted.
+        bool openFailed = false;
+        bool wanted = false;
         std::unique_ptr<SlotCallback> callback;
-        /// Which routes (by index) matched this slot in the last published routing (UI/diag).
-        int routeIndex = -1;
     };
+    /// Device-mode / All readiness of one row's input right now (shared by status + Record).
+    struct InputAvailability
+    {
+        bool configured = false; ///< mode != None
+        bool deliverable = false; ///< at least one opened device feeds this row
+        juce::String problem;     ///< empty when deliverable
+    };
+    [[nodiscard]] InputAvailability inputAvailabilityForTrack(TrackId trackId) const;
+    [[nodiscard]] bool anyDeviceOpen() const noexcept;
+    void retryFailedDeviceOpens();
 
     void timerCallback() override;
     void rebuildRoutingIfChanged();
@@ -207,4 +234,5 @@ private:
     std::vector<std::uint32_t> lastActivityCounts_;
     std::map<TrackId, double> lastActivityMsByTrack_;
     std::set<TrackId> activeNow_;
+    double lastOpenRetryMs_ = 0.0;
 };

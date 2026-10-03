@@ -152,6 +152,11 @@ public:
     }
     [[nodiscard]] juce::String getMidiInputStatusTextForStabilityTest() const { return midiInputStatusLabel_.getText(); }
     [[nodiscard]] bool isMidiInputComboVisibleForStabilityTest() const { return midiInputComboBox_.isVisible(); }
+    /// [Stability] Pick a MIDI Input item by its visible text exactly like a user: the combo's
+    /// own `onChange` runs (→ the undoable handler → Session). False when no such item exists.
+    bool chooseMidiInputByTextForStabilityTest(const juce::String& itemText);
+    /// [Stability] Pick the Input Channel (0 = All, 1 … 16) through the combo's `onChange`.
+    bool chooseMidiInputChannelForStabilityTest(int channelOrZeroForAll);
 
     /// [Message thread] Undoable **MIDI** output channel (`kTrackMidiOutputChannelAny` or 1 … 16).
     void setMidiOutputChannelHandler(std::function<void(TrackId, int)> fn) noexcept

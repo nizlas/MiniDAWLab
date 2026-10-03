@@ -435,6 +435,26 @@ struct StabilityRunnerHooks
     /// True when the device manager has the device enabled AND the coordinator's slot callback is
     /// registered for it (the real device-callback path is wired).
     std::function<bool(const juce::String& identifier, juce::String& detail)> liveMidiIsDeviceOpen;
+    // --- Live MIDI: the user's REAL control paths (header cell clicks, Inspector combo picks) ---
+    /// Click the row header's Monitor / Arm cell exactly like a mouse press at its centre
+    /// (hit test → enabled → the header's own callback). False when the cell is absent/disabled.
+    std::function<bool(TrackId, const juce::String& cell)> clickHeaderCellLikeMouse;
+    /// Pick a MIDI Input item by its visible text in the Inspector (combo `onChange` → handler).
+    std::function<bool(const juce::String& itemText)> inspectorChooseMidiInput;
+    /// Pick the Input Channel in the Inspector (0 = All).
+    std::function<bool(int channelOrZeroForAll)> inspectorChooseMidiInputChannel;
+    /// The session's current active row (what the Inspector edits).
+    std::function<TrackId()> getActiveTrackId;
+    /// Session truth of a row's MIDI input: "none" | "all" | "device:<name>" plus " ch=<n|all>".
+    std::function<juce::String(TrackId)> describeTrackMidiInputFromSession;
+    /// Runtime truth: is the row's TrackId present in the bus's published routing, and with which
+    /// monitor/capture flags ("absent" when not routed).
+    std::function<juce::String(TrackId)> describePublishedRouteForTrack;
+    /// Text of the last refused Record start (empty = the last press was accepted).
+    std::function<juce::String()> lastRecordStartRefusal;
+    /// First Instrument row whose Primary is a LOADED plug-in (for the audible measurement), or
+    /// kInvalidTrackId.
+    std::function<TrackId()> firstLoadedInstrumentRow;
     /// Audio record-arm like the header R button (`RecorderService`); `kInvalidTrackId` disarms.
     std::function<void(TrackId)> armAudioTrackForRecording;
     /// Number of timeline audio clips on a row.

@@ -606,19 +606,40 @@ void RecordingCoordinator::numpadRecordToggled()
 
     // Live MIDI rows (Instrument / Midi kind) record through their own capture path; several may
     // be armed at once and they may combine with the (single) armed audio track in one take.
+    lastRecordStartRefusal_.clear();
     const std::vector<TrackId> midiTracks = callbacks_.armedMidiTracksReadyToRecord
                                                 ? callbacks_.armedMidiTracksReadyToRecord()
                                                 : std::vector<TrackId>{};
+    const juce::StringArray midiNotReady = callbacks_.describeArmedMidiRowsNotReady
+                                               ? callbacks_.describeArmedMidiRowsNotReady()
+                                               : juce::StringArray{};
     const TrackId armed = recorder_.getArmedTrackId();
     if (armed == kInvalidTrackId && midiTracks.empty())
     {
-        juce::AlertWindow::showMessageBoxAsync(
-            juce::AlertWindow::InfoIcon,
-            "Recording",
-            "Arm a track for recording first (the R control on a track header). An instrument or "
-            "MIDI track also needs a MIDI Input selected in the Inspector.");
-        juce::Logger::writeToLog("[Rec] start blocked: no armed track");
+        // Distinguish "nothing is armed" from "armed, but the MIDI input cannot deliver": the
+        // row IS armed in the second case, so telling the user to arm it would be wrong.
+        juce::String msg;
+        if (midiNotReady.isEmpty())
+        {
+            msg = "Arm a track for recording first (the R control on a track header).";
+        }
+        else
+        {
+            msg = "Recording cannot start - the armed track" + juce::String(midiNotReady.size() > 1 ? "s have" : " has")
+                  + " no usable MIDI input:\n\n" + midiNotReady.joinIntoString("\n")
+                  + "\n\nThe track stays armed; fix the MIDI Input in the Inspector and press Record again.";
+        }
+        lastRecordStartRefusal_ = msg;
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Recording", msg);
+        juce::Logger::writeToLog("[Rec] start blocked: " + (midiNotReady.isEmpty() ? juce::String("no armed track")
+                                                                                     : "armed MIDI rows not ready: " + midiNotReady.joinIntoString(" | ")));
         return;
+    }
+    if (!midiNotReady.isEmpty())
+    {
+        // Some armed MIDI rows cannot deliver while others (or the audio track) can: the take
+        // starts for the ready rows; the skipped ones are logged and explained in the Inspector.
+        juce::Logger::writeToLog("[Rec] armed MIDI rows skipped (not ready): " + midiNotReady.joinIntoString(" | "));
     }
     if (!midiTracks.empty())
     {
@@ -629,11 +650,9 @@ void RecordingCoordinator::numpadRecordToggled()
         const std::int64_t locR = session_.getRightLocatorSamples();
         if (cycleOn && locR > locL && locR > 0)
         {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon,
-                "Recording",
-                "MIDI recording needs Cycle switched off: it records one linear take. Turn Cycle "
-                "off, then press Record again. (Audio-only cycle recording is unchanged.)");
+            lastRecordStartRefusal_ = "MIDI recording needs Cycle switched off: it records one linear take. Turn Cycle "
+                                      "off, then press Record again. (Audio-only cycle recording is unchanged.)";
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Recording", lastRecordStartRefusal_);
             juce::Logger::writeToLog("[Rec] start blocked: cycle active with armed MIDI rows");
             return;
         }
@@ -644,8 +663,8 @@ void RecordingCoordinator::numpadRecordToggled()
         juce::AudioIODevice* const dev = deviceManager_.getCurrentAudioDevice();
         if (dev == nullptr || dev->getCurrentSampleRate() <= 0.0)
         {
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon, "Audio", "No active audio device.");
+            lastRecordStartRefusal_ = "No active audio device.";
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Audio", lastRecordStartRefusal_);
             return;
         }
         cycleRecordingActive_ = false;

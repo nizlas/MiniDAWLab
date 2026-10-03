@@ -124,10 +124,23 @@ void LiveMidiInputCoordinator::enableSlotOnManager(DeviceSlot& slot, const int s
         {
             deviceManager_.addMidiInputDeviceCallback(slot.identifier, slot.callback.get());
             slot.enabledOnManager = true;
+            slot.openFailed = false;
             if (callbacks_.logLine)
             {
                 callbacks_.logLine("[LiveMidi] input opened: \"" + slot.name + "\" (" + slot.identifier + ")");
             }
+        }
+        else
+        {
+            // `MidiInput::openDevice` returned null: on Windows this is almost always another
+            // application holding the port exclusively. Reported in the Inspector / Record message
+            // and retried every few seconds while the device is still wanted.
+            if (!slot.openFailed && callbacks_.logLine)
+            {
+                callbacks_.logLine("[LiveMidi] input could NOT be opened: \"" + slot.name + "\" (" + slot.identifier
+                                   + ") - in use by another application?");
+            }
+            slot.openFailed = true;
         }
     }
     else
@@ -135,10 +148,97 @@ void LiveMidiInputCoordinator::enableSlotOnManager(DeviceSlot& slot, const int s
         deviceManager_.removeMidiInputDeviceCallback(slot.identifier, slot.callback.get());
         deviceManager_.setMidiInputDeviceEnabled(slot.identifier, false);
         slot.enabledOnManager = false;
+        slot.openFailed = false;
         if (callbacks_.logLine)
         {
             callbacks_.logLine("[LiveMidi] input closed: \"" + slot.name + "\"");
         }
+    }
+}
+
+void LiveMidiInputCoordinator::retryFailedDeviceOpens()
+{
+    bool changed = false;
+    for (int i = 0; i < live_midi::kMaxDeviceSlots; ++i)
+    {
+        DeviceSlot& s = slots_[(size_t)i];
+        if (s.present && s.wanted && !s.enabledOnManager)
+        {
+            enableSlotOnManager(s, i, true);
+            changed = changed || s.enabledOnManager;
+        }
+    }
+    if (changed)
+    {
+        publishedRouting_ = nullptr;
+        rebuildRoutingIfChanged();
+        if (callbacks_.onUiStateChanged)
+        {
+            callbacks_.onUiStateChanged();
+        }
+    }
+}
+
+bool LiveMidiInputCoordinator::anyDeviceOpen() const noexcept
+{
+    return std::any_of(slots_.begin(), slots_.end(), [](const DeviceSlot& s) { return s.present && s.enabledOnManager; });
+}
+
+LiveMidiInputCoordinator::InputAvailability LiveMidiInputCoordinator::inputAvailabilityForTrack(const TrackId trackId) const
+{
+    InputAvailability a;
+    const auto snap = session_.loadSessionSnapshotForAudioThread();
+    const int ix = snap != nullptr ? snap->findTrackIndexById(trackId) : -1;
+    if (ix < 0)
+    {
+        a.problem = "track not found";
+        return a;
+    }
+    const TrackMidiInputAssignment& mi = snap->getTrack(ix).getMidiInputAssignment();
+    switch (mi.mode)
+    {
+    case TrackMidiInputMode::None:
+        a.problem = "no MIDI Input selected (Inspector > MIDI Input)";
+        return a;
+    case TrackMidiInputMode::AllEnabled:
+        a.configured = true;
+        if (!std::any_of(slots_.begin(), slots_.end(), [](const DeviceSlot& s) { return s.present; }))
+        {
+            a.problem = "All MIDI inputs is selected, but no MIDI input device is connected";
+            return a;
+        }
+        if (!anyDeviceOpen())
+        {
+            a.problem = "All MIDI inputs is selected, but no MIDI input device could be opened (in use by another application?)";
+            return a;
+        }
+        a.deliverable = true;
+        return a;
+    case TrackMidiInputMode::Device:
+    default:
+        a.configured = true;
+        for (const DeviceSlot& s : slots_)
+        {
+            if (s.identifier != mi.deviceIdentifier)
+            {
+                continue;
+            }
+            if (!s.present)
+            {
+                break;
+            }
+            if (!s.enabledOnManager)
+            {
+                a.problem = "MIDI device \"" + (mi.deviceName.isNotEmpty() ? mi.deviceName : s.name)
+                            + "\" could not be opened (in use by another application?)";
+                return a;
+            }
+            a.deliverable = true;
+            return a;
+        }
+        a.problem = "MIDI device \"" + (mi.deviceName.isNotEmpty() ? mi.deviceName : mi.deviceIdentifier)
+                    + "\" is not connected (assignment kept)";
+        return a;
     }
 }
 
@@ -212,6 +312,7 @@ void LiveMidiInputCoordinator::refreshDevicesAndRouting()
             continue;
         }
         const bool wanted = s.present && (all || referenced.count(s.identifier) != 0);
+        s.wanted = wanted;
         enableSlotOnManager(s, i, wanted);
         if (!s.present && s.enabledOnManager)
         {
@@ -425,9 +526,9 @@ bool LiveMidiInputCoordinator::liveMonitorRequestedForDestination(const TrackId 
     return false;
 }
 
-std::vector<TrackId> LiveMidiInputCoordinator::armedTracksReadyToRecord() const
+std::vector<LiveMidiInputCoordinator::ArmedRowStatus> LiveMidiInputCoordinator::armedRowsStatus() const
 {
-    std::vector<TrackId> out;
+    std::vector<ArmedRowStatus> out;
     const auto snap = session_.loadSessionSnapshotForAudioThread();
     if (snap == nullptr)
     {
@@ -440,11 +541,26 @@ std::vector<TrackId> LiveMidiInputCoordinator::armedTracksReadyToRecord() const
         {
             continue;
         }
-        if (t.getMidiInputAssignment().mode == TrackMidiInputMode::None)
+        ArmedRowStatus s;
+        s.trackId = t.getId();
+        s.trackName = t.getName();
+        const InputAvailability a = inputAvailabilityForTrack(t.getId());
+        s.ready = a.deliverable;
+        s.reason = a.problem;
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+std::vector<TrackId> LiveMidiInputCoordinator::armedTracksReadyToRecord() const
+{
+    std::vector<TrackId> out;
+    for (const ArmedRowStatus& s : armedRowsStatus())
+    {
+        if (s.ready)
         {
-            continue;
+            out.push_back(s.trackId);
         }
-        out.push_back(t.getId());
     }
     return out;
 }
@@ -464,19 +580,41 @@ juce::String LiveMidiInputCoordinator::describeInputStatus(const TrackId trackId
     }
     const Track& t = snap->getTrack(ix);
     const TrackMidiInputAssignment& mi = t.getMidiInputAssignment();
+    const bool monitorOn = monitor_.count(trackId) != 0;
+    const bool armedOn = armed_.count(trackId) != 0;
     if (mi.mode == TrackMidiInputMode::None)
     {
+        // The row's buttons are on but nothing can arrive: say so where the choice is made.
+        if (monitorOn || armedOn)
+        {
+            return juce::String(monitorOn && armedOn ? "Monitor and R are on" : (monitorOn ? "Monitor is on" : "R is on"))
+                   + ", but this track has no MIDI Input - choose a device or All MIDI inputs above";
+        }
         return {};
     }
     juce::StringArray parts;
-    if (mi.mode == TrackMidiInputMode::Device && !isAssignedDevicePresent(trackId))
+    const InputAvailability avail = inputAvailabilityForTrack(trackId);
+    if (!avail.deliverable && avail.problem.isNotEmpty())
     {
-        parts.add("MIDI device missing: " + (mi.deviceName.isNotEmpty() ? mi.deviceName : mi.deviceIdentifier)
-                  + " (assignment kept)");
+        parts.add(avail.problem);
     }
-    else if (mi.mode == TrackMidiInputMode::AllEnabled && !isAssignedDevicePresent(trackId))
+    else if (monitorOn || armedOn)
     {
-        parts.add("No MIDI input device present");
+        // Deliverable and in use: tell the user whether anything has actually arrived for this row
+        // (the first question when a keyboard stays silent).
+        std::uint32_t received = 0;
+        if (publishedRouting_ != nullptr)
+        {
+            for (size_t i = 0; i < publishedRouting_->routes.size(); ++i)
+            {
+                if (publishedRouting_->routes[i].trackId == trackId)
+                {
+                    received = bus_.routeActivityCount((int)i);
+                }
+            }
+        }
+        parts.add(received == 0 ? juce::String("Ready - no MIDI received yet on this track's input")
+                                : "MIDI received: " + juce::String((int)received) + " events");
     }
     const TrackId dest = destinationForTrack(trackId);
     if (dest == kInvalidTrackId)
@@ -636,6 +774,14 @@ void LiveMidiInputCoordinator::timerCallback()
         -(std::int64_t)juce::jmax(0, latencyStore_.getReportedOutputLatencySamples()));
     drainCaptureRing();
     updateActivityFromBus();
+    // A wanted device whose port was busy is retried every 2 s (another application releasing
+    // the port must not require the user to re-select it).
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (nowMs - lastOpenRetryMs_ > 2000.0)
+    {
+        lastOpenRetryMs_ = nowMs;
+        retryFailedDeviceOpens();
+    }
 }
 
 void LiveMidiInputCoordinator::drainCaptureRing()

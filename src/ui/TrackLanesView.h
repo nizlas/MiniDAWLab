@@ -148,6 +148,11 @@ public:
     void simulateHeaderColumnHandleDragForStabilityTest(int deltaPx) noexcept;
     /// [Diagnostics] The attached instrument / MIDI row header for `tid`, or null.
     [[nodiscard]] const TrackHeaderView* findInstrumentRowHeaderForDiagnostics(TrackId tid) const noexcept;
+    /// [Stability] Mutable access to the same header (to click its cells like the mouse does).
+    [[nodiscard]] TrackHeaderView* findInstrumentRowHeaderForStabilityTest(TrackId tid) noexcept
+    {
+        return const_cast<TrackHeaderView*>(findInstrumentRowHeaderForDiagnostics(tid));
+    }
     /// Diagnostics (stability runner): checks every visible header of every row kind against the
     /// shared boundary — header width == effective column width, every present strip cell /
     /// alternatives button fully inside the header, and every lane starting exactly at the boundary.

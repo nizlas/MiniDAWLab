@@ -807,6 +807,17 @@ public:
             });
         recordingCoordinator_->setLiveMidiTakeCallbacks(
             [this] { return liveMidiInputCoordinator_->armedTracksReadyToRecord(); },
+            [this]() -> juce::StringArray {
+                juce::StringArray lines;
+                for (const auto& s : liveMidiInputCoordinator_->armedRowsStatus())
+                {
+                    if (!s.ready)
+                    {
+                        lines.add(s.trackName + ": " + s.reason);
+                    }
+                }
+                return lines;
+            },
             [this](const std::int64_t startSample, const double sr) {
                 liveMidiInputCoordinator_->beginTake(startSample, sr);
                 trackLanesView.repaint();
@@ -2163,6 +2174,12 @@ public:
                 },
             });
         trackLanesEditCoordinator_->install();
+        trackLanesEditCoordinator_->setOnMidiInputAssignmentChanged([this] {
+            if (liveMidiInputCoordinator_ != nullptr)
+            {
+                liveMidiInputCoordinator_->refreshDevicesAndRouting();
+            }
+        });
 
         // Audio Input selector (Inspector, audio rows): the combo lists the ACTIVE device's
         // enabled physical input channels by name. Message-thread only.
@@ -3981,16 +3998,8 @@ public:
                 }
                 return true;
             };
-            {
-                TrackMidiInputAssignment mi;
-                mi.mode = TrackMidiInputMode::AllEnabled;
-                mi.channelFilter = 1;
-                if (!session.setTrackMidiInputAssignment(inst, mi))
-                {
-                    failReason = "instrument: setTrackMidiInputAssignment refused";
-                    return false;
-                }
-            }
+            // The instrument row's MIDI Input is deliberately left at None: the scenario sets it
+            // through the Inspector exactly as the user does (the 1.1.10 defect lived there).
             if (!addRoutedRow("Lower", 2, 5, lower) || !addRoutedRow("Pedal", 3, 6, pedal))
             {
                 return false;
@@ -4173,6 +4182,102 @@ public:
                    + inspectorView_.getMidiInputStatusTextForStabilityTest().replace("\n", " | ") + "\"";
         };
         hooks.selectTrackLikeHeaderClick = hooks.activateTrackLikeHeaderClick;
+        hooks.clickHeaderCellLikeMouse = [this](const TrackId tid, const juce::String& cell) -> bool {
+            TrackHeaderView* const header = trackLanesView.findInstrumentRowHeaderForStabilityTest(tid);
+            if (header == nullptr)
+            {
+                return false;
+            }
+            if (cell.equalsIgnoreCase("monitor"))
+            {
+                return header->clickMonitorCellLikeMouseForStabilityTest();
+            }
+            if (cell.equalsIgnoreCase("arm"))
+            {
+                return header->clickArmCellLikeMouseForStabilityTest();
+            }
+            if (cell.equalsIgnoreCase("mute"))
+            {
+                return header->clickMuteCellLikeMouseForStabilityTest();
+            }
+            return header->clickPowerCellLikeMouseForStabilityTest();
+        };
+        hooks.inspectorChooseMidiInput = [this](const juce::String& text) {
+            return inspectorView_.chooseMidiInputByTextForStabilityTest(text);
+        };
+        hooks.inspectorChooseMidiInputChannel = [this](const int ch) {
+            return inspectorView_.chooseMidiInputChannelForStabilityTest(ch);
+        };
+        hooks.getActiveTrackId = [this] { return session.getActiveTrackId(); };
+        hooks.describeTrackMidiInputFromSession = [this](const TrackId tid) -> juce::String {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            if (ix < 0)
+            {
+                return "missing";
+            }
+            const TrackMidiInputAssignment& mi = snap->getTrack(ix).getMidiInputAssignment();
+            juce::String s = mi.mode == TrackMidiInputMode::None ? "none"
+                             : mi.mode == TrackMidiInputMode::AllEnabled ? "all"
+                                                                          : "device:" + mi.deviceName;
+            s << " ch=" << (mi.channelFilter == kTrackMidiInputChannelAll ? juce::String("all") : juce::String(mi.channelFilter));
+            return s;
+        };
+        hooks.describePublishedRouteForTrack = [this](const TrackId tid) -> juce::String {
+            if (liveMidiInputCoordinator_ == nullptr)
+            {
+                return "no coordinator";
+            }
+            const auto routing = liveMidiInputCoordinator_->busForDiagnostics().currentRouting();
+            if (routing == nullptr)
+            {
+                return "absent (no routing published)";
+            }
+            for (const auto& r : routing->routes)
+            {
+                if (r.trackId == tid)
+                {
+                    return "routed slot=" + juce::String(r.deviceSlot) + " filter=" + juce::String(r.channelFilter) + " monitor="
+                           + (r.monitor ? "yes" : "no") + " capture=" + (r.capture ? "yes" : "no");
+                }
+            }
+            return "absent";
+        };
+        hooks.lastRecordStartRefusal = [this] {
+            return recordingCoordinator_ != nullptr ? recordingCoordinator_->getLastRecordStartRefusalForDiagnostics() : juce::String();
+        };
+        hooks.firstLoadedInstrumentRow = [this]() -> TrackId {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            if (snap == nullptr || instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return kInvalidTrackId;
+            }
+            // Prefer a melodic instrument that sounds for any note (VB3-II organ); a drum kit may
+            // simply have no sample on the probe note.
+            TrackId first = kInvalidTrackId;
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                if (t.getKind() != TrackKind::Instrument)
+                {
+                    continue;
+                }
+                ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(t.getId());
+                if (h == nullptr || !h->hasInstrument())
+                {
+                    continue;
+                }
+                if (t.getName().containsIgnoreCase("VB3"))
+                {
+                    return t.getId();
+                }
+                if (first == kInvalidTrackId)
+                {
+                    first = t.getId();
+                }
+            }
+            return first;
+        };
         hooks.liveMidiFirstRealInputDevice = [](juce::String& identifier, juce::String& name) -> bool {
             const auto devices = juce::MidiInput::getAvailableDevices();
             if (devices.isEmpty())

@@ -210,6 +210,14 @@ public:
     [[nodiscard]] juce::Rectangle<int> getMonitorButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
 
+    /// [Stability] Click the Monitor / Arm / Mute / Power cell exactly like a left mouse press at
+    /// its centre: the same hit test, enabled check and callback dispatch as `mouseDown`. False
+    /// when the cell is absent or disabled (nothing dispatched).
+    bool clickMonitorCellLikeMouseForStabilityTest();
+    bool clickArmCellLikeMouseForStabilityTest();
+    bool clickMuteCellLikeMouseForStabilityTest();
+    bool clickPowerCellLikeMouseForStabilityTest();
+
 private:
     enum class DragBlocker : std::uint8_t
     {
@@ -234,6 +242,8 @@ private:
         /// bottom-left corner (instrument destinations only; not a strip cell).
         Alternatives,
     };
+
+    bool clickStripCellLikeMouse(TrackHeaderButtonKind kind);
 
     struct TrackHeaderStripButtonSpec
     {

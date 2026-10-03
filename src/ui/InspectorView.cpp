@@ -1480,6 +1480,33 @@ void InspectorView::populateAudioInputCombo(const Track& track)
     inputComboGuard_ = false;
 }
 
+bool InspectorView::chooseMidiInputByTextForStabilityTest(const juce::String& itemText)
+{
+    refreshFromSession(); // the list the user would see right now
+    for (int i = 0; i < midiInputComboBox_.getNumItems(); ++i)
+    {
+        if (midiInputComboBox_.getItemText(i) == itemText)
+        {
+            // Same notification path as a popup pick: `onChange` fires synchronously here.
+            midiInputComboBox_.setSelectedId(midiInputComboBox_.getItemId(i), juce::sendNotificationSync);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool InspectorView::chooseMidiInputChannelForStabilityTest(const int channelOrZeroForAll)
+{
+    refreshFromSession();
+    const int id = channelOrZeroForAll <= 0 ? 1 : juce::jlimit(1, 16, channelOrZeroForAll) + 1;
+    if (!midiInputChannelComboBox_.isEnabled())
+    {
+        return false;
+    }
+    midiInputChannelComboBox_.setSelectedId(id, juce::sendNotificationSync);
+    return true;
+}
+
 void InspectorView::populateMidiInputControls(const Track& track)
 {
     InspectorMidiInputSnapshot snap;

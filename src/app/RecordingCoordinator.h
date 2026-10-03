@@ -36,8 +36,12 @@ public:
         std::function<void()> clearCycleRecordingPreviewContext;
 
         // ---- Live MIDI take (LiveMidiInputCoordinator seam; all optional) -------------------
-        /// Rows that are record-armed AND have a MIDI input configured right now.
+        /// Rows that are record-armed AND whose MIDI input can deliver right now.
         std::function<std::vector<TrackId>()> armedMidiTracksReadyToRecord;
+        /// Human lines ("<track>: <reason>") for armed MIDI rows that are NOT ready: no input
+        /// selected, device missing, device could not be opened, All without a connected device.
+        /// Used to tell the user the real reason instead of a generic "arm a track".
+        std::function<juce::StringArray()> describeArmedMidiRowsNotReady;
         /// Start capturing at the record boundary (same moment the audio take begins).
         std::function<void(std::int64_t recordStartSample, double sampleRate)> beginMidiTake;
         /// Finalize at the stop boundary: builds + appends one clip per row with content.
@@ -71,6 +75,9 @@ public:
     /// alone, because a MIDI-only take never starts the audio recorder.
     [[nodiscard]] bool isRecordingInProgress() const noexcept;
     [[nodiscard]] bool isMidiTakeActive() const noexcept { return midiTakeActive_; }
+    /// [Diagnostics / stability] The text of the last refusal shown by `numpadRecordToggled`
+    /// (empty when the last press started a count-in or stopped a take).
+    [[nodiscard]] juce::String getLastRecordStartRefusalForDiagnostics() const { return lastRecordStartRefusal_; }
     /// Project replacement while a MIDI take runs: the take belongs to the OLD project and is
     /// dropped without clips (never half-committed into the new one). Count-in is cancelled too.
     void abortMidiTakeForProjectReplace();
@@ -80,12 +87,14 @@ public:
 
     /// Install the live-MIDI take seam (see `Callbacks`); called once from the composition root.
     void setLiveMidiTakeCallbacks(std::function<std::vector<TrackId>()> armedMidiTracksReadyToRecord,
+                                  std::function<juce::StringArray()> describeArmedMidiRowsNotReady,
                                   std::function<void(std::int64_t, double)> beginMidiTake,
                                   std::function<int(std::int64_t)> commitMidiTake,
                                   std::function<void()> abortMidiTake,
                                   std::function<void(const juce::String&, std::function<void()>)> runUndoableTakeCommit)
     {
         callbacks_.armedMidiTracksReadyToRecord = std::move(armedMidiTracksReadyToRecord);
+        callbacks_.describeArmedMidiRowsNotReady = std::move(describeArmedMidiRowsNotReady);
         callbacks_.beginMidiTake = std::move(beginMidiTake);
         callbacks_.commitMidiTake = std::move(commitMidiTake);
         callbacks_.abortMidiTake = std::move(abortMidiTake);
@@ -120,6 +129,7 @@ private:
     /// Live MIDI take state (message thread). A take may be MIDI-only (no audio recorder).
     bool midiTakeActive_ = false;
     bool pendingMidiTake_ = false; ///< set during count-in when MIDI rows will record
+    juce::String lastRecordStartRefusal_;
     TrackId cycleSessionTrackId_ = kInvalidTrackId;
     std::int64_t cycleSessionLocL_ = 0;
     std::int64_t cycleSessionLocR_ = 0;
