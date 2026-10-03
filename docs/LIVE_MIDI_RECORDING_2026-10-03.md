@@ -4,6 +4,7 @@
 |---|---|
 | Date | 2026-10-03 |
 | Baseline | 1.1.9 (`639b2e2`) |
+| Delivered as | 1.1.10, commit `aeafa90` on `origin/main` |
 | Build with the changes | `build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` (Debug), `build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe` + `dist\DanielssonsAudioLab-1.1.10-Setup.exe` / `dist\DanielssonsAudioLab-1.1.10.zip` (Release) |
 | Evidence | `docs/evidence/live-midi-2026-10-03/` |
 | Test material | sibling copies of `%TEMP%\dal-tse-copy\TSE_pt2.dalproj` (180 BPM, VB3-II, AmpliTube) and `%TEMP%\dal-pregain-fixture\pregain-fixture.dalproj` (120 BPM, audio-only). The user's projects were never opened for writing. |
