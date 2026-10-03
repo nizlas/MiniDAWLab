@@ -85,6 +85,12 @@ enum class StabilityScenarioKind
     /// Inspector control is reachable by scrolling, and the layout survives a low window. PNG
     /// evidence of the real Inspector column is written for the report.
     InspectorPanel,
+    /// Organ residual signal: with the transport STOPPED, measures the selected instrument row's
+    /// post-strip stage and the Stereo Out (DC / varying AC component / peak, separately) in the
+    /// current audio samples — not the UI's hold values — before, during and after a header mute,
+    /// then after a short playback. Shows whether the "stuck" meter is real signal and how big the
+    /// step is that a mute/unmute switches (the click).
+    OrganDc,
 };
 
 /// Mirror of the exporter's level report / the engine's meter reading for scenario logging.
@@ -316,11 +322,10 @@ struct StabilityRunnerHooks
     std::function<bool(juce::String& report, juce::String& failReason)> verifyInspectorPanelLayout;
     /// PNG of the Inspector column (scroll area + channel panel) as rendered.
     std::function<bool(const juce::File& png)> captureInspectorPng;
-    /// Meter state line: displayed dB, held peak text, overload latch, DC tag — track and Stereo Out.
+    /// Meter state line: displayed dB, held peak text, overload latch, DC tag of the output meter.
     std::function<juce::String()> describeInspectorMeters;
-    std::function<bool()> isInspectorMasterMeterOverloadLatched;
-    std::function<bool()> inspectorMasterMeterShowsSignal;
-    std::function<bool()> inspectorTrackMeterShowsSignal;
+    std::function<bool()> isInspectorOutputMeterOverloadLatched;
+    std::function<bool()> inspectorOutputMeterShowsSignal;
     std::function<void()> resetInspectorOverloadLatches;
     /// Same handlers the fader's value field (Return) and Ctrl/Cmd+click use.
     std::function<void(const juce::String&)> inspectorFaderTypeValue;
@@ -331,6 +336,15 @@ struct StabilityRunnerHooks
     /// Main window size (restored by the scenario).
     std::function<juce::Rectangle<int>()> getMainWindowBounds;
     std::function<void(int w, int h)> setMainWindowSize;
+
+    // --- Organ DC scenario -----------------------------------------------------------------
+    /// Monotonic count of blocks the row's instrument host has processed (`processOkBlocks`);
+    /// a muted row must keep processing (gain 0), so this must still advance while muted.
+    std::function<std::uint64_t(TrackId)> instrumentProcessedBlocks;
+    /// Largest number of MIDI events the row's host delivered to its instance in one block since
+    /// the last reset (`resetTo0 == true` resets after reading). Must stay bounded across a
+    /// mute → unmute while playing: no stale burst.
+    std::function<std::uint32_t(TrackId, bool resetTo0)> instrumentMaxMidiEventsInOneBlock;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -381,6 +395,8 @@ private:
     void appendExportLevelsSteps(const juce::File& project);
     /// Inspector channel panel: modes per row kind, meters, latch, fader paths, scrolling, low window.
     void appendInspectorPanelSteps(const juce::File& project);
+    /// Organ residual DC / AC before, during and after mute with the transport stopped (+ after playback).
+    void appendOrganDcSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

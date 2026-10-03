@@ -1,0 +1,79 @@
+﻿scenario start: organ-dc iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2.dalproj
+step begin: organ-dc: load TSE_pt2.dalproj
+step end ok: organ-dc: load TSE_pt2.dalproj elapsedMs=3367
+step begin: organ-dc: verify loaded
+step end ok: organ-dc: verify loaded elapsedMs=3
+step begin: organ-dc: select the VB3-II row like a header click (transport stopped)
+step end ok: organ-dc: select the VB3-II row like a header click (transport stopped) elapsedMs=4
+step begin: organ-dc: stopped, unmuted, before any playback - arm 2 s window
+step end ok: organ-dc: stopped, unmuted, before any playback - arm 2 s window elapsedMs=0
+step begin: organ-dc: stopped, unmuted, before any playback - read
+  stopped, unmuted, before any playback ORGAN post-strip: frames=98048 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000] hostBlocksProcessed=766
+  stopped, unmuted, before any playback STEREO OUT: frames=98048 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000]
+  stopped, unmuted, before any playback UI meters: outputMeter(track){visible=yes displayedDb=[-60.0,-60.0] heldPeak="-âˆž" latched=no overs=0 dc=no ch=2}
+  NOTE: organ row is silent in this window (no residual signal present right now)
+step end ok: organ-dc: stopped, unmuted, before any playback - read elapsedMs=9
+step begin: organ-dc: mute the organ row like the header button (transport still stopped)
+step end ok: organ-dc: mute the organ row like the header button (transport still stopped) elapsedMs=0
+step begin: organ-dc: stopped, MUTED - arm 2 s window
+step end ok: organ-dc: stopped, MUTED - arm 2 s window elapsedMs=0
+step begin: organ-dc: stopped, MUTED - read
+  stopped, MUTED ORGAN post-strip: frames=97664 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000] hostBlocksProcessed=763
+  stopped, MUTED STEREO OUT: frames=97664 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000]
+  stopped, MUTED UI meters: outputMeter(track){visible=yes displayedDb=[-60.0,-60.0] heldPeak="-âˆž" latched=no overs=0 dc=no ch=2}
+step end ok: organ-dc: stopped, MUTED - read elapsedMs=7
+step begin: organ-dc: unmute like the header button
+step end ok: organ-dc: unmute like the header button elapsedMs=1
+step begin: organ-dc: stopped, unmuted again - arm 2 s window
+step end ok: organ-dc: stopped, unmuted again - arm 2 s window elapsedMs=0
+step begin: organ-dc: stopped, unmuted again - read
+  stopped, unmuted again ORGAN post-strip: frames=97920 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000] hostBlocksProcessed=765
+  stopped, unmuted again STEREO OUT: frames=97792 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000]
+  stopped, unmuted again UI meters: outputMeter(track){visible=yes displayedDb=[-60.0,-60.0] heldPeak="-âˆž" latched=no overs=0 dc=no ch=2}
+  NOTE: organ row is silent in this window (no residual signal present right now)
+step end ok: organ-dc: stopped, unmuted again - read elapsedMs=10
+step begin: organ-dc: play 4 s from 24 s (the organ plays there), then stop
+step end ok: organ-dc: play 4 s from 24 s (the organ plays there), then stop elapsedMs=0
+step begin: organ-dc: stop
+step end ok: organ-dc: stop elapsedMs=0
+step begin: organ-dc: stopped after playback, unmuted - arm 2 s window
+step end ok: organ-dc: stopped after playback, unmuted - arm 2 s window elapsedMs=0
+step begin: organ-dc: stopped after playback, unmuted - read
+  stopped after playback, unmuted ORGAN post-strip: frames=97280 dc=[0.3404,0.3404] (-9.36 dBFS) acRms=[0.00027,0.00027] peak=[0.3434,0.3430] rms=[0.3404,0.3404] hostBlocksProcessed=760
+  stopped after playback, unmuted STEREO OUT: frames=97280 dc=[0.1914,0.1914] (-14.36 dBFS) acRms=[0.00416,0.00411] peak=[0.2301,0.2222] rms=[0.1915,0.1915]
+  stopped after playback, unmuted UI meters: outputMeter(track){visible=yes displayedDb=[-10.2,-10.2] heldPeak="-9.3" latched=no overs=0 dc=YES ch=2}
+step end ok: organ-dc: stopped after playback, unmuted - read elapsedMs=5
+step begin: organ-dc: mute after playback
+step end ok: organ-dc: mute after playback elapsedMs=0
+step begin: organ-dc: stopped after playback, MUTED - arm 2 s window
+step end ok: organ-dc: stopped after playback, MUTED - arm 2 s window elapsedMs=0
+step begin: organ-dc: stopped after playback, MUTED - read
+  stopped after playback, MUTED ORGAN post-strip: frames=98560 dc=[0.0000,0.0000] (-inf dBFS) acRms=[0.00000,0.00000] peak=[0.0000,0.0000] rms=[0.0000,0.0000] hostBlocksProcessed=770
+  stopped after playback, MUTED STEREO OUT: frames=98560 dc=[-0.0000,0.0000] (-inf dBFS) acRms=[0.00015,0.00017] peak=[0.0010,0.0011] rms=[0.0002,0.0002]
+  stopped after playback, MUTED UI meters: outputMeter(track){visible=yes displayedDb=[-60.0,-60.0] heldPeak="-âˆž" latched=no overs=0 dc=no ch=2}
+step end ok: organ-dc: stopped after playback, MUTED - read elapsedMs=6
+step begin: organ-dc: reference - play 5 s from 24 s unmuted, record max MIDI events per block
+step end ok: organ-dc: reference - play 5 s from 24 s unmuted, record max MIDI events per block elapsedMs=1
+step begin: organ-dc: stop reference playback
+  reference (unmuted playback): max MIDI events in one block = 5
+step end ok: organ-dc: stop reference playback elapsedMs=3
+step begin: organ-dc: mute, then play from 24 s with the row MUTED for 4000 ms
+step end ok: organ-dc: mute, then play from 24 s with the row MUTED for 4000 ms elapsedMs=0
+step begin: organ-dc: unmute WHILE PLAYING after 4000 ms (play 1 s more)
+step end ok: organ-dc: unmute WHILE PLAYING after 4000 ms (play 1 s more) elapsedMs=1
+step begin: organ-dc: stop after the 4000 ms muted run
+  muted 4000 ms: host blocks processed while muted = 1519, max MIDI events in one block while muted = 17, in the 1 s after unmute = 2 (unmuted reference 5)
+step end ok: organ-dc: stop after the 4000 ms muted run elapsedMs=3
+step begin: organ-dc: mute, then play from 24 s with the row MUTED for 300 ms
+step end ok: organ-dc: mute, then play from 24 s with the row MUTED for 300 ms elapsedMs=0
+step begin: organ-dc: unmute WHILE PLAYING after 300 ms (play 1 s more)
+step end ok: organ-dc: unmute WHILE PLAYING after 300 ms (play 1 s more) elapsedMs=1
+step begin: organ-dc: stop after the 300 ms muted run
+  muted 300 ms: host blocks processed while muted = 118, max MIDI events in one block while muted = 17, in the 1 s after unmute = 2 (unmuted reference 5)
+step end ok: organ-dc: stop after the 300 ms muted run elapsedMs=2
+step begin: organ-dc: unmute burst must not depend on the mute duration
+  unmute block maximum: after 4000 ms muted = 2, after 300 ms muted = 2
+step end ok: organ-dc: unmute burst must not depend on the mute duration elapsedMs=3
+step begin: organ-dc: release the meter tap
+step end ok: organ-dc: release the meter tap elapsedMs=0
+RESULT: PASS scenario=organ-dc totalMs=37695

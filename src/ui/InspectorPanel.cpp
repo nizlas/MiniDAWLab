@@ -12,10 +12,14 @@ InspectorPanel::InspectorPanel(Session& session)
     // The viewed component is sized by this panel (width = viewport width minus scrollbar, height =
     // the Inspector's own preferred content height), so the Viewport scrolls, never the Inspector.
     inspectorView_.setOnPreferredHeightChanged([this] { resized(); });
+    // MIDI rows / no active row have no audio output: the channel panel hides and the scroll area
+    // takes the whole column.
+    channelPanel_.onAudioStripVisibilityChanged = [this] { resized(); };
 }
 
 InspectorPanel::~InspectorPanel()
 {
+    channelPanel_.onAudioStripVisibilityChanged = nullptr;
     inspectorView_.setOnPreferredHeightChanged(nullptr);
     viewport_.setViewedComponent(nullptr, false);
 }
@@ -33,15 +37,25 @@ void InspectorPanel::resized()
         return;
     }
     // Channel panel height: preferred when the Inspector is tall enough; otherwise give the scroll
-    // area its minimum and shrink the panel, but never below the panel's own minimum.
-    int panelH = ChannelStripPanel::preferredHeight();
-    const int roomForPanel = area.getHeight() - kMinimumScrollAreaHeightPx;
-    if (roomForPanel < panelH)
+    // area its minimum and shrink the panel, but never below the panel's own minimum. Rows without
+    // an audio output (MIDI / none) show no panel at all.
+    const bool showPanel = channelPanel_.hasAudioStrip();
+    channelPanel_.setVisible(showPanel);
+    if (showPanel)
     {
-        panelH = juce::jmax(ChannelStripPanel::minimumHeight(), roomForPanel);
+        int panelH = ChannelStripPanel::preferredHeight();
+        const int roomForPanel = area.getHeight() - kMinimumScrollAreaHeightPx;
+        if (roomForPanel < panelH)
+        {
+            panelH = juce::jmax(ChannelStripPanel::minimumHeight(), roomForPanel);
+        }
+        panelH = juce::jmin(panelH, area.getHeight());
+        channelPanel_.setBounds(area.removeFromBottom(panelH));
     }
-    panelH = juce::jmin(panelH, area.getHeight());
-    channelPanel_.setBounds(area.removeFromBottom(panelH));
+    else
+    {
+        channelPanel_.setBounds(area.getX(), area.getBottom(), area.getWidth(), 0);
+    }
     viewport_.setBounds(area);
 
     const int contentW = juce::jmax(0, area.getWidth() - (viewport_.isVerticalScrollBarShown() ? viewport_.getScrollBarThickness() : 0));

@@ -497,6 +497,402 @@ int probeInstrumentDc(const juce::File& bundle, const juce::File& project, const
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Organ DC isolation: fresh instances, one parameter at a time, plus a .vstpreset for Cubase
+// ---------------------------------------------------------------------------------------------
+struct DcProbeResult
+{
+    double dcBefore[2] = { 0.0, 0.0 };     ///< silence before the first note (channel 0 / 1)
+    double dcDuring[2] = { 0.0, 0.0 };     ///< while notes are held
+    double dcAfter[2] = { 0.0, 0.0 };      ///< silence after note-off (3 s window)
+    double acRmsAfter[2] = { 0.0, 0.0 };   ///< sqrt(rms^2 - dc^2) of the same window: the varying part
+    double peakAfter[2] = { 0.0, 0.0 };
+    double dcAfterLate[2] = { 0.0, 0.0 };  ///< a further 3 s later (does it decay?)
+};
+
+struct ProbeWindow
+{
+    double sum[2] = { 0.0, 0.0 };
+    double sumSq[2] = { 0.0, 0.0 };
+    double peak[2] = { 0.0, 0.0 };
+    std::int64_t n = 0;
+    void fold(const juce::AudioBuffer<float>& buf, const int numSamples)
+    {
+        for (int ch = 0; ch < 2 && ch < buf.getNumChannels(); ++ch)
+        {
+            const float* x = buf.getReadPointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                sum[ch] += x[i];
+                sumSq[ch] += (double)x[i] * (double)x[i];
+                peak[ch] = std::max(peak[ch], std::fabs((double)x[i]));
+            }
+        }
+        n += numSamples;
+    }
+    [[nodiscard]] double dc(const int ch) const { return n > 0 ? sum[ch] / (double)n : 0.0; }
+    [[nodiscard]] double acRms(const int ch) const
+    {
+        if (n <= 0) return 0.0;
+        const double rms2 = sumSq[ch] / (double)n;
+        const double d = dc(ch);
+        return std::sqrt(std::max(0.0, rms2 - d * d));
+    }
+};
+
+enum class NoteOffStyle { NoteOffsOnly, NoteOffsPlusAllNotesOff, AllSoundOff };
+
+/// One complete protocol on ONE fresh instance: [state] -> [mutations] -> 1 s silence -> 2 s chord
+/// -> note-off (style) -> 3 s silence -> 3 s more silence.
+[[nodiscard]] DcProbeResult runDcProtocol(juce::AudioPluginInstance& inst, const NoteOffStyle style)
+{
+    const int chans = juce::jmax(2, inst.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buf(chans, kBlock);
+    const auto blocksFor = [](const double seconds) { return (int)std::lround(seconds * kRate / kBlock); };
+    DcProbeResult r;
+    ProbeWindow before, during, after, late;
+    const auto run = [&](ProbeWindow& w, const int blocks, const std::function<void(juce::MidiBuffer&, int)>& midiFor) {
+        for (int b = 0; b < blocks; ++b)
+        {
+            buf.clear();
+            juce::MidiBuffer midi;
+            midiFor(midi, b);
+            inst.processBlock(buf, midi);
+            w.fold(buf, kBlock);
+        }
+    };
+    run(before, blocksFor(1.0), [](juce::MidiBuffer&, int) {});
+    run(during, blocksFor(2.0), [](juce::MidiBuffer& m, const int b) {
+        if (b == 0)
+        {
+            m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), 0);
+            m.addEvent(juce::MidiMessage::noteOn(1, 64, (juce::uint8)100), 0);
+            m.addEvent(juce::MidiMessage::noteOn(1, 67, (juce::uint8)100), 0);
+        }
+    });
+    run(after, blocksFor(3.0), [style](juce::MidiBuffer& m, const int b) {
+        if (b == 0)
+        {
+            if (style == NoteOffStyle::AllSoundOff)
+            {
+                m.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            }
+            else
+            {
+                m.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+                m.addEvent(juce::MidiMessage::noteOff(1, 64), 0);
+                m.addEvent(juce::MidiMessage::noteOff(1, 67), 0);
+                if (style == NoteOffStyle::NoteOffsPlusAllNotesOff)
+                {
+                    m.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                }
+            }
+        }
+    });
+    run(late, blocksFor(3.0), [](juce::MidiBuffer&, int) {});
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        r.dcBefore[ch] = before.dc(ch);
+        r.dcDuring[ch] = during.dc(ch);
+        r.dcAfter[ch] = after.dc(ch);
+        r.acRmsAfter[ch] = after.acRms(ch);
+        r.peakAfter[ch] = after.peak[ch];
+        r.dcAfterLate[ch] = late.dc(ch);
+    }
+    return r;
+}
+
+[[nodiscard]] juce::String describeDcResult(const DcProbeResult& r)
+{
+    return "dcBefore=[" + juce::String(r.dcBefore[0], 4) + "," + juce::String(r.dcBefore[1], 4) + "] dcDuring=["
+           + juce::String(r.dcDuring[0], 4) + "," + juce::String(r.dcDuring[1], 4) + "] dcAfter=[" + juce::String(r.dcAfter[0], 4) + ","
+           + juce::String(r.dcAfter[1], 4) + "] (" + dbfs(std::fabs(r.dcAfter[0])) + " dBFS) acRmsAfter=[" + juce::String(r.acRmsAfter[0], 5) + ","
+           + juce::String(r.acRmsAfter[1], 5) + "] peakAfter=" + juce::String(r.peakAfter[0], 4) + " dcAfterLate=[" + juce::String(r.dcAfterLate[0], 4)
+           + "," + juce::String(r.dcAfterLate[1], 4) + "]";
+}
+
+[[nodiscard]] juce::MemoryBlock loadSavedInstrumentState(const juce::File& project, const int trackId, juce::String& nameOut)
+{
+    juce::MemoryBlock state;
+    if (!project.existsAsFile())
+    {
+        return state;
+    }
+    const juce::var root = juce::JSON::parse(project);
+    const juce::var rows = root.getProperty("experimentalInstrumentTracks", {});
+    if (!rows.isArray())
+    {
+        return state;
+    }
+    for (const juce::var& r : *rows.getArray())
+    {
+        if ((int)r.getProperty("trackId", -1) == trackId)
+        {
+            nameOut = r.getProperty("name", "").toString();
+            const juce::String b64 = r.getProperty("pluginStateBase64", "").toString();
+            juce::MemoryOutputStream mos;
+            if (b64.isNotEmpty() && juce::Base64::convertFromBase64(mos, b64))
+            {
+                state.replaceAll(mos.getData(), mos.getDataSize());
+            }
+        }
+    }
+    return state;
+}
+
+[[nodiscard]] std::unique_ptr<juce::AudioPluginInstance> freshInstance(juce::AudioPluginFormatManager& formats,
+                                                                      const juce::PluginDescription& desc,
+                                                                      const juce::MemoryBlock* state)
+{
+    juce::String err;
+    std::unique_ptr<juce::AudioPluginInstance> inst = formats.createPluginInstance(desc, kRate, kBlock, err);
+    if (inst == nullptr)
+    {
+        info("instantiate failed: " + err);
+        return nullptr;
+    }
+    inst->setPlayConfigDetails(0, juce::jmax(2, inst->getTotalNumOutputChannels()), kRate, kBlock);
+    inst->prepareToPlay(kRate, kBlock);
+    if (state != nullptr && state->getSize() > 0)
+    {
+        inst->setStateInformation(state->getData(), (int)state->getSize());
+    }
+    return inst;
+}
+
+/// Writes a Steinberg .vstpreset (header 'VST3', version 1, 32-char class ID, chunk list with
+/// 'Comp' + 'Cont') from the JUCE "VST3PluginState" blob a DAL project stores, so the same state
+/// can be loaded in another host (Cubase) for an independent comparison.
+[[nodiscard]] bool writeVstPresetFromJuceState(const juce::MemoryBlock& juceState, const juce::String& classId32,
+                                               const juce::File& out, juce::String& detail)
+{
+    std::unique_ptr<juce::XmlElement> xml = juce::AudioProcessor::getXmlFromBinary(juceState.getData(), (int)juceState.getSize());
+    if (xml == nullptr || !xml->hasTagName("VST3PluginState"))
+    {
+        detail = "state blob is not a JUCE VST3PluginState block";
+        return false;
+    }
+    juce::MemoryBlock comp, cont;
+    if (auto* c = xml->getChildByName("IComponent"))
+    {
+        comp.fromBase64Encoding(c->getAllSubText().trim());
+    }
+    if (auto* c = xml->getChildByName("IEditController"))
+    {
+        cont.fromBase64Encoding(c->getAllSubText().trim());
+    }
+    if (comp.getSize() == 0)
+    {
+        detail = "no IComponent state in the blob";
+        return false;
+    }
+    if (classId32.length() != 32)
+    {
+        detail = "class ID must be 32 hex characters";
+        return false;
+    }
+    juce::MemoryOutputStream s;
+    s.write("VST3", 4);
+    s.writeInt(1);
+    s.write(classId32.toRawUTF8(), 32);
+    const juce::int64 compOffset = 48;
+    const juce::int64 contOffset = compOffset + (juce::int64)comp.getSize();
+    const juce::int64 listOffset = contOffset + (juce::int64)cont.getSize();
+    s.writeInt64(listOffset);
+    s.write(comp.getData(), comp.getSize());
+    s.write(cont.getData(), cont.getSize());
+    s.write("List", 4);
+    s.writeInt(cont.getSize() > 0 ? 2 : 1);
+    s.write("Comp", 4);
+    s.writeInt64(compOffset);
+    s.writeInt64((juce::int64)comp.getSize());
+    if (cont.getSize() > 0)
+    {
+        s.write("Cont", 4);
+        s.writeInt64(contOffset);
+        s.writeInt64((juce::int64)cont.getSize());
+    }
+    (void)out.deleteFile();
+    if (!out.replaceWithData(s.getData(), s.getDataSize()))
+    {
+        detail = "could not write " + out.getFullPathName();
+        return false;
+    }
+    detail = "component " + juce::String((juce::int64)comp.getSize()) + " bytes, controller " + juce::String((juce::int64)cont.getSize())
+             + " bytes -> " + out.getFullPathName();
+    return true;
+}
+
+int probeInstrumentDcIsolation(const juce::File& bundle, const juce::File& project, const int trackId, const juce::File& outDir)
+{
+    juce::AudioPluginFormatManager formats;
+    formats.addFormat(new juce::VST3PluginFormat());
+    juce::OwnedArray<juce::PluginDescription> found;
+    for (int i = 0; i < formats.getNumFormats(); ++i)
+    {
+        formats.getFormat(i)->findAllTypesForFile(found, bundle.getFullPathName());
+    }
+    if (found.isEmpty())
+    {
+        std::printf("no plugin types in %s\n", bundle.getFullPathName().toRawUTF8());
+        return 1;
+    }
+    const juce::PluginDescription desc = *found[0];
+    juce::String trackName;
+    const juce::MemoryBlock saved = loadSavedInstrumentState(project, trackId, trackName);
+    info("isolation: " + desc.name + " " + desc.version + " state for track " + juce::String(trackId) + " \"" + trackName + "\" = "
+         + juce::String((juce::int64)saved.getSize()) + " bytes");
+    (void)outDir.createDirectory();
+
+    // 0. Reproduction package for another host: the saved state as a .vstpreset.
+    {
+        juce::String classId;
+        const juce::File moduleInfo = bundle.getChildFile("Contents").getChildFile("Resources").getChildFile("moduleinfo.json");
+        if (moduleInfo.existsAsFile())
+        {
+            // moduleinfo.json has trailing commas (not strict JSON) — pick the Audio Module Class CID by text.
+            const juce::String text = moduleInfo.loadFileAsString();
+            const int audioModule = text.indexOf("\"Audio Module Class\"");
+            const int before = audioModule >= 0 ? text.substring(0, audioModule).lastIndexOf("\"CID\"") : -1;
+            if (before >= 0)
+            {
+                classId = text.substring(before).fromFirstOccurrenceOf(":", false, false).upToFirstOccurrenceOf(",", false, false)
+                              .removeCharacters(" \"\t\r\n");
+            }
+        }
+        juce::String detail;
+        if (classId.isNotEmpty() && writeVstPresetFromJuceState(saved, classId, outDir.getChildFile(desc.name + "-track" + juce::String(trackId) + ".vstpreset"), detail))
+        {
+            info("vstpreset: class " + classId + ": " + detail);
+        }
+        else
+        {
+            info("vstpreset: not written (" + (classId.isEmpty() ? juce::String("no class ID") : detail) + ")");
+        }
+    }
+
+    // 1. Parameter inventory: default (fresh) vs saved.
+    struct ParamDiff { int index; juce::String name; float defaultValue; float savedValue; juce::String defaultText; juce::String savedText; int steps; bool discrete; };
+    std::vector<ParamDiff> diffs;
+    {
+        auto fresh = freshInstance(formats, desc, nullptr);
+        auto withState = freshInstance(formats, desc, &saved);
+        if (fresh == nullptr || withState == nullptr)
+        {
+            return 1;
+        }
+        const auto& pf = fresh->getParameters();
+        const auto& ps = withState->getParameters();
+        info("parameters: " + juce::String(pf.size()) + " (listing those whose saved value differs from the default)");
+        for (int i = 0; i < pf.size() && i < ps.size(); ++i)
+        {
+            const float dv = pf[i]->getValue();
+            const float sv = ps[i]->getValue();
+            if (std::fabs(dv - sv) > 1.0e-4f)
+            {
+                ParamDiff d{ i, ps[i]->getName(64), dv, sv, pf[i]->getText(dv, 32), ps[i]->getText(sv, 32), ps[i]->getNumSteps(), ps[i]->isDiscrete() };
+                diffs.push_back(d);
+                info("  [" + juce::String(i) + "] \"" + d.name + "\": default " + juce::String(dv, 4) + " (" + d.defaultText + ") -> saved "
+                     + juce::String(sv, 4) + " (" + d.savedText + ")" + (d.discrete ? " discrete" : ""));
+            }
+        }
+    }
+
+    // 2. Baselines on fresh instances.
+    {
+        auto inst = freshInstance(formats, desc, &saved);
+        info("A  saved state, note-offs + all-notes-off : " + describeDcResult(runDcProtocol(*inst, NoteOffStyle::NoteOffsPlusAllNotesOff)));
+    }
+    {
+        auto inst = freshInstance(formats, desc, &saved);
+        info("A2 saved state, note-offs only            : " + describeDcResult(runDcProtocol(*inst, NoteOffStyle::NoteOffsOnly)));
+    }
+    {
+        auto inst = freshInstance(formats, desc, &saved);
+        info("A3 saved state, all-sound-off             : " + describeDcResult(runDcProtocol(*inst, NoteOffStyle::AllSoundOff)));
+    }
+    {
+        auto inst = freshInstance(formats, desc, nullptr);
+        info("B  plug-in defaults                       : " + describeDcResult(runDcProtocol(*inst, NoteOffStyle::NoteOffsPlusAllNotesOff)));
+    }
+    // C. Defaults + every differing parameter set individually to its saved value (bypasses the
+    //    state-restore mechanism: is it the parameter VALUES or the restore path?).
+    {
+        auto inst = freshInstance(formats, desc, nullptr);
+        for (const ParamDiff& d : diffs)
+        {
+            inst->getParameters()[d.index]->setValue(d.savedValue);
+        }
+        info("C  defaults + saved values set via parameters: " + describeDcResult(runDcProtocol(*inst, NoteOffStyle::NoteOffsPlusAllNotesOff)));
+    }
+    // D. Saved state, ONE differing parameter reverted to its default per fresh instance.
+    info("D  saved state with ONE parameter reverted to default (fresh instance each):");
+    struct Ranked { juce::String name; double dcAfter; };
+    std::vector<Ranked> ranked;
+    for (const ParamDiff& d : diffs)
+    {
+        auto inst = freshInstance(formats, desc, &saved);
+        inst->getParameters()[d.index]->setValue(d.defaultValue);
+        const DcProbeResult r = runDcProtocol(*inst, NoteOffStyle::NoteOffsPlusAllNotesOff);
+        const double worst = std::max(std::fabs(r.dcAfter[0]), std::fabs(r.dcAfter[1]));
+        ranked.push_back({ d.name, worst });
+        info("   revert \"" + d.name + "\" -> " + d.defaultText + ": dcAfter=[" + juce::String(r.dcAfter[0], 4) + "," + juce::String(r.dcAfter[1], 4)
+             + "] acRmsAfter=" + juce::String(r.acRmsAfter[0], 5) + " dcLate=" + juce::String(r.dcAfterLate[0], 4));
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const Ranked& a, const Ranked& b) { return a.dcAfter < b.dcAfter; });
+    if (!ranked.empty())
+    {
+        info("   -> smallest residual DC when reverting: \"" + ranked.front().name + "\" (" + juce::String(ranked.front().dcAfter, 4) + ")");
+    }
+    // E. Named suspects swept through all their values on the saved state.
+    {
+        auto probeInst = freshInstance(formats, desc, &saved);
+        const auto& params = probeInst->getParameters();
+        for (int i = 0; i < params.size(); ++i)
+        {
+            const juce::String name = params[i]->getName(64);
+            const bool suspect = name.containsIgnoreCase("tube") || name.containsIgnoreCase("feedback") || name.containsIgnoreCase("amp")
+                                 || name.containsIgnoreCase("model") || name.containsIgnoreCase("V.1") || name.containsIgnoreCase("V.2");
+            if (!suspect)
+            {
+                continue;
+            }
+            const juce::StringArray values = params[i]->getAllValueStrings();
+            const int steps = params[i]->getNumSteps();
+            std::vector<float> tryValues;
+            if (!values.isEmpty() && values.size() <= 16)
+            {
+                for (int v = 0; v < values.size(); ++v)
+                {
+                    tryValues.push_back(values.size() > 1 ? (float)v / (float)(values.size() - 1) : 0.0f);
+                }
+            }
+            else if (params[i]->isDiscrete() && steps > 1 && steps <= 16)
+            {
+                for (int v = 0; v < steps; ++v)
+                {
+                    tryValues.push_back((float)v / (float)(steps - 1));
+                }
+            }
+            else
+            {
+                tryValues = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+            }
+            info("E  sweep \"" + name + "\" (saved " + params[i]->getText(params[i]->getValue(), 32) + "):");
+            for (const float v : tryValues)
+            {
+                auto inst = freshInstance(formats, desc, &saved);
+                inst->getParameters()[i]->setValue(v);
+                const juce::String text = inst->getParameters()[i]->getText(v, 32);
+                const DcProbeResult r = runDcProtocol(*inst, NoteOffStyle::NoteOffsPlusAllNotesOff);
+                info("     = " + text.paddedRight(' ', 14) + " dcAfter=[" + juce::String(r.dcAfter[0], 4) + "," + juce::String(r.dcAfter[1], 4)
+                     + "] acRmsAfter=" + juce::String(r.acRmsAfter[0], 5) + " dcLate=" + juce::String(r.dcAfterLate[0], 4));
+            }
+        }
+    }
+    return 0;
+}
+
 int analyzeFolder(const juce::File& dir)
 {
     if (!dir.isDirectory())
@@ -864,6 +1260,11 @@ int main(int argc, char** argv)
         {
             return probeInstrumentDc(juce::File(juce::String(argv[i + 1])), juce::File(juce::String(argv[i + 2])),
                                      juce::String(argv[i + 3]).getIntValue());
+        }
+        if (a == "--probe-vst3-isolate" && i + 4 < argc)
+        {
+            return probeInstrumentDcIsolation(juce::File(juce::String(argv[i + 1])), juce::File(juce::String(argv[i + 2])),
+                                              juce::String(argv[i + 3]).getIntValue(), juce::File(juce::String(argv[i + 4])));
         }
     }
     testLevelMeterAccumulator();

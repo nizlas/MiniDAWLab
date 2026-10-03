@@ -959,12 +959,11 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
     {
         return;
     }
+    // Mute and a fader at −∞ both fold the host's output with gain 0 — the instrument itself keeps
+    // processing (MIDI consumed, state follows the transport) exactly like an audible row. Only a
+    // track that is OFF skips the host.
     const float storedFaderGain = track.getChannelFaderGain();
-    const float effectiveGain = track.isMuted() ? 0.0f : storedFaderGain;
-    if (!track.isMuted() && storedFaderGain <= 0.0f)
-    {
-        return;
-    }
+    const float effectiveGain = track.isMuted() ? 0.0f : juce::jmax(0.0f, storedFaderGain);
 
     const TrackId trackId = track.getId();
     const bool useInsert

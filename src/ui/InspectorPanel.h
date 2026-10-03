@@ -7,9 +7,10 @@
 // ROLE
 //   Owns the Inspector UI as two parts: a vertically scrollable `InspectorView` (name, pre-gain,
 //   pan, routing, inserts, sends — unchanged controls) inside a `juce::Viewport`, and the
-//   always-visible `ChannelStripPanel` (fader + meters) pinned to the bottom. The scroll area
-//   keeps meaningful height on low windows: the channel panel shrinks from its preferred height
-//   towards its minimum before the scroll area gives up space (see `resized`).
+//   `ChannelStripPanel` (fader + the selected row's output meter) pinned to the bottom for rows
+//   that carry audio (audio / instrument / group / master); MIDI rows and "no row" show the scroll
+//   area only. The scroll area keeps meaningful height on low windows: the channel panel shrinks
+//   from its preferred height towards its minimum before the scroll area gives up space.
 //
 // OWNERSHIP
 //   Owns both children; `TransportControlsContent` keeps using `inspector()` exactly as it used the

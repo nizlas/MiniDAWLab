@@ -1249,18 +1249,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     fillPlayEdgePeekOnly("sessionOff");
                     continue;
                 }
-                if (tr.isMuted())
-                {
-                    fillPlayEdgePeekOnly("sessionMuted");
-                    continue;
-                }
-
-                const float fader = tr.getChannelFaderGain();
-                if (fader <= 0.0f)
-                {
-                    fillPlayEdgePeekOnly("faderZero");
-                    continue;
-                }
+                // Mute and a fader at −∞ are GAIN decisions, not "skip the instrument": the host
+                // keeps processing (its transport MIDI is consumed, its state follows the
+                // transport) and the strip folds the output with gain 0. Skipping the host here
+                // (pre-1.1.9) let the scheduled MIDI pile up in the host's per-block buffer for as
+                // long as the row stayed muted (audio-thread allocation, then a burst of stale
+                // events on unmute) and froze the plug-in mid-state.
+                const float fader = tr.isMuted() ? 0.0f : tr.getChannelFaderGain();
 
                 const float pkBeforeThisMix = (routePlayEdgeDiag && sx >= 0)
                                                   ? peakAbsStereoDevice(outputChannelData, numOutputChannels, numSamples)
@@ -2342,16 +2337,10 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
             {
                 continue;
             }
-            if (tr.isMuted())
-            {
-                continue;
-            }
-
-            const float fader = tr.getChannelFaderGain();
-            if (fader <= 0.0f)
-            {
-                continue;
-            }
+            // Same as the realtime path: mute / fader −∞ are gain 0, the host still processes so
+            // the offline render consumes exactly the MIDI it schedules (no leftover burst into
+            // the realtime callback after the export).
+            const float fader = tr.isMuted() ? 0.0f : tr.getChannelFaderGain();
 
             const RoutingPlan::SourceStep* srcStep = nullptr;
             if (rp != nullptr)

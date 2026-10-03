@@ -1847,6 +1847,7 @@ ExperimentalInstrumentHost::readRtActivitySnapshotForDiagnostics() const noexcep
     RtActivitySnapshot s;
     s.processOkBlocks = rtDiag_processOkBlocks_.load(std::memory_order_relaxed);
     s.midiDeliveryBoundaryBlocks = rtMidiDeliveryBoundaryBlocks_.load(std::memory_order_relaxed);
+    s.maxMidiEventsInOneBlock = rtDiag_maxBlockMidiEvents_.load(std::memory_order_relaxed);
     const std::uint32_t bits = rtDiag_lastScratchPeakBits_.load(std::memory_order_relaxed);
     std::memcpy(&s.lastProcessedBlockPeak, &bits, sizeof(float));
     return s;
@@ -3843,6 +3844,14 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     rtMidiDeliveryBoundaryBlocks_.fetch_add(1, std::memory_order_relaxed);
     if (!blockMidi.isEmpty())
     {
+        // Diagnostics: relaxed CAS-max of the events delivered in one block (lock/allocation-free).
+        const auto n = (std::uint32_t)juce::jmax(0, blockMidi.getNumEvents());
+        std::uint32_t prev = rtDiag_maxBlockMidiEvents_.load(std::memory_order_relaxed);
+        while (prev < n
+               && !rtDiag_maxBlockMidiEvents_.compare_exchange_weak(prev, n, std::memory_order_relaxed,
+                                                                    std::memory_order_relaxed))
+        {
+        }
         // P1H §9.4.4 host-observable quiescence input: relaxed timestamp of the most recent
         // block that actually delivered MIDI/CC to the instance. Lock/allocation-free.
         rtLastMidiDeliveryMs_.store((juce::int64)juce::Time::getMillisecondCounter(),

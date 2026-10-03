@@ -3589,21 +3589,46 @@ public:
             const int idx = snap != nullptr ? snap->findTrackIndexById(active) : -1;
             const TrackKind kind = idx >= 0 ? snap->getTrack(idx).getKind() : TrackKind::Audio;
             const bool haveTrack = idx >= 0;
-            const bool expectFader = haveTrack && kind != TrackKind::Midi;
-            const bool expectTrackMeter = haveTrack && kind != TrackKind::Midi && kind != TrackKind::Master;
-            const TrackId expectedMetered = expectTrackMeter ? active : kInvalidTrackId;
+            const bool expectStrip = haveTrack && kind != TrackKind::Midi;           // audio / instrument / group / master
+            const bool expectTrackTap = expectStrip && kind != TrackKind::Master;     // master reads the Stereo Out accumulator
+            const TrackId expectedMetered = expectTrackTap ? active : kInvalidTrackId;
             report << "inspector column " << inspectorPanel_.getBounds().toString() << " viewport " << vp.getBounds().toString()
                    << " content " << inspectorView_.getBounds().toString() << " panel " << panel.getBounds().toString()
+                   << (panel.isVisible() ? " (shown)" : " (hidden)")
                    << " panelMin=" << ChannelStripPanel::minimumHeight() << " panelPref=" << ChannelStripPanel::preferredHeight() << "\n";
             report << "active track " << juce::String((juce::int64)active) << " kind=" << (int)kind << " name=\"" << panel.getNameText()
-                   << "\" fader=" << (panel.isFaderVisible() ? "shown" : "hidden") << " trackMeter="
-                   << (panel.trackMeter().isVisible() ? "shown" : "hidden") << " masterMeter="
-                   << (panel.masterMeter().isVisible() ? "shown" : "hidden") << " metered=" << juce::String((juce::int64)playbackEngine_.getMeteredTrackForUi())
+                   << "\" fader=" << (panel.isFaderVisible() ? "shown" : "hidden") << " outputMeter="
+                   << (panel.outputMeter().isVisible() ? (panel.isShowingMaster() ? "shown(StereoOut)" : "shown(track)") : "hidden")
+                   << " metered=" << juce::String((juce::int64)playbackEngine_.getMeteredTrackForUi())
                    << " faderText=\"" << panel.fader().getValueFieldText() << "\"\n";
             const juce::Rectangle<int> col = inspectorPanel_.getLocalBounds();
-            if (!col.contains(panel.getBounds()) || !col.contains(vp.getBounds()))
+            if (!col.contains(vp.getBounds()))
             {
-                failReason = "channel panel or scroll viewport outside the Inspector column";
+                failReason = "scroll viewport outside the Inspector column";
+                return false;
+            }
+            if (panel.isVisible() != expectStrip)
+            {
+                failReason = juce::String("channel panel visibility wrong for this row kind (expected ") + (expectStrip ? "shown" : "hidden") + ")";
+                return false;
+            }
+            if (!expectStrip)
+            {
+                if (vp.getHeight() != col.getHeight())
+                {
+                    failReason = "scroll area does not take the whole column when no channel panel is shown";
+                    return false;
+                }
+                if (playbackEngine_.getMeteredTrackForUi() != kInvalidTrackId)
+                {
+                    failReason = "engine still meters a track although no audio row is selected";
+                    return false;
+                }
+                return true;
+            }
+            if (!col.contains(panel.getBounds()))
+            {
+                failReason = "channel panel outside the Inspector column";
                 return false;
             }
             if (panel.getBottom() != col.getBottom())
@@ -3622,19 +3647,14 @@ public:
                 failReason = "scroll area below its minimum height (" + juce::String(vp.getHeight()) + ")";
                 return false;
             }
-            if (panel.isFaderVisible() != expectFader)
+            if (!panel.isFaderVisible() || !panel.outputMeter().isVisible())
             {
-                failReason = juce::String("fader visibility wrong for this row kind (expected ") + (expectFader ? "shown" : "hidden") + ")";
+                failReason = "fader or output meter hidden on an audio-carrying row";
                 return false;
             }
-            if (panel.trackMeter().isVisible() != expectTrackMeter)
+            if (panel.isShowingMaster() != (kind == TrackKind::Master))
             {
-                failReason = juce::String("track meter visibility wrong for this row kind (expected ") + (expectTrackMeter ? "shown" : "hidden") + ")";
-                return false;
-            }
-            if (!panel.masterMeter().isVisible())
-            {
-                failReason = "Stereo Out meter not visible";
+                failReason = "output meter source wrong (master vs track)";
                 return false;
             }
             if (playbackEngine_.getMeteredTrackForUi() != expectedMetered)
@@ -3646,31 +3666,20 @@ public:
             // Children inside the panel, non-overlapping, and the fader text equals the session gain.
             const juce::Rectangle<int> pl = panel.getLocalBounds();
             for (const juce::Component* c : { static_cast<const juce::Component*>(&panel.fader()),
-                                              static_cast<const juce::Component*>(&panel.trackMeter()),
-                                              static_cast<const juce::Component*>(&panel.masterMeter()) })
+                                              static_cast<const juce::Component*>(&panel.outputMeter()) })
             {
-                if (c->isVisible() && !pl.contains(c->getBounds()))
+                if (!pl.contains(c->getBounds()))
                 {
                     failReason = "a channel-panel control lies outside the panel: " + c->getBounds().toString() + " vs " + pl.toString();
                     return false;
                 }
             }
-            if (panel.fader().isVisible() && panel.trackMeter().isVisible() && panel.fader().getBounds().intersects(panel.trackMeter().getBounds()))
+            if (panel.fader().getBounds().intersects(panel.outputMeter().getBounds()))
             {
-                failReason = "fader and track meter overlap";
+                failReason = "fader and output meter overlap";
                 return false;
             }
-            if (panel.trackMeter().isVisible() && panel.trackMeter().getBounds().intersects(panel.masterMeter().getBounds()))
-            {
-                failReason = "track meter and Stereo Out meter overlap";
-                return false;
-            }
-            if (panel.fader().isVisible() && panel.fader().getBounds().intersects(panel.masterMeter().getBounds()))
-            {
-                failReason = "fader and Stereo Out meter overlap";
-                return false;
-            }
-            if (expectFader && haveTrack)
+            if (expectStrip && haveTrack)
             {
                 const juce::String want = channel_fader_scale::Scale::gainText(snap->getTrack(idx).getChannelFaderGain());
                 if (panel.fader().getValueFieldText() != want)
@@ -3697,28 +3706,20 @@ public:
         };
         hooks.describeInspectorMeters = [this]() -> juce::String {
             ChannelStripPanel& panel = inspectorPanel_.channelPanel();
-            const auto describe = [](const LevelMeterComponent& m) {
-                return "displayedDb=[" + juce::String(m.getDisplayedDb(0), 1) + "," + juce::String(m.getDisplayedDb(1), 1) + "] heldPeak=\""
-                       + m.getPeakText() + "\" latched=" + (m.isOverloadLatched() ? "YES" : "no") + " overs="
-                       + juce::String((juce::int64)m.getOverloadSampleCount()) + " dc=" + (m.hasDcTag() ? "YES" : "no") + " ch=" + juce::String(m.getChannelCount());
-            };
-            return "track{" + describe(panel.trackMeter()) + "} stereoOut{" + describe(panel.masterMeter()) + "}";
+            const LevelMeterComponent& m = panel.outputMeter();
+            return juce::String(panel.isShowingMaster() ? "outputMeter(StereoOut){" : "outputMeter(track){") + "visible="
+                   + (m.isVisible() ? "yes" : "no") + " displayedDb=[" + juce::String(m.getDisplayedDb(0), 1) + "," + juce::String(m.getDisplayedDb(1), 1)
+                   + "] heldPeak=\"" + m.getPeakText() + "\" latched=" + (m.isOverloadLatched() ? "YES" : "no") + " overs="
+                   + juce::String((juce::int64)m.getOverloadSampleCount()) + " dc=" + (m.hasDcTag() ? "YES" : "no") + " ch=" + juce::String(m.getChannelCount()) + "}";
         };
-        hooks.isInspectorMasterMeterOverloadLatched = [this]() -> bool {
-            return inspectorPanel_.channelPanel().masterMeter().isOverloadLatched();
+        hooks.isInspectorOutputMeterOverloadLatched = [this]() -> bool {
+            return inspectorPanel_.channelPanel().outputMeter().isOverloadLatched();
         };
-        hooks.inspectorMasterMeterShowsSignal = [this]() -> bool {
-            const LevelMeterComponent& m = inspectorPanel_.channelPanel().masterMeter();
-            return m.getDisplayedDb(0) > -50.0 || m.getDisplayedDb(1) > -50.0 || m.getHeldPeakLinear() > 0.003f;
+        hooks.inspectorOutputMeterShowsSignal = [this]() -> bool {
+            const LevelMeterComponent& m = inspectorPanel_.channelPanel().outputMeter();
+            return m.isVisible() && (m.getDisplayedDb(0) > -50.0 || m.getDisplayedDb(1) > -50.0 || m.getHeldPeakLinear() > 0.003f);
         };
-        hooks.inspectorTrackMeterShowsSignal = [this]() -> bool {
-            const LevelMeterComponent& m = inspectorPanel_.channelPanel().trackMeter();
-            return m.getDisplayedDb(0) > -50.0 || m.getDisplayedDb(1) > -50.0 || m.getHeldPeakLinear() > 0.003f;
-        };
-        hooks.resetInspectorOverloadLatches = [this] {
-            inspectorPanel_.channelPanel().masterMeter().resetOverloadLatch();
-            inspectorPanel_.channelPanel().trackMeter().resetOverloadLatch();
-        };
+        hooks.resetInspectorOverloadLatches = [this] { inspectorPanel_.channelPanel().outputMeter().resetOverloadLatch(); };
         hooks.inspectorFaderTypeValue = [this](const juce::String& text) {
             inspectorPanel_.channelPanel().refreshFromSession();
             inspectorPanel_.channelPanel().fader().commitTypedValue(text);
@@ -3766,6 +3767,34 @@ public:
             }
             juce::PNGImageFormat fmt;
             return fmt.writeImageToStream(img, out);
+        };
+
+        hooks.instrumentProcessedBlocks = [this](const TrackId tid) -> std::uint64_t {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return 0;
+            }
+            if (ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid))
+            {
+                return h->readRtActivitySnapshotForDiagnostics().processOkBlocks;
+            }
+            return 0;
+        };
+        hooks.instrumentMaxMidiEventsInOneBlock = [this](const TrackId tid, const bool resetTo0) -> std::uint32_t {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return 0;
+            }
+            if (ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid))
+            {
+                const std::uint32_t v = h->readRtActivitySnapshotForDiagnostics().maxMidiEventsInOneBlock;
+                if (resetTo0)
+                {
+                    h->resetRtMaxBlockMidiEventsForDiagnostics();
+                }
+                return v;
+            }
+            return 0;
         };
 
         hooks.audioHealthProbeBegin = [this] {

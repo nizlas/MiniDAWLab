@@ -116,6 +116,7 @@ void LevelMeterComponent::pushReading(const level_meter::Reading& reading, const
     }
     lastDc_ = dcMax;
     dcTag_ = dcMax > kDcTagThreshold;
+    lastReadingSeconds_ = nowSeconds;
     repaint();
 }
 
@@ -129,6 +130,14 @@ void LevelMeterComponent::tick(const double nowSeconds)
     const double dt = juce::jlimit(0.0, 0.5, nowSeconds - lastTickSeconds_);
     lastTickSeconds_ = nowSeconds;
     bool changed = false;
+    // No block has been folded for a while (row muted / not rendered): the DC tag describes the
+    // last signal that existed, not the current silence — drop it.
+    if (dcTag_ && lastReadingSeconds_ > 0.0 && nowSeconds - lastReadingSeconds_ > 0.5)
+    {
+        dcTag_ = false;
+        lastDc_ = 0.0;
+        changed = true;
+    }
     for (int ch = 0; ch < 2; ++ch)
     {
         if (displayedDb_[ch] > kMinDb)
@@ -167,6 +176,7 @@ void LevelMeterComponent::clear()
     nonFiniteSeen_ = false;
     dcTag_ = false;
     lastDc_ = 0.0;
+    lastReadingSeconds_ = 0.0;
     repaint();
 }
 

@@ -238,6 +238,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-organ-dc")
+        {
+            if (!setKind(StabilityScenarioKind::OrganDc)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-organ-dc requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -326,6 +335,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::HeaderColumn: scenarioName_ = "header-column"; break;
         case StabilityScenarioKind::ExportLevels: scenarioName_ = "export-levels"; break;
         case StabilityScenarioKind::InspectorPanel: scenarioName_ = "inspector-panel"; break;
+        case StabilityScenarioKind::OrganDc: scenarioName_ = "organ-dc"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -405,6 +415,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::InspectorPanel:
             appendInspectorPanelSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::OrganDc:
+            appendOrganDcSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -2675,8 +2688,8 @@ void StabilityScenarioRunner::appendExportLevelsSteps(const juce::File& project)
 void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& project)
 {
     if (hooks_.verifyInspectorPanelLayout == nullptr || hooks_.captureInspectorPng == nullptr
-        || hooks_.describeInspectorMeters == nullptr || hooks_.isInspectorMasterMeterOverloadLatched == nullptr
-        || hooks_.inspectorMasterMeterShowsSignal == nullptr || hooks_.inspectorTrackMeterShowsSignal == nullptr
+        || hooks_.describeInspectorMeters == nullptr || hooks_.isInspectorOutputMeterOverloadLatched == nullptr
+        || hooks_.inspectorOutputMeterShowsSignal == nullptr
         || hooks_.resetInspectorOverloadLatches == nullptr || hooks_.inspectorFaderTypeValue == nullptr
         || hooks_.inspectorFaderResetGesture == nullptr || hooks_.inspectorFaderValueText == nullptr
         || hooks_.inspectorScrollToBottomAndVerify == nullptr || hooks_.getMainWindowBounds == nullptr
@@ -2804,32 +2817,27 @@ void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& projec
                                return true;
                            },
                            3000 });
-    steps_.push_back(Step{ "inspector-panel: meters show signal while playing",
+    steps_.push_back(Step{ "inspector-panel: the selected instrument row's output meter shows signal while playing",
                            [this, verifyAndCapture](juce::String& failReason) -> bool {
-                               const bool master = hooks_.inspectorMasterMeterShowsSignal();
-                               const bool track = hooks_.inspectorTrackMeterShowsSignal();
+                               const bool signal = hooks_.inspectorOutputMeterShowsSignal();
                                const bool ok = verifyAndCapture("playing", failReason);
                                hooks_.setPlaybackActive(false);
                                if (!ok)
                                {
                                    return false;
                                }
-                               if (!master)
+                               if (!signal)
                                {
-                                   failReason = "Stereo Out meter shows no signal while the project plays";
-                                   return false;
-                               }
-                               if (!track)
-                               {
-                                   failReason = "track meter shows no signal for the playing instrument row";
+                                   failReason = "output meter shows no signal for the playing instrument row";
                                    return false;
                                }
                                return true;
                            },
                            600 });
 
-    // Overload latch: master +6 dB makes this project exceed 0 dBFS.
-    steps_.push_back(Step{ "inspector-panel: Stereo Out fader +6 dB, play 3 s (forces an overload)",
+    // Overload latch: select the Stereo Out row (its meter is the master output), +6 dB makes this
+    // project exceed 0 dBFS.
+    steps_.push_back(Step{ "inspector-panel: select Stereo Out, fader +6 dB, play 3 s (forces an overload)",
                            [this](juce::String& failReason) -> bool {
                                TrackId master = kInvalidTrackId;
                                for (const StabilityTrackInfo& t : hooks_.listAllTracks())
@@ -2845,6 +2853,7 @@ void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& projec
                                    return false;
                                }
                                exportMasterTrackId_ = master;
+                               hooks_.activateTrackLikeHeaderClick(master);
                                exportMasterFaderAtStart_ = hooks_.getTrackChannelFaderGain(master);
                                hooks_.setTrackChannelFaderGain(master, 1.99526f);
                                hooks_.resetInspectorOverloadLatches();
@@ -2858,10 +2867,10 @@ void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& projec
                                return true;
                            },
                            3000 });
-    steps_.push_back(Step{ "inspector-panel: overload latch set, then reset by the user gesture",
+    steps_.push_back(Step{ "inspector-panel: overload latch set on the Stereo Out meter, then reset by the user gesture",
                            [this, verifyAndCapture](juce::String& failReason) -> bool {
                                hooks_.setPlaybackActive(false);
-                               const bool latched = hooks_.isInspectorMasterMeterOverloadLatched();
+                               const bool latched = hooks_.isInspectorOutputMeterOverloadLatched();
                                appendStabilityRunLine("  after +6 dB playback: " + hooks_.describeInspectorMeters());
                                (void)verifyAndCapture("overload", failReason);
                                hooks_.setTrackChannelFaderGain(exportMasterTrackId_, exportMasterFaderAtStart_);
@@ -2871,7 +2880,7 @@ void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& projec
                                    return false;
                                }
                                hooks_.resetInspectorOverloadLatches();
-                               if (hooks_.isInspectorMasterMeterOverloadLatched())
+                               if (hooks_.isInspectorOutputMeterOverloadLatched())
                                {
                                    failReason = "overload lamp stayed latched after reset";
                                    return false;
@@ -2955,6 +2964,306 @@ void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& projec
                            [this, verifyAndCapture](juce::String& failReason) -> bool {
                                appendStabilityRunLine("  main window now " + hooks_.getMainWindowBounds().toString());
                                return verifyAndCapture("restored", failReason);
+                           },
+                           kSettleDefaultMs });
+}
+
+// -----------------------------------------------------------------------------
+// Organ residual DC / AC with the transport stopped, around a header mute
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendOrganDcSteps(const juce::File& project)
+{
+    if (hooks_.listAllTracks == nullptr || hooks_.activateTrackLikeHeaderClick == nullptr || hooks_.setMeteredTrack == nullptr
+        || hooks_.drainTrackMeter == nullptr || hooks_.drainMasterMeter == nullptr || hooks_.setTrackMutedLikeHeader == nullptr
+        || hooks_.describeTrackForDiagnostics == nullptr || hooks_.seekTransportTo == nullptr || hooks_.setPlaybackActive == nullptr)
+    {
+        steps_.push_back(Step{ "organ-dc: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "organ-dc hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    appendLoadAndVerifySteps(project, "organ-dc");
+
+    auto organ = std::make_shared<TrackId>(kInvalidTrackId);
+    const auto acRms = [](const StabilityLevelStats& s, const int ch) {
+        const double rms2 = s.rms[ch] * s.rms[ch];
+        const double dc2 = s.dcOffset[ch] * s.dcOffset[ch];
+        return std::sqrt(juce::jmax(0.0, rms2 - dc2));
+    };
+    const auto describe = [acRms](const juce::String& who, const StabilityLevelStats& s) {
+        return who + ": frames=" + juce::String((juce::int64)s.frames) + " dc=[" + juce::String(s.dcOffset[0], 4) + "," + juce::String(s.dcOffset[1], 4)
+               + "] (" + dbfs((float)std::fabs(s.dcOffset[0])) + " dBFS) acRms=[" + juce::String(acRms(s, 0), 5) + "," + juce::String(acRms(s, 1), 5)
+               + "] peak=[" + juce::String(s.peak[0], 4) + "," + juce::String(s.peak[1], 4) + "] rms=[" + juce::String(s.rms[0], 4) + ","
+               + juce::String(s.rms[1], 4) + "]";
+    };
+
+    steps_.push_back(Step{ "organ-dc: select the VB3-II row like a header click (transport stopped)",
+                           [this, organ](juce::String& failReason) -> bool {
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "instrument" && t.name.containsIgnoreCase("VB3"))
+                                   {
+                                       *organ = t.id;
+                                   }
+                               }
+                               if (*organ == kInvalidTrackId)
+                               {
+                                   failReason = "no VB3-II instrument row in this project";
+                                   return false;
+                               }
+                               hooks_.setPlaybackActive(false);
+                               hooks_.activateTrackLikeHeaderClick(*organ);
+                               hooks_.setMeteredTrack(*organ);
+                               appendStabilityRunLine("  " + hooks_.describeTrackForDiagnostics(*organ));
+                               (void)hooks_.drainTrackMeter();
+                               (void)hooks_.drainMasterMeter();
+                               return true;
+                           },
+                           500 });
+
+    auto hostBlocksAtArm = std::make_shared<std::uint64_t>(0);
+    const auto measureStep = [this, organ, describe, hostBlocksAtArm](const juce::String& label, const int settleMs,
+                                                                      const bool expectTrackSignal, const bool expectTrackSilence) {
+        steps_.push_back(Step{ "organ-dc: " + label + " - arm 2 s window",
+                               [this, organ, hostBlocksAtArm](juce::String&) -> bool {
+                                   (void)hooks_.drainTrackMeter();
+                                   (void)hooks_.drainMasterMeter();
+                                   *hostBlocksAtArm = hooks_.instrumentProcessedBlocks != nullptr ? hooks_.instrumentProcessedBlocks(*organ) : 0;
+                                   return true;
+                               },
+                               settleMs });
+        steps_.push_back(Step{ "organ-dc: " + label + " - read",
+                               [this, organ, hostBlocksAtArm, label, describe, expectTrackSignal, expectTrackSilence](juce::String& failReason) -> bool {
+                                   const StabilityLevelStats t = hooks_.drainTrackMeter();
+                                   const StabilityLevelStats m = hooks_.drainMasterMeter();
+                                   const std::uint64_t hostBlocks = hooks_.instrumentProcessedBlocks != nullptr
+                                                                        ? hooks_.instrumentProcessedBlocks(*organ) - *hostBlocksAtArm
+                                                                        : 0;
+                                   appendStabilityRunLine("  " + describe(label + " ORGAN post-strip", t) + " hostBlocksProcessed="
+                                                          + juce::String((juce::int64)hostBlocks));
+                                   appendStabilityRunLine("  " + describe(label + " STEREO OUT", m));
+                                   if (hooks_.instrumentProcessedBlocks != nullptr && hostBlocks == 0)
+                                   {
+                                       failReason = "the organ's instrument host processed no blocks in this window (a muted row must keep "
+                                                    "processing with gain 0 — otherwise its MIDI piles up and bursts on unmute)";
+                                       return false;
+                                   }
+                                   if (hooks_.describeInspectorMeters != nullptr)
+                                   {
+                                       appendStabilityRunLine("  " + label + " UI meters: " + hooks_.describeInspectorMeters());
+                                   }
+                                   if (m.frames == 0)
+                                   {
+                                       failReason = "no audio blocks measured on the Stereo Out (callback not running?)";
+                                       return false;
+                                   }
+                                   if (t.frames == 0)
+                                   {
+                                       failReason = "no audio blocks measured on the organ row's stage (the strip must run — muted = gain 0)";
+                                       return false;
+                                   }
+                                   const double worstDc = juce::jmax(std::fabs(t.dcOffset[0]), std::fabs(t.dcOffset[1]));
+                                   if (expectTrackSignal && worstDc < 0.01 && t.peak[0] < 0.01)
+                                   {
+                                       appendStabilityRunLine("  NOTE: organ row is silent in this window (no residual signal present right now)");
+                                   }
+                                   if (expectTrackSilence && (t.peak[0] > 1.0e-4f || t.peak[1] > 1.0e-4f))
+                                   {
+                                       failReason = "muted organ row still carries signal on its post-strip stage";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               kSettleDefaultMs });
+    };
+
+    measureStep("stopped, unmuted, before any playback", 2000, true, false);
+
+    steps_.push_back(Step{ "organ-dc: mute the organ row like the header button (transport still stopped)",
+                           [this, organ](juce::String&) -> bool {
+                               hooks_.setTrackMutedLikeHeader(*organ, true);
+                               return true;
+                           },
+                           200 });
+    measureStep("stopped, MUTED", 2000, false, true);
+    steps_.push_back(Step{ "organ-dc: unmute like the header button",
+                           [this, organ](juce::String&) -> bool {
+                               hooks_.setTrackMutedLikeHeader(*organ, false);
+                               return true;
+                           },
+                           200 });
+    measureStep("stopped, unmuted again", 2000, true, false);
+
+    steps_.push_back(Step{ "organ-dc: play 4 s from 24 s (the organ plays there), then stop",
+                           [this](juce::String&) -> bool {
+                               std::int64_t start = 0, len = 0;
+                               double sr = 48000.0;
+                               if (hooks_.getActiveLoopSpan != nullptr && hooks_.getActiveLoopSpan(start, len, sr))
+                               {
+                                   hooks_.seekTransportTo(start + (std::int64_t)(24.0 * sr));
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           4000 });
+    steps_.push_back(Step{ "organ-dc: stop",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               return true;
+                           },
+                           500 });
+    measureStep("stopped after playback, unmuted", 2000, true, false);
+    steps_.push_back(Step{ "organ-dc: mute after playback",
+                           [this, organ](juce::String&) -> bool {
+                               hooks_.setTrackMutedLikeHeader(*organ, true);
+                               return true;
+                           },
+                           200 });
+    measureStep("stopped after playback, MUTED", 2000, false, true);
+
+    // ---- Mute WHILE PLAYING: the muted row must keep consuming its transport MIDI block by block.
+    // Pre-1.1.9 the engine skipped muted instrument rows before the host ran, so the MIDI scheduled
+    // every block piled up in the host's per-block buffer and was delivered as one stale burst on
+    // unmute. The per-block maximum over "4 s muted playback + unmute while playing" must therefore
+    // stay in the same range as the reference maximum from normal (unmuted) playback.
+    auto refMaxEvents = std::make_shared<std::uint32_t>(0);
+    auto blocksAtMutedPlayStart = std::make_shared<std::uint64_t>(0);
+    // Same timeline span as the muted run below (24 s → 29 s) so the per-block maxima are comparable.
+    steps_.push_back(Step{ "organ-dc: reference - play 5 s from 24 s unmuted, record max MIDI events per block",
+                           [this, organ](juce::String&) -> bool {
+                               hooks_.setTrackMutedLikeHeader(*organ, false);
+                               if (hooks_.instrumentMaxMidiEventsInOneBlock != nullptr)
+                               {
+                                   (void)hooks_.instrumentMaxMidiEventsInOneBlock(*organ, true);
+                               }
+                               std::int64_t start = 0, len = 0;
+                               double sr = 48000.0;
+                               if (hooks_.getActiveLoopSpan != nullptr && hooks_.getActiveLoopSpan(start, len, sr))
+                               {
+                                   hooks_.seekTransportTo(start + (std::int64_t)(24.0 * sr));
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           5000 });
+    steps_.push_back(Step{ "organ-dc: stop reference playback",
+                           [this, organ, refMaxEvents](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               if (hooks_.instrumentMaxMidiEventsInOneBlock == nullptr)
+                               {
+                                   return true;
+                               }
+                               *refMaxEvents = hooks_.instrumentMaxMidiEventsInOneBlock(*organ, true);
+                               appendStabilityRunLine("  reference (unmuted playback): max MIDI events in one block = "
+                                                      + juce::String((int)*refMaxEvents));
+                               if (*refMaxEvents == 0)
+                               {
+                                   failReason = "the organ received no MIDI during the reference playback (does the organ play at 24 s?)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           500 });
+    // One muted run = mute → play from 24 s for `mutedMs` → read the muted-window maximum → unmute
+    // while playing → 1 s → stop → read the unmute-window maximum. Two runs with very different
+    // mute durations: accumulation would make the unmute maximum grow with the mute duration;
+    // a bounded, duration-independent value is the normal per-block content plus the CC chase.
+    struct MutedRunResult
+    {
+        std::uint64_t blocksWhileMuted = 0;
+        std::uint32_t maxEventsWhileMuted = 0;
+        std::uint32_t maxEventsAfterUnmute = 0;
+    };
+    auto longRun = std::make_shared<MutedRunResult>();
+    auto shortRun = std::make_shared<MutedRunResult>();
+    const auto appendMutedRun = [this, organ, blocksAtMutedPlayStart, refMaxEvents](const int mutedMs,
+                                                                                    std::shared_ptr<MutedRunResult> result) {
+        const juce::String tag = juce::String(mutedMs) + " ms";
+        steps_.push_back(Step{ "organ-dc: mute, then play from 24 s with the row MUTED for " + tag,
+                               [this, organ, blocksAtMutedPlayStart](juce::String&) -> bool {
+                                   hooks_.setTrackMutedLikeHeader(*organ, true);
+                                   *blocksAtMutedPlayStart = hooks_.instrumentProcessedBlocks != nullptr
+                                                                 ? hooks_.instrumentProcessedBlocks(*organ)
+                                                                 : 0;
+                                   std::int64_t start = 0, len = 0;
+                                   double sr = 48000.0;
+                                   if (hooks_.getActiveLoopSpan != nullptr && hooks_.getActiveLoopSpan(start, len, sr))
+                                   {
+                                       hooks_.seekTransportTo(start + (std::int64_t)(24.0 * sr));
+                                   }
+                                   hooks_.setPlaybackActive(true);
+                                   return true;
+                               },
+                               mutedMs });
+        steps_.push_back(Step{ "organ-dc: unmute WHILE PLAYING after " + tag + " (play 1 s more)",
+                               [this, organ, blocksAtMutedPlayStart, result](juce::String& failReason) -> bool {
+                                   result->blocksWhileMuted = hooks_.instrumentProcessedBlocks != nullptr
+                                                                  ? hooks_.instrumentProcessedBlocks(*organ) - *blocksAtMutedPlayStart
+                                                                  : 0;
+                                   result->maxEventsWhileMuted = hooks_.instrumentMaxMidiEventsInOneBlock != nullptr
+                                                                     ? hooks_.instrumentMaxMidiEventsInOneBlock(*organ, true)
+                                                                     : 0;
+                                   hooks_.setTrackMutedLikeHeader(*organ, false);
+                                   if (hooks_.instrumentProcessedBlocks != nullptr && result->blocksWhileMuted == 0)
+                                   {
+                                       failReason = "the organ's host processed no blocks while muted during playback";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               1000 });
+        steps_.push_back(Step{ "organ-dc: stop after the " + tag + " muted run",
+                               [this, organ, refMaxEvents, result, tag](juce::String& failReason) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   result->maxEventsAfterUnmute = hooks_.instrumentMaxMidiEventsInOneBlock != nullptr
+                                                                      ? hooks_.instrumentMaxMidiEventsInOneBlock(*organ, true)
+                                                                      : 0;
+                                   appendStabilityRunLine("  muted " + tag + ": host blocks processed while muted = "
+                                                          + juce::String((juce::int64)result->blocksWhileMuted)
+                                                          + ", max MIDI events in one block while muted = "
+                                                          + juce::String((int)result->maxEventsWhileMuted)
+                                                          + ", in the 1 s after unmute = " + juce::String((int)result->maxEventsAfterUnmute)
+                                                          + " (unmuted reference " + juce::String((int)*refMaxEvents) + ")");
+                                   if (hooks_.instrumentMaxMidiEventsInOneBlock != nullptr
+                                       && result->maxEventsWhileMuted > *refMaxEvents * 2 + 8)
+                                   {
+                                       failReason = "the muted row received " + juce::String((int)result->maxEventsWhileMuted)
+                                                    + " MIDI events in one block vs reference " + juce::String((int)*refMaxEvents)
+                                                    + " (per-block buffer not consumed while muted)";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               500 });
+    };
+    appendMutedRun(4000, longRun);
+    appendMutedRun(300, shortRun);
+    steps_.push_back(Step{ "organ-dc: unmute burst must not depend on the mute duration",
+                           [this, longRun, shortRun](juce::String& failReason) -> bool {
+                               if (hooks_.instrumentMaxMidiEventsInOneBlock == nullptr)
+                               {
+                                   return true;
+                               }
+                               appendStabilityRunLine("  unmute block maximum: after 4000 ms muted = "
+                                                      + juce::String((int)longRun->maxEventsAfterUnmute) + ", after 300 ms muted = "
+                                                      + juce::String((int)shortRun->maxEventsAfterUnmute));
+                               if (longRun->maxEventsAfterUnmute > shortRun->maxEventsAfterUnmute * 2 + 8)
+                               {
+                                   failReason = "a longer mute produced a larger MIDI burst on unmute (stale events accumulated while muted)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           0 });
+
+    steps_.push_back(Step{ "organ-dc: release the meter tap",
+                           [this](juce::String&) -> bool {
+                               hooks_.setMeteredTrack(kInvalidTrackId);
+                               return true;
                            },
                            kSettleDefaultMs });
 }

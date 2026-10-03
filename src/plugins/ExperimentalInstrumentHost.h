@@ -336,8 +336,16 @@ public:
     {
         std::uint64_t processOkBlocks = 0;
         std::uint64_t midiDeliveryBoundaryBlocks = 0;
+        /// Largest number of MIDI events handed to the instance in ONE block since the last
+        /// `resetRtMaxBlockMidiEventsForDiagnostics()`. A bounded value proves the per-block
+        /// buffer is consumed every block (a muted row must not let it accumulate).
+        std::uint32_t maxMidiEventsInOneBlock = 0;
         float lastProcessedBlockPeak = 0.0f;
     };
+    void resetRtMaxBlockMidiEventsForDiagnostics() noexcept
+    {
+        rtDiag_maxBlockMidiEvents_.store(0, std::memory_order_relaxed);
+    }
     [[nodiscard]] RtActivitySnapshot readRtActivitySnapshotForDiagnostics() const noexcept;
 
     /// Diagnostics: blocks in which the audio callback ENTERED the proxy branch (a published
@@ -448,6 +456,7 @@ private:
     /// Test-only capture sink for the MIDI delivery boundary (null in production).
     std::atomic<MidiDeliveryCaptureSink*> midiCaptureSink_{ nullptr };
     std::atomic<std::uint64_t> rtMidiDeliveryBoundaryBlocks_{ 0 };
+    std::atomic<std::uint32_t> rtDiag_maxBlockMidiEvents_{ 0 };
     /// P2 Secondary channel mapping (0 = Preserve; 1..16 = Force). Message thread stores,
     /// audio thread latches once per block.
     std::atomic<int> forcedMidiChannelForDelivery_{ 0 };
