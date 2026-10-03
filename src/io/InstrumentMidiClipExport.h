@@ -30,6 +30,8 @@ struct InstrumentMidiClipExportResult
     juce::String errorMessage;
     int notesExported = 0;
     int ccEventsExported = 0;
+    /// v24: Pitch Wheel events written (one per stored point; raw 14-bit values preserved).
+    int pitchBendEventsExported = 0;
 };
 
 /// Builds the SMF1 in memory (Stage C seam: unit tests parse the produced `juce::MidiFile`

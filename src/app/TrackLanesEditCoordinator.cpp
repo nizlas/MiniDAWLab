@@ -744,6 +744,25 @@ void TrackLanesEditCoordinator::install()
             });
     });
 
+    inspectorView_.setMidiInputHandler([this](const TrackId trackId, const TrackMidiInputAssignment assignment) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return;
+        }
+        callbacks_.executeUndoableSessionEdit(
+            "Set MIDI input",
+            [this, trackId, assignment]() -> bool {
+                if (!session_.setTrackMidiInputAssignment(trackId, assignment))
+                {
+                    return false;
+                }
+                // The live-MIDI coordinator follows the session on its own tick (device open /
+                // routing republish); refresh the Inspector now so the new choice shows at once.
+                inspectorView_.refreshFromSession();
+                return true;
+            });
+    });
+
     inspectorView_.setMidiDestinationHandler([this](const TrackId trackId, const TrackId destTrackId) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {

@@ -56,6 +56,24 @@ static void copyAndNormalizeCcPointsFromDto(const ProjectFileExperimentalInstrum
             + " CC point(s) (dropped negative ticks / resolved duplicate identities) on clip id="
             + juce::String((juce::int64)cdto.id) + "; notes untouched");
     }
+    // v24 pitch bend: same contract (clamp, normalize, diagnose; notes and CC untouched).
+    clip.pattern.pitchBendPoints.clear();
+    for (const auto& pp : cdto.pitchBendPoints)
+    {
+        MidiPitchBendPoint p;
+        p.startTick = pp.startTick;
+        p.value = midi_pb::sanitizeValue(pp.value);
+        p.channel = (std::uint8_t)midi_pb::sanitizeChannel(pp.channel);
+        clip.pattern.pitchBendPoints.push_back(p);
+    }
+    const int repairedPb = midi_pb::normalizePoints(clip.pattern.pitchBendPoints);
+    if (repairedPb > 0)
+    {
+        appendProjectLoadDiagnosticLine(
+            juce::String("pitchbend-load: normalized ") + juce::String(repairedPb)
+            + " pitch-bend point(s) on clip id=" + juce::String((juce::int64)cdto.id)
+            + "; notes and CC untouched");
+    }
 }
 
 [[nodiscard]] static const ProjectFileExperimentalInstrumentTrackV1*
@@ -161,6 +179,7 @@ InstrumentTrackController::InstrumentTrackController(ExperimentalInstrumentHost*
     : host_(hostOrNull)
 {
     rtCcLastSentValue_.fill(-1); // -1 = "nothing delivered yet" (0 is a valid CC value)
+    rtPitchBendLastSentValue_.fill(-1);
     publishRenderSnapshot();
 }
 
@@ -1138,6 +1157,14 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
             p.channel = (int)cp.channel;
             p.interpolationToNext = cp.interpolationToNext == MidiCcInterpolation::linear ? 1 : 0;
             c.ccPoints.push_back(p);
+        }
+        for (const auto& pp : cptr->pattern.pitchBendPoints)
+        {
+            ProjectFileExperimentalMidiPitchBendPointV24 p;
+            p.startTick = pp.startTick;
+            p.value = pp.value;
+            p.channel = (int)pp.channel;
+            c.pitchBendPoints.push_back(p);
         }
         dto.clips.push_back(std::move(c));
     }
@@ -2290,6 +2317,63 @@ InstrumentMidiClipId InstrumentTrackController::createEmptyTimelineMidiClipAtSam
     return outId;
 }
 
+InstrumentMidiClipId InstrumentTrackController::appendRecordedTimelineMidiClip(ExperimentalMidiPattern pattern,
+                                                                              const std::int64_t startSamples,
+                                                                              const std::int64_t lengthSamples,
+                                                                              juce::String name)
+{
+    if (!trackActive_)
+    {
+        return 0;
+    }
+
+    auto clip = std::make_unique<InstrumentMidiClip>();
+    clip->id = nextClipId_++;
+    const juce::String trimmed = name.trim();
+    clip->name = trimmed.isNotEmpty() ? trimmed : (juce::String("MIDI ") + juce::String(clip->id));
+    clip->startSamples = juce::jmax(std::int64_t{ 0 }, startSamples);
+    clip->timelineAnchorSamples = clip->startSamples;
+    // The take window IS the clip window (like an audio take): a short performance inside a long
+    // take keeps its silence, and notes released at the stop boundary end exactly there.
+    clip->lengthSamples = juce::jmax<std::int64_t>(1, lengthSamples);
+
+    clip->pattern = std::move(pattern);
+    if (clip->pattern.ticksPerQuarter <= 0)
+    {
+        clip->pattern.ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+    }
+    if (!(clip->pattern.bpm > 0.0) || !std::isfinite(clip->pattern.bpm))
+    {
+        ProjectMusicalTime musicalTime;
+        if (session_ != nullptr)
+        {
+            musicalTime = sanitizeProjectMusicalTime(session_->getProjectMusicalTime());
+        }
+        clip->pattern.bpm = musicalTime.bpm;
+    }
+    // Stored order is the ORD-1 tie-break for equal-time notes; the recorder appends in received
+    // order, so a stable sort by start keeps "earlier received first" for equal ticks.
+    std::stable_sort(clip->pattern.timelineNotes.begin(), clip->pattern.timelineNotes.end(),
+                     [](const TimelineMidiNote& a, const TimelineMidiNote& b) {
+                         return a.startTick < b.startTick;
+                     });
+    (void)midi_cc::normalizePoints(clip->pattern.ccPoints);
+    (void)midi_pb::normalizePoints(clip->pattern.pitchBendPoints);
+
+    clip->laneStartFractionPermille = 0;
+    clip->laneEndFractionPermille = 250;
+    clip->midiRollVisibleStartSamples = 0;
+    clip->midiRollSamplesPerPixel = 0.0;
+    clip->midiRollFollowEnabled = true;
+
+    const InstrumentMidiClipId outId = clip->id;
+    clips_.push_back(std::move(clip));
+
+    publishRenderSnapshot();
+    sendChangeMessage();
+    return outId;
+}
+
 bool InstrumentTrackController::applyInstrumentMidiClipVisibleTrim(const InstrumentMidiClipId id,
                                                                    const std::int64_t newVisibleStartSamples,
                                                                    const std::int64_t newVisibleLengthSamples) noexcept
@@ -2657,6 +2741,68 @@ void InstrumentTrackController::publishRenderSnapshot()
                          });
     }
 
+    // Live-recording slice: pitch bend baked exactly like CC — not window-filtered (the wheel
+    // position is sticky), one stream per effective channel, clips visited in ascending start
+    // order with last-wins on equal samples, recorded values verbatim (no interpolation).
+    {
+        struct ClipOrderRef
+        {
+            const InstrumentMidiClip* clip = nullptr;
+        };
+        std::vector<ClipOrderRef> orderedClips;
+        for (const auto& cptr : clips_)
+        {
+            if (cptr != nullptr && cptr->lengthSamples > 0 && !cptr->pattern.pitchBendPoints.empty())
+            {
+                orderedClips.push_back({ cptr.get() });
+            }
+        }
+        std::stable_sort(orderedClips.begin(), orderedClips.end(),
+                         [](const ClipOrderRef& a, const ClipOrderRef& b) {
+                             return a.clip->startSamples < b.clip->startSamples;
+                         });
+        const auto findOrAddStream = [&snap](const int effCh) -> InstrumentPitchBendRenderStream& {
+            for (auto& s : snap->pitchBendStreams)
+            {
+                if ((int)s.midiChannel == effCh)
+                {
+                    return s;
+                }
+            }
+            InstrumentPitchBendRenderStream ns;
+            ns.midiChannel = (std::uint8_t)effCh;
+            snap->pitchBendStreams.push_back(std::move(ns));
+            return snap->pitchBendStreams.back();
+        };
+        for (const auto& ref : orderedClips)
+        {
+            const InstrumentMidiClip& clip = *ref.clip;
+            const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
+            const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
+            std::vector<MidiPitchBendPoint> pts = clip.pattern.pitchBendPoints;
+            (void)midi_pb::normalizePoints(pts); // defensive: kept normalized by every writer
+            for (const auto& p : pts)
+            {
+                const int effCh = midi_channel_diag::effectiveChannel((int)p.channel, forcedMidiChannel);
+                InstrumentPitchBendRenderEvent rev;
+                rev.absSample = clip.timelineAnchorSamples + ticksToRelativeSamples(p.startTick, bpm, tpq, sr);
+                rev.value = p.value;
+                findOrAddStream(effCh).events.push_back(rev);
+            }
+        }
+        for (auto& s : snap->pitchBendStreams)
+        {
+            std::stable_sort(s.events.begin(), s.events.end(),
+                             [](const InstrumentPitchBendRenderEvent& a, const InstrumentPitchBendRenderEvent& b) {
+                                 return a.absSample < b.absSample;
+                             });
+        }
+        std::stable_sort(snap->pitchBendStreams.begin(), snap->pitchBendStreams.end(),
+                         [](const InstrumentPitchBendRenderStream& a, const InstrumentPitchBendRenderStream& b) {
+                             return a.midiChannel < b.midiChannel;
+                         });
+    }
+
     std::int64_t arrangeMinSample = 0;
     std::int64_t arrangeMaxExclusive = -1;
     int routedNoteRows = 0;
@@ -2757,6 +2903,7 @@ void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstr
     // Controllers are sticky and have no universal reset value, so no CC reset is sent — but the
     // delivery memory is dropped so the next start/seek chases the curve fresh.
     rtCcLastSentValue_.fill(-1);
+    rtPitchBendLastSentValue_.fill(-1);
     for (int c = 1; c <= 16; ++c)
     {
         host.audioThread_addMidiEventForCurrentBlock(off0, juce::MidiMessage::allNotesOff(c));
@@ -2788,6 +2935,7 @@ void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(
     // source's controller state, so forget delivery memory and let the next segment chase. No
     // reset value is sent to the OLD destination (controllers are sticky; none exists generically).
     rtCcLastSentValue_.fill(-1);
+    rtPitchBendLastSentValue_.fill(-1);
 }
 
 void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
@@ -2828,6 +2976,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
         // Stream slots are parallel to the (new) snapshot's stream list: forget delivery state so
         // every stream re-chases against the republished curve.
         rtCcLastSentValue_.fill(-1);
+        rtPitchBendLastSentValue_.fill(-1);
     }
 
     const bool gap = (rtLastSegEndTimeline_ >= 0 && timelineSegStart != rtLastSegEndTimeline_);
@@ -2839,6 +2988,7 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     {
         // The dedup memory tracks what the OLD host received — the new host has seen nothing.
         rtCcLastSentValue_.fill(-1);
+        rtPitchBendLastSentValue_.fill(-1);
     }
     const bool discontinuity = forceDiscontinuity || revBump || gap || hostSwapChase;
 
@@ -2896,6 +3046,9 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     audioThread_scheduleCcForSegment(host, *snap, timelineSegStart, segEnd, discontinuity,
                                      bufferOffsetInDevice, deviceBlockNumSamples,
                                      outMidiEventsEmitted);
+    audioThread_schedulePitchBendForSegment(host, *snap, timelineSegStart, segEnd, discontinuity,
+                                            bufferOffsetInDevice, deviceBlockNumSamples,
+                                            outMidiEventsEmitted);
 
     const int gate = juce::jmax(1, snap->gateSamples);
 
@@ -3023,6 +3176,75 @@ void InstrumentTrackController::audioThread_scheduleCcForSegment(
             const int rel = static_cast<int>(it->absSample - timelineSegStart);
             const int o = juce::jlimit(0, deviceBlockNumSamples - 1, rel + bufferOffsetInDevice);
             emitCc(o, (int)it->value);
+        }
+    }
+}
+
+void InstrumentTrackController::audioThread_schedulePitchBendForSegment(
+    ExperimentalInstrumentHost& host,
+    const InstrumentTrackRenderSnapshot& snap,
+    const std::int64_t timelineSegStart,
+    const std::int64_t segEnd,
+    const bool discontinuity,
+    const int bufferOffsetInDevice,
+    const int deviceBlockNumSamples,
+    int* outMidiEventsEmitted) noexcept
+{
+    if (snap.pitchBendStreams.empty())
+    {
+        return;
+    }
+    const int off0 = juce::jlimit(0, deviceBlockNumSamples - 1, bufferOffsetInDevice);
+
+    for (int si = 0; si < (int)snap.pitchBendStreams.size(); ++si)
+    {
+        const InstrumentPitchBendRenderStream& s = snap.pitchBendStreams[(size_t)si];
+        const bool trackedSlot = si < kMaxRtPitchBendStreams;
+        const int lastSent = trackedSlot ? rtPitchBendLastSentValue_[(size_t)si] : -1;
+
+        const auto emitPb = [&](const int offset, const int value) noexcept {
+            if (trackedSlot && rtPitchBendLastSentValue_[(size_t)si] == value)
+            {
+                return; // unchanged: chases never flood the plugin
+            }
+            host.audioThread_addMidiEventForCurrentBlock(
+                offset,
+                juce::MidiMessage::pitchWheel(juce::jlimit(1, 16, (int)s.midiChannel),
+                                              juce::jlimit(0, kMidiPitchBendMax, value)));
+            if (trackedSlot)
+            {
+                rtPitchBendLastSentValue_[(size_t)si] = value;
+            }
+            if (outMidiEventsEmitted != nullptr)
+            {
+                ++(*outMidiEventsEmitted);
+            }
+        };
+
+        // Chase: the latest point strictly before the segment start is the held wheel position
+        // here (hold semantics). Nothing before the first point ⇒ nothing is sent (no invented
+        // centre reset).
+        if (discontinuity || lastSent < 0)
+        {
+            auto it = std::lower_bound(s.events.begin(), s.events.end(), timelineSegStart,
+                                       [](const InstrumentPitchBendRenderEvent& e, const std::int64_t v) {
+                                           return e.absSample < v;
+                                       });
+            if (it != s.events.begin())
+            {
+                emitPb(off0, (it - 1)->value);
+            }
+        }
+
+        auto it = std::lower_bound(s.events.begin(), s.events.end(), timelineSegStart,
+                                   [](const InstrumentPitchBendRenderEvent& e, const std::int64_t v) {
+                                       return e.absSample < v;
+                                   });
+        for (; it != s.events.end() && it->absSample < segEnd; ++it)
+        {
+            const int rel = static_cast<int>(it->absSample - timelineSegStart);
+            const int o = juce::jlimit(0, deviceBlockNumSamples - 1, rel + bufferOffsetInDevice);
+            emitPb(o, it->value);
         }
     }
 }

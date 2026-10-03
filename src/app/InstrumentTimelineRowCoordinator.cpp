@@ -340,6 +340,33 @@ private:
             }
         }
 
+        // Live MIDI take in progress on this row: a translucent red region growing from the record
+        // boundary to the transport playhead. Nothing is played back from it (the clip exists only
+        // after the take is committed), so the direct monitoring is never doubled.
+        if (owner_.callbacks_.liveMidiTakeInProgressForTrack != nullptr)
+        {
+            std::int64_t takeStart = 0;
+            if (owner_.callbacks_.liveMidiTakeInProgressForTrack(laneTimelineTrackId_, takeStart))
+            {
+                const std::int64_t head = owner_.transport_.readPlayheadSamplesForUi();
+                if (head > takeStart)
+                {
+                    const auto eb = getEventBoundsForSessionSpan(takeStart, head - takeStart, laneContent);
+                    if (!eb.isEmpty())
+                    {
+                        const juce::Rectangle<float> r = eb.toFloat();
+                        g.setColour(juce::Colour(0xffd01818).withAlpha(0.28f));
+                        g.fillRoundedRectangle(r, mini_daw::timeline_clip_chrome::kEventCorner);
+                        g.setColour(juce::Colour(0xffff6060).withAlpha(0.7f));
+                        g.drawRoundedRectangle(r, mini_daw::timeline_clip_chrome::kEventCorner, 1.0f);
+                        g.setColour(juce::Colours::white.withAlpha(0.85f));
+                        g.setFont(11.0f);
+                        g.drawText("REC", r.reduced(4.0f, 0.0f), juce::Justification::centredLeft, false);
+                    }
+                }
+            }
+        }
+
         InstrumentTrackController* const ac = activeControllerNullable();
         if (ac == nullptr)
         {
@@ -1727,6 +1754,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         m.muteInteractable = true;
         m.armInteractable = false;
         bool isInstrumentDestinationRow = false;
+        bool acceptsLiveMidi = false;
         if (const auto sn = session_.loadSessionSnapshotForAudioThread())
         {
             const int idx = sn->findTrackIndexById(laneTid);
@@ -1735,6 +1763,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
                 m.name = sn->getTrack(idx).getName();
                 m.trackNameRenameEnabled = (sn->getTrack(idx).getKind() != TrackKind::Master);
                 isInstrumentDestinationRow = (sn->getTrack(idx).getKind() == TrackKind::Instrument);
+                acceptsLiveMidi = trackKindAcceptsLiveMidiInput(sn->getTrack(idx).getKind());
             }
             else
             {
@@ -1753,13 +1782,29 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         // headers for plugin-less TrackKind::Midi content rows — those must never show the
         // button (kind-checked here on every model poll, so there is no transient flash).
         m.instrumentAlternativesAvailable = isInstrumentDestinationRow;
-        // Monitor cell: Instrument destination rows show it as a DISABLED placeholder (always
-        // playback mode — live MIDI monitoring is not available yet). Plain
-        // TrackKind::Midi content rows from this same builder must never show it. Kind-checked
-        // on every model poll, so row reuse / kind changes cannot flash a transient button.
-        m.monitorAvailable = isInstrumentDestinationRow;
-        m.monitorEnabled = false;
-        m.monitorInteractable = false;
+        // Monitor / Arm cells: live MIDI monitoring and MIDI recording for Instrument AND Midi
+        // rows (runtime flags owned by the live-MIDI coordinator; both start OFF per project).
+        // Without the seam installed the old chrome remains: a disabled placeholder on
+        // instrument rows, no Monitor cell on Midi rows. Kind-checked on every model poll.
+        const bool liveMidiWired = callbacks_.isLiveMidiMonitorEnabled != nullptr
+                                   && callbacks_.toggleLiveMidiMonitor != nullptr
+                                   && callbacks_.isLiveMidiRecordArmed != nullptr
+                                   && callbacks_.toggleLiveMidiRecordArm != nullptr;
+        if (acceptsLiveMidi && liveMidiWired)
+        {
+            m.monitorAvailable = true;
+            m.monitorInteractable = true;
+            m.monitorEnabled = callbacks_.isLiveMidiMonitorEnabled(laneTid);
+            m.armInteractable = true;
+            m.armed = callbacks_.isLiveMidiRecordArmed(laneTid);
+            m.midiActivity = callbacks_.isLiveMidiActive != nullptr && callbacks_.isLiveMidiActive(laneTid);
+        }
+        else
+        {
+            m.monitorAvailable = isInstrumentDestinationRow;
+            m.monitorEnabled = false;
+            m.monitorInteractable = false;
+        }
         return m;
     };
 
@@ -1791,7 +1836,22 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         repaintExtras();
         return true;
     };
-    callbacks.onToggleArm = [] {};
+    // Arm / Monitor: runtime flags in the live-MIDI coordinator. Selecting a row never arms it
+    // and arming never switches monitoring on — the two are independent by design.
+    callbacks.onToggleArm = [this, laneTid, repaintExtras] {
+        if (callbacks_.toggleLiveMidiRecordArm != nullptr)
+        {
+            callbacks_.toggleLiveMidiRecordArm(laneTid);
+            repaintExtras();
+        }
+    };
+    callbacks.onToggleMonitor = [this, laneTid, repaintExtras] {
+        if (callbacks_.toggleLiveMidiMonitor != nullptr)
+        {
+            callbacks_.toggleLiveMidiMonitor(laneTid);
+            repaintExtras();
+        }
+    };
     callbacks.onOpenInstrumentEditor = [this, laneTid] {
         if (ExperimentalInstrumentHost* h = instrumentRuntime_.getInstrumentHostForTrack(laneTid))
         {

@@ -98,6 +98,22 @@ struct InstrumentCcRenderStream
     std::vector<InstrumentCcRenderEvent> events;
 };
 
+/// Live-recording slice: one baked 14-bit pitch-bend change (effective channel applied at
+/// publish time, like CC). `value` is the raw wheel position 0 … 16383.
+struct InstrumentPitchBendRenderEvent
+{
+    std::int64_t absSample = 0;
+    int value = 8192;
+};
+
+/// All pitch-bend changes of one effective channel, merged across the track's clips and sorted
+/// by `absSample` (same stickiness and chase rules as `InstrumentCcRenderStream`).
+struct InstrumentPitchBendRenderStream
+{
+    std::uint8_t midiChannel = 1;
+    std::vector<InstrumentPitchBendRenderEvent> events;
+};
+
 struct InstrumentTrackRenderSnapshot
 {
     std::uint32_t revision = 0;
@@ -112,6 +128,8 @@ struct InstrumentTrackRenderSnapshot
     /// Stage D: precomputed CC automation, one stream per (controller, effective channel).
     /// Bounded event lists (one event per crossed integer value inside Linear segments).
     std::vector<InstrumentCcRenderStream> ccStreams;
+    /// Pitch bend per effective channel (hold semantics; recorded wheel data verbatim).
+    std::vector<InstrumentPitchBendRenderStream> pitchBendStreams;
 };
 
 /// Tracks whether a MIDI editor drum-row label came from the user vs plugin discovery (`mergeAutoPluginDrumLabels`).
@@ -573,6 +591,16 @@ public:
     /// Returns **0** when no instrument shell is active (`!trackActive_`).
     [[nodiscard]] InstrumentMidiClipId createEmptyTimelineMidiClipAtSamples(std::int64_t startSamples);
 
+    /// Live MIDI recording: append one finished take as a clip whose window is exactly the take
+    /// (`startSamples`, `lengthSamples`; anchor = start). `pattern` arrives in the project tempo
+    /// and PPQ with notes / CC / pitch bend already in clip ticks; it is normalized here (CC and
+    /// pitch-bend duplicate identities resolved, nothing interpolated). Message thread only;
+    /// returns **0** when no shell is active. Callers wrap this in the recording undo step.
+    [[nodiscard]] InstrumentMidiClipId appendRecordedTimelineMidiClip(ExperimentalMidiPattern pattern,
+                                                                     std::int64_t startSamples,
+                                                                     std::int64_t lengthSamples,
+                                                                     juce::String name);
+
     /// Arrangement move: shift all currently selected MIDI clips by `deltaSamples`. Clamps as a group so no
     /// clip starts before sample 0. Returns false if nothing changed.
     [[nodiscard]] bool moveSelectedInstrumentMidiClipsByDeltaSamples(std::int64_t deltaSamples) noexcept;
@@ -788,6 +816,21 @@ private:
                                           int bufferOffsetInDevice,
                                           int deviceBlockNumSamples,
                                           int* outMidiEventsEmitted) noexcept;
+    /// Pitch-bend delivery memory per effective channel slot (parallel to
+    /// `InstrumentTrackRenderSnapshot::pitchBendStreams`, at most 16); -1 = nothing delivered yet.
+    /// Reset together with `rtCcLastSentValue_` on every discontinuity that forgets CC memory.
+    static constexpr int kMaxRtPitchBendStreams = 16;
+    std::array<int, (size_t)kMaxRtPitchBendStreams> rtPitchBendLastSentValue_{};
+    /// Same contract as `audioThread_scheduleCcForSegment` for the pitch-bend streams (runs right
+    /// after CC, before note-ons).
+    void audioThread_schedulePitchBendForSegment(ExperimentalInstrumentHost& host,
+                                                 const InstrumentTrackRenderSnapshot& snap,
+                                                 std::int64_t timelineSegStart,
+                                                 std::int64_t segEnd,
+                                                 bool discontinuity,
+                                                 int bufferOffsetInDevice,
+                                                 int deviceBlockNumSamples,
+                                                 int* outMidiEventsEmitted) noexcept;
     /// [Audio thread] Destination the engine last delivered this Midi source's events to.
     TrackId rtLastRoutedDestTrackId_ = kInvalidTrackId;
 

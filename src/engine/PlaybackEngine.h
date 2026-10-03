@@ -50,6 +50,7 @@
 
 #include "domain/Track.h"
 #include "engine/LevelMeterAccumulator.h"
+#include "engine/LiveMidiInputBus.h"
 #include "engine/PlaybackMixHelpers.h"
 #include "engine/RoutingPlan.h"
 #include "transport/Transport.h"
@@ -326,6 +327,22 @@ public:
     /// [Message thread] Current monitor state for UI (header button repaint).
     [[nodiscard]] bool isTrackInputMonitoringEnabled(TrackId trackId) const noexcept;
 
+    // -----------------------------------------------------------------------
+    // Live MIDI input (keyboard → instrument hosts → take capture) — runtime-only
+    // -----------------------------------------------------------------------
+    /// [Message thread, before the device starts or with the callback drained] Install the live
+    /// MIDI bus. Every realtime callback dispatches its pending device events into the hosts of
+    /// the current instrument snapshot (after `beginAudioBlock`, before processing), with sample
+    /// offsets derived from the device timestamps; the offline render never sees live input.
+    /// `nullptr` detaches. The bus must outlive the engine's callback registration.
+    void setLiveMidiInputBus(live_midi::LiveMidiInputBus* bus) noexcept;
+    /// [Message thread] Timeline placement offset added to every captured live-MIDI event
+    /// (normally −reported output latency; see `LiveMidiInputBus` time model). Relaxed atomic.
+    void setLiveMidiRecordPlacementOffsetSamples(std::int64_t samples) noexcept
+    {
+        liveMidiRecordPlacementOffsetSamples_.store(samples, std::memory_order_relaxed);
+    }
+
     /// [Message thread] Physical device input channels active at the last device start, as a bit
     /// mask (bit N = physical input N enabled). Matches the callback's packed input array:
     /// active-array position of physical channel N = popcount of lower set bits.
@@ -461,4 +478,12 @@ private:
     /// loaded once per audio callback. Null = nothing monitored.
     std::atomic<std::shared_ptr<const playback_mix_helpers::LiveInputMonitorSnapshot>>
         liveInputMonitorSnapshot_;
+
+    /// Live MIDI bus (non-owning; installed from Main). Relaxed pointer: installed before the
+    /// device starts / with the callback drained, so the callback never races the store.
+    std::atomic<live_midi::LiveMidiInputBus*> liveMidiBus_{ nullptr };
+    std::atomic<std::int64_t> liveMidiRecordPlacementOffsetSamples_{ 0 };
+    /// [Audio thread] Adapter from the bus's delivery seam onto the host's per-block MIDI buffer.
+    static void audioThread_deliverLiveMidiToHost(void* context, ExperimentalInstrumentHost* host,
+                                                  int sampleOffset, const juce::MidiMessage& message) noexcept;
 };

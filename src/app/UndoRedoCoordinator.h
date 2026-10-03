@@ -90,6 +90,12 @@ public:
     void executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator);
     void executeUndoableInstrumentEdit(const juce::String& label, std::function<bool()> mutator);
 
+    /// Recording commit: ONE undo step that may change both the timeline (an audio take clip)
+    /// and instrument musical state (live-MIDI take clips on several rows). Records whichever
+    /// side(s) actually changed; nothing is recorded when the mutator changed nothing (an empty
+    /// take leaves no undo step). Marks the project dirty when a step was recorded.
+    void executeUndoableRecordingCommit(const juce::String& label, std::function<void()> mutator);
+
     /// Delete Track: like `executeUndoableSessionEdit`, but the mutator may also hand back the
     /// pre-teardown insert chain (`outPluginSides`) and, for instrument tracks, the full captured
     /// project row (`outInstrumentDelete`) so undo can restore inserts and the instrument runtime.
@@ -99,6 +105,8 @@ public:
                            std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete)> mutator);
 
     void clearHistory() noexcept;
+    /// [Diagnostics / stability] Current undo stack depth.
+    [[nodiscard]] int undoStackSizeForDiagnostics() const noexcept { return sessionHistory_.undoStackSize(); }
 
 private:
     void refreshAfterSessionSnapshotRestore();

@@ -110,6 +110,13 @@ Track Track::withInputAssignment(const TrackInputAssignment assignment) const no
     return out;
 }
 
+Track Track::withMidiInputAssignment(TrackMidiInputAssignment assignment) const noexcept
+{
+    Track out(*this);
+    out.midiInputAssignment_ = sanitizeTrackMidiInputAssignment(std::move(assignment));
+    return out;
+}
+
 Track Track::withTrackOff(const bool off) const noexcept
 {
     Track out(*this);

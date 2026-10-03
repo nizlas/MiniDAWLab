@@ -7,12 +7,14 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "app/AddInstrumentTrackCoordinator.h"
 #include "app/AudioClipImportCoordinator.h"
 #include "app/InstrumentMidiImportCoordinator.h"
+#include "app/LiveMidiInputCoordinator.h"
 #include "app/ClipPasteboardController.h"
 #include "app/MainAppDialogs.h"
 #include "app/MainMenuModel.h"
@@ -342,7 +344,7 @@ public:
               timelineViewport_,
               uiPlayheadClock_,
               [this]() {
-                  return recorder_.isRecording()
+                  return anyRecordingInProgress()
                          || (recordingCoordinator_ != nullptr
                              && recordingCoordinator_->isCountInActive());
               })
@@ -414,7 +416,7 @@ public:
             transport,
             nullptr,
             TransportPlayPauseStopController::Callbacks{
-                [this]() { return recorder_.isRecording(); },
+                [this]() { return anyRecordingInProgress(); },
                 [this]() {
                     return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
                 },
@@ -428,7 +430,7 @@ public:
             session,
             pluginHost_,
             UndoRedoCoordinator::Callbacks{
-                [this] { return recorder_.isRecording(); },
+                [this] { return anyRecordingInProgress(); },
                 [this] {
                     return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
                 },
@@ -561,7 +563,7 @@ public:
             playbackEngine_,
             InstrumentRuntimeCoordinator::Callbacks{
                 [this]() noexcept {
-                    return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing || recorder_.isRecording()
+                    return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing || anyRecordingInProgress()
                            || recordingCoordinator_->isCountInActive();
                 },
                 [this]() {
@@ -764,9 +766,74 @@ public:
                     instrumentRuntimeCoordinator_->setSecondaryTransportActive(tid, active);
                 }
             };
+            // Live MIDI: a monitored row needs a live instrument — the coordinator decides
+            // whether that means a temporary Secondary (see ProxyPlaybackCoordinator deps).
+            pbDeps.liveMonitorRequested = [this](const TrackId tid) {
+                return liveMidiInputCoordinator_ != nullptr
+                       && liveMidiInputCoordinator_->liveMonitorRequestedForDestination(tid);
+            };
             proxyPlaybackCoordinator_
                 = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
         }
+
+        // Live MIDI input (keyboard → hosts → take capture): message-thread owner of devices,
+        // Monitor/Arm runtime flags and the routing published to the engine's bus. Built after
+        // the instrument runtime and the playback-source coordinator it talks to.
+        liveMidiInputCoordinator_ = std::make_unique<LiveMidiInputCoordinator>(
+            session,
+            deviceManager,
+            playbackEngine_,
+            *instrumentRuntimeCoordinator_,
+            latencyStore_,
+            LiveMidiInputCoordinator::Callbacks{
+                [this](const TrackId dest) {
+                    if (proxyPlaybackCoordinator_ != nullptr)
+                    {
+                        proxyPlaybackCoordinator_->refreshDestination(dest);
+                    }
+                },
+                [this](const TrackId dest) {
+                    return proxyPlaybackCoordinator_ != nullptr && proxyPlaybackCoordinator_->isLiveMonitorOverrideActive(dest);
+                },
+                [this] {
+                    if (instrumentTimelineRowCoordinator_ != nullptr)
+                    {
+                        instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+                    }
+                    trackLanesView.repaint();
+                    inspectorView_.refreshFromSession();
+                },
+                [](const juce::String& line) { juce::Logger::writeToLog(line); },
+            });
+        recordingCoordinator_->setLiveMidiTakeCallbacks(
+            [this] { return liveMidiInputCoordinator_->armedTracksReadyToRecord(); },
+            [this](const std::int64_t startSample, const double sr) {
+                liveMidiInputCoordinator_->beginTake(startSample, sr);
+                trackLanesView.repaint();
+            },
+            [this](const std::int64_t stopSample) {
+                const LiveMidiTakeCommitResult r = liveMidiInputCoordinator_->commitTake(stopSample);
+                if (r.captureOverflowSeen)
+                {
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::InfoIcon, "Recording",
+                        "The MIDI take was committed, but some incoming MIDI could not be kept "
+                        "(capture queue overflow). Held notes were ended at the stop boundary.");
+                }
+                refreshInstrumentUi();
+                return r.clipsCreated;
+            },
+            [this] { liveMidiInputCoordinator_->abortTake(); },
+            [this](const juce::String& label, std::function<void()> commit) {
+                if (undoRedoCoordinator_ != nullptr)
+                {
+                    undoRedoCoordinator_->executeUndoableRecordingCommit(label, std::move(commit));
+                }
+                else
+                {
+                    commit();
+                }
+            });
 
         // P1H: the per-destination update-policy engine (§18.1). Same project-runtime owner as
         // the render engine and playback coordinator; observes canonical identity, runs the
@@ -831,7 +898,7 @@ public:
                 proxyRenderScheduler_.notifyDestinationIdentityChanged(tid);
             };
             polDeps.recordingActive = [this] {
-                return recorder_.isRecording()
+                return anyRecordingInProgress()
                        || (recordingCoordinator_ != nullptr
                            && recordingCoordinator_->isCountInActive());
             };
@@ -1219,7 +1286,7 @@ public:
                               >= proxy_policy::kSnapshotQuiescenceDebounceMs;
             };
             prepDeps.recordingActive = [this] {
-                return recorder_.isRecording()
+                return anyRecordingInProgress()
                        || (recordingCoordinator_ != nullptr
                            && recordingCoordinator_->isCountInActive());
             };
@@ -1276,7 +1343,7 @@ public:
             pluginHost_,
             Vst3PluginPickerCoordinator::Callbacks{
                 [this] {
-                    return recorder_.isRecording()
+                    return anyRecordingInProgress()
                            || (recordingCoordinator_ != nullptr
                                && recordingCoordinator_->isCountInActive());
                 },
@@ -1373,6 +1440,43 @@ public:
                 },
                 [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); },
             });
+        // Live MIDI: Monitor / Arm cells of Instrument + Midi rows read and toggle the runtime
+        // flags owned by the live-MIDI coordinator (independent of row selection and of each other).
+        instrumentTimelineRowCoordinator_->setLiveMidiCallbacks(
+            [this](const TrackId tid) {
+                return liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isMonitorEnabled(tid);
+            },
+            [this](const TrackId tid) {
+                if (liveMidiInputCoordinator_ != nullptr)
+                {
+                    liveMidiInputCoordinator_->setMonitorEnabled(tid, !liveMidiInputCoordinator_->isMonitorEnabled(tid));
+                }
+            },
+            [this](const TrackId tid) {
+                return liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isRecordArmed(tid);
+            },
+            [this](const TrackId tid) {
+                if (liveMidiInputCoordinator_ != nullptr)
+                {
+                    liveMidiInputCoordinator_->setRecordArmed(tid, !liveMidiInputCoordinator_->isRecordArmed(tid));
+                }
+            },
+            [this](const TrackId tid) {
+                return liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isTrackMidiActive(tid);
+            },
+            [this](const TrackId tid, std::int64_t& takeStart) {
+                if (liveMidiInputCoordinator_ == nullptr || !liveMidiInputCoordinator_->isTakeActive())
+                {
+                    return false;
+                }
+                const auto& tracks = liveMidiInputCoordinator_->takeTracks();
+                if (std::find(tracks.begin(), tracks.end(), tid) == tracks.end())
+                {
+                    return false;
+                }
+                takeStart = liveMidiInputCoordinator_->takeStartSample();
+                return true;
+            });
 
         midiEditorPresenter_ = std::make_unique<MidiEditorPresenter>(
             transport,
@@ -1402,7 +1506,7 @@ public:
                     return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
                 },
                 [this]() {
-                    return recorder_.isRecording()
+                    return anyRecordingInProgress()
                            || (recordingCoordinator_ != nullptr
                                && recordingCoordinator_->isCountInActive());
                 },
@@ -1433,7 +1537,7 @@ public:
         });
 
         ClipPasteboardController::Callbacks clipPasteCallbacks;
-        clipPasteCallbacks.isRecording = [this] { return recorder_.isRecording(); };
+        clipPasteCallbacks.isRecording = [this] { return anyRecordingInProgress(); };
         clipPasteCallbacks.isCountInActive = [this] {
             return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
         };
@@ -1520,13 +1624,13 @@ public:
         });
         trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
             // Power / delete / inserts are not realtime-safe paths: blocked while Playing (not mute).
-            return recorder_.isRecording()
+            return anyRecordingInProgress()
                    || (recordingCoordinator_ != nullptr
                        && recordingCoordinator_->isCountInActive())
                    || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
         });
         trackLanesView.setInstrumentMidiClipMoveBlockedPredicate([this]() {
-            return recorder_.isRecording()
+            return anyRecordingInProgress()
                    || (recordingCoordinator_ != nullptr
                        && recordingCoordinator_->isCountInActive());
         });
@@ -1847,6 +1951,17 @@ public:
                     {
                         portablePreparationService_->shutdownAndJoin();
                     }
+                    // Live MIDI: Monitor / Arm are runtime-only and start OFF in the next project;
+                    // a half-finished take belongs to the OLD project and is dropped (never
+                    // half-committed). The input configuration itself comes from the file.
+                    if (recordingCoordinator_ != nullptr)
+                    {
+                        recordingCoordinator_->abortMidiTakeForProjectReplace();
+                    }
+                    if (liveMidiInputCoordinator_ != nullptr)
+                    {
+                        liveMidiInputCoordinator_->clearRuntimeStateForProjectReplace();
+                    }
                     proxyRenderScheduler_.notifyProjectChanged();
                     if (proxyUpdatePolicyService_ != nullptr)
                     {
@@ -1876,7 +1991,7 @@ public:
         // else (save/load/export/undo/redo/delete) runs synchronously on the message thread and
         // cannot overlap the timer; modal prompts are covered inside the coordinator.
         projectIoCoordinator_->setAutosaveBlockReasonProvider([this]() -> juce::String {
-            if (recorder_.isRecording())
+            if (anyRecordingInProgress())
             {
                 return "recording active";
             }
@@ -1980,7 +2095,7 @@ public:
             rulerView,
             inspectorView_,
             TrackLanesEditCoordinator::Callbacks{
-                [this] { return recorder_.isRecording(); },
+                [this] { return anyRecordingInProgress(); },
                 [this] {
                     return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive();
                 },
@@ -2062,6 +2177,19 @@ public:
                 }
                 return snap;
             });
+        inspectorView_.setMidiInputSnapshotProvider([this](const TrackId tid) -> InspectorMidiInputSnapshot {
+            InspectorMidiInputSnapshot snap;
+            if (liveMidiInputCoordinator_ == nullptr)
+            {
+                return snap;
+            }
+            for (const auto& d : liveMidiInputCoordinator_->availableDevicesFor(tid))
+            {
+                snap.devices.push_back({ d.identifier, d.name, d.present });
+            }
+            snap.statusLine = liveMidiInputCoordinator_->describeInputStatus(tid);
+            return snap;
+        });
 
         if (instrumentTimelineRowCoordinator_ != nullptr)
         {
@@ -2144,7 +2272,7 @@ public:
 
     void invokeJumpToLeftLocatorFromWindowShortcut() override
     {
-        if (recorder_.isRecording() || recordingCoordinator_->isCountInActive())
+        if (anyRecordingInProgress() || recordingCoordinator_->isCountInActive())
         {
             juce::Logger::writeToLog("[Shortcut] numpad1 ignored (recording or count-in)");
             if constexpr (transport_shortcut_diag::kEnabled)
@@ -3797,6 +3925,341 @@ public:
             return 0;
         };
 
+        // ---- Live MIDI scenario hooks -------------------------------------------------------
+        hooks.liveMidiFixtureSetup = [this](TrackId& inst, TrackId& lower, TrackId& pedal, juce::String& failReason) -> bool {
+            if (instrumentRuntimeCoordinator_ == nullptr || liveMidiInputCoordinator_ == nullptr)
+            {
+                failReason = "no instrument runtime / live MIDI coordinator";
+                return false;
+            }
+            const auto instIdOpt = session.appendExperimentalInstrumentShellTrack("LiveMidiDest");
+            if (!instIdOpt.has_value())
+            {
+                failReason = "could not append instrument shell row";
+                return false;
+            }
+            inst = *instIdOpt;
+            const auto pr = instrumentRuntimeCoordinator_->getOrCreateInstrumentRuntimeForTrack(inst);
+            if (pr.first == nullptr || pr.second == nullptr)
+            {
+                failReason = "could not create destination runtime";
+                return false;
+            }
+            stabilityLiveMidiCaptureSink_.reset();
+            pr.first->installMidiDeliveryCaptureSinkForTests(&stabilityLiveMidiCaptureSink_);
+            if (!pr.second->bootstrapGrooveAgentShellForSessionTrack(inst))
+            {
+                failReason = "could not bootstrap destination shell";
+                return false;
+            }
+            const auto addRoutedRow = [this, inst, &failReason](const char* label, const int outputChannel,
+                                                                 const int inputFilter, TrackId& outTid) -> bool {
+                const auto midiIdOpt = session.addMidiTrack();
+                if (!midiIdOpt.has_value())
+                {
+                    failReason = juce::String(label) + ": could not add Midi track row";
+                    return false;
+                }
+                outTid = *midiIdOpt;
+                if (instrumentRuntimeCoordinator_->getOrCreateMidiContentControllerForTrack(outTid) == nullptr
+                    || !session.setTrackMidiDestination(outTid, inst) || !session.setTrackMidiOutputChannel(outTid, outputChannel))
+                {
+                    failReason = juce::String(label) + ": routing setup refused";
+                    return false;
+                }
+                if (InstrumentTrackController* const c = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(outTid))
+                {
+                    c->refreshMidiOutputChannelFromSession();
+                }
+                TrackMidiInputAssignment mi;
+                mi.mode = TrackMidiInputMode::AllEnabled;
+                mi.channelFilter = inputFilter;
+                if (!session.setTrackMidiInputAssignment(outTid, mi))
+                {
+                    failReason = juce::String(label) + ": setTrackMidiInputAssignment refused";
+                    return false;
+                }
+                return true;
+            };
+            {
+                TrackMidiInputAssignment mi;
+                mi.mode = TrackMidiInputMode::AllEnabled;
+                mi.channelFilter = 1;
+                if (!session.setTrackMidiInputAssignment(inst, mi))
+                {
+                    failReason = "instrument: setTrackMidiInputAssignment refused";
+                    return false;
+                }
+            }
+            if (!addRoutedRow("Lower", 2, 5, lower) || !addRoutedRow("Pedal", 3, 6, pedal))
+            {
+                return false;
+            }
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            refreshInstrumentUi();
+            inspectorView_.refreshFromSession();
+            transport.requestSeek(0);
+            // Let the coordinator pick the new session up now (not on its next tick) so the
+            // routing is published before the scenario injects.
+            liveMidiInputCoordinator_->refreshDevicesAndRouting();
+            return true;
+        };
+        hooks.liveMidiDescribeDevices = [this]() -> juce::String {
+            juce::String s = "inputs=[";
+            for (const auto& d : juce::MidiInput::getAvailableDevices())
+            {
+                s << "\"" << d.name << "\" ";
+            }
+            s << "] outputs=[";
+            for (const auto& d : juce::MidiOutput::getAvailableDevices())
+            {
+                s << "\"" << d.name << "\" ";
+            }
+            s << "]";
+            ensureStabilityLiveMidiLoopbackResolved();
+            if (stabilityLiveMidiLoopbackOut_ != nullptr)
+            {
+                s << " loopback=\"" << stabilityLiveMidiLoopbackOut_->getName() << "\"";
+            }
+            return s;
+        };
+        hooks.liveMidiInjectUsesRealPort = [this] {
+            ensureStabilityLiveMidiLoopbackResolved();
+            return stabilityLiveMidiLoopbackOut_ != nullptr;
+        };
+        hooks.liveMidiInject = [this](const juce::MidiMessage& m) {
+            ensureStabilityLiveMidiLoopbackResolved();
+            if (stabilityLiveMidiLoopbackOut_ != nullptr)
+            {
+                stabilityLiveMidiLoopbackOut_->sendMessageNow(m);
+                return;
+            }
+            // No loopback port on this machine: enter at the device-callback boundary from a
+            // dedicated thread (like a MIDI driver thread would), with the device-style timestamp.
+            if (liveMidiInputCoordinator_ == nullptr)
+            {
+                return;
+            }
+            live_midi::LiveMidiInputBus* const bus = &liveMidiInputCoordinator_->busForDiagnostics();
+            juce::MidiMessage copy(m);
+            std::thread([bus, copy]() mutable {
+                copy.setTimeStamp(juce::Time::getMillisecondCounterHiRes() * 0.001);
+                bus->deviceThread_push(0, copy);
+            }).join();
+        };
+        hooks.liveMidiSetMonitor = [this](const TrackId tid, const bool on) {
+            if (liveMidiInputCoordinator_ != nullptr)
+            {
+                liveMidiInputCoordinator_->setMonitorEnabled(tid, on);
+            }
+        };
+        hooks.liveMidiSetArm = [this](const TrackId tid, const bool on) {
+            if (liveMidiInputCoordinator_ != nullptr)
+            {
+                liveMidiInputCoordinator_->setRecordArmed(tid, on);
+            }
+        };
+        hooks.liveMidiCapturedNoteCount = [this](const int channel, const int note, const bool noteOn) {
+            return stabilityLiveMidiCaptureSink_.countNotes(channel, note, noteOn);
+        };
+        hooks.liveMidiCapturedCcCount = [this](const int channel, const int controller) {
+            return stabilityLiveMidiCaptureSink_.countCc(channel, controller);
+        };
+        hooks.liveMidiCapturedPitchBendCount = [this](const int channel) {
+            return stabilityLiveMidiCaptureSink_.countPitchBend(channel);
+        };
+        hooks.liveMidiCaptureReset = [this] { stabilityLiveMidiCaptureSink_.reset(); };
+        hooks.liveMidiAttachCaptureSink = [this](const TrackId tid, juce::String& failReason) -> bool {
+            ExperimentalInstrumentHost* const h
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid) : nullptr;
+            if (h == nullptr)
+            {
+                failReason = "no destination host for track " + juce::String((juce::int64)tid) + " after reload";
+                return false;
+            }
+            stabilityLiveMidiCaptureSink_.reset();
+            h->installMidiDeliveryCaptureSinkForTests(&stabilityLiveMidiCaptureSink_);
+            return true;
+        };
+        hooks.recordToggleLikeKey = [this] {
+            if (recordingCoordinator_ != nullptr)
+            {
+                recordingCoordinator_->numpadRecordToggled();
+            }
+        };
+        hooks.isCountInActive = [this] { return recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive(); };
+        hooks.isRecordingInProgress = [this] { return anyRecordingInProgress(); };
+        hooks.getTransportPlayheadSamples = [this] { return transport.readPlayheadSamplesForUi(); };
+        hooks.liveMidiTakeStartSample = [this]() -> std::int64_t {
+            return liveMidiInputCoordinator_ != nullptr ? liveMidiInputCoordinator_->takeStartSample() : 0;
+        };
+        hooks.reportedOutputLatencySamples = [this] { return latencyStore_.getReportedOutputLatencySamples(); };
+        hooks.liveMidiSummarizeClips = [this](const TrackId tid) -> StabilityMidiClipSummary {
+            StabilityMidiClipSummary s;
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (c == nullptr)
+            {
+                return s;
+            }
+            for (const auto& up : c->getClips())
+            {
+                if (up == nullptr)
+                {
+                    continue;
+                }
+                if (s.clipCount == 0)
+                {
+                    s.firstClipStartSamples = up->startSamples;
+                    s.firstClipLengthSamples = up->lengthSamples;
+                    s.bpm = up->pattern.bpm;
+                    s.ticksPerQuarter = up->pattern.ticksPerQuarter;
+                    for (const auto& n : up->pattern.timelineNotes)
+                    {
+                        s.notes.push_back({ n.midiNote, n.velocity, n.offVelocity, (int)n.channel, n.startTick, n.durationTicks });
+                    }
+                    for (const auto& p : up->pattern.ccPoints)
+                    {
+                        s.cc.push_back({ p.startTick, (int)p.controller, (int)p.value, (int)p.channel });
+                    }
+                    for (const auto& b : up->pattern.pitchBendPoints)
+                    {
+                        s.pitchBend.push_back({ b.startTick, b.value, (int)b.channel });
+                    }
+                }
+                ++s.clipCount;
+            }
+            return s;
+        };
+        hooks.liveMidiExportFirstClip = [this](const TrackId tid, const juce::File& out, int& notes, int& cc, int& pb,
+                                               juce::String& failReason) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (c == nullptr || c->getClips().empty() || c->getClips().front() == nullptr)
+            {
+                failReason = "no clip to export";
+                return false;
+            }
+            int outputChannel = kTrackMidiOutputChannelAny;
+            if (const auto snap = session.loadSessionSnapshotForAudioThread())
+            {
+                const int ix = snap->findTrackIndexById(tid);
+                if (ix >= 0)
+                {
+                    outputChannel = snap->getTrack(ix).getMidiOutputChannel();
+                }
+            }
+            const InstrumentMidiClipExportResult r
+                = exportInstrumentMidiClipToMidiFile(*c->getClips().front(), outputChannel, out, 48000.0);
+            if (!r.ok)
+            {
+                failReason = "export failed: " + r.errorMessage;
+                return false;
+            }
+            notes = r.notesExported;
+            cc = r.ccEventsExported;
+            pb = r.pitchBendEventsExported;
+            return true;
+        };
+        hooks.undoStackSize = [this] { return undoRedoCoordinator_ != nullptr ? (int)undoRedoCoordinator_->undoStackSizeForDiagnostics() : 0; };
+        hooks.setCycleEnabled = [this](const bool on) { transport.requestCycleEnabled(on); };
+        hooks.isCycleEnabled = [this] { return transport.readCycleEnabledForUi(); };
+        hooks.inspectorMidiInputTexts = [this]() -> juce::String {
+            inspectorView_.refreshFromSession();
+            return "visible=" + juce::String(inspectorView_.isMidiInputComboVisibleForStabilityTest() ? "yes" : "no")
+                   + " input=\"" + inspectorView_.getMidiInputComboTextForStabilityTest() + "\" channel="
+                   + inspectorView_.getMidiInputChannelComboTextForStabilityTest() + " status=\""
+                   + inspectorView_.getMidiInputStatusTextForStabilityTest().replace("\n", " | ") + "\"";
+        };
+        hooks.selectTrackLikeHeaderClick = hooks.activateTrackLikeHeaderClick;
+        hooks.liveMidiFirstRealInputDevice = [](juce::String& identifier, juce::String& name) -> bool {
+            const auto devices = juce::MidiInput::getAvailableDevices();
+            if (devices.isEmpty())
+            {
+                return false;
+            }
+            identifier = devices[0].identifier;
+            name = devices[0].name;
+            return true;
+        };
+        hooks.liveMidiSetTrackInputDevice = [this](const TrackId tid, const juce::String& identifier, const juce::String& name) {
+            TrackMidiInputAssignment mi;
+            if (identifier.isEmpty())
+            {
+                mi.mode = TrackMidiInputMode::AllEnabled;
+            }
+            else
+            {
+                mi.mode = TrackMidiInputMode::Device;
+                mi.deviceIdentifier = identifier;
+                mi.deviceName = name;
+            }
+            if (const auto snap = session.loadSessionSnapshotForAudioThread())
+            {
+                const int ix = snap->findTrackIndexById(tid);
+                if (ix >= 0)
+                {
+                    mi.channelFilter = snap->getTrack(ix).getMidiInputAssignment().channelFilter;
+                }
+            }
+            const bool ok = session.setTrackMidiInputAssignment(tid, mi);
+            if (liveMidiInputCoordinator_ != nullptr)
+            {
+                liveMidiInputCoordinator_->refreshDevicesAndRouting();
+            }
+            inspectorView_.refreshFromSession();
+            return ok;
+        };
+        hooks.liveMidiIsDeviceOpen = [this](const juce::String& identifier, juce::String& detail) -> bool {
+            const bool enabled = deviceManager.isMidiInputDeviceEnabled(identifier);
+            const int slot = liveMidiInputCoordinator_ != nullptr
+                                 ? liveMidiInputCoordinator_->slotForDeviceIdentifierForDiagnostics(identifier)
+                                 : -1;
+            detail = "managerEnabled=" + juce::String(enabled ? "yes" : "no") + " slot=" + juce::String(slot);
+            return enabled && slot >= 0;
+        };
+        hooks.armAudioTrackForRecording = [this](const TrackId tid) {
+            if (tid == kInvalidTrackId)
+            {
+                recorder_.disarm();
+            }
+            else
+            {
+                recorder_.armForRecording(tid);
+            }
+            trackLanesView.repaint();
+        };
+        hooks.audioClipCountForTrack = [this](const TrackId tid) -> int {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            return ix >= 0 ? snap->getTrack(ix).getNumPlacedClips() : 0;
+        };
+        hooks.verifyLiveMidiHeaderCells = [this](const TrackId tid, juce::String& report, juce::String& failReason) -> bool {
+            const TrackHeaderView* const header = trackLanesView.findInstrumentRowHeaderForDiagnostics(tid);
+            if (header == nullptr)
+            {
+                failReason = "no header view for track " + juce::String((juce::int64)tid);
+                return false;
+            }
+            const auto bounds = header->getLocalBounds();
+            const auto monitor = header->getMonitorButtonBounds();
+            const auto arm = header->getArmButtonBounds();
+            report = "track " + juce::String((juce::int64)tid) + " header " + bounds.toString() + " monitor=" + monitor.toString()
+                     + " arm=" + arm.toString();
+            if (monitor.isEmpty() || arm.isEmpty())
+            {
+                failReason = "Monitor / Arm cell missing on a live-MIDI row";
+                return false;
+            }
+            if (!bounds.contains(monitor) || !bounds.contains(arm))
+            {
+                failReason = "Monitor / Arm cell clipped by the header bounds";
+                return false;
+            }
+            return true;
+        };
+
         hooks.audioHealthProbeBegin = [this] {
             (void)playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
             stabilityAudioProbeCallbackBaseline_ = playbackEngine_.readAudioCallbackEnterCountForDiagnostics();
@@ -4273,12 +4736,18 @@ private:
         // rendering. Pushed as an immutable flag on this 10 Hz message-thread tick (transport
         // PLAYBACK intentionally never pauses rendering — measured default, revision 6).
         proxyRenderScheduler_.notifyRecordingState(
-            recorder_.isRecording()
+            anyRecordingInProgress()
             || (recordingCoordinator_ != nullptr && recordingCoordinator_->isCountInActive()));
         if (instrumentTimelineRowCoordinator_ != nullptr)
         {
             instrumentTimelineRowCoordinator_->tickStructuralEditBlockedHeaderStripRepaint(
                 trackLanesView.isStructuralTimelineEditBlocked());
+            // Live MIDI take: the growing REC region follows the playhead on this 10 Hz tick
+            // (never at playhead-stripe cadence — see the buffered-lane rule).
+            if (liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isTakeActive())
+            {
+                instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+            }
         }
         transportPlayPauseStopController_->updatePlayPauseButtonFromTransport();
         inspectorView_.refreshFromSession();
@@ -4805,6 +5274,14 @@ private:
         }
     }
 
+    /// "A take is running" for every edit/undo/autosave guard: the audio recorder OR a live MIDI
+    /// take (a MIDI-only take never starts the audio recorder). Safe during construction.
+    [[nodiscard]] bool anyRecordingInProgress() const noexcept
+    {
+        return recorder_.isRecording()
+               || (recordingCoordinator_ != nullptr && recordingCoordinator_->isMidiTakeActive());
+    }
+
     Transport& transport;
     Session& session;
     PluginInsertHost& pluginHost_;
@@ -4838,6 +5315,10 @@ private:
     std::unique_ptr<InstrumentRuntimeCoordinator> instrumentRuntimeCoordinator_;
     /// Listed after IRC: reverse member destruction runs this dtor first while `instrumentRuntimeCoordinator_` still exists.
     std::unique_ptr<AddInstrumentTrackCoordinator> addInstrumentTrackCoordinator_;
+    /// Live MIDI input (devices, Monitor/Arm runtime flags, routing, take capture). Declared after
+    /// the instrument runtime so it is destroyed first: its destructor detaches the engine bus
+    /// and unregisters the device callbacks while hosts and controllers still exist.
+    std::unique_ptr<LiveMidiInputCoordinator> liveMidiInputCoordinator_;
 
     /// When Audio Settings is open; auto-clears when the dialog-owned view is destroyed.
     juce::Component::SafePointer<LatencySettingsView> audioLatencySettingsWeak_;
@@ -5159,6 +5640,131 @@ private:
         }
     };
     StabilityMidiRoutingCaptureSink stabilityMidiRoutingCaptureSink_;
+
+    /// Live-MIDI scenario: event-level record of everything the fixture destination received at
+    /// its processing boundary (RT-safe: fixed array + atomic count; read after the fact).
+    struct StabilityLiveMidiCaptureSink final : ExperimentalInstrumentHost::MidiDeliveryCaptureSink
+    {
+        struct Rec
+        {
+            std::uint8_t status = 0;
+            std::uint8_t d1 = 0;
+            std::uint8_t d2 = 0;
+            int offset = 0;
+        };
+        static constexpr int kCapacity = 8192;
+        std::array<Rec, (size_t)kCapacity> recs {};
+        std::atomic<int> count { 0 };
+
+        void reset() noexcept { count.store(0, std::memory_order_relaxed); }
+        void onMidiBlockDelivered(const juce::MidiBuffer& merged, int) override
+        {
+            for (const auto meta : merged)
+            {
+                const int n = count.load(std::memory_order_relaxed);
+                if (n >= kCapacity)
+                {
+                    return;
+                }
+                const juce::MidiMessage m = meta.getMessage();
+                if (m.getRawDataSize() < 1)
+                {
+                    continue;
+                }
+                Rec r;
+                r.status = m.getRawData()[0];
+                r.d1 = m.getRawDataSize() > 1 ? m.getRawData()[1] : (std::uint8_t)0;
+                r.d2 = m.getRawDataSize() > 2 ? m.getRawData()[2] : (std::uint8_t)0;
+                r.offset = meta.samplePosition;
+                recs[(size_t)n] = r;
+                count.store(n + 1, std::memory_order_release);
+            }
+        }
+        [[nodiscard]] int countNotes(const int channel, const int note, const bool noteOn) const noexcept
+        {
+            int total = 0;
+            const int n = juce::jmin(kCapacity, count.load(std::memory_order_acquire));
+            for (int i = 0; i < n; ++i)
+            {
+                const Rec& r = recs[(size_t)i];
+                const int ch = (r.status & 0x0f) + 1;
+                const int st = r.status & 0xf0;
+                if (ch != channel || (int)r.d1 != note)
+                {
+                    continue;
+                }
+                const bool isOn = st == 0x90 && r.d2 > 0;
+                const bool isOff = st == 0x80 || (st == 0x90 && r.d2 == 0);
+                if ((noteOn && isOn) || (!noteOn && isOff))
+                {
+                    ++total;
+                }
+            }
+            return total;
+        }
+        [[nodiscard]] int countCc(const int channel, const int controller) const noexcept
+        {
+            int total = 0;
+            const int n = juce::jmin(kCapacity, count.load(std::memory_order_acquire));
+            for (int i = 0; i < n; ++i)
+            {
+                const Rec& r = recs[(size_t)i];
+                if ((r.status & 0xf0) == 0xb0 && ((r.status & 0x0f) + 1) == channel && (int)r.d1 == controller)
+                {
+                    ++total;
+                }
+            }
+            return total;
+        }
+        [[nodiscard]] int countPitchBend(const int channel) const noexcept
+        {
+            int total = 0;
+            const int n = juce::jmin(kCapacity, count.load(std::memory_order_acquire));
+            for (int i = 0; i < n; ++i)
+            {
+                const Rec& r = recs[(size_t)i];
+                if ((r.status & 0xf0) == 0xe0 && ((r.status & 0x0f) + 1) == channel)
+                {
+                    ++total;
+                }
+            }
+            return total;
+        }
+    };
+    StabilityLiveMidiCaptureSink stabilityLiveMidiCaptureSink_;
+    /// Live-MIDI scenario: a real loopback output (an output whose name matches an input) when
+    /// one exists on this machine; null otherwise (then injection enters at the bus boundary).
+    std::unique_ptr<juce::MidiOutput> stabilityLiveMidiLoopbackOut_;
+    bool stabilityLiveMidiLoopbackResolved_ = false;
+    void ensureStabilityLiveMidiLoopbackResolved()
+    {
+        if (stabilityLiveMidiLoopbackResolved_)
+        {
+            return;
+        }
+        stabilityLiveMidiLoopbackResolved_ = true;
+        const auto inputs = juce::MidiInput::getAvailableDevices();
+        for (const auto& out : juce::MidiOutput::getAvailableDevices())
+        {
+            // Only a dedicated virtual loopback is used (loopMIDI-style names), never a hardware
+            // port of the user's interface.
+            const bool loopbackName = out.name.containsIgnoreCase("loop") || out.name.containsIgnoreCase("virtual");
+            bool hasMatchingInput = false;
+            for (const auto& in : inputs)
+            {
+                hasMatchingInput = hasMatchingInput || in.name == out.name;
+            }
+            if (loopbackName && hasMatchingInput)
+            {
+                stabilityLiveMidiLoopbackOut_ = juce::MidiOutput::openDevice(out.identifier);
+                if (stabilityLiveMidiLoopbackOut_ != nullptr)
+                {
+                    // Make sure the matching input is one the fixture listens to ("All").
+                    break;
+                }
+            }
+        }
+    }
     TrackId stabilityMidiRoutingInstTid_ = kInvalidTrackId;
     /// Phase B.1 many-to-one sources: "Lower" (fixed output channel 2), "Pedal" (fixed 3).
     TrackId stabilityMidiRoutingMidiLowerTid_ = kInvalidTrackId;

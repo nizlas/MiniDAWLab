@@ -194,10 +194,17 @@ private:
         int midiChannel = 1;
         int offVelocity = 64;
     };
+    struct BakedPitchBendStream
+    {
+        int midiChannel = 1;
+        std::vector<BakedCcEvent> events; ///< `value` = raw 14-bit wheel position
+        int lastSentValue = -1;           ///< emission state (live rtPitchBendLastSentValue_ mirror)
+    };
     struct Unit
     {
         std::vector<BakedPlan> clips;
         std::vector<BakedCcStream> ccStreams;
+        std::vector<BakedPitchBendStream> pitchBendStreams;
         std::vector<PendingOff> pendingOffs; ///< emission state (live rtPendingOffs_ mirror)
         bool firstSegment = true;            ///< live "discontinuity" on the first delivered block
     };
@@ -352,6 +359,77 @@ private:
                              });
         }
 
+        // Pitch-bend bake mirror (live publishRenderSnapshot): one stream per effective channel,
+        // clips in ascending start order, recorded values verbatim, per-stream stable sort.
+        {
+            struct ClipRef
+            {
+                const proxy_snapshot::SnapshotClip* clip = nullptr;
+            };
+            std::vector<ClipRef> orderedClips;
+            for (const auto& clip : clips)
+            {
+                if (clip.lengthSamples > 0 && !clip.pitchBendPoints.empty())
+                {
+                    orderedClips.push_back({ &clip });
+                }
+            }
+            std::stable_sort(orderedClips.begin(), orderedClips.end(),
+                             [](const ClipRef& a, const ClipRef& b) {
+                                 return a.clip->startSamples < b.clip->startSamples;
+                             });
+            const auto findOrAddStream = [&unit](const int effCh) -> BakedPitchBendStream& {
+                for (auto& s : unit.pitchBendStreams)
+                {
+                    if (s.midiChannel == effCh)
+                    {
+                        return s;
+                    }
+                }
+                BakedPitchBendStream ns;
+                ns.midiChannel = effCh;
+                unit.pitchBendStreams.push_back(std::move(ns));
+                return unit.pitchBendStreams.back();
+            };
+            for (const auto& ref : orderedClips)
+            {
+                const proxy_snapshot::SnapshotClip& clip = *ref.clip;
+                const std::int64_t anchorRender = toRender(clip.timelineAnchorSamples);
+                const double bpm = clip.bpm > 0.0 ? clip.bpm : 120.0;
+                const int tpq = juce::jmax(1, clip.ticksPerQuarter);
+                std::vector<MidiPitchBendPoint> pts;
+                pts.reserve(clip.pitchBendPoints.size());
+                for (const auto& sp : clip.pitchBendPoints)
+                {
+                    MidiPitchBendPoint p;
+                    p.startTick = sp.startTick;
+                    p.value = midi_pb::sanitizeValue(sp.value);
+                    p.channel = (std::uint8_t)midi_pb::sanitizeChannel(sp.channel);
+                    pts.push_back(p);
+                }
+                (void)midi_pb::normalizePoints(pts);
+                for (const auto& p : pts)
+                {
+                    const int effCh = midi_channel_diag::effectiveChannel((int)p.channel, forcedMidiChannel);
+                    BakedCcEvent rev;
+                    rev.absSample = anchorRender + ticksToRelativeSamples(p.startTick, bpm, tpq, renderRate_);
+                    rev.value = p.value;
+                    findOrAddStream(effCh).events.push_back(rev);
+                }
+            }
+            for (auto& s : unit.pitchBendStreams)
+            {
+                std::stable_sort(s.events.begin(), s.events.end(),
+                                 [](const BakedCcEvent& a, const BakedCcEvent& b) {
+                                     return a.absSample < b.absSample;
+                                 });
+            }
+            std::stable_sort(unit.pitchBendStreams.begin(), unit.pitchBendStreams.end(),
+                             [](const BakedPitchBendStream& a, const BakedPitchBendStream& b) {
+                                 return a.midiChannel < b.midiChannel;
+                             });
+        }
+
         units_.push_back(std::move(unit));
     }
 
@@ -418,6 +496,39 @@ private:
             for (auto it = lowerBound(segStart); it != s.events.end() && it->absSample < segEnd; ++it)
             {
                 emitCc((int)(it->absSample - segStart), it->value);
+            }
+        }
+
+        // 2b) Pitch bend — mirror of audioThread_schedulePitchBendForSegment (hold semantics,
+        //     chase at the first segment, unchanged-value dedup).
+        for (auto& s : u.pitchBendStreams)
+        {
+            const auto emitPb = [&](const int offset, const int value) {
+                if (s.lastSentValue == value)
+                {
+                    return;
+                }
+                out.addEvent(juce::MidiMessage::pitchWheel(s.midiChannel, juce::jlimit(0, kMidiPitchBendMax, value)),
+                             juce::jlimit(0, numSamples - 1, offset));
+                s.lastSentValue = value;
+            };
+            const auto lowerBound = [&s](const std::int64_t v) {
+                return std::lower_bound(s.events.begin(), s.events.end(), v,
+                                        [](const BakedCcEvent& e, const std::int64_t x) {
+                                            return e.absSample < x;
+                                        });
+            };
+            if (discontinuity || s.lastSentValue < 0)
+            {
+                auto it = lowerBound(segStart);
+                if (it != s.events.begin())
+                {
+                    emitPb(0, (it - 1)->value);
+                }
+            }
+            for (auto it = lowerBound(segStart); it != s.events.end() && it->absSample < segEnd; ++it)
+            {
+                emitPb((int)(it->absSample - segStart), it->value);
             }
         }
 

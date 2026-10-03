@@ -373,6 +373,12 @@ bool TrackLanesView::verifyHeaderColumnLayoutForDiagnostics(juce::String& report
     return true;
 }
 
+const TrackHeaderView* TrackLanesView::findInstrumentRowHeaderForDiagnostics(const TrackId tid) const noexcept
+{
+    const auto it = instrumentTimelineAttachments_.find(tid);
+    return it != instrumentTimelineAttachments_.end() ? it->second.header : nullptr;
+}
+
 TrackLanesView::HeaderColumnResizeHandle::HeaderColumnResizeHandle(TrackLanesView& owner) noexcept
     : owner_(owner)
 {

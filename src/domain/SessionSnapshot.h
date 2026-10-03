@@ -193,6 +193,12 @@ public:
         TrackId trackId,
         TrackInputAssignment assignment) noexcept;
 
+    /// [Message thread] Replace one row's live MIDI input assignment (sanitized); see `Track`.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackMidiInputAssignment(
+        const SessionSnapshot& previous,
+        TrackId trackId,
+        TrackMidiInputAssignment assignment) noexcept;
+
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackStereoPan(
         const SessionSnapshot& previous,
         TrackId trackId,

@@ -92,6 +92,44 @@ struct Kind
         kinds.push_back(std::move(k));
     }
     {
+        // Live-MIDI slice: instrument destination row with WORKING Monitor + Arm (armed, monitoring,
+        // activity dot) — the widest strip: [Instrument][Power][Mute][Monitor][Arm] + Alternatives.
+        Kind k{ "instrument-live-midi", {}, {} };
+        k.model.name = trackName;
+        k.model.subtitle = "VB3-II";
+        k.model.active = true;
+        k.model.instrumentEditorAvailable = true;
+        k.model.instrumentAlternativesAvailable = true;
+        k.model.monitorAvailable = true;
+        k.model.monitorInteractable = true;
+        k.model.monitorEnabled = true;
+        k.model.armInteractable = true;
+        k.model.armed = true;
+        k.model.midiActivity = true;
+        k.callbacks.onOpenInstrumentEditor = [] {};
+        k.callbacks.onShowInstrumentAlternatives = [](juce::Rectangle<int>) {};
+        k.callbacks.onToggleMute = [] {};
+        k.callbacks.onToggleArm = [] {};
+        k.callbacks.onToggleMonitor = [] {};
+        k.callbacks.onTogglePower = [] { return true; };
+        kinds.push_back(std::move(k));
+    }
+    {
+        // Live-MIDI slice: plain Midi row now carries a Monitor cell: [Power][Mute][Monitor][Arm].
+        Kind k{ "midi-live-midi", {}, {} };
+        k.model.name = trackName;
+        k.model.active = true;
+        k.model.monitorAvailable = true;
+        k.model.monitorInteractable = true;
+        k.model.armInteractable = true;
+        k.model.midiActivity = true;
+        k.callbacks.onToggleMute = [] {};
+        k.callbacks.onToggleArm = [] {};
+        k.callbacks.onToggleMonitor = [] {};
+        k.callbacks.onTogglePower = [] { return true; };
+        kinds.push_back(std::move(k));
+    }
+    {
         Kind k{ "group", {}, {} };
         k.model.name = trackName;
         k.model.active = true;
@@ -217,7 +255,7 @@ void testGeometryPerKindAndWidth(const juce::File& shotDir)
             const juce::String who = juce::String(k.name) + " @ " + juce::String(width) + " px";
             info(who + ": cells=" + juce::String((int)cells.present.size()) + " rightmost edge=" + juce::String(cells.rightMost)
                  + " margin=" + juce::String(width - cells.rightMost) + desc);
-            if (legacyWidth && juce::String(k.name) == "instrument")
+            if (legacyWidth && (juce::String(k.name) == "instrument" || juce::String(k.name) == "instrument-live-midi"))
             {
                 // Negative control: documents the reported defect at the old fixed width.
                 expect(!allInside, who + ": (old width) the 5-cell instrument row's Arm cell IS clipped — the reported defect");
@@ -244,6 +282,17 @@ void testGeometryPerKindAndWidth(const juce::File& shotDir)
                     const auto& last = cells.present[lastIdx];
                     expect(countNonBackgroundPixels(img, last.second, bg) > 30,
                            who + ": the right-most strip button (" + juce::String(last.first) + ") is actually painted");
+                }
+                // Live-MIDI rows: Monitor AND Arm cells both exist, are inside and are painted
+                // (the orange monitoring face / red armed face are not the background).
+                if (juce::String(k.name).endsWith("live-midi"))
+                {
+                    const juce::Rectangle<int> mon = view->getMonitorButtonBounds();
+                    const juce::Rectangle<int> arm = view->getArmButtonBounds();
+                    expect(!mon.isEmpty() && !arm.isEmpty() && local.contains(mon) && local.contains(arm),
+                           who + ": Monitor and Arm cells present and inside the header");
+                    expect(countNonBackgroundPixels(img, mon, bg) > 30 && countNonBackgroundPixels(img, arm, bg) > 30,
+                           who + ": Monitor and Arm cells are painted");
                 }
             }
         }

@@ -146,6 +146,8 @@ public:
     /// Stability runner: the exact sequence the handle performs for one drag — anchor at the
     /// current effective width, apply `deltaPx`, then the drag-ended notification (persist).
     void simulateHeaderColumnHandleDragForStabilityTest(int deltaPx) noexcept;
+    /// [Diagnostics] The attached instrument / MIDI row header for `tid`, or null.
+    [[nodiscard]] const TrackHeaderView* findInstrumentRowHeaderForDiagnostics(TrackId tid) const noexcept;
     /// Diagnostics (stability runner): checks every visible header of every row kind against the
     /// shared boundary — header width == effective column width, every present strip cell /
     /// alternatives button fully inside the header, and every lane starting exactly at the boundary.

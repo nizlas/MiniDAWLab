@@ -187,6 +187,22 @@ namespace
                 break;
             }
         }
+        if (fileVersion >= 24 && t.midiInputAssignment.mode != TrackMidiInputMode::None)
+        {
+            // Absent keys = None (no live MIDI input), so default-valued tracks keep the pre-v24
+            // byte layout. The device is stored by JUCE identifier + readable name, never an index.
+            const TrackMidiInputAssignment& mi = t.midiInputAssignment;
+            to->setProperty("midiInput", mi.mode == TrackMidiInputMode::AllEnabled ? "all" : "device");
+            if (mi.mode == TrackMidiInputMode::Device)
+            {
+                to->setProperty("midiInputDeviceId", mi.deviceIdentifier);
+                to->setProperty("midiInputDeviceName", mi.deviceName);
+            }
+            if (mi.channelFilter != kTrackMidiInputChannelAll)
+            {
+                to->setProperty("midiInputChannel", mi.channelFilter);
+            }
+        }
         if (t.off)
         {
             to->setProperty("off", true);
@@ -1093,6 +1109,42 @@ namespace
                                 }
                             }
                         }
+                        // v24: optional sparse pitch-bend points. Absent (all v23-and-older
+                        // files) → empty vector, identical sound. Range clamps + duplicate
+                        // resolution happen in the controller's normalize step.
+                        const juce::var& pbv = cv.getProperty("pitchBend", {});
+                        if (pbv.isArray())
+                        {
+                            if (const juce::Array<juce::var>* pbarr = pbv.getArray())
+                            {
+                                for (const juce::var& pv : *pbarr)
+                                {
+                                    if (!pv.isObject())
+                                    {
+                                        continue;
+                                    }
+                                    ProjectFileExperimentalMidiPitchBendPointV24 pp;
+                                    bool tickOk = false;
+                                    const std::int64_t tick
+                                        = int64FromVarId(pv.getProperty("startTick", {}), tickOk);
+                                    if (tickOk)
+                                    {
+                                        pp.startTick = tick;
+                                    }
+                                    const juce::var& val = pv.getProperty("value", {});
+                                    if (val.isInt() || val.isInt64() || val.isDouble())
+                                    {
+                                        pp.value = (int)static_cast<double>(val);
+                                    }
+                                    const juce::var& chp = pv.getProperty("channel", {});
+                                    if (chp.isInt() || chp.isInt64() || chp.isDouble())
+                                    {
+                                        pp.channel = (int)static_cast<double>(chp);
+                                    }
+                                    c.pitchBendPoints.push_back(pp);
+                                }
+                            }
+                        }
                         const juce::var& mrvs = cv.getProperty("midiRollVisibleStartSamples", {});
                         if (mrvs.isInt() || mrvs.isInt64() || mrvs.isDouble())
                         {
@@ -1472,6 +1524,21 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
                         ccVars.add(juce::var(cpO.get()));
                     }
                     co->setProperty("ccPoints", juce::var(ccVars));
+                }
+                // v24: sparse pitch-bend points, written only when present (older readers never
+                // see the key; newer readers treat absence as "no pitch bend").
+                if (!cl.pitchBendPoints.empty())
+                {
+                    juce::Array<juce::var> pbVars;
+                    for (const auto& pp : cl.pitchBendPoints)
+                    {
+                        juce::DynamicObject::Ptr ppO = new juce::DynamicObject();
+                        ppO->setProperty("startTick", static_cast<juce::int64>(pp.startTick));
+                        ppO->setProperty("value", juce::jlimit(0, 16383, pp.value));
+                        ppO->setProperty("channel", juce::jlimit(1, 16, pp.channel));
+                        pbVars.add(juce::var(ppO.get()));
+                    }
+                    co->setProperty("pitchBend", juce::var(pbVars));
                 }
                 if (cl.midiRollSamplesPerPixel > 0.0 && std::isfinite(cl.midiRollSamplesPerPixel))
                 {
@@ -2003,6 +2070,34 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 trk.inputAssignment = sanitizeTrackInputAssignment(ia);
             }
         }
+        trk.midiInputAssignment = {};
+        if (ver >= 24)
+        {
+            // Absent keys (and every pre-v24 file) = None: no live MIDI coupling is created by
+            // opening an older project. A device entry without an identifier repairs to None.
+            const juce::var& miV = tv.getProperty("midiInput", {});
+            if (miV.isString())
+            {
+                TrackMidiInputAssignment mi;
+                const juce::String mode = miV.toString();
+                if (mode.equalsIgnoreCase("all"))
+                {
+                    mi.mode = TrackMidiInputMode::AllEnabled;
+                }
+                else if (mode.equalsIgnoreCase("device"))
+                {
+                    mi.mode = TrackMidiInputMode::Device;
+                    mi.deviceIdentifier = tv.getProperty("midiInputDeviceId", juce::String()).toString();
+                    mi.deviceName = tv.getProperty("midiInputDeviceName", juce::String()).toString();
+                }
+                const juce::var& chV = tv.getProperty("midiInputChannel", {});
+                if (chV.isInt() || chV.isInt64() || chV.isDouble())
+                {
+                    mi.channelFilter = static_cast<int>(static_cast<double>(chV) + 0.5);
+                }
+                trk.midiInputAssignment = sanitizeTrackMidiInputAssignment(std::move(mi));
+            }
+        }
         {
             const juce::var& ov = tv.getProperty("off", {});
             if (ov.isBool())
@@ -2263,6 +2358,21 @@ namespace
             const auto& q = b.ccPoints[i];
             if (p.startTick != q.startTick || p.controller != q.controller || p.value != q.value
                 || p.channel != q.channel || p.interpolationToNext != q.interpolationToNext)
+            {
+                return false;
+            }
+        }
+        // v24: pitch bend is musical state too — a recorded take with only wheel movement must
+        // still produce an undo step.
+        if (a.pitchBendPoints.size() != b.pitchBendPoints.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.pitchBendPoints.size(); ++i)
+        {
+            const auto& p = a.pitchBendPoints[i];
+            const auto& q = b.pitchBendPoints[i];
+            if (p.startTick != q.startTick || p.value != q.value || p.channel != q.channel)
             {
                 return false;
             }

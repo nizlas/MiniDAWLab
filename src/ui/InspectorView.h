@@ -53,6 +53,24 @@ struct InspectorAudioInputDeviceSnapshot
     bool deviceAvailable = false;
 };
 
+/// [Message thread] One MIDI input device for the "MIDI Input" selector (wired from Main via the
+/// live-MIDI coordinator). `present == false` marks the row's saved device that is not connected
+/// right now — listed so the assignment stays visible, never silently replaced.
+struct InspectorMidiInputDeviceOption
+{
+    juce::String identifier;
+    juce::String name;
+    bool present = true;
+};
+
+/// [Message thread] Live-MIDI snapshot for the selected row: devices to list and a status line.
+struct InspectorMidiInputSnapshot
+{
+    std::vector<InspectorMidiInputDeviceOption> devices;
+    /// Empty when nominal; otherwise e.g. "MIDI device missing: …", "No playable instrument …".
+    juce::String statusLine;
+};
+
 /// Active-track-only controls (Cubase-style Inspector), not repeated in every track header.
 
 class InspectorView final : public juce::Component,
@@ -114,6 +132,26 @@ public:
     {
         audioInputDeviceSnapshotProvider_ = std::move(fn);
     }
+
+    /// [Message thread] Undoable live **MIDI input** assignment (`TrackLanesEditCoordinator`):
+    /// device + input-channel filter for Instrument / Midi rows (the control is hidden elsewhere).
+    void setMidiInputHandler(std::function<void(TrackId, TrackMidiInputAssignment)> fn) noexcept
+    {
+        midiInputHandler_ = std::move(fn);
+    }
+    /// [Message thread] Provider for the MIDI devices + status of a row (wired from Main).
+    void setMidiInputSnapshotProvider(std::function<InspectorMidiInputSnapshot(TrackId)> fn) noexcept
+    {
+        midiInputSnapshotProvider_ = std::move(fn);
+    }
+    /// [Stability] Current MIDI Input / channel combo texts and status (what the user sees).
+    [[nodiscard]] juce::String getMidiInputComboTextForStabilityTest() const { return midiInputComboBox_.getText(); }
+    [[nodiscard]] juce::String getMidiInputChannelComboTextForStabilityTest() const
+    {
+        return midiInputChannelComboBox_.getText();
+    }
+    [[nodiscard]] juce::String getMidiInputStatusTextForStabilityTest() const { return midiInputStatusLabel_.getText(); }
+    [[nodiscard]] bool isMidiInputComboVisibleForStabilityTest() const { return midiInputComboBox_.isVisible(); }
 
     /// [Message thread] Undoable **MIDI** output channel (`kTrackMidiOutputChannelAny` or 1 … 16).
     void setMidiOutputChannelHandler(std::function<void(TrackId, int)> fn) noexcept
@@ -203,6 +241,8 @@ private:
     /// Rebuild the "Audio Input" combo from the active device snapshot and the track's stored
     /// assignment (unresolved assignments appear as an explicit "(unavailable)" entry).
     void populateAudioInputCombo(const Track& track);
+    /// Rebuild the "MIDI Input" + "Input Channel" combos and the status line for the row.
+    void populateMidiInputControls(const Track& track);
 
     void clearInsertRowStrips();
     void rebuildInsertRowStrips(TrackId active, const std::vector<InspectorInsertRow>& rows);
@@ -232,6 +272,13 @@ private:
     /// MIDI destination ("MIDI To") — `TrackKind::Midi` rows only.
     juce::Label midiDestCaptionLabel_;
     juce::ComboBox midiDestComboBox_;
+    /// Live MIDI input (Instrument / Midi rows): device selector, input-channel FILTER (distinct
+    /// from the output "MIDI Channel" above) and a one-line status.
+    juce::Label midiInputCaptionLabel_;
+    juce::ComboBox midiInputComboBox_;
+    juce::Label midiInputChannelCaptionLabel_;
+    juce::ComboBox midiInputChannelComboBox_;
+    juce::Label midiInputStatusLabel_;
     juce::Label insertsSectionLabel_;
     juce::Label preSectionLabel_;
     juce::Label preEmptyLabel_;
@@ -283,6 +330,12 @@ private:
     std::function<void(TrackId, TrackId)> routedOutputHandler_;
     std::function<void(TrackId, int)> midiOutputChannelHandler_;
     std::function<void(TrackId, TrackId)> midiDestinationHandler_;
+    std::function<void(TrackId, TrackMidiInputAssignment)> midiInputHandler_;
+    std::function<InspectorMidiInputSnapshot(TrackId)> midiInputSnapshotProvider_;
+    bool midiInputComboGuard_ = false;
+    /// Parallel to the MIDI Input combo's item ids (1-based); channel filter is applied on top.
+    std::vector<TrackMidiInputAssignment> midiInputComboValues_;
+    bool midiInputChannelComboGuard_ = false;
     std::function<void(TrackId, int, TrackId)> trackSendDestinationHandler_;
     std::function<void(TrackId, int, float)> trackSendAmountHandler_;
     std::function<void(TrackId, int, bool)> trackSendEnabledHandler_;

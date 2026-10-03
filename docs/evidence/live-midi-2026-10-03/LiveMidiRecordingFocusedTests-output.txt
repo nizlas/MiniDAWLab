@@ -1,0 +1,81 @@
+﻿[PASS] offset: at window start = 0
+[PASS] offset: mid-window = numSamples/2 (├é┬▒1)
+[PASS] offset: after the window clamps to the last sample
+[PASS] offset: before the window clamps to 0
+[PASS] offset: unknown previous callback ├ó┬å┬Æ 0
+[PASS] offset: quarter of a 1024-sample window @ 44.1 kHz = 256 (├é┬▒1)
+[PASS] offset: three quarters of a 64-sample window @ 96 kHz = 48 (├é┬▒1)
+[PASS] timeline: 100 ms ago @ 44.1 kHz = 4410 samples back, minus a 256-sample output latency
+[PASS] timeline: gesture 20 ms before the callback lands 960 samples back, minus output latency
+[PASS] timeline: gesture at callback entry = block start minus output latency
+[PASS] timeline: future timestamps clamp to the block start (never ahead)
+[PASS] timeline: clock-skew guard clamps to 2 s back
+[PASS] timeline: stopped transport reports the stopped playhead
+[PASS] forward: note on
+[PASS] forward: CC
+[PASS] forward: pitch wheel
+[PASS] forward: channel pressure passes through for monitoring
+[PASS] drop: program change
+[PASS] drop: SysEx
+[PASS] drop: realtime clock
+[PASS] capture: aftertouch is monitored but not recorded (documented limitation)
+[PASS] instrument row (Preserve, filter All): ch1 note reaches the host on ch1
+[PASS] Lower row (filter 5, Force 2): ch5 note reaches the SAME host on ch2
+[PASS] Pedal row (filter 6, Force 3, device All): ch6 note on ch3
+[PASS] instrument row with filter All forwards every channel unchanged (Preserve)
+[PASS] exactly one delivery per matching (event, route) ├ó┬Ç┬ö nothing duplicated: 6
+[PASS] all deliveries go to the destination's transport host
+[PASS] sample offsets follow timestamps inside the block
+[PASS] program change dropped (counted)
+[PASS] capture ring: armed rows receive their matching events (4/1/0), unarmed row none
+[PASS] captured events keep the received channel and carry a playing timeline stamp
+[PASS] six live notes owned (one per delivered Note On)
+[PASS] Note Off reaches the channel the Note On used (2), not the new output channel (4)
+[PASS] instrument row's own ch5 copy is released too (Preserve)
+[PASS] Monitor off releases the row's own live notes with targeted Note Offs
+[PASS] ├ó┬Ç┬ªand leaves the Pedal row's note (ch3) sounding
+[PASS] one live note remains (Pedal ch3)
+[PASS] device loss releases the affected row's live notes
+[PASS] note on to host A
+[PASS] host swap: the held note is released in the host that received the Note On
+[PASS] transport stopped: live MIDI still reaches the (new) host
+[PASS] stopped-transport capture carries playing=false and the stopped playhead
+[PASS] overflow test: note held
+[PASS] device ring overflow counted: 11
+[PASS] overflow releases the device's live notes (no hanging tone)
+[PASS] overflow marker reaches the capture ring for armed rows
+[PASS] capture ring bounded
+[PASS] discard: events received while gated never reach a host
+[PASS] two concurrent device threads: every event delivered or counted as overflow (4094 delivered, 1906 overflow)
+[PASS] take: one note recorded
+[PASS] take: position 960, length 480, velocity 100, off 40, channel 1
+[PASS] take: project tempo / PPQ adopted
+[PASS] take: Note On velocity 0 ends the note (default off velocity), channel 5 kept
+[PASS] take: key held across the start boundary enters at tick 0 with its real velocity
+[PASS] take: chord held through the whole take = note from 0 to the stop boundary (3840 ticks)
+[PASS] take: note held at stop ends exactly on the stop boundary
+[PASS] take: held sustain pedal is released at the stop boundary
+[PASS] take: the post-stop release is ignored
+[PASS] take: recorded CC points use Hold (no interpolation invented)
+[PASS] take: sustain / expression / pitch bend state restated at tick 0, others not
+[PASS] take: sustain still down at stop ├ó┬å┬Æ released
+[PASS] take: boundary state alone is not content (empty take)
+[PASS] take: controller-only take is valid content (CC + 14-bit pitch bend kept)
+[PASS] take: retrigger ends the earlier note where the new one starts
+[PASS] take: 44.1 kHz @ 180 BPM ├ó┬Ç┬ö one beat = 960 ticks, no 120 BPM assumption
+[PASS] take: a key pressed after the stop is not part of the take
+[PASS] take: overflow marker reported; unmatched note closed at stop
+[PASS] v24 project writes
+[PASS] v24 project reads at current version
+[PASS] v24: device mode, identifier, readable name and channel filter round-trip
+[PASS] v24: All-inputs mode round-trips with filter All
+[PASS] v24: unassigned row stays None
+[PASS] v24: pitch bend points round-trip with full 14-bit values
+[PASS] v24 json: device key written
+[PASS] v24 json: no empty identifiers
+[PASS] a pre-v24 file loads every row with MIDI input None (keys ignored below v24)
+[PASS] export: three pitch wheel events written
+[PASS] export: raw 14-bit values and native channels preserved under Any (Preserve)
+[PASS] export: fixed track channel remaps pitch wheel like notes and CC
+
+79 checks, 0 failure(s)

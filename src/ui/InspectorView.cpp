@@ -656,6 +656,89 @@ InspectorView::InspectorView(Session& session)
         midiChannelComboBox_.setTooltip(midiChannelTip);
     }
 
+    // Live MIDI input (Instrument / Midi rows). "MIDI Input" selects the device that feeds the
+    // row live; "Input Channel" FILTERS incoming events (never remaps them — the output "MIDI
+    // Channel" above is what the instrument receives on).
+    {
+        const juce::String midiInputTip
+            = "Which MIDI device plays this track live (Monitor) and is recorded (R).\n\n"
+              "None: no live input. All MIDI inputs: every connected MIDI device. A device saved on "
+              "another computer that is not connected here shows as \"(missing)\" and stays "
+              "assigned until you change it.";
+        midiInputCaptionLabel_.setText("MIDI Input", juce::dontSendNotification);
+        midiInputCaptionLabel_.setFont(juce::FontOptions(11.0f));
+        midiInputCaptionLabel_.setTooltip(midiInputTip);
+        addAndMakeVisible(midiInputCaptionLabel_);
+        midiInputComboBox_.setTooltip(midiInputTip);
+        midiInputComboBox_.onChange = [this] {
+            if (midiInputComboGuard_ || midiInputHandler_ == nullptr)
+            {
+                return;
+            }
+            const TrackId active = session_.getActiveTrackId();
+            const int pick = midiInputComboBox_.getSelectedId();
+            if (active == kInvalidTrackId || pick <= 0)
+            {
+                return;
+            }
+            const size_t ix = static_cast<size_t>(pick - 1);
+            if (ix >= midiInputComboValues_.size())
+            {
+                return;
+            }
+            TrackMidiInputAssignment next = midiInputComboValues_[ix];
+            // Keep the channel filter the row already has; only the device changes here.
+            if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+            {
+                const int tix = snap->findTrackIndexById(active);
+                if (tix >= 0)
+                {
+                    next.channelFilter = snap->getTrack(tix).getMidiInputAssignment().channelFilter;
+                }
+            }
+            midiInputHandler_(active, next);
+        };
+        addAndMakeVisible(midiInputComboBox_);
+
+        const juce::String channelTip
+            = "Input channel filter: All accepts every incoming channel; 1-16 accepts only that "
+              "channel. Recorded events keep the channel they were received on; the MIDI Channel "
+              "setting above decides what the instrument hears.";
+        midiInputChannelCaptionLabel_.setText("Input Channel", juce::dontSendNotification);
+        midiInputChannelCaptionLabel_.setFont(juce::FontOptions(11.0f));
+        midiInputChannelCaptionLabel_.setTooltip(channelTip);
+        addAndMakeVisible(midiInputChannelCaptionLabel_);
+        midiInputChannelComboBox_.setTooltip(channelTip);
+        midiInputChannelComboBox_.onChange = [this] {
+            if (midiInputChannelComboGuard_ || midiInputHandler_ == nullptr)
+            {
+                return;
+            }
+            const TrackId active = session_.getActiveTrackId();
+            const int pick = midiInputChannelComboBox_.getSelectedId(); // 1 = All, 2..17 = ch 1..16
+            if (active == kInvalidTrackId || pick <= 0)
+            {
+                return;
+            }
+            const auto snap = session_.loadSessionSnapshotForAudioThread();
+            const int tix = snap != nullptr ? snap->findTrackIndexById(active) : -1;
+            if (tix < 0)
+            {
+                return;
+            }
+            TrackMidiInputAssignment next = snap->getTrack(tix).getMidiInputAssignment();
+            next.channelFilter = pick == 1 ? kTrackMidiInputChannelAll : (pick - 1);
+            midiInputHandler_(active, next);
+        };
+        addAndMakeVisible(midiInputChannelComboBox_);
+
+        midiInputStatusLabel_.setFont(juce::FontOptions(10.5f));
+        midiInputStatusLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffe0a040));
+        midiInputStatusLabel_.setJustificationType(juce::Justification::topLeft);
+        midiInputStatusLabel_.setMinimumHorizontalScale(1.0f);
+        addAndMakeVisible(midiInputStatusLabel_);
+    }
+
     midiDestCaptionLabel_.setText("MIDI To", juce::dontSendNotification);
     midiDestCaptionLabel_.setFont(juce::FontOptions(11.0f));
     addAndMakeVisible(midiDestCaptionLabel_);
@@ -1397,6 +1480,74 @@ void InspectorView::populateAudioInputCombo(const Track& track)
     inputComboGuard_ = false;
 }
 
+void InspectorView::populateMidiInputControls(const Track& track)
+{
+    InspectorMidiInputSnapshot snap;
+    if (midiInputSnapshotProvider_ != nullptr)
+    {
+        snap = midiInputSnapshotProvider_(track.getId());
+    }
+    const TrackMidiInputAssignment current = track.getMidiInputAssignment();
+
+    // ---- device ----
+    midiInputComboGuard_ = true;
+    midiInputComboBox_.clear(juce::dontSendNotification);
+    midiInputComboValues_.clear();
+    int selectId = 0;
+    const auto sameDevice = [&current](const TrackMidiInputAssignment& v) {
+        return v.mode == current.mode
+               && (v.mode != TrackMidiInputMode::Device || v.deviceIdentifier == current.deviceIdentifier);
+    };
+    const auto addItem = [this, &sameDevice, &selectId](TrackMidiInputAssignment value, const juce::String& label) {
+        midiInputComboValues_.push_back(value);
+        const int itemId = static_cast<int>(midiInputComboValues_.size());
+        midiInputComboBox_.addItem(label, itemId);
+        if (sameDevice(value))
+        {
+            selectId = itemId;
+        }
+    };
+    addItem({ TrackMidiInputMode::None, {}, {}, kTrackMidiInputChannelAll }, "None");
+    addItem({ TrackMidiInputMode::AllEnabled, {}, {}, kTrackMidiInputChannelAll }, "All MIDI inputs");
+    for (const auto& d : snap.devices)
+    {
+        TrackMidiInputAssignment v;
+        v.mode = TrackMidiInputMode::Device;
+        v.deviceIdentifier = d.identifier;
+        v.deviceName = d.name;
+        addItem(v, d.present ? d.name : (d.name + " (missing)"));
+    }
+    if (selectId == 0 && current.mode == TrackMidiInputMode::Device)
+    {
+        // Saved device not listed by the provider at all: still visible and selected.
+        addItem(current, (current.deviceName.isNotEmpty() ? current.deviceName : current.deviceIdentifier)
+                             + " (missing)");
+        selectId = static_cast<int>(midiInputComboValues_.size());
+    }
+    midiInputComboBox_.setSelectedId(selectId > 0 ? selectId : 1, juce::dontSendNotification);
+    midiInputComboGuard_ = false;
+
+    // ---- channel filter ----
+    midiInputChannelComboGuard_ = true;
+    midiInputChannelComboBox_.clear(juce::dontSendNotification);
+    midiInputChannelComboBox_.addItem("All", 1);
+    for (int ch = 1; ch <= 16; ++ch)
+    {
+        midiInputChannelComboBox_.addItem(juce::String(ch), ch + 1);
+    }
+    midiInputChannelComboBox_.setSelectedId(
+        current.channelFilter == kTrackMidiInputChannelAll ? 1 : current.channelFilter + 1, juce::dontSendNotification);
+    midiInputChannelComboBox_.setEnabled(current.mode != TrackMidiInputMode::None);
+    midiInputChannelComboGuard_ = false;
+
+    // ---- status (only claims space when there is something to say) ----
+    if (midiInputStatusLabel_.getText() != snap.statusLine)
+    {
+        midiInputStatusLabel_.setText(snap.statusLine, juce::dontSendNotification);
+        resized();
+    }
+}
+
 void InspectorView::populateSendDestCombo(const int sendRowIndex,
                                           const TrackId activeTrackId,
                                           const Track& track)
@@ -1860,17 +2011,32 @@ void InspectorView::refreshFromSession()
     const bool showMidiChannel
         = (tr.getKind() == TrackKind::Instrument || tr.getKind() == TrackKind::Midi);
     const bool showMidiDest = (tr.getKind() == TrackKind::Midi);
+    const bool showMidiInput = trackKindAcceptsLiveMidiInput(tr.getKind());
     const bool midiChannelVisibilityChanged = (midiChannelComboBox_.isVisible() != showMidiChannel)
-                                              || (midiDestComboBox_.isVisible() != showMidiDest);
+                                              || (midiDestComboBox_.isVisible() != showMidiDest)
+                                              || (midiInputComboBox_.isVisible() != showMidiInput);
     midiChannelCaptionLabel_.setVisible(showMidiChannel);
     midiChannelComboBox_.setVisible(showMidiChannel);
     midiDestCaptionLabel_.setVisible(showMidiDest);
     midiDestComboBox_.setVisible(showMidiDest);
+    midiInputCaptionLabel_.setVisible(showMidiInput);
+    midiInputComboBox_.setVisible(showMidiInput);
+    midiInputChannelCaptionLabel_.setVisible(showMidiInput);
+    midiInputChannelComboBox_.setVisible(showMidiInput);
+    midiInputStatusLabel_.setVisible(showMidiInput);
     if (midiChannelVisibilityChanged)
     {
         // `resized()` only reserves a row for this control while it is visible, so the rest of the
         // panel has to be re-flowed when the selected row changes kind.
         resized();
+    }
+    if (showMidiInput)
+    {
+        populateMidiInputControls(tr);
+    }
+    else if (midiInputStatusLabel_.getText().isNotEmpty())
+    {
+        midiInputStatusLabel_.setText({}, juce::dontSendNotification);
     }
     if (showMidiChannel)
     {
@@ -2043,6 +2209,35 @@ void InspectorView::resized()
         midiDestCaptionLabel_.setBounds(area.removeFromTop(18));
         area.removeFromTop(2);
         midiDestComboBox_.setBounds(area.removeFromTop(24));
+    }
+
+    // Live MIDI input (Instrument / Midi rows): device, input-channel filter, optional status.
+    if (midiInputComboBox_.isVisible())
+    {
+        area.removeFromTop(8);
+        midiInputCaptionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        midiInputComboBox_.setBounds(area.removeFromTop(24));
+        area.removeFromTop(6);
+        midiInputChannelCaptionLabel_.setBounds(area.removeFromTop(18));
+        area.removeFromTop(2);
+        midiInputChannelComboBox_.setBounds(area.removeFromTop(24));
+        if (midiInputStatusLabel_.getText().isNotEmpty())
+        {
+            area.removeFromTop(2);
+            // Wrapped status text at 10.5 px: estimate the wrapped line count per source line.
+            const int approxCharsPerLine = juce::jmax(16, area.getWidth() / 6);
+            int lines = 0;
+            for (const auto& srcLine : juce::StringArray::fromLines(midiInputStatusLabel_.getText()))
+            {
+                lines += juce::jmax(1, (srcLine.length() + approxCharsPerLine - 1) / approxCharsPerLine);
+            }
+            midiInputStatusLabel_.setBounds(area.removeFromTop(14 * juce::jlimit(1, 6, lines)));
+        }
+        else
+        {
+            midiInputStatusLabel_.setBounds(area.getX(), area.getY(), area.getWidth(), 0);
+        }
     }
 
     // Audio Input sits directly above Audio Output and only claims vertical space on audio rows.

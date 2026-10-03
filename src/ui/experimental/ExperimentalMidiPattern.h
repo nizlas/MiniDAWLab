@@ -22,6 +22,7 @@
 // =============================================================================
 
 #include "ui/experimental/ExperimentalMidiCcAutomation.h"
+#include "ui/experimental/ExperimentalMidiPitchBend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -76,6 +77,11 @@ struct ExperimentalMidiPattern
     /// `midi_cc::normalizePoints` on load and after every edit. v18 and older projects simply
     /// have an empty vector.
     std::vector<MidiCcPoint> ccPoints;
+
+    /// Live-recording slice: sparse 14-bit pitch-bend points, clip-owned like `ccPoints` (hold
+    /// semantics, per channel; see `ExperimentalMidiPitchBend.h`). Kept normalized by
+    /// `midi_pb::normalizePoints`. Projects saved before v24 simply have an empty vector.
+    std::vector<MidiPitchBendPoint> pitchBendPoints;
 };
 
 [[nodiscard]] inline int experimentalEffectiveTicksPerQuarter(const ExperimentalMidiPattern& p) noexcept

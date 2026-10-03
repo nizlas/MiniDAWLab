@@ -97,6 +97,12 @@ public:
         /// (InstrumentRuntimeCoordinator::setSecondaryTransportActive — idempotent; the swap
         /// takes effect at the next audio-block boundary). Optional.
         std::function<void(TrackId, bool)> setSecondaryTransportActive;
+        /// Live-MIDI slice: true while at least one monitored row (the destination itself or a
+        /// Midi row routed to it) needs a LIVE instrument for monitoring. A Current proxy cannot
+        /// play new notes, so while this holds and Primary is unusable the configured Secondary
+        /// becomes the transport source TEMPORARILY (for existing clips AND the live input — one
+        /// instance, never proxy + live in parallel). Optional; absent = never requested.
+        std::function<bool(TrackId)> liveMonitorRequested;
     };
 
     explicit ProxyPlaybackCoordinator(Dependencies deps) : deps_(std::move(deps)) {}
@@ -292,6 +298,9 @@ private:
         bool silentGeneration = false;
         juce::String generationId;
         juce::String cacheKey; ///< generation + engine rate (reader reuse/coalescing)
+        /// The Secondary was chosen ONLY because live monitoring needs a live source (a Current
+        /// proxy would otherwise have been selected). Source selection only — never currency.
+        bool liveMonitorOverride = false;
     };
 
     struct PublishedDestination
@@ -301,7 +310,19 @@ private:
         ProxyPlaybackSourceState state = ProxyPlaybackSourceState::MissingPrimary;
         juce::String cacheKey;
         std::uint64_t lastSeenUnderruns = 0;
+        bool liveMonitorOverride = false;
     };
+
+public:
+    /// [Message thread] True while the destination plays its Secondary temporarily because a
+    /// monitored row needs a live instrument (UI: "Secondary used for live monitoring").
+    [[nodiscard]] bool isLiveMonitorOverrideActive(const TrackId destination) const
+    {
+        const auto it = published_.find(destination);
+        return it != published_.end() && it->second.liveMonitorOverride;
+    }
+
+private:
 
     struct RetiredReader
     {
@@ -364,6 +385,20 @@ private:
         {
             ev.generationId = meta->generationId;
         }
+
+        // ---- Live-monitoring override (live MIDI slice). A Current proxy cannot play new notes:
+        // while a monitored row targets this destination, the configured Secondary — when it can
+        // be loaded — becomes the transport source instead of the proxy, for the background clips
+        // AND the live input (one instance; proxy and live never sound together). Generation
+        // currency is untouched: Monitor on/off never makes the proxy stale or the project dirty.
+        // With no usable Secondary the proxy keeps playing and live monitoring is reported absent.
+        if (ev.decision.useProxy && deps_.liveMonitorRequested && deps_.liveMonitorRequested(destination)
+            && deps_.secondaryUsable && deps_.secondaryUsable(destination))
+        {
+            ev.decision = { ProxyPlaybackSourceState::SecondaryLive, false };
+            ev.liveMonitorOverride = true;
+        }
+
         if (!ev.decision.useProxy)
         {
             ev.reader = nullptr; // never hand a reader to a non-proxy decision
@@ -475,6 +510,7 @@ private:
         next.state = ev.decision.state;
         next.cacheKey = ev.cacheKey;
         next.reader = ev.reader;
+        next.liveMonitorOverride = ev.liveMonitorOverride;
 
         if (ev.decision.useProxy)
         {

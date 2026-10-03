@@ -466,6 +466,75 @@ void UndoRedoCoordinator::executeUndoableTrackDelete(
     }
 }
 
+void UndoRedoCoordinator::executeUndoableRecordingCommit(const juce::String& label,
+                                                        std::function<void()> mutator)
+{
+    std::shared_ptr<const SessionSnapshot> before = session_.loadSessionSnapshotForAudioThread();
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> beforeMusical;
+    if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
+    {
+        beforeMusical = callbacks_.buildSortedInstrumentMusicalUndoSnapshot();
+    }
+    if (callbacks_.stableSortInstrumentMusicalUndoVector)
+    {
+        callbacks_.stableSortInstrumentMusicalUndoVector(beforeMusical);
+    }
+
+    if (mutator)
+    {
+        mutator();
+    }
+    if (callbacks_.reconcileMidiEditorAfterInstrumentEdit)
+    {
+        callbacks_.reconcileMidiEditorAfterInstrumentEdit();
+    }
+
+    std::shared_ptr<const SessionSnapshot> after = session_.loadSessionSnapshotForAudioThread();
+    std::vector<ProjectFileExperimentalInstrumentTrackV1> afterMusical;
+    if (callbacks_.buildSortedInstrumentMusicalUndoSnapshot)
+    {
+        afterMusical = callbacks_.buildSortedInstrumentMusicalUndoSnapshot();
+    }
+    if (callbacks_.stableSortInstrumentMusicalUndoVector)
+    {
+        callbacks_.stableSortInstrumentMusicalUndoVector(afterMusical);
+    }
+
+    const bool sessionChanged = before != nullptr && after != nullptr && before.get() != after.get();
+    const bool musicalChanged = !beforeMusical.empty() && !afterMusical.empty()
+                                && !experimentalInstrumentTracksMusicalUndoEqual(beforeMusical, afterMusical);
+    if (!sessionChanged && !musicalChanged)
+    {
+        if constexpr (undo_diagnostic::kUndoDiag)
+        {
+            writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableRecordingCommit skip: nothing changed label=\""
+                                       + label + "\"");
+        }
+        return;
+    }
+    if (before == nullptr || after == nullptr)
+    {
+        return;
+    }
+    std::optional<InstrumentUndoStepSides> instrumentSides;
+    if (musicalChanged)
+    {
+        instrumentSides = InstrumentUndoStepSides{ std::move(beforeMusical), std::move(afterMusical) };
+    }
+    sessionHistory_.record(label, std::move(before), std::move(after), std::nullopt, std::move(instrumentSides));
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableRecordingCommit recorded label=\"" + label
+                                   + "\" session=" + juce::String(sessionChanged ? "Y" : "n")
+                                   + " musical=" + juce::String(musicalChanged ? "Y" : "n")
+                                   + " undoSize=" + juce::String(sessionHistory_.undoStackSize()));
+    }
+}
+
 void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& label,
                                                        std::function<bool()> mutator)
 {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.9 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.10 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,6 +58,8 @@ target_sources(MiniDAWLab PRIVATE
     src/app/InstrumentTimelineRowCoordinator.cpp
     src/app/ProjectIoCoordinator.cpp
     src/app/RecordingCoordinator.cpp
+    src/app/LiveMidiInputCoordinator.cpp
+    src/engine/LiveMidiInputBus.cpp
     src/app/TrackLanesEditCoordinator.cpp
     src/app/TransportLayoutHelper.cpp
     src/app/TransportPlayPauseStopController.cpp
@@ -396,6 +398,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/engine/RoutingPlanBuilder.cpp
     src/engine/RecorderService.cpp
     src/engine/CountInClickOutput.cpp
+    src/engine/LiveMidiInputBus.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
@@ -421,6 +424,45 @@ if (MSVC)
 endif()
 # PlaybackEngine.cpp includes app/ShortcutDiagnostics.h, which uses the generated JuceHeader.h.
 juce_generate_juce_header(ExportLevelFocusedTests)
+
+# -----------------------------------------------------------------------------
+# LiveMidiRecordingFocusedTests: live MIDI input slice — the realtime LiveMidiInputBus (device-thread
+# push, routing by device slot / channel filter, delivery with sample offsets and the row's output
+# mapping, live-note ownership across setting changes / Monitor off / device loss / host swap,
+# overflow handling, capture stamps, the two time mappings), the take builder (note pairing,
+# boundaries, controller state, tempo / rate math), the v24 project round trip (MIDI input
+# assignment, pitch bend) and pitch-bend MIDI export. Device-free and deterministic.
+# -----------------------------------------------------------------------------
+juce_add_console_app(LiveMidiRecordingFocusedTests PRODUCT_NAME "LiveMidiRecordingFocusedTests")
+target_sources(LiveMidiRecordingFocusedTests PRIVATE
+    tests/selftest/LiveMidiRecordingFocusedTestsMain.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/LiveMidiInputBus.cpp
+    src/io/InstrumentMidiClipExport.cpp
+    src/io/ProjectFile.cpp)
+target_include_directories(LiveMidiRecordingFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(LiveMidiRecordingFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(LiveMidiRecordingFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(LiveMidiRecordingFocusedTests PRIVATE /wd4458)
+endif()
 
 # -----------------------------------------------------------------------------
 # TrackHeaderColumnFocusedTests: the shared track-header column width. Drives the PRODUCTION

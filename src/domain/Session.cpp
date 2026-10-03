@@ -1266,6 +1266,35 @@ bool Session::setTrackInputAssignment(const TrackId trackId,
     return true;
 }
 
+bool Session::setTrackMidiInputAssignment(const TrackId trackId,
+                                          TrackMidiInputAssignment assignment) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0 || !trackKindAcceptsLiveMidiInput(current->getTrack(idx).getKind()))
+    {
+        return false;
+    }
+    const TrackMidiInputAssignment sanitized = sanitizeTrackMidiInputAssignment(std::move(assignment));
+    if (sanitized == current->getTrack(idx).getMidiInputAssignment())
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> next
+        = SessionSnapshot::withTrackMidiInputAssignment(*current, trackId, sanitized);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    return true;
+}
+
 void Session::setTrackStereoPan(const TrackId trackId, const float stereoPan) noexcept
 {
     if (trackId == kInvalidTrackId)
@@ -1687,6 +1716,7 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.channelFaderGain = t.getChannelFaderGain();
         tr.preGainDb = t.getPreGainDb();
         tr.inputAssignment = t.getInputAssignment();
+        tr.midiInputAssignment = t.getMidiInputAssignment();
         tr.stereoPan = t.getStereoPan();
         tr.off = (t.getKind() == TrackKind::Master) ? false : t.isTrackOff();
         tr.muted = t.isMuted();
@@ -2134,6 +2164,13 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             && trDto.inputAssignment.kind != TrackInputKind::DefaultFirstInput)
         {
             built.back() = built.back().withInputAssignment(trDto.inputAssignment);
+        }
+        // Live MIDI input (v24): Instrument / Midi rows only; pre-v24 files carry no keys and keep
+        // the default `None` — no automatic MIDI coupling is created when an older project opens.
+        if (trackKindAcceptsLiveMidiInput(tk)
+            && trDto.midiInputAssignment.mode != TrackMidiInputMode::None)
+        {
+            built.back() = built.back().withMidiInputAssignment(trDto.midiInputAssignment);
         }
         appendProjectLoadDiagnosticLine(
             "apply: built track id=" + juce::String((juce::int64)trDto.id) + " kind="

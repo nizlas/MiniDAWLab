@@ -226,6 +226,12 @@ public:
     [[nodiscard]] bool setTrackInputAssignment(TrackId trackId,
                                                TrackInputAssignment assignment) noexcept;
 
+    /// [Message thread] Set an Instrument / Midi row's live MIDI input (device + channel filter).
+    /// Sanitized; returns false (no snapshot publish) when the track is missing, cannot take live
+    /// MIDI, or the value is unchanged — callers use this for undo no-op suppression.
+    [[nodiscard]] bool setTrackMidiInputAssignment(TrackId trackId,
+                                                   TrackMidiInputAssignment assignment) noexcept;
+
     // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.

@@ -78,6 +78,12 @@ struct ProjectFileTrackV1
     /// default, so older projects keep their established recording source exactly. Sanitized on
     /// load (inconsistent values repair to the default, never to a different concrete input).
     TrackInputAssignment inputAssignment{};
+    /// v24: live MIDI input for Instrument / Midi rows (`midiInput` = "device" | "all",
+    /// `midiInputDeviceId`, `midiInputDeviceName`, `midiInputChannel` 1 … 16 — absent = all
+    /// channels). All keys omitted for the default `None` — absent keys (every pre-v24 file) load as
+    /// None, so opening an older project never creates a MIDI coupling by itself. Identity-based
+    /// (JUCE device identifier + the readable name), never a list index; sanitized on load.
+    TrackMidiInputAssignment midiInputAssignment{};
     /// Optional stereo pan [-1,+1]; omitted when ~ center (`pan` JSON key).
     float stereoPan = 0.0f;
     /// Skipped entirely by playback (JSON key `"off"`). Omitted when false.
@@ -132,6 +138,17 @@ struct ProjectFileExperimentalMidiCcPointV19
     int interpolationToNext = 1;
 };
 
+/// v24: one sparse pitch-bend point (clip-owned, tick domain of `timelineNotes`). JSON array key
+/// `pitchBend`; omitted when empty, absent in v23-and-older files → no pitch bend, identical sound.
+struct ProjectFileExperimentalMidiPitchBendPointV24
+{
+    std::int64_t startTick = 0;
+    /// Raw 14-bit wheel position 0 … 16383 (8192 = centre).
+    int value = 8192;
+    /// Native MIDI channel 1 … 16.
+    int channel = 1;
+};
+
 struct ProjectFileExperimentalInstrumentClipV1
 {
     std::uint64_t id = 0;
@@ -150,6 +167,8 @@ struct ProjectFileExperimentalInstrumentClipV1
     std::vector<ProjectFileExperimentalTimelineNoteV12> timelineNotes;
     /// v19+ optional: sparse MIDI CC automation points; omitted when empty.
     std::vector<ProjectFileExperimentalMidiCcPointV19> ccPoints;
+    /// v24+ optional: sparse pitch-bend points; omitted when empty.
+    std::vector<ProjectFileExperimentalMidiPitchBendPointV24> pitchBendPoints;
     /// v12+ optional: MIDI roll horizontal scroll (samples). Omitted when no saved roll viewport.
     std::int64_t midiRollVisibleStartSamples = 0;
     /// v12+ optional: MIDI roll zoom; absence or 0 = no per-clip roll viewport in file.
@@ -351,7 +370,12 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**23** adds the optional `tracks[].inputKind` /
+    /// Current JSON writer version (**24** adds the optional `tracks[].midiInput` /
+    /// `midiInputDeviceId` / `midiInputDeviceName` / `midiInputChannel` — per Instrument/Midi-row
+    /// live MIDI input for monitoring and recording; absent = None — and the optional
+    /// `experimentalInstrumentTracks[].clips[].pitchBend` sparse 14-bit pitch-bend points; both
+    /// additive with absent-key defaults).
+    /// **23** adds the optional `tracks[].inputKind` /
     /// `inputChanA` / `inputChanB` — per-audio-track device input assignment for recording and
     /// input monitoring; additive with absent-key default = first active input, mono — the
     /// pre-v23 capture behavior).
@@ -367,7 +391,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 23;
+    static constexpr int kCurrentVersion = 24;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

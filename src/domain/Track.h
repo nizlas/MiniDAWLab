@@ -150,6 +150,78 @@ sanitizeTrackInputAssignment(TrackInputAssignment a) noexcept
     }
 }
 
+// ---------------------------------------------------------------------------
+// MIDI input assignment — which MIDI device feeds an Instrument / Midi row live
+// ---------------------------------------------------------------------------
+// Live MIDI (a keyboard) reaches a row through this assignment; it is independent of the row's
+// MIDI *output* channel (`getMidiOutputChannel()`, applied to everything the row sends on) and of
+// its `MIDI To` destination (which instrument a `Midi` row plays). The device is identified by
+// JUCE's stable device identifier plus the human-readable name the user chose — never a list
+// index. A device that is not present on this machine stays assigned ("(missing)" in the UI),
+// receives nothing and is never silently replaced by whichever device happens to be first.
+// `channelFilter` is an INPUT filter (0 = all channels, 1 … 16 = only that channel) and never
+// rewrites the channel of a received event: recorded events keep their received channel, and the
+// row's normal output mapping (Preserve / Force) is applied on delivery exactly like playback.
+enum class TrackMidiInputMode : std::uint8_t
+{
+    /// No live input (default for new rows and for every project saved before v24).
+    None,
+    /// One specific device (`deviceIdentifier` / `deviceName`).
+    Device,
+    /// Every MIDI input device present on this machine.
+    AllEnabled,
+};
+
+inline constexpr int kTrackMidiInputChannelAll = 0;
+
+struct TrackMidiInputAssignment
+{
+    TrackMidiInputMode mode = TrackMidiInputMode::None;
+    /// JUCE `MidiDeviceInfo::identifier` (stable across sessions on one machine). Device mode only.
+    juce::String deviceIdentifier;
+    /// `MidiDeviceInfo::name` at the time of selection — shown even while the device is missing.
+    juce::String deviceName;
+    /// `kTrackMidiInputChannelAll` or 1 … 16.
+    int channelFilter = kTrackMidiInputChannelAll;
+
+    [[nodiscard]] bool operator==(const TrackMidiInputAssignment& o) const noexcept
+    {
+        return mode == o.mode && deviceIdentifier == o.deviceIdentifier && deviceName == o.deviceName
+               && channelFilter == o.channelFilter;
+    }
+    [[nodiscard]] bool operator!=(const TrackMidiInputAssignment& o) const noexcept
+    {
+        return !(*this == o);
+    }
+};
+
+/// Repairs any stored/serialized assignment: a Device mode without an identifier falls back to
+/// None (never to another device); the channel filter is clamped to All / 1 … 16.
+[[nodiscard]] inline TrackMidiInputAssignment
+sanitizeTrackMidiInputAssignment(TrackMidiInputAssignment a) noexcept
+{
+    if (a.channelFilter < kTrackMidiInputChannelAll || a.channelFilter > 16)
+    {
+        a.channelFilter = kTrackMidiInputChannelAll;
+    }
+    switch (a.mode)
+    {
+    case TrackMidiInputMode::Device:
+        if (a.deviceIdentifier.isEmpty())
+        {
+            return { TrackMidiInputMode::None, {}, {}, a.channelFilter };
+        }
+        return a;
+    case TrackMidiInputMode::AllEnabled:
+        a.deviceIdentifier.clear();
+        a.deviceName.clear();
+        return a;
+    case TrackMidiInputMode::None:
+    default:
+        return { TrackMidiInputMode::None, {}, {}, a.channelFilter };
+    }
+}
+
 enum class TrackKind : std::uint8_t
 {
     Audio,
@@ -261,9 +333,17 @@ inline constexpr float kSendAmountMaxLinear = 2.0f;
     return kind == TrackKind::Audio;
 }
 
+/// Rows whose record-arm records an **audio** take through `RecorderService`.
 [[nodiscard]] inline constexpr bool trackKindAcceptsRecordArm(const TrackKind kind) noexcept
 {
     return kind == TrackKind::Audio;
+}
+
+/// Rows that can receive live MIDI (Inspector `MIDI Input`), monitor it and record it as MIDI
+/// clips: the rows that own timeline MIDI clips.
+[[nodiscard]] inline constexpr bool trackKindAcceptsLiveMidiInput(const TrackKind kind) noexcept
+{
+    return kind == TrackKind::Instrument || kind == TrackKind::Midi;
 }
 
 /// Rows that own timeline MIDI clips and are edited in the MIDI editor.
@@ -345,6 +425,12 @@ public:
     {
         return inputAssignment_;
     }
+    /// Live MIDI input (device + channel filter) for Instrument / Midi rows — see the block above
+    /// `TrackKind`. Not a constructor parameter (same COW route as the audio input assignment).
+    [[nodiscard]] const TrackMidiInputAssignment& getMidiInputAssignment() const noexcept
+    {
+        return midiInputAssignment_;
+    }
     /// If true, `PlaybackEngine` skips this track entirely (not the same as mute).
     [[nodiscard]] bool isTrackOff() const noexcept { return trackOff_; }
     /// If true, effective output gain is zero; stored fader value is unchanged.
@@ -375,6 +461,7 @@ public:
     [[nodiscard]] Track withChannelFaderGain(float gain) const noexcept;
     [[nodiscard]] Track withPreGainDb(float preGainDb) const noexcept;
     [[nodiscard]] Track withInputAssignment(TrackInputAssignment assignment) const noexcept;
+    [[nodiscard]] Track withMidiInputAssignment(TrackMidiInputAssignment assignment) const noexcept;
     [[nodiscard]] Track withTrackOff(bool off) const noexcept;
     [[nodiscard]] Track withMuted(bool muted) const noexcept;
     [[nodiscard]] Track withKind(TrackKind kind) const noexcept;
@@ -391,6 +478,7 @@ private:
     float channelFaderGain_ = kTrackChannelVolumeUnityGain;
     float preGainDb_ = kTrackPreGainDbDefault;
     TrackInputAssignment inputAssignment_{};
+    TrackMidiInputAssignment midiInputAssignment_{};
     bool trackOff_ = false;
     bool trackMuted_ = false;
     TrackKind kind_ = TrackKind::Audio;

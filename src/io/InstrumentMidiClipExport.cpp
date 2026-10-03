@@ -176,6 +176,24 @@ InstrumentMidiClipExportResult buildInstrumentMidiClipMidiFile(const InstrumentM
             result.ccEventsExported = ccCount;
         }
 
+        // v24: recorded pitch bend as standard Pitch Wheel events — one per stored point, the raw
+        // 14-bit value preserved, same channel contract as CC and notes, added before the notes
+        // so a wheel position at a note's start tick precedes that Note On after the stable sort.
+        {
+            std::vector<MidiPitchBendPoint> pts = clip.pattern.pitchBendPoints;
+            (void)midi_pb::normalizePoints(pts);
+            int pbCount = 0;
+            for (const auto& p : pts)
+            {
+                const int effCh = midi_channel_diag::effectiveChannel((int)p.channel,
+                                                                      sourceTrackMidiOutputChannel);
+                noteTrack.addEvent(juce::MidiMessage::pitchWheel(effCh, juce::jlimit(0, kMidiPitchBendMax, p.value))
+                                       .withTimeStamp((double)p.startTick));
+                ++pbCount;
+            }
+            result.pitchBendEventsExported = pbCount;
+        }
+
         for (const auto& n : notes)
         {
             const int ch = juce::jlimit(1, 16, n.channel);

@@ -66,6 +66,14 @@ namespace proxy_snapshot
         int ticksPerQuarter = 960;
         std::vector<SnapshotNote> notes;
         std::vector<SnapshotCcPoint> ccPoints;
+        /// v24 pitch bend (raw 14-bit, native channel) — absent for every pre-v24 clip.
+        struct SnapshotPitchBendPoint
+        {
+            std::int64_t startTick = 0;
+            int value = 8192;
+            int channel = 1;
+        };
+        std::vector<SnapshotPitchBendPoint> pitchBendPoints;
     };
 
     /// F7/F8/F9 — one routed MIDI source with its content and eligibility, in session order.
@@ -202,6 +210,15 @@ namespace proxy_snapshot
                 sp.interpolationToNext = (p.interpolationToNext == MidiCcInterpolation::linear) ? 1 : 0;
                 out.ccPoints.push_back(sp);
             }
+            out.pitchBendPoints.reserve(c.pattern.pitchBendPoints.size());
+            for (const auto& p : c.pattern.pitchBendPoints)
+            {
+                SnapshotClip::SnapshotPitchBendPoint pp;
+                pp.startTick = p.startTick;
+                pp.value = p.value;
+                pp.channel = (int)p.channel;
+                out.pitchBendPoints.push_back(pp);
+            }
             return out;
         }
 
@@ -224,6 +241,15 @@ namespace proxy_snapshot
                 }
             }
             for (const auto& p : c.ccPoints)
+            {
+                const std::int64_t atRef = c.timelineAnchorSamples
+                                           + ticksToRelativeSamples(p.startTick, bpm, tpq, referenceRate);
+                if (atRef > last)
+                {
+                    last = atRef;
+                }
+            }
+            for (const auto& p : c.pitchBendPoints)
             {
                 const std::int64_t atRef = c.timelineAnchorSamples
                                            + ticksToRelativeSamples(p.startTick, bpm, tpq, referenceRate);
@@ -304,7 +330,7 @@ namespace proxy_snapshot
         const auto scanClips = [&lastRef, &anyEvents, refRate](const std::vector<SnapshotClip>& clips) {
             for (const auto& c : clips)
             {
-                if (!c.notes.empty() || !c.ccPoints.empty())
+                if (!c.notes.empty() || !c.ccPoints.empty() || !c.pitchBendPoints.empty())
                 {
                     anyEvents = true;
                     const std::int64_t e = detail::clipLastEventReferenceSample(c, refRate);

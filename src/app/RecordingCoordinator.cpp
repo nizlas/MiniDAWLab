@@ -227,7 +227,7 @@ void RecordingCoordinator::onCycleRecordingWrapTimerTick()
 
 void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContext)
 {
-    if (!recorder_.isRecording())
+    if (!isRecordingInProgress())
     {
         return;
     }
@@ -236,7 +236,9 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
         juce::Logger::writeToLog(juce::String{"[Rec] stop/commit source="} + sourceContext);
     }
 
-    const bool commitCycleTakes = cycleRecordingActive_;
+    const bool audioTake = recorder_.isRecording();
+    const bool midiTake = midiTakeActive_;
+    const bool commitCycleTakes = cycleRecordingActive_ && audioTake;
     const TrackId cycleTrackId = cycleSessionTrackId_;
     const std::int64_t cycleLocL = cycleSessionLocL_;
     const std::int64_t cycleLocR = cycleSessionLocR_;
@@ -244,6 +246,9 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
     const double cycleSr = cycleSessionSampleRate_;
 
     transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
+    // Stop boundary for the MIDI take: the transport position at the moment of stop. Held notes
+    // end here, a held sustain pedal is released here.
+    const std::int64_t stopSample = transport_.readPlayheadSamplesForUi();
     callbacks_.updatePlayPauseButtonFromTransport();
     if (cycleRecordingWrapTimer_ != nullptr)
     {
@@ -252,6 +257,39 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
 
     callbacks_.clearCycleRecordingPreviewContext();
     cycleRecordingActive_ = false;
+    midiTakeActive_ = false;
+
+    // One atomic commit for everything this take produced (audio clip + MIDI clips), so a single
+    // Undo removes the whole take and Redo restores it coherently.
+    const auto commitUndoable = [this](std::function<void()> commit) {
+        if (callbacks_.runUndoableTakeCommit)
+        {
+            callbacks_.runUndoableTakeCommit("Record take", std::move(commit));
+        }
+        else
+        {
+            commit();
+        }
+    };
+    const auto commitMidiClipsNow = [this, midiTake, stopSample]() -> int {
+        if (!midiTake || !callbacks_.commitMidiTake)
+        {
+            return 0;
+        }
+        const int clips = callbacks_.commitMidiTake(stopSample);
+        juce::Logger::writeToLog("[Rec] MIDI take committed: " + juce::String(clips) + " clip(s), stop sample "
+                                 + juce::String((juce::int64)stopSample));
+        return clips;
+    };
+
+    if (!audioTake)
+    {
+        // MIDI-only take.
+        commitUndoable([&] { (void)commitMidiClipsNow(); });
+        callbacks_.syncViewportFromSession();
+        callbacks_.repaintRulerAndLanes();
+        return;
+    }
 
     const RecordedTakeResult r = recorder_.stopRecordingAndFinalize();
 
@@ -264,6 +302,13 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             "Recording",
             r.errorMessage.isNotEmpty() ? r.errorMessage : "Could not finalize recording.");
         juce::Logger::writeToLog(juce::String{"[Rec] stop/finalize failed: "} + r.errorMessage);
+        // The MIDI part of the take is still valid material — keep it.
+        if (midiTake)
+        {
+            commitUndoable([&] { (void)commitMidiClipsNow(); });
+            callbacks_.syncViewportFromSession();
+            callbacks_.repaintRulerAndLanes();
+        }
         return;
     }
 
@@ -496,12 +541,16 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
         const std::int64_t committedStartSamples = juce::jmax<std::int64_t>(
             std::int64_t{ 0 }, r.recordingStartSample + recordingPlacementOffsetSamples);
 
-        const juce::Result ar = session_.addRecordedTakeAtSample(
-            r.takeFile,
-            r.sampleRate,
-            committedStartSamples,
-            r.targetTrackId,
-            r.intendedSampleCount);
+        juce::Result ar = juce::Result::ok();
+        commitUndoable([&] {
+            ar = session_.addRecordedTakeAtSample(
+                r.takeFile,
+                r.sampleRate,
+                committedStartSamples,
+                r.targetTrackId,
+                r.intendedSampleCount);
+            (void)commitMidiClipsNow();
+        });
         if (!ar.wasOk())
         {
             juce::AlertWindow::showMessageBoxAsync(
@@ -518,9 +567,32 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
     callbacks_.repaintRulerAndLanes();
 }
 
+bool RecordingCoordinator::isRecordingInProgress() const noexcept
+{
+    return recorder_.isRecording() || midiTakeActive_;
+}
+
+void RecordingCoordinator::abortMidiTakeForProjectReplace()
+{
+    if (isCountInActive())
+    {
+        cancelCountIn();
+    }
+    if (!midiTakeActive_)
+    {
+        return;
+    }
+    midiTakeActive_ = false;
+    if (callbacks_.abortMidiTake)
+    {
+        callbacks_.abortMidiTake();
+    }
+    juce::Logger::writeToLog("[Rec] MIDI take aborted (project replaced)");
+}
+
 void RecordingCoordinator::numpadRecordToggled()
 {
-    if (recorder_.isRecording())
+    if (isRecordingInProgress())
     {
         stopRecordingAndCommitFromUi("numpad_*");
         return;
@@ -532,14 +604,58 @@ void RecordingCoordinator::numpadRecordToggled()
         return;
     }
 
+    // Live MIDI rows (Instrument / Midi kind) record through their own capture path; several may
+    // be armed at once and they may combine with the (single) armed audio track in one take.
+    const std::vector<TrackId> midiTracks = callbacks_.armedMidiTracksReadyToRecord
+                                                ? callbacks_.armedMidiTracksReadyToRecord()
+                                                : std::vector<TrackId>{};
     const TrackId armed = recorder_.getArmedTrackId();
-    if (armed == kInvalidTrackId)
+    if (armed == kInvalidTrackId && midiTracks.empty())
     {
         juce::AlertWindow::showMessageBoxAsync(
             juce::AlertWindow::InfoIcon,
             "Recording",
-            "Arm a track for recording (use the R control on a track header) first.");
+            "Arm a track for recording first (the R control on a track header). An instrument or "
+            "MIDI track also needs a MIDI Input selected in the Inspector.");
         juce::Logger::writeToLog("[Rec] start blocked: no armed track");
+        return;
+    }
+    if (!midiTracks.empty())
+    {
+        // First live-MIDI delivery records one linear take. Cycle is left exactly as the user set
+        // it (never switched off behind their back) — they are told what to change.
+        const bool cycleOn = transport_.readCycleEnabledForUi();
+        const std::int64_t locL = session_.getLeftLocatorSamples();
+        const std::int64_t locR = session_.getRightLocatorSamples();
+        if (cycleOn && locR > locL && locR > 0)
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "Recording",
+                "MIDI recording needs Cycle switched off: it records one linear take. Turn Cycle "
+                "off, then press Record again. (Audio-only cycle recording is unchanged.)");
+            juce::Logger::writeToLog("[Rec] start blocked: cycle active with armed MIDI rows");
+            return;
+        }
+    }
+    if (armed == kInvalidTrackId)
+    {
+        // MIDI-only take: no take file, but the transport still needs a running device.
+        juce::AudioIODevice* const dev = deviceManager_.getCurrentAudioDevice();
+        if (dev == nullptr || dev->getCurrentSampleRate() <= 0.0)
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon, "Audio", "No active audio device.");
+            return;
+        }
+        cycleRecordingActive_ = false;
+        BeginRecordingRequest req;
+        req.targetTrackId = kInvalidTrackId; // no audio recorder take
+        req.recordingStartSample = 0;
+        req.sampleRate = dev->getCurrentSampleRate();
+        req.numChannels = 1;
+        pendingMidiTake_ = true;
+        startCountInAfterValidation(std::move(req));
         return;
     }
     {
@@ -724,6 +840,7 @@ void RecordingCoordinator::numpadRecordToggled()
     req.numChannels = takeNumChannels;
     req.inputPhysicalChannelA = takePhysA;
     req.inputPhysicalChannelB = takePhysB;
+    pendingMidiTake_ = !midiTracks.empty();
     startCountInAfterValidation(std::move(req));
 }
 
@@ -757,6 +874,7 @@ void RecordingCoordinator::cancelCountIn()
     }
     countInAwaitingPostClickDelay_ = false;
     pendingCountIn_.reset();
+    pendingMidiTake_ = false;
     countInClicks_.cancel();
     countInStatusLabel_.setText({}, juce::dontSendNotification);
     if (cycleRecordingActive_)
@@ -850,6 +968,12 @@ void RecordingCoordinator::completeCountInAndStartRecording()
     countInStatusLabel_.setText({}, juce::dontSendNotification);
 
     const bool armedCycleSession = cycleRecordingActive_;
+    const bool audioTake = req.targetTrackId != kInvalidTrackId;
+    const bool midiTake = pendingMidiTake_;
+    pendingMidiTake_ = false;
+    // ONE boundary for every armed row, audio and MIDI alike: the transport position when the
+    // count-in finishes. The MIDI capture maps each gesture onto this timeline (see
+    // LiveMidiInputBus time model); the audio take places its file here (+ its own offset).
     req.recordingStartSample = transport_.readPlayheadSamplesForUi();
     if (armedCycleSession)
     {
@@ -859,7 +983,7 @@ void RecordingCoordinator::completeCountInAndStartRecording()
         cycleSessionRecordingStartSample_ = req.recordingStartSample;
     }
 
-    if (!recorder_.beginRecording(req))
+    if (audioTake && !recorder_.beginRecording(req))
     {
         if (armedCycleSession)
         {
@@ -879,7 +1003,16 @@ void RecordingCoordinator::completeCountInAndStartRecording()
         }
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Recording", err);
         juce::Logger::writeToLog(juce::String{"[Rec] beginRecording failed: "} + err);
-        return;
+        return; // the MIDI take is not started either: one take, one outcome
+    }
+
+    if (midiTake && callbacks_.beginMidiTake)
+    {
+        callbacks_.beginMidiTake(req.recordingStartSample, req.sampleRate);
+        midiTakeActive_ = true;
+        juce::Logger::writeToLog("[Rec] MIDI take started at sample "
+                                 + juce::String((juce::int64)req.recordingStartSample)
+                                 + (audioTake ? " (with audio take)" : " (MIDI only)"));
     }
 
     if (armedCycleSession)

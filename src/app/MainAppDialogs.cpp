@@ -373,7 +373,7 @@ void showAudioSettingsDialog(juce::Component& parent,
                              PlaybackEngine& playbackEngine,
                              juce::Component::SafePointer<LatencySettingsView>& audioLatencySettingsWeakSlot)
 {
-    if (recorder.isRecording() || recordingCoordinator.isCountInActive())
+    if (recorder.isRecording() || recordingCoordinator.isRecordingInProgress() || recordingCoordinator.isCountInActive())
     {
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
                                                "Audio Settings",

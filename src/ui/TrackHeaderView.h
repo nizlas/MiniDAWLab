@@ -53,10 +53,10 @@ struct TrackHeaderModel
     bool showRecordAndPowerStripCells = true;
     /// When false or `callbacks.onOpenInstrumentEditor` unset, strip omits instrument-editor cell (audio rows).
     bool instrumentEditorAvailable = false;
-    /// Input-monitoring cell (speaker glyph next to Arm). Audio rows: available + interactable.
-    /// Instrument destination rows: available but NOT interactable — a visibly disabled
-    /// placeholder (always playback mode; live MIDI monitoring does not exist yet). Plain MIDI /
-    /// group / master rows: unavailable — no cell, hit target, or tooltip.
+    /// Input-monitoring cell (speaker glyph next to Arm). Audio rows: live audio input monitoring.
+    /// Instrument and Midi rows: live MIDI monitoring (available + interactable since the live
+    /// MIDI slice; before that the instrument cell was a disabled placeholder and Midi rows had
+    /// none). Group / master rows: unavailable — no cell, hit target, or tooltip.
     bool monitorAvailable = false;
     /// Speaker lights orange while live input monitoring is on (runtime state, not persisted).
     bool monitorEnabled = false;
@@ -70,6 +70,9 @@ struct TrackHeaderModel
     bool instrumentAlternativesAvailable = false;
     /// When false, double-click inline rename is disabled (`TrackKind::Master` / Stereo Out).
     bool trackNameRenameEnabled = true;
+    /// Live MIDI arrived for this row within the last ~150 ms: a small green dot is painted at
+    /// the right end of the name row (discreet activity indicator, never a dialog).
+    bool midiActivity = false;
 };
 
 using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;

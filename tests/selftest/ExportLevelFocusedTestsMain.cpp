@@ -1291,6 +1291,7 @@ void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstr
 void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(ExperimentalInstrumentHost&, int, int) noexcept {}
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* const*, int, int, float, float) noexcept {}
 void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int) noexcept {}
+void ExperimentalInstrumentHost::audioThread_addMidiEventForCurrentBlock(int, const juce::MidiMessage&) noexcept {}
 void ExperimentalInstrumentHost::audioThread_noteProxyTimelineSegmentForCurrentBlock(std::int64_t, int, int) noexcept {}
 void ExperimentalInstrumentHost::audioThread_noteProxyLoopRangeForCurrentBlock(std::int64_t, std::int64_t) noexcept {}
 bool ExperimentalInstrumentHost::messageThread_prefetchProxyRangeForOffline(std::int64_t, int, int) noexcept { return true; }

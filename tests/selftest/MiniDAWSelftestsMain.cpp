@@ -6432,6 +6432,15 @@ namespace
             return out;
         };
         deps.engineRateProvider = [&] { return engineRate; };
+        // Live-MIDI slice: Monitor on a row targeting this destination + a loadable Secondary.
+        bool liveMonitorRequested = false;
+        bool secondaryUsable = false;
+        std::vector<std::pair<TrackId, bool>> secondaryTransportCalls;
+        deps.liveMonitorRequested = [&](const TrackId) { return liveMonitorRequested; };
+        deps.secondaryUsable = [&](const TrackId) { return secondaryUsable; };
+        deps.setSecondaryTransportActive = [&](const TrackId tid, const bool on) {
+            secondaryTransportCalls.emplace_back(tid, on);
+        };
 
         proxy_playback::ProxyPlaybackCoordinator coord(std::move(deps));
         const TrackId dest{ 1 };
@@ -6467,6 +6476,44 @@ namespace
         }
         expect(coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::ProxyCurrent,
                "p1g-e2e: runtime status is ProxyCurrent once resident");
+
+        // 2b) Live MIDI monitoring override: a Current proxy cannot play new notes. Monitor on
+        //     (+ loadable Secondary) -> the Secondary becomes the TEMPORARY transport source
+        //     (view withdrawn, no proxy + live in parallel); Monitor off -> the Current proxy is
+        //     back with its generation untouched. Without a Secondary the proxy keeps playing.
+        {
+            secondaryTransportCalls.clear();
+            liveMonitorRequested = true;
+            secondaryUsable = false;
+            coord.refreshDestination(dest);
+            expect(hostSlot != nullptr && hostSlot->useProxy && !coord.isLiveMonitorOverrideActive(dest),
+                   "live-midi/proxy: Monitor without a Secondary keeps the Current proxy (no live source available)");
+            secondaryUsable = true;
+            coord.refreshDestination(dest);
+            expect(hostSlot == nullptr && coord.isLiveMonitorOverrideActive(dest)
+                       && coord.runtimeStateForTrack(dest) == ProxyPlaybackSourceState::SecondaryLive,
+                   "live-midi/proxy: Monitor + Secondary -> SecondaryLive replaces the proxy view (temporary)");
+            bool activated = false;
+            for (const auto& c : secondaryTransportCalls)
+            {
+                activated = activated || (c.first == dest && c.second);
+            }
+            expect(activated, "live-midi/proxy: the Secondary was made the transport source");
+            secondaryTransportCalls.clear();
+            liveMonitorRequested = false;
+            coord.refreshDestination(dest);
+            bool deactivated = false;
+            for (const auto& c : secondaryTransportCalls)
+            {
+                deactivated = deactivated || (c.first == dest && !c.second);
+            }
+            expect(hostSlot != nullptr && hostSlot->useProxy && hostSlot->selectedState == ProxyPlaybackSourceState::ProxyCurrent
+                       && !coord.isLiveMonitorOverrideActive(dest) && deactivated,
+                   "live-midi/proxy: last Monitor off -> Current proxy restored, Secondary released, generation still Current");
+            expect(hostSlot->reader->messageThread_ensureRangeReady(0, 512, 5000),
+                   "live-midi/proxy: restored proxy reader primes again");
+            secondaryUsable = false;
+        }
 
         // 3) Engine-rate change: derived state rebuilt, generation stays Current (PI-030).
         engineRate = 44100.0;

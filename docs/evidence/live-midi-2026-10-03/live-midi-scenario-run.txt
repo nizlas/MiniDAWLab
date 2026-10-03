@@ -1,0 +1,79 @@
+﻿scenario start: live-midi iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture.dalproj
+steps queued: 43 (delete-loop iterations expand at plan time)
+  test copy: C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture-livemiditest.dalproj
+step end ok: live-midi: copy project to sibling test file elapsedMs=10
+step end ok: live-midi: load test copy elapsedMs=438
+  inputs=["Babyface Midi Port 1" ] outputs=["Microsoft GS Wavetable Synth" "Babyface Midi Port 1" ]
+  injection path: device-thread entry of the bus (no loopback port on this machine)
+step end ok: live-midi: MIDI devices present on this machine elapsedMs=14
+  fixture: inst=3 lower=4 pedal=5
+step end ok: live-midi: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6) elapsedMs=53
+step end ok: live-midi: save fixture (direct save to the test copy) and clear the dirty flag elapsedMs=43
+  inspector: visible=yes input="All MIDI inputs" channel=1 status="No playable instrument: live MIDI is recorded but not heard"
+  header: track 3 header 0 0 149 96 monitor=56 29 22 22 arm=78 29 22 22
+  header: track 4 header 0 0 149 96 monitor=56 29 22 22 arm=78 29 22 22
+step end ok: live-midi: Inspector shows MIDI Input / Input Channel for the instrument row elapsedMs=17
+step end ok: live-midi: Monitor ON (instrument row), transport stopped, play ch1 note 60 elapsedMs=1
+  captured ch1 note60 on=1
+step end ok: live-midi: note reached the destination host on channel 1; project still clean elapsedMs=5
+  with only the instrument row monitoring (filter 1): ch5->0 ch6->0 (both expected 0)
+step end ok: live-midi: filter: ch5 / ch6 are NOT forwarded by the instrument row (filter 1) elapsedMs=258
+step end ok: live-midi: Monitor ON Lower + Pedal, play ch5 and ch6 -> arrive as ch2 / ch3 on the same host elapsedMs=2
+  captured: ch1=1 ch2=1 ch3=1 leaked native ch5/6=0
+step end ok: live-midi: per-channel counts 1/1/1 (Upper ch1, Lower ch2, Pedal ch3), native channels never leak elapsedMs=4
+step end ok: live-midi: Monitor OFF on Lower while its note is held -> targeted note-off on ch2 only elapsedMs=1
+  after Monitor off (Lower): off ch2=1 ch1=0 ch3=0
+step end ok: live-midi: release check (ch2 off = 1, ch1/ch3 still sounding) elapsedMs=6
+step end ok: live-midi: all Monitors off; nothing dirty so far elapsedMs=1
+step end ok: live-midi: real device - assign the first physical MIDI input to the instrument row (Device mode) elapsedMs=1
+  device "Babyface Midi Port 1": managerEnabled=yes slot=0
+  inspector: visible=yes input="Babyface Midi Port 1" channel=1 status="No playable instrument: live MIDI is recorded but not heard"
+  Device-mode route delivered ch1 note61 on=1
+step end ok: live-midi: real device - opened on the device manager, slot callback registered, Inspector shows it elapsedMs=431
+  after restoring All: managerEnabled=yes slot=0
+step end ok: live-midi: real device - back to All MIDI inputs (device stays open: still referenced by All) elapsedMs=4
+  countIn=no cycleStillOn=yes
+step end ok: live-midi: Cycle ON + armed MIDI row + Record -> refused, Cycle unchanged elapsedMs=154
+step end ok: live-midi: arm instrument + Lower, Monitor ON instrument only, press Record (count-in starts) elapsedMs=102
+step end ok: live-midi: during count-in: hold ch1 note 48 (must enter the take at tick 0); Lower monitored off still records elapsedMs=0
+  take start sample 0 playhead now 33792
+step end ok: live-midi: recording started (transport playing) elapsedMs=4
+step end ok: live-midi: +0.5 s ch1 note 60 on (vel 100), ch5 note 62 on (vel 90), sustain down, expression 90, pitch bend 12000 elapsedMs=75
+step end ok: live-midi: +1.2 s release ch1 60 (vel-0 shorthand) and ch5 62, release note 48; ch1 note 72 stays held past stop elapsedMs=2
+  live during take: ch1 60 on=1 Lower(ch2) 62 on=0 (Lower Monitor OFF -> 0 expected, still recorded)
+step end ok: live-midi: monitored events were heard live (ch1 60 on at the destination during the take) elapsedMs=106
+step end ok: live-midi: Stop (same path as the Stop button) -> take committed elapsedMs=153
+step end ok: live-midi: release the key still held after stop (must not re-enter any clip) elapsedMs=1
+  instrument: clips=1 start=0 len=144384 bpm=120.00 tpq=960 notes=[(n48 v77 ch1 @0 d3943)(n60 v100 ch1 @2555 d1387)(n72 v64 ch1 @3943 d1832)] cc=[(cc11=90 ch1 @2556)(cc64=127 ch1 @2556)(cc64=0 ch1 @5775)] pb=[(12000 ch1 @2557)]
+  lower: clips=1 start=0 len=144384 bpm=120.00 tpq=960 notes=[(n62 v90 ch5 @2555 d1388)] cc=[] pb=[]
+  pedal: clips=0
+  expected ticks: on=2558 off=3946 stop=5775 tolerance=219 outputLatency=168
+step end ok: live-midi: verify recorded clips (instrument row: notes 48 / 60 / 72, CC64 / CC11, pitch bend; Lower row: note 62 ch5) elapsedMs=16
+  undo -> inst/lower clips 0/0; redo -> 1/1
+step end ok: live-midi: Undo removes both rows' take clips at once; Redo restores both elapsedMs=417
+step end ok: live-midi: save, reload, verify the take survived (notes, CC, pitch bend, MIDI Input assignment) elapsedMs=36
+step end ok: live-midi: reload test copy elapsedMs=639
+  after reload: inst clips=1 notes=3 cc=3 pb=1; lower clips=1
+  inspector (Lower) after reload: visible=yes input="All MIDI inputs" channel=5 status="No playable instrument: live MIDI is recorded but not heard"
+step end ok: live-midi: after reload: clips, controller data and the Inspector MIDI Input persisted; Monitor/Arm are OFF elapsedMs=161
+  export: notes=3 cc=3 pitchWheel=1 -> C:\Users\nicla\AppData\Local\Temp\dal-live-midi-take.mid
+step end ok: live-midi: MIDI export of the instrument take carries notes, CC and pitch wheel elapsedMs=6
+step end ok: live-midi: the recorded clip opens in the MIDI editor (ordinary clip), then close elapsedMs=121
+step end ok: live-midi: close the MIDI editor elapsedMs=5
+  offline export: result=ok heardLiveBefore=1 liveLeakedIntoExport=0 clipNotesRendered=1 size=864104
+step end ok: live-midi: hold a live note (Monitor on) and run an offline WAV export: the clip renders, live MIDI never leaks elapsedMs=440
+step end ok: live-midi: playback after the take (transport + clips play normally) elapsedMs=0
+  playback: ch1 60 on=1 Lower->ch2 62 on=1
+step end ok: live-midi: the recorded notes came back through playback (ch1 60 on >= 1); stop elapsedMs=3
+step end ok: live-midi: empty take - arm instrument, Record, no input, Stop -> no clip, no undo step elapsedMs=102
+  empty take: clips before/after=1/1 undo size delta=0
+step end ok: live-midi: stop the empty take elapsedMs=206
+  combined take count-in started: yes
+step end ok: live-midi: combined take - arm an audio track (R) + the instrument row, Record elapsedMs=205
+step end ok: live-midi: combined take - play ch1 note 67 while recording elapsedMs=1
+  combined take: audio clips 1->2, midi clips 1->2, undo steps +1
+  combined take undo -> audio/midi 1/1; redo -> 2/2
+step end ok: live-midi: combined take - release, Stop, verify ONE undo step holds both the audio clip and the MIDI clip elapsedMs=1180
+step end ok: live-midi: delete the export file elapsedMs=1
+cleanup: deleted temp project copy C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture-livemiditest.dalproj
+RESULT: PASS scenario=live-midi totalMs=38830

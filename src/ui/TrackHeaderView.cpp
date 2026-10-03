@@ -1066,6 +1066,17 @@ void TrackHeaderView::paint(juce::Graphics& g)
             g.drawFittedText(m.subtitle, r, juce::Justification::topLeft, 2);
         }
     }
+    // Live-MIDI activity dot: a 6 px disc at the right end of the name row (inside the header,
+    // above the control strip) while MIDI is arriving for this row. Painted only when active so
+    // idle headers are byte-identical to before.
+    if (m.midiActivity && !layout.nameTextBounds.isEmpty())
+    {
+        constexpr int kDot = 6;
+        const juce::Rectangle<int> dot(layout.nameTextBounds.getRight() - kDot - 1,
+                                       layout.nameTextBounds.getCentreY() - kDot / 2, kDot, kDot);
+        g.setColour(juce::Colour(0xff3ddc84));
+        g.fillEllipse(dot.toFloat());
+    }
 
     juce::Colour const ctlNeutralEdge(0xd0161616);
 

@@ -435,6 +435,12 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
         {
             experimentalPrepareAllHosts_(sr, bs);
         }
+        // Events that arrived while no callback was running describe gestures nobody heard —
+        // drop them (and any ownership from before the stop) before the first block.
+        if (live_midi::LiveMidiInputBus* const bus = liveMidiBus_.load(std::memory_order_acquire))
+        {
+            bus->audioThread_discardPendingAndForgetNotes();
+        }
         rebuildRoutingPlanFromSession();
     }
 }
@@ -491,6 +497,21 @@ bool PlaybackEngine::isTrackInputMonitoringEnabled(const TrackId trackId) const 
 {
     const auto snap = liveInputMonitorSnapshot_.load(std::memory_order_acquire);
     return snap != nullptr && snap->contains(trackId);
+}
+
+void PlaybackEngine::setLiveMidiInputBus(live_midi::LiveMidiInputBus* bus) noexcept
+{
+    liveMidiBus_.store(bus, std::memory_order_release);
+}
+
+void PlaybackEngine::audioThread_deliverLiveMidiToHost(void* /*context*/, ExperimentalInstrumentHost* host,
+                                                       const int sampleOffset,
+                                                       const juce::MidiMessage& message) noexcept
+{
+    if (host != nullptr)
+    {
+        host->audioThread_addMidiEventForCurrentBlock(sampleOffset, message);
+    }
 }
 
 void PlaybackEngine::audioDeviceStopped()
@@ -738,6 +759,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 juce::FloatVectorOperations::clear(row, numSamples);
             }
         }
+        // Live MIDI must never leak into the offline render: drop whatever the keyboard sent
+        // while the export owns the hosts (keeps the device rings from overflowing).
+        if (live_midi::LiveMidiInputBus* const bus = liveMidiBus_.load(std::memory_order_acquire))
+        {
+            bus->audioThread_discardPendingAndForgetNotes();
+        }
         transport_.audioThread_advancePlayheadIfPlaying(0);
         return;
     }
@@ -799,6 +826,32 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     const std::int64_t locL = sessionSnap != nullptr ? sessionSnap->getLeftLocatorSamples() : 0;
     const std::int64_t locR = sessionSnap != nullptr ? sessionSnap->getRightLocatorSamples() : 0;
     const bool validCycle = cycleOn && locR > locL && locR > 0;
+
+    // [Audio thread] Live MIDI input: deliver this block's keyboard events into the hosts of the
+    // snapshot just begun (sample offsets from device timestamps) and forward the armed rows'
+    // events to the take capture, stamped with this block's transport position. Runs stopped or
+    // playing — monitoring does not depend on the transport. With instrument processing
+    // suspended the hosts are not driven, so pending input is dropped instead of piling up.
+    if (live_midi::LiveMidiInputBus* const bus = liveMidiBus_.load(std::memory_order_acquire))
+    {
+        if (allowInstrumentProcessing && instrumentSnap != nullptr)
+        {
+            live_midi::BlockContext ctx;
+            ctx.session = sessionSnap.get();
+            ctx.instruments = instrumentSnap.get();
+            ctx.numSamples = numSamples;
+            ctx.sampleRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
+            ctx.nowMs = juce::Time::getMillisecondCounterHiRes();
+            ctx.playheadAtBlockStart = t0;
+            ctx.transportPlaying = playbackIntent == PlaybackIntent::Playing;
+            ctx.recordPlacementOffsetSamples = liveMidiRecordPlacementOffsetSamples_.load(std::memory_order_relaxed);
+            bus->audioThread_dispatch(ctx, &PlaybackEngine::audioThread_deliverLiveMidiToHost, nullptr);
+        }
+        else
+        {
+            bus->audioThread_discardPendingAndForgetNotes();
+        }
+    }
 
     // Every insert chain reads the same host-owned playhead during its synchronous processBlock.
     // Keep that context at the exact timeline segment for clip rendering, and at this callback's

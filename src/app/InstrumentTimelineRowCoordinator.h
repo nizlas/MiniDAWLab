@@ -40,7 +40,33 @@ public:
         std::function<void()> clearAllArrangementEventSelections;
 
         std::function<std::int64_t(std::int64_t timelineSample)> snapArrangementTimelineSample;
+
+        // ---- Live MIDI (Instrument + Midi rows); all optional — absent = pre-live-MIDI chrome ----
+        std::function<bool(TrackId)> isLiveMidiMonitorEnabled;
+        std::function<void(TrackId)> toggleLiveMidiMonitor;
+        std::function<bool(TrackId)> isLiveMidiRecordArmed;
+        std::function<void(TrackId)> toggleLiveMidiRecordArm;
+        std::function<bool(TrackId)> isLiveMidiActive;
+        /// True while a MIDI take is being captured on this row; `takeStartSample` receives the
+        /// record boundary so the lane can draw the growing take region up to the playhead.
+        std::function<bool(TrackId, std::int64_t& takeStartSample)> liveMidiTakeInProgressForTrack;
     };
+
+    /// Install the live-MIDI header / lane seam after construction (composition root).
+    void setLiveMidiCallbacks(std::function<bool(TrackId)> isMonitorEnabled,
+                              std::function<void(TrackId)> toggleMonitor,
+                              std::function<bool(TrackId)> isRecordArmed,
+                              std::function<void(TrackId)> toggleRecordArm,
+                              std::function<bool(TrackId)> isActive,
+                              std::function<bool(TrackId, std::int64_t&)> takeInProgressForTrack)
+    {
+        callbacks_.isLiveMidiMonitorEnabled = std::move(isMonitorEnabled);
+        callbacks_.toggleLiveMidiMonitor = std::move(toggleMonitor);
+        callbacks_.isLiveMidiRecordArmed = std::move(isRecordArmed);
+        callbacks_.toggleLiveMidiRecordArm = std::move(toggleRecordArm);
+        callbacks_.isLiveMidiActive = std::move(isActive);
+        callbacks_.liveMidiTakeInProgressForTrack = std::move(takeInProgressForTrack);
+    }
 
     InstrumentTimelineRowCoordinator(Session& session,
                                     Transport& transport,

@@ -1,7 +1,8 @@
-#include "diagnostics/StabilityScenarioRunner.h"
+﻿#include "diagnostics/StabilityScenarioRunner.h"
 
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
+#include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <atomic>
 #include <cmath>
@@ -247,6 +248,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-live-midi")
+        {
+            if (!setKind(StabilityScenarioKind::LiveMidi)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-live-midi requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -336,6 +346,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::ExportLevels: scenarioName_ = "export-levels"; break;
         case StabilityScenarioKind::InspectorPanel: scenarioName_ = "inspector-panel"; break;
         case StabilityScenarioKind::OrganDc: scenarioName_ = "organ-dc"; break;
+        case StabilityScenarioKind::LiveMidi: scenarioName_ = "live-midi"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -419,6 +430,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::OrganDc:
             appendOrganDcSteps(request.projectA);
             break;
+        case StabilityScenarioKind::LiveMidi:
+            appendLiveMidiSteps(request.projectA);
+            break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
             return;
@@ -463,7 +477,7 @@ void StabilityScenarioRunner::timerCallback()
     }
     // Stability C3: verify runtime invariants after every successful step. Also fail when any
     // invariant failure was logged from an app-internal call site (delete/undo/load hooks) since
-    // the run started — a matrix must never silently pass with invariant failures.
+    // the run started - a matrix must never silently pass with invariant failures.
     if (hooks_.verifyInvariants && !hooks_.verifyInvariants("runner:" + step.name))
     {
         appendStabilityRunLine("step INVARIANT FAIL after: " + step.name
@@ -481,7 +495,7 @@ void StabilityScenarioRunner::timerCallback()
 
     appendStabilityRunLine("step end ok: " + step.name + " elapsedMs=" + juce::String(elapsed));
     // A step may choose its own settle at run time (e.g. "play the whole loop", whose length is
-    // only known after the project loaded) — see `settleOverrideMsForCurrentStep_`.
+    // only known after the project loaded) - see `settleOverrideMsForCurrentStep_`.
     const int settleMs = settleOverrideMsForCurrentStep_ > 0 ? settleOverrideMsForCurrentStep_ : step.settleMsAfter;
     settleOverrideMsForCurrentStep_ = -1;
     resumeAtMs_ = nowMs() + settleMs;
@@ -1368,9 +1382,9 @@ void StabilityScenarioRunner::appendMixdownSteps(const juce::File& project, cons
 // -----------------------------------------------------------------------------
 // The user's report was "−24 dB pre-gain changes nothing". This scenario measures the two
 // production signal paths a listener can hear or export, on a copy of an audio-only fixture:
-//   realtime  — device-output peak hold while the transport plays a steady tone, 0 dB vs −24 dB,
+//   realtime  - device-output peak hold while the transport plays a steady tone, 0 dB vs −24 dB,
 //               with the −24 dB value set WHILE PLAYING (live update + ramp must both work);
-//   offline   — RMS of the mixdown WAV at 0 dB vs −24 dB.
+//   offline   - RMS of the mixdown WAV at 0 dB vs −24 dB.
 // Both ratios must equal 10^(−24/20) ≈ 0.06310 (±3 % realtime, ±1 % offline): "applied once".
 // A ratio near 1.0 would reproduce the report; a ratio near 0.004 would mean "applied twice".
 void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
@@ -1616,14 +1630,14 @@ void StabilityScenarioRunner::appendPreGainSteps(const juce::File& project)
 // -----------------------------------------------------------------------------
 // Pre-gain through the REAL Inspector on a real project (user-flow reproduction)
 // -----------------------------------------------------------------------------
-// Report under test: "pre-gain 0 → -24 dB on the AmpliTube audio track changed nothing while the
+// Report under test: "pre-gain 0 -> -24 dB on the AmpliTube audio track changed nothing while the
 // recorded guitar played". Every step below goes through the production UI / session objects of
 // the running app (no direct session setter for the edit):
-//   activate the track like a header click → type "-24" + Return into the Inspector field →
-//   compare displayed text, committed snapshot value and the track id it landed on →
+//   activate the track like a header click -> type "-24" + Return into the Inspector field ->
+//   compare displayed text, committed snapshot value and the track id it landed on ->
 //   measure, while the transport plays, the level entering the first insert and leaving the last
-//   one (PluginInsertHost level tap) — first in the project's own state, then with the track
-//   unmuted — so "which audio path is actually heard" is answered by numbers, not assumptions.
+//   one (PluginInsertHost level tap) - first in the project's own state, then with the track
+//   unmuted - so "which audio path is actually heard" is answered by numbers, not assumptions.
 void StabilityScenarioRunner::appendPreGainInspectorSteps(const juce::File& project)
 {
     if (hooks_.activateTrackLikeHeaderClick == nullptr || hooks_.inspectorTypePreGainAndReturn == nullptr
@@ -2061,7 +2075,7 @@ void StabilityScenarioRunner::appendInsertsSteps(const juce::File& project)
                            600 });
 
     steps_.push_back(Step{
-        "inserts: add DAL Mono Delay — Post on instrument, Pre on audio, Post on master (picker path)",
+        "inserts: add DAL Mono Delay - Post on instrument, Pre on audio, Post on master (picker path)",
         [this, delayBundle](juce::String& failReason) -> bool {
             if (!delayBundle.exists())
             {
@@ -2969,6 +2983,921 @@ void StabilityScenarioRunner::appendInspectorPanelSteps(const juce::File& projec
 }
 
 // -----------------------------------------------------------------------------
+// Live MIDI input: monitoring, routing, a recorded take, persistence, export, undo, guards
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
+{
+    if (hooks_.liveMidiFixtureSetup == nullptr || hooks_.liveMidiInject == nullptr || hooks_.liveMidiSetMonitor == nullptr
+        || hooks_.liveMidiSetArm == nullptr || hooks_.liveMidiCapturedNoteCount == nullptr || hooks_.liveMidiCaptureReset == nullptr
+        || hooks_.recordToggleLikeKey == nullptr || hooks_.isCountInActive == nullptr || hooks_.isRecordingInProgress == nullptr
+        || hooks_.getTransportPlayheadSamples == nullptr || hooks_.liveMidiSummarizeClips == nullptr || hooks_.undoStackSize == nullptr
+        || hooks_.invokeUndo == nullptr || hooks_.invokeRedo == nullptr || hooks_.isProjectDirty == nullptr
+        || hooks_.loadProjectFromFile == nullptr || hooks_.saveProject == nullptr)
+    {
+        steps_.push_back(Step{ "live-midi: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "live-midi hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    // Sibling copy: the user's project is never modified; relative media paths keep resolving.
+    steps_.push_back(Step{ "live-midi: copy project to sibling test file",
+                           [this, project](juce::String& failReason) -> bool {
+                               const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-livemiditest.dalproj");
+                               (void)copy.deleteFile();
+                               if (!project.copyFileTo(copy))
+                               {
+                                   failReason = "could not copy project to " + copy.getFullPathName();
+                                   return false;
+                               }
+                               openSaveCloseCopy_ = copy;
+                               appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "live-midi: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "live-midi: MIDI devices present on this machine",
+                           [this](juce::String&) -> bool {
+                               if (hooks_.liveMidiDescribeDevices)
+                               {
+                                   appendStabilityRunLine("  " + hooks_.liveMidiDescribeDevices());
+                               }
+                               appendStabilityRunLine(juce::String("  injection path: ")
+                                                      + (hooks_.liveMidiInjectUsesRealPort && hooks_.liveMidiInjectUsesRealPort()
+                                                             ? "REAL loopback MIDI port (device callback + timestamps exercised)"
+                                                             : "device-thread entry of the bus (no loopback port on this machine)"));
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "live-midi: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6)",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.liveMidiFixtureSetup(liveMidiInstTid_, liveMidiLowerTid_, liveMidiPedalTid_, failReason))
+                               {
+                                   return false;
+                               }
+                               appendStabilityRunLine("  fixture: inst=" + juce::String((juce::int64)liveMidiInstTid_) + " lower="
+                                                      + juce::String((juce::int64)liveMidiLowerTid_) + " pedal="
+                                                      + juce::String((juce::int64)liveMidiPedalTid_));
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "live-midi: save fixture (direct save to the test copy) and clear the dirty flag",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           600 });
+
+    const auto inject = [this](const juce::MidiMessage& m) { hooks_.liveMidiInject(m); };
+    const auto on = [](const int ch, const int note, const int vel) {
+        return juce::MidiMessage::noteOn(ch, note, (juce::uint8)vel);
+    };
+    const auto off = [](const int ch, const int note) { return juce::MidiMessage::noteOff(ch, note, (juce::uint8)0); };
+
+    // ---- 1. Monitor on, transport stopped: live MIDI reaches the destination; project not dirty.
+    steps_.push_back(Step{ "live-midi: Inspector shows MIDI Input / Input Channel for the instrument row",
+                           [this](juce::String& failReason) -> bool {
+                               if (hooks_.selectTrackLikeHeaderClick)
+                               {
+                                   hooks_.selectTrackLikeHeaderClick(liveMidiInstTid_);
+                               }
+                               if (hooks_.inspectorMidiInputTexts)
+                               {
+                                   const juce::String texts = hooks_.inspectorMidiInputTexts();
+                                   appendStabilityRunLine("  inspector: " + texts);
+                                   if (!texts.contains("All MIDI inputs") || !texts.contains("channel=1"))
+                                   {
+                                       failReason = "Inspector does not show the fixture's MIDI Input (All) / channel 1: " + texts;
+                                       return false;
+                                   }
+                               }
+                               if (hooks_.verifyLiveMidiHeaderCells)
+                               {
+                                   juce::String report;
+                                   for (const TrackId tid : { liveMidiInstTid_, liveMidiLowerTid_ })
+                                   {
+                                       if (!hooks_.verifyLiveMidiHeaderCells(tid, report, failReason))
+                                       {
+                                           return false;
+                                       }
+                                       appendStabilityRunLine("  header: " + report);
+                                   }
+                               }
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "live-midi: Monitor ON (instrument row), transport stopped, play ch1 note 60",
+                           [this, inject, on](juce::String& failReason) -> bool {
+                               if (hooks_.isProjectDirty())
+                               {
+                                   failReason = "project dirty before monitoring started";
+                                   return false;
+                               }
+                               hooks_.liveMidiCaptureReset();
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
+                               inject(on(1, 60, 100));
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "live-midi: note reached the destination host on channel 1; project still clean",
+                           [this, inject, off](juce::String& failReason) -> bool {
+                               const int n = hooks_.liveMidiCapturedNoteCount(1, 60, true);
+                               appendStabilityRunLine("  captured ch1 note60 on=" + juce::String(n));
+                               if (n != 1)
+                               {
+                                   failReason = "expected exactly one ch1 note-on at the destination while stopped, got " + juce::String(n);
+                                   return false;
+                               }
+                               if (hooks_.isProjectDirty())
+                               {
+                                   failReason = "Monitor on + live playing marked the project dirty";
+                                   return false;
+                               }
+                               inject(off(1, 60));
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "live-midi: filter: ch5 / ch6 are NOT forwarded by the instrument row (filter 1)",
+                           [this, inject, on, off](juce::String& failReason) -> bool {
+                               if (hooks_.liveMidiCapturedNoteCount(1, 60, false) != 1)
+                               {
+                                   failReason = "note-off did not reach the destination";
+                                   return false;
+                               }
+                               hooks_.liveMidiCaptureReset();
+                               inject(on(5, 62, 90));
+                               inject(on(6, 64, 80));
+                               juce::Thread::sleep(250);
+                               const int c5 = hooks_.liveMidiCapturedNoteCount(5, 62, true) + hooks_.liveMidiCapturedNoteCount(2, 62, true);
+                               const int c6 = hooks_.liveMidiCapturedNoteCount(6, 64, true) + hooks_.liveMidiCapturedNoteCount(3, 64, true);
+                               appendStabilityRunLine("  with only the instrument row monitoring (filter 1): ch5->" + juce::String(c5)
+                                                      + " ch6->" + juce::String(c6) + " (both expected 0)");
+                               inject(off(5, 62));
+                               inject(off(6, 64));
+                               if (c5 != 0 || c6 != 0)
+                               {
+                                   failReason = "input channel filter leaked events";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+    // ---- 2. Routed rows: Lower (filter 5 -> Force 2), Pedal (filter 6 -> Force 3) to the SAME host.
+    steps_.push_back(Step{ "live-midi: Monitor ON Lower + Pedal, play ch5 and ch6 -> arrive as ch2 / ch3 on the same host",
+                           [this, inject, on](juce::String&) -> bool {
+                               hooks_.liveMidiCaptureReset();
+                               hooks_.liveMidiSetMonitor(liveMidiLowerTid_, true);
+                               hooks_.liveMidiSetMonitor(liveMidiPedalTid_, true);
+                               inject(on(5, 62, 90));
+                               inject(on(6, 64, 80));
+                               inject(on(1, 65, 70));
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "live-midi: per-channel counts 1/1/1 (Upper ch1, Lower ch2, Pedal ch3), native channels never leak",
+                           [this](juce::String& failReason) -> bool {
+                               const int ch1 = hooks_.liveMidiCapturedNoteCount(1, 65, true);
+                               const int ch2 = hooks_.liveMidiCapturedNoteCount(2, 62, true);
+                               const int ch3 = hooks_.liveMidiCapturedNoteCount(3, 64, true);
+                               const int leak = hooks_.liveMidiCapturedNoteCount(5, 62, true) + hooks_.liveMidiCapturedNoteCount(6, 64, true);
+                               appendStabilityRunLine("  captured: ch1=" + juce::String(ch1) + " ch2=" + juce::String(ch2) + " ch3="
+                                                      + juce::String(ch3) + " leaked native ch5/6=" + juce::String(leak));
+                               if (ch1 != 1 || ch2 != 1 || ch3 != 1 || leak != 0)
+                               {
+                                   failReason = "Force mapping / routing of live MIDI is wrong (expected 1/1/1, no leak)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "live-midi: Monitor OFF on Lower while its note is held -> targeted note-off on ch2 only",
+                           [this](juce::String&) -> bool {
+                               hooks_.liveMidiCaptureReset();
+                               hooks_.liveMidiSetMonitor(liveMidiLowerTid_, false);
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "live-midi: release check (ch2 off = 1, ch1/ch3 still sounding)",
+                           [this, inject, off](juce::String& failReason) -> bool {
+                               const int off2 = hooks_.liveMidiCapturedNoteCount(2, 62, false);
+                               const int off1 = hooks_.liveMidiCapturedNoteCount(1, 65, false);
+                               const int off3 = hooks_.liveMidiCapturedNoteCount(3, 64, false);
+                               appendStabilityRunLine("  after Monitor off (Lower): off ch2=" + juce::String(off2) + " ch1=" + juce::String(off1)
+                                                      + " ch3=" + juce::String(off3));
+                               inject(off(1, 65));
+                               inject(off(6, 64));
+                               if (off2 != 1 || off1 != 0 || off3 != 0)
+                               {
+                                   failReason = "Monitor off must release exactly the row's own live notes";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "live-midi: all Monitors off; nothing dirty so far",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                               hooks_.liveMidiSetMonitor(liveMidiPedalTid_, false);
+                               if (hooks_.isProjectDirty())
+                               {
+                                   failReason = "monitoring alone made the project dirty";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+
+    // ---- 2b. Real device path: when a physical MIDI input exists, assign it (Device mode) and
+    //          prove the device is opened on the device manager with the slot callback registered,
+    //          that a message entering that slot still reaches the host, and that "None" closes it.
+    if (hooks_.liveMidiFirstRealInputDevice && hooks_.liveMidiSetTrackInputDevice && hooks_.liveMidiIsDeviceOpen)
+    {
+        auto devId = std::make_shared<juce::String>();
+        auto devName = std::make_shared<juce::String>();
+        steps_.push_back(Step{ "live-midi: real device - assign the first physical MIDI input to the instrument row (Device mode)",
+                               [this, devId, devName](juce::String& failReason) -> bool {
+                                   if (!hooks_.liveMidiFirstRealInputDevice(*devId, *devName))
+                                   {
+                                       appendStabilityRunLine("  no physical MIDI input on this machine - device-open check skipped");
+                                       return true;
+                                   }
+                                   if (!hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, *devId, *devName))
+                                   {
+                                       failReason = "could not assign device \"" + *devName + "\"";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               500 });
+        steps_.push_back(Step{ "live-midi: real device - opened on the device manager, slot callback registered, Inspector shows it",
+                               [this, devId, devName, inject, on, off](juce::String& failReason) -> bool {
+                                   if (devId->isEmpty())
+                                   {
+                                       return true;
+                                   }
+                                   juce::String detail;
+                                   const bool open = hooks_.liveMidiIsDeviceOpen(*devId, detail);
+                                   appendStabilityRunLine("  device \"" + *devName + "\": " + detail);
+                                   if (!open)
+                                   {
+                                       failReason = "physical MIDI input was not opened / registered: " + detail;
+                                       return false;
+                                   }
+                                   if (hooks_.selectTrackLikeHeaderClick && hooks_.inspectorMidiInputTexts)
+                                   {
+                                       hooks_.selectTrackLikeHeaderClick(liveMidiInstTid_);
+                                       const juce::String texts = hooks_.inspectorMidiInputTexts();
+                                       appendStabilityRunLine("  inspector: " + texts);
+                                       if (!texts.contains(*devName))
+                                       {
+                                           failReason = "Inspector does not show the assigned device name";
+                                           return false;
+                                       }
+                                       if (hooks_.captureInspectorPng)
+                                       {
+                                           const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-live-midi");
+                                           (void)dir.createDirectory();
+                                           (void)hooks_.captureInspectorPng(dir.getChildFile("live-midi-inspector-device.png"));
+                                       }
+                                   }
+                                   // A message entering the device's slot (slot 0 = first enumerated device) is
+                                   // routed by the Device-mode row.
+                                   hooks_.liveMidiCaptureReset();
+                                   hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
+                                   inject(on(1, 61, 100));
+                                   juce::Thread::sleep(250);
+                                   const int n = hooks_.liveMidiCapturedNoteCount(1, 61, true);
+                                   inject(off(1, 61));
+                                   juce::Thread::sleep(150);
+                                   hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                                   appendStabilityRunLine("  Device-mode route delivered ch1 note61 on=" + juce::String(n));
+                                   if (n != 1)
+                                   {
+                                       failReason = "Device-mode route did not deliver the message entering its slot";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "live-midi: real device - back to All MIDI inputs (device stays open: still referenced by All)",
+                               [this, devId, devName](juce::String& failReason) -> bool {
+                                   if (devId->isEmpty())
+                                   {
+                                       return true;
+                                   }
+                                   if (!hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, {}, {}))
+                                   {
+                                       failReason = "could not restore All MIDI inputs";
+                                       return false;
+                                   }
+                                   juce::String detail;
+                                   const bool open = hooks_.liveMidiIsDeviceOpen(*devId, detail);
+                                   appendStabilityRunLine("  after restoring All: " + detail);
+                                   if (!open)
+                                   {
+                                       failReason = "device closed although rows still use All MIDI inputs";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               400 });
+    }
+
+    // ---- 3. Cycle guard: Record with armed MIDI rows and Cycle on must refuse (Cycle untouched).
+    if (hooks_.setCycleEnabled && hooks_.isCycleEnabled)
+    {
+        steps_.push_back(Step{ "live-midi: Cycle ON + armed MIDI row + Record -> refused, Cycle unchanged",
+                               [this](juce::String& failReason) -> bool {
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   hooks_.setCycleEnabled(true);
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(150);
+                                   const bool countIn = hooks_.isCountInActive();
+                                   const bool cycleStill = hooks_.isCycleEnabled();
+                                   appendStabilityRunLine(juce::String("  countIn=") + (countIn ? "yes" : "no") + " cycleStillOn="
+                                                          + (cycleStill ? "yes" : "no"));
+                                   hooks_.setCycleEnabled(false);
+                                   if (countIn)
+                                   {
+                                       failReason = "Record started a count-in although Cycle was on with an armed MIDI row";
+                                       return false;
+                                   }
+                                   if (!cycleStill)
+                                   {
+                                       failReason = "Cycle was switched off automatically";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               400 });
+    }
+
+    // ---- 4. The take: instrument (filter 1) + Lower (filter 5) armed, Monitor on instrument only.
+    steps_.push_back(Step{ "live-midi: arm instrument + Lower, Monitor ON instrument only, press Record (count-in starts)",
+                           [this](juce::String& failReason) -> bool {
+                               liveMidiUndoSizeBeforeTake_ = hooks_.undoStackSize();
+                               hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                               hooks_.liveMidiSetArm(liveMidiLowerTid_, true);
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
+                               hooks_.liveMidiCaptureReset();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(100);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "Record did not start the count-in for a MIDI-only take";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "live-midi: during count-in: hold ch1 note 48 (must enter the take at tick 0); Lower monitored off still records",
+                           [this, inject, on](juce::String&) -> bool {
+                               inject(on(1, 48, 77));
+                               return true;
+                           },
+                           3700 }); // count-in = 8 × 375 ms + 375 ms
+    steps_.push_back(Step{ "live-midi: recording started (transport playing)",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress() || hooks_.isCountInActive())
+                               {
+                                   failReason = "take did not start after the count-in";
+                                   return false;
+                               }
+                               liveMidiTakeStart_ = hooks_.liveMidiTakeStartSample ? hooks_.liveMidiTakeStartSample() : 0;
+                               appendStabilityRunLine("  take start sample " + juce::String((juce::int64)liveMidiTakeStart_)
+                                                      + " playhead now " + juce::String((juce::int64)hooks_.getTransportPlayheadSamples()));
+                               return true;
+                           },
+                           500 });
+    steps_.push_back(Step{ "live-midi: +0.5 s ch1 note 60 on (vel 100), ch5 note 62 on (vel 90), sustain down, expression 90, pitch bend 12000",
+                           [this, inject, on](juce::String&) -> bool {
+                               if (hooks_.captureArrangementPng)
+                               {
+                                   const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-live-midi");
+                                   (void)dir.createDirectory();
+                                   (void)hooks_.captureArrangementPng(dir.getChildFile("live-midi-recording.png"));
+                               }
+                               liveMidiNoteOnPlayhead_ = hooks_.getTransportPlayheadSamples();
+                               inject(on(1, 60, 100));
+                               liveMidiLowerOnPlayhead_ = liveMidiNoteOnPlayhead_;
+                               inject(on(5, 62, 90));
+                               inject(juce::MidiMessage::controllerEvent(1, 64, 127));
+                               inject(juce::MidiMessage::controllerEvent(1, 11, 90));
+                               inject(juce::MidiMessage::pitchWheel(1, 12000));
+                               return true;
+                           },
+                           700 });
+    steps_.push_back(Step{ "live-midi: +1.2 s release ch1 60 (vel-0 shorthand) and ch5 62, release note 48; ch1 note 72 stays held past stop",
+                           [this, inject, on, off](juce::String&) -> bool {
+                               liveMidiNoteOffPlayhead_ = hooks_.getTransportPlayheadSamples();
+                               inject(on(1, 60, 0));
+                               liveMidiLowerOffPlayhead_ = liveMidiNoteOffPlayhead_;
+                               inject(off(5, 62));
+                               inject(off(1, 48));
+                               inject(on(1, 72, 64));
+                               return true;
+                           },
+                           700 });
+    steps_.push_back(Step{ "live-midi: monitored events were heard live (ch1 60 on at the destination during the take)",
+                           [this](juce::String& failReason) -> bool {
+                               if (hooks_.captureArrangementPng)
+                               {
+                                   const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-live-midi");
+                                   (void)dir.createDirectory();
+                                   (void)hooks_.captureArrangementPng(dir.getChildFile("live-midi-recording-growing.png"));
+                               }
+                               const int heard = hooks_.liveMidiCapturedNoteCount(1, 60, true);
+                               const int lowerHeard = hooks_.liveMidiCapturedNoteCount(2, 62, true);
+                               appendStabilityRunLine("  live during take: ch1 60 on=" + juce::String(heard) + " Lower(ch2) 62 on="
+                                                      + juce::String(lowerHeard) + " (Lower Monitor OFF -> 0 expected, still recorded)");
+                               if (heard != 1)
+                               {
+                                   failReason = "monitored row did not hear its live note during recording";
+                                   return false;
+                               }
+                               if (lowerHeard != 0)
+                               {
+                                   failReason = "a row with Monitor OFF must not be heard live";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "live-midi: Stop (same path as the Stop button) -> take committed",
+                           [this](juce::String& failReason) -> bool {
+                               liveMidiStopPlayhead_ = hooks_.getTransportPlayheadSamples();
+                               hooks_.recordToggleLikeKey(); // Record key while recording = stop + commit
+                               juce::Thread::sleep(150);
+                               if (hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "take still active after stop";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "live-midi: release the key still held after stop (must not re-enter any clip)",
+                           [this, inject, off](juce::String&) -> bool {
+                               inject(off(1, 72));
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "live-midi: verify recorded clips (instrument row: notes 48 / 60 / 72, CC64 / CC11, pitch bend; Lower row: note 62 ch5)",
+                           [this](juce::String& failReason) -> bool {
+                               const StabilityMidiClipSummary inst = hooks_.liveMidiSummarizeClips(liveMidiInstTid_);
+                               const StabilityMidiClipSummary lower = hooks_.liveMidiSummarizeClips(liveMidiLowerTid_);
+                               const StabilityMidiClipSummary pedal = hooks_.liveMidiSummarizeClips(liveMidiPedalTid_);
+                               const auto describe = [](const char* who, const StabilityMidiClipSummary& s) {
+                                   juce::String line = juce::String(who) + ": clips=" + juce::String(s.clipCount);
+                                   if (s.clipCount > 0)
+                                   {
+                                       line << " start=" << juce::String((juce::int64)s.firstClipStartSamples) << " len="
+                                            << juce::String((juce::int64)s.firstClipLengthSamples) << " bpm=" << juce::String(s.bpm, 2)
+                                            << " tpq=" << juce::String(s.ticksPerQuarter) << " notes=[";
+                                       for (const auto& n : s.notes)
+                                       {
+                                           line << "(n" << n.note << " v" << n.velocity << " ch" << n.channel << " @" << juce::String((juce::int64)n.startTick)
+                                                << " d" << juce::String((juce::int64)n.durationTicks) << ")";
+                                       }
+                                       line << "] cc=[";
+                                       for (const auto& c : s.cc)
+                                       {
+                                           line << "(cc" << c.controller << "=" << c.value << " ch" << c.channel << " @" << juce::String((juce::int64)c.tick) << ")";
+                                       }
+                                       line << "] pb=[";
+                                       for (const auto& b : s.pitchBend)
+                                       {
+                                           line << "(" << b.value << " ch" << b.channel << " @" << juce::String((juce::int64)b.tick) << ")";
+                                       }
+                                       line << "]";
+                                   }
+                                   return line;
+                               };
+                               appendStabilityRunLine("  " + describe("instrument", inst));
+                               appendStabilityRunLine("  " + describe("lower", lower));
+                               appendStabilityRunLine("  " + describe("pedal", pedal));
+                               if (inst.clipCount != 1 || lower.clipCount != 1 || pedal.clipCount != 0)
+                               {
+                                   failReason = "expected one clip on the instrument row and on Lower, none on Pedal (not armed)";
+                                   return false;
+                               }
+                               if (inst.firstClipStartSamples != liveMidiTakeStart_)
+                               {
+                                   failReason = "instrument clip does not start at the record boundary";
+                                   return false;
+                               }
+                               // Expected ticks from the playhead stamps taken at injection (±tolerance: the UI
+                               // playhead is a per-block staircase and the device/callback clocks jitter by < 2 blocks).
+                               const double sr = 48000.0;
+                               const std::int64_t latency = hooks_.reportedOutputLatencySamples ? hooks_.reportedOutputLatencySamples() : 0;
+                               const auto tickOf = [&inst, sr, latency, this](const std::int64_t playhead) {
+                                   const std::int64_t rel = juce::jmax<std::int64_t>(0, playhead - liveMidiTakeStart_ - latency);
+                                   return relativeSamplesToTicks(rel, inst.bpm, inst.ticksPerQuarter, sr);
+                               };
+                               const std::int64_t tolTicks = relativeSamplesToTicks(3 * 1024 + 2400, inst.bpm, inst.ticksPerQuarter, sr);
+                               const std::int64_t stopTick = relativeSamplesToTicks(inst.firstClipLengthSamples, inst.bpm, inst.ticksPerQuarter, sr);
+                               bool n48 = false, n60 = false, n72 = false;
+                               for (const auto& n : inst.notes)
+                               {
+                                   if (n.note == 48 && n.channel == 1 && n.velocity == 77 && n.startTick == 0
+                                       && std::llabs(n.durationTicks - tickOf(liveMidiNoteOffPlayhead_)) <= tolTicks)
+                                   {
+                                       n48 = true;
+                                   }
+                                   if (n.note == 60 && n.channel == 1 && n.velocity == 100
+                                       && std::llabs(n.startTick - tickOf(liveMidiNoteOnPlayhead_)) <= tolTicks
+                                       && std::llabs((n.startTick + n.durationTicks) - tickOf(liveMidiNoteOffPlayhead_)) <= tolTicks)
+                                   {
+                                       n60 = true;
+                                   }
+                                   if (n.note == 72 && n.channel == 1 && n.velocity == 64 && n.startTick + n.durationTicks == stopTick)
+                                   {
+                                       n72 = true;
+                                   }
+                               }
+                               appendStabilityRunLine("  expected ticks: on=" + juce::String((juce::int64)tickOf(liveMidiNoteOnPlayhead_)) + " off="
+                                                      + juce::String((juce::int64)tickOf(liveMidiNoteOffPlayhead_)) + " stop=" + juce::String((juce::int64)stopTick)
+                                                      + " tolerance=" + juce::String((juce::int64)tolTicks) + " outputLatency=" + juce::String((juce::int64)latency));
+                               if (!n48 || !n60 || !n72 || inst.notes.size() != 3)
+                               {
+                                   failReason = juce::String("instrument take notes wrong: held-at-start=") + (n48 ? "ok" : "BAD")
+                                                + " timed-note=" + (n60 ? "ok" : "BAD") + " held-at-stop=" + (n72 ? "ok" : "BAD")
+                                                + " count=" + juce::String((int)inst.notes.size());
+                                   return false;
+                               }
+                               bool cc64on = false, cc64off = false, cc11 = false, pb = false;
+                               for (const auto& c : inst.cc)
+                               {
+                                   cc64on = cc64on || (c.controller == 64 && c.value == 127 && c.channel == 1);
+                                   cc64off = cc64off || (c.controller == 64 && c.value == 0 && c.channel == 1 && c.tick == stopTick);
+                                   cc11 = cc11 || (c.controller == 11 && c.value == 90 && c.channel == 1);
+                               }
+                               for (const auto& b : inst.pitchBend)
+                               {
+                                   pb = pb || (b.value == 12000 && b.channel == 1);
+                               }
+                               if (!cc64on || !cc64off || !cc11 || !pb)
+                               {
+                                   failReason = juce::String("controller data wrong: sustainOn=") + (cc64on ? "ok" : "BAD")
+                                                + " sustainReleasedAtStop=" + (cc64off ? "ok" : "BAD") + " cc11=" + (cc11 ? "ok" : "BAD")
+                                                + " pitchBend=" + (pb ? "ok" : "BAD");
+                                   return false;
+                               }
+                               if (lower.notes.size() != 1 || lower.notes[0].note != 62 || lower.notes[0].channel != 5
+                                   || lower.notes[0].velocity != 90)
+                               {
+                                   failReason = "Lower take must hold exactly note 62 on its RECEIVED channel 5 (not the Force 2 output)";
+                                   return false;
+                               }
+                               if (hooks_.undoStackSize() != liveMidiUndoSizeBeforeTake_ + 1)
+                               {
+                                   failReason = "the take did not produce exactly one undo step (got "
+                                                + juce::String(hooks_.undoStackSize() - liveMidiUndoSizeBeforeTake_) + ")";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "live-midi: Undo removes both rows' take clips at once; Redo restores both",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.invokeUndo();
+                               juce::Thread::sleep(200);
+                               const int afterUndoInst = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                               const int afterUndoLower = hooks_.liveMidiSummarizeClips(liveMidiLowerTid_).clipCount;
+                               hooks_.invokeRedo();
+                               juce::Thread::sleep(200);
+                               const StabilityMidiClipSummary redoInst = hooks_.liveMidiSummarizeClips(liveMidiInstTid_);
+                               const int afterRedoLower = hooks_.liveMidiSummarizeClips(liveMidiLowerTid_).clipCount;
+                               appendStabilityRunLine("  undo -> inst/lower clips " + juce::String(afterUndoInst) + "/" + juce::String(afterUndoLower)
+                                                      + "; redo -> " + juce::String(redoInst.clipCount) + "/" + juce::String(afterRedoLower));
+                               if (afterUndoInst != 0 || afterUndoLower != 0 || redoInst.clipCount != 1 || afterRedoLower != 1
+                                   || redoInst.notes.size() != 3 || redoInst.pitchBend.empty())
+                               {
+                                   failReason = "undo/redo of the take is not atomic across rows (or lost controller data)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "live-midi: save, reload, verify the take survived (notes, CC, pitch bend, MIDI Input assignment)",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "live-midi: reload test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "live-midi: after reload: clips, controller data and the Inspector MIDI Input persisted; Monitor/Arm are OFF",
+                           [this](juce::String& failReason) -> bool {
+                               // The reload rebuilt the destination runtime: attach the capture sink to the new host.
+                               if (hooks_.liveMidiAttachCaptureSink && !hooks_.liveMidiAttachCaptureSink(liveMidiInstTid_, failReason))
+                               {
+                                   return false;
+                               }
+                               const StabilityMidiClipSummary inst = hooks_.liveMidiSummarizeClips(liveMidiInstTid_);
+                               const StabilityMidiClipSummary lower = hooks_.liveMidiSummarizeClips(liveMidiLowerTid_);
+                               bool pb = false, cc = false;
+                               for (const auto& b : inst.pitchBend)
+                               {
+                                   pb = pb || b.value == 12000;
+                               }
+                               for (const auto& c : inst.cc)
+                               {
+                                   cc = cc || (c.controller == 64 && c.value == 127);
+                               }
+                               appendStabilityRunLine("  after reload: inst clips=" + juce::String(inst.clipCount) + " notes=" + juce::String((int)inst.notes.size())
+                                                      + " cc=" + juce::String((int)inst.cc.size()) + " pb=" + juce::String((int)inst.pitchBend.size())
+                                                      + "; lower clips=" + juce::String(lower.clipCount));
+                               if (inst.clipCount != 1 || inst.notes.size() != 3 || !pb || !cc || lower.clipCount != 1)
+                               {
+                                   failReason = "take did not survive save/reload";
+                                   return false;
+                               }
+                               if (hooks_.selectTrackLikeHeaderClick && hooks_.inspectorMidiInputTexts)
+                               {
+                                   hooks_.selectTrackLikeHeaderClick(liveMidiLowerTid_);
+                                   juce::Thread::sleep(150);
+                                   const juce::String texts = hooks_.inspectorMidiInputTexts();
+                                   appendStabilityRunLine("  inspector (Lower) after reload: " + texts);
+                                   if (!texts.contains("All MIDI inputs") || !texts.contains("channel=5"))
+                                   {
+                                       failReason = "Lower's MIDI Input assignment (All, channel 5) did not persist";
+                                       return false;
+                                   }
+                               }
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "live-midi: MIDI export of the instrument take carries notes, CC and pitch wheel",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.liveMidiExportFirstClip)
+                               {
+                                   return true;
+                               }
+                               liveMidiExportFile_ = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-live-midi-take.mid");
+                               int notes = 0, cc = 0, pb = 0;
+                               if (!hooks_.liveMidiExportFirstClip(liveMidiInstTid_, liveMidiExportFile_, notes, cc, pb, failReason))
+                               {
+                                   return false;
+                               }
+                               appendStabilityRunLine("  export: notes=" + juce::String(notes) + " cc=" + juce::String(cc) + " pitchWheel="
+                                                      + juce::String(pb) + " -> " + liveMidiExportFile_.getFullPathName());
+                               if (notes != 3 || cc < 3 || pb < 1)
+                               {
+                                   failReason = "exported SMF lacks the recorded notes / CC / pitch wheel";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "live-midi: the recorded clip opens in the MIDI editor (ordinary clip), then close",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.openMidiEditorOnFirstClip || !hooks_.closeMidiEditor)
+                               {
+                                   return true;
+                               }
+                               if (!hooks_.openMidiEditorOnFirstClip(liveMidiInstTid_))
+                               {
+                                   failReason = "could not open the MIDI editor on the recorded clip";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "live-midi: close the MIDI editor",
+                           [this](juce::String&) -> bool {
+                               if (hooks_.closeMidiEditor)
+                               {
+                                   hooks_.closeMidiEditor();
+                               }
+                               return true;
+                           },
+                           400 });
+    if (hooks_.runMixdownBlocking)
+    {
+        steps_.push_back(Step{ "live-midi: hold a live note (Monitor on) and run an offline WAV export: the clip renders, live MIDI never leaks",
+                               [this, inject, on, off](juce::String& failReason) -> bool {
+                                   hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
+                                   inject(on(1, 90, 100));
+                                   juce::Thread::sleep(250);
+                                   const int heardLive = hooks_.liveMidiCapturedNoteCount(1, 90, true);
+                                   hooks_.liveMidiCaptureReset();
+                                   const juce::File out = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-live-midi-export.wav");
+                                   (void)out.deleteFile();
+                                   // The exporter renders the active loop range: enable Cycle for the export only
+                                   // (the project's locators are untouched), restore afterwards.
+                                   const bool cycleWas = hooks_.isCycleEnabled ? hooks_.isCycleEnabled() : false;
+                                   if (hooks_.setCycleEnabled)
+                                   {
+                                       hooks_.setCycleEnabled(true);
+                                   }
+                                   const juce::Result r = hooks_.runMixdownBlocking(out, false);
+                                   if (hooks_.setCycleEnabled)
+                                   {
+                                       hooks_.setCycleEnabled(cycleWas);
+                                   }
+                                   const int leaked = hooks_.liveMidiCapturedNoteCount(1, 90, true);
+                                   const int clipNotes = hooks_.liveMidiCapturedNoteCount(1, 60, true);
+                                   appendStabilityRunLine("  offline export: result=" + juce::String(r.wasOk() ? "ok" : r.getErrorMessage())
+                                                          + " heardLiveBefore=" + juce::String(heardLive) + " liveLeakedIntoExport="
+                                                          + juce::String(leaked) + " clipNotesRendered=" + juce::String(clipNotes) + " size="
+                                                          + juce::String(out.getSize()));
+                                   inject(off(1, 90));
+                                   (void)out.deleteFile();
+                                   hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                                   if (!r.wasOk())
+                                   {
+                                       failReason = "offline export failed after the take: " + r.getErrorMessage();
+                                       return false;
+                                   }
+                                   if (heardLive != 1 || leaked != 0 || clipNotes < 1)
+                                   {
+                                       failReason = "live MIDI leaked into the offline render, or the recorded clip did not render";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               600 });
+    }
+    steps_.push_back(Step{ "live-midi: playback after the take (transport + clips play normally)",
+                           [this](juce::String&) -> bool {
+                               hooks_.liveMidiCaptureReset();
+                               if (hooks_.seekTransportTo)
+                               {
+                                   hooks_.seekTransportTo(juce::jmax<std::int64_t>(0, liveMidiTakeStart_ - 24000));
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           2500 });
+    steps_.push_back(Step{ "live-midi: the recorded notes came back through playback (ch1 60 on >= 1); stop",
+                           [this](juce::String& failReason) -> bool {
+                               const int n = hooks_.liveMidiCapturedNoteCount(1, 60, true);
+                               const int lowerN = hooks_.liveMidiCapturedNoteCount(2, 62, true);
+                               appendStabilityRunLine("  playback: ch1 60 on=" + juce::String(n) + " Lower->ch2 62 on=" + juce::String(lowerN));
+                               hooks_.setPlaybackActive(false);
+                               if (n < 1 || lowerN < 1)
+                               {
+                                   failReason = "recorded clips did not play back to the destination";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           500 });
+    // ---- 5. Empty take: arm, record, play nothing, stop -> no clip, no undo step.
+    steps_.push_back(Step{ "live-midi: empty take - arm instrument, Record, no input, Stop -> no clip, no undo step",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                               const int before = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                               liveMidiUndoSizeBeforeTake_ = hooks_.undoStackSize();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(100);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "empty-take Record did not start a count-in";
+                                   return false;
+                               }
+                               liveMidiNoteOnPlayhead_ = before; // reuse as scratch: clip count before
+                               return true;
+                           },
+                           4300 });
+    steps_.push_back(Step{ "live-midi: stop the empty take",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "empty take never started recording";
+                                   return false;
+                               }
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(200);
+                               const int after = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                               appendStabilityRunLine("  empty take: clips before/after=" + juce::String((int)liveMidiNoteOnPlayhead_) + "/" + juce::String(after)
+                                                      + " undo size delta=" + juce::String(hooks_.undoStackSize() - liveMidiUndoSizeBeforeTake_));
+                               if (after != (int)liveMidiNoteOnPlayhead_ || hooks_.undoStackSize() != liveMidiUndoSizeBeforeTake_)
+                               {
+                                   failReason = "an empty take created a clip or an undo step";
+                                   return false;
+                               }
+                               hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                               hooks_.liveMidiSetArm(liveMidiLowerTid_, false);
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    // ---- 6. Audio + MIDI in ONE take (needs an audio track with an available input; skipped
+    //         with a logged reason when the device has no active input).
+    if (hooks_.armAudioTrackForRecording && hooks_.audioClipCountForTrack && hooks_.listAllTracks)
+    {
+        auto audioTid = std::make_shared<TrackId>(kInvalidTrackId);
+        auto audioClipsBefore = std::make_shared<int>(0);
+        auto combinedStarted = std::make_shared<bool>(false);
+        steps_.push_back(Step{ "live-midi: combined take - arm an audio track (R) + the instrument row, Record",
+                               [this, audioTid, audioClipsBefore, combinedStarted](juce::String&) -> bool {
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                                   {
+                                       if (t.kindName == "audio" && *audioTid == kInvalidTrackId)
+                                       {
+                                           *audioTid = t.id;
+                                       }
+                                   }
+                                   if (*audioTid == kInvalidTrackId)
+                                   {
+                                       appendStabilityRunLine("  no audio track in this project - combined take skipped");
+                                       return true;
+                                   }
+                                   *audioClipsBefore = hooks_.audioClipCountForTrack(*audioTid);
+                                   liveMidiUndoSizeBeforeTake_ = hooks_.undoStackSize();
+                                   hooks_.armAudioTrackForRecording(*audioTid);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(200);
+                                   *combinedStarted = hooks_.isCountInActive();
+                                   appendStabilityRunLine(juce::String("  combined take count-in started: ") + (*combinedStarted ? "yes" : "no (audio input unavailable on this device - skipped)"));
+                                   return true;
+                               },
+                               3900 });
+        steps_.push_back(Step{ "live-midi: combined take - play ch1 note 67 while recording",
+                               [this, combinedStarted, inject, on](juce::String& failReason) -> bool {
+                                   if (!*combinedStarted)
+                                   {
+                                       return true;
+                                   }
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "combined take did not start recording";
+                                       return false;
+                                   }
+                                   inject(on(1, 67, 100));
+                                   return true;
+                               },
+                               800 });
+        steps_.push_back(Step{ "live-midi: combined take - release, Stop, verify ONE undo step holds both the audio clip and the MIDI clip",
+                               [this, audioTid, audioClipsBefore, combinedStarted, inject, off](juce::String& failReason) -> bool {
+                                   if (!*combinedStarted)
+                                   {
+                                       hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                       hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                       return true;
+                                   }
+                                   inject(off(1, 67));
+                                   juce::Thread::sleep(150);
+                                   const int midiBefore = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(400);
+                                   const int audioAfter = hooks_.audioClipCountForTrack(*audioTid);
+                                   const int midiAfter = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                                   const int undoDelta = hooks_.undoStackSize() - liveMidiUndoSizeBeforeTake_;
+                                   appendStabilityRunLine("  combined take: audio clips " + juce::String(*audioClipsBefore) + "->" + juce::String(audioAfter)
+                                                          + ", midi clips " + juce::String(midiBefore) + "->" + juce::String(midiAfter) + ", undo steps +"
+                                                          + juce::String(undoDelta));
+                                   hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                   if (audioAfter != *audioClipsBefore + 1 || midiAfter != midiBefore + 1 || undoDelta != 1)
+                                   {
+                                       failReason = "audio + MIDI take must add one audio clip and one MIDI clip in exactly one undo step";
+                                       return false;
+                                   }
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(300);
+                                   const int audioUndo = hooks_.audioClipCountForTrack(*audioTid);
+                                   const int midiUndo = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                                   hooks_.invokeRedo();
+                                   juce::Thread::sleep(300);
+                                   const int audioRedo = hooks_.audioClipCountForTrack(*audioTid);
+                                   const int midiRedo = hooks_.liveMidiSummarizeClips(liveMidiInstTid_).clipCount;
+                                   appendStabilityRunLine("  combined take undo -> audio/midi " + juce::String(audioUndo) + "/" + juce::String(midiUndo)
+                                                          + "; redo -> " + juce::String(audioRedo) + "/" + juce::String(midiRedo));
+                                   if (audioUndo != *audioClipsBefore || midiUndo != midiBefore || audioRedo != *audioClipsBefore + 1
+                                       || midiRedo != midiBefore + 1)
+                                   {
+                                       failReason = "undo/redo of the combined take is not atomic";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               kSettleDefaultMs });
+    }
+    steps_.push_back(Step{ "live-midi: delete the export file",
+                           [this](juce::String&) -> bool {
+                               (void)liveMidiExportFile_.deleteFile();
+                               return true;
+                           },
+                           0 });
+}
+
+// -----------------------------------------------------------------------------
 // Organ residual DC / AC with the transport stopped, around a header mute
 // -----------------------------------------------------------------------------
 void StabilityScenarioRunner::appendOrganDcSteps(const juce::File& project)
@@ -3049,7 +3978,7 @@ void StabilityScenarioRunner::appendOrganDcSteps(const juce::File& project)
                                    if (hooks_.instrumentProcessedBlocks != nullptr && hostBlocks == 0)
                                    {
                                        failReason = "the organ's instrument host processed no blocks in this window (a muted row must keep "
-                                                    "processing with gain 0 — otherwise its MIDI piles up and bursts on unmute)";
+                                                    "processing with gain 0 - otherwise its MIDI piles up and bursts on unmute)";
                                        return false;
                                    }
                                    if (hooks_.describeInspectorMeters != nullptr)
@@ -3063,7 +3992,7 @@ void StabilityScenarioRunner::appendOrganDcSteps(const juce::File& project)
                                    }
                                    if (t.frames == 0)
                                    {
-                                       failReason = "no audio blocks measured on the organ row's stage (the strip must run — muted = gain 0)";
+                                       failReason = "no audio blocks measured on the organ row's stage (the strip must run - muted = gain 0)";
                                        return false;
                                    }
                                    const double worstDc = juce::jmax(std::fabs(t.dcOffset[0]), std::fabs(t.dcOffset[1]));
@@ -3132,7 +4061,7 @@ void StabilityScenarioRunner::appendOrganDcSteps(const juce::File& project)
     // stay in the same range as the reference maximum from normal (unmuted) playback.
     auto refMaxEvents = std::make_shared<std::uint32_t>(0);
     auto blocksAtMutedPlayStart = std::make_shared<std::uint64_t>(0);
-    // Same timeline span as the muted run below (24 s → 29 s) so the per-block maxima are comparable.
+    // Same timeline span as the muted run below (24 s -> 29 s) so the per-block maxima are comparable.
     steps_.push_back(Step{ "organ-dc: reference - play 5 s from 24 s unmuted, record max MIDI events per block",
                            [this, organ](juce::String&) -> bool {
                                hooks_.setTrackMutedLikeHeader(*organ, false);
@@ -3168,8 +4097,8 @@ void StabilityScenarioRunner::appendOrganDcSteps(const juce::File& project)
                                return true;
                            },
                            500 });
-    // One muted run = mute → play from 24 s for `mutedMs` → read the muted-window maximum → unmute
-    // while playing → 1 s → stop → read the unmute-window maximum. Two runs with very different
+    // One muted run = mute -> play from 24 s for `mutedMs` -> read the muted-window maximum -> unmute
+    // while playing -> 1 s -> stop -> read the unmute-window maximum. Two runs with very different
     // mute durations: accumulation would make the unmute maximum grow with the mute duration;
     // a bounded, duration-independent value is the normal per-block content plus the CC chase.
     struct MutedRunResult
@@ -3334,7 +4263,7 @@ void StabilityScenarioRunner::appendMidiRoutingSteps(const juce::File& project)
                            },
                            kSettleDefaultMs });
 
-    // Phase B.1: same fixture, offline mixdown path — the capture sink must see equivalent
+    // Phase B.1: same fixture, offline mixdown path - the capture sink must see equivalent
     // routed MIDI (per-channel counts identical to the realtime pass).
     steps_.push_back(Step{ "midi-routing: offline mixdown parity (same routed MIDI)",
                            [this](juce::String& failReason) -> bool {
@@ -3444,7 +4373,7 @@ void StabilityScenarioRunner::appendMidiTrackParitySteps(const juce::File& proje
 namespace
 {
     /// Built-in import fixture when `--midi` is absent: a format-0 SMF (480 PPQ) with eight quarter
-    /// notes on channel 1 — the same shape as a typical single-track export.
+    /// notes on channel 1 - the same shape as a typical single-track export.
     [[nodiscard]] bool writeFixtureMidiFile(const juce::File& target)
     {
         constexpr int kPpq = 480;
@@ -3701,7 +4630,7 @@ void StabilityScenarioRunner::appendMidiEditorMoveCrashSteps(const juce::File& p
             return true;
         },
         kSettleDefaultMs });
-    // The settle above and this extra window let the controller's ASYNC change message dispatch —
+    // The settle above and this extra window let the controller's ASYNC change message dispatch -
     // this is exactly where the pre-fix use-after-free crashed. Reaching the next step proves the
     // process survived it.
     steps_.push_back(Step{ "midi-editor-move: settle after move (async change dispatch)",

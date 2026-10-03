@@ -97,6 +97,20 @@ namespace proxy_fingerprint
                 w.i32(p.channel);
                 w.i32(p.interpolationToNext);
             }
+            // F5b — v24 pitch bend. Written ONLY when present so every generation published before
+            // pitch bend existed keeps its fingerprint (no mass invalidation on upgrade); a clip
+            // that gains wheel data changes its fingerprint exactly like a note edit would.
+            if (!c.pitchBendPoints.empty())
+            {
+                w.u32(0x50424E44u); // 'PBND' section tag
+                w.u32((std::uint32_t)c.pitchBendPoints.size());
+                for (const auto& p : c.pitchBendPoints)
+                {
+                    w.i64(p.startTick);
+                    w.i32(p.value);
+                    w.i32(p.channel);
+                }
+            }
         }
 
         /// Clips serialize in the bake's PLAN order: stable sort by `startSamples` over the stored

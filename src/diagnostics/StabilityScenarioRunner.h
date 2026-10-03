@@ -91,6 +91,49 @@ enum class StabilityScenarioKind
     /// then after a short playback. Shows whether the "stuck" meter is real signal and how big the
     /// step is that a mute/unmute switches (the click).
     OrganDc,
+    /// Live MIDI input through the production path: builds an instrument shell (capture sink) with
+    /// two routed `Midi` rows, assigns MIDI inputs, injects MIDI from a separate thread (or a real
+    /// loopback port when one is present), and verifies monitoring with a stopped transport (no
+    /// dirty flag), channel mapping, Monitor off releasing held notes, a recorded take through the
+    /// real Record / count-in / Stop path (clip positions, lengths, velocities, channels, CC,
+    /// sustain, pitch bend), save / reload, MIDI export, undo / redo, the empty take and the Cycle
+    /// guard. Nothing of the user's project is modified (sibling copy).
+    LiveMidi,
+};
+
+/// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
+struct StabilityMidiClipSummary
+{
+    int clipCount = 0;
+    std::int64_t firstClipStartSamples = 0;
+    std::int64_t firstClipLengthSamples = 0;
+    double bpm = 0.0;
+    int ticksPerQuarter = 0;
+    struct Note
+    {
+        int note = 0;
+        int velocity = 0;
+        int offVelocity = 0;
+        int channel = 0;
+        std::int64_t startTick = 0;
+        std::int64_t durationTicks = 0;
+    };
+    std::vector<Note> notes; ///< first clip
+    struct Cc
+    {
+        std::int64_t tick = 0;
+        int controller = 0;
+        int value = 0;
+        int channel = 0;
+    };
+    std::vector<Cc> cc; ///< first clip
+    struct Pb
+    {
+        std::int64_t tick = 0;
+        int value = 0;
+        int channel = 0;
+    };
+    std::vector<Pb> pitchBend; ///< first clip
 };
 
 /// Mirror of the exporter's level report / the engine's meter reading for scenario logging.
@@ -345,6 +388,57 @@ struct StabilityRunnerHooks
     /// the last reset (`resetTo0 == true` resets after reading). Must stay bounded across a
     /// mute → unmute while playing: no stale burst.
     std::function<std::uint32_t(TrackId, bool resetTo0)> instrumentMaxMidiEventsInOneBlock;
+
+    // --- Live MIDI scenario ----------------------------------------------------------------
+    /// Builds the fixture: plugin-less instrument shell (event-recording capture sink) + "Lower"
+    /// (Force 2) and "Pedal" (Force 3) Midi rows routed to it; MIDI Input = All MIDI inputs with
+    /// channel filters 1 / 5 / 6. Returns the three ids.
+    std::function<bool(TrackId& inst, TrackId& lower, TrackId& pedal, juce::String& failReason)> liveMidiFixtureSetup;
+    /// Enumeration of real MIDI inputs/outputs (logged) and whether a loopback pair was found.
+    std::function<juce::String()> liveMidiDescribeDevices;
+    /// Inject one message as a device would: through a real loopback MIDI output when present,
+    /// otherwise straight into the bus from a dedicated thread with a device-style timestamp.
+    std::function<void(const juce::MidiMessage&)> liveMidiInject;
+    std::function<bool()> liveMidiInjectUsesRealPort;
+    std::function<void(TrackId, bool)> liveMidiSetMonitor;
+    std::function<void(TrackId, bool)> liveMidiSetArm;
+    /// Capture sink of the fixture destination: counts of a (channel, note, on/off) and a reset.
+    std::function<int(int channel, int note, bool noteOn)> liveMidiCapturedNoteCount;
+    std::function<int(int channel, int controller)> liveMidiCapturedCcCount;
+    std::function<int(int channel)> liveMidiCapturedPitchBendCount;
+    std::function<void()> liveMidiCaptureReset;
+    /// After a project reload the destination runtime is new: re-install the capture sink on it.
+    std::function<bool(TrackId, juce::String& failReason)> liveMidiAttachCaptureSink;
+    /// Same entry points as the Record key / Stop button.
+    std::function<void()> recordToggleLikeKey;
+    std::function<bool()> isCountInActive;
+    std::function<bool()> isRecordingInProgress;
+    std::function<std::int64_t()> getTransportPlayheadSamples;
+    std::function<std::int64_t()> liveMidiTakeStartSample;
+    std::function<int()> reportedOutputLatencySamples;
+    std::function<StabilityMidiClipSummary(TrackId)> liveMidiSummarizeClips;
+    /// Export the row's first clip as SMF to `out`; returns counts via the summary-like string.
+    std::function<bool(TrackId, const juce::File& out, int& notes, int& cc, int& pb, juce::String& failReason)>
+        liveMidiExportFirstClip;
+    std::function<int()> undoStackSize;
+    std::function<void(bool)> setCycleEnabled;
+    std::function<bool()> isCycleEnabled;
+    /// Inspector texts for the active row (MIDI Input combo / channel combo / status line).
+    std::function<juce::String()> inspectorMidiInputTexts;
+    std::function<void(TrackId)> selectTrackLikeHeaderClick;
+    /// Header geometry check for the live-MIDI cells of the row at the current column width.
+    std::function<bool(TrackId, juce::String& report, juce::String& failReason)> verifyLiveMidiHeaderCells;
+    /// First REAL MIDI input device present (identifier + name); false when none.
+    std::function<bool(juce::String& identifier, juce::String& name)> liveMidiFirstRealInputDevice;
+    /// Session edit: assign one specific device (Device mode) or back to All (empty identifier).
+    std::function<bool(TrackId, const juce::String& identifier, const juce::String& name)> liveMidiSetTrackInputDevice;
+    /// True when the device manager has the device enabled AND the coordinator's slot callback is
+    /// registered for it (the real device-callback path is wired).
+    std::function<bool(const juce::String& identifier, juce::String& detail)> liveMidiIsDeviceOpen;
+    /// Audio record-arm like the header R button (`RecorderService`); `kInvalidTrackId` disarms.
+    std::function<void(TrackId)> armAudioTrackForRecording;
+    /// Number of timeline audio clips on a row.
+    std::function<int(TrackId)> audioClipCountForTrack;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -397,6 +491,8 @@ private:
     void appendInspectorPanelSteps(const juce::File& project);
     /// Organ residual DC / AC before, during and after mute with the transport stopped (+ after playback).
     void appendOrganDcSteps(const juce::File& project);
+    /// Live MIDI input: monitoring, routing, a recorded take, persistence, export, undo, guards.
+    void appendLiveMidiSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -454,6 +550,18 @@ private:
     juce::Rectangle<int> inspectorWindowBoundsAtStart_;
     float inspectorAudioFaderAtStart_ = 1.0f;
     TrackId inspectorAudioTrackId_ = kInvalidTrackId;
+    /// LiveMidi: fixture rows + the per-injection playhead stamps of the recorded take.
+    TrackId liveMidiInstTid_ = kInvalidTrackId;
+    TrackId liveMidiLowerTid_ = kInvalidTrackId;
+    TrackId liveMidiPedalTid_ = kInvalidTrackId;
+    std::int64_t liveMidiTakeStart_ = 0;
+    std::int64_t liveMidiNoteOnPlayhead_ = 0;
+    std::int64_t liveMidiNoteOffPlayhead_ = 0;
+    std::int64_t liveMidiLowerOnPlayhead_ = 0;
+    std::int64_t liveMidiLowerOffPlayhead_ = 0;
+    std::int64_t liveMidiStopPlayhead_ = 0;
+    int liveMidiUndoSizeBeforeTake_ = 0;
+    juce::File liveMidiExportFile_;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };
