@@ -711,6 +711,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     setCallbackPhase(AudioCallbackPhase::Begin);
     audioCallbackLastBlockSamples_.store(numSamples, std::memory_order_relaxed);
     audioCallbackEnterCount_.fetch_add(1, std::memory_order_relaxed);
+    // Monotone device clock (live-MIDI time base): this block's first sample, advanced on every
+    // return path below because it is advanced here, unconditionally.
+    const std::int64_t monoSampleAtBlockStart = monoSampleClock_;
+    monoSampleClock_ += juce::jmax(0, numSamples);
 
     // [Audio thread] Input-selection slice: map the packed active-channel input array so both the
     // recording push and the monitoring pass can resolve PHYSICAL input assignments per block.
@@ -845,6 +849,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             ctx.playheadAtBlockStart = t0;
             ctx.transportPlaying = playbackIntent == PlaybackIntent::Playing;
             ctx.recordPlacementOffsetSamples = liveMidiRecordPlacementOffsetSamples_.load(std::memory_order_relaxed);
+            ctx.monoSampleAtBlockStart = monoSampleAtBlockStart;
             bus->audioThread_dispatch(ctx, &PlaybackEngine::audioThread_deliverLiveMidiToHost, nullptr);
         }
         else
@@ -1925,12 +1930,24 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         jmax0(loopSpan),
         jmax0(timelineEnd - locL));
 
+    // Live-MIDI cycle recording: the wrap's exact position on the monotone clock delimits the
+    // cycle passes of a take (anchor + wrap marker; see LiveMidiInputBus time model). Noted on
+    // both wrap branches below, after the transport's own wrap bookkeeping.
+    const auto noteLiveMidiWrap = [&]() noexcept {
+        if (live_midi::LiveMidiInputBus* const bus = liveMidiBus_.load(std::memory_order_acquire))
+        {
+            bus->audioThread_noteCycleWrap(monoSampleAtBlockStart + firstRun64, locL,
+                                           transport_.audioThread_relaxedLoadWrapPassCount());
+        }
+    };
+
     if (secondRun64 > 0)
     {
         const int sr = static_cast<int>(secondRun64);
         renderRun(locL, sr, firstRun, true);
         transport_.audioThread_storePlayheadOnWrap(locL + secondRun64);
         transport_.audioThread_signalCycleWrap();
+        noteLiveMidiWrap();
 #if !defined(NDEBUG)
         juce::Logger::writeToLog(
             juce::String("PlaybackEngine wrap: cycleOn=")
@@ -1958,6 +1975,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     {
         transport_.audioThread_storePlayheadOnWrap(locL);
         transport_.audioThread_signalCycleWrap();
+        noteLiveMidiWrap();
 #if !defined(NDEBUG)
         juce::Logger::writeToLog(
             juce::String("PlaybackEngine wrap: cycleOn=")

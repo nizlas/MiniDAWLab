@@ -114,6 +114,18 @@ namespace live_midi
         return (int)juce::jlimit(0.0, (double)(numSamples - 1), std::floor(pos + 1.0e-6));
     }
 
+    namespace
+    {
+        /// Samples the gesture lies before the callback entry (lookback clamped to 2 s: a gesture
+        /// is never attributed further into the past — clock-skew guard — nor into the future).
+        [[nodiscard]] std::int64_t lookbackSamples(const double timeStampSeconds, const BlockContext& ctx) noexcept
+        {
+            const double agoMs = ctx.nowMs - timeStampSeconds * 1000.0;
+            const double clampedAgoMs = juce::jlimit(0.0, 2000.0, std::isfinite(agoMs) ? agoMs : 0.0);
+            return (std::int64_t)std::llround(clampedAgoMs * 0.001 * ctx.sampleRate);
+        }
+    } // namespace
+
     std::int64_t LiveMidiInputBus::timelineSampleForTimestamp(const double timeStampSeconds,
                                                               const BlockContext& ctx) noexcept
     {
@@ -121,12 +133,107 @@ namespace live_midi
         {
             return ctx.playheadAtBlockStart;
         }
-        const double agoMs = ctx.nowMs - timeStampSeconds * 1000.0;
-        // Clamp to a sane window: a gesture is never attributed more than 2 s into the past
-        // (clock skew guard) nor into the future.
-        const double clampedAgoMs = juce::jlimit(0.0, 2000.0, std::isfinite(agoMs) ? agoMs : 0.0);
-        const std::int64_t agoSamples = (std::int64_t)std::llround(clampedAgoMs * 0.001 * ctx.sampleRate);
-        return ctx.playheadAtBlockStart - agoSamples + ctx.recordPlacementOffsetSamples;
+        return ctx.playheadAtBlockStart - lookbackSamples(timeStampSeconds, ctx) + ctx.recordPlacementOffsetSamples;
+    }
+
+    std::int64_t LiveMidiInputBus::monoSampleForTimestamp(const double timeStampSeconds,
+                                                          const BlockContext& ctx) noexcept
+    {
+        const std::int64_t mono = ctx.monoSampleAtBlockStart - lookbackSamples(timeStampSeconds, ctx)
+                                  + ctx.recordPlacementOffsetSamples;
+        return mono < 0 ? std::int64_t{ 0 } : mono;
+    }
+
+    // ---------------------------------------------------------------------- timeline anchors
+    void LiveMidiInputBus::audioThread_pushAnchor(const TimelineAnchor& a) noexcept
+    {
+        if (anchorCount_ > 0 && anchors_[(size_t)anchorHead_].monoSample == a.monoSample)
+        {
+            anchors_[(size_t)anchorHead_] = a; // same instant: the later decision replaces the earlier
+            return;
+        }
+        anchorHead_ = anchorCount_ == 0 ? 0 : (anchorHead_ + 1) % kMaxAnchors;
+        anchors_[(size_t)anchorHead_] = a;
+        anchorCount_ = anchorCount_ < kMaxAnchors ? anchorCount_ + 1 : kMaxAnchors;
+    }
+
+    void LiveMidiInputBus::audioThread_updateAnchorsForBlock(const BlockContext& ctx) noexcept
+    {
+        const std::int64_t mono0 = ctx.monoSampleAtBlockStart;
+        const std::int64_t t0 = ctx.playheadAtBlockStart;
+        bool needAnchor = anchorCount_ == 0;
+        if (!needAnchor)
+        {
+            if (ctx.transportPlaying)
+            {
+                // Continuous playback predicts t0 from the previous block's end; a seek, a play
+                // start or a gap (blocks without dispatch) breaks the prediction.
+                const bool continues = lastBlockPlaying_ && lastBlockMonoEnd_ == mono0
+                                       && lastBlockTimelineEnd_ == t0;
+                needAnchor = !continues;
+            }
+            else
+            {
+                // Stopped: an anchor when playback just ended or the stopped playhead moved (seek).
+                needAnchor = lastBlockPlaying_ || anchors_[(size_t)anchorHead_].timelineSample != t0;
+            }
+        }
+        if (needAnchor)
+        {
+            audioThread_pushAnchor({ mono0, t0, ctx.transportPlaying });
+        }
+        lastBlockPlaying_ = ctx.transportPlaying;
+        lastBlockMonoEnd_ = mono0 + ctx.numSamples;
+        lastBlockTimelineEnd_ = ctx.transportPlaying ? t0 + ctx.numSamples : t0;
+    }
+
+    bool LiveMidiInputBus::audioThread_mapMonoToTimeline(const std::int64_t monoSample,
+                                                         std::int64_t& outTimeline,
+                                                         bool& outPlaying) const noexcept
+    {
+        if (anchorCount_ == 0)
+        {
+            return false;
+        }
+        // Newest first: the first anchor at or before the mono position is the mapping in force.
+        for (int i = 0; i < anchorCount_; ++i)
+        {
+            const int idx = ((anchorHead_ - i) % kMaxAnchors + kMaxAnchors) % kMaxAnchors;
+            const TimelineAnchor& a = anchors_[(size_t)idx];
+            if (a.monoSample <= monoSample)
+            {
+                outPlaying = a.playing;
+                outTimeline = a.playing ? a.timelineSample + (monoSample - a.monoSample) : a.timelineSample;
+                return true;
+            }
+        }
+        // Older than every anchor we still remember: use the oldest one (bounded history).
+        const int oldest = ((anchorHead_ - (anchorCount_ - 1)) % kMaxAnchors + kMaxAnchors) % kMaxAnchors;
+        const TimelineAnchor& a = anchors_[(size_t)oldest];
+        outPlaying = a.playing;
+        outTimeline = a.playing ? a.timelineSample - (a.monoSample - monoSample) : a.timelineSample;
+        return true;
+    }
+
+    void LiveMidiInputBus::audioThread_noteCycleWrap(const std::int64_t monoSampleAtWrap,
+                                                     const std::int64_t loopStartSample,
+                                                     const std::uint32_t wrapSerial) noexcept
+    {
+        audioThread_pushAnchor({ monoSampleAtWrap, loopStartSample, true });
+        // The block that wrapped continues at the loop start: keep the continuity prediction for
+        // the next block consistent with the jump (its end is loopStart + samples after the wrap).
+        if (lastBlockMonoEnd_ >= monoSampleAtWrap)
+        {
+            lastBlockTimelineEnd_ = loopStartSample + (lastBlockMonoEnd_ - monoSampleAtWrap);
+        }
+        CapturedEvent marker;
+        marker.trackId = kInvalidTrackId;
+        marker.monoSample = monoSampleAtWrap;
+        marker.timelineSample = loopStartSample;
+        marker.transportPlaying = true;
+        marker.wrapMarker = true;
+        marker.wrapSerial = wrapSerial;
+        audioThread_pushCaptured(marker);
     }
 
     // ---------------------------------------------------------------------- device threads
@@ -439,10 +546,23 @@ namespace live_midi
             = std::atomic_load_explicit(&routing_, std::memory_order_acquire);
         const RoutingSnapshot* const routing = routingHold.get();
 
+        audioThread_updateAnchorsForBlock(ctx);
         audioThread_reconcileLiveNotes(routing, ctx, deliver, deliverContext);
 
         const double previousMs = previousCallbackMs_;
         previousCallbackMs_ = ctx.nowMs;
+
+        // Recorded position of a gesture: mono clock first, then the anchor mapping (exact across
+        // wraps / seeks / stops); the single-segment projection only before any anchor exists.
+        const auto recordedPosition = [this, &ctx](const double timeStampSeconds, std::int64_t& outMono,
+                                                   std::int64_t& outTimeline, bool& outPlaying) noexcept {
+            outMono = monoSampleForTimestamp(timeStampSeconds, ctx);
+            if (!audioThread_mapMonoToTimeline(outMono, outTimeline, outPlaying))
+            {
+                outTimeline = timelineSampleForTimestamp(timeStampSeconds, ctx);
+                outPlaying = ctx.transportPlaying;
+            }
+        };
 
         const int numRoutes = routing != nullptr ? (int)routing->routes.size() : 0;
 
@@ -472,6 +592,7 @@ namespace live_midi
                         CapturedEvent marker;
                         marker.trackId = r.trackId;
                         marker.timelineSample = ctx.playheadAtBlockStart;
+                        marker.monoSample = ctx.monoSampleAtBlockStart;
                         marker.timeStampSeconds = ctx.nowMs * 0.001;
                         marker.transportPlaying = ctx.transportPlaying;
                         marker.overflowMarker = true;
@@ -499,7 +620,10 @@ namespace live_midi
                     continue;
                 }
                 const int offset = offsetForTimestamp(raw.timeStampSeconds, previousMs, ctx.nowMs, ctx.numSamples);
-                const std::int64_t timelineSample = timelineSampleForTimestamp(raw.timeStampSeconds, ctx);
+                std::int64_t monoSample = 0;
+                std::int64_t timelineSample = 0;
+                bool gesturePlaying = false;
+                recordedPosition(raw.timeStampSeconds, monoSample, timelineSample, gesturePlaying);
                 const bool isNoteOff = received.isNoteOff(true);
                 const bool isNoteOn = received.isNoteOn(false) && !isNoteOff;
 
@@ -557,12 +681,13 @@ namespace live_midi
                         CapturedEvent ce;
                         ce.trackId = r.trackId;
                         ce.timelineSample = timelineSample;
+                        ce.monoSample = monoSample;
                         ce.timeStampSeconds = raw.timeStampSeconds;
                         ce.size = raw.size;
                         ce.bytes[0] = raw.bytes[0];
                         ce.bytes[1] = raw.bytes[1];
                         ce.bytes[2] = raw.bytes[2];
-                        ce.transportPlaying = ctx.transportPlaying;
+                        ce.transportPlaying = gesturePlaying;
                         audioThread_pushCaptured(ce);
                     }
                 }

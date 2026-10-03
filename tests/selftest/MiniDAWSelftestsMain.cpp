@@ -1630,7 +1630,9 @@ namespace
             expect(f.fp() == base,
                    "p1c: raw state-blob byte changes never alter the fingerprint (revision is identity)");
         }
-        // Equal-start clip stored order is data; different-start stored order is not (plan order).
+        // Clip stored order is the layer stack (LAYER-1, fingerprint schema 2): ANY reorder of a
+        // track's clips is render data — equal-start (which clip owns the window) and
+        // different-start alike (the stack decides who wins where they overlap).
         {
             ProxyFixture f = makeOrganFixture();
             auto& clips = f.clipsByTrack[TrackId{ 1 }];
@@ -1638,7 +1640,7 @@ namespace
             const juce::String ordered = f.fp();
             std::swap(clips[0], clips[1]);
             expect(f.fp() != ordered,
-                   "p1c: equal-start clip stored-order swap changes the fingerprint (delivery tie-break)");
+                   "p1c: equal-start clip stored-order swap changes the fingerprint (layer stack is data)");
         }
         {
             ProxyFixture f = makeOrganFixture();
@@ -1646,9 +1648,11 @@ namespace
             clips.push_back(makeClip(11, 96000, { makeNote(67, 0, 960, 1) })); // later start
             const juce::String ordered = f.fp();
             std::swap(clips[0], clips[1]);
-            expect(f.fp() == ordered,
-                   "p1c: different-start clip stored-order swap does not change the fingerprint (plan order)");
+            expect(f.fp() != ordered,
+                   "p1c: different-start clip stored-order swap changes the fingerprint (layer stack is data, schema 2)");
         }
+        expect(proxy_fingerprint::kFingerprintSchemaVersion == 2,
+               "p1c: fingerprint schema 2 (layered bake) marks every additive-era proxy stale");
     }
 
     void testFingerprintExclusions()
@@ -2725,6 +2729,293 @@ namespace
                 }
             }
             expect(cc11Count == 1, "p1d-seq: single-point CC stream emits exactly one CC11");
+        }
+    }
+
+    //==========================================================================
+    // LAYER-1 — per-source MIDI clip layering (MidiLayeredRenderBake.h), shared by the live
+    // bake and the proxy sequencer. The pure helpers first, then the sequencer end to end with
+    // literal expected event lists (origin per source unit = channel; per clip = pitch).
+    //==========================================================================
+
+    void testMidiLayeredRenderBakeHelpers()
+    {
+        using namespace midi_layer_bake;
+
+        // Spans: bottom clip [0,400) under top [100,200) and [300,350) → three audible spans;
+        // the top clips own their windows completely; an empty-length window neither sounds nor covers.
+        {
+            const std::vector<ClipWindow> stack { { 0, 400 }, { 100, 200 }, { 300, 350 }, { 120, 120 } };
+            const auto spans = audibleSpansPerClip(stack);
+            bool ok = spans.size() == 4 && spans[0].size() == 3
+                      && spans[0][0].start == 0 && spans[0][0].endExclusive == 100
+                      && spans[0][1].start == 200 && spans[0][1].endExclusive == 300
+                      && spans[0][2].start == 350 && spans[0][2].endExclusive == 400
+                      && spans[1].size() == 1 && spans[1][0].start == 100 && spans[1][0].endExclusive == 200
+                      && spans[2].size() == 1 && spans[2][0].start == 300 && spans[2][0].endExclusive == 350
+                      && spans[3].empty();
+            expect(ok, "layer: audible spans = window minus the clips above; zero-length windows ignored");
+        }
+        // Fully covered clip has no spans; a clip covering exactly the same window wins entirely.
+        {
+            const std::vector<ClipWindow> stack { { 0, 100 }, { 0, 100 } };
+            const auto spans = audibleSpansPerClip(stack);
+            expect(spans[0].empty() && spans[1].size() == 1,
+                   "layer: identical windows — only the topmost clip is audible");
+        }
+        // Note segmentation: a note running across a covered gap is cut and resumed.
+        {
+            const std::vector<SampleSpan> spans { { 0, 100 }, { 200, 300 } };
+            std::vector<std::pair<std::int64_t, std::int64_t>> segs;
+            forEachAudibleNoteSegment(50, 260, spans, [&](const std::int64_t a, const std::int64_t b) {
+                segs.emplace_back(a, b);
+            });
+            expect(segs.size() == 2 && segs[0] == std::make_pair<std::int64_t, std::int64_t>(50, 100)
+                       && segs[1] == std::make_pair<std::int64_t, std::int64_t>(200, 260),
+                   "layer: a note across a cover becomes [on, coverStart) + [coverEnd, off)");
+            segs.clear();
+            forEachAudibleNoteSegment(120, 180, spans, [&](const std::int64_t a, const std::int64_t b) {
+                segs.emplace_back(a, b);
+            });
+            expect(segs.empty(), "layer: a note entirely inside a cover is silent");
+        }
+        // Stream restriction + chase: events in spans kept, hidden events dropped, the clip's
+        // current value restated at a resumed span start, own audible end keeps the end event.
+        {
+            const std::vector<StreamEvent> ev { { 0, 100 }, { 150, 40 }, { 250, 70 }, { 400, 0 } };
+            const std::vector<SampleSpan> spans { { 0, 100 }, { 200, 400 } };
+            const auto out = restrictStreamToAudibleSpans(ev, spans, 400);
+            bool ok = out.size() == 4
+                      && out[0].absSample == 0 && out[0].value == 100
+                      && out[1].absSample == 200 && out[1].value == 40 // chase: 150→40 restated at 200
+                      && out[2].absSample == 250 && out[2].value == 70
+                      && out[3].absSample == 400 && out[3].value == 0; // own end edge audible
+            expect(ok, "layer: hidden CC dropped, current value chased at the resumed span, end event kept");
+            // Covered at its own end: the end event is not the clip's to send any more.
+            const auto cut = restrictStreamToAudibleSpans(ev, { { 0, 100 }, { 200, 390 } }, 400);
+            bool endDropped = true;
+            for (const auto& e : cut)
+            {
+                endDropped = endDropped && e.absSample != 400;
+            }
+            expect(endDropped, "layer: a clip covered at its end does not emit its end-edge event");
+            // Left-trimmed window: an event before the first span is chased to the span start.
+            const auto trimmed = restrictStreamToAudibleSpans(ev, { { 50, 120 } }, 120);
+            expect(trimmed.size() == 1 && trimmed[0].absSample == 50 && trimmed[0].value == 100,
+                   "layer: a value established before the window is restated at the window start");
+        }
+    }
+
+    /// Helper: CC point for the sequencer snapshots.
+    proxy_snapshot::SnapshotCcPoint makeSeqCc(const std::int64_t tick, const int controller, const int value, const int channel)
+    {
+        proxy_snapshot::SnapshotCcPoint cc;
+        cc.startTick = tick;
+        cc.controller = controller;
+        cc.value = value;
+        cc.channel = channel;
+        cc.interpolationToNext = 0;
+        return cc;
+    }
+
+    void testProxyOfflineSequencerLayering()
+    {
+        using proxy_render::ProxyOfflineSequencer;
+        const double rate = 48000.0; // 120 bpm, 960 tpq: 1 tick = 25 samples; 1920 ticks = 1 s
+        const auto sec = [](const double s) { return (std::int64_t)std::llround(s * 48000.0); };
+
+        const auto find = [](const std::vector<EmittedEvent>& evs, const int status, const int channel,
+                             const int d1, const std::int64_t absSample, const int d2 = -1) {
+            for (const auto& e : evs)
+            {
+                if (e.status == status && e.channel == channel && e.d1 == d1 && e.absSample == absSample
+                    && (d2 < 0 || e.d2 == d2))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto count = [](const std::vector<EmittedEvent>& evs, const int status, const int d1) {
+            int n = 0;
+            for (const auto& e : evs)
+            {
+                n += (e.status == status && e.d1 == d1) ? 1 : 0;
+            }
+            return n;
+        };
+        const auto indexOf = [](const std::vector<EmittedEvent>& evs, const int status, const int channel,
+                                const int d1, const std::int64_t absSample) -> int {
+            for (size_t i = 0; i < evs.size(); ++i)
+            {
+                const auto& e = evs[i];
+                if (e.status == status && e.channel == channel && e.d1 == d1 && e.absSample == absSample)
+                {
+                    return (int)i;
+                }
+            }
+            return -1;
+        };
+
+        // (a) Two overlapping takes with different notes + sustain, CC11 and pitch bend.
+        //     Bottom A [0,4s): note 60 held the whole clip, CC64=127, CC11=100, PB=12000 at tick 0,
+        //     CC64=0 at its end tick. Top B [1s,2s): note 64 whole clip, CC64=0, CC11=50, PB=4000.
+        {
+            proxy_snapshot::ProxyRenderSnapshot snap;
+            snap.destinationTrackId = TrackId{ 7 };
+            snap.destinationMidiOutputChannel = 0;
+            snap.renderConfig.timelineReferenceRate = rate;
+            auto a = makeSeqClip(0, 0, sec(4.0));
+            a.clipId = 1;
+            a.notes.push_back(makeSeqNote(0, 4 * 1920, 60, 1));
+            a.ccPoints.push_back(makeSeqCc(0, 64, 127, 1));
+            a.ccPoints.push_back(makeSeqCc(0, 11, 100, 1));
+            a.ccPoints.push_back(makeSeqCc(4 * 1920, 64, 0, 1)); // pedal release at the take end
+            a.pitchBendPoints.push_back({ 0, 12000, 1 });
+            auto b = makeSeqClip(sec(1.0), sec(1.0), sec(1.0));
+            b.clipId = 2;
+            b.notes.push_back(makeSeqNote(0, 1920, 64, 1));
+            b.ccPoints.push_back(makeSeqCc(0, 64, 0, 1));
+            b.ccPoints.push_back(makeSeqCc(0, 11, 50, 1));
+            b.pitchBendPoints.push_back({ 0, 4000, 1 });
+            snap.destinationClips.push_back(a);
+            snap.destinationClips.push_back(b);
+
+            ProxyOfflineSequencer seq(snap, rate);
+            const auto evs = runSequencer(seq, sec(5.0), 512, false);
+
+            bool ok = find(evs, 0x90, 1, 60, 0) && find(evs, 0xB0, 1, 64, 0, 127) && find(evs, 0xB0, 1, 11, 0, 100)
+                      && find(evs, 0xE0, 1, 12000 & 0x7f, 0, 12000 >> 7);
+            expect(ok, "layer-seq: bottom take plays from 0 with its sustain / CC11 / wheel state");
+            ok = find(evs, 0x80, 1, 60, sec(1.0)) && find(evs, 0x90, 1, 64, sec(1.0))
+                 && find(evs, 0xB0, 1, 64, sec(1.0), 0) && find(evs, 0xB0, 1, 11, sec(1.0), 50)
+                 && find(evs, 0xE0, 1, 4000 & 0x7f, sec(1.0), 4000 >> 7);
+            expect(ok, "layer-seq: at the cover start the lower note ends, the top take's note + controller state take over");
+            expect(indexOf(evs, 0x80, 1, 60, sec(1.0)) < indexOf(evs, 0x90, 1, 64, sec(1.0)),
+                   "layer-seq: Note Off of the covered note precedes the top take's Note On at the same sample");
+            ok = find(evs, 0x80, 1, 64, sec(2.0)) && find(evs, 0x90, 1, 60, sec(2.0), 100)
+                 && find(evs, 0xB0, 1, 64, sec(2.0), 127) && find(evs, 0xB0, 1, 11, sec(2.0), 100)
+                 && find(evs, 0xE0, 1, 12000 & 0x7f, sec(2.0), 12000 >> 7);
+            expect(ok, "layer-seq: when the lower take resumes, its note restarts (same velocity) and its state is chased");
+            expect(indexOf(evs, 0x80, 1, 64, sec(2.0)) < indexOf(evs, 0x90, 1, 60, sec(2.0)),
+                   "layer-seq: top take's Note Off precedes the resumed lower Note On");
+            ok = find(evs, 0x80, 1, 60, sec(4.0)) && find(evs, 0xB0, 1, 64, sec(4.0), 0);
+            expect(ok, "layer-seq: the lower take ends normally with its pedal release at its own end");
+            expect(count(evs, 0x90, 60) == 2 && count(evs, 0x80, 60) == 2 && count(evs, 0x90, 64) == 1,
+                   "layer-seq: exactly two segments for the covered note, one for the top note");
+            // Nothing of B leaks outside [1s,2s); nothing of A sounds inside it.
+            bool leak = false;
+            for (const auto& e : evs)
+            {
+                const bool insideB = e.absSample >= sec(1.0) && e.absSample < sec(2.0);
+                if (e.status == 0x90 && e.d1 == 60 && insideB && e.absSample != sec(1.0))
+                {
+                    leak = true;
+                }
+                if (e.status == 0x90 && e.d1 == 64 && !insideB)
+                {
+                    leak = true;
+                }
+            }
+            expect(!leak, "layer-seq: hidden material is never delivered during the cover");
+
+            // Reversed stack: A on top owns [0,4s) completely → B is never heard, A plays whole.
+            std::swap(snap.destinationClips[0], snap.destinationClips[1]);
+            ProxyOfflineSequencer seq2(snap, rate);
+            const auto evs2 = runSequencer(seq2, sec(5.0), 512, false);
+            expect(count(evs2, 0x90, 64) == 0 && count(evs2, 0x90, 60) == 1 && find(evs2, 0x80, 1, 60, sec(4.0))
+                       && !find(evs2, 0xB0, 1, 11, sec(1.0), 50),
+                   "layer-seq: stored order is the stack — the topmost clip owns its whole window");
+        }
+
+        // (b) A rest and a completely empty top clip mask the clip underneath; (c) partial
+        //     overlap in the middle of a long note with resumption.
+        {
+            proxy_snapshot::ProxyRenderSnapshot snap;
+            snap.destinationTrackId = TrackId{ 7 };
+            snap.renderConfig.timelineReferenceRate = rate;
+            auto a = makeSeqClip(0, 0, sec(4.0));
+            a.clipId = 1;
+            for (int i = 0; i < 8; ++i)
+            {
+                a.notes.push_back(makeSeqNote(i * 960, 960, 48 + i, 2)); // one note per 0.5 s
+            }
+            a.notes.push_back(makeSeqNote(0, 3 * 1920, 72, 2)); // long note [0,3s)
+            auto emptyTop = makeSeqClip(sec(1.0), sec(1.0), sec(1.0)); // [1s,2s), no events at all
+            emptyTop.clipId = 2;
+            snap.destinationClips.push_back(a);
+            snap.destinationClips.push_back(emptyTop);
+            ProxyOfflineSequencer seq(snap, rate);
+            const auto evs = runSequencer(seq, sec(5.0), 512, false);
+            bool ok = find(evs, 0x90, 2, 48, 0) && find(evs, 0x90, 2, 49, sec(0.5))
+                      && !find(evs, 0x90, 2, 50, sec(1.0)) && !find(evs, 0x90, 2, 51, sec(1.5))
+                      && find(evs, 0x90, 2, 52, sec(2.0)) && find(evs, 0x90, 2, 55, sec(3.5));
+            expect(ok, "layer-seq: an empty top clip silences the notes underneath for its whole window");
+            ok = find(evs, 0x90, 2, 72, 0) && find(evs, 0x80, 2, 72, sec(1.0)) && find(evs, 0x90, 2, 72, sec(2.0))
+                 && find(evs, 0x80, 2, 72, sec(3.0)) && count(evs, 0x90, 72) == 2;
+            expect(ok, "layer-seq: a long note is cut at the cover and resumed at its remaining end");
+        }
+
+        // (d) Upper (destination), Lower and Pedal (routed sources) into one instrument: the
+        //     stack is resolved per SOURCE unit — Lower's overlapping takes never affect Upper or
+        //     Pedal, and all three sound together (origin = channel 1 / 2 / 3).
+        {
+            proxy_snapshot::ProxyRenderSnapshot snap;
+            snap.destinationTrackId = TrackId{ 7 };
+            snap.renderConfig.timelineReferenceRate = rate;
+            auto upper = makeSeqClip(0, 0, sec(4.0));
+            upper.notes.push_back(makeSeqNote(0, 4 * 1920, 60, 1));
+            snap.destinationClips.push_back(upper);
+            {
+                proxy_snapshot::SnapshotSource lower;
+                lower.trackId = TrackId{ 8 };
+                lower.midiOutputChannel = 2;
+                auto take1 = makeSeqClip(0, 0, sec(4.0));
+                take1.clipId = 10;
+                take1.notes.push_back(makeSeqNote(0, 4 * 1920, 48, 1));
+                auto take2 = makeSeqClip(0, 0, sec(4.0));
+                take2.clipId = 11;
+                take2.notes.push_back(makeSeqNote(0, 4 * 1920, 50, 1));
+                lower.clips.push_back(take1);
+                lower.clips.push_back(take2);
+                snap.sources.push_back(lower);
+            }
+            {
+                proxy_snapshot::SnapshotSource pedal;
+                pedal.trackId = TrackId{ 9 };
+                pedal.midiOutputChannel = 3;
+                auto p = makeSeqClip(0, 0, sec(4.0));
+                p.notes.push_back(makeSeqNote(0, 4 * 1920, 36, 1));
+                pedal.clips.push_back(p);
+                snap.sources.push_back(pedal);
+            }
+            ProxyOfflineSequencer seq(snap, rate);
+            const auto evs = runSequencer(seq, sec(5.0), 512, false);
+            expect(find(evs, 0x90, 1, 60, 0) && find(evs, 0x90, 2, 50, 0) && !find(evs, 0x90, 2, 48, 0)
+                       && find(evs, 0x90, 3, 36, 0),
+                   "layer-seq: Upper + Lower(top take only) + Pedal sound together; selection is per source track");
+        }
+
+        // (e) Channel-sharing sources keep the deterministic merge: two sources on the same
+        //     output channel both deliver (no isolation is claimed; order = session order).
+        {
+            proxy_snapshot::ProxyRenderSnapshot snap;
+            snap.destinationTrackId = TrackId{ 7 };
+            snap.renderConfig.timelineReferenceRate = rate;
+            for (int s = 0; s < 2; ++s)
+            {
+                proxy_snapshot::SnapshotSource src;
+                src.trackId = TrackId{ (std::uint64_t)(20 + s) };
+                src.midiOutputChannel = 5;
+                auto c = makeSeqClip(0, 0, sec(1.0));
+                c.notes.push_back(makeSeqNote(0, 960, 40 + s, 1));
+                src.clips.push_back(c);
+                snap.sources.push_back(src);
+            }
+            ProxyOfflineSequencer seq(snap, rate);
+            const auto evs = runSequencer(seq, sec(2.0), 512, false);
+            expect(indexOf(evs, 0x90, 5, 40, 0) >= 0 && indexOf(evs, 0x90, 5, 41, 0) > indexOf(evs, 0x90, 5, 40, 0),
+                   "layer-seq: sources sharing a channel both deliver in session order (unchanged)");
         }
     }
 
@@ -8728,6 +9019,8 @@ int main()
     testSpike01CaptureDiagnostics();
     testSpike01MidiDeliveryCounters();
         testProxyOfflineSequencerLiveParity();
+        testMidiLayeredRenderBakeHelpers();
+        testProxyOfflineSequencerLayering();
         testProxyTailDetectorPolicy();
         testProxyRenderExecutorCompleteRender();
         testProxyRenderExecutorLatencyPreservation();

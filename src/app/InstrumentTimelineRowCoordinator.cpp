@@ -10,6 +10,7 @@
 #include "transport/Transport.h"
 #include "ui/ForbiddenCursor.h"
 #include "ui/InspectorView.h"
+#include "ui/PlayheadPixelMapping.h"
 #include "ui/TimelineClipEventChrome.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
@@ -340,36 +341,10 @@ private:
             }
         }
 
-        // Live MIDI take in progress on this row: a translucent red region growing from the record
-        // boundary to the transport playhead. Nothing is played back from it (the clip exists only
-        // after the take is committed), so the direct monitoring is never doubled.
-        if (owner_.callbacks_.liveMidiTakeInProgressForTrack != nullptr)
-        {
-            std::int64_t takeStart = 0;
-            if (owner_.callbacks_.liveMidiTakeInProgressForTrack(laneTimelineTrackId_, takeStart))
-            {
-                const std::int64_t head = owner_.transport_.readPlayheadSamplesForUi();
-                if (head > takeStart)
-                {
-                    const auto eb = getEventBoundsForSessionSpan(takeStart, head - takeStart, laneContent);
-                    if (!eb.isEmpty())
-                    {
-                        const juce::Rectangle<float> r = eb.toFloat();
-                        g.setColour(juce::Colour(0xffd01818).withAlpha(0.28f));
-                        g.fillRoundedRectangle(r, mini_daw::timeline_clip_chrome::kEventCorner);
-                        g.setColour(juce::Colour(0xffff6060).withAlpha(0.7f));
-                        g.drawRoundedRectangle(r, mini_daw::timeline_clip_chrome::kEventCorner, 1.0f);
-                        g.setColour(juce::Colours::white.withAlpha(0.85f));
-                        g.setFont(11.0f);
-                        g.drawText("REC", r.reduced(4.0f, 0.0f), juce::Justification::centredLeft, false);
-                    }
-                }
-            }
-        }
-
         InstrumentTrackController* const ac = activeControllerNullable();
         if (ac == nullptr)
         {
+            paintLiveTakePreview(g, laneContent);
             return;
         }
 
@@ -439,7 +414,155 @@ private:
                 paintEventChromeTrimHandle(g, eb.toFloat(), false);
             }
         }
+
+        // The running take is drawn ON TOP of the existing clips (like the audio lanes' take
+        // preview over older material) — it is a preview only, never a playback source.
+        paintLiveTakePreview(g, laneContent);
     }
+
+    /// Exact time geometry of the running take on this lane (lane-local x), or nullopt.
+    struct LiveTakePreviewGeometry
+    {
+        float xPassStart = 0.0f; ///< current pass start (record boundary / left locator after a wrap)
+        float xHead = 0.0f;      ///< the playhead's display position — same value + transform as the line
+        bool hasCompleted = false;
+        float xCompleted0 = 0.0f;
+        float xCompleted1 = 0.0f;
+    };
+
+    [[nodiscard]] std::optional<LiveTakePreviewGeometry> liveTakePreviewGeometry(const juce::Rectangle<int> laneContent) const
+    {
+        if (owner_.callbacks_.liveMidiTakePreviewForTrack == nullptr || laneContent.isEmpty())
+        {
+            return std::nullopt;
+        }
+        const auto preview = owner_.callbacks_.liveMidiTakePreviewForTrack(laneTimelineTrackId_);
+        if (!preview.active)
+        {
+            return std::nullopt;
+        }
+        TimelineViewportModel& vp = owner_.timelineViewport_;
+        const double spp = vp.getSamplesPerPixel();
+        if (!(spp > 0.0) || !std::isfinite(spp))
+        {
+            return std::nullopt;
+        }
+        const std::int64_t visStart = vp.getVisibleStartSamples();
+        const float originX = (float)laneContent.getX();
+        // Right edge: the overlay's stored frame position (never re-sampled here), so the edge
+        // and the playhead line share one column; the published transport position is only the
+        // fallback when no overlay drives frames (tests / headless).
+        const double headSamples = owner_.callbacks_.playheadDisplaySamplesForUi != nullptr
+                                       ? owner_.callbacks_.playheadDisplaySamplesForUi()
+                                       : (double)owner_.transport_.readPlayheadSamplesForUi();
+        LiveTakePreviewGeometry geo;
+        geo.xPassStart = TimelineRulerView::sessionSampleToLocalX(
+            juce::jmax(std::int64_t{ 0 }, preview.currentPassStartSample), originX, visStart, spp);
+        geo.xHead = playhead_pixel::localXForSample(headSamples, originX, visStart, spp);
+        geo.hasCompleted = preview.completedEndExclusive > preview.completedStart;
+        if (geo.hasCompleted)
+        {
+            geo.xCompleted0 = TimelineRulerView::sessionSampleToLocalX(
+                juce::jmax(std::int64_t{ 0 }, preview.completedStart), originX, visStart, spp);
+            geo.xCompleted1 = TimelineRulerView::sessionSampleToLocalX(
+                juce::jmax(std::int64_t{ 0 }, preview.completedEndExclusive), originX, visStart, spp);
+        }
+        return geo;
+    }
+
+    /// Live MIDI take in progress on this row: a translucent red region from the CURRENT pass
+    /// start to the playhead's display position — exact time geometry, no minimum width, no
+    /// symmetric expansion (the 1.1.10 preview reused the clip-chrome helper, whose 40 px floor
+    /// made the region start before the boundary and run ahead of the playhead). Earlier passes
+    /// of this run are a dimmer wash. A very short region shows only a 2 px start marker; the
+    /// "REC" label appears once it fits inside the region. Nothing is clickable here.
+    void paintLiveTakePreview(juce::Graphics& g, const juce::Rectangle<int> laneContent) const
+    {
+        const auto geoOpt = liveTakePreviewGeometry(laneContent);
+        if (!geoOpt.has_value())
+        {
+            return;
+        }
+        const LiveTakePreviewGeometry& geo = *geoOpt;
+        using namespace mini_daw::timeline_clip_chrome;
+        const juce::Rectangle<float> band = laneContent.toFloat().reduced(0.0f, kEventVerticalMargin);
+        const auto clampX = [&band](const float x) { return juce::jlimit(band.getX(), band.getRight(), x); };
+
+        if (geo.hasCompleted)
+        {
+            const float c0 = clampX(geo.xCompleted0);
+            const float c1 = clampX(geo.xCompleted1);
+            if (c1 - c0 >= 1.0f)
+            {
+                g.setColour(juce::Colour(0xffd01818).withAlpha(0.14f));
+                g.fillRect(juce::Rectangle<float>(c0, band.getY(), c1 - c0, band.getHeight()));
+            }
+        }
+
+        const float x0 = clampX(geo.xPassStart);
+        const float x1 = clampX(geo.xHead);
+        if (geo.xHead > geo.xPassStart && x1 - x0 >= 1.0f)
+        {
+            const juce::Rectangle<float> r(x0, band.getY(), x1 - x0, band.getHeight());
+            g.setColour(juce::Colour(0xffd01818).withAlpha(0.28f));
+            g.fillRect(r);
+            g.setColour(juce::Colour(0xffff6060).withAlpha(0.7f));
+            g.drawRect(r, 1.0f);
+            constexpr float kLabelMinWidth = 34.0f;
+            if (r.getWidth() >= kLabelMinWidth)
+            {
+                g.setColour(juce::Colours::white.withAlpha(0.85f));
+                g.setFont(11.0f);
+                g.drawText("REC", r.reduced(4.0f, 0.0f), juce::Justification::centredLeft, false);
+            }
+        }
+        // Start marker: always at the real pass start while it is on screen (also covers the
+        // frames right after a wrap, before the display position has advanced past the locator).
+        if (geo.xPassStart >= band.getX() && geo.xPassStart <= band.getRight())
+        {
+            g.setColour(juce::Colour(0xffff6060).withAlpha(0.9f));
+            g.fillRect(juce::Rectangle<float>(geo.xPassStart, band.getY(), 2.0f, band.getHeight()));
+        }
+    }
+
+    /// Per-frame growth invalidation (see `InstrumentTimelineRowCoordinator::repaintLiveTakePreviewGrowth`).
+    void repaintLiveTakePreviewGrowthForFrame()
+    {
+        const auto laneContent = getLaneContentBounds();
+        const auto geoOpt = liveTakePreviewGeometry(laneContent);
+        if (!geoOpt.has_value())
+        {
+            lastPreviewHeadX_ = std::numeric_limits<float>::quiet_NaN();
+            return;
+        }
+        const float x = geoOpt->xHead;
+        if (!std::isfinite(lastPreviewHeadX_))
+        {
+            lastPreviewHeadX_ = x;
+            repaint();
+            return;
+        }
+        if ((int)std::floor(lastPreviewHeadX_) == (int)std::floor(x))
+        {
+            return;
+        }
+        const int a = (int)std::floor(juce::jmin(lastPreviewHeadX_, x)) - 2;
+        const int b = (int)std::ceil(juce::jmax(lastPreviewHeadX_, x)) + 2;
+        lastPreviewHeadX_ = x;
+        repaint(juce::Rectangle<int>(a, 0, juce::jmax(1, b - a), getHeight()));
+    }
+
+    [[nodiscard]] std::optional<std::pair<int, int>> liveTakePreviewPixelSpan() const
+    {
+        const auto geoOpt = liveTakePreviewGeometry(getLaneContentBounds());
+        if (!geoOpt.has_value())
+        {
+            return std::nullopt;
+        }
+        return std::make_pair(juce::roundToInt(geoOpt->xPassStart), juce::roundToInt(geoOpt->xHead));
+    }
+
+    float lastPreviewHeadX_ = std::numeric_limits<float>::quiet_NaN();
 
     void mouseDown(const juce::MouseEvent& e) override
     {
@@ -1616,6 +1739,32 @@ void InstrumentTimelineRowCoordinator::repaintInstrumentTrackRow()
             kv.second->repaint();
         }
     }
+}
+
+void InstrumentTimelineRowCoordinator::repaintLiveTakePreviewGrowth(const double /*displaySamples*/) noexcept
+{
+    if (callbacks_.liveMidiTakePreviewForTrack == nullptr)
+    {
+        return;
+    }
+    for (auto& kv : instrumentMidiEventLanesByTrackId_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->repaintLiveTakePreviewGrowthForFrame();
+        }
+    }
+}
+
+std::optional<std::pair<int, int>> InstrumentTimelineRowCoordinator::liveTakePreviewPixelSpanForDiagnostics(
+    const TrackId tid) const
+{
+    const auto it = instrumentMidiEventLanesByTrackId_.find(tid);
+    if (it == instrumentMidiEventLanesByTrackId_.end() || it->second == nullptr)
+    {
+        return std::nullopt;
+    }
+    return it->second->liveTakePreviewPixelSpan();
 }
 
 void InstrumentTimelineRowCoordinator::rewireInstrumentTrackRenameHandlers() noexcept

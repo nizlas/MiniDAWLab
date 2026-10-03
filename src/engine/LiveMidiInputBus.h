@@ -31,15 +31,25 @@
 //       mutual timing is preserved at the cost of the inherent one-block latency (an event cannot
 //       be rendered before the block it arrives in). Events arriving while the callback itself
 //       runs clamp to the last sample.
-//     * RECORDED POSITION on the transport timeline: `playheadAtBlockStart − (nowMs − t) · sr +
-//       recordPlacementOffsetSamples` — the moment the key was actually pressed, projected back
-//       onto the timeline the player was hearing. The placement offset is the device's reported
-//       OUTPUT latency negated (what the player heard at time t was rendered that much earlier),
-//       supplied by the coordinator; it is deliberately not the audio input recording offset and
-//       involves no plugin-latency compensation.
-//   Nothing here reads the UI playhead or repaint timing; while the transport is stopped the
-//   captured events carry `transportPlaying == false` and the take capture ignores them except
-//   for keeping its held-note / controller state current.
+//     * RECORDED POSITION. The engine advances a MONOTONE device sample clock every callback
+//       (`BlockContext::monoSampleAtBlockStart`; it never wraps, seeks or stops). A gesture at
+//       time t is first placed on that clock — `mono = monoAtBlockStart − (nowMs − t) · sr +
+//       recordPlacementOffsetSamples` — and then mapped onto the transport timeline through the
+//       bus's **timeline anchors**: one anchor per discontinuity of the mono→timeline mapping
+//       (play start, seek, cycle wrap, stop), recorded by the audio thread from the engine's own
+//       block segments. Between anchors the timeline advances one sample per mono sample; after a
+//       stop anchor it stands still. So an event that is delivered late — in a block after the
+//       loop wrapped — still lands before the right locator in the previous pass, and the pass it
+//       belongs to is decided by comparing its mono position with the engine's **wrap markers**
+//       (`CapturedEvent::wrapMarker`, pushed into the capture ring at every wrap with the exact
+//       mono sample of the wrap and the transport's wrap serial) — never by a UI timer and never
+//       by two events happening to have decreasing positions. The placement offset is the
+//       device's reported OUTPUT latency negated (what the player heard at time t was rendered
+//       that much earlier), supplied by the coordinator; it is deliberately not the audio input
+//       recording offset and involves no plugin-latency compensation.
+//   Nothing here reads the UI playhead or repaint timing; events whose anchor is a stopped
+//   transport carry `transportPlaying == false` and the take capture ignores them except for
+//   keeping its held-note / controller state current.
 //
 // REALTIME CONTRACT
 //   `audioThread_*` functions allocate nothing, take no locks and never dereference a host: they
@@ -111,6 +121,10 @@ namespace live_midi
         /// Transport-timeline sample of the gesture (see TIME MODEL). Meaningful only while
         /// `transportPlaying`; otherwise the stopped playhead.
         std::int64_t timelineSample = 0;
+        /// Position of the gesture on the engine's monotone device clock (see TIME MODEL). The
+        /// take capture orders events and decides their cycle pass with this, never with
+        /// `timelineSample` alone.
+        std::int64_t monoSample = 0;
         double timeStampSeconds = 0.0;
         std::uint8_t bytes[3] = { 0, 0, 0 };
         std::uint8_t size = 0;
@@ -118,6 +132,12 @@ namespace live_midi
         /// Synthesized marker: the source device ring overflowed before this point — events were
         /// lost, this row's live notes were released. The take reports it; nothing is invented.
         bool overflowMarker = false;
+        /// Synthesized marker (trackId = kInvalidTrackId): the transport wrapped from the right
+        /// to the left locator at exactly `monoSample`; `timelineSample` is the loop start and
+        /// `wrapSerial` the transport's wrap count after this wrap. Pushed even when no MIDI
+        /// arrives, so cycle passes are delimited by the engine, not by events.
+        bool wrapMarker = false;
+        std::uint32_t wrapSerial = 0;
     };
 
     struct BlockContext
@@ -132,6 +152,9 @@ namespace live_midi
         bool transportPlaying = false;
         /// Added to every recorded timeline position (normally −reported output latency).
         std::int64_t recordPlacementOffsetSamples = 0;
+        /// Engine's monotone device clock at this block's first sample (advances every callback,
+        /// playing or not; the anchor / wrap-marker time base).
+        std::int64_t monoSampleAtBlockStart = 0;
     };
 
     /// Delivery adapter: `host` is a snapshot pointer of this block; the engine forwards to
@@ -200,13 +223,30 @@ namespace live_midi
         void audioThread_releaseAllLiveNotes(const ExperimentalInstrumentPlaybackSnapshot* instruments,
                                              DeliverFn deliver, void* deliverContext) noexcept;
 
+        /// [Audio thread] The engine wrapped the playhead from the right locator to
+        /// `loopStartSample` at exactly `monoSampleAtWrap` (block start + first run). Records a
+        /// timeline anchor and pushes a wrap marker into the capture ring (always, armed rows or
+        /// not). `wrapSerial` is the transport's wrap count after this wrap.
+        void audioThread_noteCycleWrap(std::int64_t monoSampleAtWrap, std::int64_t loopStartSample,
+                                       std::uint32_t wrapSerial) noexcept;
+
         // ------------------------------------------------------------------ pure helpers (tests)
         /// Live-delivery sample offset for a timestamp inside the current block window.
         [[nodiscard]] static int offsetForTimestamp(double timeStampSeconds, double previousCallbackMs,
                                                     double nowMs, int numSamples) noexcept;
-        /// Recorded timeline position for a timestamp (see TIME MODEL).
+        /// Recorded timeline position for a timestamp WITHOUT anchors (the single-segment
+        /// projection `playheadAtBlockStart − (now − t)·sr + offset`; see TIME MODEL). The
+        /// dispatch uses the anchor mapping, which reduces to this while the transport plays
+        /// continuously from the block in which it started.
         [[nodiscard]] static std::int64_t timelineSampleForTimestamp(double timeStampSeconds,
                                                                      const BlockContext& ctx) noexcept;
+        /// Mono position of a timestamp (see TIME MODEL): `monoAtBlockStart − (now − t)·sr + offset`,
+        /// the lookback clamped to 2 s and the result to >= 0.
+        [[nodiscard]] static std::int64_t monoSampleForTimestamp(double timeStampSeconds,
+                                                                 const BlockContext& ctx) noexcept;
+        /// [Tests] Number of timeline anchors currently remembered (audio-thread state, read
+        /// between dispatches in deterministic tests).
+        [[nodiscard]] int anchorCountForDiagnostics() const noexcept { return anchorCount_; }
         /// True for the channel-voice messages the bus forwards (notes, CC, pitch bend,
         /// aftertouch / channel pressure for monitoring); false for SysEx, program change,
         /// realtime and system messages.
@@ -245,6 +285,25 @@ namespace live_midi
         [[nodiscard]] static bool hostIsInSnapshot(const ExperimentalInstrumentHost* host,
                                                    const ExperimentalInstrumentPlaybackSnapshot* instruments) noexcept;
 
+        /// One discontinuity of the mono→timeline mapping (see TIME MODEL). `playing == false`
+        /// means the timeline stands still at `timelineSample` from `monoSample` on.
+        struct TimelineAnchor
+        {
+            std::int64_t monoSample = 0;
+            std::int64_t timelineSample = 0;
+            bool playing = false;
+        };
+        static constexpr int kMaxAnchors = 64;
+
+        /// [Audio thread] Record an anchor when this block's transport mapping does not continue
+        /// the previous one (play start, seek, stop, first block).
+        void audioThread_updateAnchorsForBlock(const BlockContext& ctx) noexcept;
+        void audioThread_pushAnchor(const TimelineAnchor& a) noexcept;
+        /// [Audio thread] Map a mono position through the anchors; false when no anchor covers it
+        /// (nothing recorded yet) — callers then fall back to the single-segment projection.
+        [[nodiscard]] bool audioThread_mapMonoToTimeline(std::int64_t monoSample, std::int64_t& outTimeline,
+                                                         bool& outPlaying) const noexcept;
+
         void audioThread_reconcileLiveNotes(const RoutingSnapshot* routing, const BlockContext& ctx,
                                             DeliverFn deliver, void* deliverContext) noexcept;
         void audioThread_releaseNotesForRoute(TrackId trackId, const ExperimentalInstrumentPlaybackSnapshot* instruments,
@@ -274,5 +333,14 @@ namespace live_midi
 
         double previousCallbackMs_ = 0.0; ///< audio-thread private
         bool haveStaleNotesToDrop_ = false;
+
+        /// Timeline anchors (audio-thread private ring, oldest overwritten): enough for the 2 s
+        /// lookback at any sane loop length; an older gesture maps through the oldest kept anchor.
+        std::array<TimelineAnchor, (size_t)kMaxAnchors> anchors_ {};
+        int anchorHead_ = 0;  ///< index of the newest anchor
+        int anchorCount_ = 0;
+        bool lastBlockPlaying_ = false;
+        std::int64_t lastBlockMonoEnd_ = -1;
+        std::int64_t lastBlockTimelineEnd_ = -1;
     };
 } // namespace live_midi

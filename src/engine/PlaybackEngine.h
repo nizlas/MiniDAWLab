@@ -483,6 +483,10 @@ private:
     /// device starts / with the callback drained, so the callback never races the store.
     std::atomic<live_midi::LiveMidiInputBus*> liveMidiBus_{ nullptr };
     std::atomic<std::int64_t> liveMidiRecordPlacementOffsetSamples_{ 0 };
+    /// [Audio thread] Monotone device sample clock: advanced by every callback's block size on
+    /// every path (gated, stopped, playing). The time base of the live-MIDI anchors and cycle
+    /// wrap markers (`LiveMidiInputBus` time model); never reset while the device runs.
+    std::int64_t monoSampleClock_ = 0;
     /// [Audio thread] Adapter from the bus's delivery seam onto the host's per-block MIDI buffer.
     static void audioThread_deliverLiveMidiToHost(void* context, ExperimentalInstrumentHost* host,
                                                   int sampleOffset, const juce::MidiMessage& message) noexcept;

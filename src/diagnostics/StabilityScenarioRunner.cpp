@@ -257,6 +257,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-midi-cycle-takes")
+        {
+            if (!setKind(StabilityScenarioKind::MidiCycleTakes)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-midi-cycle-takes requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -347,6 +356,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::InspectorPanel: scenarioName_ = "inspector-panel"; break;
         case StabilityScenarioKind::OrganDc: scenarioName_ = "organ-dc"; break;
         case StabilityScenarioKind::LiveMidi: scenarioName_ = "live-midi"; break;
+        case StabilityScenarioKind::MidiCycleTakes: scenarioName_ = "midi-cycle-takes"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -432,6 +442,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::LiveMidi:
             appendLiveMidiSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::MidiCycleTakes:
+            appendMidiCycleTakesSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -578,6 +591,1036 @@ void StabilityScenarioRunner::finish(const bool pass, const juce::String& reason
 // -----------------------------------------------------------------------------
 // Step builders
 // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// MIDI cycle takes + layering (`--stability-midi-cycle-takes <project>`)
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& project)
+{
+    if (hooks_.liveMidiFixtureSetup == nullptr || hooks_.liveMidiInject == nullptr || hooks_.liveMidiSetMonitor == nullptr
+        || hooks_.liveMidiSetArm == nullptr || hooks_.liveMidiCapturedNoteCount == nullptr || hooks_.liveMidiCaptureReset == nullptr
+        || hooks_.recordToggleLikeKey == nullptr || hooks_.isCountInActive == nullptr || hooks_.isRecordingInProgress == nullptr
+        || hooks_.getTransportPlayheadSamples == nullptr || hooks_.liveMidiSummarizeAllClips == nullptr || hooks_.undoStackSize == nullptr
+        || hooks_.invokeUndo == nullptr || hooks_.invokeRedo == nullptr || hooks_.loadProjectFromFile == nullptr
+        || hooks_.saveProject == nullptr || hooks_.setLocatorsSamples == nullptr || hooks_.getCycleWrapCount == nullptr
+        || hooks_.setCycleEnabled == nullptr || hooks_.seekTransportTo == nullptr || hooks_.setPlaybackActive == nullptr
+        || hooks_.deleteTopmostMidiClipLikeUi == nullptr || hooks_.getDeviceSampleRate == nullptr
+        || hooks_.liveMidiAttachCaptureSink == nullptr)
+    {
+        steps_.push_back(Step{ "midi-cycle: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "midi-cycle hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    steps_.push_back(Step{ "midi-cycle: copy project to sibling test file",
+                           [this, project](juce::String& failReason) -> bool {
+                               const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-midicycletest.dalproj");
+                               (void)copy.deleteFile();
+                               if (!project.copyFileTo(copy))
+                               {
+                                   failReason = "could not copy project to " + copy.getFullPathName();
+                                   return false;
+                               }
+                               openSaveCloseCopy_ = copy;
+                               cycleEvidenceDir_ = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-midi-cycle");
+                               (void)cycleEvidenceDir_.createDirectory();
+                               appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "midi-cycle: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "midi-cycle: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6)",
+                           [this](juce::String& failReason) -> bool {
+                               if (!hooks_.liveMidiFixtureSetup(liveMidiInstTid_, liveMidiLowerTid_, liveMidiPedalTid_, failReason))
+                               {
+                                   return false;
+                               }
+                               appendStabilityRunLine("  fixture: inst=" + juce::String((juce::int64)liveMidiInstTid_) + " lower="
+                                                      + juce::String((juce::int64)liveMidiLowerTid_) + " pedal="
+                                                      + juce::String((juce::int64)liveMidiPedalTid_)
+                                                      + " injection=" + (hooks_.liveMidiInjectUsesRealPort && hooks_.liveMidiInjectUsesRealPort()
+                                                                             ? "REAL loopback port" : "bus device-thread entry"));
+                               return true;
+                           },
+                           600 });
+
+    const auto inject = [this](const juce::MidiMessage& m) { hooks_.liveMidiInject(m); };
+    const auto on = [](const int ch, const int note, const int vel) { return juce::MidiMessage::noteOn(ch, note, (juce::uint8)vel); };
+    const auto off = [](const int ch, const int note) { return juce::MidiMessage::noteOff(ch, note, (juce::uint8)0); };
+    const auto sr = [this]() { return hooks_.getDeviceSampleRate() > 0.0 ? hooks_.getDeviceSampleRate() : 48000.0; };
+    const auto secondsToSamples = [sr](const double s) { return (std::int64_t)std::llround(s * sr()); };
+    /// Settle until the transport (playing inside [L, R)) reaches `targetSample`, plus a margin.
+    const auto settleUntilPlayhead = [this, sr](const std::int64_t targetSample, const int marginMs) {
+        const std::int64_t head = hooks_.getTransportPlayheadSamples();
+        const double ms = targetSample > head ? (double)(targetSample - head) / sr() * 1000.0 : 0.0;
+        settleOverrideMsForCurrentStep_ = (int)juce::jlimit(50.0, 6000.0, ms + (double)marginMs);
+    };
+    const auto describeClip = [](const StabilityMidiClipSummary& s) {
+        juce::String line;
+        line << "start=" << juce::String((juce::int64)s.firstClipStartSamples) << " len="
+             << juce::String((juce::int64)s.firstClipLengthSamples) << " notes=[";
+        for (const auto& n : s.notes)
+        {
+            line << "(n" << n.note << " v" << n.velocity << " ch" << n.channel << " @" << juce::String((juce::int64)n.startTick)
+                 << " d" << juce::String((juce::int64)n.durationTicks) << ")";
+        }
+        line << "] cc=[";
+        for (const auto& c : s.cc)
+        {
+            line << "(cc" << c.controller << "=" << c.value << " ch" << c.channel << " @" << juce::String((juce::int64)c.tick) << ")";
+        }
+        line << "] pb=[";
+        for (const auto& b : s.pitchBend)
+        {
+            line << "(" << b.value << " ch" << b.channel << " @" << juce::String((juce::int64)b.tick) << ")";
+        }
+        line << "]";
+        return line;
+    };
+    const auto hasNote = [](const StabilityMidiClipSummary& s, const int note) {
+        for (const auto& n : s.notes)
+        {
+            if (n.note == note)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto noteAt = [](const StabilityMidiClipSummary& s, const int note) -> const StabilityMidiClipSummary::Note* {
+        for (const auto& n : s.notes)
+        {
+            if (n.note == note)
+            {
+                return &n;
+            }
+        }
+        return nullptr;
+    };
+    const auto hasCc = [](const StabilityMidiClipSummary& s, const int cc, const int value) {
+        for (const auto& c : s.cc)
+        {
+            if (c.controller == cc && c.value == value)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    /// Preview geometry check against the lane's own viewport: left edge at the expected pass
+    /// start, right edge at the overlay's frame position (same value the playhead line draws).
+    const auto checkPreview = [this](const juce::String& label, const std::int64_t expectedPassStart,
+                                     juce::String& failReason) -> bool {
+        if (hooks_.liveMidiTakePreviewGeometry == nullptr || hooks_.playheadDisplaySamples == nullptr)
+        {
+            appendStabilityRunLine("  preview (" + label + "): geometry hooks missing - skipped");
+            return true;
+        }
+        int x0 = 0, x1 = 0;
+        float originX = 0.0f;
+        std::int64_t visStart = 0;
+        double spp = 0.0;
+        if (!hooks_.liveMidiTakePreviewGeometry(liveMidiInstTid_, x0, x1, originX, visStart, spp) || spp <= 0.0)
+        {
+            failReason = "no running-take preview on the instrument lane (" + label + ")";
+            return false;
+        }
+        const double display = hooks_.playheadDisplaySamples();
+        const double expectedX0 = (double)originX + ((double)expectedPassStart - (double)visStart) / spp;
+        const double expectedX1 = (double)originX + (display - (double)visStart) / spp;
+        const double headNow = (double)hooks_.getTransportPlayheadSamples();
+        appendStabilityRunLine("  preview (" + label + "): x0=" + juce::String(x0) + " expected=" + juce::String(expectedX0, 1)
+                               + " | x1=" + juce::String(x1) + " expected(display)=" + juce::String(expectedX1, 1)
+                               + " | passStart=" + juce::String((juce::int64)expectedPassStart) + " display="
+                               + juce::String(display, 0) + " transport=" + juce::String(headNow, 0) + " visStart="
+                               + juce::String((juce::int64)visStart) + " spp=" + juce::String(spp, 2));
+        if (std::abs((double)x0 - expectedX0) > 1.5)
+        {
+            failReason = "preview left edge is not at the current pass start (" + label + ")";
+            return false;
+        }
+        if (std::abs((double)x1 - expectedX1) > 1.5)
+        {
+            failReason = "preview right edge does not follow the playhead frame position (" + label + ")";
+            return false;
+        }
+        if (x1 < x0 - 1)
+        {
+            failReason = "preview runs ahead of its start (" + label + ")";
+            return false;
+        }
+        return true;
+    };
+    const auto png = [this](const juce::String& name) {
+        if (hooks_.captureArrangementPng)
+        {
+            const juce::File f = cycleEvidenceDir_.getChildFile(name);
+            (void)f.deleteFile(); // a shorter PNG written over a longer one would keep the old tail
+            (void)hooks_.captureArrangementPng(f);
+        }
+    };
+    /// Play one full loop from L with the capture sink reset; reports which (channel, note) sounded.
+    const auto playLoopAndReport = [this, sr](const juce::String& label) {
+        hooks_.setPlaybackActive(false);
+        hooks_.seekTransportTo(cycleLocL_);
+        hooks_.setCycleEnabled(true);
+        juce::Thread::sleep(120);
+        hooks_.liveMidiCaptureReset();
+        hooks_.setPlaybackActive(true);
+        const double loopMs = (double)(cycleLocR_ - cycleLocL_) / sr() * 1000.0;
+        settleOverrideMsForCurrentStep_ = (int)juce::jlimit(500.0, 8000.0, loopMs + 400.0);
+        appendStabilityRunLine("  playback (" + label + "): one loop from L, " + juce::String(settleOverrideMsForCurrentStep_) + " ms");
+    };
+    const auto heard = [this](const int ch, const int note) { return hooks_.liveMidiCapturedNoteCount(ch, note, true); };
+    const auto reportHeard = [this, heard](const juce::String& label) {
+        juce::String line = "  heard (" + label + "): inst ch1 60=" + juce::String(heard(1, 60)) + " 62=" + juce::String(heard(1, 62))
+                            + " 64=" + juce::String(heard(1, 64)) + " 65=" + juce::String(heard(1, 65)) + " | Lower ch2 48="
+                            + juce::String(heard(2, 48)) + " 50=" + juce::String(heard(2, 50));
+        appendStabilityRunLine(line);
+    };
+
+    // ---- 1. Loop [2 s, 5 s), start inside it at 2.5 s; arm inst + Lower; Monitor on inst only; Cycle ON.
+    steps_.push_back(Step{ "midi-cycle: instrument row MIDI Input = All MIDI inputs, channel 1 (through the Inspector)",
+                           [this](juce::String& failReason) -> bool {
+                               if (hooks_.activateTrackLikeHeaderClick && hooks_.inspectorChooseMidiInput && hooks_.inspectorChooseMidiInputChannel)
+                               {
+                                   hooks_.activateTrackLikeHeaderClick(liveMidiInstTid_);
+                                   if (!hooks_.inspectorChooseMidiInput("All MIDI inputs") || !hooks_.inspectorChooseMidiInputChannel(1))
+                                   {
+                                       failReason = "Inspector pick of All MIDI inputs / channel 1 failed on the instrument row";
+                                       return false;
+                                   }
+                               }
+                               else if (!hooks_.liveMidiSetTrackInputDevice || !hooks_.liveMidiSetTrackInputDevice(liveMidiInstTid_, {}, {}))
+                               {
+                                   failReason = "could not configure the instrument row's MIDI input";
+                                   return false;
+                               }
+                               if (hooks_.describeTrackMidiInputFromSession)
+                               {
+                                   appendStabilityRunLine("  inst input: " + hooks_.describeTrackMidiInputFromSession(liveMidiInstTid_));
+                               }
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "midi-cycle: set loop [2.0 s, 5.0 s), Cycle ON, seek to 2.5 s (inside the loop), arm inst + Lower, Monitor inst",
+                           [this, secondsToSamples](juce::String& failReason) -> bool {
+                               cycleLocL_ = secondsToSamples(2.0);
+                               cycleLocR_ = secondsToSamples(5.0);
+                               hooks_.setLocatorsSamples(cycleLocL_, cycleLocR_);
+                               hooks_.setCycleEnabled(true);
+                               hooks_.setPlaybackActive(false);
+                               hooks_.seekTransportTo(secondsToSamples(2.5));
+                               hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                               hooks_.liveMidiSetArm(liveMidiLowerTid_, true);
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
+                               hooks_.liveMidiSetMonitor(liveMidiLowerTid_, false);
+                               cycleInstClipsBefore_ = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
+                               cycleLowerClipsBefore_ = (int)hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_).size();
+                               cycleUndoSizeBefore_ = hooks_.undoStackSize();
+                               if (!hooks_.isCycleEnabled || !hooks_.isCycleEnabled())
+                               {
+                                   failReason = "Cycle could not be enabled";
+                                   return false;
+                               }
+                               appendStabilityRunLine("  loop [" + juce::String((juce::int64)cycleLocL_) + ", " + juce::String((juce::int64)cycleLocR_)
+                                                      + ") clipsBefore inst=" + juce::String(cycleInstClipsBefore_) + " lower="
+                                                      + juce::String(cycleLowerClipsBefore_) + " undo=" + juce::String(cycleUndoSizeBefore_));
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "midi-cycle: press Record with Cycle ON -> count-in starts (no refusal)",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.liveMidiCaptureReset();
+                               cycleWrapsAtRecordStart_ = hooks_.getCycleWrapCount();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(120);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "Record did not start the count-in with Cycle on"
+                                                + (hooks_.lastRecordStartRefusal ? " (" + hooks_.lastRecordStartRefusal().replace("\n", " / ") + ")"
+                                                                                 : juce::String());
+                                   return false;
+                               }
+                               appendStabilityRunLine("  count-in started with Cycle ON; wrap count at start=" + juce::String((int)cycleWrapsAtRecordStart_));
+                               return true;
+                           },
+                           3700 }); // 8 × 375 ms + 375 ms pre-roll
+    steps_.push_back(Step{ "midi-cycle: recording started; preview starts exactly at the record boundary (no 40 px floor)",
+                           [this, checkPreview, png](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress() || hooks_.isCountInActive())
+                               {
+                                   failReason = "take did not start after the count-in";
+                                   return false;
+                               }
+                               cycleRecordStart_ = hooks_.liveMidiTakeStartSample ? hooks_.liveMidiTakeStartSample() : 0;
+                               appendStabilityRunLine("  record start=" + juce::String((juce::int64)cycleRecordStart_) + " playhead="
+                                                      + juce::String((juce::int64)hooks_.getTransportPlayheadSamples()) + " wraps="
+                                                      + juce::String((int)hooks_.getCycleWrapCount()));
+                               if (hooks_.getCycleWrapCount() != cycleWrapsAtRecordStart_)
+                               {
+                                   failReason = "a wrap happened during the count-in (loop too short for this check)";
+                                   return false;
+                               }
+                               png("cycle-preview-start.png");
+                               return checkPreview("start", cycleRecordStart_, failReason);
+                           },
+                           300 });
+    // ---- 2. Pass 0: notes on inst (ch1) + Lower (ch5 → Force 2), sustain + wheel; key 62 held across wrap 1.
+    steps_.push_back(Step{ "midi-cycle: pass 0 - ch1 60 on + ch5 48 on (Lower), sustain down, pitch bend 12000",
+                           [this, inject, on](juce::String&) -> bool {
+                               inject(on(1, 60, 100));
+                               inject(on(5, 48, 90));
+                               inject(juce::MidiMessage::controllerEvent(1, 64, 127));
+                               inject(juce::MidiMessage::pitchWheel(1, 12000));
+                               return true;
+                           },
+                           500 });
+    steps_.push_back(Step{ "midi-cycle: pass 0 - release 60 / 48, hold ch1 62 across the first wrap",
+                           [this, inject, on, off, settleUntilPlayhead](juce::String&) -> bool {
+                               inject(off(1, 60));
+                               inject(off(5, 48));
+                               inject(on(1, 62, 96));
+                               settleUntilPlayhead(cycleLocR_, 250); // wait for wrap 1
+                               return true;
+                           },
+                           1000 });
+    steps_.push_back(Step{ "midi-cycle: after wrap 1 - transport wrapped; preview restarts at the LEFT locator (earlier pass dimmed)",
+                           [this, checkPreview, png](juce::String& failReason) -> bool {
+                               const std::uint32_t wraps = hooks_.getCycleWrapCount() - cycleWrapsAtRecordStart_;
+                               appendStabilityRunLine("  wraps since record start=" + juce::String((int)wraps) + " playhead="
+                                                      + juce::String((juce::int64)hooks_.getTransportPlayheadSamples()));
+                               if (wraps != 1)
+                               {
+                                   failReason = "expected exactly one wrap by now, saw " + juce::String((int)wraps);
+                                   return false;
+                               }
+                               png("cycle-preview-after-wrap.png");
+                               return checkPreview("after wrap 1", cycleLocL_, failReason);
+                           },
+                           100 });
+    // Viewport changes repaint through the coalesced flush, so each PNG is taken in the NEXT step.
+    steps_.push_back(Step{ "midi-cycle: zoom in x1.5: the preview keeps its time anchoring under the new viewport",
+                           [this, checkPreview](juce::String& failReason) -> bool {
+                               if (hooks_.zoomTimelineLikeWheel == nullptr || hooks_.panTimelineBySamples == nullptr)
+                               {
+                                   appendStabilityRunLine("  zoom/pan hooks missing - skipped");
+                                   return true;
+                               }
+                               hooks_.zoomTimelineLikeWheel(1.5);
+                               return checkPreview("zoomed in x1.5", cycleLocL_, failReason);
+                           },
+                           150 });
+    steps_.push_back(Step{ "midi-cycle: PNG (zoomed), then zoom x4 + scroll -0.5 s: still anchored",
+                           [this, checkPreview, png, secondsToSamples](juce::String& failReason) -> bool {
+                               if (hooks_.zoomTimelineLikeWheel == nullptr || hooks_.panTimelineBySamples == nullptr)
+                               {
+                                   return true;
+                               }
+                               png("cycle-preview-zoomed.png");
+                               // Zoom further in so the visible span is shorter than the arrangement, then scroll.
+                               hooks_.zoomTimelineLikeWheel(4.0);
+                               hooks_.panTimelineBySamples(-secondsToSamples(0.5)); // scroll left by half a second (region stays on screen)
+                               return checkPreview("zoomed x4 + panned -0.5 s", cycleLocL_, failReason);
+                           },
+                           150 });
+    steps_.push_back(Step{ "midi-cycle: PNG (panned), then restore the viewport",
+                           [this, checkPreview, png, secondsToSamples](juce::String& failReason) -> bool {
+                               if (hooks_.zoomTimelineLikeWheel == nullptr || hooks_.panTimelineBySamples == nullptr)
+                               {
+                                   return true;
+                               }
+                               png("cycle-preview-panned.png");
+                               hooks_.panTimelineBySamples(secondsToSamples(0.5));
+                               hooks_.zoomTimelineLikeWheel(1.0 / 4.0);
+                               hooks_.zoomTimelineLikeWheel(1.0 / 1.5);
+                               return checkPreview("restored", cycleLocL_, failReason);
+                           },
+                           150 });
+    steps_.push_back(Step{ "midi-cycle: pass 1 - release 62 (+0.3 s), ch1 64 on + ch5 50 on",
+                           [this, inject, on, off](juce::String&) -> bool {
+                               inject(off(1, 62));
+                               inject(on(1, 64, 100));
+                               inject(on(5, 50, 90));
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "midi-cycle: pass 1 - release 64 / 50; wait for wrap 2",
+                           [this, inject, off, settleUntilPlayhead](juce::String&) -> bool {
+                               inject(off(1, 64));
+                               inject(off(5, 50));
+                               settleUntilPlayhead(cycleLocR_, 250);
+                               return true;
+                           },
+                           1000 });
+    steps_.push_back(Step{ "midi-cycle: pass 2 - controller-only on inst (pedal release), Lower silent; wait for wrap 3",
+                           [this, inject, settleUntilPlayhead](juce::String& failReason) -> bool {
+                               const std::uint32_t wraps = hooks_.getCycleWrapCount() - cycleWrapsAtRecordStart_;
+                               if (wraps != 2)
+                               {
+                                   failReason = "expected two wraps by now, saw " + juce::String((int)wraps);
+                                   return false;
+                               }
+                               inject(juce::MidiMessage::controllerEvent(1, 64, 0));
+                               settleUntilPlayhead(cycleLocR_, 250);
+                               return true;
+                           },
+                           1000 });
+    steps_.push_back(Step{ "midi-cycle: pass 3 (partial) - ch1 65 on, off; Stop inside the pass",
+                           [this, inject, on, off, settleUntilPlayhead, secondsToSamples](juce::String& failReason) -> bool {
+                               const std::uint32_t wraps = hooks_.getCycleWrapCount() - cycleWrapsAtRecordStart_;
+                               if (wraps != 3)
+                               {
+                                   failReason = "expected three wraps by now, saw " + juce::String((int)wraps);
+                                   return false;
+                               }
+                               inject(on(1, 65, 100));
+                               juce::Thread::sleep(250);
+                               inject(off(1, 65));
+                               settleUntilPlayhead(cycleLocL_ + secondsToSamples(0.8), 0);
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "midi-cycle: Stop (Record key while recording) -> all passes committed in ONE undo step",
+                           [this](juce::String& failReason) -> bool {
+                               liveMidiStopPlayhead_ = hooks_.getTransportPlayheadSamples();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(200);
+                               if (hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "take still active after stop";
+                                   return false;
+                               }
+                               const int undoNow = hooks_.undoStackSize();
+                               appendStabilityRunLine("  stop playhead=" + juce::String((juce::int64)liveMidiStopPlayhead_) + " wraps="
+                                                      + juce::String((int)(hooks_.getCycleWrapCount() - cycleWrapsAtRecordStart_))
+                                                      + " undo before=" + juce::String(cycleUndoSizeBefore_) + " after=" + juce::String(undoNow));
+                               if (undoNow != cycleUndoSizeBefore_ + 1)
+                               {
+                                   failReason = "the recording run must be exactly one undo step";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           500 });
+    // ---- 3. Verify the takes: one clip per pass and row, windows, boundary handling, stack order.
+    steps_.push_back(Step{ "midi-cycle: verify takes - 4 passes per row, windows [start,R) [L,R) [L,R) [L,stop), held key / pedal / wheel across wraps",
+                           [this, describeClip, hasNote, noteAt, hasCc, sr](juce::String& failReason) -> bool {
+                               const auto inst = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                               const auto lower = hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_);
+                               for (size_t i = (size_t)cycleInstClipsBefore_; i < inst.size(); ++i)
+                               {
+                                   appendStabilityRunLine("  inst take " + juce::String((int)(i - (size_t)cycleInstClipsBefore_)) + ": " + describeClip(inst[i]));
+                               }
+                               for (size_t i = (size_t)cycleLowerClipsBefore_; i < lower.size(); ++i)
+                               {
+                                   appendStabilityRunLine("  lower take " + juce::String((int)(i - (size_t)cycleLowerClipsBefore_)) + ": " + describeClip(lower[i]));
+                               }
+                               if ((int)inst.size() != cycleInstClipsBefore_ + 4 || (int)lower.size() != cycleLowerClipsBefore_ + 4)
+                               {
+                                   failReason = "expected 4 new takes on the instrument row and 4 on the Lower row (silent passes included)";
+                                   return false;
+                               }
+                               const StabilityMidiClipSummary& p0 = inst[(size_t)cycleInstClipsBefore_];
+                               const StabilityMidiClipSummary& p1 = inst[(size_t)cycleInstClipsBefore_ + 1];
+                               const StabilityMidiClipSummary& p2 = inst[(size_t)cycleInstClipsBefore_ + 2];
+                               const StabilityMidiClipSummary& p3 = inst[(size_t)cycleInstClipsBefore_ + 3];
+                               const std::int64_t tol = (std::int64_t)(sr() * 0.05);
+                               const auto windowIs = [tol](const StabilityMidiClipSummary& s, const std::int64_t start, const std::int64_t end) {
+                                   return std::abs((long long)(s.firstClipStartSamples - start)) <= tol
+                                          && std::abs((long long)(s.firstClipStartSamples + s.firstClipLengthSamples - end)) <= tol;
+                               };
+                               if (!windowIs(p0, cycleRecordStart_, cycleLocR_) || !windowIs(p1, cycleLocL_, cycleLocR_)
+                                   || !windowIs(p2, cycleLocL_, cycleLocR_) || p3.firstClipStartSamples != cycleLocL_
+                                   || p3.firstClipLengthSamples <= 0 || p3.firstClipStartSamples + p3.firstClipLengthSamples > cycleLocR_)
+                               {
+                                   failReason = "pass windows do not match [start,R) [L,R) [L,R) [L,stop)";
+                                   return false;
+                               }
+                               // Pass 0: 60, 62 closed at the pass end, pedal down + released at the end, wheel.
+                               const auto* n62p0 = noteAt(p0, 62);
+                               const std::int64_t p0EndTick = (std::int64_t)std::llround((double)p0.firstClipLengthSamples / sr() * p0.bpm / 60.0 * p0.ticksPerQuarter);
+                               if (!hasNote(p0, 60) || n62p0 == nullptr
+                                   || std::abs((long long)(n62p0->startTick + n62p0->durationTicks - p0EndTick)) > 40
+                                   || !hasCc(p0, 64, 127) || p0.pitchBend.empty())
+                               {
+                                   failReason = "pass 0 must hold 60, 62 ending on the pass end, CC64 down and the wheel";
+                                   return false;
+                               }
+                               // Pass 1: 62 continues from tick 0 with velocity 96 / ch1, then 64; pedal + wheel restated at 0.
+                               const auto* n62p1 = noteAt(p1, 62);
+                               bool pbAtZero = false;
+                               for (const auto& b : p1.pitchBend)
+                               {
+                                   pbAtZero = pbAtZero || (b.tick == 0 && b.value == 12000);
+                               }
+                               bool ccAtZero = false;
+                               for (const auto& c : p1.cc)
+                               {
+                                   ccAtZero = ccAtZero || (c.tick == 0 && c.controller == 64 && c.value == 127);
+                               }
+                               if (n62p1 == nullptr || n62p1->startTick != 0 || n62p1->velocity != 96 || n62p1->channel != 1 || !hasNote(p1, 64)
+                                   || !pbAtZero || !ccAtZero || hasNote(p1, 60))
+                               {
+                                   failReason = "pass 1 must continue 62 from tick 0 (velocity / channel kept), hold 64, restate pedal + wheel";
+                                   return false;
+                               }
+                               // Pass 2: controller-only (pedal release), no notes.
+                               if (!p2.notes.empty() || !hasCc(p2, 64, 0))
+                               {
+                                   failReason = "pass 2 must be a controller-only take (pedal release, no notes)";
+                                   return false;
+                               }
+                               // Pass 3: 65 only, partial window.
+                               if (!hasNote(p3, 65) || hasNote(p3, 64) || hasNote(p3, 62))
+                               {
+                                   failReason = "pass 3 must hold only note 65";
+                                   return false;
+                               }
+                               // Lower: 48 / 50 / silent / silent (silent passes still exist as masking takes).
+                               const StabilityMidiClipSummary& l0 = lower[(size_t)cycleLowerClipsBefore_];
+                               const StabilityMidiClipSummary& l1 = lower[(size_t)cycleLowerClipsBefore_ + 1];
+                               const StabilityMidiClipSummary& l2 = lower[(size_t)cycleLowerClipsBefore_ + 2];
+                               const StabilityMidiClipSummary& l3 = lower[(size_t)cycleLowerClipsBefore_ + 3];
+                               if (!hasNote(l0, 48) || !hasNote(l1, 50) || !l2.notes.empty() || !l3.notes.empty() || l3.firstClipLengthSamples <= 0)
+                               {
+                                   failReason = "Lower passes must be 48 / 50 / silent full / silent partial";
+                                   return false;
+                               }
+                               if (l0.notes[0].channel != 5)
+                               {
+                                   failReason = "Lower take must keep its RECEIVED channel 5";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    // ---- 4. Undo / redo of the whole run.
+    steps_.push_back(Step{ "midi-cycle: Undo removes every pass on both rows; Redo restores them",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.invokeUndo();
+                               juce::Thread::sleep(150);
+                               const int instAfterUndo = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
+                               const int lowerAfterUndo = (int)hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_).size();
+                               hooks_.invokeRedo();
+                               juce::Thread::sleep(150);
+                               const int instAfterRedo = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
+                               const int lowerAfterRedo = (int)hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_).size();
+                               appendStabilityRunLine("  undo -> inst/lower clips " + juce::String(instAfterUndo) + "/" + juce::String(lowerAfterUndo)
+                                                      + "; redo -> " + juce::String(instAfterRedo) + "/" + juce::String(lowerAfterRedo));
+                               if (instAfterUndo != cycleInstClipsBefore_ || lowerAfterUndo != cycleLowerClipsBefore_
+                                   || instAfterRedo != cycleInstClipsBefore_ + 4 || lowerAfterRedo != cycleLowerClipsBefore_ + 4)
+                               {
+                                   failReason = "undo/redo of the recording run is not one coherent step";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+    // ---- 5. Playback selection: topmost take wins per source track.
+    steps_.push_back(Step{ "midi-cycle: play one loop - only the topmost takes sound (inst: 65 from pass 3, rest masked; Lower: masked by its silent passes)",
+                           [this, playLoopAndReport](juce::String&) -> bool {
+                               playLoopAndReport("full stack");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback of the full stack",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("full stack");
+                               if (heard(1, 65) < 1 || heard(1, 60) != 0 || heard(1, 62) != 0 || heard(1, 64) != 0
+                                   || heard(2, 48) != 0 || heard(2, 50) != 0)
+                               {
+                                   failReason = "the topmost takes must be the only audible ones (inst 65; Lower nothing)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "midi-cycle: delete the topmost take on inst and Lower (pass 3) -> pass 2 wins (controller-only / silent): still nothing but no 65",
+                           [this, playLoopAndReport](juce::String& failReason) -> bool {
+                               if (!hooks_.deleteTopmostMidiClipLikeUi(liveMidiInstTid_) || !hooks_.deleteTopmostMidiClipLikeUi(liveMidiLowerTid_))
+                               {
+                                   failReason = "could not delete the topmost take";
+                                   return false;
+                               }
+                               playLoopAndReport("after deleting pass 3");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback after deleting pass 3",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("after deleting pass 3");
+                               if (heard(1, 65) != 0 || heard(1, 64) != 0 || heard(1, 62) != 0 || heard(2, 50) != 0)
+                               {
+                                   failReason = "after deleting pass 3 the silent / controller-only pass 2 must mask everything below";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "midi-cycle: delete pass 2 on both rows -> pass 1 is heard (inst 62 + 64, Lower 50); pass 0 stays masked",
+                           [this, playLoopAndReport](juce::String& failReason) -> bool {
+                               if (!hooks_.deleteTopmostMidiClipLikeUi(liveMidiInstTid_) || !hooks_.deleteTopmostMidiClipLikeUi(liveMidiLowerTid_))
+                               {
+                                   failReason = "could not delete the topmost take";
+                                   return false;
+                               }
+                               playLoopAndReport("after deleting pass 2");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback after deleting pass 2",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("after deleting pass 2");
+                               if (heard(1, 62) < 1 || heard(1, 64) < 1 || heard(2, 50) < 1 || heard(1, 60) != 0 || heard(2, 48) != 0 || heard(1, 65) != 0)
+                               {
+                                   failReason = "after deleting pass 2 the previous take (pass 1) must be heard and pass 0 stay masked";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "midi-cycle: Undo the four deletes -> full stack again (only 65 audible)",
+                           [this, playLoopAndReport](juce::String& failReason) -> bool {
+                               for (int i = 0; i < 4; ++i)
+                               {
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(80);
+                               }
+                               if ((int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() != cycleInstClipsBefore_ + 4
+                                   || (int)hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_).size() != cycleLowerClipsBefore_ + 4)
+                               {
+                                   failReason = "undo did not restore the deleted takes";
+                                   return false;
+                               }
+                               playLoopAndReport("after undoing the deletes");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback after undo (65 only), then Redo the deletes and verify pass 1 again",
+                           [this, heard, reportHeard, playLoopAndReport](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("after undo");
+                               if (heard(1, 65) < 1 || heard(1, 64) != 0 || heard(1, 62) != 0 || heard(2, 50) != 0)
+                               {
+                                   failReason = "undo must restore the original audible result";
+                                   return false;
+                               }
+                               for (int i = 0; i < 4; ++i)
+                               {
+                                   hooks_.invokeRedo();
+                                   juce::Thread::sleep(80);
+                               }
+                               playLoopAndReport("after redoing the deletes");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback after redo (pass 1 heard); Undo the deletes again for the remaining checks",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("after redo");
+                               if (heard(1, 64) < 1 || heard(2, 50) < 1 || heard(1, 65) != 0)
+                               {
+                                   failReason = "redo must restore the deleted state's audible result";
+                                   return false;
+                               }
+                               for (int i = 0; i < 4; ++i)
+                               {
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(80);
+                               }
+                               return (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() == cycleInstClipsBefore_ + 4;
+                           },
+                           300 });
+    // ---- 6. MIDI editor open across delete / undo / move of the topmost take.
+    if (hooks_.openMidiEditorOnFirstClipOfTrack && hooks_.closeMidiEditor && hooks_.isMidiEditorOpen && hooks_.moveTopmostMidiClipLikeUi)
+    {
+        steps_.push_back(Step{ "midi-cycle: open the MIDI editor on the inst row, delete the topmost take, undo, move the topmost take, undo - no crash",
+                               [this, secondsToSamples](juce::String& failReason) -> bool {
+                                   if (!hooks_.openMidiEditorOnFirstClipOfTrack(liveMidiInstTid_))
+                                   {
+                                       failReason = "MIDI editor did not open";
+                                       return false;
+                                   }
+                                   juce::Thread::sleep(150);
+                                   if (!hooks_.deleteTopmostMidiClipLikeUi(liveMidiInstTid_))
+                                   {
+                                       failReason = "delete with open editor failed";
+                                       return false;
+                                   }
+                                   juce::Thread::sleep(150);
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(150);
+                                   if (!hooks_.moveTopmostMidiClipLikeUi(liveMidiInstTid_, secondsToSamples(0.1)))
+                                   {
+                                       failReason = "move with open editor failed";
+                                       return false;
+                                   }
+                                   juce::Thread::sleep(150);
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(150);
+                                   appendStabilityRunLine(juce::String("  editor open after delete/undo/move/undo: ") + (hooks_.isMidiEditorOpen() ? "yes" : "no (closed by the edit - acceptable)"));
+                                   hooks_.closeMidiEditor();
+                                   return (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() == cycleInstClipsBefore_ + 4;
+                               },
+                               400 });
+    }
+    // ---- 7. Save / reload keeps content, windows and stack order; the audible result is the same.
+    steps_.push_back(Step{ "midi-cycle: save, reload, verify clip count + stack order survived",
+                           [this, describeClip](juce::String& failReason) -> bool {
+                               const auto before = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                               hooks_.saveProject();
+                               juce::Thread::sleep(200);
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               juce::Thread::sleep(600);
+                               const auto after = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                               const auto lowerAfter = hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_);
+                               if (after.size() != before.size() || (int)lowerAfter.size() != cycleLowerClipsBefore_ + 4)
+                               {
+                                   failReason = "clip count changed across save/reload";
+                                   return false;
+                               }
+                               for (size_t i = 0; i < before.size(); ++i)
+                               {
+                                   if (before[i].firstClipStartSamples != after[i].firstClipStartSamples
+                                       || before[i].firstClipLengthSamples != after[i].firstClipLengthSamples
+                                       || before[i].notes.size() != after[i].notes.size() || before[i].cc.size() != after[i].cc.size()
+                                       || before[i].pitchBend.size() != after[i].pitchBend.size())
+                                   {
+                                       failReason = "stack order / content changed across save/reload at index " + juce::String((int)i) + ": "
+                                                    + describeClip(before[i]) + " vs " + describeClip(after[i]);
+                                       return false;
+                                   }
+                               }
+                               if (!hooks_.liveMidiAttachCaptureSink(liveMidiInstTid_, failReason))
+                               {
+                                   return false;
+                               }
+                               return true;
+                           },
+                           kSettleAfterLoadMs });
+    steps_.push_back(Step{ "midi-cycle: play one loop after reload",
+                           [this, playLoopAndReport](juce::String&) -> bool {
+                               playLoopAndReport("after reload");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback after reload (65 only)",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("after reload");
+                               if (heard(1, 65) < 1 || heard(1, 64) != 0 || heard(1, 62) != 0 || heard(1, 60) != 0 || heard(2, 50) != 0 || heard(2, 48) != 0)
+                               {
+                                   failReason = "the reloaded project must select the same takes";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    // ---- 8. Offline mixdown and a fresh proxy sequencer select the same events.
+    if (hooks_.runMixdownBlocking)
+    {
+        steps_.push_back(Step{ "midi-cycle: offline WAV mixdown delivers the same selection (65 only)",
+                               [this, heard, reportHeard](juce::String& failReason) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   hooks_.setCycleEnabled(true);
+                                   hooks_.liveMidiCaptureReset();
+                                   const juce::File out = cycleEvidenceDir_.getChildFile("midi-cycle-mixdown.wav");
+                                   (void)out.deleteFile();
+                                   const juce::Result r = hooks_.runMixdownBlocking(out, false);
+                                   appendStabilityRunLine("  mixdown: " + juce::String(r.wasOk() ? "ok" : r.getErrorMessage()) + " size="
+                                                          + juce::String((juce::int64)out.getSize()));
+                                   reportHeard("offline mixdown");
+                                   (void)out.deleteFile();
+                                   if (!r.wasOk())
+                                   {
+                                       failReason = "mixdown failed: " + r.getErrorMessage();
+                                       return false;
+                                   }
+                                   if (heard(1, 65) < 1 || heard(1, 64) != 0 || heard(1, 62) != 0 || heard(1, 60) != 0 || heard(2, 50) != 0 || heard(2, 48) != 0)
+                                   {
+                                       failReason = "the offline mixdown delivered a different selection than realtime playback";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+    }
+    if (hooks_.proxySequencerNoteOnsForDestination)
+    {
+        steps_.push_back(Step{ "midi-cycle: a fresh proxy render (P1C snapshot + offline sequencer) selects the same events",
+                               [this](juce::String& failReason) -> bool {
+                                   const juce::String ons = hooks_.proxySequencerNoteOnsForDestination(liveMidiInstTid_);
+                                   appendStabilityRunLine("  proxy sequencer note-ons: " + ons);
+                                   const bool ok = ons.contains("1:65@") && !ons.contains("1:64@") && !ons.contains("1:62@")
+                                                   && !ons.contains("1:60@") && !ons.contains("2:50@") && !ons.contains("2:48@");
+                                   if (!ok)
+                                   {
+                                       failReason = "the proxy bake selects different events than realtime";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               100 });
+    }
+    // ---- 9. While a row records, its own earlier takes are silent (no doubling of the live
+    //         performance); the live input is still heard; Record alone (not Monitor) decides.
+    steps_.push_back(Step{ "midi-cycle: second run - Record on inst again (Monitor on): press Record",
+                           [this](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               hooks_.setCycleEnabled(true);
+                               hooks_.seekTransportTo(cycleLocL_);
+                               hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                               hooks_.liveMidiSetArm(liveMidiLowerTid_, false);
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
+                               cycleUndoSizeBefore_ = hooks_.undoStackSize();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(120);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "second Record did not start a count-in";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           3700 });
+    steps_.push_back(Step{ "midi-cycle: second run - recording: play ch1 67 live; the row's own earlier take (65) must NOT sound",
+                           [this, inject, on, off, sr](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "second take did not start";
+                                   return false;
+                               }
+                               hooks_.liveMidiCaptureReset();
+                               inject(on(1, 67, 100));
+                               juce::Thread::sleep(200);
+                               inject(off(1, 67));
+                               const double loopMs = (double)(cycleLocR_ - cycleLocL_) / sr() * 1000.0;
+                               settleOverrideMsForCurrentStep_ = (int)juce::jlimit(500.0, 8000.0, loopMs + 300.0);
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: second run - verify (65 silent while recording, 67 heard live), Stop, Undo the run",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               reportHeard("while recording the second run");
+                               const int live67 = heard(1, 67);
+                               const int old65 = heard(1, 65);
+                               appendStabilityRunLine("  live 67 heard=" + juce::String(live67) + " earlier take 65 heard=" + juce::String(old65));
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(200);
+                               if (hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "second take still active after stop";
+                                   return false;
+                               }
+                               if (old65 != 0)
+                               {
+                                   failReason = "the recording row's earlier take doubled the live performance";
+                                   return false;
+                               }
+                               if (live67 < 1)
+                               {
+                                   failReason = "the live note was not heard while recording";
+                                   return false;
+                               }
+                               const int clipsNow = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
+                               if (clipsNow <= cycleInstClipsBefore_ + 4 || hooks_.undoStackSize() != cycleUndoSizeBefore_ + 1)
+                               {
+                                   failReason = "the second run did not add its passes as one undo step";
+                                   return false;
+                               }
+                               hooks_.invokeUndo();
+                               juce::Thread::sleep(150);
+                               return (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() == cycleInstClipsBefore_ + 4;
+                           },
+                           300 });
+    steps_.push_back(Step{ "midi-cycle: after the run the row's clips play again (65 heard with Monitor still on, nothing recording)",
+                           [this, playLoopAndReport](juce::String&) -> bool {
+                               playLoopAndReport("after the second run");
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "midi-cycle: verify playback after the second run",
+                           [this, heard, reportHeard](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               reportHeard("after the second run");
+                               if (heard(1, 65) < 1)
+                               {
+                                   failReason = "clip suppression must end with the take";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    // ---- 10. Simultaneous audio + MIDI cycle recording: the audio slices and the MIDI passes get
+    //          the same pass boundaries (same start boundary, locators and stop wrap count), in ONE
+    //          undo step. Skipped with a logged reason when no audio input is available.
+    if (hooks_.armAudioTrackForRecording && hooks_.audioClipWindowsForTrack && hooks_.listAllTracks)
+    {
+        auto audioTid = std::make_shared<TrackId>(kInvalidTrackId);
+        auto audioBefore = std::make_shared<int>(0);
+        auto started = std::make_shared<bool>(false);
+        steps_.push_back(Step{ "midi-cycle: combined audio + MIDI cycle take - arm an audio track + inst, seek to L, Record",
+                               [this, audioTid, audioBefore, started](juce::String&) -> bool {
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                                   {
+                                       if (t.kindName == "audio" && *audioTid == kInvalidTrackId)
+                                       {
+                                           *audioTid = t.id;
+                                       }
+                                   }
+                                   if (*audioTid == kInvalidTrackId)
+                                   {
+                                       appendStabilityRunLine("  no audio track in this project - combined cycle take skipped");
+                                       return true;
+                                   }
+                                   hooks_.setPlaybackActive(false);
+                                   hooks_.setCycleEnabled(true);
+                                   hooks_.seekTransportTo(cycleLocL_);
+                                   *audioBefore = (int)hooks_.audioClipWindowsForTrack(*audioTid).size();
+                                   cycleUndoSizeBefore_ = hooks_.undoStackSize();
+                                   hooks_.armAudioTrackForRecording(*audioTid);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   hooks_.liveMidiSetArm(liveMidiLowerTid_, false);
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(200);
+                                   *started = hooks_.isCountInActive();
+                                   appendStabilityRunLine(juce::String("  combined cycle count-in started: ")
+                                                          + (*started ? "yes" : "no (audio input unavailable on this device - skipped)"));
+                                   if (!*started)
+                                   {
+                                       hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                   }
+                                   return true;
+                               },
+                               3700 });
+        steps_.push_back(Step{ "midi-cycle: combined cycle - pass 0: ch1 67; wait for the wrap",
+                               [this, started, inject, on, off, settleUntilPlayhead](juce::String& failReason) -> bool {
+                                   if (!*started)
+                                   {
+                                       return true;
+                                   }
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "combined cycle take did not start";
+                                       return false;
+                                   }
+                                   cycleWrapsAtRecordStart_ = hooks_.getCycleWrapCount();
+                                   inject(on(1, 67, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 67));
+                                   settleUntilPlayhead(cycleLocR_, 250);
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "midi-cycle: combined cycle - pass 1: ch1 69; Stop inside pass 1",
+                               [this, started, inject, on, off, settleUntilPlayhead, secondsToSamples](juce::String& failReason) -> bool {
+                                   if (!*started)
+                                   {
+                                       return true;
+                                   }
+                                   if (hooks_.getCycleWrapCount() - cycleWrapsAtRecordStart_ != 1)
+                                   {
+                                       failReason = "expected one wrap in the combined cycle take";
+                                       return false;
+                                   }
+                                   inject(on(1, 69, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 69));
+                                   settleUntilPlayhead(cycleLocL_ + secondsToSamples(0.8), 0);
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "midi-cycle: combined cycle - Stop: audio slices and MIDI passes share the pass boundaries, ONE undo step; undo",
+                               [this, started, audioTid, audioBefore, sr, describeClip](juce::String& failReason) -> bool {
+                                   if (!*started)
+                                   {
+                                       return true;
+                                   }
+                                   const int midiBefore = cycleInstClipsBefore_ + 4;
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(600);
+                                   hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                   const auto audio = hooks_.audioClipWindowsForTrack(*audioTid);
+                                   const auto midi = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                                   const int undoDelta = hooks_.undoStackSize() - cycleUndoSizeBefore_;
+                                   juce::String audioLine = "  combined cycle: audio clips " + juce::String(*audioBefore) + "->" + juce::String((int)audio.size()) + " [";
+                                   for (size_t i = 0; i < audio.size() && (int)i < (int)audio.size() - *audioBefore; ++i)
+                                   {
+                                       audioLine << "(start=" << juce::String((juce::int64)audio[i].first) << " len=" << juce::String((juce::int64)audio[i].second) << ")";
+                                   }
+                                   audioLine << "] midi clips " << midiBefore << "->" << (int)midi.size() << " undo +" << undoDelta;
+                                   appendStabilityRunLine(audioLine);
+                                   for (size_t i = (size_t)midiBefore; i < midi.size(); ++i)
+                                   {
+                                       appendStabilityRunLine("  combined cycle midi pass " + juce::String((int)(i - (size_t)midiBefore)) + ": " + describeClip(midi[i]));
+                                   }
+                                   const int newAudio = (int)audio.size() - *audioBefore;
+                                   const int newMidi = (int)midi.size() - midiBefore;
+                                   if (newAudio != 2 || newMidi != 2 || undoDelta != 1)
+                                   {
+                                       failReason = "combined cycle take must add 2 audio slices and 2 MIDI passes in exactly one undo step";
+                                       return false;
+                                   }
+                                   // Audio clips are newest-first; MIDI passes oldest-first. Compare lengths (the audio
+                                   // placement adds its own recording offset to the start by design).
+                                   const std::int64_t tol = (std::int64_t)(sr() * 0.1);
+                                   const std::int64_t audioPass0Len = audio[1].second;
+                                   const std::int64_t audioPass1Len = audio[0].second;
+                                   const std::int64_t midiPass0Len = midi[(size_t)midiBefore].firstClipLengthSamples;
+                                   const std::int64_t midiPass1Len = midi[(size_t)midiBefore + 1].firstClipLengthSamples;
+                                   appendStabilityRunLine("  pass lengths: audio " + juce::String((juce::int64)audioPass0Len) + " / " + juce::String((juce::int64)audioPass1Len)
+                                                          + " midi " + juce::String((juce::int64)midiPass0Len) + " / " + juce::String((juce::int64)midiPass1Len)
+                                                          + " (tolerance " + juce::String((juce::int64)tol) + ")");
+                                   if (std::abs((long long)(audioPass0Len - midiPass0Len)) > tol || std::abs((long long)(audioPass1Len - midiPass1Len)) > tol)
+                                   {
+                                       failReason = "audio slices and MIDI passes do not share the pass boundaries";
+                                       return false;
+                                   }
+                                   bool has67 = false, has69 = false;
+                                   for (const auto& n : midi[(size_t)midiBefore].notes) { has67 = has67 || n.note == 67; }
+                                   for (const auto& n : midi[(size_t)midiBefore + 1].notes) { has69 = has69 || n.note == 69; }
+                                   if (!has67 || !has69)
+                                   {
+                                       failReason = "combined cycle MIDI passes do not hold their notes (67 in pass 0, 69 in pass 1)";
+                                       return false;
+                                   }
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(300);
+                                   const bool restored = (int)hooks_.audioClipWindowsForTrack(*audioTid).size() == *audioBefore
+                                                         && (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() == midiBefore;
+                                   if (!restored)
+                                   {
+                                       failReason = "one Undo did not remove both the audio slices and the MIDI passes";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               400 });
+    }
+    steps_.push_back(Step{ "midi-cycle: cleanup (Cycle off, disarm, Monitor off)",
+                           [this](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               hooks_.setCycleEnabled(false);
+                               hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                               hooks_.liveMidiSetArm(liveMidiLowerTid_, false);
+                               hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                               return true;
+                           },
+                           200 });
+}
 
 void StabilityScenarioRunner::appendLoadAndVerifySteps(const juce::File& project,
                                                        const juce::String& label)
@@ -3167,8 +4210,8 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                300 });
         steps_.push_back(Step{ "user-flow: Record now starts (count-in) - then cancel it; switch R + Monitor off again via the header cells",
                                [this](juce::String& failReason) -> bool {
-                                   // A project saved with Cycle on would be refused for the documented reason
-                                   // (linear MIDI takes); the user-flow check is about the input, so switch it off.
+                                   // The user-flow check is about the input, not about passes: run it as a
+                                   // linear take (Cycle off) so the later steps' expectations stay simple.
                                    if (hooks_.setCycleEnabled)
                                    {
                                        hooks_.setCycleEnabled(false);
@@ -3675,10 +4718,11 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                400 });
     }
 
-    // ---- 3. Cycle guard: Record with armed MIDI rows and Cycle on must refuse (Cycle untouched).
+    // ---- 3. Cycle: Record with armed MIDI rows and Cycle on STARTS (cycle takes are passes — the
+    //         full behaviour is covered by `--stability-midi-cycle-takes`); Cycle is left untouched.
     if (hooks_.setCycleEnabled && hooks_.isCycleEnabled)
     {
-        steps_.push_back(Step{ "live-midi: Cycle ON + armed MIDI row + Record -> refused, Cycle unchanged",
+        steps_.push_back(Step{ "live-midi: Cycle ON + armed MIDI row + Record -> count-in starts (cycle recording), Cycle unchanged; cancel",
                                [this](juce::String& failReason) -> bool {
                                    hooks_.liveMidiSetArm(liveMidiInstTid_, true);
                                    hooks_.setCycleEnabled(true);
@@ -3687,11 +4731,19 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                    const bool countIn = hooks_.isCountInActive();
                                    const bool cycleStill = hooks_.isCycleEnabled();
                                    appendStabilityRunLine(juce::String("  countIn=") + (countIn ? "yes" : "no") + " cycleStillOn="
-                                                          + (cycleStill ? "yes" : "no"));
-                                   hooks_.setCycleEnabled(false);
+                                                          + (cycleStill ? "yes" : "no")
+                                                          + (hooks_.lastRecordStartRefusal && hooks_.lastRecordStartRefusal().isNotEmpty()
+                                                                 ? " refusal=" + hooks_.lastRecordStartRefusal().replace("\n", " / ")
+                                                                 : juce::String()));
                                    if (countIn)
                                    {
-                                       failReason = "Record started a count-in although Cycle was on with an armed MIDI row";
+                                       hooks_.recordToggleLikeKey(); // cancel the count-in
+                                       juce::Thread::sleep(100);
+                                   }
+                                   hooks_.setCycleEnabled(false);
+                                   if (!countIn)
+                                   {
+                                       failReason = "Record refused with Cycle on although MIDI cycle recording is supported";
                                        return false;
                                    }
                                    if (!cycleStill)
@@ -3699,7 +4751,7 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                        failReason = "Cycle was switched off automatically";
                                        return false;
                                    }
-                                   return true;
+                                   return hooks_.isCountInActive() == false;
                                },
                                400 });
     }

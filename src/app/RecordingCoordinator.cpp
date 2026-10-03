@@ -247,8 +247,22 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
 
     transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
     // Stop boundary for the MIDI take: the transport position at the moment of stop. Held notes
-    // end here, a held sustain pedal is released here.
-    const std::int64_t stopSample = transport_.readPlayheadSamplesForUi();
+    // end here, a held sustain pedal is released here. The wrap count is read as a CONSISTENT
+    // pair with the position (re-read until no wrap slipped in between), so a cycle take's last
+    // pass is counted exactly once: a wrap the engine performs after this read belongs to blocks
+    // past the user's Stop and is discarded by the take builder.
+    std::uint32_t stopWrapSerial = transport_.readCycleWrapCountForUi();
+    std::int64_t stopSample = transport_.readPlayheadSamplesForUi();
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+        const std::uint32_t again = transport_.readCycleWrapCountForUi();
+        if (again == stopWrapSerial)
+        {
+            break;
+        }
+        stopWrapSerial = again;
+        stopSample = transport_.readPlayheadSamplesForUi();
+    }
     callbacks_.updatePlayPauseButtonFromTransport();
     if (cycleRecordingWrapTimer_ != nullptr)
     {
@@ -271,14 +285,15 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             commit();
         }
     };
-    const auto commitMidiClipsNow = [this, midiTake, stopSample]() -> int {
+    const auto commitMidiClipsNow = [this, midiTake, stopSample, stopWrapSerial]() -> int {
         if (!midiTake || !callbacks_.commitMidiTake)
         {
             return 0;
         }
-        const int clips = callbacks_.commitMidiTake(stopSample);
+        const int clips = callbacks_.commitMidiTake(stopSample, stopWrapSerial);
         juce::Logger::writeToLog("[Rec] MIDI take committed: " + juce::String(clips) + " clip(s), stop sample "
-                                 + juce::String((juce::int64)stopSample));
+                                 + juce::String((juce::int64)stopSample) + " wrapSerial="
+                                 + juce::String((int)stopWrapSerial));
         return clips;
     };
 
@@ -312,7 +327,9 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
         return;
     }
 
-    std::uint32_t wrapFinal = transport_.readCycleWrapCountForUi();
+    // The audio slices and the MIDI passes count wraps from the SAME stop read (`stopWrapSerial`),
+    // so a combined audio + MIDI cycle take has identical pass boundaries on every row.
+    const std::uint32_t wrapFinal = stopWrapSerial;
     if (commitCycleTakes)
     {
         if (wrapFinal != lastSeenWrapCount_)
@@ -321,6 +338,14 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             lastSeenWrapCount_ = wrapFinal;
         }
     }
+    // Cycle-commit failure paths below: the MIDI passes are still valid material — keep them.
+    const auto commitMidiOnlyAfterAudioFailure = [&]() {
+        if (midiTake)
+        {
+            commitUndoable([&] { (void)commitMidiClipsNow(); });
+            callbacks_.syncViewportFromSession();
+        }
+    };
 
     if (r.droppedSampleCount > 0)
     {
@@ -346,6 +371,7 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
                                                                : "Could not decode recorded WAV.");
             juce::Logger::writeToLog(
                 juce::String{"[Rec] cycle decode failed: "} + loadClipResult.getErrorMessage());
+            commitMidiOnlyAfterAudioFailure();
             callbacks_.repaintRulerAndLanes();
             return;
         }
@@ -359,6 +385,7 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
                 juce::AlertWindow::WarningIcon,
                 "Session",
                 "Cycle recording commit failed: invalid loop range or decoded material.");
+            commitMidiOnlyAfterAudioFailure();
             callbacks_.repaintRulerAndLanes();
             return;
         }
@@ -370,6 +397,7 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             lastSeenWrapCount_ = 0;
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon, "Session", "Could not resolve project Audio folder.");
+            commitMidiOnlyAfterAudioFailure();
             callbacks_.repaintRulerAndLanes();
             return;
         }
@@ -381,6 +409,7 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
                 juce::AlertWindow::WarningIcon,
                 "Session",
                 "Could not create project Audio folder: " + audioDir.getFullPathName());
+            commitMidiOnlyAfterAudioFailure();
             callbacks_.repaintRulerAndLanes();
             return;
         }
@@ -404,6 +433,7 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
                 juce::AlertWindow::WarningIcon,
                 "Session",
                 "Cycle recording had no usable samples to commit.");
+            commitMidiOnlyAfterAudioFailure();
             callbacks_.repaintRulerAndLanes();
             return;
         }
@@ -488,36 +518,41 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
         const std::int64_t actualStart = juce::jmax<std::int64_t>(std::int64_t{ 0 }, cycleStart);
         const int wraps = juce::jmax(0, numCompletedPasses_);
 
-        if (actualStart >= cycleLocR || wraps <= 0)
-        {
-            writeSliceCommit(std::int64_t{ 0 }, totalAvail, actualStart);
-        }
-        else
-        {
-            const std::int64_t firstSegLen = juce::jmin(cycleLocR - actualStart, totalAvail);
-            writeSliceCommit(std::int64_t{ 0 }, firstSegLen, actualStart);
-
-            const std::int64_t remainingAfterFirst = totalAvail - firstSegLen;
-            const std::int64_t maxAdditionalFullsBySamples
-                = passLen > 0 ? remainingAfterFirst / passLen : std::int64_t{ 0 };
-            const int subsequentFull = static_cast<int>(
-                juce::jmin(static_cast<std::int64_t>(juce::jmax(0, wraps - 1)),
-                           maxAdditionalFullsBySamples));
-            for (int i = 0; i < subsequentFull; ++i)
+        // ONE undo step for the whole recording run: every audio pass slice plus every MIDI pass
+        // of every recording row (older takes are never overwritten — each pass is a new clip).
+        commitUndoable([&] {
+            if (actualStart >= cycleLocR || wraps <= 0)
             {
-                const std::int64_t off = firstSegLen + static_cast<std::int64_t>(i) * passLen;
-                writeSliceCommit(off, passLen, cycleLocL);
+                writeSliceCommit(std::int64_t{ 0 }, totalAvail, actualStart);
             }
-
-            const std::int64_t partialOffset
-                = firstSegLen + static_cast<std::int64_t>(subsequentFull) * passLen;
-            std::int64_t partialLen = totalAvail - partialOffset;
-            partialLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, partialLen);
-            if (partialLen > 0)
+            else
             {
-                writeSliceCommit(partialOffset, partialLen, cycleLocL);
+                const std::int64_t firstSegLen = juce::jmin(cycleLocR - actualStart, totalAvail);
+                writeSliceCommit(std::int64_t{ 0 }, firstSegLen, actualStart);
+
+                const std::int64_t remainingAfterFirst = totalAvail - firstSegLen;
+                const std::int64_t maxAdditionalFullsBySamples
+                    = passLen > 0 ? remainingAfterFirst / passLen : std::int64_t{ 0 };
+                const int subsequentFull = static_cast<int>(
+                    juce::jmin(static_cast<std::int64_t>(juce::jmax(0, wraps - 1)),
+                               maxAdditionalFullsBySamples));
+                for (int i = 0; i < subsequentFull; ++i)
+                {
+                    const std::int64_t off = firstSegLen + static_cast<std::int64_t>(i) * passLen;
+                    writeSliceCommit(off, passLen, cycleLocL);
+                }
+
+                const std::int64_t partialOffset
+                    = firstSegLen + static_cast<std::int64_t>(subsequentFull) * passLen;
+                std::int64_t partialLen = totalAvail - partialOffset;
+                partialLen = juce::jlimit<std::int64_t>(std::int64_t{ 0 }, passLen, partialLen);
+                if (partialLen > 0)
+                {
+                    writeSliceCommit(partialOffset, partialLen, cycleLocL);
+                }
             }
-        }
+            (void)commitMidiClipsNow();
+        });
 
         numCompletedPasses_ = 0;
         lastSeenWrapCount_ = 0;
@@ -641,22 +676,9 @@ void RecordingCoordinator::numpadRecordToggled()
         // starts for the ready rows; the skipped ones are logged and explained in the Inspector.
         juce::Logger::writeToLog("[Rec] armed MIDI rows skipped (not ready): " + midiNotReady.joinIntoString(" | "));
     }
-    if (!midiTracks.empty())
-    {
-        // First live-MIDI delivery records one linear take. Cycle is left exactly as the user set
-        // it (never switched off behind their back) — they are told what to change.
-        const bool cycleOn = transport_.readCycleEnabledForUi();
-        const std::int64_t locL = session_.getLeftLocatorSamples();
-        const std::int64_t locR = session_.getRightLocatorSamples();
-        if (cycleOn && locR > locL && locR > 0)
-        {
-            lastRecordStartRefusal_ = "MIDI recording needs Cycle switched off: it records one linear take. Turn Cycle "
-                                      "off, then press Record again. (Audio-only cycle recording is unchanged.)";
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Recording", lastRecordStartRefusal_);
-            juce::Logger::writeToLog("[Rec] start blocked: cycle active with armed MIDI rows");
-            return;
-        }
-    }
+    // MIDI rows record with Cycle on as well: the take is split into one clip per pass at the
+    // engine's wrap markers (see LiveMidiTakeBuilder.h), with the same start boundary and locators
+    // as the audio cycle slices when an audio track records alongside.
     if (armed == kInvalidTrackId)
     {
         // MIDI-only take: no take file, but the transport still needs a running device.
@@ -994,6 +1016,20 @@ void RecordingCoordinator::completeCountInAndStartRecording()
     // count-in finishes. The MIDI capture maps each gesture onto this timeline (see
     // LiveMidiInputBus time model); the audio take places its file here (+ its own offset).
     req.recordingStartSample = transport_.readPlayheadSamplesForUi();
+    // Recording at / past the end of the arrangement: the engine stops advancing the playhead at
+    // the arrangement extent, which would freeze the take's timeline (the audio take keeps its
+    // device-clock length, but MIDI gestures would have no position after the end). Grow the
+    // navigable extent through the same grow-only session operation that seeds new projects, so
+    // the transport runs for the whole take (headroom: 30 minutes past the record start).
+    {
+        const double sr = req.sampleRate > 0.0 ? req.sampleRate : 48000.0;
+        const std::int64_t needed = req.recordingStartSample + (std::int64_t)std::llround(30.0 * 60.0 * sr);
+        if (session_.getArrangementExtentSamples() < needed)
+        {
+            session_.setArrangementExtentSamples(needed);
+            callbacks_.syncViewportFromSession();
+        }
+    }
     if (armedCycleSession)
     {
         cycleSessionTrackId_ = req.targetTrackId;
@@ -1027,11 +1063,18 @@ void RecordingCoordinator::completeCountInAndStartRecording()
 
     if (midiTake && callbacks_.beginMidiTake)
     {
-        callbacks_.beginMidiTake(req.recordingStartSample, req.sampleRate);
+        // Cycle context from the transport as it is NOW (the same decision the audio cycle session
+        // took above when an audio track records; a MIDI-only take reads it here).
+        const std::int64_t locL = session_.getLeftLocatorSamples();
+        const std::int64_t locR = session_.getRightLocatorSamples();
+        const bool cycleActive = transport_.readCycleEnabledForUi() && locR > locL && locR > 0;
+        callbacks_.beginMidiTake(req.recordingStartSample, req.sampleRate, cycleActive, locL, locR,
+                                 transport_.readCycleWrapCountForUi());
         midiTakeActive_ = true;
         juce::Logger::writeToLog("[Rec] MIDI take started at sample "
                                  + juce::String((juce::int64)req.recordingStartSample)
-                                 + (audioTake ? " (with audio take)" : " (MIDI only)"));
+                                 + (audioTake ? " (with audio take)" : " (MIDI only)")
+                                 + (cycleActive ? " cycle" : " linear"));
     }
 
     if (armedCycleSession)

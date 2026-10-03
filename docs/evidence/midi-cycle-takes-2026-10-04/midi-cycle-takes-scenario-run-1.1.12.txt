@@ -1,0 +1,323 @@
+﻿Danielssons Audio Lab 1.1.12 - --stability-midi-cycle-takes scenario log (sources of commit for 1.1.12; Debug exe build\ninja-debug-2\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe, FileVersion 1.1.12)
+Captured 2026-10-04 from %APPDATA%\MiniDAWLab\stability-run.log. Run 1: 120 BPM fixture (plugin-less instrument shell + routed Lower/Pedal rows, capture sink), Debug exe. Run 2: temp copy of TSE_pt2 (VB3-II + AmpliTube), Release exe of the same sources.
+MIDI entered through the bus's device-thread entry with device-style timestamps; the user's controls (Record key, header cells, Inspector combos, Delete key, undo/redo, save/reload) were driven for real. No physical key, no listening. PNGs: cycle-preview-*.png from run 1.
+
+2026-10-04T00:34:38.334+02:00 scenario start: midi-cycle-takes iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture.dalproj
+2026-10-04T00:34:38.337+02:00 steps queued: 45 (delete-loop iterations expand at plan time)
+2026-10-04T00:34:38.848+02:00 step begin: midi-cycle: copy project to sibling test file
+2026-10-04T00:34:38.852+02:00   test copy: C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture-midicycletest.dalproj
+2026-10-04T00:34:38.857+02:00 step end ok: midi-cycle: copy project to sibling test file elapsedMs=4
+2026-10-04T00:34:39.153+02:00 step begin: midi-cycle: load test copy
+2026-10-04T00:34:39.515+02:00 step end ok: midi-cycle: load test copy elapsedMs=356
+2026-10-04T00:34:40.747+02:00 step begin: midi-cycle: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6)
+2026-10-04T00:34:40.754+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-04T00:34:40.757+02:00   fixture: inst=3 lower=4 pedal=5 injection=bus device-thread entry
+2026-10-04T00:34:40.762+02:00 step end ok: midi-cycle: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6) elapsedMs=10
+2026-10-04T00:34:41.411+02:00 step begin: midi-cycle: instrument row MIDI Input = All MIDI inputs, channel 1 (through the Inspector)
+2026-10-04T00:34:41.418+02:00   inst input: all ch=1
+2026-10-04T00:34:41.423+02:00 step end ok: midi-cycle: instrument row MIDI Input = All MIDI inputs, channel 1 (through the Inspector) elapsedMs=6
+2026-10-04T00:34:41.869+02:00 step begin: midi-cycle: set loop [2.0 s, 5.0 s), Cycle ON, seek to 2.5 s (inside the loop), arm inst + Lower, Monitor inst
+2026-10-04T00:34:41.875+02:00   loop [96000, 240000) clipsBefore inst=0 lower=0 undo=2
+2026-10-04T00:34:41.881+02:00 step end ok: midi-cycle: set loop [2.0 s, 5.0 s), Cycle ON, seek to 2.5 s (inside the loop), arm inst + Lower, Monitor inst elapsedMs=3
+2026-10-04T00:34:42.329+02:00 step begin: midi-cycle: press Record with Cycle ON -> count-in starts (no refusal)
+2026-10-04T00:34:42.453+02:00   count-in started with Cycle ON; wrap count at start=0
+2026-10-04T00:34:42.459+02:00 step end ok: midi-cycle: press Record with Cycle ON -> count-in starts (no refusal) elapsedMs=125
+2026-10-04T00:34:45.715+02:00   [LiveMidi] take begins at sample 120000 for 2 row(s) cycle [96000, 240000) wrapSerial=0
+2026-10-04T00:34:46.181+02:00 step begin: midi-cycle: recording started; preview starts exactly at the record boundary (no 40 px floor)
+2026-10-04T00:34:46.184+02:00   record start=120000 playhead=142400 wraps=0
+2026-10-04T00:34:46.230+02:00   preview (start): x0=25 expected=25.0 | x1=30 expected(display)=29.6 | passStart=120000 display=142198 transport=144576 visStart=0 spp=4800.00
+2026-10-04T00:34:46.236+02:00 step end ok: midi-cycle: recording started; preview starts exactly at the record boundary (no 40 px floor) elapsedMs=49
+2026-10-04T00:34:46.554+02:00 step begin: midi-cycle: pass 0 - ch1 60 on + ch5 48 on (Lower), sustain down, pitch bend 12000
+2026-10-04T00:34:46.563+02:00 step end ok: midi-cycle: pass 0 - ch1 60 on + ch5 48 on (Lower), sustain down, pitch bend 12000 elapsedMs=0
+2026-10-04T00:34:47.078+02:00 step begin: midi-cycle: pass 0 - release 60 / 48, hold ch1 62 across the first wrap
+2026-10-04T00:34:47.084+02:00 step end ok: midi-cycle: pass 0 - release 60 / 48, hold ch1 62 across the first wrap elapsedMs=0
+2026-10-04T00:34:48.501+02:00 step begin: midi-cycle: after wrap 1 - transport wrapped; preview restarts at the LEFT locator (earlier pass dimmed)
+2026-10-04T00:34:48.504+02:00   wraps since record start=1 playhead=109760
+2026-10-04T00:34:48.548+02:00   preview (after wrap 1): x0=20 expected=20.0 | x1=23 expected(display)=22.7 | passStart=96000 display=108944 transport=111808 visStart=0 spp=4800.00
+2026-10-04T00:34:48.554+02:00 step end ok: midi-cycle: after wrap 1 - transport wrapped; preview restarts at the LEFT locator (earlier pass dimmed) elapsedMs=47
+2026-10-04T00:34:48.659+02:00 step begin: midi-cycle: zoom in x1.5: the preview keeps its time anchoring under the new viewport
+2026-10-04T00:34:48.662+02:00   preview (zoomed in x1.5): x0=18 expected=17.8 | x1=24 expected(display)=24.2 | passStart=96000 display=116633 transport=117312 visStart=39104 spp=3200.00
+2026-10-04T00:34:48.667+02:00 step end ok: midi-cycle: zoom in x1.5: the preview keeps its time anchoring under the new viewport elapsedMs=2
+2026-10-04T00:34:48.864+02:00 step begin: midi-cycle: PNG (zoomed), then zoom x4 + scroll -0.5 s: still anchored
+2026-10-04T00:34:48.908+02:00   preview (zoomed x4 + panned -0.5 s): x0=17 expected=16.8 | x1=55 expected(display)=55.3 | passStart=96000 display=126835 transport=129088 visStart=82592 spp=800.00
+2026-10-04T00:34:48.914+02:00 step end ok: midi-cycle: PNG (zoomed), then zoom x4 + scroll -0.5 s: still anchored elapsedMs=44
+2026-10-04T00:34:49.078+02:00 step begin: midi-cycle: PNG (panned), then restore the viewport
+2026-10-04T00:34:49.123+02:00   preview (restored): x0=20 expected=20.0 | x1=29 expected(display)=28.6 | passStart=96000 display=137277 transport=139456 visStart=0 spp=4800.00
+2026-10-04T00:34:49.129+02:00 step end ok: midi-cycle: PNG (panned), then restore the viewport elapsedMs=44
+2026-10-04T00:34:49.284+02:00 step begin: midi-cycle: pass 1 - release 62 (+0.3 s), ch1 64 on + ch5 50 on
+2026-10-04T00:34:49.292+02:00 step end ok: midi-cycle: pass 1 - release 62 (+0.3 s), ch1 64 on + ch5 50 on elapsedMs=0
+2026-10-04T00:34:49.695+02:00 step begin: midi-cycle: pass 1 - release 64 / 50; wait for wrap 2
+2026-10-04T00:34:49.702+02:00 step end ok: midi-cycle: pass 1 - release 64 / 50; wait for wrap 2 elapsedMs=0
+2026-10-04T00:34:51.500+02:00 step begin: midi-cycle: pass 2 - controller-only on inst (pedal release), Lower silent; wait for wrap 3
+2026-10-04T00:34:51.508+02:00 step end ok: midi-cycle: pass 2 - controller-only on inst (pedal release), Lower silent; wait for wrap 3 elapsedMs=1
+2026-10-04T00:34:54.486+02:00 step begin: midi-cycle: pass 3 (partial) - ch1 65 on, off; Stop inside the pass
+2026-10-04T00:34:54.742+02:00 step end ok: midi-cycle: pass 3 (partial) - ch1 65 on, off; Stop inside the pass elapsedMs=251
+2026-10-04T00:34:55.047+02:00 step begin: midi-cycle: Stop (Record key while recording) -> all passes committed in ONE undo step
+2026-10-04T00:34:55.051+02:00   [LiveMidi] take row 3 pass 0 [120000, 240000): events=5 notes=2 closedAtStop=1 cc=1 pb=1 outside=0 overflow=no clipId=1
+2026-10-04T00:34:55.053+02:00   [LiveMidi] take row 3 pass 1 [96000, 240000): events=3 notes=2 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T00:34:55.055+02:00   [LiveMidi] take row 3 pass 2 [96000, 240000): events=1 notes=0 closedAtStop=0 cc=1 pb=0 outside=0 overflow=no clipId=3
+2026-10-04T00:34:55.057+02:00   [LiveMidi] take row 3 pass 3 [96000, 136000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=4
+2026-10-04T00:34:55.059+02:00   [LiveMidi] take row 4 pass 0 [120000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=1
+2026-10-04T00:34:55.060+02:00   [LiveMidi] take row 4 pass 1 [96000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T00:34:55.062+02:00   [LiveMidi] take row 4 pass 2 [96000, 240000): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=3
+2026-10-04T00:34:55.064+02:00   [LiveMidi] take row 4 pass 3 [96000, 136000): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=4
+2026-10-04T00:34:55.066+02:00   [LiveMidi] take committed: passes=4 wrapMarkers=3 stopWrapSerial=3 stop=136000 clips=8
+2026-10-04T00:34:55.268+02:00   stop playhead=136000 wraps=3 undo before=2 after=3
+2026-10-04T00:34:55.273+02:00 step end ok: midi-cycle: Stop (Record key while recording) -> all passes committed in ONE undo step elapsedMs=221
+2026-10-04T00:34:55.785+02:00 step begin: midi-cycle: verify takes - 4 passes per row, windows [start,R) [L,R) [L,R) [L,stop), held key / pedal / wheel across wraps
+2026-10-04T00:34:55.789+02:00   inst take 0: start=120000 len=120000 notes=[(n60 v100 ch1 @1607 d1001)(n62 v96 ch1 @2608 d2192)] cc=[(cc64=127 ch1 @1607)(cc64=0 ch1 @4800)] pb=[(12000 ch1 @1608)]
+2026-10-04T00:34:55.791+02:00   inst take 1: start=96000 len=144000 notes=[(n62 v96 ch1 @0 d2047)(n64 v100 ch1 @2047 d787)] cc=[(cc64=127 ch1 @0)(cc64=0 ch1 @5760)] pb=[(12000 ch1 @0)]
+2026-10-04T00:34:55.793+02:00   inst take 2: start=96000 len=144000 notes=[] cc=[(cc64=127 ch1 @0)(cc64=0 ch1 @541)] pb=[(12000 ch1 @0)]
+2026-10-04T00:34:55.795+02:00   inst take 3: start=96000 len=40000 notes=[(n65 v100 ch1 @511 d481)] cc=[(cc64=0 ch1 @0)] pb=[(12000 ch1 @0)]
+2026-10-04T00:34:55.797+02:00   lower take 0: start=120000 len=120000 notes=[(n48 v90 ch5 @1607 d1001)] cc=[] pb=[]
+2026-10-04T00:34:55.799+02:00   lower take 1: start=96000 len=144000 notes=[(n50 v90 ch5 @2048 d787)] cc=[] pb=[]
+2026-10-04T00:34:55.802+02:00   lower take 2: start=96000 len=144000 notes=[] cc=[] pb=[]
+2026-10-04T00:34:55.804+02:00   lower take 3: start=96000 len=40000 notes=[] cc=[] pb=[]
+2026-10-04T00:34:55.809+02:00 step end ok: midi-cycle: verify takes - 4 passes per row, windows [start,R) [L,R) [L,R) [L,stop), held key / pedal / wheel across wraps elapsedMs=18
+2026-10-04T00:34:56.042+02:00 step begin: midi-cycle: Undo removes every pass on both rows; Redo restores them
+2026-10-04T00:34:56.359+02:00   undo -> inst/lower clips 0/0; redo -> 4/4
+2026-10-04T00:34:56.365+02:00 step end ok: midi-cycle: Undo removes every pass on both rows; Redo restores them elapsedMs=316
+2026-10-04T00:34:56.674+02:00 step begin: midi-cycle: play one loop - only the topmost takes sound (inst: 65 from pass 3, rest masked; Lower: masked by its silent passes)
+2026-10-04T00:34:56.798+02:00   playback (full stack): one loop from L, 3400 ms
+2026-10-04T00:34:56.804+02:00 step end ok: midi-cycle: play one loop - only the topmost takes sound (inst: 65 from pass 3, rest masked; Lower: masked by its silent passes) elapsedMs=125
+2026-10-04T00:35:00.229+02:00 step begin: midi-cycle: verify playback of the full stack
+2026-10-04T00:35:00.233+02:00   heard (full stack): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:35:00.240+02:00 step end ok: midi-cycle: verify playback of the full stack elapsedMs=5
+2026-10-04T00:35:00.487+02:00 step begin: midi-cycle: delete the topmost take on inst and Lower (pass 3) -> pass 2 wins (controller-only / silent): still nothing but no 65
+2026-10-04T00:35:00.613+02:00   playback (after deleting pass 3): one loop from L, 3400 ms
+2026-10-04T00:35:00.621+02:00 step end ok: midi-cycle: delete the topmost take on inst and Lower (pass 3) -> pass 2 wins (controller-only / silent): still nothing but no 65 elapsedMs=126
+2026-10-04T00:35:04.040+02:00 step begin: midi-cycle: verify playback after deleting pass 3
+2026-10-04T00:35:04.043+02:00   heard (after deleting pass 3): inst ch1 60=0 62=0 64=0 65=0 | Lower ch2 48=0 50=0
+2026-10-04T00:35:04.048+02:00 step end ok: midi-cycle: verify playback after deleting pass 3 elapsedMs=3
+2026-10-04T00:35:04.295+02:00 step begin: midi-cycle: delete pass 2 on both rows -> pass 1 is heard (inst 62 + 64, Lower 50); pass 0 stays masked
+2026-10-04T00:35:04.422+02:00   playback (after deleting pass 2): one loop from L, 3400 ms
+2026-10-04T00:35:04.430+02:00 step end ok: midi-cycle: delete pass 2 on both rows -> pass 1 is heard (inst 62 + 64, Lower 50); pass 0 stays masked elapsedMs=128
+2026-10-04T00:35:07.846+02:00 step begin: midi-cycle: verify playback after deleting pass 2
+2026-10-04T00:35:07.849+02:00   heard (after deleting pass 2): inst ch1 60=0 62=2 64=1 65=0 | Lower ch2 48=0 50=1
+2026-10-04T00:35:07.855+02:00 step end ok: midi-cycle: verify playback after deleting pass 2 elapsedMs=3
+2026-10-04T00:35:08.100+02:00 step begin: midi-cycle: Undo the four deletes -> full stack again (only 65 audible)
+2026-10-04T00:35:08.568+02:00   playback (after undoing the deletes): one loop from L, 3400 ms
+2026-10-04T00:35:08.575+02:00 step end ok: midi-cycle: Undo the four deletes -> full stack again (only 65 audible) elapsedMs=469
+2026-10-04T00:35:12.003+02:00 step begin: midi-cycle: verify playback after undo (65 only), then Redo the deletes and verify pass 1 again
+2026-10-04T00:35:12.007+02:00   heard (after undo): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:35:12.473+02:00   playback (after redoing the deletes): one loop from L, 3400 ms
+2026-10-04T00:35:12.480+02:00 step end ok: midi-cycle: verify playback after undo (65 only), then Redo the deletes and verify pass 1 again elapsedMs=469
+2026-10-04T00:35:15.911+02:00 step begin: midi-cycle: verify playback after redo (pass 1 heard); Undo the deletes again for the remaining checks
+2026-10-04T00:35:15.914+02:00   heard (after redo): inst ch1 60=0 62=2 64=1 65=0 | Lower ch2 48=0 50=1
+2026-10-04T00:35:16.260+02:00 step end ok: midi-cycle: verify playback after redo (pass 1 heard); Undo the deletes again for the remaining checks elapsedMs=343
+2026-10-04T00:35:16.574+02:00 step begin: midi-cycle: open the MIDI editor on the inst row, delete the topmost take, undo, move the topmost take, undo - no crash
+2026-10-04T00:35:17.415+02:00   editor open after delete/undo/move/undo: yes
+2026-10-04T00:35:17.433+02:00 step end ok: midi-cycle: open the MIDI editor on the inst row, delete the topmost take, undo, move the topmost take, undo - no crash elapsedMs=852
+2026-10-04T00:35:17.847+02:00 step begin: midi-cycle: save, reload, verify clip count + stack order survived
+2026-10-04T00:35:19.271+02:00 step end ok: midi-cycle: save, reload, verify clip count + stack order survived elapsedMs=1418
+2026-10-04T00:35:20.491+02:00 step begin: midi-cycle: play one loop after reload
+2026-10-04T00:35:20.615+02:00   playback (after reload): one loop from L, 3400 ms
+2026-10-04T00:35:20.622+02:00 step end ok: midi-cycle: play one loop after reload elapsedMs=124
+2026-10-04T00:35:24.052+02:00 step begin: midi-cycle: verify playback after reload (65 only)
+2026-10-04T00:35:24.055+02:00   heard (after reload): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:35:24.060+02:00 step end ok: midi-cycle: verify playback after reload (65 only) elapsedMs=3
+2026-10-04T00:35:24.307+02:00 step begin: midi-cycle: offline WAV mixdown delivers the same selection (65 only)
+2026-10-04T00:35:24.436+02:00   mixdown: ok size=864104
+2026-10-04T00:35:24.438+02:00   heard (offline mixdown): inst ch1 60=0 62=0 64=0 65=1 | Lower ch2 48=0 50=0
+2026-10-04T00:35:24.443+02:00 step end ok: midi-cycle: offline WAV mixdown delivers the same selection (65 only) elapsedMs=131
+2026-10-04T00:35:24.753+02:00 step begin: midi-cycle: a fresh proxy render (P1C snapshot + offline sequencer) selects the same events
+2026-10-04T00:35:24.944+02:00   proxy sequencer note-ons: 1:65@108775
+2026-10-04T00:35:24.951+02:00 step end ok: midi-cycle: a fresh proxy render (P1C snapshot + offline sequencer) selects the same events elapsedMs=191
+2026-10-04T00:35:25.056+02:00 step begin: midi-cycle: second run - Record on inst again (Monitor on): press Record
+2026-10-04T00:35:25.185+02:00 step end ok: midi-cycle: second run - Record on inst again (Monitor on): press Record elapsedMs=122
+2026-10-04T00:35:28.438+02:00   [LiveMidi] take begins at sample 96000 for 1 row(s) cycle [96000, 240000) wrapSerial=9
+2026-10-04T00:35:28.915+02:00 step begin: midi-cycle: second run - recording: play ch1 67 live; the row's own earlier take (65) must NOT sound
+2026-10-04T00:35:29.124+02:00 step end ok: midi-cycle: second run - recording: play ch1 67 live; the row's own earlier take (65) must NOT sound elapsedMs=201
+2026-10-04T00:35:32.474+02:00 step begin: midi-cycle: second run - verify (65 silent while recording, 67 heard live), Stop, Undo the run
+2026-10-04T00:35:32.478+02:00   heard (while recording the second run): inst ch1 60=0 62=0 64=0 65=0 | Lower ch2 48=0 50=0
+2026-10-04T00:35:32.481+02:00   live 67 heard=1 earlier take 65 heard=0
+2026-10-04T00:35:32.483+02:00   [LiveMidi] take row 3 pass 0 [96000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=5
+2026-10-04T00:35:32.486+02:00   [LiveMidi] take row 3 pass 1 [96000, 145920): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=6
+2026-10-04T00:35:32.488+02:00   [LiveMidi] take committed: passes=2 wrapMarkers=1 stopWrapSerial=10 stop=145920 clips=2
+2026-10-04T00:35:32.852+02:00 step end ok: midi-cycle: second run - verify (65 silent while recording, 67 heard live), Stop, Undo the run elapsedMs=370
+2026-10-04T00:35:33.158+02:00 step begin: midi-cycle: after the run the row's clips play again (65 heard with Monitor still on, nothing recording)
+2026-10-04T00:35:33.283+02:00   playback (after the second run): one loop from L, 3400 ms
+2026-10-04T00:35:33.289+02:00 step end ok: midi-cycle: after the run the row's clips play again (65 heard with Monitor still on, nothing recording) elapsedMs=124
+2026-10-04T00:35:36.712+02:00 step begin: midi-cycle: verify playback after the second run
+2026-10-04T00:35:36.715+02:00   heard (after the second run): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:35:36.721+02:00 step end ok: midi-cycle: verify playback after the second run elapsedMs=3
+2026-10-04T00:35:36.967+02:00 step begin: midi-cycle: combined audio + MIDI cycle take - arm an audio track + inst, seek to L, Record
+2026-10-04T00:35:37.173+02:00   combined cycle count-in started: yes
+2026-10-04T00:35:37.179+02:00 step end ok: midi-cycle: combined audio + MIDI cycle take - arm an audio track + inst, seek to L, Record elapsedMs=204
+2026-10-04T00:35:40.356+02:00   [LiveMidi] take begins at sample 96000 for 1 row(s) cycle [96000, 240000) wrapSerial=11
+2026-10-04T00:35:40.882+02:00 step begin: midi-cycle: combined cycle - pass 0: ch1 67; wait for the wrap
+2026-10-04T00:35:41.092+02:00 step end ok: midi-cycle: combined cycle - pass 0: ch1 67; wait for the wrap elapsedMs=202
+2026-10-04T00:35:43.618+02:00 step begin: midi-cycle: combined cycle - pass 1: ch1 69; Stop inside pass 1
+2026-10-04T00:35:43.826+02:00 step end ok: midi-cycle: combined cycle - pass 1: ch1 69; Stop inside pass 1 elapsedMs=201
+2026-10-04T00:35:44.197+02:00 step begin: midi-cycle: combined cycle - Stop: audio slices and MIDI passes share the pass boundaries, ONE undo step; undo
+2026-10-04T00:35:44.218+02:00   [LiveMidi] take row 3 pass 0 [96000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=5
+2026-10-04T00:35:44.221+02:00   [LiveMidi] take row 3 pass 1 [96000, 136320): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=6
+2026-10-04T00:35:44.224+02:00   [LiveMidi] take committed: passes=2 wrapMarkers=1 stopWrapSerial=12 stop=136320 clips=2
+2026-10-04T00:35:44.830+02:00   combined cycle: audio clips 1->3 [(start=95849 len=40448)(start=95849 len=144000)] midi clips 4->6 undo +1
+2026-10-04T00:35:44.833+02:00   combined cycle midi pass 0: start=96000 len=144000 notes=[(n67 v100 ch1 @1004 d386)] cc=[] pb=[]
+2026-10-04T00:35:44.835+02:00   combined cycle midi pass 1: start=96000 len=40320 notes=[(n69 v100 ch1 @496 d385)] cc=[] pb=[]
+2026-10-04T00:35:44.838+02:00   pass lengths: audio 144000 / 40448 midi 144000 / 40320 (tolerance 4800)
+2026-10-04T00:35:45.147+02:00 step end ok: midi-cycle: combined cycle - Stop: audio slices and MIDI passes share the pass boundaries, ONE undo step; undo elapsedMs=944
+2026-10-04T00:35:45.555+02:00 step begin: midi-cycle: cleanup (Cycle off, disarm, Monitor off)
+2026-10-04T00:35:45.562+02:00 step end ok: midi-cycle: cleanup (Cycle off, disarm, Monitor off) elapsedMs=0
+2026-10-04T00:35:45.813+02:00 cleanup: deleted temp project copy C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture-midicycletest.dalproj
+2026-10-04T00:35:45.817+02:00 RESULT: PASS scenario=midi-cycle-takes totalMs=67485
+
+=====
+
+2026-10-04T00:23:56.263+02:00 scenario start: midi-cycle-takes iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2.dalproj
+2026-10-04T00:23:56.265+02:00 steps queued: 43 (delete-loop iterations expand at plan time)
+2026-10-04T00:23:56.810+02:00 step begin: midi-cycle: copy project to sibling test file
+2026-10-04T00:23:56.814+02:00   test copy: C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2-midicycletest.dalproj
+2026-10-04T00:23:56.818+02:00 step end ok: midi-cycle: copy project to sibling test file elapsedMs=4
+2026-10-04T00:23:57.118+02:00 step begin: midi-cycle: load test copy
+2026-10-04T00:23:59.751+02:00 step end ok: midi-cycle: load test copy elapsedMs=2625
+2026-10-04T00:24:02.005+02:00 step begin: midi-cycle: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6)
+2026-10-04T00:24:02.008+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-04T00:24:02.011+02:00   fixture: inst=9 lower=10 pedal=11 injection=bus device-thread entry
+2026-10-04T00:24:02.015+02:00 step end ok: midi-cycle: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6) elapsedMs=5
+2026-10-04T00:24:02.663+02:00 step begin: midi-cycle: instrument row MIDI Input = All MIDI inputs, channel 1 (through the Inspector)
+2026-10-04T00:24:02.667+02:00   inst input: all ch=1
+2026-10-04T00:24:02.673+02:00 step end ok: midi-cycle: instrument row MIDI Input = All MIDI inputs, channel 1 (through the Inspector) elapsedMs=5
+2026-10-04T00:24:03.121+02:00 step begin: midi-cycle: set loop [2.0 s, 5.0 s), Cycle ON, seek to 2.5 s (inside the loop), arm inst + Lower, Monitor inst
+2026-10-04T00:24:03.124+02:00   loop [96000, 240000) clipsBefore inst=0 lower=0 undo=2
+2026-10-04T00:24:03.130+02:00 step end ok: midi-cycle: set loop [2.0 s, 5.0 s), Cycle ON, seek to 2.5 s (inside the loop), arm inst + Lower, Monitor inst elapsedMs=3
+2026-10-04T00:24:03.532+02:00 step begin: midi-cycle: press Record with Cycle ON -> count-in starts (no refusal)
+2026-10-04T00:24:03.656+02:00   count-in started with Cycle ON; wrap count at start=0
+2026-10-04T00:24:03.662+02:00 step end ok: midi-cycle: press Record with Cycle ON -> count-in starts (no refusal) elapsedMs=124
+2026-10-04T00:24:06.918+02:00   [LiveMidi] take begins at sample 120000 for 2 row(s) cycle [96000, 240000) wrapSerial=0
+2026-10-04T00:24:07.399+02:00 step begin: midi-cycle: recording started; preview starts exactly at the record boundary (no 40 px floor)
+2026-10-04T00:24:07.402+02:00   record start=120000 playhead=143040 wraps=0
+2026-10-04T00:24:07.461+02:00   preview (start): x0=25 expected=25.0 | x1=30 expected(display)=29.7 | passStart=120000 display=142595 transport=145856 visStart=0 spp=4800.00
+2026-10-04T00:24:07.466+02:00 step end ok: midi-cycle: recording started; preview starts exactly at the record boundary (no 40 px floor) elapsedMs=62
+2026-10-04T00:24:07.774+02:00 step begin: midi-cycle: pass 0 - ch1 60 on + ch5 48 on (Lower), sustain down, pitch bend 12000
+2026-10-04T00:24:07.783+02:00 step end ok: midi-cycle: pass 0 - ch1 60 on + ch5 48 on (Lower), sustain down, pitch bend 12000 elapsedMs=1
+2026-10-04T00:24:08.294+02:00 step begin: midi-cycle: pass 0 - release 60 / 48, hold ch1 62 across the first wrap
+2026-10-04T00:24:08.301+02:00 step end ok: midi-cycle: pass 0 - release 60 / 48, hold ch1 62 across the first wrap elapsedMs=1
+2026-10-04T00:24:09.720+02:00 step begin: midi-cycle: after wrap 1 - transport wrapped; preview restarts at the LEFT locator (earlier pass dimmed)
+2026-10-04T00:24:09.725+02:00   wraps since record start=1 playhead=110528
+2026-10-04T00:24:09.784+02:00   preview (after wrap 1): x0=20 expected=20.0 | x1=23 expected(display)=22.9 | passStart=96000 display=110145 transport=113344 visStart=0 spp=4800.00
+2026-10-04T00:24:09.793+02:00 step end ok: midi-cycle: after wrap 1 - transport wrapped; preview restarts at the LEFT locator (earlier pass dimmed) elapsedMs=63
+2026-10-04T00:24:09.896+02:00 step begin: midi-cycle: zoom in x1.5 and pan: the preview keeps its time anchoring under the new viewport
+2026-10-04T00:24:09.901+02:00   preview (zoomed in x1.5): x0=-214 expected=-214.5 | x1=-208 expected(display)=-207.6 | passStart=96000 display=118050 transport=118976 visStart=782400 spp=3200.00
+2026-10-04T00:24:09.959+02:00   preview (zoomed x4 + panned +0.5 s): x0=-2355 expected=-2355.0 | x1=-2327 expected(display)=-2327.4 | passStart=96000 display=118050 transport=121792 visStart=1980000 spp=800.00
+2026-10-04T00:24:10.012+02:00   preview (restored): x0=20 expected=20.0 | x1=25 expected(display)=24.6 | passStart=96000 display=118050 transport=124352 visStart=0 spp=4800.00
+2026-10-04T00:24:10.018+02:00 step end ok: midi-cycle: zoom in x1.5 and pan: the preview keeps its time anchoring under the new viewport elapsedMs=114
+2026-10-04T00:24:10.175+02:00 step begin: midi-cycle: pass 1 - release 62 (+0.3 s), ch1 64 on + ch5 50 on
+2026-10-04T00:24:10.181+02:00 step end ok: midi-cycle: pass 1 - release 62 (+0.3 s), ch1 64 on + ch5 50 on elapsedMs=1
+2026-10-04T00:24:10.643+02:00 step begin: midi-cycle: pass 1 - release 64 / 50; wait for wrap 2
+2026-10-04T00:24:10.651+02:00 step end ok: midi-cycle: pass 1 - release 64 / 50; wait for wrap 2 elapsedMs=1
+2026-10-04T00:24:12.683+02:00 step begin: midi-cycle: pass 2 - controller-only on inst (pedal release), Lower silent; wait for wrap 3
+2026-10-04T00:24:12.691+02:00 step end ok: midi-cycle: pass 2 - controller-only on inst (pedal release), Lower silent; wait for wrap 3 elapsedMs=1
+2026-10-04T00:24:15.703+02:00 step begin: midi-cycle: pass 3 (partial) - ch1 65 on, off; Stop inside the pass
+2026-10-04T00:24:15.961+02:00 step end ok: midi-cycle: pass 3 (partial) - ch1 65 on, off; Stop inside the pass elapsedMs=251
+2026-10-04T00:24:16.268+02:00 step begin: midi-cycle: Stop (Record key while recording) -> all passes committed in ONE undo step
+2026-10-04T00:24:16.286+02:00   [LiveMidi] take row 9 pass 0 [120000, 240000): events=5 notes=2 closedAtStop=1 cc=1 pb=1 outside=0 overflow=no clipId=1
+2026-10-04T00:24:16.289+02:00   [LiveMidi] take row 9 pass 1 [96000, 240000): events=3 notes=2 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T00:24:16.291+02:00   [LiveMidi] take row 9 pass 2 [96000, 240000): events=1 notes=0 closedAtStop=0 cc=1 pb=0 outside=0 overflow=no clipId=3
+2026-10-04T00:24:16.293+02:00   [LiveMidi] take row 9 pass 3 [96000, 136768): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=4
+2026-10-04T00:24:16.295+02:00   [LiveMidi] take row 10 pass 0 [120000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=1
+2026-10-04T00:24:16.296+02:00   [LiveMidi] take row 10 pass 1 [96000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T00:24:16.298+02:00   [LiveMidi] take row 10 pass 2 [96000, 240000): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=3
+2026-10-04T00:24:16.301+02:00   [LiveMidi] take row 10 pass 3 [96000, 136768): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=4
+2026-10-04T00:24:16.302+02:00   [LiveMidi] take committed: passes=4 wrapMarkers=3 stopWrapSerial=3 stop=136768 clips=8
+2026-10-04T00:24:16.518+02:00   stop playhead=136768 wraps=3 undo before=2 after=3
+2026-10-04T00:24:16.524+02:00 step end ok: midi-cycle: Stop (Record key while recording) -> all passes committed in ONE undo step elapsedMs=251
+2026-10-04T00:24:17.037+02:00 step begin: midi-cycle: verify takes - 4 passes per row, windows [start,R) [L,R) [L,R) [L,stop), held key / pedal / wheel across wraps
+2026-10-04T00:24:17.040+02:00   inst take 0: start=120000 len=120000 notes=[(n60 v100 ch1 @2458 d1491)(n62 v96 ch1 @3951 d3249)] cc=[(cc64=127 ch1 @2459)(cc64=0 ch1 @7200)] pb=[(12000 ch1 @2459)]
+2026-10-04T00:24:17.043+02:00   inst take 1: start=96000 len=144000 notes=[(n62 v96 ch1 @0 d2166)(n64 v100 ch1 @2167 d1347)] cc=[(cc64=127 ch1 @0)(cc64=0 ch1 @8640)] pb=[(12000 ch1 @0)]
+2026-10-04T00:24:17.046+02:00   inst take 2: start=96000 len=144000 notes=[] cc=[(cc64=127 ch1 @0)(cc64=0 ch1 @754)] pb=[(12000 ch1 @0)]
+2026-10-04T00:24:17.048+02:00   inst take 3: start=96000 len=40768 notes=[(n65 v100 ch1 @806 d723)] cc=[(cc64=0 ch1 @0)] pb=[(12000 ch1 @0)]
+2026-10-04T00:24:17.050+02:00   lower take 0: start=120000 len=120000 notes=[(n48 v90 ch5 @2458 d1493)] cc=[] pb=[]
+2026-10-04T00:24:17.052+02:00   lower take 1: start=96000 len=144000 notes=[(n50 v90 ch5 @2167 d1348)] cc=[] pb=[]
+2026-10-04T00:24:17.054+02:00   lower take 2: start=96000 len=144000 notes=[] cc=[] pb=[]
+2026-10-04T00:24:17.056+02:00   lower take 3: start=96000 len=40768 notes=[] cc=[] pb=[]
+2026-10-04T00:24:17.060+02:00 step end ok: midi-cycle: verify takes - 4 passes per row, windows [start,R) [L,R) [L,R) [L,stop), held key / pedal / wheel across wraps elapsedMs=18
+2026-10-04T00:24:17.292+02:00 step begin: midi-cycle: Undo removes every pass on both rows; Redo restores them
+2026-10-04T00:24:17.605+02:00   undo -> inst/lower clips 0/0; redo -> 4/4
+2026-10-04T00:24:17.610+02:00 step end ok: midi-cycle: Undo removes every pass on both rows; Redo restores them elapsedMs=312
+2026-10-04T00:24:17.917+02:00 step begin: midi-cycle: play one loop - only the topmost takes sound (inst: 65 from pass 3, rest masked; Lower: masked by its silent passes)
+2026-10-04T00:24:18.042+02:00   playback (full stack): one loop from L, 3400 ms
+2026-10-04T00:24:18.047+02:00 step end ok: midi-cycle: play one loop - only the topmost takes sound (inst: 65 from pass 3, rest masked; Lower: masked by its silent passes) elapsedMs=124
+2026-10-04T00:24:21.480+02:00 step begin: midi-cycle: verify playback of the full stack
+2026-10-04T00:24:21.483+02:00   heard (full stack): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:24:21.488+02:00 step end ok: midi-cycle: verify playback of the full stack elapsedMs=3
+2026-10-04T00:24:21.736+02:00 step begin: midi-cycle: delete the topmost take on inst and Lower (pass 3) -> pass 2 wins (controller-only / silent): still nothing but no 65
+2026-10-04T00:24:21.921+02:00   playback (after deleting pass 3): one loop from L, 3400 ms
+2026-10-04T00:24:21.927+02:00 step end ok: midi-cycle: delete the topmost take on inst and Lower (pass 3) -> pass 2 wins (controller-only / silent): still nothing but no 65 elapsedMs=186
+2026-10-04T00:24:25.340+02:00 step begin: midi-cycle: verify playback after deleting pass 3
+2026-10-04T00:24:25.343+02:00   heard (after deleting pass 3): inst ch1 60=0 62=0 64=0 65=0 | Lower ch2 48=0 50=0
+2026-10-04T00:24:25.348+02:00 step end ok: midi-cycle: verify playback after deleting pass 3 elapsedMs=3
+2026-10-04T00:24:25.595+02:00 step begin: midi-cycle: delete pass 2 on both rows -> pass 1 is heard (inst 62 + 64, Lower 50); pass 0 stays masked
+2026-10-04T00:24:25.778+02:00   playback (after deleting pass 2): one loop from L, 3400 ms
+2026-10-04T00:24:25.785+02:00 step end ok: midi-cycle: delete pass 2 on both rows -> pass 1 is heard (inst 62 + 64, Lower 50); pass 0 stays masked elapsedMs=184
+2026-10-04T00:24:29.216+02:00 step begin: midi-cycle: verify playback after deleting pass 2
+2026-10-04T00:24:29.220+02:00   heard (after deleting pass 2): inst ch1 60=0 62=2 64=1 65=0 | Lower ch2 48=0 50=1
+2026-10-04T00:24:29.225+02:00 step end ok: midi-cycle: verify playback after deleting pass 2 elapsedMs=3
+2026-10-04T00:24:29.472+02:00 step begin: midi-cycle: Undo the four deletes -> full stack again (only 65 audible)
+2026-10-04T00:24:29.933+02:00   playback (after undoing the deletes): one loop from L, 3400 ms
+2026-10-04T00:24:29.940+02:00 step end ok: midi-cycle: Undo the four deletes -> full stack again (only 65 audible) elapsedMs=462
+2026-10-04T00:24:33.365+02:00 step begin: midi-cycle: verify playback after undo (65 only), then Redo the deletes and verify pass 1 again
+2026-10-04T00:24:33.369+02:00   heard (after undo): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:24:33.828+02:00   playback (after redoing the deletes): one loop from L, 3400 ms
+2026-10-04T00:24:33.834+02:00 step end ok: midi-cycle: verify playback after undo (65 only), then Redo the deletes and verify pass 1 again elapsedMs=463
+2026-10-04T00:24:37.260+02:00 step begin: midi-cycle: verify playback after redo (pass 1 heard); Undo the deletes again for the remaining checks
+2026-10-04T00:24:37.263+02:00   heard (after redo): inst ch1 60=0 62=2 64=1 65=0 | Lower ch2 48=0 50=1
+2026-10-04T00:24:37.604+02:00 step end ok: midi-cycle: verify playback after redo (pass 1 heard); Undo the deletes again for the remaining checks elapsedMs=338
+2026-10-04T00:24:37.913+02:00 step begin: midi-cycle: open the MIDI editor on the inst row, delete the topmost take, undo, move the topmost take, undo - no crash
+2026-10-04T00:24:38.785+02:00   editor open after delete/undo/move/undo: yes
+2026-10-04T00:24:38.799+02:00 step end ok: midi-cycle: open the MIDI editor on the inst row, delete the topmost take, undo, move the topmost take, undo - no crash elapsedMs=880
+2026-10-04T00:24:39.209+02:00 step begin: midi-cycle: save, reload, verify clip count + stack order survived
+2026-10-04T00:24:46.519+02:00 step end ok: midi-cycle: save, reload, verify clip count + stack order survived elapsedMs=7302
+2026-10-04T00:24:48.738+02:00 step begin: midi-cycle: play one loop after reload
+2026-10-04T00:24:48.861+02:00   playback (after reload): one loop from L, 3400 ms
+2026-10-04T00:24:48.868+02:00 step end ok: midi-cycle: play one loop after reload elapsedMs=124
+2026-10-04T00:24:52.312+02:00 step begin: midi-cycle: verify playback after reload (65 only)
+2026-10-04T00:24:52.315+02:00   heard (after reload): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:24:52.320+02:00 step end ok: midi-cycle: verify playback after reload (65 only) elapsedMs=3
+2026-10-04T00:24:52.567+02:00 step begin: midi-cycle: offline WAV mixdown delivers the same selection (65 only)
+2026-10-04T00:24:52.788+02:00   mixdown: ok size=864104
+2026-10-04T00:24:52.790+02:00   heard (offline mixdown): inst ch1 60=0 62=0 64=0 65=1 | Lower ch2 48=0 50=0
+2026-10-04T00:24:52.795+02:00 step end ok: midi-cycle: offline WAV mixdown delivers the same selection (65 only) elapsedMs=223
+2026-10-04T00:24:53.104+02:00 step begin: midi-cycle: a fresh proxy render (P1C snapshot + offline sequencer) selects the same events
+2026-10-04T00:24:53.111+02:00   proxy sequencer note-ons: 1:65@109433
+2026-10-04T00:24:53.117+02:00 step end ok: midi-cycle: a fresh proxy render (P1C snapshot + offline sequencer) selects the same events elapsedMs=8
+2026-10-04T00:24:53.255+02:00 step begin: midi-cycle: second run - Record on inst again (Monitor on): press Record
+2026-10-04T00:24:53.382+02:00 step end ok: midi-cycle: second run - Record on inst again (Monitor on): press Record elapsedMs=121
+2026-10-04T00:24:56.640+02:00   [LiveMidi] take begins at sample 96000 for 1 row(s) cycle [96000, 240000) wrapSerial=9
+2026-10-04T00:24:57.105+02:00 step begin: midi-cycle: second run - recording: play ch1 67 live; the row's own earlier take (65) must NOT sound
+2026-10-04T00:24:57.313+02:00 step end ok: midi-cycle: second run - recording: play ch1 67 live; the row's own earlier take (65) must NOT sound elapsedMs=202
+2026-10-04T00:25:00.641+02:00 step begin: midi-cycle: second run - verify (65 silent while recording, 67 heard live), Stop, Undo the run
+2026-10-04T00:25:00.644+02:00   heard (while recording the second run): inst ch1 60=0 62=0 64=0 65=0 | Lower ch2 48=0 50=0
+2026-10-04T00:25:00.647+02:00   live 67 heard=1 earlier take 65 heard=0
+2026-10-04T00:25:00.664+02:00   [LiveMidi] take row 9 pass 0 [96000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=5
+2026-10-04T00:25:00.667+02:00   [LiveMidi] take row 9 pass 1 [96000, 144384): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=6
+2026-10-04T00:25:00.669+02:00   [LiveMidi] take committed: passes=2 wrapMarkers=1 stopWrapSerial=10 stop=144384 clips=2
+2026-10-04T00:25:01.045+02:00 step end ok: midi-cycle: second run - verify (65 silent while recording, 67 heard live), Stop, Undo the run elapsedMs=397
+2026-10-04T00:25:01.352+02:00 step begin: midi-cycle: after the run the row's clips play again (65 heard with Monitor still on, nothing recording)
+2026-10-04T00:25:01.476+02:00   playback (after the second run): one loop from L, 3400 ms
+2026-10-04T00:25:01.482+02:00 step end ok: midi-cycle: after the run the row's clips play again (65 heard with Monitor still on, nothing recording) elapsedMs=124
+2026-10-04T00:25:04.898+02:00 step begin: midi-cycle: verify playback after the second run
+2026-10-04T00:25:04.902+02:00   heard (after the second run): inst ch1 60=0 62=0 64=0 65=2 | Lower ch2 48=0 50=0
+2026-10-04T00:25:04.907+02:00 step end ok: midi-cycle: verify playback after the second run elapsedMs=2
+2026-10-04T00:25:05.152+02:00 step begin: midi-cycle: combined audio + MIDI cycle take - arm an audio track + inst, seek to L, Record
+2026-10-04T00:25:05.357+02:00   combined cycle count-in started: yes
+2026-10-04T00:25:05.363+02:00 step end ok: midi-cycle: combined audio + MIDI cycle take - arm an audio track + inst, seek to L, Record elapsedMs=204
+2026-10-04T00:25:08.539+02:00   [LiveMidi] take begins at sample 96000 for 1 row(s) cycle [96000, 240000) wrapSerial=11
+2026-10-04T00:25:09.078+02:00 step begin: midi-cycle: combined cycle - pass 0: ch1 67; wait for the wrap
+2026-10-04T00:25:09.286+02:00 step end ok: midi-cycle: combined cycle - pass 0: ch1 67; wait for the wrap elapsedMs=202
+2026-10-04T00:25:11.845+02:00 step begin: midi-cycle: combined cycle - pass 1: ch1 69; Stop inside pass 1
+2026-10-04T00:25:12.054+02:00 step end ok: midi-cycle: combined cycle - pass 1: ch1 69; Stop inside pass 1 elapsedMs=202
+2026-10-04T00:25:12.364+02:00 step begin: midi-cycle: combined cycle - Stop: audio slices and MIDI passes share the pass boundaries, ONE undo step; undo
+2026-10-04T00:25:12.391+02:00   [LiveMidi] take row 9 pass 0 [96000, 240000): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=5
+2026-10-04T00:25:12.393+02:00   [LiveMidi] take row 9 pass 1 [96000, 135552): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=6
+2026-10-04T00:25:12.395+02:00   [LiveMidi] take committed: passes=2 wrapMarkers=1 stopWrapSerial=12 stop=135552 clips=2
+2026-10-04T00:25:13.014+02:00   combined cycle: audio clips 1->3 [(start=95849 len=39808)(start=95849 len=144000)] midi clips 4->6 undo +1
+2026-10-04T00:25:13.018+02:00   combined cycle midi pass 0: start=96000 len=144000 notes=[(n67 v100 ch1 @1535 d580)] cc=[] pb=[]
+2026-10-04T00:25:13.020+02:00   combined cycle midi pass 1: start=96000 len=39552 notes=[(n69 v100 ch1 @867 d580)] cc=[] pb=[]
+2026-10-04T00:25:13.023+02:00   pass lengths: audio 144000 / 39808 midi 144000 / 39552 (tolerance 4800)
+2026-10-04T00:25:13.332+02:00 step end ok: midi-cycle: combined cycle - Stop: audio slices and MIDI passes share the pass boundaries, ONE undo step; undo elapsedMs=962
+2026-10-04T00:25:13.743+02:00 step begin: midi-cycle: cleanup (Cycle off, disarm, Monitor off)
+2026-10-04T00:25:13.749+02:00 step end ok: midi-cycle: cleanup (Cycle off, disarm, Monitor off) elapsedMs=0
+2026-10-04T00:25:14.001+02:00 cleanup: deleted temp project copy C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2-midicycletest.dalproj
+2026-10-04T00:25:14.004+02:00 RESULT: PASS scenario=midi-cycle-takes totalMs=77744

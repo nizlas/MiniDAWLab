@@ -7,9 +7,11 @@
 // The fingerprint is a SHA-256 over a canonical byte serialization of a ProxyRenderSnapshot,
 // following the Locked §11.4 rules:
 //   * fixed F-number field order, tagged with {algorithm id, fingerprint schema version};
-//   * clips in the bake's plan order (stable sort by startSamples, stored-order ties — the ORD-1
-//     delivery tie-break); notes in stored vector order; CC in repository-canonical normalized
-//     order; sources strictly in session order, destination content first;
+//   * clips in STORED order — schema 2: the stored sequence is the layer stack of the LAYER-1
+//     overlap rule (MidiLayeredRenderBake.h; last = topmost owns its window), so clip order is
+//     render semantics, not just an equal-start tie-break; notes in stored vector order; CC in
+//     repository-canonical normalized order; sources strictly in session order, destination
+//     content first;
 //   * integers fixed-width little-endian; doubles as IEEE 754 bit patterns; UTF-8
 //     length-prefixed strings; plugin path normalized to forward slashes;
 //   * NO raw plugin-state blob bytes — the F2 identity component is the host-managed state
@@ -36,7 +38,9 @@ namespace proxy_fingerprint
 {
     /// Bumping either value deterministically marks every existing proxy stale (§11.4).
     inline constexpr std::uint32_t kFingerprintAlgorithmId = 1;   // 1 = SHA-256 over this layout
-    inline constexpr std::uint32_t kFingerprintSchemaVersion = 1; // field-layout version
+    /// 2 = clips serialize in stored (layer-stack) order and the bake applies the LAYER-1
+    /// overlap rule; every generation rendered under the additive schema-1 semantics is stale.
+    inline constexpr std::uint32_t kFingerprintSchemaVersion = 2; // field-layout version
 
     namespace detail
     {
@@ -113,24 +117,14 @@ namespace proxy_fingerprint
             }
         }
 
-        /// Clips serialize in the bake's PLAN order: stable sort by `startSamples` over the stored
-        /// sequence — equal-start ties keep stored order (§11.4; matches live scheduling).
-        inline void writeClipsInPlanOrder(Writer& w, const std::vector<proxy_snapshot::SnapshotClip>& clips)
+        /// Clips serialize in STORED order (§11.4, schema 2): the stored sequence is the layer
+        /// stack the bake resolves overlaps with (LAYER-1), so a reorder is a render change.
+        inline void writeClipsInStoredOrder(Writer& w, const std::vector<proxy_snapshot::SnapshotClip>& clips)
         {
-            std::vector<const proxy_snapshot::SnapshotClip*> plan;
-            plan.reserve(clips.size());
+            w.u32((std::uint32_t)clips.size());
             for (const auto& c : clips)
             {
-                plan.push_back(&c);
-            }
-            std::stable_sort(plan.begin(), plan.end(),
-                             [](const proxy_snapshot::SnapshotClip* a, const proxy_snapshot::SnapshotClip* b) {
-                                 return a->startSamples < b->startSamples;
-                             });
-            w.u32((std::uint32_t)plan.size());
-            for (const auto* c : plan)
-            {
-                writeClip(w, *c);
+                writeClip(w, c);
             }
         }
     } // namespace detail
@@ -156,7 +150,7 @@ namespace proxy_fingerprint
         w.u64(s.stateIdentity.primaryStateRevision);
         w.u8(s.stateIdentity.pairedWithSavedState);
         // F3/F4/F5 — destination's own content first (Locked merge rule).
-        detail::writeClipsInPlanOrder(w, s.destinationClips);
+        detail::writeClipsInStoredOrder(w, s.destinationClips);
         // F6 — destination MIDI output channel.
         w.i32(s.destinationMidiOutputChannel);
         // F7/F8/F9 — routed sources strictly in session order; order itself is data.
@@ -167,7 +161,7 @@ namespace proxy_fingerprint
             w.i32(src.midiOutputChannel);
             w.u8(src.trackOff);
             w.u8(src.muted);
-            detail::writeClipsInPlanOrder(w, src.clips);
+            detail::writeClipsInStoredOrder(w, src.clips);
         }
         // F10 — note-off gate rule inputs.
         w.i32(s.renderConfig.noteOffGateMs);

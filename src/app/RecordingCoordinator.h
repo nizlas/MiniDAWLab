@@ -42,11 +42,18 @@ public:
         /// selected, device missing, device could not be opened, All without a connected device.
         /// Used to tell the user the real reason instead of a generic "arm a track".
         std::function<juce::StringArray()> describeArmedMidiRowsNotReady;
-        /// Start capturing at the record boundary (same moment the audio take begins).
-        std::function<void(std::int64_t recordStartSample, double sampleRate)> beginMidiTake;
-        /// Finalize at the stop boundary: builds + appends one clip per row with content.
+        /// Start capturing at the record boundary (same moment the audio take begins). With
+        /// `cycleActive` the MIDI take is split into passes at the engine's wrap markers using the
+        /// same locators and start boundary as the audio cycle slices; `wrapSerialAtStart` is the
+        /// transport wrap count at that moment (lane preview).
+        std::function<void(std::int64_t recordStartSample, double sampleRate, bool cycleActive,
+                           std::int64_t leftLocatorSample, std::int64_t rightLocatorSample,
+                           std::uint32_t wrapSerialAtStart)>
+            beginMidiTake;
+        /// Finalize at the stop boundary (`recordStopSample` and `stopWrapSerial` read as one
+        /// consistent pair at the stop): builds + appends the takes (one per pass and row).
         /// Returns the number of clips created. Called INSIDE `runUndoableTakeCommit`.
-        std::function<int(std::int64_t recordStopSample)> commitMidiTake;
+        std::function<int(std::int64_t recordStopSample, std::uint32_t stopWrapSerial)> commitMidiTake;
         /// Drop a take without clips (count-in cancel after arming, failure paths).
         std::function<void()> abortMidiTake;
         /// Wrap the whole take commit (audio clip add + MIDI clips) in ONE undo step
@@ -88,8 +95,8 @@ public:
     /// Install the live-MIDI take seam (see `Callbacks`); called once from the composition root.
     void setLiveMidiTakeCallbacks(std::function<std::vector<TrackId>()> armedMidiTracksReadyToRecord,
                                   std::function<juce::StringArray()> describeArmedMidiRowsNotReady,
-                                  std::function<void(std::int64_t, double)> beginMidiTake,
-                                  std::function<int(std::int64_t)> commitMidiTake,
+                                  std::function<void(std::int64_t, double, bool, std::int64_t, std::int64_t, std::uint32_t)> beginMidiTake,
+                                  std::function<int(std::int64_t, std::uint32_t)> commitMidiTake,
                                   std::function<void()> abortMidiTake,
                                   std::function<void(const juce::String&, std::function<void()>)> runUndoableTakeCommit)
     {

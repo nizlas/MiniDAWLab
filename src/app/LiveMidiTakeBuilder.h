@@ -21,13 +21,28 @@
 //     * a take with no notes and no controller movement inside the window is empty (no clip);
 //       controller-only takes are valid content.
 //   The owning coordinator feeds the tracker with every captured event of the row (stopped or
-//   playing) and calls `buildTakePattern` once at stop.
+//   playing) and calls `buildTakePasses` once at stop.
+//
+// CYCLE PASSES (`buildTakePasses`)
+//   With Cycle on, one recording run yields one take per pass. Pass boundaries are the engine's
+//   WRAP MARKERS (exact mono sample of each wrap, with the transport's wrap serial), never a UI
+//   timer and never inferred from event positions: an event belongs to the pass whose wrap
+//   markers precede it on the monotone clock, which keeps late-delivered events in the right
+//   pass. Windows: pass 0 = [record start, right locator), full passes = [left, right), the last
+//   pass = [left, stop) — a stop exactly on a wrap yields no zero-length pass. Markers beyond the
+//   serial observed at stop belong to blocks that ran after the user's stop; they and every
+//   event after them are discarded. Each pass is built with the single-window builder, starting
+//   from the row state at the end of the previous pass: a key held across a wrap ends on the
+//   previous pass's end boundary and re-enters the next pass at tick 0 with its channel and
+//   velocity; sustain / expression / wheel state is restated at tick 0. These boundary events are
+//   synthesized into the stored takes only — the live tracker never sees them.
 // =============================================================================
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "ui/experimental/ExperimentalMidiPattern.h"
@@ -38,6 +53,8 @@ namespace live_midi_take
     struct TakeEvent
     {
         std::int64_t timelineSample = 0;
+        /// Position on the engine's monotone clock (pass assignment / ordering; see header).
+        std::int64_t monoSample = 0;
         std::uint8_t bytes[3] = { 0, 0, 0 };
         std::uint8_t size = 0;
         bool transportPlaying = false;
@@ -282,7 +299,10 @@ namespace live_midi_take
         for (const auto& e : events)
         {
             sawPlaying = sawPlaying || e.transportPlaying;
-            const bool beforeWindow = (!e.transportPlaying && !sawPlaying)
+            // A stopped event shapes the start state only while the transport still stands at (or
+            // before) the record boundary — a key pressed after Stop (frozen playhead = stop
+            // position) in a pass that never saw a playing event must not be invented as held.
+            const bool beforeWindow = (!e.transportPlaying && !sawPlaying && e.timelineSample <= p.recordStartSample)
                                       || (e.transportPlaying && e.timelineSample < p.recordStartSample);
             if (e.overflowMarker)
             {
@@ -408,5 +428,147 @@ namespace live_midi_take
         (void)midi_cc::normalizePoints(r.pattern.ccPoints);
         (void)midi_pb::normalizePoints(r.pattern.pitchBendPoints);
         return r;
+    }
+
+    // ------------------------------------------------------------------------- cycle passes
+
+    /// One engine wrap seen during the take (from `LiveMidiInputBus::CapturedEvent::wrapMarker`).
+    struct WrapMarker
+    {
+        std::int64_t monoSample = 0;
+        std::uint32_t wrapSerial = 0;
+    };
+
+    struct CycleTakeParams
+    {
+        /// Record boundary (count-in end) and the stop boundary as the stop read them.
+        std::int64_t recordStartSample = 0;
+        std::int64_t recordStopSample = 0;
+        /// Transport wrap count read together with `recordStopSample` (consistent pair): markers
+        /// with a larger serial happened after the stop and are discarded with their events.
+        std::uint32_t stopWrapSerial = 0;
+        /// Cycle range while recording (used only when `cycleActive`).
+        bool cycleActive = false;
+        std::int64_t leftLocatorSample = 0;
+        std::int64_t rightLocatorSample = 0;
+        /// Wrap markers received during the take, in capture order.
+        std::vector<WrapMarker> wrapMarkers;
+        double sampleRate = 48000.0;
+        double bpm = 120.0;
+        int ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
+    };
+
+    struct TakePassResult
+    {
+        int passIndex = 0;
+        /// Clip window on the timeline: `[startSample, endSampleExclusive)`.
+        std::int64_t startSample = 0;
+        std::int64_t endSampleExclusive = 0;
+        TakeBuildResult build;
+        /// Events of this pass in captured order (diagnostics / tests).
+        int eventsAssigned = 0;
+    };
+
+    /// Split one recording run into its passes and build each pass's pattern. With Cycle off (or
+    /// no wrap marker) this is exactly one pass = `buildTakePattern` over the whole window.
+    /// Passes with a non-positive window (stop exactly on a wrap) are not returned.
+    [[nodiscard]] inline std::vector<TakePassResult> buildTakePasses(const std::vector<TakeEvent>& events,
+                                                                     const TakeStateTracker& initialState,
+                                                                     const CycleTakeParams& p)
+    {
+        std::vector<TakePassResult> out;
+
+        // Valid wrap markers (at or before the stop), ascending on the mono clock; the first
+        // marker beyond the stop serial bounds the recording on the mono clock.
+        std::vector<WrapMarker> valid;
+        std::int64_t stopMono = std::numeric_limits<std::int64_t>::max();
+        if (p.cycleActive)
+        {
+            for (const WrapMarker& m : p.wrapMarkers)
+            {
+                if (m.wrapSerial <= p.stopWrapSerial)
+                {
+                    valid.push_back(m);
+                }
+                else
+                {
+                    stopMono = std::min(stopMono, m.monoSample);
+                }
+            }
+            std::stable_sort(valid.begin(), valid.end(), [](const WrapMarker& a, const WrapMarker& b) {
+                return a.monoSample < b.monoSample;
+            });
+        }
+
+        // Pass windows.
+        struct Window
+        {
+            std::int64_t start = 0;
+            std::int64_t end = 0;
+        };
+        std::vector<Window> windows;
+        if (valid.empty())
+        {
+            windows.push_back({ p.recordStartSample, p.recordStopSample });
+        }
+        else
+        {
+            windows.push_back({ p.recordStartSample, p.rightLocatorSample });
+            for (std::size_t k = 1; k < valid.size(); ++k)
+            {
+                windows.push_back({ p.leftLocatorSample, p.rightLocatorSample });
+            }
+            windows.push_back({ p.leftLocatorSample, p.recordStopSample });
+        }
+
+        // Pass assignment: number of valid markers at or before the event's mono position.
+        std::vector<std::vector<TakeEvent>> perPass(windows.size());
+        for (const TakeEvent& e : events)
+        {
+            if (e.monoSample >= stopMono)
+            {
+                continue; // after the stop (a block that ran past the user's Stop)
+            }
+            std::size_t pass = 0;
+            for (const WrapMarker& m : valid)
+            {
+                if (m.monoSample <= e.monoSample)
+                {
+                    ++pass;
+                }
+            }
+            if (pass < perPass.size())
+            {
+                perPass[pass].push_back(e);
+            }
+        }
+
+        // Build each pass from the row state at the end of the previous pass.
+        TakeStateTracker state = initialState;
+        for (std::size_t k = 0; k < windows.size(); ++k)
+        {
+            const Window& w = windows[k];
+            if (w.end > w.start)
+            {
+                TakeBuildParams bp;
+                bp.recordStartSample = w.start;
+                bp.recordStopSample = w.end;
+                bp.sampleRate = p.sampleRate;
+                bp.bpm = p.bpm;
+                bp.ticksPerQuarter = p.ticksPerQuarter;
+                TakePassResult r;
+                r.passIndex = (int)k;
+                r.startSample = w.start;
+                r.endSampleExclusive = w.end;
+                r.eventsAssigned = (int)perPass[k].size();
+                r.build = buildTakePattern(perPass[k], state, bp);
+                out.push_back(std::move(r));
+            }
+            for (const TakeEvent& e : perPass[k])
+            {
+                state.feed(e); // the next pass starts from the real state, never from synthesized boundary events
+            }
+        }
+        return out;
     }
 } // namespace live_midi_take

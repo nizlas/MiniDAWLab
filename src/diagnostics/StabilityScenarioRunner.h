@@ -99,6 +99,15 @@ enum class StabilityScenarioKind
     /// sustain, pitch bend), save / reload, MIDI export, undo / redo, the empty take and the Cycle
     /// guard. Nothing of the user's project is modified (sibling copy).
     LiveMidi,
+    /// `--stability-midi-cycle-takes <project>`: MIDI cycle recording through the real Record /
+    /// count-in / Stop path with Cycle on (instrument row + routed MIDI row, ≥ 3 passes, a key /
+    /// sustain / wheel held across a wrap, a silent pass, a controller-only pass, a partial last
+    /// pass), one take per pass as new topmost layers, ONE undo step, the layering rule on
+    /// playback (topmost take heard; delete top → previous heard; undo/redo), the running-take
+    /// preview geometry (start / after wrap / zoom / scroll, PNG evidence), save / reload, the
+    /// MIDI editor open across delete / undo / move, offline mixdown and a fresh proxy sequencer
+    /// selecting the same events as realtime. Sibling copy only.
+    MidiCycleTakes,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -459,6 +468,34 @@ struct StabilityRunnerHooks
     std::function<void(TrackId)> armAudioTrackForRecording;
     /// Number of timeline audio clips on a row.
     std::function<int(TrackId)> audioClipCountForTrack;
+
+    // --- MIDI cycle takes / layering scenario --------------------------------------------------
+    /// Session locators (same setters the ruler drags use).
+    std::function<void(std::int64_t left, std::int64_t right)> setLocatorsSamples;
+    /// Current device sample rate (0 when no device).
+    std::function<double()> getDeviceSampleRate;
+    /// The transport's wrap count (the counter the engine advances at every cycle wrap).
+    std::function<std::uint32_t()> getCycleWrapCount;
+    /// Every MIDI clip of a row in STACK order (bottom → top), one summary per clip.
+    std::function<std::vector<StabilityMidiClipSummary>(TrackId)> liveMidiSummarizeAllClips;
+    /// Select the row's topmost clip and delete it through the Delete-key path.
+    std::function<bool(TrackId)> deleteTopmostMidiClipLikeUi;
+    /// Select the row's topmost clip and move it by `deltaSamples` through the undoable edit path.
+    std::function<bool(TrackId, std::int64_t deltaSamples)> moveTopmostMidiClipLikeUi;
+    /// Note Ons a FRESH proxy render of `destination` would deliver (P1C snapshot + offline
+    /// sequencer, no plugin): "ch:note@sample" tokens separated by spaces, in emission order.
+    std::function<juce::String(TrackId destination)> proxySequencerNoteOnsForDestination;
+    /// Lane-local geometry of the running take preview on a row: current-pass `[x0, x1]`, the
+    /// lane's content origin x and the viewport it was computed with. False when no take runs.
+    std::function<bool(TrackId, int& x0, int& x1, float& originX, std::int64_t& visibleStart, double& samplesPerPixel)>
+        liveMidiTakePreviewGeometry;
+    /// The overlay's current playhead frame position (what the line and the preview edge draw).
+    std::function<double()> playheadDisplaySamples;
+    /// Zoom the main timeline around the column centre (`factor > 1` = zoom in) / pan it.
+    std::function<void(double factor)> zoomTimelineLikeWheel;
+    std::function<void(std::int64_t deltaSamples)> panTimelineBySamples;
+    /// Audio clip windows `(start, effective length)` of a row, newest first (track order).
+    std::function<std::vector<std::pair<std::int64_t, std::int64_t>>(TrackId)> audioClipWindowsForTrack;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -513,6 +550,8 @@ private:
     void appendOrganDcSteps(const juce::File& project);
     /// Live MIDI input: monitoring, routing, a recorded take, persistence, export, undo, guards.
     void appendLiveMidiSteps(const juce::File& project);
+    /// MIDI cycle recording + layering (see `StabilityScenarioKind::MidiCycleTakes`).
+    void appendMidiCycleTakesSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.
@@ -582,6 +621,15 @@ private:
     std::int64_t liveMidiStopPlayhead_ = 0;
     int liveMidiUndoSizeBeforeTake_ = 0;
     juce::File liveMidiExportFile_;
+    /// MidiCycleTakes: loop range, start boundary, clip counts before the run, evidence folder.
+    std::int64_t cycleLocL_ = 0;
+    std::int64_t cycleLocR_ = 0;
+    std::int64_t cycleRecordStart_ = 0;
+    std::uint32_t cycleWrapsAtRecordStart_ = 0;
+    int cycleInstClipsBefore_ = 0;
+    int cycleLowerClipsBefore_ = 0;
+    int cycleUndoSizeBefore_ = 0;
+    juce::File cycleEvidenceDir_;
 
     JUCE_DECLARE_NON_COPYABLE(StabilityScenarioRunner)
 };

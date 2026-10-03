@@ -68,7 +68,9 @@
 #include "instruments/ProxyUpdatePolicyService.h"
 #include "instruments/InstrumentTrackController.h"
 #include "instruments/ProxyAssetStore.h"
+#include "instruments/ProxyOfflineSequencer.h"
 #include "instruments/ProxyRenderScheduler.h"
+#include "instruments/ProxyRenderSnapshot.h"
 #include "plugins/InsertSlotId.h"
 #include "transport/Transport.h"
 #include "ui/TimelineRulerView.h"
@@ -803,7 +805,14 @@ public:
                     trackLanesView.repaint();
                     inspectorView_.refreshFromSession();
                 },
-                [](const juce::String& line) { juce::Logger::writeToLog(line); },
+                [](const juce::String& line) {
+                    juce::Logger::writeToLog(line);
+                    // Scenario runs keep the take / pass bookkeeping next to the step log.
+                    if (isStabilityTestModeActive())
+                    {
+                        appendStabilityRunLine("  " + line);
+                    }
+                },
             });
         recordingCoordinator_->setLiveMidiTakeCallbacks(
             [this] { return liveMidiInputCoordinator_->armedTracksReadyToRecord(); },
@@ -818,12 +827,13 @@ public:
                 }
                 return lines;
             },
-            [this](const std::int64_t startSample, const double sr) {
-                liveMidiInputCoordinator_->beginTake(startSample, sr);
+            [this](const std::int64_t startSample, const double sr, const bool cycleActive,
+                   const std::int64_t locL, const std::int64_t locR, const std::uint32_t wrapSerialAtStart) {
+                liveMidiInputCoordinator_->beginTake(startSample, sr, cycleActive, locL, locR, wrapSerialAtStart);
                 trackLanesView.repaint();
             },
-            [this](const std::int64_t stopSample) {
-                const LiveMidiTakeCommitResult r = liveMidiInputCoordinator_->commitTake(stopSample);
+            [this](const std::int64_t stopSample, const std::uint32_t stopWrapSerial) {
+                const LiveMidiTakeCommitResult r = liveMidiInputCoordinator_->commitTake(stopSample, stopWrapSerial);
                 if (r.captureOverflowSeen)
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -1475,18 +1485,37 @@ public:
             [this](const TrackId tid) {
                 return liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isTrackMidiActive(tid);
             },
-            [this](const TrackId tid, std::int64_t& takeStart) {
-                if (liveMidiInputCoordinator_ == nullptr || !liveMidiInputCoordinator_->isTakeActive())
+            [this](const TrackId tid) {
+                InstrumentTimelineRowCoordinator::Callbacks::LiveTakePreview preview;
+                if (liveMidiInputCoordinator_ == nullptr)
                 {
-                    return false;
+                    return preview;
                 }
-                const auto& tracks = liveMidiInputCoordinator_->takeTracks();
-                if (std::find(tracks.begin(), tracks.end(), tid) == tracks.end())
+                const LiveMidiTakePreviewInfo info = liveMidiInputCoordinator_->takePreviewInfoForTrack(tid);
+                if (!info.active)
                 {
-                    return false;
+                    return preview;
                 }
-                takeStart = liveMidiInputCoordinator_->takeStartSample();
-                return true;
+                preview.active = true;
+                preview.currentPassStartSample = info.recordStartSample;
+                if (info.cycleActive)
+                {
+                    // Pass geometry from the TRANSPORT's wrap count (the same counter the engine
+                    // advances at the wrap) — never a lane-local pass number.
+                    const std::uint32_t wraps = transport.readCycleWrapCountForUi() - info.wrapSerialAtStart;
+                    if (wraps > 0)
+                    {
+                        preview.currentPassStartSample = info.leftLocatorSample;
+                        preview.completedStart = juce::jmin(info.recordStartSample, info.leftLocatorSample);
+                        preview.completedEndExclusive = info.rightLocatorSample;
+                    }
+                }
+                return preview;
+            },
+            [this]() -> double {
+                return std::isfinite(lastPlayheadFrameDisplaySamples_)
+                           ? lastPlayheadFrameDisplaySamples_
+                           : (double)transport.readPlayheadSamplesForUi();
             });
 
         midiEditorPresenter_ = std::make_unique<MidiEditorPresenter>(
@@ -2084,6 +2113,14 @@ public:
                 mainFollowGovernor_.noteFrameTick(juce::Time::getMillisecondCounterHiRes());
                 maybeFollowMainArrangementPlayhead(displaySamples, true);
                 // No ruler push: the overlay covers the ruler band and draws the marker itself.
+                // The MIDI lanes' running-take preview draws its right edge from this same frame
+                // value; only the strip it grew by is invalidated (recording lanes only).
+                lastPlayheadFrameDisplaySamples_ = displaySamples;
+                if (liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isTakeActive()
+                    && instrumentTimelineRowCoordinator_ != nullptr)
+                {
+                    instrumentTimelineRowCoordinator_->repaintLiveTakePreviewGrowth(displaySamples);
+                }
             });
         addAndMakeVisible(*lanePlayheadOverlay_);
         refreshInstrumentUi();
@@ -4340,6 +4377,205 @@ public:
             const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
             return ix >= 0 ? snap->getTrack(ix).getNumPlacedClips() : 0;
         };
+        // --- MIDI cycle takes / layering scenario ---------------------------------------------
+        hooks.setLocatorsSamples = [this](const std::int64_t l, const std::int64_t r) {
+            // Locators clamp to the navigable extent (a tiny fixture project may end before `r`):
+            // grow it first, the same grow-only session operation the default seeding uses.
+            if (session.getArrangementExtentSamples() < r)
+            {
+                session.setArrangementExtentSamples(r);
+                syncViewportFromSession();
+            }
+            session.setLeftLocatorAtSample(l);
+            session.setRightLocatorAtSample(r);
+            rulerView.repaint();
+            trackLanesView.repaint();
+        };
+        hooks.getDeviceSampleRate = [this]() -> double {
+            if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
+            {
+                return dev->getCurrentSampleRate();
+            }
+            return 0.0;
+        };
+        hooks.getCycleWrapCount = [this]() -> std::uint32_t { return transport.readCycleWrapCountForUi(); };
+        hooks.liveMidiSummarizeAllClips = [this](const TrackId tid) -> std::vector<StabilityMidiClipSummary> {
+            std::vector<StabilityMidiClipSummary> out;
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (c == nullptr)
+            {
+                return out;
+            }
+            for (const auto& up : c->getClips())
+            {
+                if (up == nullptr)
+                {
+                    continue;
+                }
+                StabilityMidiClipSummary s;
+                s.clipCount = 1;
+                s.firstClipStartSamples = up->startSamples;
+                s.firstClipLengthSamples = up->lengthSamples;
+                s.bpm = up->pattern.bpm;
+                s.ticksPerQuarter = up->pattern.ticksPerQuarter;
+                for (const auto& n : up->pattern.timelineNotes)
+                {
+                    s.notes.push_back({ n.midiNote, n.velocity, n.offVelocity, (int)n.channel, n.startTick, n.durationTicks });
+                }
+                for (const auto& p : up->pattern.ccPoints)
+                {
+                    s.cc.push_back({ p.startTick, (int)p.controller, (int)p.value, (int)p.channel });
+                }
+                for (const auto& b : up->pattern.pitchBendPoints)
+                {
+                    s.pitchBend.push_back({ b.startTick, b.value, (int)b.channel });
+                }
+                out.push_back(std::move(s));
+            }
+            return out;
+        };
+        hooks.deleteTopmostMidiClipLikeUi = [this](const TrackId tid) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (c == nullptr || c->getClips().empty() || c->getClips().back() == nullptr)
+            {
+                return false;
+            }
+            const int before = (int)c->getClips().size();
+            if (arrangementEventSelectionCoordinator_ != nullptr)
+            {
+                arrangementEventSelectionCoordinator_->clearAllArrangementEventSelections();
+            }
+            session.setActiveTrack(tid);
+            c->setSelectedClipIdsExclusive(c->getClips().back()->id); // the topmost layer
+            invokeDeleteSelectedPlacedClipFromWindowShortcut();        // the Delete-key path
+            return (int)c->getClips().size() == before - 1;
+        };
+        hooks.moveTopmostMidiClipLikeUi = [this](const TrackId tid, const std::int64_t deltaSamples) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (c == nullptr || c->getClips().empty() || c->getClips().back() == nullptr || undoRedoCoordinator_ == nullptr)
+            {
+                return false;
+            }
+            c->setSelectedClipIdsExclusive(c->getClips().back()->id);
+            bool moved = false;
+            undoRedoCoordinator_->executeUndoableInstrumentEdit("Move MIDI clip", [c, deltaSamples, &moved] {
+                moved = c->moveSelectedInstrumentMidiClipsByDeltaSamples(deltaSamples);
+                return moved;
+            });
+            return moved;
+        };
+        hooks.proxySequencerNoteOnsForDestination = [this](const TrackId destination) -> juce::String {
+            const auto sessionSnap = session.loadSessionSnapshotForAudioThread();
+            if (sessionSnap == nullptr || instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return {};
+            }
+            double sr = 48000.0;
+            if (juce::AudioIODevice* dev = deviceManager.getCurrentAudioDevice())
+            {
+                sr = dev->getCurrentSampleRate() > 0.0 ? dev->getCurrentSampleRate() : sr;
+            }
+            proxy_snapshot::BuildInputs in;
+            in.renderConfig.renderSampleRate = sr;
+            in.renderConfig.timelineReferenceRate = sr;
+            const auto clipsFor = [this](const TrackId tid) {
+                std::vector<const InstrumentMidiClip*> v;
+                if (InstrumentTrackController* const c = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid))
+                {
+                    for (const auto& up : c->getClips())
+                    {
+                        v.push_back(up.get());
+                    }
+                }
+                return v;
+            };
+            const proxy_snapshot::ProxyRenderSnapshot snap
+                = proxy_snapshot::buildProxyRenderSnapshot(*sessionSnap, destination, clipsFor, in);
+            proxy_render::ProxyOfflineSequencer seq(snap, sr);
+            const std::int64_t total = juce::jmax<std::int64_t>(sessionSnap->getArrangementExtentSamples(), seq.lastEventRenderSample() + 1);
+            juce::String out;
+            juce::MidiBuffer midi;
+            for (std::int64_t pos = 0; pos < total; pos += 512)
+            {
+                midi.clear();
+                seq.emitBlock(pos, 512, midi);
+                for (const auto meta : midi)
+                {
+                    const juce::MidiMessage m = meta.getMessage();
+                    if (m.isNoteOn())
+                    {
+                        out << m.getChannel() << ":" << m.getNoteNumber() << "@" << juce::String((juce::int64)(pos + meta.samplePosition)) << " ";
+                    }
+                }
+            }
+            return out.trim();
+        };
+        hooks.liveMidiTakePreviewGeometry = [this](const TrackId tid, int& x0, int& x1, float& originX, std::int64_t& visStart,
+                                                   double& spp) -> bool {
+            if (instrumentTimelineRowCoordinator_ == nullptr)
+            {
+                return false;
+            }
+            const auto span = instrumentTimelineRowCoordinator_->liveTakePreviewPixelSpanForDiagnostics(tid);
+            if (!span.has_value())
+            {
+                return false;
+            }
+            x0 = span->first;
+            x1 = span->second;
+            originX = 0.0f; // the lane maps samples in its own local x (content band starts at x = 0)
+            visStart = timelineViewport_.getVisibleStartSamples();
+            spp = timelineViewport_.getSamplesPerPixel();
+            return true;
+        };
+        hooks.playheadDisplaySamples = [this]() -> double {
+            return std::isfinite(lastPlayheadFrameDisplaySamples_) ? lastPlayheadFrameDisplaySamples_
+                                                                   : (double)transport.readPlayheadSamplesForUi();
+        };
+        hooks.zoomTimelineLikeWheel = [this](const double factor) {
+            const double w = (double)rulerView.getWidth();
+            const std::int64_t arr = session.getArrangementExtentSamples();
+            if (w <= 0.0 || arr <= 0 || factor <= 0.0)
+            {
+                return;
+            }
+            const double sppMax = juce::jmax(1.0, (double)arr / w);
+            // Zoom around the playhead's current column (like a wheel gesture over it), so the
+            // region under test stays on screen.
+            const double spp = timelineViewport_.getSamplesPerPixel();
+            const double headX = spp > 0.0
+                                     ? ((double)transport.readPlayheadSamplesForUi() - (double)timelineViewport_.getVisibleStartSamples()) / spp
+                                     : w * 0.5;
+            timelineViewport_.zoomAroundSample(1.0 / factor, juce::jlimit(0.0, w, headX), w, arr, 1.0, sppMax);
+        };
+        hooks.panTimelineBySamples = [this](const std::int64_t delta) {
+            const double w = (double)rulerView.getWidth();
+            const std::int64_t arr = session.getArrangementExtentSamples();
+            if (w <= 0.0 || arr <= 0)
+            {
+                return;
+            }
+            timelineViewport_.panBySamples(delta, w, arr);
+        };
+        hooks.audioClipWindowsForTrack = [this](const TrackId tid) {
+            std::vector<std::pair<std::int64_t, std::int64_t>> out;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int ix = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            if (ix < 0)
+            {
+                return out;
+            }
+            const Track& t = snap->getTrack(ix);
+            for (int i = 0; i < t.getNumPlacedClips(); ++i)
+            {
+                const PlacedClip& c = t.getPlacedClip(i);
+                out.emplace_back(c.getStartSample(), c.getEffectiveLengthSamples());
+            }
+            return out;
+        };
         hooks.verifyLiveMidiHeaderCells = [this](const TrackId tid, juce::String& report, juce::String& failReason) -> bool {
             const TrackHeaderView* const header = trackLanesView.findInstrumentRowHeaderForDiagnostics(tid);
             if (header == nullptr)
@@ -5516,6 +5752,10 @@ private:
         }
     } };
     std::unique_ptr<PlayheadOverlay> lanePlayheadOverlay_;
+    /// The overlay's most recent per-frame display position (session samples; NaN before the
+    /// first frame). The MIDI lanes' running-take preview reads it so its right edge and the
+    /// playhead line come from one value — the overlay stays the only clock sampler.
+    double lastPlayheadFrameDisplaySamples_ = std::numeric_limits<double>::quiet_NaN();
     /// Inspector column: scrollable `InspectorView` + fixed `ChannelStripPanel`. `inspectorView_`
     /// is a reference into the panel so the many existing call sites stay unchanged.
     InspectorPanel inspectorPanel_;

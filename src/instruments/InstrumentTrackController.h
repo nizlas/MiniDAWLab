@@ -9,8 +9,17 @@
 // Project persistence: experimental `experimentalInstrumentTracks[]` payloads, v11+ conventions.
 // `instrumentLoaded_`: whether **this** lane’s paired host currently has an instrument loaded—not a global singleton flag.
 //
+// CLIP STACK (layer order). `clips_` is the one persistent z-order of this track's MIDI clips:
+// index 0 = bottom, last = topmost. The lane paints bottom→top and hit-tests top→bottom, a new
+// recorded take or paste is appended (topmost), save / load / musical undo round-trip the order
+// positionally, and the render bake resolves overlaps with it (topmost clip owns its whole window;
+// see `MidiLayeredRenderBake.h`). A moved clip that ends up free of overlap is promoted to the top
+// (the audio lanes' committed-move rule); a move that still overlaps keeps its layer. Selection,
+// focus and the MIDI editor never reorder the stack.
+//
 // =============================================================================
 
+#include "instruments/MidiLayeredRenderBake.h"
 #include "io/ProjectFile.h"
 #include "io/ProxyMetadataCheckpoint.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
@@ -70,11 +79,16 @@ struct InstrumentNoteRenderEvent
     std::uint8_t midiChannel = 1;
 };
 
+/// One clip's window under the layering rule (`MidiLayeredRenderBake.h`): the clip's audible
+/// spans are its window minus the windows of the clips above it in the stack. Diagnostics /
+/// bookkeeping only — the audio thread walks `InstrumentTrackRenderSnapshot::notes`.
 struct InstrumentClipRenderPlan
 {
     std::int64_t startSamples = 0;
     std::int64_t endSamplesExclusive = 0;
-    std::vector<InstrumentNoteRenderEvent> notes;
+    std::vector<midi_layer_bake::SampleSpan> audibleSpans;
+    /// Note segments this clip contributed to the merged note list.
+    int noteSegments = 0;
 };
 
 /// Stage D: one baked, discrete controller change. Like notes, the **effective** channel is
@@ -123,8 +137,12 @@ struct InstrumentTrackRenderSnapshot
     /// below, so the audio thread never has to consult it.
     int midiChannel = kTrackMidiOutputChannelAny;
     int gateSamples = 4800;
-    /// Sorted by `startSamples`. Notes sorted by `absSample` within each clip.
+    /// Clip windows in STACK order (stored order, last = topmost) with their audible spans.
     std::vector<InstrumentClipRenderPlan> clips;
+    /// Every audible note segment of the track, merged across clips and stable-sorted by
+    /// `absSample` (equal samples keep stack order, then stored note order — ORD-1). Segments
+    /// are already cut to the clips' audible spans, so the scheduler never consults windows.
+    std::vector<InstrumentNoteRenderEvent> notes;
     /// Stage D: precomputed CC automation, one stream per (controller, effective channel).
     /// Bounded event lists (one event per crossed integer value inside Linear segments).
     std::vector<InstrumentCcRenderStream> ccStreams;
@@ -236,9 +254,24 @@ public:
         return experimentalInstrumentKind_;
     }
 
+    /// Clips in STACK order (index 0 = bottom, last = topmost; see the header comment).
     [[nodiscard]] const std::vector<std::unique_ptr<InstrumentMidiClip>>& getClips() const noexcept
     {
         return clips_;
+    }
+
+    /// [Message thread] Live-MIDI take in progress on THIS source row: while set, the track's own
+    /// clips are not scheduled (pending note-offs still complete), so earlier takes never double
+    /// what the player performs live. Other rows — including other MIDI rows routed to the same
+    /// instrument — are untouched. Set by the live-MIDI coordinator at take begin, cleared at
+    /// commit / abort; never persisted, never part of the render snapshot.
+    void setTransportClipsSuppressedForRecording(const bool suppressed) noexcept
+    {
+        rtSuppressTransportClipsForRecording_.store(suppressed, std::memory_order_release);
+    }
+    [[nodiscard]] bool isTransportClipsSuppressedForRecording() const noexcept
+    {
+        return rtSuppressTransportClipsForRecording_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] InstrumentMidiClip* getClipById(InstrumentMidiClipId id) noexcept;
@@ -685,6 +718,8 @@ public:
 
 private:
     void pruneInstrumentMidiClipSelectionToExistingClips() noexcept;
+    /// Committed-move layer rule (see the header comment): moved clips free of overlap go on top.
+    void promoteMovedClipsFreeOfOverlapToTop(const std::vector<InstrumentMidiClipId>& movedIds) noexcept;
 
     [[nodiscard]] bool computeInstrumentLoadedFromHost() const noexcept;
 
@@ -839,6 +874,9 @@ private:
     /// consumed by the next `audioThread_scheduleTransportMidiForSegment` as a discontinuity so
     /// the newly active host receives the chased CC state instead of stale delivery memory.
     std::atomic<bool> rtForceTransportChaseOnce_{ false };
+
+    /// Live-MIDI take on this source row (see `setTransportClipsSuppressedForRecording`).
+    std::atomic<bool> rtSuppressTransportClipsForRecording_{ false };
 
 public:
     /// [Message thread] The playback registry swapped this track's transport host (steering §17

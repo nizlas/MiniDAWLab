@@ -2481,9 +2481,61 @@ bool InstrumentTrackController::moveSelectedInstrumentMidiClipsByDeltaSamples(co
         return false;
     }
 
+    promoteMovedClipsFreeOfOverlapToTop(selectedClipIds_);
     publishRenderSnapshot();
     sendChangeMessage();
     return true;
+}
+
+void InstrumentTrackController::promoteMovedClipsFreeOfOverlapToTop(const std::vector<InstrumentMidiClipId>& movedIds) noexcept
+{
+    // Audio lanes' committed-move rule (SessionSnapshot::withClipMoved): a moved clip that no longer
+    // overlaps any other clip of the track becomes the newest (topmost) layer; a clip that still
+    // overlaps keeps its layer, so dragging a lower take across the stack never silently makes it
+    // win. Moved clips are visited in their current stack order so their relative order survives.
+    std::vector<InstrumentMidiClipId> inStackOrder;
+    for (const auto& cptr : clips_)
+    {
+        if (cptr != nullptr
+            && std::find(movedIds.begin(), movedIds.end(), cptr->id) != movedIds.end())
+        {
+            inStackOrder.push_back(cptr->id);
+        }
+    }
+    for (const InstrumentMidiClipId id : inStackOrder)
+    {
+        const auto it = std::find_if(clips_.begin(), clips_.end(),
+                                     [id](const std::unique_ptr<InstrumentMidiClip>& p) {
+                                         return p != nullptr && p->id == id;
+                                     });
+        if (it == clips_.end() || (*it)->lengthSamples <= 0)
+        {
+            continue;
+        }
+        const std::int64_t m0 = (*it)->startSamples;
+        const std::int64_t m1 = m0 + (*it)->lengthSamples;
+        bool overlapsOther = false;
+        for (const auto& other : clips_)
+        {
+            if (other == nullptr || other->id == id || other->lengthSamples <= 0)
+            {
+                continue;
+            }
+            const std::int64_t o0 = other->startSamples;
+            const std::int64_t o1 = o0 + other->lengthSamples;
+            if (m0 < o1 && o0 < m1)
+            {
+                overlapsOther = true;
+                break;
+            }
+        }
+        if (!overlapsOther && it + 1 != clips_.end())
+        {
+            std::unique_ptr<InstrumentMidiClip> promoted = std::move(*it);
+            clips_.erase(it);
+            clips_.push_back(std::move(promoted));
+        }
+    }
 }
 
 bool InstrumentTrackController::removeInstrumentMidiClipsByIds(const std::vector<InstrumentMidiClipId>& ids) noexcept
@@ -2599,89 +2651,97 @@ void InstrumentTrackController::publishRenderSnapshot()
     // while plugin-less routed MIDI sources (no host of their own) kept sounding.
     snap->playbackEnabled = trackActive_ && powerOn_ && !muted_;
 
+    // ---- Layering (MidiLayeredRenderBake.h): the clip stack is `clips_` in stored order, last =
+    // topmost. Each clip's audible spans are its window minus the windows of the clips above it;
+    // everything below is cut to those spans. The proxy sequencer mirrors this bake line for line
+    // (ProxyOfflineSequencer.h) — change both together. ----
+    std::vector<const InstrumentMidiClip*> stack; // bottom → top, positive-length clips only
+    std::vector<midi_layer_bake::ClipWindow> windows;
     for (const auto& cptr : clips_)
     {
-        if (cptr == nullptr)
+        if (cptr != nullptr && cptr->lengthSamples > 0)
         {
-            continue;
+            stack.push_back(cptr.get());
+            windows.push_back({ cptr->startSamples, cptr->startSamples + cptr->lengthSamples });
         }
-        const InstrumentMidiClip& clip = *cptr;
-        if (clip.lengthSamples <= 0)
-        {
-            continue;
-        }
+    }
+    const std::vector<std::vector<midi_layer_bake::SampleSpan>> audible
+        = midi_layer_bake::audibleSpansPerClip(windows);
+
+    for (std::size_t ci = 0; ci < stack.size(); ++ci)
+    {
+        const InstrumentMidiClip& clip = *stack[ci];
+        const std::vector<midi_layer_bake::SampleSpan>& spans = audible[ci];
         InstrumentClipRenderPlan plan;
-        plan.startSamples = clip.startSamples;
-        plan.endSamplesExclusive = clip.startSamples + clip.lengthSamples;
+        plan.startSamples = windows[ci].start;
+        plan.endSamplesExclusive = windows[ci].endExclusive;
+        plan.audibleSpans = spans;
+
+        // Notes: stored order first (ORD-1 tie-break), cut into audible segments. A segment that
+        // starts after the note's own start is a resumed note: new Note On, same channel / velocity.
+        std::vector<InstrumentNoteRenderEvent> clipNotes;
+        if (!spans.empty())
         {
             const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
             const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
             for (const auto& tn : clip.pattern.timelineNotes)
             {
-                InstrumentNoteRenderEvent ev;
-                ev.absSample = absoluteSampleForTimelineNote(clip.timelineAnchorSamples, tn, clip.pattern, sr);
+                const std::int64_t on = absoluteSampleForTimelineNote(clip.timelineAnchorSamples, tn, clip.pattern, sr);
+                if (on < plan.startSamples || on >= plan.endSamplesExclusive)
+                {
+                    continue; // a note starting outside its own clip window is not played (unchanged rule)
+                }
                 const std::int64_t durSam =
                     ticksToRelativeSamples(juce::jmax<std::int64_t>(1, tn.durationTicks), bpm, tpq, sr);
-                ev.noteOffAbsSample = ev.absSample + juce::jmax<std::int64_t>(1, durSam);
-                ev.noteOffAbsSample = juce::jmin(ev.noteOffAbsSample, plan.endSamplesExclusive);
-                if (ev.noteOffAbsSample <= ev.absSample)
+                std::int64_t off = on + juce::jmax<std::int64_t>(1, durSam);
+                off = juce::jmin(off, plan.endSamplesExclusive);
+                if (off <= on)
                 {
-                    ev.noteOffAbsSample = ev.absSample + 1;
+                    off = on + 1;
                 }
-                ev.midiNote = (std::uint8_t)juce::jlimit(0, 127, tn.midiNote);
-                ev.velocity = (std::uint8_t)juce::jlimit(1, 127, tn.velocity);
-                ev.offVelocity = (std::uint8_t)sanitizeMidiNoteOffVelocity(tn.offVelocity);
-                ev.midiChannel = (std::uint8_t)(forcedMidiChannel == kTrackMidiOutputChannelAny
-                                                    ? juce::jlimit(1, 16, (int)tn.channel)
-                                                    : forcedMidiChannel);
-                if (ev.absSample < plan.startSamples || ev.absSample >= plan.endSamplesExclusive)
-                {
-                    continue;
-                }
-                plan.notes.push_back(ev);
+                InstrumentNoteRenderEvent proto;
+                proto.midiNote = (std::uint8_t)juce::jlimit(0, 127, tn.midiNote);
+                proto.velocity = (std::uint8_t)juce::jlimit(1, 127, tn.velocity);
+                proto.offVelocity = (std::uint8_t)sanitizeMidiNoteOffVelocity(tn.offVelocity);
+                proto.midiChannel = (std::uint8_t)(forcedMidiChannel == kTrackMidiOutputChannelAny
+                                                       ? juce::jlimit(1, 16, (int)tn.channel)
+                                                       : forcedMidiChannel);
+                midi_layer_bake::forEachAudibleNoteSegment(on, off, spans,
+                    [&](const std::int64_t segOn, const std::int64_t segOff) {
+                        InstrumentNoteRenderEvent ev = proto;
+                        ev.absSample = segOn;
+                        ev.noteOffAbsSample = segOff;
+                        clipNotes.push_back(ev);
+                    });
             }
         }
         // ORD-1 (steering §8.3, HR-10): stable sort so STORED ORDER is the documented tie-break
-        // for equal-time notes. `std::sort` left equal-key order implementation-defined, which
-        // made equal-time Note Off/Note On interleaving (same-pitch retrigger vs. kill) and the
-        // P1C fingerprint's stored-order serialization non-authoritative. No behavior change for
-        // non-equal keys.
-        std::stable_sort(plan.notes.begin(), plan.notes.end(), [](const InstrumentNoteRenderEvent& a,
-                                                                  const InstrumentNoteRenderEvent& b) {
+        // for equal-time notes within a clip; the merged list below keeps stack order for equal
+        // samples across clips (audible spans of different clips never share an instant, so that
+        // case only arises at a span boundary where the lower clip's segment ENDS as the upper
+        // clip's note starts — processed earlier by the scheduler because its Note On is earlier).
+        std::stable_sort(clipNotes.begin(), clipNotes.end(), [](const InstrumentNoteRenderEvent& a,
+                                                                const InstrumentNoteRenderEvent& b) {
             return a.absSample < b.absSample;
         });
+        plan.noteSegments = (int)clipNotes.size();
+        snap->notes.insert(snap->notes.end(), clipNotes.begin(), clipNotes.end());
         snap->clips.push_back(std::move(plan));
     }
-    // ORD-1: equal-start clip plans likewise keep stored (append/load) order deterministically.
-    std::stable_sort(snap->clips.begin(), snap->clips.end(), [](const InstrumentClipRenderPlan& a,
-                                                                const InstrumentClipRenderPlan& b) {
-        return a.startSamples < b.startSamples;
+    std::stable_sort(snap->notes.begin(), snap->notes.end(), [](const InstrumentNoteRenderEvent& a,
+                                                                const InstrumentNoteRenderEvent& b) {
+        return a.absSample < b.absSample;
     });
 
-    // Stage D: bake CC automation into per-(controller, effective channel) streams. Unlike notes,
-    // CC events are NOT filtered to the clip's visible sample window: controller state is sticky,
-    // so a curve that ended before the playhead still defines the chased value. The evaluator
+    // Stage D: bake CC automation into per-(controller, effective channel) streams. The evaluator
     // (`midi_cc::collectCcEventsInTickRange`) emits a bounded set — endpoints plus one event per
     // crossed integer inside Linear segments — so the audio thread only ever walks discrete,
-    // pre-sorted events. Clips are visited in ascending start order; equal-sample events keep
-    // that order and the last delivered value wins (deterministic).
+    // pre-sorted events. Layering: each clip's events are delivered only inside its audible spans
+    // and its current value is restated at every span start (the chase when the winning clip
+    // changes); the clip's own audible end keeps the events placed exactly there (pedal release
+    // of a recorded take). Clips are visited bottom → top, so at a touching boundary the upper
+    // clip's value is appended last and wins (deterministic "last delivered value wins").
     {
-        struct ClipOrderRef
-        {
-            const InstrumentMidiClip* clip = nullptr;
-        };
-        std::vector<ClipOrderRef> orderedClips;
-        for (const auto& cptr : clips_)
-        {
-            if (cptr != nullptr && cptr->lengthSamples > 0 && !cptr->pattern.ccPoints.empty())
-            {
-                orderedClips.push_back({ cptr.get() });
-            }
-        }
-        std::stable_sort(orderedClips.begin(), orderedClips.end(),
-                         [](const ClipOrderRef& a, const ClipOrderRef& b) {
-                             return a.clip->startSamples < b.clip->startSamples;
-                         });
         const auto findOrAddStream = [&snap](const int controller, const int effCh)
             -> InstrumentCcRenderStream& {
             for (auto& s : snap->ccStreams)
@@ -2697,9 +2757,13 @@ void InstrumentTrackController::publishRenderSnapshot()
             snap->ccStreams.push_back(std::move(ns));
             return snap->ccStreams.back();
         };
-        for (const auto& ref : orderedClips)
+        for (std::size_t ci = 0; ci < stack.size(); ++ci)
         {
-            const InstrumentMidiClip& clip = *ref.clip;
+            const InstrumentMidiClip& clip = *stack[ci];
+            if (clip.pattern.ccPoints.empty() || audible[ci].empty())
+            {
+                continue;
+            }
             const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
             const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
             std::vector<MidiCcPoint> pts = clip.pattern.ccPoints;
@@ -2714,15 +2778,27 @@ void InstrumentTrackController::publishRenderSnapshot()
                 std::vector<midi_cc::MidiCcEvent> evs;
                 midi_cc::collectCcEventsInTickRange(pts, key.controller, key.channel, 0,
                                                     lastTick + 1, std::nullopt, evs);
-                const int effCh = midi_channel_diag::effectiveChannel(key.channel, forcedMidiChannel);
-                auto& stream = findOrAddStream(key.controller, effCh);
+                std::vector<midi_layer_bake::StreamEvent> clipEvents;
+                clipEvents.reserve(evs.size());
                 for (const auto& e : evs)
                 {
+                    clipEvents.push_back({ clip.timelineAnchorSamples + ticksToRelativeSamples(e.tick, bpm, tpq, sr),
+                                           (int)e.value });
+                }
+                std::stable_sort(clipEvents.begin(), clipEvents.end(),
+                                 [](const midi_layer_bake::StreamEvent& a, const midi_layer_bake::StreamEvent& b) {
+                                     return a.absSample < b.absSample;
+                                 });
+                const std::vector<midi_layer_bake::StreamEvent> audibleEvents
+                    = midi_layer_bake::restrictStreamToAudibleSpans(clipEvents, audible[ci], windows[ci].endExclusive);
+                const int effCh = midi_channel_diag::effectiveChannel(key.channel, forcedMidiChannel);
+                auto& stream = findOrAddStream(key.controller, effCh);
+                for (const auto& e : audibleEvents)
+                {
                     InstrumentCcRenderEvent rev;
-                    rev.absSample = clip.timelineAnchorSamples
-                                    + ticksToRelativeSamples(e.tick, bpm, tpq, sr);
-                    rev.controller = e.controller;
-                    rev.value = e.value;
+                    rev.absSample = e.absSample;
+                    rev.controller = (std::uint8_t)key.controller;
+                    rev.value = (std::uint8_t)juce::jlimit(0, 127, e.value);
                     stream.events.push_back(rev);
                 }
             }
@@ -2741,26 +2817,9 @@ void InstrumentTrackController::publishRenderSnapshot()
                          });
     }
 
-    // Live-recording slice: pitch bend baked exactly like CC — not window-filtered (the wheel
-    // position is sticky), one stream per effective channel, clips visited in ascending start
-    // order with last-wins on equal samples, recorded values verbatim (no interpolation).
+    // Live-recording slice: pitch bend baked exactly like CC — one stream per effective channel,
+    // recorded values verbatim (no interpolation), the same layering / chase rule.
     {
-        struct ClipOrderRef
-        {
-            const InstrumentMidiClip* clip = nullptr;
-        };
-        std::vector<ClipOrderRef> orderedClips;
-        for (const auto& cptr : clips_)
-        {
-            if (cptr != nullptr && cptr->lengthSamples > 0 && !cptr->pattern.pitchBendPoints.empty())
-            {
-                orderedClips.push_back({ cptr.get() });
-            }
-        }
-        std::stable_sort(orderedClips.begin(), orderedClips.end(),
-                         [](const ClipOrderRef& a, const ClipOrderRef& b) {
-                             return a.clip->startSamples < b.clip->startSamples;
-                         });
         const auto findOrAddStream = [&snap](const int effCh) -> InstrumentPitchBendRenderStream& {
             for (auto& s : snap->pitchBendStreams)
             {
@@ -2774,20 +2833,48 @@ void InstrumentTrackController::publishRenderSnapshot()
             snap->pitchBendStreams.push_back(std::move(ns));
             return snap->pitchBendStreams.back();
         };
-        for (const auto& ref : orderedClips)
+        for (std::size_t ci = 0; ci < stack.size(); ++ci)
         {
-            const InstrumentMidiClip& clip = *ref.clip;
+            const InstrumentMidiClip& clip = *stack[ci];
+            if (clip.pattern.pitchBendPoints.empty() || audible[ci].empty())
+            {
+                continue;
+            }
             const double bpm = clip.pattern.bpm > 0.0 ? clip.pattern.bpm : 120.0;
             const int tpq = experimentalEffectiveTicksPerQuarter(clip.pattern);
             std::vector<MidiPitchBendPoint> pts = clip.pattern.pitchBendPoints;
             (void)midi_pb::normalizePoints(pts); // defensive: kept normalized by every writer
-            for (const auto& p : pts)
+            // Per native channel (the stream key before the output remap).
+            for (int nativeCh = 1; nativeCh <= 16; ++nativeCh)
             {
-                const int effCh = midi_channel_diag::effectiveChannel((int)p.channel, forcedMidiChannel);
-                InstrumentPitchBendRenderEvent rev;
-                rev.absSample = clip.timelineAnchorSamples + ticksToRelativeSamples(p.startTick, bpm, tpq, sr);
-                rev.value = p.value;
-                findOrAddStream(effCh).events.push_back(rev);
+                std::vector<midi_layer_bake::StreamEvent> clipEvents;
+                for (const auto& p : pts)
+                {
+                    if ((int)p.channel == nativeCh)
+                    {
+                        clipEvents.push_back({ clip.timelineAnchorSamples + ticksToRelativeSamples(p.startTick, bpm, tpq, sr),
+                                               p.value });
+                    }
+                }
+                if (clipEvents.empty())
+                {
+                    continue;
+                }
+                std::stable_sort(clipEvents.begin(), clipEvents.end(),
+                                 [](const midi_layer_bake::StreamEvent& a, const midi_layer_bake::StreamEvent& b) {
+                                     return a.absSample < b.absSample;
+                                 });
+                const std::vector<midi_layer_bake::StreamEvent> audibleEvents
+                    = midi_layer_bake::restrictStreamToAudibleSpans(clipEvents, audible[ci], windows[ci].endExclusive);
+                const int effCh = midi_channel_diag::effectiveChannel(nativeCh, forcedMidiChannel);
+                auto& stream = findOrAddStream(effCh);
+                for (const auto& e : audibleEvents)
+                {
+                    InstrumentPitchBendRenderEvent rev;
+                    rev.absSample = e.absSample;
+                    rev.value = e.value;
+                    stream.events.push_back(rev);
+                }
             }
         }
         for (auto& s : snap->pitchBendStreams)
@@ -2805,7 +2892,7 @@ void InstrumentTrackController::publishRenderSnapshot()
 
     std::int64_t arrangeMinSample = 0;
     std::int64_t arrangeMaxExclusive = -1;
-    int routedNoteRows = 0;
+    const int routedNoteRows = (int)snap->notes.size();
     if (!snap->clips.empty())
     {
         arrangeMinSample = std::numeric_limits<std::int64_t>::max();
@@ -2814,7 +2901,6 @@ void InstrumentTrackController::publishRenderSnapshot()
         {
             arrangeMinSample = juce::jmin(arrangeMinSample, pl.startSamples);
             arrangeMaxExclusive = juce::jmax(arrangeMaxExclusive, pl.endSamplesExclusive);
-            routedNoteRows += static_cast<int>(pl.notes.size());
         }
     }
 
@@ -2848,14 +2934,11 @@ void InstrumentTrackController::publishRenderSnapshot()
         // Off-velocity audit aid: how many scheduled note ends will carry a non-default release
         // velocity (the value the audio thread puts into `MidiMessage::noteOff`).
         int nonDefaultOffVelocityNotes = 0;
-        for (const auto& pl : snap->clips)
+        for (const auto& ev : snap->notes)
         {
-            for (const auto& ev : pl.notes)
+            if ((int)ev.offVelocity != kDefaultMidiNoteOffVelocity)
             {
-                if ((int)ev.offVelocity != kDefaultMidiNoteOffVelocity)
-                {
-                    ++nonDefaultOffVelocityNotes;
-                }
+                ++nonDefaultOffVelocityNotes;
             }
         }
 
@@ -3033,8 +3116,11 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
 
     // Track-state gate (snapshot) + host readiness of the host ACTUALLY delivered to this block
     // (Primary, or the Secondary while it is the transport source). Pending note-offs above are
-    // always flushed so mute/off/host-swap never strands sounding notes.
-    if (!snap->playbackEnabled || !host.acceptsTransportMidi())
+    // always flushed so mute/off/host-swap never strands sounding notes. A live-MIDI take on this
+    // source row suppresses its own clips the same way (earlier takes must not double the live
+    // performance; other rows into the same instrument keep playing).
+    if (!snap->playbackEnabled || !host.acceptsTransportMidi()
+        || rtSuppressTransportClipsForRecording_.load(std::memory_order_acquire))
     {
         return;
     }
@@ -3052,56 +3138,51 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
 
     const int gate = juce::jmax(1, snap->gateSamples);
 
-    for (const auto& plan : snap->clips)
+    // One merged, pre-segmented note list for the whole track (layering already applied at bake
+    // time): ascending `absSample`, so a segment that ENDS at sample X (its Note Off emitted while
+    // its earlier Note On is processed, or from the pending list above) always precedes a segment
+    // that STARTS at X — the same-pitch off-before-on order the layering rule relies on.
+    auto it = std::lower_bound(snap->notes.begin(), snap->notes.end(), timelineSegStart,
+                               [](const InstrumentNoteRenderEvent& e, const std::int64_t s) {
+                                   return e.absSample < s;
+                               });
+    for (; it != snap->notes.end() && it->absSample < segEnd; ++it)
     {
-        if (plan.endSamplesExclusive <= timelineSegStart || plan.startSamples >= segEnd)
+        const InstrumentNoteRenderEvent& ev = *it;
+        if (ev.absSample < timelineSegStart)
         {
             continue;
         }
 
-        auto it = std::lower_bound(plan.notes.begin(), plan.notes.end(), timelineSegStart,
-                                   [](const InstrumentNoteRenderEvent& e, const std::int64_t s) {
-                                       return e.absSample < s;
-                                   });
+        const int onRel = static_cast<int>(ev.absSample - timelineSegStart);
+        const int onOffset = juce::jlimit(0, deviceBlockNumSamples - 1, onRel + bufferOffsetInDevice);
+        const float vel = static_cast<float>(ev.velocity) / 127.0f;
+        const int noteCh = juce::jlimit(1, 16, (int)ev.midiChannel);
+        emitCounted(onOffset, juce::MidiMessage::noteOn(noteCh, (int)ev.midiNote, vel));
 
-        for (; it != plan.notes.end() && it->absSample < segEnd; ++it)
+        // Scheduled note ends send a **true** Note Off carrying the note's stored release
+        // velocity (MIDI correctness; instruments are free to ignore the value).
+        const auto offVel = (juce::uint8)juce::jlimit(0, 127, (int)ev.offVelocity);
+        const std::int64_t dueAbs = (ev.noteOffAbsSample > ev.absSample)
+                                        ? ev.noteOffAbsSample
+                                        : (ev.absSample + static_cast<std::int64_t>(gate));
+        if (dueAbs >= timelineSegStart && dueAbs < segEnd)
         {
-            const InstrumentNoteRenderEvent& ev = *it;
-            if (ev.absSample < timelineSegStart)
+            const int offRel = static_cast<int>(dueAbs - timelineSegStart);
+            const int o = juce::jlimit(0, deviceBlockNumSamples - 1, offRel + bufferOffsetInDevice);
+            emitCounted(o, juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
+        }
+        else if (dueAbs >= segEnd)
+        {
+            if (rtPendingOffCount_ < kMaxPendingTransportOffs)
             {
-                continue;
+                rtPendingOffs_[(size_t)rtPendingOffCount_++]
+                    = { dueAbs, (int)ev.midiNote, noteCh, (int)ev.offVelocity };
             }
-
-            const int onRel = static_cast<int>(ev.absSample - timelineSegStart);
-            const int onOffset = juce::jlimit(0, deviceBlockNumSamples - 1, onRel + bufferOffsetInDevice);
-            const float vel = static_cast<float>(ev.velocity) / 127.0f;
-            const int noteCh = juce::jlimit(1, 16, (int)ev.midiChannel);
-            emitCounted(onOffset, juce::MidiMessage::noteOn(noteCh, (int)ev.midiNote, vel));
-
-            // Scheduled note ends send a **true** Note Off carrying the note's stored release
-            // velocity (MIDI correctness; instruments are free to ignore the value).
-            const auto offVel = (juce::uint8)juce::jlimit(0, 127, (int)ev.offVelocity);
-            const std::int64_t dueAbs = (ev.noteOffAbsSample > ev.absSample)
-                                            ? ev.noteOffAbsSample
-                                            : (ev.absSample + static_cast<std::int64_t>(gate));
-            if (dueAbs >= timelineSegStart && dueAbs < segEnd)
+            else
             {
-                const int offRel = static_cast<int>(dueAbs - timelineSegStart);
-                const int o = juce::jlimit(0, deviceBlockNumSamples - 1, offRel + bufferOffsetInDevice);
-                emitCounted(o, juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
-            }
-            else if (dueAbs >= segEnd)
-            {
-                if (rtPendingOffCount_ < kMaxPendingTransportOffs)
-                {
-                    rtPendingOffs_[(size_t)rtPendingOffCount_++]
-                        = { dueAbs, (int)ev.midiNote, noteCh, (int)ev.offVelocity };
-                }
-                else
-                {
-                    emitCounted(juce::jmax(0, deviceBlockNumSamples - 1),
-                                juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
-                }
+                emitCounted(juce::jmax(0, deviceBlockNumSamples - 1),
+                            juce::MidiMessage::noteOff(noteCh, (int)ev.midiNote, offVel));
             }
         }
     }

@@ -653,6 +653,295 @@ void testTakeBuilder()
 }
 
 // ----------------------------------------------------------------------------- persistence / export
+// ----------------------------------------------------------------------------- cycle: anchors + markers
+/// The bus maps gestures through the engine's timeline anchors: a key pressed before a wrap but
+/// delivered after it lands before the right locator; the wrap marker carries the exact mono
+/// position and serial; stopped / playing transitions are anchored; several blocks between
+/// dispatches do not break the mapping.
+void testCycleAnchorsAndWrapMarkers()
+{
+    live_midi::LiveMidiInputBus bus;
+    bus.publishRouting(makeRouting(false, false)); // capture on, nothing monitored (no hosts)
+    const double blockMs = 256.0 / 48.0;
+    auto ctxAt = [](const double nowMs, const bool playing, const std::int64_t t0, const std::int64_t mono,
+                    const std::int64_t offset = 0) {
+        live_midi::BlockContext c = makeContext(nullptr, nullptr, nowMs, playing, t0, offset);
+        c.monoSampleAtBlockStart = mono;
+        return c;
+    };
+    const auto drain = [&bus]() {
+        std::vector<live_midi::CapturedEvent> out;
+        live_midi::CapturedEvent ce;
+        while (bus.popCaptured(ce))
+        {
+            out.push_back(ce);
+        }
+        return out;
+    };
+
+    // Block A: stopped at 1000, mono 0. A key pressed 1 ms before the callback → stopped anchor.
+    double now = 1000.0;
+    bus.deviceThread_push(0, stamped(juce::MidiMessage::noteOn(1, 40, (juce::uint8)100), (now - 1.0) * 0.001));
+    bus.audioThread_dispatch(ctxAt(now, false, 1000, 0), nullptr, nullptr);
+    {
+        const auto got = drain();
+        expect(got.size() == 1 && !got[0].transportPlaying && got[0].timelineSample == 1000 && got[0].monoSample == 0,
+               "anchors: gesture before any playing block = stopped anchor (frozen playhead, mono clamped at 0)");
+        expect(bus.anchorCountForDiagnostics() == 1, "anchors: first block records one anchor");
+    }
+    // Block B: playing from 1000 at mono 256 → playing anchor {256, 1000}.
+    now += blockMs;
+    bus.audioThread_dispatch(ctxAt(now, true, 1000, 256), nullptr, nullptr);
+    expect(bus.anchorCountForDiagnostics() == 2, "anchors: play start records an anchor");
+    // Blocks C, D: continuous → no new anchors.
+    now += blockMs;
+    bus.audioThread_dispatch(ctxAt(now, true, 1256, 512), nullptr, nullptr);
+    now += blockMs;
+    bus.audioThread_dispatch(ctxAt(now, true, 1512, 768), nullptr, nullptr);
+    expect(bus.anchorCountForDiagnostics() == 2, "anchors: continuous playback adds no anchors");
+    // Block E: t0 = 1768, mono 1024; the engine wraps at offset 100 (R = 1868) to L = 200.
+    now += blockMs;
+    bus.audioThread_dispatch(ctxAt(now, true, 1768, 1024), nullptr, nullptr);
+    bus.audioThread_noteCycleWrap(1024 + 100, 200, 1);
+    expect(bus.anchorCountForDiagnostics() == 3, "anchors: the wrap records an anchor at its exact mono sample");
+    // Block F: t0 = 200 + 156 = 356, mono 1280 → continues the wrap anchor (no new anchor). Two
+    // keys delivered now: one pressed BEFORE the wrap (mono 1100), one after (mono 1130).
+    now += blockMs;
+    const double tBefore = (now - (1280.0 - 1100.0) / 48.0) * 0.001;
+    const double tAfter = (now - (1280.0 - 1130.0) / 48.0) * 0.001;
+    bus.deviceThread_push(0, stamped(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), tBefore));
+    bus.deviceThread_push(0, stamped(juce::MidiMessage::noteOn(1, 62, (juce::uint8)100), tAfter));
+    bus.audioThread_dispatch(ctxAt(now, true, 356, 1280), nullptr, nullptr);
+    expect(bus.anchorCountForDiagnostics() == 3, "anchors: the block after a wrap continues the wrap anchor");
+    {
+        const auto got = drain();
+        // Ring order: wrap marker (pushed in block E), then the two keys (block F).
+        expect(got.size() == 3 && got[0].wrapMarker && got[0].monoSample == 1124 && got[0].timelineSample == 200
+                   && got[0].wrapSerial == 1 && got[0].trackId == kInvalidTrackId,
+               "markers: the wrap marker carries the exact mono sample, the loop start and the serial");
+        bool ok = got.size() == 3 && !got[1].wrapMarker && got[1].bytes[1] == 60 && got[1].transportPlaying
+                  && std::abs((long long)(got[1].monoSample - 1100)) <= 1
+                  && std::abs((long long)(got[1].timelineSample - (1000 + (1100 - 256)))) <= 1;
+        expect(ok, "anchors: a key pressed before the wrap but delivered after it lands before R in the previous pass");
+        ok = got.size() == 3 && got[2].bytes[1] == 62 && std::abs((long long)(got[2].monoSample - 1130)) <= 1
+             && std::abs((long long)(got[2].timelineSample - (200 + (1130 - 1124)))) <= 1;
+        expect(ok, "anchors: a key pressed after the wrap lands just after L in the new pass");
+        expect(got.size() == 3 && got[1].monoSample < got[0].monoSample,
+               "markers: pass identity comes from the mono order, not from the ring order");
+    }
+    // Several wraps between dispatches (short loop, many blocks without MIDI): each wrap is a
+    // marker + anchor and the mapping stays exact.
+    for (int i = 0; i < 3; ++i)
+    {
+        now += blockMs;
+        const std::int64_t mono = 1536 + 256 * i;
+        bus.audioThread_dispatch(ctxAt(now, true, 356 + 256 * (i + 1), mono), nullptr, nullptr);
+    }
+    {
+        // Simulate two wraps inside one block: at offsets 10 and 20 of the block at mono 2304.
+        now += blockMs;
+        bus.audioThread_dispatch(ctxAt(now, true, 356 + 256 * 4, 2304), nullptr, nullptr);
+        bus.audioThread_noteCycleWrap(2304 + 10, 200, 2);
+        bus.audioThread_noteCycleWrap(2304 + 20, 200, 3);
+        const auto got = drain();
+        expect(got.size() == 2 && got[0].wrapSerial == 2 && got[1].wrapSerial == 3 && got[0].monoSample == 2314
+                   && got[1].monoSample == 2324,
+               "markers: wraps are delimited even when no MIDI arrives between them (several per UI update)");
+    }
+    // Stop: the next block is stopped at the frozen playhead → stopped anchor; a key pressed
+    // afterwards maps to the frozen position with transportPlaying = false.
+    now += blockMs;
+    bus.audioThread_dispatch(ctxAt(now, false, 436, 2560), nullptr, nullptr);
+    now += blockMs;
+    bus.deviceThread_push(0, stamped(juce::MidiMessage::noteOn(1, 70, (juce::uint8)100), (now - 1.0) * 0.001));
+    bus.audioThread_dispatch(ctxAt(now, false, 436, 2816), nullptr, nullptr);
+    {
+        const auto got = drain();
+        expect(got.size() == 1 && !got[0].transportPlaying && got[0].timelineSample == 436,
+               "anchors: after Stop a gesture maps to the frozen playhead and is flagged stopped");
+    }
+    // Placement offset: −48 samples (1 ms output latency) shifts the mono position back.
+    now += blockMs;
+    bus.audioThread_dispatch(ctxAt(now, true, 436, 3072, -48), nullptr, nullptr);
+    now += blockMs;
+    bus.deviceThread_push(0, stamped(juce::MidiMessage::noteOn(1, 71, (juce::uint8)100), now * 0.001));
+    bus.audioThread_dispatch(ctxAt(now, true, 692, 3328, -48), nullptr, nullptr);
+    {
+        const auto got = drain();
+        expect(got.size() == 1 && got[0].monoSample == 3328 - 48 && got[0].timelineSample == 692 - 48,
+               "anchors: the output-latency placement offset is applied once, on the mono clock");
+    }
+}
+
+// ----------------------------------------------------------------------------- cycle: take passes
+live_midi_take::TakeEvent evm(const std::int64_t mono, const std::int64_t timeline, const juce::MidiMessage& m,
+                              const bool playing = true)
+{
+    live_midi_take::TakeEvent e = ev(timeline, m, playing);
+    e.monoSample = mono;
+    return e;
+}
+
+void testCycleTakePasses()
+{
+    using namespace live_midi_take;
+    // 120 bpm @ 48 kHz, 960 tpq: 25 samples per tick. Loop [48000, 96000) = 1920 ticks.
+    CycleTakeParams p;
+    p.recordStartSample = 60000; // start inside the loop → first pass [60000, 96000) = 1440 ticks
+    p.recordStopSample = 60000;  // stop inside pass 3 at L + 12000 (480 ticks)
+    p.stopWrapSerial = 3;
+    p.cycleActive = true;
+    p.leftLocatorSample = 48000;
+    p.rightLocatorSample = 96000;
+    p.wrapMarkers = { { 36000, 1 }, { 84000, 2 }, { 132000, 3 }, { 150000, 4 } }; // serial 4 = after the stop
+    p.sampleRate = 48000.0;
+    p.bpm = 120.0;
+    p.ticksPerQuarter = 960;
+
+    std::vector<TakeEvent> es;
+    // Pass 0 (mono 0 … 36000, timeline 60000 … 96000).
+    es.push_back(evm(10000, 70000, juce::MidiMessage::noteOn(1, 60, (juce::uint8)100)));
+    es.push_back(evm(20000, 80000, juce::MidiMessage::noteOff(1, 60, (juce::uint8)0)));
+    es.push_back(evm(30000, 90000, juce::MidiMessage::noteOn(2, 62, (juce::uint8)88))); // held across wrap 1
+    es.push_back(evm(31000, 91000, juce::MidiMessage::controllerEvent(1, 64, 127)));   // pedal down
+    es.push_back(evm(32000, 92000, juce::MidiMessage::pitchWheel(1, 12000)));
+    // Pass 1 (mono 36000 … 84000): the held key is released at L + 4000.
+    es.push_back(evm(40000, 52000, juce::MidiMessage::noteOff(2, 62, (juce::uint8)0)));
+    // Late delivery: a pass-0 gesture (mono 35000) drained after pass-1 events — still pass 0.
+    es.push_back(evm(35000, 95000, juce::MidiMessage::noteOn(1, 66, (juce::uint8)70)));
+    es.push_back(evm(35500, 95500, juce::MidiMessage::noteOff(1, 66, (juce::uint8)0)));
+    // Pass 2 (mono 84000 … 132000): pedal released at L + 6000, CC11 at L + 16000 (controller-only).
+    es.push_back(evm(90000, 54000, juce::MidiMessage::controllerEvent(1, 64, 0)));
+    es.push_back(evm(100000, 64000, juce::MidiMessage::controllerEvent(1, 11, 90)));
+    // Pass 3 (mono 132000 … stop): note 64 at L + 4000, held past the stop.
+    es.push_back(evm(136000, 52000, juce::MidiMessage::noteOn(1, 64, (juce::uint8)101)));
+    // After the stop (mono beyond marker serial 4): must be discarded.
+    es.push_back(evm(151000, 49000, juce::MidiMessage::noteOn(1, 65, (juce::uint8)100)));
+
+    const auto passes = buildTakePasses(es, TakeStateTracker{}, p);
+    expect(passes.size() == 4, "passes: three wraps before the stop = four passes");
+    if (passes.size() == 4)
+    {
+        expect(passes[0].startSample == 60000 && passes[0].endSampleExclusive == 96000
+                   && passes[1].startSample == 48000 && passes[1].endSampleExclusive == 96000
+                   && passes[2].startSample == 48000 && passes[2].endSampleExclusive == 96000
+                   && passes[3].startSample == 48000 && passes[3].endSampleExclusive == 60000,
+               "passes: windows = [start, R), [L, R), [L, R), [L, stop)");
+        const auto findNote = [](const ExperimentalMidiPattern& pat, const int note) -> const TimelineMidiNote* {
+            for (const auto& n : pat.timelineNotes)
+            {
+                if (n.midiNote == note)
+                {
+                    return &n;
+                }
+            }
+            return nullptr;
+        };
+        const auto findCc = [](const ExperimentalMidiPattern& pat, const int cc, const std::int64_t tick, const int value) {
+            for (const auto& c : pat.ccPoints)
+            {
+                if (c.controller == cc && c.startTick == tick && c.value == value)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto findPb = [](const ExperimentalMidiPattern& pat, const std::int64_t tick, const int value) {
+            for (const auto& b : pat.pitchBendPoints)
+            {
+                if (b.startTick == tick && b.value == value)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        // Pass 0.
+        {
+            const auto& b = passes[0].build;
+            const TimelineMidiNote* n60 = findNote(b.pattern, 60);
+            const TimelineMidiNote* n62 = findNote(b.pattern, 62);
+            const TimelineMidiNote* n66 = findNote(b.pattern, 66);
+            expect(b.hasContent && n60 != nullptr && n60->startTick == 400 && n60->durationTicks == 400,
+                   "pass 0: note 60 at tick 400 for 400 ticks");
+            expect(n62 != nullptr && n62->startTick == 1200 && n62->durationTicks == 240 && n62->channel == 2
+                       && n62->velocity == 88 && b.notesClosedAtStop == 1,
+                   "pass 0: the key held across the wrap ends on the pass end boundary (R)");
+            expect(n66 != nullptr && n66->startTick == 1400 && n66->durationTicks == 20,
+                   "pass 0: a late-delivered pass-0 gesture is placed in pass 0 by its mono position");
+            expect(findCc(b.pattern, 64, 1240, 127) && findCc(b.pattern, 64, 1440, 0) && b.sustainReleasedAtStop,
+                   "pass 0: pedal down recorded, released on the pass end boundary");
+            expect(findPb(b.pattern, 1280, 12000), "pass 0: pitch bend recorded verbatim");
+        }
+        // Pass 1: continuation of the held key, restated pedal + wheel, pedal released at the end.
+        {
+            const auto& b = passes[1].build;
+            const TimelineMidiNote* n62 = findNote(b.pattern, 62);
+            expect(b.hasContent && n62 != nullptr && n62->startTick == 0 && n62->durationTicks == 160 && n62->channel == 2
+                       && n62->velocity == 88,
+                   "pass 1: the held key continues from tick 0 with its channel and velocity");
+            expect(findCc(b.pattern, 64, 0, 127) && findPb(b.pattern, 0, 12000),
+                   "pass 1: sustain and wheel state restated at tick 0");
+            expect(findCc(b.pattern, 64, 1920, 0) && b.sustainReleasedAtStop,
+                   "pass 1: the pedal still down at the wrap is released on the pass end");
+            expect(b.pattern.timelineNotes.size() == 1, "pass 1: no invented notes");
+        }
+        // Pass 2: controller-only take.
+        {
+            const auto& b = passes[2].build;
+            expect(b.hasContent && b.pattern.timelineNotes.empty() && findCc(b.pattern, 64, 0, 127)
+                       && findCc(b.pattern, 64, 240, 0) && findCc(b.pattern, 11, 640, 90) && !b.sustainReleasedAtStop,
+                   "pass 2: controller-only pass (restated pedal, real release, CC11) is valid content");
+        }
+        // Pass 3: partial pass up to the stop; note closed at the stop boundary.
+        {
+            const auto& b = passes[3].build;
+            const TimelineMidiNote* n64 = findNote(b.pattern, 64);
+            expect(n64 != nullptr && n64->startTick == 160 && n64->durationTicks == 320 && b.notesClosedAtStop == 1,
+                   "pass 3: note held past Stop ends on the stop boundary (480 ticks)");
+            expect(findNote(b.pattern, 65) == nullptr && passes[3].eventsAssigned == 1,
+                   "pass 3: a gesture after the stop (beyond the invalid wrap marker) is discarded");
+        }
+    }
+    // Stop exactly on a wrap: the last window is empty → no zero-length take.
+    {
+        CycleTakeParams q = p;
+        q.recordStopSample = 48000;
+        const auto r = buildTakePasses(es, TakeStateTracker{}, q);
+        expect(r.size() == 3, "passes: a Stop exactly on the wrap creates no extra zero-length pass");
+    }
+    // Silent full pass and silent partial pass still come back as passes (the caller creates the
+    // masking clips); a stopped-before-the-first-wrap run is one linear-shaped pass.
+    {
+        CycleTakeParams q = p;
+        q.wrapMarkers = { { 36000, 1 }, { 84000, 2 } };
+        q.stopWrapSerial = 2;
+        q.recordStopSample = 50000;
+        const auto r = buildTakePasses({}, TakeStateTracker{}, q);
+        expect(r.size() == 3 && !r[1].build.hasContent && !r[2].build.hasContent && r[2].endSampleExclusive == 50000,
+               "passes: silent full and silent partial passes are reported with their windows");
+        CycleTakeParams lin = p;
+        lin.cycleActive = false;
+        lin.recordStopSample = 150000;
+        const auto one = buildTakePasses(es, TakeStateTracker{}, lin);
+        expect(one.size() == 1 && one[0].startSample == 60000 && one[0].endSampleExclusive == 150000,
+               "passes: with Cycle off the whole run is one take regardless of markers");
+    }
+    // A key pressed after Stop (stopped event, frozen playhead = stop position) in a pass that
+    // never saw a playing event must not be invented as a held note.
+    {
+        CycleTakeParams q = p;
+        q.wrapMarkers = { { 36000, 1 } };
+        q.stopWrapSerial = 1;
+        q.recordStopSample = 50000;
+        std::vector<TakeEvent> late;
+        late.push_back(evm(37000, 50000, juce::MidiMessage::noteOn(1, 72, (juce::uint8)100), false));
+        const auto r = buildTakePasses(late, TakeStateTracker{}, q);
+        expect(r.size() == 2 && !r[1].build.hasContent, "passes: a key pressed after Stop never becomes a held note");
+    }
+}
+
 void testProjectRoundTrip()
 {
     const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-live-midi-tests");
@@ -858,6 +1147,8 @@ int main(int argc, char** argv)
     testOverflowAndDiscard();
     testMultiThreadedProducers();
     testTakeBuilder();
+    testCycleAnchorsAndWrapMarkers();
+    testCycleTakePasses();
     testProjectRoundTrip();
     testExportPitchBend();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);

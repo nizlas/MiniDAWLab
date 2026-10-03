@@ -4,8 +4,8 @@
 |---|---|
 | Date | 2026-10-03 |
 | Baseline | 1.1.9 (`639b2e2`) |
-| Delivered as | 1.1.10, commit `aeafa90` on `origin/main`; fix release 1.1.11 (see the section "1.1.11 — field failure and fix") |
-| Build with the changes | `build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` (Debug, FileVersion 1.1.11), `build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe` + `dist\DanielssonsAudioLab-1.1.11-Setup.exe` / `dist\DanielssonsAudioLab-1.1.11.zip` (Release, 1.1.11; the 1.1.10 artifacts carry the original feature without the fixes below) |
+| Delivered as | 1.1.10, commit `aeafa90` on `origin/main`; fix release 1.1.11 (commit `976f26d`, section "1.1.11 — field failure and fix"); layering + Cycle takes + preview in 1.1.12 (section "1.1.12 — layering, Cycle takes, take preview") |
+| Build with the changes | `build\ninja-debug-2\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe` (Debug, FileVersion 1.1.12 — built in a separate directory because the user's 1.1.11 Debug exe was running), `build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe` + `dist\DanielssonsAudioLab-1.1.12-Setup.exe` / `dist\DanielssonsAudioLab-1.1.12.zip` (Release, 1.1.12) |
 | Evidence | `docs/evidence/live-midi-2026-10-03/` |
 | Test material | sibling copies of `%TEMP%\dal-tse-copy\TSE_pt2.dalproj` (180 BPM, VB3-II, AmpliTube) and `%TEMP%\dal-pregain-fixture\pregain-fixture.dalproj` (120 BPM, audio-only). The user's projects were never opened for writing. |
 
@@ -239,6 +239,69 @@ the physical port is enumerated, opened and callback-registered, and audio from 
 measured through the whole chain from the bus's device-thread entry. The user's keyboard test is
 the remaining confirmation.
 
+## 1.1.12 — layering, Cycle takes, take preview
+
+**Decided behaviour.** MIDI follows the audio lanes' overlap model: on each source track the
+topmost clip owns its whole window `[start, end)` (rests and empty clips included), clips
+underneath are heard only where nothing covers them, a new take or paste lands on top. The rule
+is the same for all MIDI clips (no legacy mode, no migration dialog); underlying clips and their
+data are kept. Selection per **source track** — the instrument's Upper clips and the routed Lower
+/ Pedal rows are layered independently and still sound together.
+
+**Where it lives.** `src/instruments/MidiLayeredRenderBake.h` (the one definition: audible spans,
+note segmentation with resumption, controller streams restricted to the audible spans with a
+chase restatement at every span start and the clip's own end events kept); used identically by
+`InstrumentTrackController::publishRenderSnapshot` (one merged note list per track;
+`audioThread_scheduleTransportMidiForSegment` walks it, so a same-pitch Off at sample X precedes
+an On at X) and by `ProxyOfflineSequencer::bakeUnit`; the offline mixdown drives the live
+scheduler. `ProxyFingerprint` serializes clips in stored order and bumps the schema to 2, so
+every proxy rendered under the old additive rule is stale (existing policy handles it).
+
+**Cycle recording.** `PlaybackEngine` keeps a monotone device clock; `LiveMidiInputBus` records
+timeline anchors (play start / seek / wrap / stop) and pushes a wrap marker (exact mono sample +
+transport wrap serial) at every wrap, from both wrap branches of the callback. Gestures are
+mapped mono→timeline through the anchors (a key pressed before the wrap but delivered after it
+lands before R), passes are the intervals between markers on the mono clock, the stop is read
+as a consistent `(position, wrap serial)` pair, later markers / events are discarded.
+`live_midi_take::buildTakePasses` builds `[start, R)`, `[L, R)` …, `[L, stop)` (no zero-length
+pass on a stop exactly at the wrap), each pass from the real row state at the end of the previous
+one (held key: ends on the pass end, continues at tick 0 with channel + velocity; sustain /
+expression / wheel restated at tick 0; held pedal released on the pass end). With Cycle every
+pass of positive length is a clip (silent and controller-only too — they mask like audio
+passes); with Cycle off an empty take still creates nothing. Combined audio + MIDI cycle takes
+slice the audio with the same stop wrap serial; the whole run is one undo step. Count-in once.
+While a row records, its own earlier clips are not scheduled (no doubling); Monitor still rules
+live audibility; other rows keep playing.
+
+**Preview.** Exact time geometry: left edge = current pass start (left locator after a wrap,
+from the transport's wrap count), right edge = the playhead overlay's frame position through
+the playhead's transform; dim wash for earlier passes; 2 px start marker; "REC" only when it
+fits; drawn above the clips; growth-strip invalidation per frame. The 40 px minimum-width
+helper is no longer used for it (that helper remains for clip chrome and hit areas).
+
+**Verification (what and how).**
+
+| Check | How | Result |
+|---|---|---|
+| Spans / segments / stream restriction; two overlapping takes with sustain, CC11, pitch bend; rest + empty top clip; partial overlap mid long note with resumption; Upper + Lower + Pedal per-source; channel-sharing sources; stack-order swap; fingerprint schema 2 | `MiniDAWSelftests` (pure helpers + the offline sequencer with literal expected events) | 3246 checks, 0 failures |
+| Anchors across a wrap incl. late delivery, several wraps between dispatches, stop anchor, placement offset applied once; `buildTakePasses`: 4 passes, held key / pedal / wheel across wraps, late-delivered pass-0 gesture, controller-only pass, partial last pass, stop exactly on a wrap, silent passes, after-stop discard, linear, key pressed after Stop | `LiveMidiRecordingFocusedTests` | 110 checks, 0 failures |
+| Real UI path with Cycle on: Record / count-in / Stop, 4 passes on the instrument row and the routed MIDI row (windows, contents, boundary state), ONE undo step, playback selects only the topmost take (origin per source = channel, per take = pitch), delete top → previous heard, undo / redo both ways, MIDI editor open across delete / undo / move, save / reload keeps order and selection, offline mixdown and a fresh proxy sequencer select the same events, preview geometry at start / after wrap / zoom ×1.5 / zoom ×4 + scroll with PNGs (`%TEMP%\dal-stability-midi-cycle`), recording-row clip suppression (earlier take silent, live note heard), combined audio + MIDI cycle take with shared pass lengths in one undo step | `--stability-midi-cycle-takes` on the 120 BPM fixture and the TSE copy (VB3-II loaded) | PASS / PASS |
+| Previous live-MIDI matrix (now with the Cycle step inverted: Record starts) | `--stability-live-midi` on the fixture and the TSE copy | PASS / PASS (−9.77 dBFS measured on VB3-II) |
+
+Synthetic input (bus device-thread entry with device-style timestamps), real UI handlers (Record
+key, header cells, Inspector combos, Delete key, undo / redo, save / reload), real engine +
+instrument host (VB3-II on the TSE copy, capture sink on the fixture). **Not done:** a physical
+key press (no loopback port on this machine) and listening — the measured audio and the
+delivered-event traces stand in for both; the attack restart of a resumed note is audible only
+with ears.
+
+**Limitations.** A destination playing a proxy with Monitor off still renders its earlier takes
+from the WAV during a take (a proxy cannot mute one row). A controller the winning clip never
+defines keeps its last delivered value (no reset is invented). Recording longer than 30 minutes
+past the previous arrangement end would freeze the transport again (the extent grows once at
+record start). The audio slice and the MIDI pass of a combined take may differ by one device
+block at the stop (audio length comes from the recorder's sample count).
+
 ## 8. User guide
 
 1. Select the instrument row (e.g. VB3-II) or a MIDI row routed to it (`MIDI To`).
@@ -251,8 +314,14 @@ the remaining confirmation.
 4. Click **R** on every row you want to record (several at once is fine; an audio track may be
    armed at the same time).
 5. Press **Record** (numpad `*`): 8 count-in clicks, then the take starts at the playhead. Keys
-   already held enter at the start; the REC region grows on the lane.
+   already held enter at the start; the REC region grows on the lane from the exact start to the
+   playhead.
 6. Press **Stop** (or Record again): the take becomes one clip per row. **Undo** removes the whole
    take; **Redo** brings it back.
-7. Play it back; open the clip in the MIDI editor, move / copy / delete it, save, export MIDI — a
+7. **Cycle:** switch Cycle on, set the locators, press Record once. Every loop pass becomes its
+   own take on top of the previous one (a pass you stayed silent in is a silent take that masks
+   the earlier ones, exactly like audio). Playback plays the topmost take; delete it to hear the
+   previous one. Keys, sustain and the wheel held across the loop point carry over correctly.
+   Stop ends the last pass where you stopped.
+8. Play it back; open the clip in the MIDI editor, move / copy / delete it, save, export MIDI — a
    recorded clip is an ordinary clip.

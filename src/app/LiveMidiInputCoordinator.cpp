@@ -790,9 +790,20 @@ void LiveMidiInputCoordinator::drainCaptureRing()
     int budget = live_midi::kCaptureRingCapacity;
     while (budget-- > 0 && bus_.popCaptured(e))
     {
+        if (e.wrapMarker)
+        {
+            // Engine wrap (exact mono sample + transport serial): a pass boundary of the running
+            // take. Outside a take it is simply dropped — passes are never inferred later.
+            if (takeActive_)
+            {
+                takeWrapMarkers_.push_back({ e.monoSample, e.wrapSerial });
+            }
+            continue;
+        }
         RowCapture& row = rows_[e.trackId];
         live_midi_take::TakeEvent te;
         te.timelineSample = e.timelineSample;
+        te.monoSample = e.monoSample;
         te.bytes[0] = e.bytes[0];
         te.bytes[1] = e.bytes[1];
         te.bytes[2] = e.bytes[2];
@@ -805,6 +816,33 @@ void LiveMidiInputCoordinator::drainCaptureRing()
             row.takeEvents.push_back(te);
         }
     }
+}
+
+void LiveMidiInputCoordinator::setTakeRowsClipSuppression(const bool suppressed)
+{
+    for (const TrackId tid : takeTracks_)
+    {
+        if (InstrumentTrackController* const ctl = instrumentRuntime_.getMidiClipControllerForTrack(tid))
+        {
+            ctl->setTransportClipsSuppressedForRecording(suppressed);
+        }
+    }
+}
+
+LiveMidiTakePreviewInfo LiveMidiInputCoordinator::takePreviewInfoForTrack(const TrackId trackId) const noexcept
+{
+    LiveMidiTakePreviewInfo info;
+    if (!takeActive_ || std::find(takeTracks_.begin(), takeTracks_.end(), trackId) == takeTracks_.end())
+    {
+        return info;
+    }
+    info.active = true;
+    info.recordStartSample = takeStartSample_;
+    info.cycleActive = takeCycleActive_;
+    info.leftLocatorSample = takeLeftLocator_;
+    info.rightLocatorSample = takeRightLocator_;
+    info.wrapSerialAtStart = takeWrapSerialAtStart_;
+    return info;
 }
 
 void LiveMidiInputCoordinator::updateActivityFromBus()
@@ -841,7 +879,9 @@ void LiveMidiInputCoordinator::updateActivityFromBus()
 }
 
 // ---------------------------------------------------------------------------- take capture
-void LiveMidiInputCoordinator::beginTake(const std::int64_t recordStartSample, const double sampleRate)
+void LiveMidiInputCoordinator::beginTake(const std::int64_t recordStartSample, const double sampleRate,
+                                         const bool cycleActive, const std::int64_t leftLocatorSample,
+                                         const std::int64_t rightLocatorSample, const std::uint32_t wrapSerialAtStart)
 {
     abortTake();
     drainCaptureRing(); // everything received so far belongs to the pre-take state
@@ -853,6 +893,11 @@ void LiveMidiInputCoordinator::beginTake(const std::int64_t recordStartSample, c
     takeActive_ = true;
     takeStartSample_ = recordStartSample;
     takeSampleRate_ = sampleRate;
+    takeCycleActive_ = cycleActive && rightLocatorSample > leftLocatorSample;
+    takeLeftLocator_ = leftLocatorSample;
+    takeRightLocator_ = rightLocatorSample;
+    takeWrapSerialAtStart_ = wrapSerialAtStart;
+    takeWrapMarkers_.clear();
     captureOverflowAtTakeStart_ = bus_.captureOverflowCount();
     for (const TrackId tid : takeTracks_)
     {
@@ -861,10 +906,17 @@ void LiveMidiInputCoordinator::beginTake(const std::int64_t recordStartSample, c
         row.takeEvents.clear();
         row.inTake = true;
     }
+    // Earlier takes on the recording rows must not double the live performance: their clips are
+    // suppressed on the instrument for the duration of the take (other rows keep playing).
+    setTakeRowsClipSuppression(true);
     if (callbacks_.logLine)
     {
         callbacks_.logLine("[LiveMidi] take begins at sample " + juce::String((juce::int64)recordStartSample)
-                           + " for " + juce::String((int)takeTracks_.size()) + " row(s)");
+                           + " for " + juce::String((int)takeTracks_.size()) + " row(s)"
+                           + (takeCycleActive_ ? " cycle [" + juce::String((juce::int64)leftLocatorSample) + ", "
+                                                     + juce::String((juce::int64)rightLocatorSample) + ") wrapSerial="
+                                                     + juce::String((int)wrapSerialAtStart)
+                                               : juce::String(" linear")));
     }
     if (callbacks_.onUiStateChanged)
     {
@@ -878,6 +930,7 @@ void LiveMidiInputCoordinator::abortTake()
     {
         return;
     }
+    setTakeRowsClipSuppression(false);
     takeActive_ = false;
     for (auto& [tid, row] : rows_)
     {
@@ -885,13 +938,16 @@ void LiveMidiInputCoordinator::abortTake()
         row.takeEvents.clear();
     }
     takeTracks_.clear();
+    takeWrapMarkers_.clear();
+    takeCycleActive_ = false;
     if (callbacks_.onUiStateChanged)
     {
         callbacks_.onUiStateChanged();
     }
 }
 
-LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t recordStopSample)
+LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t recordStopSample,
+                                                              const std::uint32_t stopWrapSerial)
 {
     LiveMidiTakeCommitResult result;
     if (!takeActive_)
@@ -902,39 +958,60 @@ LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t
     result.captureOverflowSeen = bus_.captureOverflowCount() != captureOverflowAtTakeStart_;
 
     ProjectMusicalTime musicalTime = sanitizeProjectMusicalTime(session_.getProjectMusicalTime());
-    live_midi_take::TakeBuildParams params;
+    live_midi_take::CycleTakeParams params;
     params.recordStartSample = takeStartSample_;
-    params.recordStopSample = juce::jmax(takeStartSample_ + 1, recordStopSample);
+    params.recordStopSample = takeCycleActive_ ? recordStopSample : juce::jmax(takeStartSample_ + 1, recordStopSample);
+    params.stopWrapSerial = stopWrapSerial;
+    params.cycleActive = takeCycleActive_;
+    params.leftLocatorSample = takeLeftLocator_;
+    params.rightLocatorSample = takeRightLocator_;
+    params.wrapMarkers = takeWrapMarkers_;
     params.sampleRate = takeSampleRate_ > 0.0 ? takeSampleRate_ : 48000.0;
     params.bpm = musicalTime.bpm;
     params.ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
 
+    const juce::String stamp = juce::Time::getCurrentTime().formatted("%H:%M:%S");
     const std::vector<TrackId> tracks = takeTracks_;
     for (const TrackId tid : tracks)
     {
-        LiveMidiTakeCommitEntry entry;
-        entry.trackId = tid;
         auto it = rows_.find(tid);
-        if (it != rows_.end())
+        if (it == rows_.end())
         {
-            entry.build = live_midi_take::buildTakePattern(it->second.takeEvents, it->second.trackerAtTakeStart, params);
-            if (entry.build.hasContent)
+            continue;
+        }
+        const std::vector<live_midi_take::TakePassResult> passes
+            = live_midi_take::buildTakePasses(it->second.takeEvents, it->second.trackerAtTakeStart, params);
+        result.passes = (int)passes.size();
+        InstrumentTrackController* const ctl = instrumentRuntime_.getMidiClipControllerForTrack(tid);
+        for (const auto& pass : passes)
+        {
+            LiveMidiTakeCommitEntry entry;
+            entry.trackId = tid;
+            entry.passIndex = pass.passIndex;
+            entry.startSample = pass.startSample;
+            entry.endSampleExclusive = pass.endSampleExclusive;
+            entry.build = pass.build;
+            // Cycle: every pass of positive length is a take, silent ones included (they mask the
+            // material underneath exactly like audio passes). Linear: only a take with content.
+            const bool createClip = ctl != nullptr && (takeCycleActive_ || entry.build.hasContent);
+            if (createClip)
             {
-                if (InstrumentTrackController* const ctl = instrumentRuntime_.getMidiClipControllerForTrack(tid))
+                const juce::String name = takeCycleActive_
+                                              ? "Take " + stamp + " pass " + juce::String(pass.passIndex + 1)
+                                              : "Take " + stamp;
+                entry.clipId = ctl->appendRecordedTimelineMidiClip(entry.build.pattern, entry.startSample,
+                                                                   entry.endSampleExclusive - entry.startSample, name);
+                if (entry.clipId != 0)
                 {
-                    const juce::String name = "Take " + juce::Time::getCurrentTime().formatted("%H:%M:%S");
-                    entry.clipId = ctl->appendRecordedTimelineMidiClip(entry.build.pattern, params.recordStartSample,
-                                                                       params.recordStopSample - params.recordStartSample,
-                                                                       name);
-                    if (entry.clipId != 0)
-                    {
-                        ++result.clipsCreated;
-                    }
+                    ++result.clipsCreated;
                 }
             }
             if (callbacks_.logLine)
             {
-                callbacks_.logLine("[LiveMidi] take row " + juce::String((juce::int64)tid) + ": notes="
+                callbacks_.logLine("[LiveMidi] take row " + juce::String((juce::int64)tid) + " pass "
+                                   + juce::String(pass.passIndex) + " [" + juce::String((juce::int64)entry.startSample)
+                                   + ", " + juce::String((juce::int64)entry.endSampleExclusive) + "): events="
+                                   + juce::String(pass.eventsAssigned) + " notes="
                                    + juce::String(entry.build.notesRecorded) + " closedAtStop="
                                    + juce::String(entry.build.notesClosedAtStop) + " cc="
                                    + juce::String(entry.build.controllerEventsRecorded) + " pb="
@@ -943,8 +1020,15 @@ LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t
                                    + juce::String(entry.build.overflowSeen ? "yes" : "no") + " clipId="
                                    + juce::String((juce::int64)entry.clipId));
             }
+            result.entries.push_back(std::move(entry));
         }
-        result.entries.push_back(std::move(entry));
+    }
+    if (callbacks_.logLine)
+    {
+        callbacks_.logLine("[LiveMidi] take committed: passes=" + juce::String(result.passes) + " wrapMarkers="
+                           + juce::String((int)takeWrapMarkers_.size()) + " stopWrapSerial="
+                           + juce::String((int)stopWrapSerial) + " stop=" + juce::String((juce::int64)recordStopSample)
+                           + " clips=" + juce::String(result.clipsCreated));
     }
     abortTake();
     return result;

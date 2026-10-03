@@ -54,11 +54,14 @@ struct LiveMidiInputDeviceOption
     bool present = true;
 };
 
-/// Result of committing one row's take.
+/// Result of committing one row's take: one entry per PASS (cycle recording), one for a linear take.
 struct LiveMidiTakeCommitEntry
 {
     TrackId trackId = kInvalidTrackId;
-    InstrumentMidiClipId clipId = 0; ///< 0 = no clip (empty take or controller missing)
+    int passIndex = 0;
+    std::int64_t startSample = 0;
+    std::int64_t endSampleExclusive = 0;
+    InstrumentMidiClipId clipId = 0; ///< 0 = no clip (empty linear take or controller missing)
     live_midi_take::TakeBuildResult build;
 };
 
@@ -66,8 +69,23 @@ struct LiveMidiTakeCommitResult
 {
     std::vector<LiveMidiTakeCommitEntry> entries;
     int clipsCreated = 0;
+    int passes = 0; ///< passes with a positive window (same for every row)
     bool captureOverflowSeen = false;
     [[nodiscard]] bool anyClipCreated() const noexcept { return clipsCreated > 0; }
+};
+
+/// What the lane preview of a running take needs (per recording row). Cycle passes are shown
+/// from the transport's own wrap count, never from a UI-derived pass number.
+struct LiveMidiTakePreviewInfo
+{
+    bool active = false;
+    std::int64_t recordStartSample = 0;
+    bool cycleActive = false;
+    std::int64_t leftLocatorSample = 0;
+    std::int64_t rightLocatorSample = 0;
+    /// Transport wrap count when the take began; a larger current count means the current pass
+    /// starts at the left locator.
+    std::uint32_t wrapSerialAtStart = 0;
 };
 
 class LiveMidiInputCoordinator final : private juce::Timer
@@ -143,14 +161,25 @@ public:
 
     // ------------------------------------------------------------------ take capture (RecordingCoordinator)
     /// Start capturing for every armed, configured row. `recordStartSample` is the transport
-    /// boundary the take begins at (events before it only shape the start state).
-    void beginTake(std::int64_t recordStartSample, double sampleRate);
+    /// boundary the take begins at (events before it only shape the start state). With
+    /// `cycleActive` the run is split into passes at the engine's wrap markers (see
+    /// `LiveMidiTakeBuilder.h`); `wrapSerialAtStart` is the transport wrap count at that moment
+    /// (preview only). While the take runs, each recording row's own clips are suppressed on the
+    /// instrument (`InstrumentTrackController::setTransportClipsSuppressedForRecording`).
+    void beginTake(std::int64_t recordStartSample, double sampleRate, bool cycleActive,
+                   std::int64_t leftLocatorSample, std::int64_t rightLocatorSample,
+                   std::uint32_t wrapSerialAtStart);
     [[nodiscard]] bool isTakeActive() const noexcept { return takeActive_; }
     [[nodiscard]] std::int64_t takeStartSample() const noexcept { return takeStartSample_; }
     [[nodiscard]] const std::vector<TrackId>& takeTracks() const noexcept { return takeTracks_; }
-    /// Finalize at `recordStopSample` and append one clip per row with content (message thread;
-    /// the caller wraps this in the recording undo step). Clears the take.
-    [[nodiscard]] LiveMidiTakeCommitResult commitTake(std::int64_t recordStopSample);
+    /// Lane preview data for `trackId` (inactive when the row is not part of the running take).
+    [[nodiscard]] LiveMidiTakePreviewInfo takePreviewInfoForTrack(TrackId trackId) const noexcept;
+    /// Finalize at `recordStopSample` (read together with `stopWrapSerial`, the transport wrap
+    /// count at the stop) and append the takes: one clip per pass and row — with Cycle every pass
+    /// of positive length (silent ones too: they mask earlier material like audio passes), with
+    /// Cycle off only a take with content. Passes are appended oldest first, so the latest pass
+    /// is the topmost layer. Message thread; the caller wraps this in ONE undo step. Clears the take.
+    [[nodiscard]] LiveMidiTakeCommitResult commitTake(std::int64_t recordStopSample, std::uint32_t stopWrapSerial);
     /// Drop the take without creating clips (cancel / failure paths).
     void abortTake();
 
@@ -230,6 +259,13 @@ private:
     double takeSampleRate_ = 48000.0;
     std::vector<TrackId> takeTracks_;
     std::uint32_t captureOverflowAtTakeStart_ = 0;
+    /// Cycle context of the running take + the engine wrap markers drained so far.
+    bool takeCycleActive_ = false;
+    std::int64_t takeLeftLocator_ = 0;
+    std::int64_t takeRightLocator_ = 0;
+    std::uint32_t takeWrapSerialAtStart_ = 0;
+    std::vector<live_midi_take::WrapMarker> takeWrapMarkers_;
+    void setTakeRowsClipSuppression(bool suppressed);
 
     std::vector<std::uint32_t> lastActivityCounts_;
     std::map<TrackId, double> lastActivityMsByTrack_;

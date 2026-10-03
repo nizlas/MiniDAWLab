@@ -704,6 +704,19 @@ ORD-1 MUST land (as its own reviewed production micro-change) before P1C's finge
 to match live delivery; the fingerprint's canonical serialization (§11.4) already encodes stored
 order so it is correct once ORD-1 holds.
 
+**LAYER-1 — per-source clip layering (landed with 1.1.12; supersedes the additive bake above for
+overlapping clips).** Within one source unit (destination-local clips, or one routed source's
+clips) the stored clip order is a **layer stack** (last = topmost): the topmost clip owns its whole
+window `[start, end)`, lower clips sound only outside the windows above them. Both bakes share
+`src/instruments/MidiLayeredRenderBake.h`: notes are cut into one segment per audible span
+(a later segment = a new Note On with the note's channel / velocity), CC / pitch-bend events are
+delivered only inside a clip's audible spans with the clip's current value restated at every span
+start (chase on winner change) and the clip's own audible end keeping its end events; the unit's
+notes become ONE merged list in ascending sample order (equal samples: stack order, then stored
+order — ORD-1 preserved). Merge order across units (destination first, then eligible sources in
+session order) and the per-segment emission structure are unchanged. Clip stored order is
+therefore render data — see §11.4 (schema 2).
+
 ### 8.4 Mute/enable semantics (Locked + Recommended)
 
 * Source eligibility (source off/mute) gates content and is fingerprinted (F8).
@@ -1120,11 +1133,13 @@ The fingerprint is a hash over a canonical byte serialization of the snapshot:
 * **Stable field order:** fields serialize in the fixed F-number order above; within structures,
   in documented declaration order tagged by the fingerprint schema version.
 * **Stable collection ordering (matches verified live scheduling, §8.3 — not an invented sort):**
-  * **Clips** serialize in the bake's plan order: stable sort by `startSamples` over the stored
-    clip sequence (equal-start ties keep stored order — the delivery tie-break once ORD-1 holds).
-    `InstrumentMidiClipId` serializes as a data field, **not** as an ordering key: live scheduling
-    never consults it. Reordering equal-start clips changes delivery and therefore the
-    fingerprint; reordering different-start clips does not change either.
+  * **Clips** serialize in **stored order** (fingerprint schema **2**, with LAYER-1 §8.3): the
+    stored sequence is the layer stack the bake resolves overlaps with, so any reorder of a unit's
+    clips is a render change and changes the fingerprint. (Schema 1 serialized the bake's plan
+    order — stable sort by `startSamples` — under the additive bake; the schema bump marks every
+    schema-1 generation stale, which is intended: an additive render may differ audibly from the
+    layered rule.) `InstrumentMidiClipId` serializes as a data field, **not** as an ordering key:
+    live scheduling never consults it.
   * **Notes** serialize in **stored vector order** within their clip (positional order is
     persisted and round-trips, `ProjectFile.cpp` ~1869–1892). Stored order is the equal-time
     delivery tie-break once ORD-1 holds (§8.3), so it is fingerprint data. Deliberately
