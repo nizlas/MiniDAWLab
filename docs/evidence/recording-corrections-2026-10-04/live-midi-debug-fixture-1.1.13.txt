@@ -1,0 +1,113 @@
+﻿2026-10-04T23:54:45.425+02:00 scenario start: live-midi iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture.dalproj
+2026-10-04T23:54:45.428+02:00 steps queued: 53 (delete-loop iterations expand at plan time)
+2026-10-04T23:54:45.941+02:00   test copy: C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture-livemiditest.dalproj
+2026-10-04T23:54:45.947+02:00 step end ok: live-midi: copy project to sibling test file elapsedMs=5
+2026-10-04T23:54:46.608+02:00 step end ok: live-midi: load test copy elapsedMs=360
+2026-10-04T23:54:47.840+02:00   inputs=["Babyface Midi Port 1" ] outputs=["Microsoft GS Wavetable Synth" "Babyface Midi Port 1" ]
+2026-10-04T23:54:47.843+02:00   injection path: device-thread entry of the bus (no loopback port on this machine)
+2026-10-04T23:54:47.851+02:00 step end ok: live-midi: MIDI devices present on this machine elapsedMs=9
+2026-10-04T23:54:48.154+02:00   fixture: inst=3 lower=4 pedal=5
+2026-10-04T23:54:48.160+02:00 step end ok: live-midi: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6) elapsedMs=11
+2026-10-04T23:54:48.812+02:00   after clicking R + Monitor on inst=3: active row=3
+2026-10-04T23:54:48.818+02:00 step end ok: user-flow: another row (Pedal) is active; click R and Monitor on the INSTRUMENT row's header cells elapsedMs=6
+2026-10-04T23:54:49.270+02:00   inspector: visible=yes input="None" channel=All status="Monitor and R are on, but this track has no MIDI Input - choose a device or All MIDI inputs above"
+2026-10-04T23:54:49.424+02:00   record refusal: Recording cannot start - the armed track has no usable MIDI input: /  / LiveMidiDest: no MIDI Input selected (Inspector > MIDI Input) /  / The track stays armed; fix the MIDI Input in the Inspector and press Record again.
+2026-10-04T23:54:49.430+02:00 step end ok: user-flow: R + Monitor on, no MIDI Input yet -> Inspector says so; Record names the row and the reason elapsedMs=158
+2026-10-04T23:54:49.996+02:00   session: inst=all ch=1 pedal=all ch=6; published route (inst): routed slot=-1 filter=1 monitor=yes capture=yes
+2026-10-04T23:54:50.002+02:00   inspector now: visible=yes input="All MIDI inputs" channel=1 status="No playable instrument: live MIDI is recorded but not heard"
+2026-10-04T23:54:50.008+02:00 step end ok: user-flow: pick "All MIDI inputs" + Input Channel 1 in the Inspector -> lands on the instrument row, route published elapsedMs=261
+2026-10-04T23:54:50.475+02:00   count-in started: yes
+2026-10-04T23:54:50.585+02:00 step end ok: user-flow: Record now starts (count-in) - then cancel it; switch R + Monitor off again via the header cells elapsedMs=258
+2026-10-04T23:54:51.000+02:00   no loaded instrument in this project - audible check skipped (MIDI delivery only)
+2026-10-04T23:54:51.006+02:00 step end ok: audible: find a row with a loaded instrument, give it All MIDI inputs via the Inspector, Monitor on via the header elapsedMs=3
+2026-10-04T23:54:51.459+02:00 step end ok: audible: silence before the key press (post-strip meter of the row) elapsedMs=0
+2026-10-04T23:54:52.119+02:00 step end ok: audible: play ch1 note 60 live (transport stopped) - the row's audio output must rise elapsedMs=0
+2026-10-04T23:54:52.476+02:00 step end ok: audible: Monitor off via the header, MIDI Input back to None via the Inspector, release the meter elapsedMs=0
+2026-10-04T23:54:52.859+02:00 step end ok: live-midi: save fixture (direct save to the test copy) and clear the dirty flag elapsedMs=24
+2026-10-04T23:54:53.499+02:00   inspector: visible=yes input="All MIDI inputs" channel=1 status="No playable instrument: live MIDI is recorded but not heard"
+2026-10-04T23:54:53.502+02:00   header: track 3 header 0 0 149 96 monitor=56 29 22 22 arm=78 29 22 22
+2026-10-04T23:54:53.506+02:00   header: track 4 header 0 0 149 96 monitor=56 29 22 22 arm=78 29 22 22
+2026-10-04T23:54:53.511+02:00 step end ok: live-midi: Inspector shows MIDI Input / Input Channel for the instrument row elapsedMs=11
+2026-10-04T23:54:53.962+02:00 step end ok: live-midi: Monitor ON (instrument row), transport stopped, play ch1 note 60 elapsedMs=1
+2026-10-04T23:54:54.418+02:00   captured ch1 note60 on=1
+2026-10-04T23:54:54.425+02:00 step end ok: live-midi: note reached the destination host on channel 1; project still clean elapsedMs=3
+2026-10-04T23:54:55.130+02:00   with only the instrument row monitoring (filter 1): ch5->0 ch6->0 (both expected 0)
+2026-10-04T23:54:55.138+02:00 step end ok: live-midi: filter: ch5 / ch6 are NOT forwarded by the instrument row (filter 1) elapsedMs=255
+2026-10-04T23:54:55.462+02:00 step end ok: live-midi: Monitor ON Lower + Pedal, play ch5 and ch6 -> arrive as ch2 / ch3 on the same host elapsedMs=2
+2026-10-04T23:54:55.913+02:00   captured: ch1=1 ch2=1 ch3=1 leaked native ch5/6=0
+2026-10-04T23:54:55.918+02:00 step end ok: live-midi: per-channel counts 1/1/1 (Upper ch1, Lower ch2, Pedal ch3), native channels never leak elapsedMs=3
+2026-10-04T23:54:56.224+02:00 step end ok: live-midi: Monitor OFF on Lower while its note is held -> targeted note-off on ch2 only elapsedMs=1
+2026-10-04T23:54:56.632+02:00   after Monitor off (Lower): off ch2=1 ch1=0 ch3=0
+2026-10-04T23:54:56.639+02:00 step end ok: live-midi: release check (ch2 off = 1, ch1/ch3 still sounding) elapsedMs=4
+2026-10-04T23:54:56.998+02:00 step end ok: live-midi: all Monitors off; nothing dirty so far elapsedMs=1
+2026-10-04T23:54:57.353+02:00   session after the pick: device:Babyface Midi Port 1 ch=1
+2026-10-04T23:54:57.360+02:00 step end ok: live-midi: real device - pick the first physical MIDI input for the instrument row in the Inspector (Device mode) elapsedMs=6
+2026-10-04T23:54:57.916+02:00   inspector with a missing device: visible=yes input="Ghost Keyboard (missing)" channel=1 status="MIDI device "Ghost Keyboard" is not connected (assignment kept) | No playable instrument: live MIDI is recorded but not heard"
+2026-10-04T23:54:58.071+02:00   record refusal: Recording cannot start - the armed track has no usable MIDI input: /  / LiveMidiDest: MIDI device "Ghost Keyboard" is not connected (assignment kept) /  / The track stays armed; fix the MIDI Input in the Inspector and press Record again.
+2026-10-04T23:54:58.078+02:00 step end ok: live-midi: missing device - a saved device that is not connected is explained and kept; Record refuses with the reason elapsedMs=160
+2026-10-04T23:54:58.409+02:00 step end ok: live-midi: real device - re-pick the physical device in the Inspector (back from the ghost) elapsedMs=2
+2026-10-04T23:54:58.861+02:00   device "Babyface Midi Port 1": managerEnabled=yes slot=0
+2026-10-04T23:54:58.865+02:00   inspector: visible=yes input="Babyface Midi Port 1" channel=1 status="No playable instrument: live MIDI is recorded but not heard"
+2026-10-04T23:54:59.287+02:00   Device-mode route delivered ch1 note61 on=1
+2026-10-04T23:54:59.295+02:00 step end ok: live-midi: real device - opened on the device manager, slot callback registered, Inspector shows it elapsedMs=430
+2026-10-04T23:54:59.607+02:00   after restoring All: managerEnabled=yes slot=0
+2026-10-04T23:54:59.613+02:00 step end ok: live-midi: real device - back to All MIDI inputs (device stays open: still referenced by All) elapsedMs=4
+2026-10-04T23:55:00.215+02:00   countIn=yes cycleStillOn=yes
+2026-10-04T23:55:00.325+02:00 step end ok: live-midi: Cycle ON + armed MIDI row + Record -> count-in starts (cycle recording), Cycle unchanged; cancel elapsedMs=259
+2026-10-04T23:55:00.846+02:00 step end ok: live-midi: arm instrument + Lower, Monitor ON instrument only, press Record (count-in starts) elapsedMs=102
+2026-10-04T23:55:01.061+02:00 step end ok: live-midi: during count-in: hold ch1 note 48 (must enter the take at tick 0); Lower monitored off still records elapsedMs=0
+2026-10-04T23:55:04.116+02:00   [LiveMidi] take begins at sample 0 for 2 row(s) linear
+2026-10-04T23:55:04.784+02:00   take start sample 0 playhead now 32000
+2026-10-04T23:55:04.790+02:00 step end ok: live-midi: recording started (transport playing) elapsedMs=3
+2026-10-04T23:55:05.385+02:00 step end ok: live-midi: +0.5 s ch1 note 60 on (vel 100), ch5 note 62 on (vel 90), sustain down, expression 90, pitch bend 12000 elapsedMs=50
+2026-10-04T23:55:06.126+02:00 step end ok: live-midi: +1.2 s release ch1 60 (vel-0 shorthand) and ch5 62, release note 48; ch1 note 72 stays held past stop elapsedMs=1
+2026-10-04T23:55:06.889+02:00   live during take: ch1 60 on=1 Lower(ch2) 62 on=0 (Lower Monitor OFF -> 0 expected, still recorded)
+2026-10-04T23:55:06.895+02:00 step end ok: live-midi: monitored events were heard live (ch1 60 on at the destination during the take) elapsedMs=49
+2026-10-04T23:55:07.003+02:00   [Rec] run boundaries: start mono=1100416 tl=0 wrap=0 | stop mono=1238784 tl=138368 wrap=0 | captured frames=138368
+2026-10-04T23:55:07.006+02:00   [LiveMidi] take row 3 pass 0 [0, 138368): events=7 notes=3 closedAtStop=1 cc=2 pb=1 outside=0 overflow=no clipId=1
+2026-10-04T23:55:07.009+02:00   [LiveMidi] take row 4 pass 0 [0, 138368): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=1
+2026-10-04T23:55:07.011+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=0 (mono 1100416) stop=138368 (mono 1238784) clips=2
+2026-10-04T23:55:07.169+02:00 step end ok: live-midi: Stop (same path as the Stop button) -> take committed elapsedMs=163
+2026-10-04T23:55:07.789+02:00 step end ok: live-midi: release the key still held after stop (must not re-enter any clip) elapsedMs=0
+2026-10-04T23:55:08.099+02:00   instrument: clips=1 start=0 len=138368 bpm=120.00 tpq=960 notes=[(n48 v77 ch1 @0 d3839)(n60 v100 ch1 @2412 d1426)(n72 v64 ch1 @3839 d1696)] cc=[(cc11=90 ch1 @2414)(cc64=127 ch1 @2414)(cc64=0 ch1 @5535)] pb=[(12000 ch1 @2415)]
+2026-10-04T23:55:08.102+02:00   lower: clips=1 start=0 len=138368 bpm=120.00 tpq=960 notes=[(n62 v90 ch5 @2413 d1426)] cc=[] pb=[]
+2026-10-04T23:55:08.105+02:00   pedal: clips=0
+2026-10-04T23:55:08.107+02:00   expected ticks: on=2415 off=3838 stop=5535 tolerance=219 outputLatency=168
+2026-10-04T23:55:08.112+02:00 step end ok: live-midi: verify recorded clips (instrument row: notes 48 / 60 / 72, CC64 / CC11, pitch bend; Lower row: note 62 ch5) elapsedMs=11
+2026-10-04T23:55:08.818+02:00   undo -> inst/lower clips 0/0; redo -> 1/1
+2026-10-04T23:55:08.826+02:00 step end ok: live-midi: Undo removes both rows' take clips at once; Redo restores both elapsedMs=414
+2026-10-04T23:55:09.118+02:00 step end ok: live-midi: save, reload, verify the take survived (notes, CC, pitch bend, MIDI Input assignment) elapsedMs=29
+2026-10-04T23:55:10.373+02:00 step end ok: live-midi: reload test copy elapsedMs=615
+2026-10-04T23:55:11.602+02:00   after reload: inst clips=1 notes=3 cc=3 pb=1; lower clips=1
+2026-10-04T23:55:11.758+02:00   inspector (Lower) after reload: visible=yes input="All MIDI inputs" channel=5 status="No playable instrument: live MIDI is recorded but not heard"
+2026-10-04T23:55:11.764+02:00 step end ok: live-midi: after reload: clips, controller data and the Inspector MIDI Input persisted; Monitor/Arm are OFF elapsedMs=160
+2026-10-04T23:55:12.184+02:00   export: notes=3 cc=3 pitchWheel=1 -> C:\Users\nicla\AppData\Local\Temp\dal-live-midi-take.mid
+2026-10-04T23:55:12.190+02:00 step end ok: live-midi: MIDI export of the instrument take carries notes, CC and pitch wheel elapsedMs=10
+2026-10-04T23:55:12.572+02:00 step end ok: live-midi: the recorded clip opens in the MIDI editor (ordinary clip), then close elapsedMs=84
+2026-10-04T23:55:13.201+02:00 step end ok: live-midi: close the MIDI editor elapsedMs=4
+2026-10-04T23:55:14.013+02:00   offline export: result=ok heardLiveBefore=1 liveLeakedIntoExport=0 clipNotesRendered=1 size=864104
+2026-10-04T23:55:14.019+02:00 step end ok: live-midi: hold a live note (Monitor on) and run an offline WAV export: the clip renders, live MIDI never leaks elapsedMs=365
+2026-10-04T23:55:14.639+02:00 step end ok: live-midi: playback after the take (transport + clips play normally) elapsedMs=0
+2026-10-04T23:55:17.147+02:00   playback: ch1 60 on=1 Lower->ch2 62 on=1
+2026-10-04T23:55:17.151+02:00 step end ok: live-midi: the recorded notes came back through playback (ch1 60 on >= 1); stop elapsedMs=2
+2026-10-04T23:55:17.762+02:00 step end ok: live-midi: empty take - arm instrument, Record, no input, Stop -> no clip, no undo step elapsedMs=101
+2026-10-04T23:55:21.042+02:00   [LiveMidi] take begins at sample 120704 for 1 row(s) linear
+2026-10-04T23:55:22.100+02:00   [Rec] run boundaries: start mono=1912960 tl=120704 wrap=0 | stop mono=1963392 tl=171136 wrap=0 | captured frames=50432
+2026-10-04T23:55:22.104+02:00   [LiveMidi] take row 3 pass 0 [120704, 171136): events=0 notes=0 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=0
+2026-10-04T23:55:22.107+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=120704 (mono 1912960) stop=171136 (mono 1963392) clips=0
+2026-10-04T23:55:22.311+02:00   empty take: clips before/after=1/1 undo size delta=0
+2026-10-04T23:55:22.318+02:00 step end ok: live-midi: stop the empty take elapsedMs=218
+2026-10-04T23:55:22.783+02:00   combined take count-in started: yes
+2026-10-04T23:55:22.792+02:00 step end ok: live-midi: combined take - arm an audio track (R) + the instrument row, Record elapsedMs=208
+2026-10-04T23:55:25.960+02:00   [LiveMidi] take begins at sample 171136 for 1 row(s) linear
+2026-10-04T23:55:26.742+02:00 step end ok: live-midi: combined take - play ch1 note 67 while recording elapsedMs=0
+2026-10-04T23:55:27.741+02:00   [Rec] run boundaries: start mono=2148992 tl=171136 wrap=0 | stop mono=2234240 tl=256384 wrap=0 | captured frames=85248
+2026-10-04T23:55:27.750+02:00   [LiveMidi] take row 3 pass 0 [171136, 256384): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T23:55:27.753+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=171136 (mono 2148992) stop=256384 (mono 2234240) clips=1
+2026-10-04T23:55:28.158+02:00   combined take: audio clips 1->2, midi clips 1->2, undo steps +1
+2026-10-04T23:55:28.162+02:00   shared stop boundary: audio len=85248 start=170985 | midi len=85248 start=171136 | audio placement offset=-151 midi gesture offset=-168 | start tl=171136 mono=2148992 wrap=0 | stop tl=256384 mono=2234240 wrap=0 | frames=85248 acked=yes
+2026-10-04T23:55:28.776+02:00   combined take undo -> audio/midi 1/1; redo -> 2/2
+2026-10-04T23:55:28.783+02:00 step end ok: live-midi: combined take - release, Stop, verify ONE undo step holds both the audio clip and the MIDI clip elapsedMs=1193
+2026-10-04T23:55:29.054+02:00 step end ok: live-midi: delete the export file elapsedMs=0
+2026-10-04T23:55:29.096+02:00 cleanup: deleted temp project copy C:\Users\nicla\AppData\Local\Temp\dal-pregain-fixture\pregain-fixture-livemiditest.dalproj
+2026-10-04T23:55:29.098+02:00 RESULT: PASS scenario=live-midi totalMs=43677

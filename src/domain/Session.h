@@ -281,6 +281,13 @@ public:
     // [Message thread] Grow-only stored arrangement extent; publishes a new snapshot. No-op if
     // `v` is not greater than the current stored value.
     void setArrangementExtentSamples(std::int64_t v) noexcept;
+    // [Message thread] End of a recording run: the stored extent becomes
+    // `max(storedExtentBeforeRun, audio content end, recordedResultEndSamples)` — the display
+    // headroom the run added is dropped, an older project's saved extent is never shrunk, and the
+    // recorded result (audio clips and the MIDI take end, which lives outside the snapshot) keeps
+    // the room it needs. Publishes a new snapshot only when the stored value changes.
+    void restoreArrangementExtentAfterRecording(std::int64_t storedExtentBeforeRun,
+                                                std::int64_t recordedResultEndSamples) noexcept;
 
     // [Message thread] Timeline locator samples (Cubase-style markers). Clamped to
     // `getArrangementExtentSamples()`; `right == 0` means right locator unset. No swap/normalize

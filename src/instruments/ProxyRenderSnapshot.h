@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -261,6 +262,93 @@ namespace proxy_snapshot
             return last;
         }
     } // namespace detail
+
+    /// LAYER-1 compatibility proof for a generation rendered under the additive bake (fingerprint
+    /// schema 1). The layered bake delivers EXACTLY the additive bake's events for a unit when,
+    /// within that unit:
+    ///   (a) no two positive-length clip windows overlap (no clip is ever covered),
+    ///   (b) the stored clip order is non-decreasing in `startSamples` (the additive bake sorted
+    ///       by start; with no overlap only equal-sample ordering at touching edges could differ,
+    ///       and this makes both orders identical),
+    ///   (c) every CC and pitch-bend point of every clip lies inside the clip's window, end
+    ///       inclusive (the additive bake delivered controller events anywhere; the layered bake
+    ///       delivers them inside the audible spans, restates a value established before the
+    ///       window at the window start, keeps the own-end events and drops later ones — so only
+    ///       in-window points behave identically).
+    /// Notes need no condition: both bakes drop notes starting outside the window and clamp the
+    /// end to it. Absence of overlap alone is NOT sufficient because of (c).
+    [[nodiscard]] inline bool unitIsLayerInsensitive(const std::vector<SnapshotClip>& clips, const double referenceRate)
+    {
+        std::vector<std::pair<std::int64_t, std::int64_t>> windows;
+        std::int64_t previousStart = std::numeric_limits<std::int64_t>::min();
+        for (const SnapshotClip& c : clips)
+        {
+            if (c.lengthSamples <= 0)
+            {
+                continue;
+            }
+            if (c.startSamples < previousStart)
+            {
+                return false; // (b)
+            }
+            previousStart = c.startSamples;
+            const std::int64_t start = c.startSamples;
+            const std::int64_t end = c.startSamples + c.lengthSamples;
+            for (const auto& w : windows)
+            {
+                if (start < w.second && w.first < end)
+                {
+                    return false; // (a)
+                }
+            }
+            windows.emplace_back(start, end);
+            const double bpm = c.bpm > 0.0 ? c.bpm : 110.0;
+            const int tpq = c.ticksPerQuarter > 0 ? c.ticksPerQuarter : 960;
+            // Tick→sample at the reference rate, the domain the windows are stored in; the bakes
+            // use the same `ticksToRelativeSamples` rounding at their rate, and a point exactly
+            // on the window edge is the only rounding-sensitive case — treat it as inside.
+            const auto inWindow = [&](const std::int64_t tick) {
+                const std::int64_t at = c.timelineAnchorSamples + ticksToRelativeSamples(tick, bpm, tpq, referenceRate);
+                return at >= start && at <= end;
+            };
+            for (const auto& p : c.ccPoints)
+            {
+                if (!inWindow(p.startTick))
+                {
+                    return false; // (c)
+                }
+            }
+            for (const auto& p : c.pitchBendPoints)
+            {
+                if (!inWindow(p.startTick))
+                {
+                    return false; // (c)
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Every unit of the snapshot (destination-local clips and each routed source, eligible or
+    /// not — the fingerprint covers all of them) is layer-insensitive.
+    [[nodiscard]] inline bool snapshotIsLayerInsensitive(const ProxyRenderSnapshot& s)
+    {
+        const double refRate = timeline_domain::isValidRate(s.renderConfig.timelineReferenceRate)
+                                   ? s.renderConfig.timelineReferenceRate
+                                   : 48000.0;
+        if (!unitIsLayerInsensitive(s.destinationClips, refRate))
+        {
+            return false;
+        }
+        for (const auto& src : s.sources)
+        {
+            if (!unitIsLayerInsensitive(src.clips, refRate))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 
     /// Message-thread builder. `clipsForTrack` supplies the stored (append/load-ordered) MIDI
     /// clips of a track id — destination-local clips for the destination id, and each routed

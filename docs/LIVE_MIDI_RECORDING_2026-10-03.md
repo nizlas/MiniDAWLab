@@ -209,7 +209,8 @@ delivers live MIDI to the host and the host produces audio (measured below).
   be opened (in use by another application?)* and *All MIDI inputs but no device connected*; open
   failures are logged and retried every 2 s while the device is wanted; the Inspector status says
   "Monitor / R is on, but this track has no MIDI Input", "Ready — no MIDI received yet on this
-  track's input" / "MIDI received: N events", or the problem above.
+  track's input" / "MIDI received: N events" (these two counter texts were removed in 1.1.13), or
+  the problem above.
 - `RecordingCoordinator`: the refusal names the armed rows and their reasons; "Arm a track" only
   when nothing is armed. Ready rows record even if other armed rows are not ready (logged). The
   Cycle and device refusals are recorded for diagnostics (`getLastRecordStartRefusalForDiagnostics`).
@@ -254,8 +255,11 @@ chase restatement at every span start and the clip's own end events kept); used 
 `InstrumentTrackController::publishRenderSnapshot` (one merged note list per track;
 `audioThread_scheduleTransportMidiForSegment` walks it, so a same-pitch Off at sample X precedes
 an On at X) and by `ProxyOfflineSequencer::bakeUnit`; the offline mixdown drives the live
-scheduler. `ProxyFingerprint` serializes clips in stored order and bumps the schema to 2, so
-every proxy rendered under the old additive rule is stale (existing policy handles it).
+scheduler. `ProxyFingerprint` serializes clips in stored order and bumps the schema to 2.
+*(Corrected in 1.1.13 — the 1.1.12 text said both "stale" and "re-rendered": a stale proxy is
+never selected for playback (Secondary or silence) and is re-rendered only in Auto mode on a
+machine where the Primary is present; a schema-1 generation over provably layer-insensitive
+content stays Current, see "1.1.13" below.)*
 
 **Cycle recording.** `PlaybackEngine` keeps a monotone device clock; `LiveMidiInputBus` records
 timeline anchors (play start / seek / wrap / stop) and pushes a wrap marker (exact mono sample +
@@ -295,12 +299,118 @@ key press (no loopback port on this machine) and listening — the measured audi
 delivered-event traces stand in for both; the attack restart of a resumed note is audible only
 with ears.
 
-**Limitations.** A destination playing a proxy with Monitor off still renders its earlier takes
-from the WAV during a take (a proxy cannot mute one row). A controller the winning clip never
-defines keeps its last delivered value (no reset is invented). Recording longer than 30 minutes
-past the previous arrangement end would freeze the transport again (the extent grows once at
-record start). The audio slice and the MIDI pass of a combined take may differ by one device
-block at the stop (audio length comes from the recorder's sample count).
+**Limitations (as shipped in 1.1.12; the first, third and fourth are resolved in 1.1.13 below).**
+A destination playing a proxy with Monitor off still renders its earlier takes from the WAV
+during a take (a proxy cannot mute one row). A controller the winning clip never defines keeps
+its last delivered value (no reset is invented). Recording longer than 30 minutes past the
+previous arrangement end would freeze the transport again (the extent grows once at record
+start). The audio slice and the MIDI pass of a combined take may differ by one device block at
+the stop (audio length comes from the recorder's sample count).
+
+## 1.1.13 — corrections after 1.1.12
+
+Five corrections, all through the production paths; commit after `0b23421`.
+
+**1. Inspector without the event counter.** `LiveMidiInputCoordinator::describeInputStatus` no
+longer produces "Ready — no MIDI received yet…" / "MIDI received: N events". A working input shows
+nothing and the status area collapses (the layout already reclaims the space); incoming MIDI is
+signalled by the header's activity dot. Real obstacles stay: no MIDI Input chosen, device not
+connected (assignment kept), device could not be opened, All MIDI inputs with no device, no
+destination, overflow. The per-route counters stay internal (`routeActivityCount`, tests).
+
+**2. Recording into a destination that plays a proxy.** `ProxyPlaybackCoordinator` has a second,
+independent need next to `liveMonitorRequested`: `liveRecordingRequested(destination)` — true
+while a MIDI take (count-in included) runs on a source row into the destination
+(`LiveMidiInputCoordinator::liveRecordingRequestedForDestination`, fed by the take rows or, during
+the count-in, the pending rows via `setTakePending`). Either need switches a proxy-backed
+destination with a usable Secondary to **SecondaryLive** for its clips and the live input; the
+evaluation reports both flags (`liveMonitorOverride`, `liveRecordingOverride`), so Monitor and
+Record stay separate functions sharing one mechanism. The Secondary is prepared off the audio
+callback (lazy load on the message thread, published at a block boundary). Arming alone does
+nothing; the override ends with Stop / abort / start failure / routing change
+(`refreshProxyDestinationsForTakeRows`), and the normal decision is re-evaluated against the
+real fingerprint — a committed take makes the generation Stale honestly, an undone one leaves it
+Current; nothing is "restored" blindly, and identity / plugin state / metadata are untouched.
+Without a usable Secondary the proxy keeps playing as backing, the take is still captured and
+the status says "Recording: earlier material on this track is still heard from the proxy - no
+live instrument is available" (no modal; other parts are not silenced). Status lines name the
+temporary use: "Secondary instrument used temporarily while recording", "… (Monitor on,
+recording)", "Monitoring through the Secondary instrument (temporary, while Monitor is on)". The
+diagnostics registry now reports the row's *transport* host (Secondary while active), so the
+bridge invariant compares like with like.
+
+**3. One stop boundary for audio and MIDI.** `PlaybackEngine` gained a *record run* handshake
+(`RecordRunState` Idle → StartRequested → Running → StopRequested → Stopped): the audio callback
+stamps `RecordRunBoundary {monoSample, timelineSample, wrapSerial}` at the first sample of the
+block where it acknowledges the start and the stop, before it reads the transport intent; the
+recorder receives input blocks only while Running. `RecordingCoordinator` requests the stop,
+waits up to 250 ms for the acknowledgement (`waitForRecordRunStop`) and uses that single
+boundary for everything: `recorder` frame count = stop.mono − start.mono, MIDI take end =
+stop.timeline with stop.wrapSerial (the `LiveMidiInputBus` wrap markers are cut at the same
+mono sample), Cycle pass count = stopWrap − startWrap, audio placement = start.timeline +
+latency-store offset, MIDI gesture compensation unchanged (`recordingPlacementOffsetSamples` vs
+the MIDI offset are still separate, raw boundary vs compensated placement). If no callback
+acknowledges (device stopped or lost) the wait returns with a message-thread fallback boundary
+(monotone clock + UI playhead + wrap) flagged `acked=no`, the take is still finalized and the
+recorder stops using the FIFO before anything is freed (`FinishRunAtExit`). Stop exactly on the
+wrap still produces no zero-length take; the last partial pass is kept.
+
+**4. Arrangement extent grows on demand.** The 30-minute reserve at record start is gone. While
+a run captures (`recordRunCapturing`, independent of `recorder_->isRecording()` so MIDI-only
+takes count), the engine's run-end rule treats the current block end as the timeline end
+(`timelineEnd = max(extent, t0 + block)`): the transport never freezes at the old end and no
+engine behaviour depends on a UI timer. A 10 Hz message-thread timer
+(`RecordingExtentFollowTimer`) grows the stored extent to playhead + 5 s for the navigation area
+(grow-only `Session::setArrangementExtentSamples`). At Stop
+`Session::restoreArrangementExtentAfterRecording(storedBefore, resultEnd)` sets the extent to
+max(stored extent before the run, derived timeline length, end of the recorded result) — the
+previous extent plus what the result needs, no reserve. Cycle runs keep the extent (takes end at
+R); older projects' saved extents are never shrunk; normal playback keeps its end rule;
+locators and export range are untouched.
+
+**5. Older proxies after schema 2.** Verified behaviour: a schema-1 generation whose fingerprint
+no longer compares is **Stale** — never selected (Secondary or silence), re-rendered only in Auto
+mode with the Primary present; the 1.1.12 wording ("auto re-renders") is corrected above. New:
+`comparableFingerprintSchemaFor(meta, snapshot)` keeps a schema-1 generation comparable when the
+current content is provably layer-insensitive (`snapshotIsLayerInsensitive`: no overlapping
+clips per unit, stored order = plan order, every CC / pitch-bend point inside its clip window at
+the reference rate) — only then the layered bake equals the additive bake; absence of overlap
+alone is not enough because controller handling changed. The missing-Primary recompute and the
+Primary-present verdict both use it; with the Primary present the render identity
+(`ProxyCurrentIdentity::expectedFingerprint`) is always the current schema and the comparable
+reading travels separately (`publishedComparableFingerprint`, `matchesPublished`). This also
+fixed a defect found while verifying: comparing a schema-1 reading against a schema-2 job made
+every re-render of such a destination end as "identity changed during finalizing — result
+discarded" (observed on the TSE copy before the fix; publishes and becomes Current after it).
+Proxy files, Primary identity and plugin state are untouched; Secondary rendering is never
+presented as a Primary render; no option for the old additive playback.
+
+**Verification (measured in-app unless marked "code").**
+
+| Check | How | Result |
+|---|---|---|
+| Inspector status text for a working input contains no "MIDI received" / "Ready -" / "events"; no empty status area | `--stability-live-midi` (fixture + TSE) | PASS |
+| Compatible schema-1 generation (GA row "Track 3", pub=83 = save=83, no overlap) on a simulated no-Primary machine (test seam `proxyForcePrimaryUnavailable`): runtime **ProxyCurrent**, destination Current, same generation after 1.5 s (no re-render); with the Primary present: destination Current through the comparable reading (`identity now=7bd0dd…  comparable=0eb66f… published=0eb66f…`) | `--stability-proxy-recording` (TSE copy) | PASS |
+| Broken-pairing schema-1 generation (VB3-II, pub=975 / save=1) forced no-Primary: never Current → SecondaryLive (HALion Sonic), destination Stale | same | PASS |
+| GA row, no Secondary, Monitor off, Record: proxy keeps playing (runtime ProxyCurrent during the take), status "Recording: earlier material … still heard from the proxy …", clip captured (1→2), after Stop ProxyStale (honest), after Undo ProxyCurrent | same | PASS |
+| GA row with a Secondary (HALion Sonic config copied from VB3-II), arming alone: ProxyCurrent, no override; Monitor off take: SecondaryLive, `recordingOverride=yes`, own clip 0 note-ons at the Secondary, live note 0 (not heard), status "Secondary instrument used temporarily while recording"; Stop → override ends, destination Stale; Undo → ProxyCurrent | same | PASS |
+| Monitor on take: live note 1 at the Secondary, own clip still silent, status "(Monitor on, recording)"; idle again: ProxyCurrent, no lingering override | same | PASS |
+| Two source rows into one proxy destination (routed MIDI row with 48× note 120 added, re-rendered with the Primary via Render now → schema-2 generation Current, forced no-Primary again → ProxyCurrent): recording the GA row — routed row heard through the Secondary (4 note-ons), GA's own clip silent; recording the MIDI row — GA's own clip heard (3), routed row silent, MIDI row status names the temporary Secondary use, take captured, no lingering override | same | PASS |
+| Common stop boundary: combined audio + MIDI Cycle take pass lengths audio 144000 / 39424 = MIDI 144000 / 39424 (1.1.12: 128-sample mismatch); linear combined take 85248 = 85248 with separate placements (audio start 170985 = 171136 − 151, MIDI gesture offset −168); `[Rec] run boundaries … acked=yes` | `--stability-midi-cycle-takes` (fixture + TSE) | PASS |
+| Device stopped mid-take: Stop returns bounded (~263 ms), `acked=no` fallback boundary, clip committed, device restarted | `--stability-midi-cycle-takes` "device-stop" steps | PASS |
+| Several device block sizes | code (the handshake stamps the first sample of the acknowledging block; nothing in it depends on the block size) — the RME ASIO buffer cannot be switched from the app | code only |
+| Past the old end: MIDI-only with a 1.5 s UI stall (transport kept running: 247360 → 319424 past the 240000 extent; stored extent after Stop = result end, no reserve), audio-only (frames = clip length), combined (equal lengths, past the old end); Cycle did not change the stored extent beyond the loop end; TSE (1 h saved extent) unchanged | `--stability-midi-cycle-takes` "past-end" steps (fixture + TSE) | PASS |
+| Regressions: `MiniDAWSelftests` 3276 (+ `p1e-cmp` scheduler checks, `layer-compat` currency checks), `LiveMidiRecordingFocusedTests` 110, `TrackHeaderColumnFocusedTests` 149, `ExportLevelFocusedTests` 47, `InputRoutingFocusedTests` 56, `MixdownPreGainFocusedTests` 49, `InsertPersistenceFocusedTests` 121; scenarios midi-routing, midi-track-parity, midi-editor-move, inspector-panel (TSE), header-column, organ-dc (TSE), mixdown, pregain, inserts | executables / `--stability-*` | 0 failures / PASS |
+
+**Remaining limitations.** With Monitor off and no usable Secondary, a proxy destination keeps
+rendering the recording row's earlier takes (shared proxy; reported in the status). A plug-in
+that restores its state asynchronously reports a different live state revision for a moment
+after load, so a destination can read Stale for that moment (observed ~1–2 s with Groove Agent
+SE on the TSE copy; the verdict corrects itself once the state is restored — the scenario waits
+for that before reading verdicts; not investigated further here).
+The AmpliTube 4 teardown crash (`AmpliTube 4.vpa+0x7675E`) is still intermittent at shutdown.
+Block-size independence of the stop handshake is verified by inspection only (fixed ASIO buffer
+on this machine).
 
 ## 8. User guide
 

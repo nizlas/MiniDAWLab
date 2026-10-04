@@ -1,0 +1,78 @@
+﻿2026-10-04T23:55:35.341+02:00 scenario start: proxy-recording iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2.dalproj
+2026-10-04T23:55:35.344+02:00 steps queued: 71 (delete-loop iterations expand at plan time)
+2026-10-04T23:55:35.855+02:00   test copy: C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2-proxyrectest.dalproj
+2026-10-04T23:55:35.862+02:00 step end ok: proxy-rec: copy project to sibling test file elapsedMs=5
+2026-10-04T23:55:39.009+02:00 step end ok: proxy-rec: load test copy elapsedMs=2846
+2026-10-04T23:55:42.743+02:00   Primary state revisions restored after poll 1
+2026-10-04T23:55:43.253+02:00   instrument row 3 "Track 3": sha256:0eb66f3d3776bcb21e58ea44cf6193a1506dcdb9c18f351a32dde76965487eee schema=1 pub=83 save=83 | runtime=Primary destination=Current | no job | identity now=sha256:7bd0dd458c69b1ec comparable=sha256:0eb66f3d3776bcb2 rev=83 (job rev=0) published=sha256:0eb66f3d3776bcb2
+2026-10-04T23:55:43.256+02:00   instrument row 5 "VB3-II": sha256:c8c10aa4202eee4d70fc9b54073aabf610b7ac1de29fa8e68880479c1cff9210 schema=1 pub=975 save=1 | runtime=Primary destination=Stale | no job | identity now=sha256:a50cc62af6d33279 comparable=sha256:3a431124ac679d0d rev=1 (job rev=0) published=sha256:c8c10aa4202eee4d
+2026-10-04T23:55:43.259+02:00   instrument row 8 "Track 8": no proxy generation | runtime=Primary destination=Absent
+2026-10-04T23:55:43.261+02:00   compatible-generation row=3 secondary donor row=5
+2026-10-04T23:55:43.269+02:00 step end ok: proxy-rec: schema-1 generations in this project (recorded schema, pairing) elapsedMs=14
+2026-10-04T23:55:44.018+02:00   GA forced no-Primary: runtime=ProxyCurrent destination=Current generation=sha256:0eb66f3d3776bcb21e58ea44cf6193a1506dcdb9c18f351a32dde76965487eee schema=1 pub=83 save=83
+2026-10-04T23:55:44.025+02:00 step end ok: proxy-rec: no-Primary machine for the Groove Agent row -> its schema-1 generation is provably compatible: ProxyCurrent, no re-render elapsedMs=413
+2026-10-04T23:55:45.565+02:00   GA after idle: destination=Current generation=sha256:0eb66f3d3776bcb21e58ea44cf6193a1506dcdb9c18f351a32dde76965487eee schema=1 pub=83 save=83
+2026-10-04T23:55:45.571+02:00 step end ok: proxy-rec: ...and 1.5 s later still the same generation (no background re-render was triggered) elapsedMs=4
+2026-10-04T23:55:46.702+02:00   VB3-II forced no-Primary: runtime=SecondaryLive destination=Stale generation=sha256:c8c10aa4202eee4d70fc9b54073aabf610b7ac1de29fa8e68880479c1cff9210 schema=1 pub=975 save=1
+2026-10-04T23:55:46.709+02:00 step end ok: proxy-rec: VB3-II row (schema-1 generation, broken save pairing) forced no-Primary -> never Current; Secondary or honest stale elapsedMs=886
+2026-10-04T23:55:47.288+02:00 step end ok: proxy-rec: GA row (no Secondary) - MIDI Input = All via the Inspector, arm, Monitor off, seek 0, Record elapsedMs=157
+2026-10-04T23:55:50.524+02:00   [LiveMidi] take begins at sample 0 for 1 row(s) linear
+2026-10-04T23:55:51.073+02:00   during take (no Secondary): runtime=ProxyCurrent override=no status="Recording: earlier material on this track is still heard from the proxy - no live instrument is available"
+2026-10-04T23:55:51.580+02:00   [Rec] run boundaries: start mono=937984 tl=0 wrap=0 | stop mono=988288 tl=50304 wrap=0 | captured frames=50304
+2026-10-04T23:55:51.610+02:00   [LiveMidi] take row 3 pass 0 [0, 50304): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T23:55:51.613+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=0 (mono 937984) stop=50304 (mono 988288) clips=1
+2026-10-04T23:55:51.943+02:00   after Stop: clips 1->2 runtime=ProxyStale status=""
+2026-10-04T23:55:52.255+02:00   after Undo: runtime=ProxyCurrent
+2026-10-04T23:55:52.264+02:00 step end ok: proxy-rec: GA row (no Secondary) - during the take the proxy keeps playing and the status explains it; capture works elapsedMs=1187
+2026-10-04T23:55:52.965+02:00   GA with Secondary configured (idle): runtime=ProxyCurrent recordingOverride=no
+2026-10-04T23:55:53.349+02:00 step end ok: proxy-rec: give the GA row the VB3-II row's Secondary (HALion Sonic); Monitor off; arm; seek 0; Record elapsedMs=682
+2026-10-04T23:55:56.361+02:00   [LiveMidi] take begins at sample 0 for 1 row(s) linear
+2026-10-04T23:55:57.097+02:00   during take (Secondary, Monitor off): runtime=SecondaryLive recordingOverride=yes status="Secondary instrument used temporarily while recording"
+2026-10-04T23:55:58.703+02:00   delivered to the Secondary during the take: own-clip note-ons=0 live note 100=0 (Monitor off -> 0 expected)
+2026-10-04T23:55:58.710+02:00   [Rec] run boundaries: start mono=1218048 tl=0 wrap=0 | stop mono=1330560 tl=112512 wrap=0 | captured frames=112512
+2026-10-04T23:55:58.741+02:00   [LiveMidi] take row 3 pass 0 [0, 112512): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T23:55:58.746+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=0 (mono 1218048) stop=112512 (mono 1330560) clips=1
+2026-10-04T23:55:59.179+02:00   after Stop: clips 1->2 runtime=SecondaryLive recordingOverride=no destination=Stale
+2026-10-04T23:55:59.590+02:00   after Undo: runtime=ProxyCurrent recordingOverride=no
+2026-10-04T23:55:59.597+02:00 step end ok: proxy-rec: Monitor off take - Secondary used temporarily, own clip silent, nothing delivered live; Stop -> override ends, real currency decides elapsedMs=2498
+2026-10-04T23:56:00.168+02:00 step end ok: proxy-rec: Monitor ON take - live note heard through the Secondary, own clip still silent; Stop; Undo elapsedMs=155
+2026-10-04T23:56:03.388+02:00   [LiveMidi] take begins at sample 0 for 1 row(s) linear
+2026-10-04T23:56:05.531+02:00   during take (Secondary, Monitor on): runtime=SecondaryLive own-clip note-ons=0 live note 100=1 status="Secondary instrument used temporarily (Monitor on, recording)"
+2026-10-04T23:56:05.536+02:00   [Rec] run boundaries: start mono=1555456 tl=0 wrap=0 | stop mono=1658240 tl=102784 wrap=0 | captured frames=102784
+2026-10-04T23:56:05.568+02:00   [LiveMidi] take row 3 pass 0 [0, 102784): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T23:56:05.571+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=0 (mono 1555456) stop=102784 (mono 1658240) clips=1
+2026-10-04T23:56:06.318+02:00   idle again: runtime=ProxyCurrent monitorOverride=no recordingOverride=no
+2026-10-04T23:56:06.325+02:00 step end ok: proxy-rec: Monitor ON take - verify elapsedMs=2094
+2026-10-04T23:56:06.658+02:00 step end ok: proxy-rec: two sources - add a MIDI row routed to the GA destination (note 120 x 48) elapsedMs=4
+2026-10-04T23:56:07.505+02:00   routed MIDI row id=9 -> GA row 3; after the content change: runtime=SecondaryLive destination=Stale
+2026-10-04T23:56:07.513+02:00 step end ok: proxy-rec: two sources - the content changed (Stale); the machine with the Primary renders the new generation (Render now) elapsedMs=5
+2026-10-04T23:56:08.325+02:00   before Render now: runtime=Primary no job | identity now=sha256:490624560840f6cc comparable=sha256:320815630cf7e55c rev=83 (job rev=0) published=sha256:0eb66f3d3776bcb2
+2026-10-04T23:56:08.330+02:00   removed 1 leftover generation file(s) of earlier runs for the GA row
+2026-10-04T23:56:08.342+02:00   right after Render now: phase=Preparing expected=sha256:490624560840f6cc msg="" renderedMs=0 | identity now=sha256:490624560840f6cc comparable=sha256:320815630cf7e55c rev=83 (job rev=83) published=sha256:0eb66f3d3776bcb2
+2026-10-04T23:56:08.349+02:00 step end ok: proxy-rec: two sources - Render now elapsedMs=21
+2026-10-04T23:56:09.368+02:00   destination=Current job: phase=Published expected=sha256:490624560840f6cc msg="" renderedMs=49322 | identity now=sha256:490624560840f6cc comparable= rev=83 (job rev=83) published=sha256:490624560840f6cc
+2026-10-04T23:56:11.410+02:00   after Render now: destination=Current generation=sha256:490624560840f6cc9f3f0ed471c5c540c1dc3f871dc20efb9f9add63714c349c schema=2 pub=83 save=0
+2026-10-04T23:56:11.715+02:00   no-Primary again: runtime=ProxyCurrent
+2026-10-04T23:56:11.724+02:00 step end ok: proxy-rec: two sources - new generation Current; the no-Primary machine plays it (ProxyCurrent) elapsedMs=311
+2026-10-04T23:56:12.192+02:00 step end ok: proxy-rec: two sources - arm the GA row only (Monitor off); Record elapsedMs=152
+2026-10-04T23:56:15.418+02:00   [LiveMidi] take begins at sample 0 for 1 row(s) linear
+2026-10-04T23:56:17.443+02:00   GA recording, two sources: runtime=SecondaryLive routed-row note 120 heard=5 GA own-clip note-ons=0 live note 100 heard=0 (Monitor off -> 0) GA status="Secondary instrument used temporarily while recording" MIDI-row status=""
+2026-10-04T23:56:17.448+02:00   [Rec] run boundaries: start mono=2132864 tl=0 wrap=0 | stop mono=2230016 tl=97152 wrap=0 | captured frames=97152
+2026-10-04T23:56:17.481+02:00   [LiveMidi] take row 3 pass 0 [0, 97152): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T23:56:17.485+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=0 (mono 2132864) stop=97152 (mono 2230016) clips=1
+2026-10-04T23:56:17.919+02:00   after Stop: GA clips 1->2 runtime=SecondaryLive | snapshot: own clips=2 notes=167 | src 9 ch=1  clips=1 notes=48
+2026-10-04T23:56:18.230+02:00   after Undo: GA clips=1 runtime=ProxyCurrent | snapshot: own clips=1 notes=166 | src 9 ch=1  clips=1 notes=48
+2026-10-04T23:56:18.237+02:00 step end ok: proxy-rec: two sources - GA row recording: the routed MIDI row is heard through the Secondary, the GA row's own clip is silent; Stop; Undo elapsedMs=2294
+2026-10-04T23:56:18.942+02:00   MIDI row armed (idle): GA runtime=ProxyCurrent recordingOverride=no tracks=8 GA clips=1 MIDI-row clips=1 MIDI-row status="" | phase=Published expected=sha256:490624560840f6cc msg="" renderedMs=49322 | identity now=sha256:490624560840f6cc comparable= rev=83 (job rev=83) published=sha256:490624560840f6cc | snapshot: own clips=1 notes=166 | src 9 ch=1  clips=1 notes=48
+2026-10-04T23:56:18.946+02:00   GA own clip: start=0 len=1920000 bpm=180 tpq=960 first notes(tick): 36@11520 43@11520 45@11520 36@12240
+2026-10-04T23:56:19.106+02:00 step end ok: proxy-rec: two sources - now arm the MIDI row instead (GA row not armed); Record elapsedMs=465
+2026-10-04T23:56:22.347+02:00   [LiveMidi] take begins at sample 168000 for 1 row(s) linear
+2026-10-04T23:56:24.382+02:00   MIDI row recording, two sources: GA runtime=SecondaryLive routed-row note 120 heard=0 GA own-clip note-ons=3 MIDI-row status="Secondary instrument used temporarily while recording"
+2026-10-04T23:56:24.389+02:00   [Rec] run boundaries: start mono=2465408 tl=168000 wrap=0 | stop mono=2563200 tl=265792 wrap=0 | captured frames=97792
+2026-10-04T23:56:24.422+02:00   [LiveMidi] take row 9 pass 0 [168000, 265792): events=2 notes=1 closedAtStop=0 cc=0 pb=0 outside=0 overflow=no clipId=2
+2026-10-04T23:56:24.425+02:00   [LiveMidi] take committed: passes=1 wrapMarkers=0 stopWrapSerial=0 start=168000 (mono 2465408) stop=265792 (mono 2563200) clips=1
+2026-10-04T23:56:24.860+02:00   after Stop: MIDI-row clips 1->2 GA runtime=SecondaryLive recordingOverride=no
+2026-10-04T23:56:25.175+02:00 step end ok: proxy-rec: two sources - MIDI row recording: the GA row's own clip is heard through the Secondary, the routed row is silent; Stop; Undo elapsedMs=2292
+2026-10-04T23:56:25.510+02:00 step end ok: proxy-rec: cleanup (Primary available again) elapsedMs=0
+2026-10-04T23:56:25.855+02:00 cleanup: deleted temp project copy C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2-proxyrectest.dalproj
+2026-10-04T23:56:25.859+02:00 RESULT: PASS scenario=proxy-recording totalMs=50522

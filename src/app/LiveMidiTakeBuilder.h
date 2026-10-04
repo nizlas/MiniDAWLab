@@ -159,6 +159,10 @@ namespace live_midi_take
         std::int64_t recordStartSample = 0;
         /// Exclusive stop boundary (the stop playhead).
         std::int64_t recordStopSample = 0;
+        /// Mono-clock position of the start boundary (engine-acknowledged); when >= 0 every event
+        /// before it on the mono clock shapes the start state only (exact, independent of the
+        /// playing flag). -1 = unknown (timeline / playing-flag rules alone).
+        std::int64_t recordStartMonoSample = -1;
         double sampleRate = 48000.0;
         double bpm = 120.0;
         int ticksPerQuarter = kDefaultExperimentalTicksPerQuarter;
@@ -302,7 +306,9 @@ namespace live_midi_take
             // A stopped event shapes the start state only while the transport still stands at (or
             // before) the record boundary — a key pressed after Stop (frozen playhead = stop
             // position) in a pass that never saw a playing event must not be invented as held.
-            const bool beforeWindow = (!e.transportPlaying && !sawPlaying && e.timelineSample <= p.recordStartSample)
+            const bool beforeByMono = p.recordStartMonoSample >= 0 && e.monoSample < p.recordStartMonoSample;
+            const bool beforeWindow = beforeByMono
+                                      || (!e.transportPlaying && !sawPlaying && e.timelineSample <= p.recordStartSample)
                                       || (e.transportPlaying && e.timelineSample < p.recordStartSample);
             if (e.overflowMarker)
             {
@@ -313,7 +319,7 @@ namespace live_midi_take
                 }
                 continue;
             }
-            const bool inWindow = e.transportPlaying && e.timelineSample >= p.recordStartSample
+            const bool inWindow = !beforeByMono && e.transportPlaying && e.timelineSample >= p.recordStartSample
                                   && e.timelineSample < p.recordStopSample;
             if (!inWindow)
             {
@@ -441,11 +447,16 @@ namespace live_midi_take
 
     struct CycleTakeParams
     {
-        /// Record boundary (count-in end) and the stop boundary as the stop read them.
+        /// Record boundary and stop boundary on the timeline (engine-acknowledged run boundaries).
         std::int64_t recordStartSample = 0;
         std::int64_t recordStopSample = 0;
-        /// Transport wrap count read together with `recordStopSample` (consistent pair): markers
-        /// with a larger serial happened after the stop and are discarded with their events.
+        /// The same boundaries on the engine's mono clock (-1 = unknown). When known they are
+        /// authoritative: events / markers at or after `recordStopMonoSample` are discarded,
+        /// events before `recordStartMonoSample` only shape the start state.
+        std::int64_t recordStartMonoSample = -1;
+        std::int64_t recordStopMonoSample = -1;
+        /// Transport wrap count at the stop boundary: markers with a larger serial happened after
+        /// the stop and are discarded with their events (second guard next to the mono stop).
         std::uint32_t stopWrapSerial = 0;
         /// Cycle range while recording (used only when `cycleActive`).
         bool cycleActive = false;
@@ -481,12 +492,13 @@ namespace live_midi_take
         // Valid wrap markers (at or before the stop), ascending on the mono clock; the first
         // marker beyond the stop serial bounds the recording on the mono clock.
         std::vector<WrapMarker> valid;
-        std::int64_t stopMono = std::numeric_limits<std::int64_t>::max();
+        std::int64_t stopMono = p.recordStopMonoSample >= 0 ? p.recordStopMonoSample
+                                                            : std::numeric_limits<std::int64_t>::max();
         if (p.cycleActive)
         {
             for (const WrapMarker& m : p.wrapMarkers)
             {
-                if (m.wrapSerial <= p.stopWrapSerial)
+                if (m.wrapSerial <= p.stopWrapSerial && m.monoSample < stopMono)
                 {
                     valid.push_back(m);
                 }
@@ -553,6 +565,8 @@ namespace live_midi_take
                 TakeBuildParams bp;
                 bp.recordStartSample = w.start;
                 bp.recordStopSample = w.end;
+                // Pass 0 starts at the run's start boundary; a later pass at its wrap marker.
+                bp.recordStartMonoSample = k == 0 ? p.recordStartMonoSample : valid[k - 1].monoSample;
                 bp.sampleRate = p.sampleRate;
                 bp.bpm = p.bpm;
                 bp.ticksPerQuarter = p.ticksPerQuarter;

@@ -526,6 +526,75 @@ bool LiveMidiInputCoordinator::liveMonitorRequestedForDestination(const TrackId 
     return false;
 }
 
+bool LiveMidiInputCoordinator::liveRecordingRequestedForDestination(const TrackId destination) const
+{
+    if (destination == kInvalidTrackId)
+    {
+        return false;
+    }
+    // A running take, or the count-in of one (the live source is prepared before the first
+    // recorded block). Arming alone is deliberately not a reason.
+    const std::vector<TrackId>& rows = takeActive_ ? takeTracks_ : pendingTakeTracks_;
+    for (const TrackId tid : rows)
+    {
+        if (destinationForTrack(tid) == destination)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void LiveMidiInputCoordinator::setTakePending(const bool pending)
+{
+    const std::vector<TrackId> before = pendingTakeTracks_;
+    pendingTakeTracks_ = pending ? armedTracksReadyToRecord() : std::vector<TrackId>{};
+    // Re-evaluate every destination that gained or lost the recording need.
+    std::set<TrackId> dests;
+    for (const TrackId tid : before)
+    {
+        dests.insert(destinationForTrack(tid));
+    }
+    for (const TrackId tid : pendingTakeTracks_)
+    {
+        dests.insert(destinationForTrack(tid));
+    }
+    if (callbacks_.refreshProxyDestination)
+    {
+        for (const TrackId d : dests)
+        {
+            if (d != kInvalidTrackId)
+            {
+                callbacks_.refreshProxyDestination(d);
+            }
+        }
+    }
+    if (callbacks_.onUiStateChanged)
+    {
+        callbacks_.onUiStateChanged();
+    }
+}
+
+void LiveMidiInputCoordinator::refreshProxyDestinationsForTakeRows(const std::vector<TrackId>& rows)
+{
+    if (!callbacks_.refreshProxyDestination)
+    {
+        return;
+    }
+    std::set<TrackId> dests;
+    for (const TrackId tid : rows)
+    {
+        dests.insert(destinationForTrack(tid));
+    }
+    for (const TrackId d : dests)
+    {
+        if (d != kInvalidTrackId)
+        {
+            callbacks_.refreshProxyDestination(d);
+        }
+    }
+}
+
 std::vector<LiveMidiInputCoordinator::ArmedRowStatus> LiveMidiInputCoordinator::armedRowsStatus() const
 {
     std::vector<ArmedRowStatus> out;
@@ -592,29 +661,14 @@ juce::String LiveMidiInputCoordinator::describeInputStatus(const TrackId trackId
         }
         return {};
     }
+    // Only real obstacles are shown; a working input shows nothing (the status area collapses).
+    // Incoming MIDI is signalled by the header's activity dot; the per-route counters stay
+    // internal (`routeActivityCount`, diagnostics / tests), never as text in the Inspector.
     juce::StringArray parts;
     const InputAvailability avail = inputAvailabilityForTrack(trackId);
     if (!avail.deliverable && avail.problem.isNotEmpty())
     {
         parts.add(avail.problem);
-    }
-    else if (monitorOn || armedOn)
-    {
-        // Deliverable and in use: tell the user whether anything has actually arrived for this row
-        // (the first question when a keyboard stays silent).
-        std::uint32_t received = 0;
-        if (publishedRouting_ != nullptr)
-        {
-            for (size_t i = 0; i < publishedRouting_->routes.size(); ++i)
-            {
-                if (publishedRouting_->routes[i].trackId == trackId)
-                {
-                    received = bus_.routeActivityCount((int)i);
-                }
-            }
-        }
-        parts.add(received == 0 ? juce::String("Ready - no MIDI received yet on this track's input")
-                                : "MIDI received: " + juce::String((int)received) + " events");
     }
     const TrackId dest = destinationForTrack(trackId);
     if (dest == kInvalidTrackId)
@@ -627,14 +681,30 @@ juce::String LiveMidiInputCoordinator::describeInputStatus(const TrackId trackId
         ExperimentalInstrumentHost* const primary = instrumentRuntime_.getInstrumentHostForTrack(dest);
         const bool primaryOk = primary != nullptr && primary->hasInstrument();
         const bool secondaryActive = instrumentRuntime_.isSecondaryTransportActive(dest);
-        const bool overrideActive = callbacks_.isLiveMonitorOverrideActive && callbacks_.isLiveMonitorOverrideActive(dest);
-        if (!primaryOk && secondaryActive && overrideActive)
+        const bool monitorOverride = callbacks_.isLiveMonitorOverrideActive && callbacks_.isLiveMonitorOverrideActive(dest);
+        const bool recordingOverride = callbacks_.isLiveRecordingOverrideActive && callbacks_.isLiveRecordingOverrideActive(dest);
+        const bool rowInTake = takeActive_ && std::find(takeTracks_.begin(), takeTracks_.end(), trackId) != takeTracks_.end();
+        const bool destOnProxy = callbacks_.isDestinationPlayingProxy && callbacks_.isDestinationPlayingProxy(dest);
+        // The Secondary as transport source means the Primary is NOT what is heard (the policy
+        // never feeds Primary/Proxy/Secondary simultaneously), so these lines follow the policy's
+        // view rather than whether a Primary plug-in object happens to exist.
+        if (secondaryActive && (monitorOverride || recordingOverride))
         {
-            parts.add("Monitoring through the Secondary instrument (temporary, while Monitor is on)");
+            parts.add(monitorOverride && recordingOverride
+                          ? juce::String("Secondary instrument used temporarily (Monitor on, recording)")
+                          : (recordingOverride ? juce::String("Secondary instrument used temporarily while recording")
+                                               : juce::String("Monitoring through the Secondary instrument (temporary, while Monitor is on)")));
         }
-        else if (!primaryOk && secondaryActive)
+        else if (secondaryActive)
         {
             parts.add("Playing through the Secondary instrument");
+        }
+        else if (destOnProxy && rowInTake)
+        {
+            // The documented limitation of a shared proxy: nothing can silence one row inside it.
+            // Decided by what the destination actually plays (the policy's view), not by whether a
+            // plug-in object exists — the policy may treat the Primary as unavailable.
+            parts.add("Recording: earlier material on this track is still heard from the proxy - no live instrument is available");
         }
         else if (!primaryOk && !secondaryActive)
         {
@@ -772,6 +842,18 @@ void LiveMidiInputCoordinator::timerCallback()
     }
     playbackEngine_.setLiveMidiRecordPlacementOffsetSamples(
         -(std::int64_t)juce::jmax(0, latencyStore_.getReportedOutputLatencySamples()));
+    // The engine-acknowledged start boundary replaces the provisional count-in read as the
+    // preview anchor as soon as it exists (identical when the transport stood still).
+    if (takeActive_ && !takeStartAcked_)
+    {
+        const PlaybackEngine::RecordRunBoundary b = playbackEngine_.recordRunStartBoundary();
+        if (b.valid)
+        {
+            takeStartSample_ = b.timelineSample;
+            takeStartMonoSample_ = b.monoSample;
+            takeStartAcked_ = true;
+        }
+    }
     drainCaptureRing();
     updateActivityFromBus();
     // A wanted device whose port was busy is retried every 2 s (another application releasing
@@ -907,8 +989,12 @@ void LiveMidiInputCoordinator::beginTake(const std::int64_t recordStartSample, c
         row.inTake = true;
     }
     // Earlier takes on the recording rows must not double the live performance: their clips are
-    // suppressed on the instrument for the duration of the take (other rows keep playing).
+    // suppressed on the instrument for the duration of the take (other rows keep playing), and
+    // destinations that play a proxy switch to a live source where one is available (the pending
+    // count-in already asked for it; this call covers rows that became ready since).
     setTakeRowsClipSuppression(true);
+    pendingTakeTracks_.clear();
+    refreshProxyDestinationsForTakeRows(takeTracks_);
     if (callbacks_.logLine)
     {
         callbacks_.logLine("[LiveMidi] take begins at sample " + juce::String((juce::int64)recordStartSample)
@@ -937,16 +1023,24 @@ void LiveMidiInputCoordinator::abortTake()
         row.inTake = false;
         row.takeEvents.clear();
     }
+    const std::vector<TrackId> rows = takeTracks_;
     takeTracks_.clear();
     takeWrapMarkers_.clear();
     takeCycleActive_ = false;
+    takeStartAcked_ = false;
+    // The recording need ends with the take: the normal source decision is re-evaluated against
+    // the then-current fingerprint (never a blind return to the previous proxy).
+    refreshProxyDestinationsForTakeRows(rows);
     if (callbacks_.onUiStateChanged)
     {
         callbacks_.onUiStateChanged();
     }
 }
 
-LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t recordStopSample,
+LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t recordStartSample,
+                                                              const std::int64_t recordStartMonoSample,
+                                                              const std::int64_t recordStopSample,
+                                                              const std::int64_t recordStopMonoSample,
                                                               const std::uint32_t stopWrapSerial)
 {
     LiveMidiTakeCommitResult result;
@@ -957,10 +1051,15 @@ LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t
     drainCaptureRing(); // include everything the audio thread captured up to the stop
     result.captureOverflowSeen = bus_.captureOverflowCount() != captureOverflowAtTakeStart_;
 
+    // The acknowledged start boundary is the take's start (the provisional count-in read is only
+    // the preview's anchor until then; both agree when the transport stood still).
+    takeStartSample_ = recordStartSample;
     ProjectMusicalTime musicalTime = sanitizeProjectMusicalTime(session_.getProjectMusicalTime());
     live_midi_take::CycleTakeParams params;
-    params.recordStartSample = takeStartSample_;
-    params.recordStopSample = takeCycleActive_ ? recordStopSample : juce::jmax(takeStartSample_ + 1, recordStopSample);
+    params.recordStartSample = recordStartSample;
+    params.recordStopSample = takeCycleActive_ ? recordStopSample : juce::jmax(recordStartSample + 1, recordStopSample);
+    params.recordStartMonoSample = recordStartMonoSample;
+    params.recordStopMonoSample = recordStopMonoSample;
     params.stopWrapSerial = stopWrapSerial;
     params.cycleActive = takeCycleActive_;
     params.leftLocatorSample = takeLeftLocator_;
@@ -1027,8 +1126,10 @@ LiveMidiTakeCommitResult LiveMidiInputCoordinator::commitTake(const std::int64_t
     {
         callbacks_.logLine("[LiveMidi] take committed: passes=" + juce::String(result.passes) + " wrapMarkers="
                            + juce::String((int)takeWrapMarkers_.size()) + " stopWrapSerial="
-                           + juce::String((int)stopWrapSerial) + " stop=" + juce::String((juce::int64)recordStopSample)
-                           + " clips=" + juce::String(result.clipsCreated));
+                           + juce::String((int)stopWrapSerial) + " start=" + juce::String((juce::int64)recordStartSample)
+                           + " (mono " + juce::String((juce::int64)recordStartMonoSample) + ") stop="
+                           + juce::String((juce::int64)recordStopSample) + " (mono "
+                           + juce::String((juce::int64)recordStopMonoSample) + ") clips=" + juce::String(result.clipsCreated));
     }
     abortTake();
     return result;

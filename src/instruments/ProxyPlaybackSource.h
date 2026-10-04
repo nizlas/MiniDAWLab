@@ -99,12 +99,44 @@ struct ProxyPlaybackView
 //==============================================================================
 // Currency: expected fingerprint under the generation's RECORDED configuration
 //==============================================================================
+/// [Message thread] Which fingerprint schema makes the CURRENT snapshot comparable with the
+/// generation `meta` was published under; 0 = not comparable (⇒ Stale).
+///   * same schema as current ⇒ current schema;
+///   * generation under the additive schema 1 ⇒ schema 1 ONLY when the current snapshot is
+///     provably layer-insensitive (`proxy_snapshot::snapshotIsLayerInsensitive`: no overlapping
+///     clips, stored order = plan order, every controller point inside its clip window), because
+///     only then the layered bake renders exactly what the additive bake rendered. A snapshot
+///     with overlaps — or with controller points outside a window, even without overlaps — is
+///     never comparable: such a generation stays Stale under the established policy and needs a
+///     re-render on a machine with the Primary.
+/// Algorithm-id drift is never comparable.
+[[nodiscard]] inline std::uint32_t comparableFingerprintSchemaFor(const ProjectFileProxyMetadataV20& meta,
+                                                                  const proxy_snapshot::ProxyRenderSnapshot& snapshot) noexcept
+{
+    if (meta.fingerprintAlgorithmId != (int)proxy_fingerprint::kFingerprintAlgorithmId)
+    {
+        return 0;
+    }
+    if (meta.fingerprintSchemaVersion == (int)proxy_fingerprint::kFingerprintSchemaVersion)
+    {
+        return proxy_fingerprint::kFingerprintSchemaVersion;
+    }
+    if (meta.fingerprintSchemaVersion == (int)proxy_fingerprint::kFingerprintSchemaVersionAdditive
+        && proxy_snapshot::snapshotIsLayerInsensitive(snapshot))
+    {
+        return proxy_fingerprint::kFingerprintSchemaVersionAdditive;
+    }
+    return 0;
+}
+
 /// [Message thread] §12.3 recomputation for the missing-Primary case: identical
 /// BuildInputs to production capture, except every non-musical input (plugin
 /// identity, state revision, render config, pairing byte) comes from the
 /// generation's persisted v20 record instead of the live host. Returns an empty
-/// string when the metadata carries no recorded identity (pre-P1G metadata) —
-/// callers MUST treat that as not-verifiable (Stale), never as a match.
+/// string when the metadata carries no recorded identity (pre-P1G metadata) or
+/// when its schema is not comparable with the current content (see
+/// `comparableFingerprintSchemaFor`) — callers MUST treat that as not-verifiable
+/// (Stale), never as a match.
 [[nodiscard]] inline juce::String computeExpectedFingerprintUnderRecordedConfig(
     const SessionSnapshot& sessionSnap,
     const TrackId destination,
@@ -134,7 +166,12 @@ struct ProxyPlaybackView
     in.instrumentClassifiedHostEventDriven = false;
     const proxy_snapshot::ProxyRenderSnapshot snap
         = proxy_snapshot::buildProxyRenderSnapshot(sessionSnap, destination, clipsForTrack, in);
-    return proxy_fingerprint::computeFingerprint(snap);
+    const std::uint32_t schema = comparableFingerprintSchemaFor(meta, snap);
+    if (schema == 0)
+    {
+        return {};
+    }
+    return proxy_fingerprint::computeFingerprint(snap, schema);
 }
 
 /// [Message thread] §12.3 persisted save-pairing: with Primary missing, the

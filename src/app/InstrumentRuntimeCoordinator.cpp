@@ -272,8 +272,20 @@ std::vector<std::tuple<TrackId, const void*, const void*>>
     for (const auto& [tid, host] : instrumentHostsByTrackId_)
     {
         const auto ctlIt = instrumentControllersByTrackId_.find(tid);
+        // The TRANSPORT host of the row: the Secondary while it is the transport source (P2 /
+        // live-source override), otherwise the Primary — the same choice the playback bridge
+        // publishes, so the bridge invariant compares like with like.
+        const void* transportHost = static_cast<const void*>(host.get());
+        if (secondaryTransportActive_.count(tid) != 0)
+        {
+            if (ExperimentalInstrumentHost* const sh = getSecondaryInstrumentHostForTrack(tid);
+                sh != nullptr && sh->hasInstrument())
+            {
+                transportHost = static_cast<const void*>(sh);
+            }
+        }
         out.emplace_back(tid,
-                         static_cast<const void*>(host.get()),
+                         transportHost,
                          ctlIt != instrumentControllersByTrackId_.end()
                              ? static_cast<const void*>(ctlIt->second.get())
                              : nullptr);

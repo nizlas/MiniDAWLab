@@ -343,6 +343,60 @@ public:
         liveMidiRecordPlacementOffsetSamples_.store(samples, std::memory_order_relaxed);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // Recording run — ONE capture boundary for audio and MIDI, acknowledged by the audio thread
+    // -----------------------------------------------------------------------------------------
+    // A recording run (audio take, MIDI take, or both) starts and stops on a BLOCK BOUNDARY that
+    // the audio callback itself stamps: the monotone device sample, the transport position and
+    // the cycle wrap serial of that block's first sample, all read in the same callback. The
+    // audio recorder receives input only while the run is `Running`, the MIDI take is cut at the
+    // same boundary (`LiveMidiTakeBuilder` discards everything on the mono clock at or after the
+    // stop), and both finalizations read these acknowledged values instead of separate UI reads
+    // — so audio and MIDI end the same run at the same instant. Latency compensation stays
+    // separate: this is the RAW capture boundary; placement offsets are applied by the
+    // coordinators afterwards. The message thread requests, the audio thread acknowledges;
+    // `waitForRecordRunStop` bounds the wait so a stopped / lost device never blocks Stop.
+    enum class RecordRunState : int
+    {
+        Idle = 0,
+        StartRequested,
+        Running,
+        StopRequested,
+        Stopped,
+    };
+    struct RecordRunBoundary
+    {
+        std::int64_t monoSample = 0;     ///< engine device clock at the boundary block's first sample
+        std::int64_t timelineSample = 0; ///< transport position at that sample (raw, uncompensated)
+        std::uint32_t wrapSerial = 0;    ///< transport cycle wrap count at that sample
+        bool valid = false;
+    };
+    /// [Message thread] After the recorder / MIDI take are prepared and the Playing intent was
+    /// requested: the next callback stamps the start boundary and begins capturing.
+    void requestRecordRunStart() noexcept;
+    /// [Message thread] After the Stopped intent was requested: the next callback stamps the stop
+    /// boundary (that block captures nothing) and acknowledges.
+    void requestRecordRunStop() noexcept;
+    /// [Message thread] Poll until the audio thread acknowledged the stop, at most `timeoutMs`.
+    /// On timeout (no callback arrives: device stopped / lost) the run is closed from the message
+    /// thread with the given fallback boundary and `false` is returned.
+    bool waitForRecordRunStop(int timeoutMs, const RecordRunBoundary& fallbackBoundary) noexcept;
+    /// [Message thread] Back to Idle after the finalizations consumed the boundaries.
+    void finishRecordRun() noexcept;
+    [[nodiscard]] RecordRunState recordRunState() const noexcept
+    {
+        return static_cast<RecordRunState>(recordRunState_.load(std::memory_order_acquire));
+    }
+    /// [Any thread] Boundaries (valid once the matching acknowledgement happened).
+    [[nodiscard]] RecordRunBoundary recordRunStartBoundary() const noexcept;
+    [[nodiscard]] RecordRunBoundary recordRunStopBoundary() const noexcept;
+    /// [Any thread] The engine's monotone device clock as of the last callback (diagnostics and
+    /// the no-callback fallback boundary).
+    [[nodiscard]] std::int64_t readMonoSampleClockForUi() const noexcept
+    {
+        return monoSampleClockPublished_.load(std::memory_order_relaxed);
+    }
+
     /// [Message thread] Physical device input channels active at the last device start, as a bit
     /// mask (bit N = physical input N enabled). Matches the callback's packed input array:
     /// active-array position of physical channel N = popcount of lower set bits.
@@ -484,9 +538,28 @@ private:
     std::atomic<live_midi::LiveMidiInputBus*> liveMidiBus_{ nullptr };
     std::atomic<std::int64_t> liveMidiRecordPlacementOffsetSamples_{ 0 };
     /// [Audio thread] Monotone device sample clock: advanced by every callback's block size on
-    /// every path (gated, stopped, playing). The time base of the live-MIDI anchors and cycle
-    /// wrap markers (`LiveMidiInputBus` time model); never reset while the device runs.
+    /// every path (gated, stopped, playing). The time base of the live-MIDI anchors, cycle
+    /// wrap markers and the record-run boundaries; never reset while the device runs.
     std::int64_t monoSampleClock_ = 0;
+    std::atomic<std::int64_t> monoSampleClockPublished_{ 0 };
+
+    /// Record run (see the public section). State transitions: message thread Idle→StartRequested
+    /// and Running→StopRequested; audio thread StartRequested→Running and StopRequested→Stopped
+    /// (boundary fields written BEFORE the release-store of the state); message thread
+    /// Stopped→Idle (and StopRequested→Stopped only on the no-callback timeout).
+    std::atomic<int> recordRunState_{ 0 };
+    std::atomic<std::int64_t> recordRunStartMono_{ 0 };
+    std::atomic<std::int64_t> recordRunStartTimeline_{ 0 };
+    std::atomic<std::uint32_t> recordRunStartWrap_{ 0 };
+    std::atomic<std::int64_t> recordRunStopMono_{ 0 };
+    std::atomic<std::int64_t> recordRunStopTimeline_{ 0 };
+    std::atomic<std::uint32_t> recordRunStopWrap_{ 0 };
+    /// True from the audio thread's start acknowledgement until the run is finished: tells the
+    /// message thread (no-callback fallback) whether the start boundary holds THIS run's values.
+    std::atomic<bool> recordRunStartAcked_{ false };
+    /// [Audio thread] Acknowledge a pending start / stop at this block's first sample; returns
+    /// true while the run captures (input is pushed to the recorder, transport runs past the end).
+    bool audioThread_updateRecordRun(std::int64_t monoSampleAtBlockStart, std::int64_t playheadAtBlockStart) noexcept;
     /// [Audio thread] Adapter from the bus's delivery seam onto the host's per-block MIDI buffer.
     static void audioThread_deliverLiveMidiToHost(void* context, ExperimentalInstrumentHost* host,
                                                   int sampleOffset, const juce::MidiMessage& message) noexcept;

@@ -1,4 +1,4 @@
-﻿#include <JuceHeader.h>
+#include <JuceHeader.h>
 
 #include <algorithm>
 #include <cmath>
@@ -389,6 +389,7 @@ public:
         recordingCoordinator_ = std::make_unique<RecordingCoordinator>(
             transport,
             session,
+            playbackEngine_,
             deviceManager,
             recorder_,
             countInClicks_,
@@ -774,6 +775,12 @@ public:
                 return liveMidiInputCoordinator_ != nullptr
                        && liveMidiInputCoordinator_->liveMonitorRequestedForDestination(tid);
             };
+            // A take on one of the destination's source rows needs a live source too (the row's
+            // earlier clips must be silent) — evaluated separately from Monitor.
+            pbDeps.liveRecordingRequested = [this](const TrackId tid) {
+                return liveMidiInputCoordinator_ != nullptr
+                       && liveMidiInputCoordinator_->liveRecordingRequestedForDestination(tid);
+            };
             proxyPlaybackCoordinator_
                 = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
         }
@@ -796,6 +803,12 @@ public:
                 },
                 [this](const TrackId dest) {
                     return proxyPlaybackCoordinator_ != nullptr && proxyPlaybackCoordinator_->isLiveMonitorOverrideActive(dest);
+                },
+                [this](const TrackId dest) {
+                    return proxyPlaybackCoordinator_ != nullptr && proxyPlaybackCoordinator_->isLiveRecordingOverrideActive(dest);
+                },
+                [this](const TrackId dest) {
+                    return proxyPlaybackCoordinator_ != nullptr && proxyPlaybackCoordinator_->isPlayingProxy(dest);
                 },
                 [this] {
                     if (instrumentTimelineRowCoordinator_ != nullptr)
@@ -832,8 +845,10 @@ public:
                 liveMidiInputCoordinator_->beginTake(startSample, sr, cycleActive, locL, locR, wrapSerialAtStart);
                 trackLanesView.repaint();
             },
-            [this](const std::int64_t stopSample, const std::uint32_t stopWrapSerial) {
-                const LiveMidiTakeCommitResult r = liveMidiInputCoordinator_->commitTake(stopSample, stopWrapSerial);
+            [this](const RecordRunBoundaries& run) {
+                const LiveMidiTakeCommitResult r = liveMidiInputCoordinator_->commitTake(
+                    run.startTimelineSample, run.startMonoSample, run.stopTimelineSample, run.stopMonoSample,
+                    run.stopWrapSerial);
                 if (r.captureOverflowSeen)
                 {
                     juce::AlertWindow::showMessageBoxAsync(
@@ -854,7 +869,8 @@ public:
                 {
                     commit();
                 }
-            });
+            },
+            [this](const bool pending) { liveMidiInputCoordinator_->setTakePending(pending); });
 
         // P1H: the per-destination update-policy engine (§18.1). Same project-runtime owner as
         // the render engine and playback coordinator; observes canonical identity, runs the
@@ -4513,6 +4529,76 @@ public:
             }
             return out.trim();
         };
+        hooks.proxySnapshotSourcesText = [this](const TrackId destination) -> juce::String {
+            const auto sessionSnap = session.loadSessionSnapshotForAudioThread();
+            if (sessionSnap == nullptr || instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return {};
+            }
+            proxy_snapshot::BuildInputs in;
+            in.renderConfig.renderSampleRate = 48000.0;
+            in.renderConfig.timelineReferenceRate = session.timelineSampleRateOr(48000.0);
+            const auto clipsFor = [this](const TrackId tid) {
+                std::vector<const InstrumentMidiClip*> v;
+                InstrumentTrackController* c = instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid);
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiContentControllerForTrack(tid);
+                }
+                if (c == nullptr)
+                {
+                    c = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+                }
+                if (c != nullptr)
+                {
+                    for (const auto& up : c->getClips())
+                    {
+                        if (up != nullptr)
+                        {
+                            v.push_back(up.get());
+                        }
+                    }
+                }
+                return v;
+            };
+            const proxy_snapshot::ProxyRenderSnapshot snap
+                = proxy_snapshot::buildProxyRenderSnapshot(*sessionSnap, destination, clipsFor, in);
+            juce::String out;
+            const auto describe = [&out](const juce::String& label, const std::vector<proxy_snapshot::SnapshotClip>& clips) {
+                int notes = 0;
+                for (const auto& c : clips)
+                {
+                    notes += (int)c.notes.size();
+                }
+                out << label << " clips=" << (int)clips.size() << " notes=" << notes;
+            };
+            describe("own", snap.destinationClips);
+            for (const auto& s : snap.sources)
+            {
+                out << " | src " << juce::String((juce::int64)s.trackId) << " ch=" << s.midiOutputChannel << (s.trackOff ? " off" : "") << (s.muted ? " muted" : "") << " ";
+                describe("", s.clips);
+            }
+            return out;
+        };
+        hooks.proxyDeleteUnpublishedGenerationFiles = [this](const TrackId tid) -> int {
+            const juce::File pf = session.getCurrentProjectFile();
+            if (pf == juce::File() || proxyRenderEngine_ == nullptr)
+            {
+                return 0;
+            }
+            const juce::String published = proxyRenderEngine_->publishedGenerationId(tid);
+            const juce::String keep = published.isNotEmpty() ? proxy_store::generationFileName(tid, published) : juce::String();
+            const juce::String prefix = "track_" + juce::String((juce::int64)tid) + "_";
+            int removed = 0;
+            for (const auto& f : proxy_store::proxyDirectory(pf.getParentDirectory()).findChildFiles(juce::File::findFiles, false, "*.wav"))
+            {
+                if (f.getFileName().startsWith(prefix) && f.getFileName() != keep && f.deleteFile())
+                {
+                    ++removed;
+                }
+            }
+            return removed;
+        };
         hooks.liveMidiTakePreviewGeometry = [this](const TrackId tid, int& x0, int& x1, float& originX, std::int64_t& visStart,
                                                    double& spp) -> bool {
             if (instrumentTimelineRowCoordinator_ == nullptr)
@@ -4559,6 +4645,195 @@ public:
                 return;
             }
             timelineViewport_.panBySamples(delta, w, arr);
+        };
+        // --- Proxy + recording, shared stop boundary, extent growth, schema-1 proxies ---------
+        hooks.proxyForcePrimaryUnavailable = [this](const TrackId tid, const bool unavailable) {
+            if (proxyPlaybackCoordinator_ != nullptr)
+            {
+                proxyPlaybackCoordinator_->setPrimaryForcedUnavailableForTests(tid, unavailable);
+                proxyPlaybackCoordinator_->refreshDestination(tid);
+            }
+        };
+        hooks.proxyRuntimeStateName = [this](const TrackId tid) -> juce::String {
+            return proxyPlaybackCoordinator_ != nullptr
+                       ? juce::String(proxy_playback::proxyPlaybackSourceStateName(proxyPlaybackCoordinator_->runtimeStateForTrack(tid)))
+                       : juce::String("n/a");
+        };
+        hooks.proxyDestinationStateName = [this](const TrackId tid) -> juce::String {
+            switch (proxyRenderScheduler_.destinationState(tid))
+            {
+                case proxy_render::ProxyDestinationState::Absent: return "Absent";
+                case proxy_render::ProxyDestinationState::Current: return "Current";
+                case proxy_render::ProxyDestinationState::Stale: return "Stale";
+                case proxy_render::ProxyDestinationState::Rendering: return "Rendering";
+                case proxy_render::ProxyDestinationState::Failed: return "Failed";
+            }
+            return "?";
+        };
+        hooks.proxyIsLiveRecordingOverrideActive = [this](const TrackId tid) {
+            return proxyPlaybackCoordinator_ != nullptr && proxyPlaybackCoordinator_->isLiveRecordingOverrideActive(tid);
+        };
+        hooks.proxyIsLiveMonitorOverrideActive = [this](const TrackId tid) {
+            return proxyPlaybackCoordinator_ != nullptr && proxyPlaybackCoordinator_->isLiveMonitorOverrideActive(tid);
+        };
+        hooks.proxyGenerationInfo = [this](const TrackId tid) -> juce::String {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid) : nullptr;
+            const auto* meta = c != nullptr ? c->getProxyMetadata() : nullptr;
+            return meta == nullptr ? juce::String()
+                                   : meta->generationId + " schema=" + juce::String(meta->fingerprintSchemaVersion)
+                                         + " pub=" + juce::String((juce::int64)meta->primaryStateRevisionAtPublish)
+                                         + " save=" + juce::String((juce::int64)meta->primaryStateRevisionAtSave);
+        };
+        hooks.proxyCopySecondaryConfigFromTrack = [this](const TrackId target, const TrackId from, juce::String& failReason) -> bool {
+            InstrumentTrackController* const dst
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(target) : nullptr;
+            InstrumentTrackController* const src
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(from) : nullptr;
+            if (dst == nullptr || src == nullptr || !src->hasSecondaryInstrument())
+            {
+                failReason = "source track has no Secondary to copy";
+                return false;
+            }
+            (void)dst->setSecondaryInstrumentFromUi(src->getSecondaryDescriptor(), src->getSecondaryPluginBundlePath());
+            instrumentRuntimeCoordinator_->noteSecondaryConfigurationChanged(target);
+            if (proxyPlaybackCoordinator_ != nullptr)
+            {
+                proxyPlaybackCoordinator_->refreshDestination(target);
+            }
+            return true;
+        };
+        hooks.liveMidiAttachCaptureSinkToSecondary = [this](const TrackId tid, juce::String& failReason) -> bool {
+            ExperimentalInstrumentHost* const h
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid) : nullptr;
+            if (h == nullptr)
+            {
+                failReason = "no Secondary host for track " + juce::String((juce::int64)tid);
+                return false;
+            }
+            stabilityLiveMidiCaptureSink_.reset();
+            h->installMidiDeliveryCaptureSinkForTests(&stabilityLiveMidiCaptureSink_);
+            return true;
+        };
+        hooks.midiInputStatusTextForTrack = [this](const TrackId tid) -> juce::String {
+            return liveMidiInputCoordinator_ != nullptr ? liveMidiInputCoordinator_->describeInputStatus(tid) : juce::String();
+        };
+        hooks.addMidiSourceRowRoutedTo = [this](const TrackId destination, const int pitch, const int noteCount,
+                                                juce::String& failReason) -> TrackId {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                failReason = "no instrument runtime coordinator";
+                return kInvalidTrackId;
+            }
+            const auto midiIdOpt = session.addMidiTrack();
+            if (!midiIdOpt.has_value())
+            {
+                failReason = "could not add a Midi track row";
+                return kInvalidTrackId;
+            }
+            InstrumentTrackController* const midiCtl
+                = instrumentRuntimeCoordinator_->getOrCreateMidiContentControllerForTrack(*midiIdOpt);
+            if (midiCtl == nullptr)
+            {
+                failReason = "could not create the midi content controller";
+                return kInvalidTrackId;
+            }
+            if (!session.setTrackMidiDestination(*midiIdOpt, destination))
+            {
+                failReason = "setTrackMidiDestination refused";
+                return kInvalidTrackId;
+            }
+            midiCtl->refreshMidiOutputChannelFromSession();
+            std::vector<TimelineMidiNote> notes;
+            for (int q = 0; q < noteCount; ++q)
+            {
+                TimelineMidiNote n;
+                n.midiNote = pitch;
+                n.velocity = 100;
+                n.channel = 1;
+                n.startTick = static_cast<std::int64_t>(q) * kDefaultExperimentalTicksPerQuarter;
+                n.durationTicks = kDefaultExperimentalTicksPerQuarter / 2;
+                notes.push_back(n);
+            }
+            if (midiCtl->appendImportedTimelineMidiClipAtSamples(notes, 0, "RoutedSource") == 0)
+            {
+                failReason = "could not create the routed source clip";
+                return kInvalidTrackId;
+            }
+            // Same post-add sync as the UI add-track menu (routing plan indices shifted; new
+            // timeline row attached).
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            refreshInstrumentUi();
+            inspectorView_.refreshFromSession();
+            return *midiIdOpt;
+        };
+        hooks.proxyRenderNow = [this](const TrackId tid) -> bool {
+            // The Inspector path: update mode -> Manual (temp project only), then "Render now".
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid) : nullptr;
+            if (c == nullptr || proxyUpdatePolicyService_ == nullptr)
+            {
+                return false;
+            }
+            if (!c->setProxyUpdateModeFromUi(proxy_policy::proxyUpdateModePersistedString(proxy_policy::ProxyUpdateMode::Manual)))
+            {
+                return false;
+            }
+            proxyUpdatePolicyService_->tick();
+            return proxyUpdatePolicyService_->renderNow(tid);
+        };
+        hooks.proxyJobStatusText = [this](const TrackId tid) -> juce::String {
+            const proxy_render::ProxyJobStatus st = proxyRenderScheduler_.jobStatus(tid);
+            juce::String s = st.exists ? juce::String("phase=") + proxy_render::toString(st.phase) + " expected=" + st.expectedFingerprint.substring(0, 23)
+                                             + " msg=\"" + st.message + "\" renderedMs=" + juce::String((juce::int64)st.progressRenderedMs)
+                                       : juce::String("no job");
+            if (proxyRenderEngine_ != nullptr)
+            {
+                const proxy_render::ProxyCurrentIdentity now = proxyRenderEngine_->currentIdentity(tid);
+                s << " | identity now=" << now.expectedFingerprint.substring(0, 23) << " comparable=" << now.publishedComparableFingerprint.substring(0, 23)
+                  << " rev=" << juce::String((juce::int64)now.primarySemanticRevision)
+                  << " (job rev=" << juce::String((juce::int64)st.primarySemanticRevision) << ")"
+                  << " published=" << proxyRenderEngine_->publishedGenerationId(tid).substring(0, 23);
+            }
+            return s;
+        };
+        hooks.recordingPlacementOffsetSamples = [this]() -> std::int64_t { return latencyStore_.getCurrentRecordingOffsetSamples(); };
+        hooks.getStoredArrangementExtentSamples = [this]() -> std::int64_t { return session.getStoredArrangementExtentSamples(); };
+        hooks.getArrangementExtentSamples = [this]() -> std::int64_t { return session.getArrangementExtentSamples(); };
+        hooks.lastRecordRunBoundaries = [this]() -> juce::String {
+            if (recordingCoordinator_ == nullptr)
+            {
+                return {};
+            }
+            const RecordRunBoundaries b = recordingCoordinator_->getLastRunBoundariesForDiagnostics();
+            return "start tl=" + juce::String((juce::int64)b.startTimelineSample) + " mono=" + juce::String((juce::int64)b.startMonoSample)
+                   + " wrap=" + juce::String((int)b.startWrapSerial) + " | stop tl=" + juce::String((juce::int64)b.stopTimelineSample)
+                   + " mono=" + juce::String((juce::int64)b.stopMonoSample) + " wrap=" + juce::String((int)b.stopWrapSerial)
+                   + " | frames=" + juce::String((juce::int64)(b.stopMonoSample - b.startMonoSample))
+                   + " acked=" + (b.acknowledgedByEngine ? "yes" : "no");
+        };
+        hooks.deviceBlockSizeSamples = [this]() -> int {
+            juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
+            return dev != nullptr ? dev->getCurrentBufferSizeSamples() : 0;
+        };
+        hooks.closeAudioDeviceForTest = [this]() -> bool {
+            if (deviceManager.getCurrentAudioDevice() == nullptr)
+            {
+                return false;
+            }
+            deviceManager.closeAudioDevice();
+            return deviceManager.getCurrentAudioDevice() == nullptr;
+        };
+        hooks.restartAudioDeviceForTest = [this](juce::String& failReason) -> bool {
+            deviceManager.restartLastAudioDevice();
+            juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
+            if (dev == nullptr || !dev->isOpen())
+            {
+                failReason = "audio device did not restart";
+                return false;
+            }
+            return true;
         };
         hooks.audioClipWindowsForTrack = [this](const TrackId tid) {
             std::vector<std::pair<std::int64_t, std::int64_t>> out;

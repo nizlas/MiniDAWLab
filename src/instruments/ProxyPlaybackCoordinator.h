@@ -103,6 +103,12 @@ public:
         /// becomes the transport source TEMPORARILY (for existing clips AND the live input — one
         /// instance, never proxy + live in parallel). Optional; absent = never requested.
         std::function<bool(TrackId)> liveMonitorRequested;
+        /// Live-MIDI slice: true while a take is running (or its count-in is pending) on a source
+        /// row of this destination. The recording row's earlier clips must stay silent during the
+        /// take, which only a LIVE source can do (a proxy WAV already contains them), so the same
+        /// temporary Secondary selection applies — independently of Monitor (Monitor off still
+        /// records without live delivery). Arming alone never sets this. Optional.
+        std::function<bool(TrackId)> liveRecordingRequested;
     };
 
     explicit ProxyPlaybackCoordinator(Dependencies deps) : deps_(std::move(deps)) {}
@@ -298,9 +304,11 @@ private:
         bool silentGeneration = false;
         juce::String generationId;
         juce::String cacheKey; ///< generation + engine rate (reader reuse/coalescing)
-        /// The Secondary was chosen ONLY because live monitoring needs a live source (a Current
-        /// proxy would otherwise have been selected). Source selection only — never currency.
+        /// The Secondary was chosen ONLY because a live source is needed (a Current proxy would
+        /// otherwise have been selected): for monitoring and/or for a running take. Source
+        /// selection only — never currency, identity or plugin state.
         bool liveMonitorOverride = false;
+        bool liveRecordingOverride = false;
     };
 
     struct PublishedDestination
@@ -311,6 +319,7 @@ private:
         juce::String cacheKey;
         std::uint64_t lastSeenUnderruns = 0;
         bool liveMonitorOverride = false;
+        bool liveRecordingOverride = false;
     };
 
 public:
@@ -320,6 +329,20 @@ public:
     {
         const auto it = published_.find(destination);
         return it != published_.end() && it->second.liveMonitorOverride;
+    }
+    /// [Message thread] True while the destination plays its Secondary temporarily because a
+    /// take runs on one of its source rows (earlier clips of that row must stay silent).
+    [[nodiscard]] bool isLiveRecordingOverrideActive(const TrackId destination) const
+    {
+        const auto it = published_.find(destination);
+        return it != published_.end() && it->second.liveRecordingOverride;
+    }
+    /// [Message thread] True while the published decision plays the proxy generation (a proxy
+    /// cannot silence one source row — callers tell the user so during a take).
+    [[nodiscard]] bool isPlayingProxy(const TrackId destination) const
+    {
+        const auto it = published_.find(destination);
+        return it != published_.end() && it->second.view != nullptr && it->second.view->useProxy;
     }
 
 private:
@@ -386,17 +409,26 @@ private:
             ev.generationId = meta->generationId;
         }
 
-        // ---- Live-monitoring override (live MIDI slice). A Current proxy cannot play new notes:
-        // while a monitored row targets this destination, the configured Secondary — when it can
-        // be loaded — becomes the transport source instead of the proxy, for the background clips
-        // AND the live input (one instance; proxy and live never sound together). Generation
-        // currency is untouched: Monitor on/off never makes the proxy stale or the project dirty.
-        // With no usable Secondary the proxy keeps playing and live monitoring is reported absent.
-        if (ev.decision.useProxy && deps_.liveMonitorRequested && deps_.liveMonitorRequested(destination)
+        // ---- Live-source override (live MIDI slice). A Current proxy cannot play new notes and
+        // cannot silence one source row's earlier clips (they are baked into the WAV): while a
+        // monitored row targets this destination, or a take runs / is pending on one of its source
+        // rows, the configured Secondary — when it can be loaded — becomes the transport source
+        // instead of the proxy, for the background clips AND the live input (one instance; proxy
+        // and live never sound together; the recording row's clips are then suppressed on the
+        // live instrument). The two needs are evaluated separately and both reported. Generation
+        // currency, identity and plugin state are untouched: the override ends with the need and
+        // the normal decision is re-evaluated against the then-current fingerprint. With no usable
+        // Secondary the proxy keeps playing; the UI reports the consequence per case.
+        const bool monitorNeedsLive
+            = deps_.liveMonitorRequested && deps_.liveMonitorRequested(destination);
+        const bool recordingNeedsLive
+            = deps_.liveRecordingRequested && deps_.liveRecordingRequested(destination);
+        if (ev.decision.useProxy && (monitorNeedsLive || recordingNeedsLive)
             && deps_.secondaryUsable && deps_.secondaryUsable(destination))
         {
             ev.decision = { ProxyPlaybackSourceState::SecondaryLive, false };
-            ev.liveMonitorOverride = true;
+            ev.liveMonitorOverride = monitorNeedsLive;
+            ev.liveRecordingOverride = recordingNeedsLive;
         }
 
         if (!ev.decision.useProxy)
@@ -409,14 +441,15 @@ private:
 
     /// §12.3 missing-Primary currency: recompute the expected fingerprint UNDER
     /// THE GENERATION'S RECORDED CONFIGURATION and require the persisted
-    /// save-pairing (or in-session publication). Schema/algorithm version drift
-    /// makes recomputation incomparable -> conservatively Stale.
+    /// save-pairing (or in-session publication). Schema/algorithm drift is decided
+    /// by `comparableFingerprintSchemaFor` inside the recompute (an additive
+    /// schema-1 generation stays comparable only for provably layer-insensitive
+    /// content) -> otherwise conservatively Stale.
     [[nodiscard]] ProxyCurrencyVerdict
         evaluateMissingPrimaryCurrency(const TrackId destination,
                                        const ProjectFileProxyMetadataV20& meta) const
     {
-        if (meta.fingerprintSchemaVersion != (int)proxy_fingerprint::kFingerprintSchemaVersion
-            || meta.fingerprintAlgorithmId != (int)proxy_fingerprint::kFingerprintAlgorithmId)
+        if (meta.fingerprintAlgorithmId != (int)proxy_fingerprint::kFingerprintAlgorithmId)
         {
             return ProxyCurrencyVerdict::Stale;
         }
@@ -511,6 +544,7 @@ private:
         next.cacheKey = ev.cacheKey;
         next.reader = ev.reader;
         next.liveMonitorOverride = ev.liveMonitorOverride;
+        next.liveRecordingOverride = ev.liveRecordingOverride;
 
         if (ev.decision.useProxy)
         {

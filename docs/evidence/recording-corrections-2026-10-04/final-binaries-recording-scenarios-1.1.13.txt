@@ -1,0 +1,8 @@
+﻿DEBUG midi-cycle-takes [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-cycle-takes totalMs=94624
+DEBUG midi-cycle-takes [TSE_pt2.dalproj] exit=-1073741819 :: RESULT: PASS scenario=midi-cycle-takes totalMs=107791
+DEBUG live-midi [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=live-midi totalMs=43677
+DEBUG proxy-recording [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=proxy-recording totalMs=50522
+RELEASE midi-cycle-takes [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-cycle-takes totalMs=94321
+RELEASE midi-cycle-takes [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=midi-cycle-takes totalMs=105814
+RELEASE live-midi [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=live-midi totalMs=43198
+RELEASE proxy-recording [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=proxy-recording totalMs=49658

@@ -98,6 +98,12 @@ public:
         /// True while the destination plays its Secondary ONLY because live monitoring needs a
         /// live source (status text "temporary"). Optional.
         std::function<bool(TrackId destination)> isLiveMonitorOverrideActive;
+        /// True while the destination plays its Secondary ONLY because a take runs on one of its
+        /// source rows (status text). Optional.
+        std::function<bool(TrackId destination)> isLiveRecordingOverrideActive;
+        /// True while the destination plays its proxy generation (a proxy cannot silence one
+        /// source row's earlier clips — the status says so during a take). Optional.
+        std::function<bool(TrackId destination)> isDestinationPlayingProxy;
         /// Header / lane repaint when Monitor, Arm or MIDI activity changes visibly.
         std::function<void()> onUiStateChanged;
         /// Diagnostics line (stability log / juce::Logger) — optional.
@@ -132,6 +138,14 @@ public:
     /// True when any monitored row (Instrument row itself, or a Midi row routed via MIDI To) with
     /// a configured input targets `destination` — the proxy policy then needs a live source.
     [[nodiscard]] bool liveMonitorRequestedForDestination(TrackId destination) const;
+    /// True when a take runs (or its count-in is pending) on a source row of `destination` — the
+    /// recording row's earlier clips must be silenced, which only a live source can do. Separate
+    /// from the Monitor need on purpose: Monitor off still records without live delivery.
+    [[nodiscard]] bool liveRecordingRequestedForDestination(TrackId destination) const;
+    /// Count-in started / cancelled (`RecordingCoordinator`): the rows that will record are known,
+    /// so destinations playing a proxy can prepare their live source off the audio thread before
+    /// the first recorded block. `beginTake` / `abortTake` supersede it.
+    void setTakePending(bool pending);
 
     // ------------------------------------------------------------------ status for the UI
     /// Rows that are armed AND have a MIDI input that can deliver right now (the rows a Record
@@ -174,12 +188,16 @@ public:
     [[nodiscard]] const std::vector<TrackId>& takeTracks() const noexcept { return takeTracks_; }
     /// Lane preview data for `trackId` (inactive when the row is not part of the running take).
     [[nodiscard]] LiveMidiTakePreviewInfo takePreviewInfoForTrack(TrackId trackId) const noexcept;
-    /// Finalize at `recordStopSample` (read together with `stopWrapSerial`, the transport wrap
-    /// count at the stop) and append the takes: one clip per pass and row — with Cycle every pass
-    /// of positive length (silent ones too: they mask earlier material like audio passes), with
-    /// Cycle off only a take with content. Passes are appended oldest first, so the latest pass
-    /// is the topmost layer. Message thread; the caller wraps this in ONE undo step. Clears the take.
-    [[nodiscard]] LiveMidiTakeCommitResult commitTake(std::int64_t recordStopSample, std::uint32_t stopWrapSerial);
+    /// Finalize at the engine-acknowledged run boundaries (`PlaybackEngine` record run — the
+    /// same pair the audio take uses: timeline + mono clock of the start and the stop, and the
+    /// wrap serial at the stop) and append the takes: one clip per pass and row — with Cycle
+    /// every pass of positive length (silent ones too: they mask earlier material like audio
+    /// passes), with Cycle off only a take with content. Passes are appended oldest first, so
+    /// the latest pass is the topmost layer. Message thread; the caller wraps this in ONE undo
+    /// step. Clears the take. Mono values < 0 = unknown (fallback to timeline rules).
+    [[nodiscard]] LiveMidiTakeCommitResult commitTake(std::int64_t recordStartSample, std::int64_t recordStartMonoSample,
+                                                      std::int64_t recordStopSample, std::int64_t recordStopMonoSample,
+                                                      std::uint32_t stopWrapSerial);
     /// Drop the take without creating clips (cancel / failure paths).
     void abortTake();
 
@@ -265,7 +283,13 @@ private:
     std::int64_t takeRightLocator_ = 0;
     std::uint32_t takeWrapSerialAtStart_ = 0;
     std::vector<live_midi_take::WrapMarker> takeWrapMarkers_;
+    /// Rows a pending count-in will record (empty outside a count-in / once the take runs).
+    std::vector<TrackId> pendingTakeTracks_;
+    /// Engine-acknowledged start boundary adopted (see `PlaybackEngine` record run).
+    bool takeStartAcked_ = false;
+    std::int64_t takeStartMonoSample_ = -1;
     void setTakeRowsClipSuppression(bool suppressed);
+    void refreshProxyDestinationsForTakeRows(const std::vector<TrackId>& rows);
 
     std::vector<std::uint32_t> lastActivityCounts_;
     std::map<TrackId, double> lastActivityMsByTrack_;

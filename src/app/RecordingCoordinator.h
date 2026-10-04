@@ -14,6 +14,23 @@ class Session;
 class RecorderService;
 class CountInClickOutput;
 class LatencySettingsStore;
+class PlaybackEngine;
+
+/// The ONE recording-run boundary pair every finalization uses (audio take placement / cycle
+/// slicing and the MIDI take), as acknowledged by the audio thread (`PlaybackEngine` record run):
+/// raw capture positions — placement compensation is applied afterwards by each consumer.
+struct RecordRunBoundaries
+{
+    std::int64_t startTimelineSample = 0;
+    std::int64_t startMonoSample = 0;
+    std::uint32_t startWrapSerial = 0;
+    std::int64_t stopTimelineSample = 0;
+    std::int64_t stopMonoSample = 0;
+    std::uint32_t stopWrapSerial = 0;
+    /// False when no callback acknowledged the stop (device stopped / lost): the values are the
+    /// message thread's fallback reads.
+    bool acknowledgedByEngine = false;
+};
 
 /// Message-thread orchestration for count-in, linear recording commit, and cycle recording split/commit.
 /// Does not own `Session`, `Transport`, UI views, or the recorder implementation.
@@ -50,12 +67,16 @@ public:
                            std::int64_t leftLocatorSample, std::int64_t rightLocatorSample,
                            std::uint32_t wrapSerialAtStart)>
             beginMidiTake;
-        /// Finalize at the stop boundary (`recordStopSample` and `stopWrapSerial` read as one
-        /// consistent pair at the stop): builds + appends the takes (one per pass and row).
-        /// Returns the number of clips created. Called INSIDE `runUndoableTakeCommit`.
-        std::function<int(std::int64_t recordStopSample, std::uint32_t stopWrapSerial)> commitMidiTake;
+        /// Finalize at the engine-acknowledged run boundaries (the same pair the audio take uses):
+        /// builds + appends the takes (one per pass and row). Returns the number of clips
+        /// created. Called INSIDE `runUndoableTakeCommit`.
+        std::function<int(const RecordRunBoundaries&)> commitMidiTake;
         /// Drop a take without clips (count-in cancel after arming, failure paths).
         std::function<void()> abortMidiTake;
+        /// Count-in started (`true`, the rows that will record are the ready armed rows) or
+        /// cancelled (`false`): destinations that play a proxy prepare their live source ahead of
+        /// the first recorded block (`LiveMidiInputCoordinator::setTakePending`). Optional.
+        std::function<void(bool pending)> setMidiTakePending;
         /// Wrap the whole take commit (audio clip add + MIDI clips) in ONE undo step
         /// (`UndoRedoCoordinator::executeUndoableRecordingCommit`). When absent, `commit` runs
         /// directly (no undo step — the pre-live-MIDI behaviour of audio takes).
@@ -64,6 +85,7 @@ public:
 
     RecordingCoordinator(Transport& transport,
                          Session& session,
+                         PlaybackEngine& playbackEngine,
                          juce::AudioDeviceManager& deviceManager,
                          RecorderService& recorder,
                          CountInClickOutput& countInClicks,
@@ -96,9 +118,10 @@ public:
     void setLiveMidiTakeCallbacks(std::function<std::vector<TrackId>()> armedMidiTracksReadyToRecord,
                                   std::function<juce::StringArray()> describeArmedMidiRowsNotReady,
                                   std::function<void(std::int64_t, double, bool, std::int64_t, std::int64_t, std::uint32_t)> beginMidiTake,
-                                  std::function<int(std::int64_t, std::uint32_t)> commitMidiTake,
+                                  std::function<int(const RecordRunBoundaries&)> commitMidiTake,
                                   std::function<void()> abortMidiTake,
-                                  std::function<void(const juce::String&, std::function<void()>)> runUndoableTakeCommit)
+                                  std::function<void(const juce::String&, std::function<void()>)> runUndoableTakeCommit,
+                                  std::function<void(bool)> setMidiTakePending = {})
     {
         callbacks_.armedMidiTracksReadyToRecord = std::move(armedMidiTracksReadyToRecord);
         callbacks_.describeArmedMidiRowsNotReady = std::move(describeArmedMidiRowsNotReady);
@@ -106,19 +129,31 @@ public:
         callbacks_.commitMidiTake = std::move(commitMidiTake);
         callbacks_.abortMidiTake = std::move(abortMidiTake);
         callbacks_.runUndoableTakeCommit = std::move(runUndoableTakeCommit);
+        callbacks_.setMidiTakePending = std::move(setMidiTakePending);
     }
+
+    /// [Diagnostics / stability] Boundaries of the last finished run (as used by the commits).
+    [[nodiscard]] RecordRunBoundaries getLastRunBoundariesForDiagnostics() const noexcept { return lastRunBoundaries_; }
 
 private:
     struct CountInTimer;
     struct CycleRecordingWrapTimer;
+    struct RecordingExtentFollowTimer;
 
     void onCountInTimerTick();
     void onCycleRecordingWrapTimerTick();
+    /// While a run captures: grow the navigable arrangement extent ahead of the playhead (small
+    /// display margin) off the audio thread — the engine already runs past the end on its own.
+    void onRecordingExtentFollowTick();
     void startCountInAfterValidation(BeginRecordingRequest&& req);
     void completeCountInAndStartRecording();
+    /// Stop the engine's record run and collect the acknowledged boundaries (bounded wait;
+    /// message-thread fallback when no callback arrives).
+    [[nodiscard]] RecordRunBoundaries stopRecordRunAndCollectBoundaries();
 
     Transport& transport_;
     Session& session_;
+    PlaybackEngine& playbackEngine_;
     juce::AudioDeviceManager& deviceManager_;
     RecorderService& recorder_;
     CountInClickOutput& countInClicks_;
@@ -145,4 +180,11 @@ private:
     juce::File cycleSessionTakeFile_;
     std::uint32_t lastSeenWrapCount_ = 0;
     int numCompletedPasses_ = 0;
+    /// Recording past the arrangement end: the stored extent before the run (restored at Stop so
+    /// no display headroom is persisted; the result's own clips keep whatever room they need).
+    std::unique_ptr<RecordingExtentFollowTimer> extentFollowTimer_;
+    bool extentFollowActive_ = false;
+    std::int64_t storedExtentBeforeRun_ = 0;
+    double runSampleRate_ = 0.0;
+    RecordRunBoundaries lastRunBoundaries_;
 };

@@ -1651,8 +1651,8 @@ namespace
             expect(f.fp() != ordered,
                    "p1c: different-start clip stored-order swap changes the fingerprint (layer stack is data, schema 2)");
         }
-        expect(proxy_fingerprint::kFingerprintSchemaVersion == 2,
-               "p1c: fingerprint schema 2 (layered bake) marks every additive-era proxy stale");
+        expect(proxy_fingerprint::kFingerprintSchemaVersion == 2 && proxy_fingerprint::kFingerprintSchemaVersionAdditive == 1,
+               "p1c: fingerprint schema 2 is current (layered bake); schema-1 generations are re-derived only when provably layer-insensitive");
     }
 
     void testFingerprintExclusions()
@@ -3790,6 +3790,9 @@ namespace
             /// as existing but not renderable, with `fp` playing the role of the
             /// §12.3 recorded-configuration recompute ("" = not verifiable).
             bool primaryAvailable = true;
+            /// Appended: the second reading of the same content under the PUBLISHED generation's
+            /// still-comparable older schema ("" = not applicable), see ProxyCurrentIdentity.
+            juce::String comparableFp;
         };
 
         std::mutex m;
@@ -3834,6 +3837,7 @@ namespace
                 id.destinationExists = true;
                 id.primaryAvailable = it->second.primaryAvailable;
                 id.expectedFingerprint = it->second.fp;
+                id.publishedComparableFingerprint = it->second.comparableFp;
                 id.primarySemanticRevision = it->second.rev;
             }
             return id;
@@ -4147,6 +4151,44 @@ namespace
         expect(rq23.exists, "p1e-mp: available Primary still queues renders");
         expect(fx.pumpUntilTerminal(TrackId{ 23 }),
                "p1e-mp: available-Primary render terminalizes normally");
+
+        // 1.1.13 — a generation published under the still-comparable additive schema 1 over
+        // layer-insensitive content: the render identity is the CURRENT schema reading (what a
+        // new render would carry), the published verdict uses the second reading. Current
+        // without a re-render; a re-render (content changed) must publish and become Current
+        // instead of being discarded as "identity changed".
+        auto& c = fx.engine.dests[TrackId{ 24 }];
+        c.exists = true;
+        c.fp = "sha256:schema2-reading";
+        c.comparableFp = "sha256:schema1-reading";
+        c.published = "sha256:schema1-reading";
+        expect(fx.sched->destinationState(TrackId{ 24 }) == ProxyDestinationState::Current,
+               "p1e-cmp: comparable schema-1 generation is Current through the second reading");
+        c.comparableFp = ""; // content no longer provably layer-insensitive (or not schema 1)
+        expect(fx.sched->destinationState(TrackId{ 24 }) == ProxyDestinationState::Stale,
+               "p1e-cmp: without a comparable reading the older generation is Stale");
+        c.comparableFp = "sha256:schema1-reading";
+        c.fp = "sha256:schema2-edited";
+        c.comparableFp = "sha256:schema1-edited"; // the edit changes both readings
+        expect(fx.sched->destinationState(TrackId{ 24 }) == ProxyDestinationState::Stale,
+               "p1e-cmp: edited content is Stale under both readings");
+        const auto rq24 = fx.sched->requestRender(TrackId{ 24 });
+        expect(rq24.exists, "p1e-cmp: the re-render queues");
+        expect(fx.pumpUntilTerminal(TrackId{ 24 }), "p1e-cmp: the re-render terminalizes");
+        const auto js24 = fx.sched->jobStatus(TrackId{ 24 });
+        expect(js24.phase == proxy_render::ProxyJobPhase::Published
+                   && js24.expectedFingerprint == "sha256:schema2-edited",
+               "p1e-cmp: the re-render publishes under the current-schema identity (not discarded)");
+        c.published = "sha256:schema2-edited";
+        c.comparableFp = "";
+        expect(fx.sched->destinationState(TrackId{ 24 }) == ProxyDestinationState::Current,
+               "p1e-cmp: the new generation is Current under the current schema");
+        proxy_render::ProxyCurrentIdentity idm;
+        idm.expectedFingerprint = "a";
+        idm.publishedComparableFingerprint = "b";
+        expect(idm.matchesPublished("a") && idm.matchesPublished("b") && !idm.matchesPublished("c")
+                   && !idm.matchesPublished(""),
+               "p1e-cmp: matchesPublished accepts either reading, never an empty id");
     }
 
     void testProxySchedulerCoalescingAndSupersession()
@@ -6527,6 +6569,76 @@ namespace
                    *snap, TrackId{ 1 }, p1gClipsFn(f), metaNoIdentity, 48000.0)
                    .isEmpty(),
                "p1g-currency: metadata without recorded identity is not verifiable");
+
+        // ---- Schema 1 (additive bake) generations after the LAYER-1 bake (schema 2) ----
+        // The Organ fixture has no overlapping clips and all its CC points inside the windows:
+        // its schema-1 generation is PROVABLY comparable -> recomputed under schema 1 it still
+        // matches (stays Current, no re-render), and the proof itself holds.
+        {
+            const auto snapForProof = proxy_snapshot::buildProxyRenderSnapshot(*snap, TrackId{ 1 }, p1gClipsFn(f), f.inputs);
+            expect(proxy_snapshot::snapshotIsLayerInsensitive(snapForProof),
+                   "layer-compat: the non-overlapping organ fixture is layer-insensitive");
+            auto metaV1 = meta;
+            metaV1.fingerprintSchemaVersion = (int)proxy_fingerprint::kFingerprintSchemaVersionAdditive;
+            metaV1.generationId = proxy_fingerprint::computeFingerprint(snapForProof, proxy_fingerprint::kFingerprintSchemaVersionAdditive);
+            expect(metaV1.generationId != meta.generationId, "layer-compat: schema 1 and schema 2 ids differ");
+            expect(proxy_playback::comparableFingerprintSchemaFor(metaV1, snapForProof)
+                       == proxy_fingerprint::kFingerprintSchemaVersionAdditive,
+                   "layer-compat: a schema-1 generation of layer-insensitive content is compared under schema 1");
+            const juce::String recomputedV1 = proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+                *snap, TrackId{ 1 }, p1gClipsFn(f), metaV1, 48000.0);
+            expect(recomputedV1.isNotEmpty() && recomputedV1 == metaV1.generationId,
+                   "layer-compat: a provably compatible schema-1 generation stays Current without a re-render");
+        }
+        // Overlap breaks the proof: the schema-1 generation is not comparable (Stale, re-render
+        // needs the Primary) — never silently Current with a different audible result.
+        {
+            ProxyFixture overlapped = makeOrganFixture();
+            overlapped.clipsByTrack[TrackId{ 1 }].push_back(makeClip(31, 0, { makeNote(67, 0, 960, 1) }));
+            const auto osnap = overlapped.session();
+            const auto osnapR = proxy_snapshot::buildProxyRenderSnapshot(*osnap, TrackId{ 1 }, p1gClipsFn(overlapped), overlapped.inputs);
+            expect(!proxy_snapshot::snapshotIsLayerInsensitive(osnapR), "layer-compat: overlapping clips are layer-sensitive");
+            auto metaV1 = meta;
+            metaV1.fingerprintSchemaVersion = (int)proxy_fingerprint::kFingerprintSchemaVersionAdditive;
+            metaV1.generationId = proxy_fingerprint::computeFingerprint(osnapR, proxy_fingerprint::kFingerprintSchemaVersionAdditive);
+            expect(proxy_playback::comparableFingerprintSchemaFor(metaV1, osnapR) == 0
+                       && proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+                              *osnap, TrackId{ 1 }, p1gClipsFn(overlapped), metaV1, 48000.0).isEmpty(),
+                   "layer-compat: a schema-1 generation with overlapping clips is not verifiable (Stale)");
+        }
+        // A controller point outside its clip window also breaks the proof even without overlap
+        // (the additive bake delivered it, the layered bake does not).
+        {
+            ProxyFixture ccOut = makeOrganFixture();
+            auto& clip0 = ccOut.clipsByTrack[TrackId{ 1 }][0];
+            MidiCcPoint far;
+            far.startTick = 10 * 960 * 1000; // far beyond the window
+            far.controller = 11;
+            far.value = 40;
+            far.channel = 1;
+            far.interpolationToNext = MidiCcInterpolation::hold;
+            clip0.pattern.ccPoints.push_back(far);
+            const auto csnap = ccOut.session();
+            const auto csnapR = proxy_snapshot::buildProxyRenderSnapshot(*csnap, TrackId{ 1 }, p1gClipsFn(ccOut), ccOut.inputs);
+            expect(!proxy_snapshot::snapshotIsLayerInsensitive(csnapR),
+                   "layer-compat: a CC point outside its clip window is layer-sensitive (no overlap needed)");
+        }
+        // Stored order that is not the plan order (later-starting clip stored first) breaks it too.
+        {
+            ProxyFixture reordered = makeOrganFixture();
+            auto& clips = reordered.clipsByTrack[TrackId{ 1 }];
+            clips.push_back(makeClip(32, 96000 * 10, { makeNote(67, 0, 960, 1) }));
+            std::swap(clips[0], clips[1]);
+            const auto rsnap = reordered.session();
+            const auto rsnapR = proxy_snapshot::buildProxyRenderSnapshot(*rsnap, TrackId{ 1 }, p1gClipsFn(reordered), reordered.inputs);
+            expect(!proxy_snapshot::snapshotIsLayerInsensitive(rsnapR),
+                   "layer-compat: stored order differing from plan order is layer-sensitive");
+        }
+        // A schema-2 generation is always compared under schema 2.
+        expect(proxy_playback::comparableFingerprintSchemaFor(
+                   meta, proxy_snapshot::buildProxyRenderSnapshot(*snap, TrackId{ 1 }, p1gClipsFn(f), f.inputs))
+                   == proxy_fingerprint::kFingerprintSchemaVersion,
+               "layer-compat: a current-schema generation compares under the current schema");
     }
 
     void testProxyPlaybackMixSubstitutionSeam()

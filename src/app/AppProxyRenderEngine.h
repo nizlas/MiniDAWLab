@@ -111,7 +111,24 @@ public:
         }
         id.destinationExists = true;
         id.primaryAvailable = true;
+        // The identity a render performed now would carry: ALWAYS the current schema (the same
+        // computation `captureRequest` stamps on a job, so job currency compares like with like).
         id.expectedFingerprint = proxy_fingerprint::computeFingerprint(snap);
+        // The PUBLISHED generation may have been recorded under the additive schema 1; it stays
+        // comparable — and Current without a re-render — only while the current content is
+        // provably layer-insensitive (identical audible result). That second reading is kept
+        // apart from the render identity; otherwise the generation derives Stale.
+        if (auto* controller = deps_.controllerForTrack ? deps_.controllerForTrack(destination) : nullptr)
+        {
+            if (const ProjectFileProxyMetadataV20* const meta = controller->getProxyMetadata())
+            {
+                const std::uint32_t comparable = proxy_playback::comparableFingerprintSchemaFor(*meta, snap);
+                if (comparable != 0 && comparable != proxy_fingerprint::kFingerprintSchemaVersion)
+                {
+                    id.publishedComparableFingerprint = proxy_fingerprint::computeFingerprint(snap, comparable);
+                }
+            }
+        }
         id.primarySemanticRevision = revision;
         return id;
     }
@@ -371,13 +388,12 @@ private:
         {
             return {};
         }
-        if (meta->fingerprintSchemaVersion
-                != (int)proxy_fingerprint::kFingerprintSchemaVersion
-            || meta->fingerprintAlgorithmId
-                   != (int)proxy_fingerprint::kFingerprintAlgorithmId)
+        if (meta->fingerprintAlgorithmId != (int)proxy_fingerprint::kFingerprintAlgorithmId)
         {
             return {};
         }
+        // Schema comparability (incl. the additive schema-1 proof) is decided inside the
+        // recompute helper, the same rule the playback selector uses.
         if (!proxy_playback::proxyStatePairingHolds(
                 *meta, controller->wasProxyPublishedThisSession()))
         {

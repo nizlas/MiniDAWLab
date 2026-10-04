@@ -108,6 +108,14 @@ enum class StabilityScenarioKind
     /// MIDI editor open across delete / undo / move, offline mixdown and a fresh proxy sequencer
     /// selecting the same events as realtime. Sibling copy only.
     MidiCycleTakes,
+    /// `--stability-proxy-recording <project>`: a project with schema-1 proxy generations (TSE
+    /// copy): a provably layer-insensitive generation stays Current without a re-render when the
+    /// Primary is unavailable (no-Primary machine simulated), a non-comparable one never does;
+    /// recording on a proxy-backed destination without a Secondary keeps the whole proxy and says
+    /// so, with a Secondary switches to it for the take (Monitor off: nothing delivered live, the
+    /// row's own clip silent; Monitor on: live heard, clip silent), the override ends with the
+    /// take and real currency decides afterwards. Sibling copy only.
+    ProxyRecording,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -496,6 +504,50 @@ struct StabilityRunnerHooks
     std::function<void(std::int64_t deltaSamples)> panTimelineBySamples;
     /// Audio clip windows `(start, effective length)` of a row, newest first (track order).
     std::function<std::vector<std::pair<std::int64_t, std::int64_t>>(TrackId)> audioClipWindowsForTrack;
+
+    // --- Proxy + recording, shared stop boundary, extent growth, schema-1 proxies -------------
+    /// Simulate a machine without the Primary for one destination (`ProxyPlaybackCoordinator`
+    /// test seam + refresh). The plug-in stays loaded; only the policy treats it as unavailable.
+    std::function<void(TrackId, bool unavailable)> proxyForcePrimaryUnavailable;
+    /// `proxyPlaybackSourceStateName(runtimeStateForTrack)`: Primary / ProxyCurrent / ProxyStale / SecondaryLive / …
+    std::function<juce::String(TrackId)> proxyRuntimeStateName;
+    /// Render-scheduler destination verdict: Absent / Current / Stale / Rendering / Failed.
+    std::function<juce::String(TrackId)> proxyDestinationStateName;
+    std::function<bool(TrackId)> proxyIsLiveRecordingOverrideActive;
+    std::function<bool(TrackId)> proxyIsLiveMonitorOverrideActive;
+    /// Published generation id + its recorded fingerprint schema ("<id> schema=<n>"), empty = none.
+    std::function<juce::String(TrackId)> proxyGenerationInfo;
+    /// Configure `target`'s Secondary from `from`'s persisted Secondary descriptor (temp project only).
+    std::function<bool(TrackId target, TrackId from, juce::String& failReason)> proxyCopySecondaryConfigFromTrack;
+    /// Install the scenario's capture sink on the destination's SECONDARY host (the transport host
+    /// while SecondaryLive), so delivered events can be counted there.
+    std::function<bool(TrackId, juce::String& failReason)> liveMidiAttachCaptureSinkToSecondary;
+    /// `LiveMidiInputCoordinator::describeInputStatus` for any row (no Inspector activation).
+    std::function<juce::String(TrackId)> midiInputStatusTextForTrack;
+    /// Add a `TrackKind::Midi` row routed (MIDI To) to `destination` carrying one clip of
+    /// `noteCount` quarter notes of `pitch` from the start (temp project only). Invalid id = failed.
+    std::function<TrackId(TrackId destination, int pitch, int noteCount, juce::String& failReason)> addMidiSourceRowRoutedTo;
+    /// The Inspector's "Render now" for a destination (`ProxyUpdatePolicyService::renderNow`).
+    std::function<bool(TrackId)> proxyRenderNow;
+    /// Render scheduler job status of a destination ("phase=… expected=… msg=… renderedMs=…").
+    std::function<juce::String(TrackId)> proxyJobStatusText;
+    /// The destination's proxy render snapshot sources ("own clips=N notes=M | src <id> ch=.. clips=.. notes=.. …").
+    std::function<juce::String(TrackId)> proxySnapshotSourcesText;
+    /// Delete generation files of one row in the loaded project's `InstrumentProxies` folder that
+    /// are NOT the published generation (leftovers of earlier test runs; the folder is shared by
+    /// the sibling test copy). Returns the number of files removed. Temp project copies only.
+    std::function<int(TrackId)> proxyDeleteUnpublishedGenerationFiles;
+    /// The audio take's placement compensation (latency store) — separate from the MIDI offset.
+    std::function<std::int64_t()> recordingPlacementOffsetSamples;
+    std::function<std::int64_t()> getStoredArrangementExtentSamples;
+    std::function<std::int64_t()> getArrangementExtentSamples;
+    /// The engine-acknowledged boundaries of the last finished run ("start tl=.. mono=.. wrap=.. | stop …").
+    std::function<juce::String()> lastRecordRunBoundaries;
+    /// Current device block size (0 = no device).
+    std::function<int()> deviceBlockSizeSamples;
+    /// Stop / restart the audio device (device-loss handling during a take).
+    std::function<bool()> closeAudioDeviceForTest;
+    std::function<bool(juce::String& failReason)> restartAudioDeviceForTest;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -552,6 +604,8 @@ private:
     void appendLiveMidiSteps(const juce::File& project);
     /// MIDI cycle recording + layering (see `StabilityScenarioKind::MidiCycleTakes`).
     void appendMidiCycleTakesSteps(const juce::File& project);
+    /// Proxy-backed destinations during recording + schema-1 generations (see `ProxyRecording`).
+    void appendProxyRecordingSteps(const juce::File& project);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

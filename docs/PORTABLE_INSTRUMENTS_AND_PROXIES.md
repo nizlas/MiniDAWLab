@@ -1136,10 +1136,26 @@ The fingerprint is a hash over a canonical byte serialization of the snapshot:
   * **Clips** serialize in **stored order** (fingerprint schema **2**, with LAYER-1 §8.3): the
     stored sequence is the layer stack the bake resolves overlaps with, so any reorder of a unit's
     clips is a render change and changes the fingerprint. (Schema 1 serialized the bake's plan
-    order — stable sort by `startSamples` — under the additive bake; the schema bump marks every
-    schema-1 generation stale, which is intended: an additive render may differ audibly from the
-    layered rule.) `InstrumentMidiClipId` serializes as a data field, **not** as an ordering key:
-    live scheduling never consults it.
+    order — stable sort by `startSamples` — under the additive bake.) `InstrumentMidiClipId`
+    serializes as a data field, **not** as an ordering key: live scheduling never consults it.
+  * **Schema-1 generations after the bump (1.1.13 rule, `comparableFingerprintSchemaFor`).** A
+    generation recorded under schema 1 is *comparable* — and may still be Current — only when the
+    current content is **provably layer-insensitive** (`proxy_snapshot::snapshotIsLayerInsensitive`):
+    in every unit (destination content and each routed source) no two clips overlap, the stored
+    order already equals the plan order, and every CC / pitch-bend point lies inside its clip's
+    window `[start, end]` at the reference rate. Only then does the layered bake produce exactly
+    what the additive bake rendered (the span restriction, the chase restatement at span starts
+    and the clip-end events change nothing when nothing is covered and no controller point lies
+    outside its window). Absence of overlap alone is **not** sufficient — controller handling
+    changed too — which is why the window condition is part of the proof. Such a generation is
+    compared through a second reading of the current content under schema 1
+    (`ProxyCurrentIdentity::publishedComparableFingerprint`); the render identity itself
+    (`expectedFingerprint`, what a new render would carry) is always the current schema, so a
+    re-render never compares a schema-1 reading with a schema-2 job. Every other schema-1
+    generation is Stale under the established policy (never selected for playback; re-rendered
+    in Auto mode when the Primary is present; otherwise the Secondary or silence, and the status
+    says the re-render needs the machine with the Primary). There is no user choice for the old
+    additive playback; proxy files, Primary identity and plugin state are untouched either way.
   * **Notes** serialize in **stored vector order** within their clip (positional order is
     persisted and round-trips, `ProjectFile.cpp` ~1869–1892). Stored order is the equal-time
     delivery tie-break once ORD-1 holds (§8.3), so it is fingerprint data. Deliberately
@@ -1157,8 +1173,9 @@ The fingerprint is a hash over a canonical byte serialization of the snapshot:
   identity strings hashed as UTF-8 bytes; display names never included.
 * **Version tags:** the serialization begins with {fingerprint algorithm id, fingerprint schema
   version}; any future field change bumps the schema version.
-* **Invalidation after change:** a fingerprint schema/algorithm bump deterministically marks all
-  existing proxies stale (they were hashed under the old schema); assets remain retained per
+* **Invalidation after change:** a fingerprint algorithm bump deterministically marks all
+  existing proxies stale; a schema bump does so for every generation whose content is not
+  provably comparable under the old schema (the schema-1 rule above); assets remain retained per
   PI-007.
 * **Hash algorithm (Recommended):** a fixed 256-bit cryptographic hash (e.g. SHA-256) — collision
   behavior must be negligible because the hash is also the asset generation identity (§16).
@@ -1659,6 +1676,24 @@ Notes:
   every mode transition (R11).
 * Offline mixdown renders through the same selected source automatically at the host-level seam
   (Verified propagation, §7.3; T-22).
+* **Temporary live-rendering need (1.1.10 Monitor, generalized 1.1.13 for recording):** two
+  independent needs can require a live instrument while the table would select a Current proxy —
+  live monitoring of a row into the destination (`liveMonitorRequested`) and an actual MIDI take
+  on a source row into it (`liveRecordingRequested`: the take must silence that row's earlier
+  clips, which a shared proxy cannot do). Each need is evaluated separately and both are
+  reported (`liveMonitorOverride` / `liveRecordingOverride`). When either holds **and a Secondary
+  is usable**, the whole destination plays through the Secondary (SecondaryLive) for its clips
+  and the live input — one consistent source, never proxy + live of the same material; other
+  source rows into the same destination keep sounding there while the recording row's own clips
+  are suppressed. Arming alone creates no need (nothing switches, no Secondary is loaded); the
+  need appears with the count-in / take and ends with Stop, abort, start failure or a routing
+  change, after which the normal decision is re-evaluated against the then-current fingerprint
+  (a committed take is a musical edit; an undone or empty one leaves the proxy Current). The
+  override never changes the instrument identity, the plugin state, the metadata or the asset.
+  With **no usable Secondary** the proxy keeps playing as backing (MIDI is still captured; with
+  Monitor off nothing is heard live) and the row's status says so: "Recording: earlier material on
+  this track is still heard from the proxy - no live instrument is available" — a documented
+  limitation of a shared proxy, not an error.
 
 ## 18. Save, autosave, undo, and dirty semantics
 

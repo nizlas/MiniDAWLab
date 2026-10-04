@@ -1,0 +1,13 @@
+﻿DEBUG(ninja-debug) midi-cycle-takes [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-cycle-takes totalMs=94604
+DEBUG(ninja-debug) midi-cycle-takes [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=midi-cycle-takes totalMs=108729
+DEBUG(ninja-debug) live-midi [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=live-midi totalMs=46122
+DEBUG(ninja-debug) live-midi [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=live-midi totalMs=61588
+DEBUG(ninja-debug) midi-routing [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-routing totalMs=10269
+DEBUG(ninja-debug) midi-track-parity [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-track-parity totalMs=6195
+DEBUG(ninja-debug) midi-editor-move [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-editor-move totalMs=10339
+DEBUG(ninja-debug) inspector-panel [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=inspector-panel totalMs=18807
+DEBUG(ninja-debug) header-column [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=header-column totalMs=5606
+DEBUG(ninja-debug) organ-dc [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=organ-dc totalMs=37100
+DEBUG(ninja-debug) mixdown [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=mixdown-wav totalMs=5101
+DEBUG(ninja-debug) pregain [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=pregain totalMs=9204
+DEBUG(ninja-debug) inserts [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=inserts totalMs=17908

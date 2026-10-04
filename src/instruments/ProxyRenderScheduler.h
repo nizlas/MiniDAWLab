@@ -134,8 +134,25 @@ struct ProxyCurrentIdentity
     /// under the generation's RECORDED configuration (§12.3) instead of the live
     /// host — the same verdict the playback selector reaches.
     bool primaryAvailable = true;
+    /// The identity a render performed NOW would carry (current fingerprint schema). Job
+    /// currency (request dedupe, start/finalize checks) compares against this.
     juce::String expectedFingerprint;
+    /// Optional second reading of the SAME content under the schema the PUBLISHED generation
+    /// was recorded with, when that older schema is still provably comparable (an additive
+    /// schema-1 generation over layer-insensitive content). Empty when not applicable. Only
+    /// the published-generation verdict (`destinationState`) consults it: such a generation
+    /// is Current without a re-render, while any new render carries the current schema.
+    juce::String publishedComparableFingerprint;
     std::uint64_t primarySemanticRevision = 0;
+
+    /// True when `published` (a generation id = its fingerprint) matches this identity.
+    [[nodiscard]] bool matchesPublished(const juce::String& published) const noexcept
+    {
+        return published.isNotEmpty()
+               && (published == expectedFingerprint
+                   || (publishedComparableFingerprint.isNotEmpty()
+                       && published == publishedComparableFingerprint));
+    }
 };
 
 /// The immutable captured render request. Production subclasses carry the full
@@ -467,8 +484,10 @@ public:
         const juce::String published = engine_->publishedGenerationId(destination);
         if (published.isNotEmpty())
         {
-            // "Current" is a pure identity verdict — never "latest file on disk".
-            if (now.destinationExists && published == now.expectedFingerprint)
+            // "Current" is a pure identity verdict — never "latest file on disk". A generation
+            // recorded under a still-comparable older schema matches through
+            // `publishedComparableFingerprint` (see ProxyCurrentIdentity).
+            if (now.destinationExists && now.matchesPublished(published))
             {
                 return ProxyDestinationState::Current;
             }

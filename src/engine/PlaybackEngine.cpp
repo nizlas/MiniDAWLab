@@ -617,6 +617,143 @@ void PlaybackEngine::audioThread_foldOutputPeak(const float* const* outputChanne
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Record run (message-thread side; see the header section)
+// ---------------------------------------------------------------------------------------------
+void PlaybackEngine::requestRecordRunStart() noexcept
+{
+    int expected = static_cast<int>(RecordRunState::Idle);
+    if (recordRunState_.load(std::memory_order_acquire) == expected)
+    {
+        recordRunStartAcked_.store(false, std::memory_order_release);
+    }
+    (void)recordRunState_.compare_exchange_strong(expected, static_cast<int>(RecordRunState::StartRequested),
+                                                  std::memory_order_acq_rel);
+}
+
+void PlaybackEngine::requestRecordRunStop() noexcept
+{
+    int expected = static_cast<int>(RecordRunState::Running);
+    if (recordRunState_.compare_exchange_strong(expected, static_cast<int>(RecordRunState::StopRequested),
+                                                std::memory_order_acq_rel))
+    {
+        return;
+    }
+    // Stop before the start was ever acknowledged (no callback ran since the start request): close
+    // the run at the start position — nothing was captured.
+    expected = static_cast<int>(RecordRunState::StartRequested);
+    if (recordRunState_.compare_exchange_strong(expected, static_cast<int>(RecordRunState::StopRequested),
+                                                std::memory_order_acq_rel))
+    {
+        return;
+    }
+}
+
+bool PlaybackEngine::waitForRecordRunStop(const int timeoutMs, const RecordRunBoundary& fallbackBoundary) noexcept
+{
+    const double deadline = juce::Time::getMillisecondCounterHiRes() + (double)juce::jmax(0, timeoutMs);
+    for (;;)
+    {
+        const auto s = recordRunState();
+        if (s == RecordRunState::Stopped || s == RecordRunState::Idle)
+        {
+            return true;
+        }
+        if (juce::Time::getMillisecondCounterHiRes() >= deadline)
+        {
+            break;
+        }
+        juce::Thread::sleep(1);
+    }
+    // No acknowledgement: the device is stopped or lost. Close the run from here with the
+    // caller's fallback boundary; a callback that resumes later finds the run already closed.
+    recordRunStopMono_.store(fallbackBoundary.monoSample, std::memory_order_relaxed);
+    recordRunStopTimeline_.store(fallbackBoundary.timelineSample, std::memory_order_relaxed);
+    recordRunStopWrap_.store(fallbackBoundary.wrapSerial, std::memory_order_relaxed);
+    int expected = static_cast<int>(RecordRunState::StopRequested);
+    if (!recordRunState_.compare_exchange_strong(expected, static_cast<int>(RecordRunState::Stopped),
+                                                 std::memory_order_acq_rel))
+    {
+        // Acknowledged in the meantime (or never started): keep the audio thread's values.
+        return recordRunState() == RecordRunState::Stopped || recordRunState() == RecordRunState::Idle;
+    }
+    if (!recordRunStartAcked_.load(std::memory_order_acquire))
+    {
+        // No callback acknowledged the start either (device dead for the whole run): the start
+        // fields still hold a previous run's values — close this run as empty at the fallback.
+        recordRunStartMono_.store(fallbackBoundary.monoSample, std::memory_order_relaxed);
+        recordRunStartTimeline_.store(fallbackBoundary.timelineSample, std::memory_order_relaxed);
+        recordRunStartWrap_.store(fallbackBoundary.wrapSerial, std::memory_order_relaxed);
+    }
+    return false;
+}
+
+void PlaybackEngine::finishRecordRun() noexcept
+{
+    recordRunStartAcked_.store(false, std::memory_order_release);
+    recordRunState_.store(static_cast<int>(RecordRunState::Idle), std::memory_order_release);
+}
+
+bool PlaybackEngine::audioThread_updateRecordRun(const std::int64_t monoSampleAtBlockStart,
+                                                  const std::int64_t playheadAtBlockStart) noexcept
+{
+    // Runs BEFORE this block's intent load: the message thread requests the Playing / Stopped
+    // intent first and the run transition second (both release-stores), so a callback that sees
+    // the request also sees the matching intent — the start block is the first playing block,
+    // the stop block does not advance the playhead. The boundary values are stored before the
+    // state (release) so the message thread reads them coherently after an acquire of the state.
+    const int s = recordRunState_.load(std::memory_order_acquire);
+    if (s == static_cast<int>(RecordRunState::StartRequested))
+    {
+        recordRunStartMono_.store(monoSampleAtBlockStart, std::memory_order_relaxed);
+        recordRunStartTimeline_.store(playheadAtBlockStart, std::memory_order_relaxed);
+        recordRunStartWrap_.store(transport_.audioThread_relaxedLoadWrapPassCount(), std::memory_order_relaxed);
+        recordRunStartAcked_.store(true, std::memory_order_release);
+        recordRunState_.store(static_cast<int>(RecordRunState::Running), std::memory_order_release);
+        return true;
+    }
+    if (s == static_cast<int>(RecordRunState::StopRequested))
+    {
+        const std::uint32_t wrap = transport_.audioThread_relaxedLoadWrapPassCount();
+        if (!recordRunStartAcked_.load(std::memory_order_acquire))
+        {
+            // Stopped before any block captured: an empty run, start = stop.
+            recordRunStartMono_.store(monoSampleAtBlockStart, std::memory_order_relaxed);
+            recordRunStartTimeline_.store(playheadAtBlockStart, std::memory_order_relaxed);
+            recordRunStartWrap_.store(wrap, std::memory_order_relaxed);
+            recordRunStartAcked_.store(true, std::memory_order_release);
+        }
+        recordRunStopMono_.store(monoSampleAtBlockStart, std::memory_order_relaxed);
+        recordRunStopTimeline_.store(playheadAtBlockStart, std::memory_order_relaxed);
+        recordRunStopWrap_.store(wrap, std::memory_order_relaxed);
+        recordRunState_.store(static_cast<int>(RecordRunState::Stopped), std::memory_order_release);
+        return false; // the boundary block captures nothing
+    }
+    return s == static_cast<int>(RecordRunState::Running);
+}
+
+PlaybackEngine::RecordRunBoundary PlaybackEngine::recordRunStartBoundary() const noexcept
+{
+    RecordRunBoundary b;
+    const auto s = recordRunState();
+    b.valid = (s == RecordRunState::Running || s == RecordRunState::StopRequested || s == RecordRunState::Stopped)
+              && recordRunStartAcked_.load(std::memory_order_acquire);
+    b.monoSample = recordRunStartMono_.load(std::memory_order_relaxed);
+    b.timelineSample = recordRunStartTimeline_.load(std::memory_order_relaxed);
+    b.wrapSerial = recordRunStartWrap_.load(std::memory_order_relaxed);
+    return b;
+}
+
+PlaybackEngine::RecordRunBoundary PlaybackEngine::recordRunStopBoundary() const noexcept
+{
+    RecordRunBoundary b;
+    b.valid = recordRunState() == RecordRunState::Stopped;
+    b.monoSample = recordRunStopMono_.load(std::memory_order_relaxed);
+    b.timelineSample = recordRunStopTimeline_.load(std::memory_order_relaxed);
+    b.wrapSerial = recordRunStopWrap_.load(std::memory_order_relaxed);
+    return b;
+}
+
 void PlaybackEngine::setMeteredTrackForUi(const TrackId trackId) noexcept
 {
     meteredTrackId_.store(static_cast<std::int64_t>(trackId), std::memory_order_relaxed);
@@ -711,10 +848,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     setCallbackPhase(AudioCallbackPhase::Begin);
     audioCallbackLastBlockSamples_.store(numSamples, std::memory_order_relaxed);
     audioCallbackEnterCount_.fetch_add(1, std::memory_order_relaxed);
-    // Monotone device clock (live-MIDI time base): this block's first sample, advanced on every
-    // return path below because it is advanced here, unconditionally.
+    // Monotone device clock (live-MIDI time base, record-run boundaries): this block's first
+    // sample, advanced on every return path below because it is advanced here, unconditionally.
     const std::int64_t monoSampleAtBlockStart = monoSampleClock_;
     monoSampleClock_ += juce::jmax(0, numSamples);
+    monoSampleClockPublished_.store(monoSampleClock_, std::memory_order_relaxed);
 
     // [Audio thread] Input-selection slice: map the packed active-channel input array so both the
     // recording push and the monitoring pass can resolve PHYSICAL input assignments per block.
@@ -733,11 +871,23 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         return pos >= 0 && pos < numInputChannels ? inputChannelData[pos] : nullptr;
     };
 
+    const int deviceBlockSizeInFrames = numSamples;
+    setCallbackPhase(AudioCallbackPhase::TransportBeginBlock);
+    transport_.audioThread_beginBlock();
+
+    // Record run handshake (see the header): acknowledge a pending start / stop at THIS block's
+    // first sample — one boundary (mono clock, transport position, wrap serial) shared by the
+    // audio recorder and the MIDI take. Must precede the intent load below so the request's
+    // matching intent is visible in the same block.
+    const std::int64_t t0 = transport_.audioThread_loadPlayhead();
+    const bool recordRunCapturing = audioThread_updateRecordRun(monoSampleAtBlockStart, t0);
+
     // [Audio thread] Route the take's SELECTED physical input channel(s) to the recorder SPSC path
-    // only while `isRecording()`; does not access Session (the coordinator resolved the armed
-    // track's assignment to concrete physical channels at record start). This is the RAW pre-strip
-    // capture point: pre-gain, inserts, fader, pan and Monitor never affect recorded samples.
-    if (recorder_ != nullptr && recorder_->isRecording() && numSamples > 0)
+    // only while the run captures (between the acknowledged start and stop boundaries); does not
+    // access Session (the coordinator resolved the armed track's assignment to concrete physical
+    // channels at record start). This is the RAW pre-strip capture point: pre-gain, inserts,
+    // fader, pan and Monitor never affect recorded samples.
+    if (recorder_ != nullptr && recordRunCapturing && recorder_->isRecording() && numSamples > 0)
     {
         setCallbackPhase(AudioCallbackPhase::RecorderPush);
         const float* const recInA
@@ -748,10 +898,6 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                   : nullptr;
         recorder_->pushInputBlock(recInA, recInB, numSamples);
     }
-
-    const int deviceBlockSizeInFrames = numSamples;
-    setCallbackPhase(AudioCallbackPhase::TransportBeginBlock);
-    transport_.audioThread_beginBlock();
 
     if (offlineRenderGateDepth_.load(std::memory_order_seq_cst) > 0)
     {
@@ -825,7 +971,6 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     }
 
     const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
-    const std::int64_t t0 = transport_.audioThread_loadPlayhead();
     const bool cycleOn = transport_.audioThread_loadCycleEnabled();
     const std::int64_t locL = sessionSnap != nullptr ? sessionSnap->getLeftLocatorSamples() : 0;
     const std::int64_t locR = sessionSnap != nullptr ? sessionSnap->getRightLocatorSamples() : 0;
@@ -1582,7 +1727,16 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         return;
     }
 
-    const std::int64_t timelineEnd = sessionSnap->getArrangementExtentSamples();
+    // Run-end rule: playback stops advancing at the arrangement extent. A capturing record run
+    // is the one exception — the transport keeps running through the take (the coordinator grows
+    // the navigable extent off the audio thread; the engine never depends on that timing), so
+    // audio-only, MIDI-only and combined takes can cross the previous end without a frozen
+    // playhead or stranded MIDI positions.
+    std::int64_t timelineEnd = sessionSnap->getArrangementExtentSamples();
+    if (recordRunCapturing)
+    {
+        timelineEnd = juce::jmax(timelineEnd, t0 + static_cast<std::int64_t>(deviceBlockSizeInFrames));
+    }
     if (timelineEnd <= 0 || t0 >= timelineEnd)
     {
         transport_.audioThread_advancePlayheadIfPlaying(0);

@@ -8,9 +8,12 @@
 #include "domain/AudioClip.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
+#include "diagnostics/StabilityDiagnosticLog.h"
+#include "diagnostics/StabilityScenarioRunner.h"
 #include "diagnostics/UndoDiagnosticConfig.h"
 #include "diagnostics/UndoDiagnosticFileLog.h"
 #include "engine/CountInClickOutput.h"
+#include "engine/PlaybackEngine.h"
 #include "audio/LatencySettingsStore.h"
 #include "io/AudioFileLoader.h"
 #include "io/MonoWavFileWriter.h"
@@ -180,8 +183,19 @@ struct RecordingCoordinator::CycleRecordingWrapTimer final : juce::Timer
     RecordingCoordinator& owner;
 };
 
+struct RecordingCoordinator::RecordingExtentFollowTimer final : juce::Timer
+{
+    explicit RecordingExtentFollowTimer(RecordingCoordinator& o) noexcept
+        : owner(o)
+    {
+    }
+    void timerCallback() override { owner.onRecordingExtentFollowTick(); }
+    RecordingCoordinator& owner;
+};
+
 RecordingCoordinator::RecordingCoordinator(Transport& transport,
                                            Session& session,
+                                           PlaybackEngine& playbackEngine,
                                            juce::AudioDeviceManager& deviceManager,
                                            RecorderService& recorder,
                                            CountInClickOutput& countInClicks,
@@ -190,6 +204,7 @@ RecordingCoordinator::RecordingCoordinator(Transport& transport,
                                            Callbacks callbacks)
     : transport_(transport)
     , session_(session)
+    , playbackEngine_(playbackEngine)
     , deviceManager_(deviceManager)
     , recorder_(recorder)
     , countInClicks_(countInClicks)
@@ -209,6 +224,74 @@ RecordingCoordinator::~RecordingCoordinator()
     {
         cycleRecordingWrapTimer_->stopTimer();
     }
+    if (extentFollowTimer_ != nullptr)
+    {
+        extentFollowTimer_->stopTimer();
+    }
+}
+
+void RecordingCoordinator::onRecordingExtentFollowTick()
+{
+    if (!extentFollowActive_ || !isRecordingInProgress())
+    {
+        return;
+    }
+    // Display follow only: the engine keeps the transport running through the take regardless
+    // (record run), this merely keeps the ruler / scroll range a few seconds ahead of the
+    // playhead through the existing grow-only session operation. The margin is removed at Stop.
+    const double sr = runSampleRate_ > 0.0 ? runSampleRate_ : 48000.0;
+    const std::int64_t margin = (std::int64_t)std::llround(5.0 * sr);
+    const std::int64_t head = transport_.readPlayheadSamplesForUi();
+    if (head + margin > session_.getArrangementExtentSamples())
+    {
+        session_.setArrangementExtentSamples(head + margin);
+        callbacks_.repaintRulerAndLanes();
+    }
+}
+
+RecordRunBoundaries RecordingCoordinator::stopRecordRunAndCollectBoundaries()
+{
+    // Intent first, run stop second: the callback that acknowledges the stop also sees the
+    // Stopped intent, so the boundary block does not advance the playhead (see PlaybackEngine).
+    transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
+    playbackEngine_.requestRecordRunStop();
+
+    PlaybackEngine::RecordRunBoundary fallback;
+    fallback.monoSample = playbackEngine_.readMonoSampleClockForUi();
+    fallback.timelineSample = transport_.readPlayheadSamplesForUi();
+    fallback.wrapSerial = transport_.readCycleWrapCountForUi();
+    fallback.valid = true;
+    const bool acked = playbackEngine_.waitForRecordRunStop(250, fallback);
+    if (!acked)
+    {
+        juce::Logger::writeToLog("[Rec] WARNING: the audio callback did not acknowledge the stop within 250 ms "
+                                 "(device stopped or lost) - the run was closed from the message thread at mono "
+                                 + juce::String((juce::int64)fallback.monoSample) + " / timeline "
+                                 + juce::String((juce::int64)fallback.timelineSample));
+    }
+    const PlaybackEngine::RecordRunBoundary startB = playbackEngine_.recordRunStartBoundary();
+    const PlaybackEngine::RecordRunBoundary stopB = playbackEngine_.recordRunStopBoundary();
+    RecordRunBoundaries b;
+    b.startTimelineSample = startB.timelineSample;
+    b.startMonoSample = startB.monoSample;
+    b.startWrapSerial = startB.wrapSerial;
+    b.stopTimelineSample = stopB.timelineSample;
+    b.stopMonoSample = stopB.monoSample;
+    b.stopWrapSerial = stopB.wrapSerial;
+    b.acknowledgedByEngine = acked;
+    lastRunBoundaries_ = b;
+    const juce::String line = "[Rec] run boundaries: start mono=" + juce::String((juce::int64)b.startMonoSample) + " tl="
+                              + juce::String((juce::int64)b.startTimelineSample) + " wrap=" + juce::String((int)b.startWrapSerial)
+                              + " | stop mono=" + juce::String((juce::int64)b.stopMonoSample) + " tl="
+                              + juce::String((juce::int64)b.stopTimelineSample) + " wrap=" + juce::String((int)b.stopWrapSerial)
+                              + " | captured frames=" + juce::String((juce::int64)(b.stopMonoSample - b.startMonoSample))
+                              + (acked ? "" : " (fallback, no callback)");
+    juce::Logger::writeToLog(line);
+    if (isStabilityTestModeActive())
+    {
+        appendStabilityRunLine("  " + line);
+    }
+    return b;
 }
 
 void RecordingCoordinator::onCycleRecordingWrapTimerTick()
@@ -242,31 +325,36 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
     const TrackId cycleTrackId = cycleSessionTrackId_;
     const std::int64_t cycleLocL = cycleSessionLocL_;
     const std::int64_t cycleLocR = cycleSessionLocR_;
-    const std::int64_t cycleStart = cycleSessionRecordingStartSample_;
     const double cycleSr = cycleSessionSampleRate_;
 
-    transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
-    // Stop boundary for the MIDI take: the transport position at the moment of stop. Held notes
-    // end here, a held sustain pedal is released here. The wrap count is read as a CONSISTENT
-    // pair with the position (re-read until no wrap slipped in between), so a cycle take's last
-    // pass is counted exactly once: a wrap the engine performs after this read belongs to blocks
-    // past the user's Stop and is discarded by the take builder.
-    std::uint32_t stopWrapSerial = transport_.readCycleWrapCountForUi();
-    std::int64_t stopSample = transport_.readPlayheadSamplesForUi();
-    for (int attempt = 0; attempt < 8; ++attempt)
-    {
-        const std::uint32_t again = transport_.readCycleWrapCountForUi();
-        if (again == stopWrapSerial)
-        {
-            break;
-        }
-        stopWrapSerial = again;
-        stopSample = transport_.readPlayheadSamplesForUi();
-    }
+    // ONE stop boundary for audio and MIDI, stamped by the audio thread at a block boundary
+    // (mono clock + transport position + wrap serial of the same sample). The audio recorder
+    // received its last block before it; the MIDI take is cut at it; both finalizations below use
+    // these values — never separate UI reads. Held notes end here, a held pedal is released here.
+    const RecordRunBoundaries run = stopRecordRunAndCollectBoundaries();
+    const std::int64_t stopSample = run.stopTimelineSample;
+    const std::uint32_t stopWrapSerial = run.stopWrapSerial;
+    // Audio placement and cycle slicing start from the acknowledged start boundary (equal to the
+    // count-in position when the transport was stopped; exact also for a punch-in while playing).
+    const std::int64_t cycleStart = run.startTimelineSample;
     callbacks_.updatePlayPauseButtonFromTransport();
     if (cycleRecordingWrapTimer_ != nullptr)
     {
         cycleRecordingWrapTimer_->stopTimer();
+    }
+    // Recording past the end: drop the display headroom again. The stored extent returns to its
+    // pre-run value (never shrinking an older project's saved extent); the committed clips below
+    // extend the content end by exactly what the result needs. Done BEFORE the undoable commit so
+    // neither undo side carries the temporary margin.
+    if (extentFollowTimer_ != nullptr)
+    {
+        extentFollowTimer_->stopTimer();
+    }
+    if (extentFollowActive_)
+    {
+        extentFollowActive_ = false;
+        session_.restoreArrangementExtentAfterRecording(storedExtentBeforeRun_, run.stopTimelineSample);
+        callbacks_.syncViewportFromSession();
     }
 
     callbacks_.clearCycleRecordingPreviewContext();
@@ -285,17 +373,23 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
             commit();
         }
     };
-    const auto commitMidiClipsNow = [this, midiTake, stopSample, stopWrapSerial]() -> int {
+    const auto commitMidiClipsNow = [this, midiTake, run]() -> int {
         if (!midiTake || !callbacks_.commitMidiTake)
         {
             return 0;
         }
-        const int clips = callbacks_.commitMidiTake(stopSample, stopWrapSerial);
+        const int clips = callbacks_.commitMidiTake(run);
         juce::Logger::writeToLog("[Rec] MIDI take committed: " + juce::String(clips) + " clip(s), stop sample "
-                                 + juce::String((juce::int64)stopSample) + " wrapSerial="
-                                 + juce::String((int)stopWrapSerial));
+                                 + juce::String((juce::int64)run.stopTimelineSample) + " wrapSerial="
+                                 + juce::String((int)run.stopWrapSerial));
         return clips;
     };
+    // Every return path below closes the engine's run once the finalizations consumed the boundaries.
+    struct FinishRunAtExit
+    {
+        PlaybackEngine& engine;
+        ~FinishRunAtExit() { engine.finishRecordRun(); }
+    } finishRunAtExit { playbackEngine_ };
 
     if (!audioTake)
     {
@@ -306,6 +400,8 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
         return;
     }
 
+    // The audio thread acknowledged the stop: no further `pushInputBlock` can run, so the
+    // recorder may join its writer and free the FIFO / buffers.
     const RecordedTakeResult r = recorder_.stopRecordingAndFinalize();
 
     if (!r.success)
@@ -327,16 +423,12 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
         return;
     }
 
-    // The audio slices and the MIDI passes count wraps from the SAME stop read (`stopWrapSerial`),
+    // The audio slices and the MIDI passes count wraps between the SAME acknowledged boundaries,
     // so a combined audio + MIDI cycle take has identical pass boundaries on every row.
-    const std::uint32_t wrapFinal = stopWrapSerial;
     if (commitCycleTakes)
     {
-        if (wrapFinal != lastSeenWrapCount_)
-        {
-            numCompletedPasses_ += static_cast<int>(wrapFinal - lastSeenWrapCount_);
-            lastSeenWrapCount_ = wrapFinal;
-        }
+        numCompletedPasses_ = static_cast<int>(stopWrapSerial - run.startWrapSerial);
+        lastSeenWrapCount_ = stopWrapSerial;
     }
     // Cycle-commit failure paths below: the MIDI passes are still valid material — keep them.
     const auto commitMidiOnlyAfterAudioFailure = [&]() {
@@ -572,9 +664,11 @@ void RecordingCoordinator::stopRecordingAndCommitFromUi(const char* sourceContex
     }
     else
     {
+        // Raw start boundary (engine-acknowledged) + the deliberate audio placement compensation
+        // (latency store) — the MIDI take applies its own, separate output-latency offset per gesture.
         const std::int64_t recordingPlacementOffsetSamples = latencyStore_.getCurrentRecordingOffsetSamples();
         const std::int64_t committedStartSamples = juce::jmax<std::int64_t>(
-            std::int64_t{ 0 }, r.recordingStartSample + recordingPlacementOffsetSamples);
+            std::int64_t{ 0 }, run.startTimelineSample + recordingPlacementOffsetSamples);
 
         juce::Result ar = juce::Result::ok();
         commitUndoable([&] {
@@ -618,6 +712,22 @@ void RecordingCoordinator::abortMidiTakeForProjectReplace()
         return;
     }
     midiTakeActive_ = false;
+    // Close the engine's record run too (bounded wait; the take is dropped, so the boundary is
+    // only needed to stop capturing) and drop the display headroom.
+    if (!recorder_.isRecording())
+    {
+        (void)stopRecordRunAndCollectBoundaries();
+        playbackEngine_.finishRecordRun();
+    }
+    if (extentFollowTimer_ != nullptr)
+    {
+        extentFollowTimer_->stopTimer();
+    }
+    if (extentFollowActive_)
+    {
+        extentFollowActive_ = false;
+        session_.restoreArrangementExtentAfterRecording(storedExtentBeforeRun_, transport_.readPlayheadSamplesForUi());
+    }
     if (callbacks_.abortMidiTake)
     {
         callbacks_.abortMidiTake();
@@ -916,6 +1026,10 @@ void RecordingCoordinator::cancelCountIn()
     countInAwaitingPostClickDelay_ = false;
     pendingCountIn_.reset();
     pendingMidiTake_ = false;
+    if (callbacks_.setMidiTakePending)
+    {
+        callbacks_.setMidiTakePending(false);
+    }
     countInClicks_.cancel();
     countInStatusLabel_.setText({}, juce::dontSendNotification);
     if (cycleRecordingActive_)
@@ -996,6 +1110,12 @@ void RecordingCoordinator::startCountInAfterValidation(BeginRecordingRequest&& r
     countInTimer_->startTimer(kCountInIntervalMs);
     juce::Logger::writeToLog(
         "[Rec] count-in started (8 clicks, 375 ms, +375 ms pre-roll before record)");
+    // The rows that will record are known now: destinations that play a proxy prepare their live
+    // source during the count-in, off the audio thread (cancel withdraws it again).
+    if (pendingMidiTake_ && callbacks_.setMidiTakePending)
+    {
+        callbacks_.setMidiTakePending(true);
+    }
 }
 
 void RecordingCoordinator::completeCountInAndStartRecording()
@@ -1016,20 +1136,11 @@ void RecordingCoordinator::completeCountInAndStartRecording()
     // count-in finishes. The MIDI capture maps each gesture onto this timeline (see
     // LiveMidiInputBus time model); the audio take places its file here (+ its own offset).
     req.recordingStartSample = transport_.readPlayheadSamplesForUi();
-    // Recording at / past the end of the arrangement: the engine stops advancing the playhead at
-    // the arrangement extent, which would freeze the take's timeline (the audio take keeps its
-    // device-clock length, but MIDI gestures would have no position after the end). Grow the
-    // navigable extent through the same grow-only session operation that seeds new projects, so
-    // the transport runs for the whole take (headroom: 30 minutes past the record start).
-    {
-        const double sr = req.sampleRate > 0.0 ? req.sampleRate : 48000.0;
-        const std::int64_t needed = req.recordingStartSample + (std::int64_t)std::llround(30.0 * 60.0 * sr);
-        if (session_.getArrangementExtentSamples() < needed)
-        {
-            session_.setArrangementExtentSamples(needed);
-            callbacks_.syncViewportFromSession();
-        }
-    }
+    // Recording at / past the end of the arrangement: the engine's record run keeps the transport
+    // running through the take; this coordinator only follows with the navigable extent (small
+    // display margin, see `onRecordingExtentFollowTick`) and removes that margin again at Stop.
+    storedExtentBeforeRun_ = session_.getStoredArrangementExtentSamples();
+    runSampleRate_ = req.sampleRate;
     if (armedCycleSession)
     {
         cycleSessionTrackId_ = req.targetTrackId;
@@ -1058,6 +1169,10 @@ void RecordingCoordinator::completeCountInAndStartRecording()
         }
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Recording", err);
         juce::Logger::writeToLog(juce::String{"[Rec] beginRecording failed: "} + err);
+        if (callbacks_.setMidiTakePending)
+        {
+            callbacks_.setMidiTakePending(false); // no temporary live-source request may linger
+        }
         return; // the MIDI take is not started either: one take, one outcome
     }
 
@@ -1094,6 +1209,16 @@ void RecordingCoordinator::completeCountInAndStartRecording()
         cycleRecordingWrapTimer_->startTimerHz(50);
     }
 
+    // Intent first, run start second (both release-stores): the callback that acknowledges the
+    // start is the first playing block, so the acknowledged start boundary IS the take's first
+    // sample for audio and MIDI alike.
     transport_.requestPlaybackIntent(PlaybackIntent::Playing);
+    playbackEngine_.requestRecordRunStart();
+    if (extentFollowTimer_ == nullptr)
+    {
+        extentFollowTimer_ = std::make_unique<RecordingExtentFollowTimer>(*this);
+    }
+    extentFollowActive_ = true;
+    extentFollowTimer_->startTimerHz(10);
     callbacks_.updatePlayPauseButtonFromTransport();
 }

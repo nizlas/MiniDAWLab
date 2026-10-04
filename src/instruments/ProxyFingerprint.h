@@ -36,11 +36,14 @@
 
 namespace proxy_fingerprint
 {
-    /// Bumping either value deterministically marks every existing proxy stale (§11.4).
+    /// Bumping either value deterministically marks every existing proxy stale (§11.4) — unless
+    /// a generation is proven comparable under its own recorded schema (see
+    /// `proxy_playback::comparableFingerprintSchemaFor`).
     inline constexpr std::uint32_t kFingerprintAlgorithmId = 1;   // 1 = SHA-256 over this layout
-    /// 2 = clips serialize in stored (layer-stack) order and the bake applies the LAYER-1
-    /// overlap rule; every generation rendered under the additive schema-1 semantics is stale.
-    inline constexpr std::uint32_t kFingerprintSchemaVersion = 2; // field-layout version
+    /// 1 = clips serialized in the additive bake's plan order (stable sort by start); 2 = clips
+    /// serialized in stored (layer-stack) order and the bake applies the LAYER-1 overlap rule.
+    inline constexpr std::uint32_t kFingerprintSchemaVersionAdditive = 1;
+    inline constexpr std::uint32_t kFingerprintSchemaVersion = 2; // current field-layout version
 
     namespace detail
     {
@@ -127,17 +130,54 @@ namespace proxy_fingerprint
                 writeClip(w, c);
             }
         }
+
+        /// Schema 1 layout: clips in the additive bake's PLAN order — stable sort by
+        /// `startSamples` over the stored sequence (equal starts keep stored order). Kept so a
+        /// schema-1 generation can be re-derived when its content is provably layer-insensitive.
+        inline void writeClipsInPlanOrder(Writer& w, const std::vector<proxy_snapshot::SnapshotClip>& clips)
+        {
+            std::vector<const proxy_snapshot::SnapshotClip*> plan;
+            plan.reserve(clips.size());
+            for (const auto& c : clips)
+            {
+                plan.push_back(&c);
+            }
+            std::stable_sort(plan.begin(), plan.end(),
+                             [](const proxy_snapshot::SnapshotClip* a, const proxy_snapshot::SnapshotClip* b) {
+                                 return a->startSamples < b->startSamples;
+                             });
+            w.u32((std::uint32_t)plan.size());
+            for (const auto* c : plan)
+            {
+                writeClip(w, *c);
+            }
+        }
+
+        inline void writeClipsForSchema(Writer& w, const std::vector<proxy_snapshot::SnapshotClip>& clips,
+                                        const std::uint32_t schemaVersion)
+        {
+            if (schemaVersion == kFingerprintSchemaVersionAdditive)
+            {
+                writeClipsInPlanOrder(w, clips);
+            }
+            else
+            {
+                writeClipsInStoredOrder(w, clips);
+            }
+        }
     } // namespace detail
 
     /// Canonical fingerprint bytes of a snapshot (before hashing). Deterministic: repeated calls
-    /// on the same snapshot produce identical bytes.
+    /// on the same snapshot produce identical bytes. `schemaVersion` selects the layout (current
+    /// by default; schema 1 only to re-derive a provably comparable older generation).
     [[nodiscard]] inline juce::MemoryBlock serializeCanonicalFingerprintBytes(
-        const proxy_snapshot::ProxyRenderSnapshot& s)
+        const proxy_snapshot::ProxyRenderSnapshot& s,
+        const std::uint32_t schemaVersion = kFingerprintSchemaVersion)
     {
         detail::Writer w;
         // Version tags first (§11.4).
         w.u32(kFingerprintAlgorithmId);
-        w.u32(kFingerprintSchemaVersion);
+        w.u32(schemaVersion);
         // F1 — plugin identity (path-normalized), F1v — version.
         w.path(s.pluginIdentity.fileOrIdentifier);
         w.i32(s.pluginIdentity.uniqueId);
@@ -150,7 +190,7 @@ namespace proxy_fingerprint
         w.u64(s.stateIdentity.primaryStateRevision);
         w.u8(s.stateIdentity.pairedWithSavedState);
         // F3/F4/F5 — destination's own content first (Locked merge rule).
-        detail::writeClipsInStoredOrder(w, s.destinationClips);
+        detail::writeClipsForSchema(w, s.destinationClips, schemaVersion);
         // F6 — destination MIDI output channel.
         w.i32(s.destinationMidiOutputChannel);
         // F7/F8/F9 — routed sources strictly in session order; order itself is data.
@@ -161,7 +201,7 @@ namespace proxy_fingerprint
             w.i32(src.midiOutputChannel);
             w.u8(src.trackOff);
             w.u8(src.muted);
-            detail::writeClipsInStoredOrder(w, src.clips);
+            detail::writeClipsForSchema(w, src.clips, schemaVersion);
         }
         // F10 — note-off gate rule inputs.
         w.i32(s.renderConfig.noteOffGateMs);
@@ -184,10 +224,11 @@ namespace proxy_fingerprint
     }
 
     /// The generation identity: "sha256:<hex>" over the canonical bytes. Doubles as the proxy
-    /// asset `generationId` (§12.2/§16).
-    [[nodiscard]] inline juce::String computeFingerprint(const proxy_snapshot::ProxyRenderSnapshot& s)
+    /// asset `generationId` (§12.2/§16). New generations always use the current schema.
+    [[nodiscard]] inline juce::String computeFingerprint(const proxy_snapshot::ProxyRenderSnapshot& s,
+                                                         const std::uint32_t schemaVersion = kFingerprintSchemaVersion)
     {
-        const juce::MemoryBlock bytes = serializeCanonicalFingerprintBytes(s);
+        const juce::MemoryBlock bytes = serializeCanonicalFingerprintBytes(s, schemaVersion);
         return "sha256:" + juce::SHA256(bytes.getData(), bytes.getSize()).toHexString();
     }
 } // namespace proxy_fingerprint

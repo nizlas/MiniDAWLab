@@ -266,6 +266,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-proxy-recording")
+        {
+            if (!setKind(StabilityScenarioKind::ProxyRecording)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-proxy-recording requires a project path";
+                return {};
+            }
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -357,6 +366,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::OrganDc: scenarioName_ = "organ-dc"; break;
         case StabilityScenarioKind::LiveMidi: scenarioName_ = "live-midi"; break;
         case StabilityScenarioKind::MidiCycleTakes: scenarioName_ = "midi-cycle-takes"; break;
+        case StabilityScenarioKind::ProxyRecording: scenarioName_ = "proxy-recording"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -445,6 +455,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::MidiCycleTakes:
             appendMidiCycleTakesSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::ProxyRecording:
+            appendProxyRecordingSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -638,17 +651,25 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                return true;
                            },
                            kSettleAfterLoadMs });
+    // The stored arrangement extent right after the fixture exists: every Cycle run below must
+    // leave it exactly there (a project's saved extent may be far beyond the loop range).
+    auto storedExtentAtStart = std::make_shared<std::int64_t>(-1);
     steps_.push_back(Step{ "midi-cycle: build fixture (instrument shell + Lower / Pedal routed rows, MIDI Input = All, filters 1/5/6)",
-                           [this](juce::String& failReason) -> bool {
+                           [this, storedExtentAtStart](juce::String& failReason) -> bool {
                                if (!hooks_.liveMidiFixtureSetup(liveMidiInstTid_, liveMidiLowerTid_, liveMidiPedalTid_, failReason))
                                {
                                    return false;
+                               }
+                               if (hooks_.getStoredArrangementExtentSamples)
+                               {
+                                   *storedExtentAtStart = hooks_.getStoredArrangementExtentSamples();
                                }
                                appendStabilityRunLine("  fixture: inst=" + juce::String((juce::int64)liveMidiInstTid_) + " lower="
                                                       + juce::String((juce::int64)liveMidiLowerTid_) + " pedal="
                                                       + juce::String((juce::int64)liveMidiPedalTid_)
                                                       + " injection=" + (hooks_.liveMidiInjectUsesRealPort && hooks_.liveMidiInjectUsesRealPort()
-                                                                             ? "REAL loopback port" : "bus device-thread entry"));
+                                                                             ? "REAL loopback port" : "bus device-thread entry")
+                                                      + " stored extent=" + juce::String((juce::int64)*storedExtentAtStart));
                                return true;
                            },
                            600 });
@@ -1382,6 +1403,14 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                hooks_.setPlaybackActive(false);
                                hooks_.setCycleEnabled(true);
                                hooks_.seekTransportTo(cycleLocL_);
+                               // Make the Lower row audible first (delete its two silent masking takes) so the
+                               // run can prove that OTHER source rows into the same instrument keep playing
+                               // while the recording row's own clips are silent. Undone after the run.
+                               if (!hooks_.deleteTopmostMidiClipLikeUi(liveMidiLowerTid_) || !hooks_.deleteTopmostMidiClipLikeUi(liveMidiLowerTid_))
+                               {
+                                   failReason = "could not uncover the Lower row's take";
+                                   return false;
+                               }
                                hooks_.liveMidiSetArm(liveMidiInstTid_, true);
                                hooks_.liveMidiSetArm(liveMidiLowerTid_, false);
                                hooks_.liveMidiSetMonitor(liveMidiInstTid_, true);
@@ -1417,7 +1446,9 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                reportHeard("while recording the second run");
                                const int live67 = heard(1, 67);
                                const int old65 = heard(1, 65);
-                               appendStabilityRunLine("  live 67 heard=" + juce::String(live67) + " earlier take 65 heard=" + juce::String(old65));
+                               const int lower50 = heard(2, 50);
+                               appendStabilityRunLine("  live 67 heard=" + juce::String(live67) + " earlier take 65 heard=" + juce::String(old65)
+                                                      + " other row (Lower 50) heard=" + juce::String(lower50));
                                hooks_.recordToggleLikeKey();
                                juce::Thread::sleep(200);
                                if (hooks_.isRecordingInProgress())
@@ -1435,15 +1466,25 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                    failReason = "the live note was not heard while recording";
                                    return false;
                                }
+                               if (lower50 < 1)
+                               {
+                                   failReason = "another source row into the same instrument stopped playing during the take";
+                                   return false;
+                               }
                                const int clipsNow = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
                                if (clipsNow <= cycleInstClipsBefore_ + 4 || hooks_.undoStackSize() != cycleUndoSizeBefore_ + 1)
                                {
                                    failReason = "the second run did not add its passes as one undo step";
                                    return false;
                                }
-                               hooks_.invokeUndo();
-                               juce::Thread::sleep(150);
-                               return (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() == cycleInstClipsBefore_ + 4;
+                               // Undo the run and the two Lower deletes (back to the full stacks).
+                               for (int i = 0; i < 3; ++i)
+                               {
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(120);
+                               }
+                               return (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size() == cycleInstClipsBefore_ + 4
+                                      && (int)hooks_.liveMidiSummarizeAllClips(liveMidiLowerTid_).size() == cycleLowerClipsBefore_ + 4;
                            },
                            300 });
     steps_.push_back(Step{ "midi-cycle: after the run the row's clips play again (65 heard with Monitor still on, nothing recording)",
@@ -1574,19 +1615,20 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                        failReason = "combined cycle take must add 2 audio slices and 2 MIDI passes in exactly one undo step";
                                        return false;
                                    }
-                                   // Audio clips are newest-first; MIDI passes oldest-first. Compare lengths (the audio
-                                   // placement adds its own recording offset to the start by design).
-                                   const std::int64_t tol = (std::int64_t)(sr() * 0.1);
+                                   // Audio clips are newest-first; MIDI passes oldest-first. Lengths must be IDENTICAL
+                                   // (one engine-acknowledged stop boundary); only the placements differ by their
+                                   // deliberate compensations (audio start = raw + latency-store offset).
                                    const std::int64_t audioPass0Len = audio[1].second;
                                    const std::int64_t audioPass1Len = audio[0].second;
                                    const std::int64_t midiPass0Len = midi[(size_t)midiBefore].firstClipLengthSamples;
                                    const std::int64_t midiPass1Len = midi[(size_t)midiBefore + 1].firstClipLengthSamples;
                                    appendStabilityRunLine("  pass lengths: audio " + juce::String((juce::int64)audioPass0Len) + " / " + juce::String((juce::int64)audioPass1Len)
                                                           + " midi " + juce::String((juce::int64)midiPass0Len) + " / " + juce::String((juce::int64)midiPass1Len)
-                                                          + " (tolerance " + juce::String((juce::int64)tol) + ")");
-                                   if (std::abs((long long)(audioPass0Len - midiPass0Len)) > tol || std::abs((long long)(audioPass1Len - midiPass1Len)) > tol)
+                                                          + " | audio placement offset=" + juce::String((juce::int64)(hooks_.recordingPlacementOffsetSamples ? hooks_.recordingPlacementOffsetSamples() : 0))
+                                                          + " | " + (hooks_.lastRecordRunBoundaries ? hooks_.lastRecordRunBoundaries() : juce::String()));
+                                   if (audioPass0Len != midiPass0Len || audioPass1Len != midiPass1Len)
                                    {
-                                       failReason = "audio slices and MIDI passes do not share the pass boundaries";
+                                       failReason = "audio slices and MIDI passes do not share the exact pass boundaries";
                                        return false;
                                    }
                                    bool has67 = false, has69 = false;
@@ -1610,6 +1652,347 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                },
                                400 });
     }
+    // ---- 11. Recording past the previous arrangement end (no fixed headroom): MIDI-only, audio-only
+    //          and combined runs cross the old end with a running transport; the extent follows the
+    //          playhead during the run and keeps only what the result needs afterwards. Cycle runs
+    //          above must not have lengthened the project.
+    if (hooks_.getStoredArrangementExtentSamples && hooks_.getArrangementExtentSamples && hooks_.lastRecordRunBoundaries)
+    {
+        auto extentBeforeAll = std::make_shared<std::int64_t>(0);
+        auto audioTid = std::make_shared<TrackId>(kInvalidTrackId);
+        steps_.push_back(Step{ "past-end: the Cycle runs did not lengthen the project (stored extent unchanged)",
+                               [this, extentBeforeAll, storedExtentAtStart](juce::String& failReason) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   hooks_.setCycleEnabled(false);
+                                   *extentBeforeAll = hooks_.getStoredArrangementExtentSamples();
+                                   appendStabilityRunLine("  stored extent now=" + juce::String((juce::int64)*extentBeforeAll) + " at fixture time="
+                                                          + juce::String((juce::int64)*storedExtentAtStart) + " (loop end R=" + juce::String((juce::int64)cycleLocR_) + ")");
+                                   // The takes end at R, so the extent may cover exactly up to R when the project was
+                                   // shorter than the loop — never beyond that (no reserve, no per-pass growth).
+                                   const std::int64_t expected = juce::jmax<std::int64_t>(*storedExtentAtStart, cycleLocR_);
+                                   if (*extentBeforeAll != expected)
+                                   {
+                                       failReason = "a Cycle run changed the stored arrangement extent beyond what the result needs (expected "
+                                                    + juce::String((juce::int64)expected) + ")";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               200 });
+        auto midiStart = std::make_shared<std::int64_t>(0);
+        auto audioClipsBeforePastEnd = std::make_shared<int>(0);
+        steps_.push_back(Step{ "past-end: MIDI-only - seek 0.5 s before the end, arm inst, Record",
+                               [this, extentBeforeAll, midiStart, secondsToSamples](juce::String& failReason) -> bool {
+                                   *midiStart = *extentBeforeAll - secondsToSamples(0.5);
+                                   hooks_.seekTransportTo(*midiStart);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   hooks_.liveMidiSetArm(liveMidiLowerTid_, false);
+                                   hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                                   cycleUndoSizeBefore_ = hooks_.undoStackSize();
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(120);
+                                   if (!hooks_.isCountInActive())
+                                   {
+                                       failReason = "Record did not start";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               3700 });
+        steps_.push_back(Step{ "past-end: MIDI-only - note 70 before the old end, block the UI 1.5 s, note 72 after it (transport must keep running)",
+                               [this, extentBeforeAll, inject, on, off](juce::String& failReason) -> bool {
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "take did not start";
+                                       return false;
+                                   }
+                                   inject(on(1, 70, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 70));
+                                   const std::int64_t headBefore = hooks_.getTransportPlayheadSamples();
+                                   juce::Thread::sleep(1500); // no UI timer can run: the engine alone must carry the transport past the end
+                                   const std::int64_t headAfter = hooks_.getTransportPlayheadSamples();
+                                   appendStabilityRunLine("  transport during the UI stall: " + juce::String((juce::int64)headBefore) + " -> "
+                                                          + juce::String((juce::int64)headAfter) + " (old extent " + juce::String((juce::int64)*extentBeforeAll)
+                                                          + ", navigable extent now " + juce::String((juce::int64)hooks_.getArrangementExtentSamples()) + ")");
+                                   if (headAfter <= *extentBeforeAll || headAfter - headBefore < 48000)
+                                   {
+                                       failReason = "the transport froze at the old arrangement end while recording";
+                                       return false;
+                                   }
+                                   inject(on(1, 72, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 72));
+                                   return true;
+                               },
+                               400 });
+        steps_.push_back(Step{ "past-end: MIDI-only - Stop; clip runs past the old end with correct positions; extent = result end, no reserve",
+                               [this, extentBeforeAll, midiStart, sr, describeClip](juce::String& failReason) -> bool {
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(250);
+                                   const auto clips = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                                   if ((int)clips.size() != cycleInstClipsBefore_ + 5)
+                                   {
+                                       failReason = "MIDI-only run past the end did not add exactly one clip";
+                                       return false;
+                                   }
+                                   const StabilityMidiClipSummary& c = clips.back();
+                                   const std::int64_t clipEnd = c.firstClipStartSamples + c.firstClipLengthSamples;
+                                   const std::int64_t stored = hooks_.getStoredArrangementExtentSamples();
+                                   appendStabilityRunLine("  take: " + describeClip(c) + " | end=" + juce::String((juce::int64)clipEnd) + " oldExtent="
+                                                          + juce::String((juce::int64)*extentBeforeAll) + " storedExtentNow=" + juce::String((juce::int64)stored)
+                                                          + " | " + hooks_.lastRecordRunBoundaries());
+                                   if (c.firstClipStartSamples != *midiStart || clipEnd <= *extentBeforeAll + (std::int64_t)sr())
+                                   {
+                                       failReason = "the take does not start at the record boundary or does not reach past the old end";
+                                       return false;
+                                   }
+                                   // Note 72 was played ~1.9 s after the start: its tick must lie beyond the old end.
+                                   bool n72Ok = false;
+                                   for (const auto& n : c.notes)
+                                   {
+                                       if (n.note == 72)
+                                       {
+                                           const double samples = (double)n.startTick / (double)c.ticksPerQuarter * 60.0 / c.bpm * sr();
+                                           n72Ok = c.firstClipStartSamples + (std::int64_t)samples > *extentBeforeAll;
+                                       }
+                                   }
+                                   if (!n72Ok)
+                                   {
+                                       failReason = "note played after the old end was not placed after it";
+                                       return false;
+                                   }
+                                   if (stored < clipEnd || stored > clipEnd + (std::int64_t)(sr() * 0.5))
+                                   {
+                                       failReason = "stored extent after Stop must equal the result end (no reserve, no margin)";
+                                       return false;
+                                   }
+                                   *extentBeforeAll = stored;
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "past-end: audio-only - arm an audio track, seek 0.3 s before the (new) end, Record 2 s, Stop; length = acknowledged frames",
+                               [this, extentBeforeAll, audioTid, audioClipsBeforePastEnd, secondsToSamples](juce::String& failReason) -> bool {
+                                   if (!hooks_.armAudioTrackForRecording || !hooks_.audioClipWindowsForTrack || !hooks_.listAllTracks)
+                                   {
+                                       return true;
+                                   }
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                                   {
+                                       if (t.kindName == "audio" && *audioTid == kInvalidTrackId)
+                                       {
+                                           *audioTid = t.id;
+                                       }
+                                   }
+                                   if (*audioTid == kInvalidTrackId)
+                                   {
+                                       appendStabilityRunLine("  no audio track - audio-only past-end run skipped");
+                                       return true;
+                                   }
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                   hooks_.armAudioTrackForRecording(*audioTid);
+                                   const std::int64_t start = *extentBeforeAll - secondsToSamples(0.3);
+                                   hooks_.seekTransportTo(start);
+                                   const int before = (int)hooks_.audioClipWindowsForTrack(*audioTid).size();
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(120);
+                                   if (!hooks_.isCountInActive())
+                                   {
+                                       appendStabilityRunLine("  audio input unavailable - audio-only past-end run skipped");
+                                       hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                       return true;
+                                   }
+                                   settleOverrideMsForCurrentStep_ = 3700 + 2000;
+                                   *audioClipsBeforePastEnd = before; // verified in the next step
+                                   return true;
+                               },
+                               100 });
+        steps_.push_back(Step{ "past-end: audio-only - Stop and verify",
+                               [this, extentBeforeAll, audioTid, audioClipsBeforePastEnd, sr](juce::String& failReason) -> bool {
+                                   if (*audioTid == kInvalidTrackId || !hooks_.isRecordingInProgress())
+                                   {
+                                       return true;
+                                   }
+                                   const std::int64_t headBeforeStop = hooks_.getTransportPlayheadSamples();
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(400);
+                                   hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                   const auto audio = hooks_.audioClipWindowsForTrack(*audioTid);
+                                   const juce::String bounds = hooks_.lastRecordRunBoundaries();
+                                   appendStabilityRunLine("  audio-only: clips=" + juce::String((int)audio.size()) + " newest start="
+                                                          + juce::String((juce::int64)(audio.empty() ? 0 : audio.front().first)) + " len="
+                                                          + juce::String((juce::int64)(audio.empty() ? 0 : audio.front().second)) + " headBeforeStop="
+                                                          + juce::String((juce::int64)headBeforeStop) + " | " + bounds);
+                                   if (audio.empty() || (int)audio.size() != *audioClipsBeforePastEnd + 1)
+                                   {
+                                       failReason = "audio-only run past the end did not add one clip";
+                                       return false;
+                                   }
+                                   // frames=<stop mono - start mono> in the boundary line must equal the clip length.
+                                   const int framesPos = bounds.indexOf("frames=");
+                                   const std::int64_t frames = framesPos >= 0 ? bounds.substring(framesPos + 7).getLargeIntValue() : -1;
+                                   if (frames != audio.front().second)
+                                   {
+                                       failReason = "audio clip length differs from the acknowledged captured frame count";
+                                       return false;
+                                   }
+                                   if (headBeforeStop <= *extentBeforeAll)
+                                   {
+                                       failReason = "audio-only transport froze at the arrangement end";
+                                       return false;
+                                   }
+                                   *extentBeforeAll = hooks_.getStoredArrangementExtentSamples();
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "past-end: combined - arm audio + inst, seek 0.3 s before the end, Record 2 s",
+                               [this, extentBeforeAll, audioTid, secondsToSamples](juce::String&) -> bool {
+                                   if (*audioTid == kInvalidTrackId)
+                                   {
+                                       return true;
+                                   }
+                                   hooks_.armAudioTrackForRecording(*audioTid);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   hooks_.seekTransportTo(*extentBeforeAll - secondsToSamples(0.3));
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(120);
+                                   if (!hooks_.isCountInActive())
+                                   {
+                                       appendStabilityRunLine("  combined past-end run could not start - skipped");
+                                       hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                       *audioTid = kInvalidTrackId;
+                                       return true;
+                                   }
+                                   settleOverrideMsForCurrentStep_ = 3700 + 1000;
+                                   return true;
+                               },
+                               100 });
+        steps_.push_back(Step{ "past-end: combined - play a note, Stop; audio and MIDI lengths identical and past the old end",
+                               [this, extentBeforeAll, audioTid, inject, on, off](juce::String& failReason) -> bool {
+                                   if (*audioTid == kInvalidTrackId)
+                                   {
+                                       return true;
+                                   }
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "combined past-end take did not start";
+                                       return false;
+                                   }
+                                   inject(on(1, 74, 100));
+                                   juce::Thread::sleep(300);
+                                   inject(off(1, 74));
+                                   juce::Thread::sleep(700);
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(400);
+                                   hooks_.armAudioTrackForRecording(kInvalidTrackId);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                   const auto audio = hooks_.audioClipWindowsForTrack(*audioTid);
+                                   const auto midi = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                                   if (audio.empty() || midi.empty())
+                                   {
+                                       failReason = "combined past-end run produced no clips";
+                                       return false;
+                                   }
+                                   const std::int64_t audioLen = audio.front().second;
+                                   const std::int64_t midiLen = midi.back().firstClipLengthSamples;
+                                   const std::int64_t midiEnd = midi.back().firstClipStartSamples + midiLen;
+                                   appendStabilityRunLine("  combined past-end: audio len=" + juce::String((juce::int64)audioLen) + " midi len="
+                                                          + juce::String((juce::int64)midiLen) + " midi end=" + juce::String((juce::int64)midiEnd)
+                                                          + " oldExtent=" + juce::String((juce::int64)*extentBeforeAll) + " storedNow="
+                                                          + juce::String((juce::int64)hooks_.getStoredArrangementExtentSamples()) + " | "
+                                                          + hooks_.lastRecordRunBoundaries());
+                                   if (audioLen != midiLen || midiEnd <= *extentBeforeAll)
+                                   {
+                                       failReason = "combined run past the end: lengths differ or the take did not cross the old end";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+    }
+    // ---- 12. Device stopped during a take: Stop must not wait forever; the take is still committed
+    //          from the message-thread fallback boundary and the device comes back.
+    if (hooks_.closeAudioDeviceForTest && hooks_.restartAudioDeviceForTest && hooks_.lastRecordRunBoundaries)
+    {
+        steps_.push_back(Step{ "device-stop: MIDI-only take, note, then the audio device is closed while recording",
+                               [this, inject, on, off](juce::String& failReason) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   hooks_.setCycleEnabled(false);
+                                   hooks_.seekTransportTo(0);
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, true);
+                                   hooks_.liveMidiSetMonitor(liveMidiInstTid_, false);
+                                   cycleUndoSizeBefore_ = hooks_.undoStackSize();
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(120);
+                                   if (!hooks_.isCountInActive())
+                                   {
+                                       failReason = "Record did not start";
+                                       return false;
+                                   }
+                                   settleOverrideMsForCurrentStep_ = 3700 + 400;
+                                   return true;
+                               },
+                               100 });
+        steps_.push_back(Step{ "device-stop: close the device mid-take, Stop (bounded wait), verify commit + restart",
+                               [this, inject, on, off](juce::String& failReason) -> bool {
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "take did not start";
+                                       return false;
+                                   }
+                                   inject(on(1, 76, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 76));
+                                   juce::Thread::sleep(100);
+                                   const int clipsBefore = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
+                                   if (!hooks_.closeAudioDeviceForTest())
+                                   {
+                                       failReason = "audio device could not be closed";
+                                       return false;
+                                   }
+                                   juce::Thread::sleep(300);
+                                   const double t0 = juce::Time::getMillisecondCounterHiRes();
+                                   hooks_.recordToggleLikeKey(); // Stop with no callback running
+                                   const double stopMs = juce::Time::getMillisecondCounterHiRes() - t0;
+                                   const juce::String bounds = hooks_.lastRecordRunBoundaries();
+                                   const int clipsAfter = (int)hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_).size();
+                                   appendStabilityRunLine("  device-stop: Stop returned after " + juce::String(stopMs, 0) + " ms, clips "
+                                                          + juce::String(clipsBefore) + "->" + juce::String(clipsAfter) + " | " + bounds);
+                                   juce::String restartFail;
+                                   const bool restarted = hooks_.restartAudioDeviceForTest(restartFail);
+                                   appendStabilityRunLine(juce::String("  device restarted: ") + (restarted ? "yes" : ("no - " + restartFail)));
+                                   hooks_.liveMidiSetArm(liveMidiInstTid_, false);
+                                   if (hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "take still active after Stop without a device";
+                                       return false;
+                                   }
+                                   if (stopMs > 2000.0)
+                                   {
+                                       failReason = "Stop without a device callback took too long";
+                                       return false;
+                                   }
+                                   if (!bounds.contains("acked=no"))
+                                   {
+                                       failReason = "expected the message-thread fallback boundary (no callback)";
+                                       return false;
+                                   }
+                                   if (clipsAfter != clipsBefore + 1)
+                                   {
+                                       failReason = "the take was not committed after the device stopped";
+                                       return false;
+                                   }
+                                   if (!restarted)
+                                   {
+                                       failReason = "audio device did not come back";
+                                       return false;
+                                   }
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(150);
+                                   return true;
+                               },
+                               800 });
+    }
     steps_.push_back(Step{ "midi-cycle: cleanup (Cycle off, disarm, Monitor off)",
                            [this](juce::String&) -> bool {
                                hooks_.setPlaybackActive(false);
@@ -1620,6 +2003,859 @@ void StabilityScenarioRunner::appendMidiCycleTakesSteps(const juce::File& projec
                                return true;
                            },
                            200 });
+}
+
+// -----------------------------------------------------------------------------
+// Proxy-backed destinations during recording + schema-1 generations
+// (`--stability-proxy-recording <project>`; designed for the TSE copy: Groove Agent SE row with a
+// schema-1 generation whose content is layer-insensitive and whose pairing is intact, VB3-II row
+// with a schema-1 generation whose save pairing is broken and a HALion Sonic Secondary)
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendProxyRecordingSteps(const juce::File& project)
+{
+    if (hooks_.loadProjectFromFile == nullptr || hooks_.listAllTracks == nullptr || hooks_.proxyForcePrimaryUnavailable == nullptr
+        || hooks_.proxyRuntimeStateName == nullptr || hooks_.proxyDestinationStateName == nullptr || hooks_.proxyGenerationInfo == nullptr
+        || hooks_.activateTrackLikeHeaderClick == nullptr || hooks_.inspectorChooseMidiInput == nullptr || hooks_.liveMidiSetArm == nullptr
+        || hooks_.liveMidiSetMonitor == nullptr || hooks_.recordToggleLikeKey == nullptr || hooks_.isCountInActive == nullptr
+        || hooks_.isRecordingInProgress == nullptr || hooks_.liveMidiInject == nullptr || hooks_.liveMidiSummarizeAllClips == nullptr
+        || hooks_.midiInputStatusTextForTrack == nullptr || hooks_.invokeUndo == nullptr || hooks_.seekTransportTo == nullptr
+        || hooks_.setPlaybackActive == nullptr || hooks_.proxyIsLiveRecordingOverrideActive == nullptr
+        || hooks_.proxyCopySecondaryConfigFromTrack == nullptr || hooks_.liveMidiAttachCaptureSinkToSecondary == nullptr
+        || hooks_.liveMidiCapturedNoteCount == nullptr || hooks_.liveMidiCaptureReset == nullptr || hooks_.setCycleEnabled == nullptr)
+    {
+        steps_.push_back(Step{ "proxy-rec: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "proxy-recording hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    steps_.push_back(Step{ "proxy-rec: copy project to sibling test file",
+                           [this, project](juce::String& failReason) -> bool {
+                               const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-proxyrectest.dalproj");
+                               (void)copy.deleteFile();
+                               if (!project.copyFileTo(copy))
+                               {
+                                   failReason = "could not copy project to " + copy.getFullPathName();
+                                   return false;
+                               }
+                               openSaveCloseCopy_ = copy;
+                               appendStabilityRunLine("  test copy: " + copy.getFullPathName());
+                               return true;
+                           },
+                           kSettleDefaultMs });
+    steps_.push_back(Step{ "proxy-rec: load test copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(openSaveCloseCopy_);
+                               return true;
+                           },
+                           kSettleAfterLoadMs + 2500 }); // plug-ins load
+    auto gaTid = std::make_shared<TrackId>(kInvalidTrackId);
+    auto vb3Tid = std::make_shared<TrackId>(kInvalidTrackId);
+    auto gaGenerationBefore = std::make_shared<juce::String>();
+    const auto inject = [this](const juce::MidiMessage& m) { hooks_.liveMidiInject(m); };
+    const auto on = [](const int ch, const int note, const int vel) { return juce::MidiMessage::noteOn(ch, note, (juce::uint8)vel); };
+    const auto off = [](const int ch, const int note) { return juce::MidiMessage::noteOff(ch, note, (juce::uint8)0); };
+    /// Note-ons the capture sink saw on any channel for any pitch except `exceptNote` (-1 = all).
+    const auto noteOnsExcept = [this](const int exceptNote) {
+        int n = 0;
+        for (int ch = 1; ch <= 16; ++ch)
+        {
+            for (int note = 0; note < 128; ++note)
+            {
+                if (note != exceptNote)
+                {
+                    n += hooks_.liveMidiCapturedNoteCount(ch, note, true);
+                }
+            }
+        }
+        return n;
+    };
+
+    // Plug-ins restore their saved state asynchronously after load; until the live state revision
+    // equals the publication's, the live identity honestly differs (F2). Poll between steps.
+    auto restoreLogged = std::make_shared<bool>(false);
+    for (int poll = 1; poll <= 10; ++poll)
+    {
+        steps_.push_back(Step{ "proxy-rec: wait for the Primary instruments to finish restoring their state (" + juce::String(poll) + "/10)",
+                               [this, poll, restoreLogged](juce::String&) -> bool {
+                                   if (*restoreLogged)
+                                   {
+                                       settleOverrideMsForCurrentStep_ = 10;
+                                       return true;
+                                   }
+                                   bool allRestored = true;
+                                   for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                                   {
+                                       if (!t.isInstrument || hooks_.proxyGenerationInfo(t.id).isEmpty())
+                                       {
+                                           continue;
+                                       }
+                                       const juce::String info = hooks_.proxyGenerationInfo(t.id);
+                                       const int pub = info.fromFirstOccurrenceOf("pub=", false, false).getIntValue();
+                                       const int save = info.fromFirstOccurrenceOf("save=", false, false).getIntValue();
+                                       const juce::String job = hooks_.proxyJobStatusText ? hooks_.proxyJobStatusText(t.id) : juce::String();
+                                       const int rev = job.fromFirstOccurrenceOf(" rev=", false, false).getIntValue();
+                                       // Only rows whose saved state IS the published one can be expected to come back to `pub`.
+                                       if (pub != 0 && pub == save && rev != pub)
+                                       {
+                                           allRestored = false;
+                                       }
+                                   }
+                                   if (allRestored || poll == 10)
+                                   {
+                                       appendStabilityRunLine(juce::String("  Primary state revisions ") + (allRestored ? "restored" : "NOT all restored (continuing)")
+                                                              + " after poll " + juce::String(poll));
+                                       *restoreLogged = true;
+                                       settleOverrideMsForCurrentStep_ = 10;
+                                   }
+                                   return true;
+                               },
+                               1000 });
+    }
+    steps_.push_back(Step{ "proxy-rec: schema-1 generations in this project (recorded schema, pairing)",
+                           [this, gaTid, vb3Tid, gaGenerationBefore](juce::String& failReason) -> bool {
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (!t.isInstrument)
+                                   {
+                                       continue;
+                                   }
+                                   const juce::String info = hooks_.proxyGenerationInfo(t.id);
+                                   appendStabilityRunLine("  instrument row " + juce::String((juce::int64)t.id) + " \"" + t.name + "\": "
+                                                          + (info.isEmpty() ? juce::String("no proxy generation") : info)
+                                                          + " | runtime=" + hooks_.proxyRuntimeStateName(t.id) + " destination="
+                                                          + hooks_.proxyDestinationStateName(t.id)
+                                                          + (hooks_.proxyJobStatusText && info.isNotEmpty() ? " | " + hooks_.proxyJobStatusText(t.id) : juce::String()));
+                                   // The "compatible generation" row: schema 1 with intact save pairing (pub == save)
+                                   // and no Secondary of its own; the Secondary donor row is the one named VB3.
+                                   if (*gaTid == kInvalidTrackId && info.contains("schema=1") && !t.name.containsIgnoreCase("VB3"))
+                                   {
+                                       const int pub = info.fromFirstOccurrenceOf("pub=", false, false).getIntValue();
+                                       const int save = info.fromFirstOccurrenceOf("save=", false, false).getIntValue();
+                                       if (pub != 0 && pub == save)
+                                       {
+                                           *gaTid = t.id;
+                                           *gaGenerationBefore = info;
+                                       }
+                                   }
+                                   if (t.name.containsIgnoreCase("VB3") && *vb3Tid == kInvalidTrackId)
+                                   {
+                                       *vb3Tid = t.id;
+                                   }
+                               }
+                               if (*gaTid == kInvalidTrackId || gaGenerationBefore->isEmpty())
+                               {
+                                   failReason = "this project has no instrument row with a paired schema-1 proxy generation (the test fixture for this scenario)";
+                                   return false;
+                               }
+                               appendStabilityRunLine("  compatible-generation row=" + juce::String((juce::int64)*gaTid) + " secondary donor row="
+                                                      + juce::String((juce::int64)*vb3Tid));
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "proxy-rec: no-Primary machine for the Groove Agent row -> its schema-1 generation is provably compatible: ProxyCurrent, no re-render",
+                           [this, gaTid, gaGenerationBefore](juce::String& failReason) -> bool {
+                               hooks_.proxyForcePrimaryUnavailable(*gaTid, true);
+                               juce::Thread::sleep(400);
+                               const juce::String runtime = hooks_.proxyRuntimeStateName(*gaTid);
+                               const juce::String dest = hooks_.proxyDestinationStateName(*gaTid);
+                               const juce::String info = hooks_.proxyGenerationInfo(*gaTid);
+                               appendStabilityRunLine("  GA forced no-Primary: runtime=" + runtime + " destination=" + dest + " generation=" + info);
+                               if (runtime != "ProxyCurrent")
+                               {
+                                   failReason = "the layer-insensitive schema-1 generation should play as ProxyCurrent without the Primary, got " + runtime;
+                                   return false;
+                               }
+                               if (info != *gaGenerationBefore)
+                               {
+                                   failReason = "the generation changed (a re-render happened) although the old one is compatible";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           1500 });
+    steps_.push_back(Step{ "proxy-rec: ...and 1.5 s later still the same generation (no background re-render was triggered)",
+                           [this, gaTid, gaGenerationBefore](juce::String& failReason) -> bool {
+                               const juce::String info = hooks_.proxyGenerationInfo(*gaTid);
+                               const juce::String dest = hooks_.proxyDestinationStateName(*gaTid);
+                               appendStabilityRunLine("  GA after idle: destination=" + dest + " generation=" + info);
+                               if (info != *gaGenerationBefore || dest == "Rendering")
+                               {
+                                   failReason = "a re-render ran for a compatible schema-1 generation";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "proxy-rec: VB3-II row (schema-1 generation, broken save pairing) forced no-Primary -> never Current; Secondary or honest stale",
+                           [this, vb3Tid](juce::String& failReason) -> bool {
+                               if (*vb3Tid == kInvalidTrackId)
+                               {
+                                   appendStabilityRunLine("  no VB3-II row - skipped");
+                                   return true;
+                               }
+                               const juce::String before = hooks_.proxyGenerationInfo(*vb3Tid);
+                               hooks_.proxyForcePrimaryUnavailable(*vb3Tid, true);
+                               juce::Thread::sleep(600);
+                               const juce::String runtime = hooks_.proxyRuntimeStateName(*vb3Tid);
+                               const juce::String dest = hooks_.proxyDestinationStateName(*vb3Tid);
+                               appendStabilityRunLine("  VB3-II forced no-Primary: runtime=" + runtime + " destination=" + dest + " generation=" + hooks_.proxyGenerationInfo(*vb3Tid));
+                               hooks_.proxyForcePrimaryUnavailable(*vb3Tid, false);
+                               if (runtime == "ProxyCurrent" || dest == "Current")
+                               {
+                                   failReason = "a schema-1 generation with broken pairing must not be Current";
+                                   return false;
+                               }
+                               if (hooks_.proxyGenerationInfo(*vb3Tid) != before)
+                               {
+                                   failReason = "the VB3-II generation / metadata changed";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           400 });
+    // ---- Recording on a proxy-backed destination WITHOUT a Secondary: the whole proxy stays, capture works, status says so.
+    steps_.push_back(Step{ "proxy-rec: GA row (no Secondary) - MIDI Input = All via the Inspector, arm, Monitor off, seek 0, Record",
+                           [this, gaTid](juce::String& failReason) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               hooks_.setCycleEnabled(false);
+                               hooks_.activateTrackLikeHeaderClick(*gaTid);
+                               if (!hooks_.inspectorChooseMidiInput("All MIDI inputs"))
+                               {
+                                   failReason = "Inspector pick failed on the GA row";
+                                   return false;
+                               }
+                               hooks_.seekTransportTo(0);
+                               hooks_.liveMidiSetArm(*gaTid, true);
+                               hooks_.liveMidiSetMonitor(*gaTid, false);
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(150);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "Record did not start" + (hooks_.lastRecordStartRefusal ? " (" + hooks_.lastRecordStartRefusal().replace("\n", " / ") + ")" : juce::String());
+                                   return false;
+                               }
+                               return true;
+                           },
+                           3700 });
+    steps_.push_back(Step{ "proxy-rec: GA row (no Secondary) - during the take the proxy keeps playing and the status explains it; capture works",
+                           [this, gaTid, inject, on, off](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "take did not start";
+                                   return false;
+                               }
+                               const juce::String runtime = hooks_.proxyRuntimeStateName(*gaTid);
+                               const juce::String status = hooks_.midiInputStatusTextForTrack(*gaTid);
+                               appendStabilityRunLine("  during take (no Secondary): runtime=" + runtime + " override=" + (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid) ? "yes" : "no")
+                                                      + " status=\"" + status.replace("\n", " | ") + "\"");
+                               inject(on(1, 36, 100));
+                               juce::Thread::sleep(200);
+                               inject(off(1, 36));
+                               juce::Thread::sleep(300);
+                               const int clipsBefore = (int)hooks_.liveMidiSummarizeAllClips(*gaTid).size();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(300);
+                               const int clipsAfter = (int)hooks_.liveMidiSummarizeAllClips(*gaTid).size();
+                               const juce::String statusAfter = hooks_.midiInputStatusTextForTrack(*gaTid);
+                               appendStabilityRunLine("  after Stop: clips " + juce::String(clipsBefore) + "->" + juce::String(clipsAfter) + " runtime="
+                                                      + hooks_.proxyRuntimeStateName(*gaTid) + " status=\"" + statusAfter.replace("\n", " | ") + "\"");
+                               if (runtime != "ProxyCurrent")
+                               {
+                                   failReason = "without a Secondary the whole proxy must keep playing during the take (got " + runtime + ")";
+                                   return false;
+                               }
+                               if (!status.contains("still heard from the proxy"))
+                               {
+                                   failReason = "the status must say that earlier material is still heard from the proxy";
+                                   return false;
+                               }
+                               if (clipsAfter != clipsBefore + 1)
+                               {
+                                   failReason = "MIDI capture must still work on a proxy-backed destination";
+                                   return false;
+                               }
+                               if (statusAfter.contains("still heard from the proxy"))
+                               {
+                                   failReason = "the recording status must disappear with the take";
+                                   return false;
+                               }
+                               hooks_.invokeUndo();
+                               juce::Thread::sleep(300);
+                               const juce::String afterUndo = hooks_.proxyRuntimeStateName(*gaTid);
+                               appendStabilityRunLine("  after Undo: runtime=" + afterUndo);
+                               if (afterUndo != "ProxyCurrent")
+                               {
+                                   failReason = "after undoing the take the compatible generation must be Current again";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+    // ---- With a Secondary: the take switches the destination to the Secondary (temporarily), the
+    //      recording row's own clip is silent there; Monitor off = nothing delivered live.
+    steps_.push_back(Step{ "proxy-rec: give the GA row the VB3-II row's Secondary (HALion Sonic); Monitor off; arm; seek 0; Record",
+                           [this, gaTid, vb3Tid](juce::String& failReason) -> bool {
+                               if (*vb3Tid == kInvalidTrackId || !hooks_.proxyCopySecondaryConfigFromTrack(*gaTid, *vb3Tid, failReason))
+                               {
+                                   failReason = "could not configure a Secondary on the GA row: " + failReason;
+                                   return false;
+                               }
+                               juce::Thread::sleep(300);
+                               appendStabilityRunLine("  GA with Secondary configured (idle): runtime=" + hooks_.proxyRuntimeStateName(*gaTid)
+                                                      + " recordingOverride=" + (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid) ? "yes" : "no"));
+                               if (hooks_.proxyRuntimeStateName(*gaTid) != "ProxyCurrent" || hooks_.proxyIsLiveRecordingOverrideActive(*gaTid))
+                               {
+                                   failReason = "arming / configuring alone must not switch the source or load the Secondary";
+                                   return false;
+                               }
+                               hooks_.seekTransportTo(0);
+                               hooks_.liveMidiSetArm(*gaTid, true);
+                               hooks_.liveMidiSetMonitor(*gaTid, false);
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(150);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "Record did not start";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           3700 });
+    steps_.push_back(Step{ "proxy-rec: Monitor off take - Secondary used temporarily, own clip silent, nothing delivered live; Stop -> override ends, real currency decides",
+                           [this, gaTid, inject, on, off, noteOnsExcept](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "take did not start";
+                                   return false;
+                               }
+                               // The Secondary may still be loading: give it a few seconds (prepared off the audio thread).
+                               bool overrideActive = false;
+                               for (int i = 0; i < 60 && !overrideActive; ++i)
+                               {
+                                   overrideActive = hooks_.proxyIsLiveRecordingOverrideActive(*gaTid);
+                                   if (!overrideActive)
+                                   {
+                                       juce::Thread::sleep(100);
+                                   }
+                               }
+                               const juce::String runtime = hooks_.proxyRuntimeStateName(*gaTid);
+                               const juce::String status = hooks_.midiInputStatusTextForTrack(*gaTid);
+                               appendStabilityRunLine("  during take (Secondary, Monitor off): runtime=" + runtime + " recordingOverride="
+                                                      + (overrideActive ? "yes" : "no") + " status=\"" + status.replace("\n", " | ") + "\"");
+                               if (!overrideActive || runtime != "SecondaryLive")
+                               {
+                                   failReason = "the take must switch a proxy-backed destination with a Secondary to SecondaryLive (got " + runtime + ")";
+                                   return false;
+                               }
+                               juce::String sinkFail;
+                               if (!hooks_.liveMidiAttachCaptureSinkToSecondary(*gaTid, sinkFail))
+                               {
+                                   failReason = sinkFail;
+                                   return false;
+                               }
+                               hooks_.liveMidiCaptureReset();
+                               juce::Thread::sleep(1200); // the GA row's own clip (166 notes from the start) would be delivered here if not suppressed
+                               inject(on(1, 100, 100));
+                               juce::Thread::sleep(200);
+                               inject(off(1, 100));
+                               juce::Thread::sleep(200);
+                               const int clipNoteOns = noteOnsExcept(100);
+                               const int liveNoteOns = hooks_.liveMidiCapturedNoteCount(1, 100, true);
+                               appendStabilityRunLine("  delivered to the Secondary during the take: own-clip note-ons=" + juce::String(clipNoteOns)
+                                                      + " live note 100=" + juce::String(liveNoteOns) + " (Monitor off -> 0 expected)");
+                               const int clipsBefore = (int)hooks_.liveMidiSummarizeAllClips(*gaTid).size();
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(400);
+                               const int clipsAfter = (int)hooks_.liveMidiSummarizeAllClips(*gaTid).size();
+                               const juce::String runtimeAfter = hooks_.proxyRuntimeStateName(*gaTid);
+                               const bool overrideAfter = hooks_.proxyIsLiveRecordingOverrideActive(*gaTid);
+                               appendStabilityRunLine("  after Stop: clips " + juce::String(clipsBefore) + "->" + juce::String(clipsAfter) + " runtime=" + runtimeAfter
+                                                      + " recordingOverride=" + (overrideAfter ? "yes" : "no") + " destination=" + hooks_.proxyDestinationStateName(*gaTid));
+                               if (clipNoteOns != 0)
+                               {
+                                   failReason = "the recording row's own earlier clip was delivered to the live source during the take";
+                                   return false;
+                               }
+                               if (liveNoteOns != 0)
+                               {
+                                   failReason = "with Monitor off live MIDI must not be delivered to the instrument";
+                                   return false;
+                               }
+                               if (!status.contains("Secondary instrument used temporarily while recording"))
+                               {
+                                   failReason = "status must name the temporary Secondary use while recording";
+                                   return false;
+                               }
+                               if (clipsAfter != clipsBefore + 1)
+                               {
+                                   failReason = "the take was not captured";
+                                   return false;
+                               }
+                               if (overrideAfter || runtimeAfter == "ProxyCurrent")
+                               {
+                                   failReason = "after the take the override must end and the (now changed) content must not be Current";
+                                   return false;
+                               }
+                               hooks_.invokeUndo();
+                               juce::Thread::sleep(400);
+                               const juce::String afterUndo = hooks_.proxyRuntimeStateName(*gaTid);
+                               appendStabilityRunLine("  after Undo: runtime=" + afterUndo + " recordingOverride=" + (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid) ? "yes" : "no"));
+                               if (afterUndo != "ProxyCurrent")
+                               {
+                                   failReason = "with the content back to the generation's, the proxy must be Current again (real currency, no blind restore)";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "proxy-rec: Monitor ON take - live note heard through the Secondary, own clip still silent; Stop; Undo",
+                           [this, gaTid, inject, on, off, noteOnsExcept](juce::String& failReason) -> bool {
+                               hooks_.seekTransportTo(0);
+                               hooks_.liveMidiSetMonitor(*gaTid, true);
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(150);
+                               if (!hooks_.isCountInActive())
+                               {
+                                   failReason = "Record did not start";
+                                   return false;
+                               }
+                               settleOverrideMsForCurrentStep_ = 3700 + 300;
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "proxy-rec: Monitor ON take - verify",
+                           [this, gaTid, inject, on, off, noteOnsExcept](juce::String& failReason) -> bool {
+                               if (!hooks_.isRecordingInProgress())
+                               {
+                                   failReason = "take did not start";
+                                   return false;
+                               }
+                               bool overrideActive = false;
+                               for (int i = 0; i < 60 && !overrideActive; ++i)
+                               {
+                                   overrideActive = hooks_.proxyIsLiveRecordingOverrideActive(*gaTid);
+                                   if (!overrideActive)
+                                   {
+                                       juce::Thread::sleep(100);
+                                   }
+                               }
+                               juce::String sinkFail;
+                               if (!hooks_.liveMidiAttachCaptureSinkToSecondary(*gaTid, sinkFail))
+                               {
+                                   failReason = sinkFail;
+                                   return false;
+                               }
+                               hooks_.liveMidiCaptureReset();
+                               juce::Thread::sleep(800);
+                               inject(on(1, 100, 100));
+                               juce::Thread::sleep(250);
+                               inject(off(1, 100));
+                               juce::Thread::sleep(250);
+                               const int clipNoteOns = noteOnsExcept(100);
+                               const int liveNoteOns = hooks_.liveMidiCapturedNoteCount(1, 100, true);
+                               const juce::String status = hooks_.midiInputStatusTextForTrack(*gaTid);
+                               appendStabilityRunLine("  during take (Secondary, Monitor on): runtime=" + hooks_.proxyRuntimeStateName(*gaTid) + " own-clip note-ons="
+                                                      + juce::String(clipNoteOns) + " live note 100=" + juce::String(liveNoteOns) + " status=\""
+                                                      + status.replace("\n", " | ") + "\"");
+                               hooks_.recordToggleLikeKey();
+                               juce::Thread::sleep(400);
+                               hooks_.invokeUndo();
+                               juce::Thread::sleep(300);
+                               hooks_.liveMidiSetMonitor(*gaTid, false);
+                               hooks_.liveMidiSetArm(*gaTid, false);
+                               if (!overrideActive || clipNoteOns != 0 || liveNoteOns < 1)
+                               {
+                                   failReason = "Monitor on: the live note must reach the Secondary while the row's own clip stays silent";
+                                   return false;
+                               }
+                               if (!status.contains("Monitor on, recording"))
+                               {
+                                   failReason = "status must name both needs (Monitor on, recording)";
+                                   return false;
+                               }
+                               const juce::String finalState = hooks_.proxyRuntimeStateName(*gaTid);
+                               appendStabilityRunLine("  idle again: runtime=" + finalState + " monitorOverride="
+                                                      + (hooks_.proxyIsLiveMonitorOverrideActive && hooks_.proxyIsLiveMonitorOverrideActive(*gaTid) ? "yes" : "no")
+                                                      + " recordingOverride=" + (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid) ? "yes" : "no"));
+                               if (finalState != "ProxyCurrent")
+                               {
+                                   failReason = "no temporary override may linger after Monitor off + take end";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+    // ---- Two source rows into ONE proxy-backed destination: recording one of them must silence
+    //      only that row inside the (temporary) live source; the other row keeps sounding there.
+    if (hooks_.addMidiSourceRowRoutedTo != nullptr && hooks_.proxyRenderNow != nullptr)
+    {
+        auto midiRowTid = std::make_shared<TrackId>(kInvalidTrackId);
+        constexpr int kRoutedPitch = 120; // outside any drum-kit mapping of the GA row's own clip
+        steps_.push_back(Step{ "proxy-rec: two sources - add a MIDI row routed to the GA destination (note 120 x 48)",
+                               [this, gaTid, midiRowTid](juce::String& failReason) -> bool {
+                                   *midiRowTid = hooks_.addMidiSourceRowRoutedTo(*gaTid, kRoutedPitch, 48, failReason);
+                                   if (*midiRowTid == kInvalidTrackId)
+                                   {
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               800 });
+        steps_.push_back(Step{ "proxy-rec: two sources - the content changed (Stale); the machine with the Primary renders the new generation (Render now)",
+                               [this, gaTid, midiRowTid](juce::String& failReason) -> bool {
+                                   appendStabilityRunLine("  routed MIDI row id=" + juce::String((juce::int64)*midiRowTid) + " -> GA row "
+                                                          + juce::String((juce::int64)*gaTid) + "; after the content change: runtime="
+                                                          + hooks_.proxyRuntimeStateName(*gaTid) + " destination=" + hooks_.proxyDestinationStateName(*gaTid));
+                                   if (hooks_.proxyDestinationStateName(*gaTid) != "Stale")
+                                   {
+                                       failReason = "adding routed content must make the old generation Stale";
+                                       return false;
+                                   }
+                                   hooks_.proxyForcePrimaryUnavailable(*gaTid, false);
+                                   return true;
+                               },
+                               800 });
+        steps_.push_back(Step{ "proxy-rec: two sources - Render now",
+                               [this, gaTid](juce::String& failReason) -> bool {
+                                   if (hooks_.proxyJobStatusText)
+                                   {
+                                       appendStabilityRunLine("  before Render now: runtime=" + hooks_.proxyRuntimeStateName(*gaTid) + " " + hooks_.proxyJobStatusText(*gaTid));
+                                   }
+                                   // The sibling test copy shares the project folder's InstrumentProxies with the
+                                   // source copy: a generation file left by an earlier run (same fingerprint, a
+                                   // different tail length) would make publication refuse the name collision.
+                                   if (hooks_.proxyDeleteUnpublishedGenerationFiles)
+                                   {
+                                       const int removed = hooks_.proxyDeleteUnpublishedGenerationFiles(*gaTid);
+                                       if (removed > 0)
+                                       {
+                                           appendStabilityRunLine("  removed " + juce::String(removed) + " leftover generation file(s) of earlier runs for the GA row");
+                                       }
+                                   }
+                                   if (!hooks_.proxyRenderNow(*gaTid))
+                                   {
+                                       failReason = "Render now was refused";
+                                       return false;
+                                   }
+                                   if (hooks_.proxyJobStatusText)
+                                   {
+                                       appendStabilityRunLine("  right after Render now: " + hooks_.proxyJobStatusText(*gaTid));
+                                   }
+                                   return true;
+                               },
+                               1000 });
+        // The render job completes through the message loop, so poll between steps (settle time),
+        // never by blocking inside one step.
+        constexpr int kRenderPolls = 40;
+        auto lastJobLine = std::make_shared<juce::String>();
+        for (int poll = 1; poll <= kRenderPolls; ++poll)
+        {
+            const bool last = poll == kRenderPolls;
+            steps_.push_back(Step{ "proxy-rec: two sources - wait for the re-render (" + juce::String(poll) + "/" + juce::String(kRenderPolls) + ")",
+                                   [this, gaTid, last, lastJobLine](juce::String& failReason) -> bool {
+                                       const juce::String dest = hooks_.proxyDestinationStateName(*gaTid);
+                                       if (hooks_.proxyJobStatusText)
+                                       {
+                                           const juce::String job = "destination=" + dest + " job: " + hooks_.proxyJobStatusText(*gaTid);
+                                           if (job != *lastJobLine)
+                                           {
+                                               appendStabilityRunLine("  " + job);
+                                               *lastJobLine = job;
+                                           }
+                                       }
+                                       if (dest == "Current")
+                                       {
+                                           settleOverrideMsForCurrentStep_ = 10;
+                                           return true;
+                                       }
+                                       if (last)
+                                       {
+                                           failReason = "the re-render did not produce a Current generation (destination=" + dest + ")";
+                                           return false;
+                                       }
+                                       if (dest != "Rendering" && dest != "Stale")
+                                       {
+                                           failReason = "unexpected destination state while re-rendering: " + dest;
+                                           return false;
+                                       }
+                                       return true;
+                                   },
+                                   2000 });
+        }
+        steps_.push_back(Step{ "proxy-rec: two sources - new generation Current; the no-Primary machine plays it (ProxyCurrent)",
+                               [this, gaTid](juce::String& failReason) -> bool {
+                                   appendStabilityRunLine("  after Render now: destination=" + hooks_.proxyDestinationStateName(*gaTid)
+                                                          + " generation=" + hooks_.proxyGenerationInfo(*gaTid));
+                                   hooks_.proxyForcePrimaryUnavailable(*gaTid, true);
+                                   juce::Thread::sleep(300);
+                                   const juce::String runtime = hooks_.proxyRuntimeStateName(*gaTid);
+                                   appendStabilityRunLine("  no-Primary again: runtime=" + runtime);
+                                   if (runtime != "ProxyCurrent")
+                                   {
+                                       failReason = "with the new generation the no-Primary machine must play the proxy (got " + runtime + ")";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+        /// Note-ons of `pitch` on any channel.
+        const auto noteOnsOf = [this](const int pitch) {
+            int n = 0;
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                n += hooks_.liveMidiCapturedNoteCount(ch, pitch, true);
+            }
+            return n;
+        };
+        /// Own-clip note-ons of the GA row: anything except the routed pitch and the live note.
+        const auto gaOwnNoteOns = [this, kRoutedPitch]() {
+            int n = 0;
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                for (int note = 0; note < 128; ++note)
+                {
+                    if (note != kRoutedPitch && note != 100)
+                    {
+                        n += hooks_.liveMidiCapturedNoteCount(ch, note, true);
+                    }
+                }
+            }
+            return n;
+        };
+        steps_.push_back(Step{ "proxy-rec: two sources - arm the GA row only (Monitor off); Record",
+                               [this, gaTid, midiRowTid](juce::String& failReason) -> bool {
+                                   hooks_.seekTransportTo(0);
+                                   hooks_.liveMidiSetMonitor(*gaTid, false);
+                                   hooks_.liveMidiSetArm(*gaTid, true);
+                                   hooks_.liveMidiSetArm(*midiRowTid, false);
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(150);
+                                   if (!hooks_.isCountInActive())
+                                   {
+                                       failReason = "Record did not start";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               3700 });
+        steps_.push_back(Step{ "proxy-rec: two sources - GA row recording: the routed MIDI row is heard through the Secondary, the GA row's own clip is silent; Stop; Undo",
+                               [this, gaTid, midiRowTid, noteOnsOf, gaOwnNoteOns, inject, on, off](juce::String& failReason) -> bool {
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "take did not start";
+                                       return false;
+                                   }
+                                   bool overrideActive = false;
+                                   for (int i = 0; i < 60 && !overrideActive; ++i)
+                                   {
+                                       overrideActive = hooks_.proxyIsLiveRecordingOverrideActive(*gaTid);
+                                       if (!overrideActive)
+                                       {
+                                           juce::Thread::sleep(100);
+                                       }
+                                   }
+                                   juce::String sinkFail;
+                                   if (!hooks_.liveMidiAttachCaptureSinkToSecondary(*gaTid, sinkFail))
+                                   {
+                                       failReason = sinkFail;
+                                       return false;
+                                   }
+                                   hooks_.liveMidiCaptureReset();
+                                   juce::Thread::sleep(1100);
+                                   // A live note so the take commits a clip (Monitor off: recorded, not heard).
+                                   inject(on(1, 100, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 100));
+                                   juce::Thread::sleep(200);
+                                   const int routed = noteOnsOf(kRoutedPitch);
+                                   const int own = gaOwnNoteOns();
+                                   const int liveHeard = hooks_.liveMidiCapturedNoteCount(1, 100, true);
+                                   const juce::String gaStatus = hooks_.midiInputStatusTextForTrack(*gaTid);
+                                   const juce::String midiStatus = hooks_.midiInputStatusTextForTrack(*midiRowTid);
+                                   appendStabilityRunLine("  GA recording, two sources: runtime=" + hooks_.proxyRuntimeStateName(*gaTid)
+                                                          + " routed-row note 120 heard=" + juce::String(routed) + " GA own-clip note-ons=" + juce::String(own)
+                                                          + " live note 100 heard=" + juce::String(liveHeard) + " (Monitor off -> 0)"
+                                                          + " GA status=\"" + gaStatus.replace("\n", " | ") + "\" MIDI-row status=\"" + midiStatus.replace("\n", " | ") + "\"");
+                                   const int gaClipsBefore = (int)hooks_.liveMidiSummarizeAllClips(*gaTid).size();
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(400);
+                                   const int gaClipsAfter = (int)hooks_.liveMidiSummarizeAllClips(*gaTid).size();
+                                   appendStabilityRunLine("  after Stop: GA clips " + juce::String(gaClipsBefore) + "->" + juce::String(gaClipsAfter) + " runtime=" + hooks_.proxyRuntimeStateName(*gaTid)
+                                                          + (hooks_.proxySnapshotSourcesText ? " | snapshot: " + hooks_.proxySnapshotSourcesText(*gaTid) : juce::String()));
+                                   if (gaClipsAfter != gaClipsBefore + 1)
+                                   {
+                                       failReason = "the GA take was not captured";
+                                       return false;
+                                   }
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(300);
+                                   appendStabilityRunLine("  after Undo: GA clips=" + juce::String((int)hooks_.liveMidiSummarizeAllClips(*gaTid).size()) + " runtime=" + hooks_.proxyRuntimeStateName(*gaTid)
+                                                          + (hooks_.proxySnapshotSourcesText ? " | snapshot: " + hooks_.proxySnapshotSourcesText(*gaTid) : juce::String()));
+                                   if (liveHeard != 0)
+                                   {
+                                       failReason = "with Monitor off the live note must not be delivered";
+                                       return false;
+                                   }
+                                   if (!overrideActive)
+                                   {
+                                       failReason = "the take must switch the destination to the Secondary";
+                                       return false;
+                                   }
+                                   if (routed < 1)
+                                   {
+                                       failReason = "the other source row routed to the same destination must keep sounding through the live source";
+                                       return false;
+                                   }
+                                   if (own != 0)
+                                   {
+                                       failReason = "the recording row's own earlier clip must be silent in the live source";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "proxy-rec: two sources - now arm the MIDI row instead (GA row not armed); Record",
+                               [this, gaTid, midiRowTid](juce::String& failReason) -> bool {
+                                   hooks_.activateTrackLikeHeaderClick(*midiRowTid);
+                                   if (!hooks_.inspectorChooseMidiInput("All MIDI inputs"))
+                                   {
+                                       failReason = "Inspector pick failed on the MIDI row";
+                                       return false;
+                                   }
+                                   // The GA row's own clip starts sounding at 4 s (tick 11520 @ 180 BPM): start this
+                                   // take at 3.5 s so its notes fall inside the capture window.
+                                   hooks_.seekTransportTo((std::int64_t)std::llround(3.5 * (hooks_.getDeviceSampleRate() > 0.0 ? hooks_.getDeviceSampleRate() : 48000.0)));
+                                   hooks_.liveMidiSetArm(*gaTid, false);
+                                   hooks_.liveMidiSetMonitor(*midiRowTid, false);
+                                   hooks_.liveMidiSetArm(*midiRowTid, true);
+                                   juce::Thread::sleep(300);
+                                   appendStabilityRunLine("  MIDI row armed (idle): GA runtime=" + hooks_.proxyRuntimeStateName(*gaTid)
+                                                          + " recordingOverride=" + (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid) ? "yes" : "no")
+                                                          + " tracks=" + juce::String(hooks_.getTrackCount()) + " GA clips=" + juce::String((int)hooks_.liveMidiSummarizeAllClips(*gaTid).size())
+                                                          + " MIDI-row clips=" + juce::String((int)hooks_.liveMidiSummarizeAllClips(*midiRowTid).size())
+                                                          + " MIDI-row status=\"" + hooks_.midiInputStatusTextForTrack(*midiRowTid).replace("\n", " | ") + "\""
+                                                          + (hooks_.proxyJobStatusText ? " | " + hooks_.proxyJobStatusText(*gaTid) : juce::String())
+                                                          + (hooks_.proxySnapshotSourcesText ? " | snapshot: " + hooks_.proxySnapshotSourcesText(*gaTid) : juce::String()));
+                                   {
+                                       const auto gaClips = hooks_.liveMidiSummarizeAllClips(*gaTid);
+                                       if (!gaClips.empty())
+                                       {
+                                           const StabilityMidiClipSummary& s = gaClips.front();
+                                           juce::String firstNotes;
+                                           for (size_t i = 0; i < s.notes.size() && i < 4; ++i)
+                                           {
+                                               firstNotes << s.notes[i].note << "@" << juce::String((juce::int64)s.notes[i].startTick) << " ";
+                                           }
+                                           appendStabilityRunLine("  GA own clip: start=" + juce::String((juce::int64)s.firstClipStartSamples) + " len="
+                                                                  + juce::String((juce::int64)s.firstClipLengthSamples) + " bpm=" + juce::String(s.bpm) + " tpq="
+                                                                  + juce::String(s.ticksPerQuarter) + " first notes(tick): " + firstNotes.trim());
+                                       }
+                                   }
+                                   if (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid))
+                                   {
+                                       failReason = "arming alone must not switch the destination's source";
+                                       return false;
+                                   }
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(150);
+                                   if (!hooks_.isCountInActive())
+                                   {
+                                       failReason = "Record did not start" + (hooks_.lastRecordStartRefusal ? " (" + hooks_.lastRecordStartRefusal().replace("\n", " / ") + ")" : juce::String());
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               3700 });
+        steps_.push_back(Step{ "proxy-rec: two sources - MIDI row recording: the GA row's own clip is heard through the Secondary, the routed row is silent; Stop; Undo",
+                               [this, gaTid, midiRowTid, noteOnsOf, gaOwnNoteOns, inject, on, off](juce::String& failReason) -> bool {
+                                   if (!hooks_.isRecordingInProgress())
+                                   {
+                                       failReason = "take did not start";
+                                       return false;
+                                   }
+                                   bool overrideActive = false;
+                                   for (int i = 0; i < 60 && !overrideActive; ++i)
+                                   {
+                                       overrideActive = hooks_.proxyIsLiveRecordingOverrideActive(*gaTid);
+                                       if (!overrideActive)
+                                       {
+                                           juce::Thread::sleep(100);
+                                       }
+                                   }
+                                   juce::String sinkFail;
+                                   if (!hooks_.liveMidiAttachCaptureSinkToSecondary(*gaTid, sinkFail))
+                                   {
+                                       failReason = sinkFail;
+                                       return false;
+                                   }
+                                   hooks_.liveMidiCaptureReset();
+                                   juce::Thread::sleep(1100);
+                                   inject(on(1, 100, 100));
+                                   juce::Thread::sleep(200);
+                                   inject(off(1, 100));
+                                   juce::Thread::sleep(200);
+                                   const int routed = noteOnsOf(kRoutedPitch);
+                                   const int own = gaOwnNoteOns();
+                                   const juce::String midiStatus = hooks_.midiInputStatusTextForTrack(*midiRowTid);
+                                   appendStabilityRunLine("  MIDI row recording, two sources: GA runtime=" + hooks_.proxyRuntimeStateName(*gaTid)
+                                                          + " routed-row note 120 heard=" + juce::String(routed) + " GA own-clip note-ons=" + juce::String(own)
+                                                          + " MIDI-row status=\"" + midiStatus.replace("\n", " | ") + "\"");
+                                   const int clipsBefore = (int)hooks_.liveMidiSummarizeAllClips(*midiRowTid).size();
+                                   hooks_.recordToggleLikeKey();
+                                   juce::Thread::sleep(400);
+                                   const int clipsAfter = (int)hooks_.liveMidiSummarizeAllClips(*midiRowTid).size();
+                                   const juce::String runtimeAfter = hooks_.proxyRuntimeStateName(*gaTid);
+                                   appendStabilityRunLine("  after Stop: MIDI-row clips " + juce::String(clipsBefore) + "->" + juce::String(clipsAfter)
+                                                          + " GA runtime=" + runtimeAfter + " recordingOverride="
+                                                          + (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid) ? "yes" : "no"));
+                                   hooks_.invokeUndo();
+                                   juce::Thread::sleep(300);
+                                   hooks_.liveMidiSetArm(*midiRowTid, false);
+                                   if (!overrideActive)
+                                   {
+                                       failReason = "recording a MIDI row into a proxy-backed destination must switch that destination to the Secondary";
+                                       return false;
+                                   }
+                                   if (own < 1)
+                                   {
+                                       failReason = "the destination's own earlier clip must keep sounding through the live source";
+                                       return false;
+                                   }
+                                   if (routed != 0)
+                                   {
+                                       failReason = "the recording MIDI row's own earlier clip must be silent in the live source";
+                                       return false;
+                                   }
+                                   if (!midiStatus.contains("Secondary instrument used temporarily while recording"))
+                                   {
+                                       failReason = "the MIDI row's status must name the temporary Secondary use while recording";
+                                       return false;
+                                   }
+                                   if (clipsAfter != clipsBefore + 1)
+                                   {
+                                       failReason = "the MIDI row's take was not captured";
+                                       return false;
+                                   }
+                                   if (hooks_.proxyIsLiveRecordingOverrideActive(*gaTid))
+                                   {
+                                       failReason = "no override may linger after the take";
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               300 });
+    }
+    steps_.push_back(Step{ "proxy-rec: cleanup (Primary available again)",
+                           [this, gaTid](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               hooks_.proxyForcePrimaryUnavailable(*gaTid, false);
+                               return true;
+                           },
+                           300 });
 }
 
 void StabilityScenarioRunner::appendLoadAndVerifySteps(const juce::File& project,
@@ -4204,6 +5440,13 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                            failReason = "Inspector does not show the picked input";
                                            return false;
                                        }
+                                       // No technical counter / readiness text in the UI (1.1.13): a working
+                                       // input shows nothing but real obstacles.
+                                       if (texts.contains("MIDI received") || texts.contains("Ready -") || texts.contains("events"))
+                                       {
+                                           failReason = "Inspector still shows the MIDI event counter / readiness text";
+                                           return false;
+                                       }
                                    }
                                    return true;
                                },
@@ -5284,6 +6527,33 @@ void StabilityScenarioRunner::appendLiveMidiSteps(const juce::File& project)
                                    {
                                        failReason = "audio + MIDI take must add one audio clip and one MIDI clip in exactly one undo step";
                                        return false;
+                                   }
+                                   // Shared stop boundary (1.1.13): the audio clip and the MIDI clip of one run have
+                                   // the SAME length (engine-acknowledged start/stop), while their placements keep
+                                   // their own deliberate compensations (audio: latency-store offset; MIDI: per
+                                   // gesture −output latency inside the clip, window start raw).
+                                   if (hooks_.audioClipWindowsForTrack && hooks_.liveMidiSummarizeAllClips)
+                                   {
+                                       const auto audio = hooks_.audioClipWindowsForTrack(*audioTid);
+                                       const auto midi = hooks_.liveMidiSummarizeAllClips(liveMidiInstTid_);
+                                       if (!audio.empty() && !midi.empty())
+                                       {
+                                           const std::int64_t audioLen = audio.front().second;
+                                           const std::int64_t midiLen = midi.back().firstClipLengthSamples;
+                                           appendStabilityRunLine("  shared stop boundary: audio len=" + juce::String((juce::int64)audioLen) + " start="
+                                                                  + juce::String((juce::int64)audio.front().first) + " | midi len="
+                                                                  + juce::String((juce::int64)midiLen) + " start="
+                                                                  + juce::String((juce::int64)midi.back().firstClipStartSamples)
+                                                                  + " | audio placement offset="
+                                                                  + juce::String((juce::int64)(hooks_.recordingPlacementOffsetSamples ? hooks_.recordingPlacementOffsetSamples() : 0))
+                                                                  + " midi gesture offset=-" + juce::String(hooks_.reportedOutputLatencySamples ? hooks_.reportedOutputLatencySamples() : 0)
+                                                                  + " | " + (hooks_.lastRecordRunBoundaries ? hooks_.lastRecordRunBoundaries() : juce::String()));
+                                           if (audioLen != midiLen)
+                                           {
+                                               failReason = "audio and MIDI clips of one run must have the same length (shared stop boundary)";
+                                               return false;
+                                           }
+                                       }
                                    }
                                    hooks_.invokeUndo();
                                    juce::Thread::sleep(300);

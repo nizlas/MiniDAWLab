@@ -1541,6 +1541,30 @@ void Session::setArrangementExtentSamples(const std::int64_t v) noexcept
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
 }
 
+void Session::restoreArrangementExtentAfterRecording(const std::int64_t storedExtentBeforeRun,
+                                                     const std::int64_t recordedResultEndSamples) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> cur = loadSessionSnapshotForAudioThread();
+    if (cur == nullptr)
+    {
+        return;
+    }
+    // Never below the pre-run stored value (an older project's saved extent may be deliberate),
+    // never below the audio content end, and never below the end of what the run recorded (MIDI
+    // clips live outside the snapshot, so the caller passes the run's stop position); only the
+    // temporary display headroom goes away.
+    const std::int64_t target = juce::jmax(juce::jmax(std::int64_t{ 0 }, storedExtentBeforeRun),
+                                           juce::jmax(cur->getDerivedTimelineLengthSamples(),
+                                                      juce::jmax(std::int64_t{ 0 }, recordedResultEndSamples)));
+    if (target == cur->getStoredArrangementExtentSamples())
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withArrangementExtent(*cur, target);
+    jassert(next != nullptr);
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
 void Session::setLeftLocatorAtSample(const std::int64_t s) noexcept
 {
     const std::shared_ptr<const SessionSnapshot> cur = loadSessionSnapshotForAudioThread();
