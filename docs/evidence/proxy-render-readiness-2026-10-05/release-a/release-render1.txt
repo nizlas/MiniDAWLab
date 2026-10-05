@@ -1,0 +1,47 @@
+release-render1: status=Succeeded reason=None
+release-render1: spanEnd=1825333 rendered=1873408 (39.029 s) tail=48128 (1.003 s) tailCompleted=yes peak=-225.4 dBFS blocks=3659 blocksWithMidi=222 midiEvents=336 latency=0/0
+release-render1: timing prepare=139.216 ms, prepare->firstBlock=78.4069 ms, render wall=61.2857 ms (636.8x realtime), worker total=73.2601 ms
+release-render1: artifact C:\Users\nicla\AppData\Local\Temp\dal-proxy-probe\release-a\release-render1.wav
+release-render1: length=1873408 (39.029 s) spanEnd=1825333 (38.028 s) peak=-200.0 dBFS firstAudible(-60)=never lastAbove(-70)=never | music: peak=-200.0 rms=-251.1 audibleSeconds=0/39 | tail: peak=-200.0 rms=-233.4 | sha256=1650f940069349d7
+
+per-second profile (peak / rms dBFS, both channels folded):
+s000 peak=-200.0 rms=-200.0
+s001 peak=-200.0 rms=-200.0
+s002 peak=-200.0 rms=-200.0
+s003 peak=-200.0 rms=-200.0
+s004 peak=-200.0 rms=-200.0
+s005 peak=-200.0 rms=-200.0
+s006 peak=-200.0 rms=-200.0
+s007 peak=-200.0 rms=-200.0
+s008 peak=-200.0 rms=-200.0
+s009 peak=-200.0 rms=-200.0
+s010 peak=-200.0 rms=-200.0
+s011 peak=-200.0 rms=-200.0
+s012 peak=-200.0 rms=-200.0
+s013 peak=-200.0 rms=-200.0
+s014 peak=-200.0 rms=-200.0
+s015 peak=-200.0 rms=-200.0
+s016 peak=-200.0 rms=-200.0
+s017 peak=-200.0 rms=-200.0
+s018 peak=-200.0 rms=-200.0
+s019 peak=-200.0 rms=-200.0
+s020 peak=-200.0 rms=-200.0
+s021 peak=-200.0 rms=-200.0
+s022 peak=-200.0 rms=-200.0
+s023 peak=-200.0 rms=-200.0
+s024 peak=-200.0 rms=-200.0
+s025 peak=-200.0 rms=-200.0
+s026 peak=-200.0 rms=-200.0
+s027 peak=-200.0 rms=-200.0
+s028 peak=-200.0 rms=-200.0
+s029 peak=-200.0 rms=-200.0
+s030 peak=-200.0 rms=-200.0
+s031 peak=-200.0 rms=-200.0
+s032 peak=-200.0 rms=-200.0
+s033 peak=-200.0 rms=-200.0
+s034 peak=-200.0 rms=-200.0
+s035 peak=-200.0 rms=-200.0
+s036 peak=-200.0 rms=-200.0
+s037 peak=-200.0 rms=-235.6
+s038 peak=-200.0 rms=-233.4
+s039 peak=-200.0 rms=-234.1

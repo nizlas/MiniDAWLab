@@ -51,6 +51,11 @@ struct ProxyRenderRequest
     double renderSampleRate = 48000.0;            ///< engine rate at enqueue (§15.3 render rate)
     int renderBlockSize = kRenderBlockSize;
     juce::File temporaryWavFile;                  ///< temp artifact target (outside project media)
+    /// Readiness verification policy for this render (production default; diagnostics may
+    /// disable it to reproduce the pre-1.1.14 behaviour).
+    ProxyReadinessPolicy readiness;
+    /// Offline (non-realtime) indication to the plug-in (§15.4). Diagnostics may clear it.
+    bool nonRealtimeIndication = true;
 };
 
 //==============================================================================
@@ -74,7 +79,8 @@ public:
         const juce::PluginDescription& desc,
         const juce::MemoryBlock& stateBlob,
         const double renderSampleRate,
-        const int renderBlockSize)
+        const int renderBlockSize,
+        const bool nonRealtimeIndication = true)
     {
         jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
         CreateOutcome out;
@@ -134,7 +140,8 @@ public:
         }
 
         // Offline indication (correctness signal, §15.4; measured speed-neutral for VB3-II).
-        inst->setNonRealtime(true);
+        // `nonRealtimeIndication = false` is a diagnostic path (plugin compatibility probing).
+        inst->setNonRealtime(nonRealtimeIndication);
         inst->prepareToPlay(renderSampleRate, renderBlockSize);
         // Measured §4 contract: flush transient state after prepare, before any scheduling.
         inst->reset();
@@ -180,7 +187,7 @@ public:
         jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
         auto created = ProxyRenderInstanceLifecycle::createPreparedIsolatedInstance(
             formatManager, request_.pluginDescription, request_.snapshot.pluginStateBlob,
-            request_.renderSampleRate, request_.renderBlockSize);
+            request_.renderSampleRate, request_.renderBlockSize, request_.nonRealtimeIndication);
         if (created.instance == nullptr)
         {
             failedResult_ = std::make_unique<ProxyRenderResult>();
@@ -260,6 +267,7 @@ private:
             cfg.temporaryWavFile = job.request_.temporaryWavFile;
             cfg.expectedFingerprint = job.request_.expectedFingerprint;
             cfg.primarySemanticRevision = job.request_.primarySemanticRevision;
+            cfg.readiness = job.request_.readiness;
             result = renderProxyDestination(*job.instance_, job.request_.snapshot, cfg,
                                             job.cancelToken_);
             done.store(true, std::memory_order_release);

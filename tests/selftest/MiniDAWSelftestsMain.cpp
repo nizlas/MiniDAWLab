@@ -3161,7 +3161,10 @@ namespace
             for (int i = 0; i < b.getNumSamples(); ++i)
             {
                 const std::int64_t abs = pos + i;
-                const float v = (held > 0 || (toneUntil >= 0 && abs <= toneUntil)) ? 0.5f : 0.0f;
+                // A real (AC) tone — a Nyquist square wave at ±0.5 — not a DC level: the readiness
+                // decision is AC-coupled on purpose (DC-parking plug-ins), so a DC "tone" would
+                // never count as sounding.
+                const float v = (held > 0 || (toneUntil >= 0 && abs <= toneUntil)) ? ((abs & 1) ? -0.5f : 0.5f) : 0.0f;
                 for (int c = 0; c < juce::jmin(2, b.getNumChannels()); ++c)
                 {
                     b.setSample(c, i, v);
@@ -3222,9 +3225,8 @@ namespace
     struct FakeMultiOutProc : FakeProcBase
     {
         FakeMultiOutProc() { outs = 6; }
-        bool markerWritten = false;
 
-        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
         {
             noteBlock(b);
             b.clear();
@@ -3235,11 +3237,64 @@ namespace
                     b.setSample(5, i, 0.9f); // junk outside the recorded boundary
                 }
             }
-            if (!markerWritten && b.getNumChannels() >= 2 && b.getNumSamples() > 0)
+            // A marker on the main pair for every block that carries a Note On (so the readiness
+            // stimulus and the render both see the instrument "answer").
+            bool noteOn = false;
+            for (const auto meta : midi)
+            {
+                if (meta.numBytes >= 3 && (meta.data[0] & 0xF0) == 0x90 && meta.data[2] > 0)
+                {
+                    noteOn = true;
+                }
+            }
+            if (noteOn && b.getNumChannels() >= 2 && b.getNumSamples() > 0)
             {
                 b.setSample(0, 0, 0.25f);
                 b.setSample(1, 0, 0.25f);
-                markerWritten = true;
+            }
+        }
+    };
+
+    /// An instrument that parks a DC offset on its output once it has played anything (the
+    /// measured VB3-II organ-dc defect): the AC-coupled readiness decision must still see every
+    /// later note answer, while the absolute-peak tail policy keeps judging the render itself.
+    struct FakeDcParkingProc : FakeSustainToneProc
+    {
+        bool playedOnce = false;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
+        {
+            FakeSustainToneProc::processBlock(b, midi);
+            if (held > 0)
+            {
+                playedOnce = true;
+            }
+            if (playedOnce)
+            {
+                for (int c = 0; c < juce::jmin(2, b.getNumChannels()); ++c)
+                {
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                    {
+                        b.setSample(c, i, b.getSample(c, i) - 0.6f); // −4.4 dBFS of DC, forever
+                    }
+                }
+            }
+        }
+    };
+
+    /// An instrument that restores its state synchronously but loads its content
+    /// asynchronously: silent for `readyAfterBlocks` processed blocks (any stimulus), then it
+    /// answers like FakeSustainToneProc. Models the measured Groove Agent SE behaviour.
+    struct FakeLateLoadingProc : FakeSustainToneProc
+    {
+        std::uint64_t readyAfterBlocks = 40;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
+        {
+            FakeSustainToneProc::processBlock(b, midi);
+            if (blocks <= readyAfterBlocks)
+            {
+                b.clear(); // "samples not loaded yet": the voice state advances, nothing is heard
             }
         }
     };
@@ -3354,7 +3409,112 @@ namespace
         cfg.temporaryWavFile = p1dTempWav(tag);
         cfg.expectedFingerprint = "sha256:test-" + tag;
         cfg.primarySemanticRevision = 42;
+        cfg.readiness.passIntervalMs = 0; // deterministic fakes answer at once; no wall-clock waits
+        cfg.readiness.maxSilentWaitMs = 0;
         return cfg;
+    }
+
+    /// 1.1.14 readiness verification: a late-loading instrument (silent for its first blocks)
+    /// must be waited for — the artifact starts with the first note audible — while an
+    /// instrument that answers at once is verified in two passes and its render is unchanged.
+    void testProxyRenderExecutorReadinessLateLoading()
+    {
+        const double sr = 48000.0;
+        auto snap = makeExecutorSnapshot(sr);
+        snap.sources.clear(); // one ch1 note at t=0: the first render block must already sound
+        {
+            auto cfg = makeExecCfg(sr, "readiness-late");
+            cfg.readiness.maxSilentWaitMs = 10000; // keep probing while the fake "loads" (it answers in pass 2)
+            FakeLateLoadingProc proc;
+            proc.readyAfterBlocks = 40; // ~0.43 s of stimulus material before anything sounds
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Succeeded,
+                   "p1d-ready: late-loading instrument renders successfully after readiness");
+            expect(r.readiness.attempted && r.readiness.verified && r.readiness.passes >= 2
+                       && r.readiness.stimulusNotes == 1 && r.readiness.soundingNotes == 1,
+                   "p1d-ready: readiness was attempted and VERIFIED once the instrument answered");
+            expect(r.readiness.blocksProcessed > 40 && r.blocksProcessed * 512 == (std::uint64_t)r.renderedLengthSamples,
+                   "p1d-ready: stimulus blocks are counted apart from the render's own blocks");
+            expect(r.midi.noteOnsByChannel[0] == 1, "p1d-ready: the stimulus never pollutes the render's MIDI tallies");
+            // The asset must sound from its first note (t = 0): no leading silence from loading.
+            juce::WavAudioFormat fmt;
+            std::unique_ptr<juce::AudioFormatReader> reader(fmt.createReaderFor(r.temporaryWavFile.createInputStream().release(), true));
+            float firstBlockPeak = 0.0f;
+            if (reader != nullptr)
+            {
+                juce::AudioBuffer<float> chunk(2, 512);
+                reader->read(&chunk, 0, 512, 0, true, true);
+                firstBlockPeak = chunk.getMagnitude(0, 512);
+            }
+            expect(firstBlockPeak > 0.4f, "p1d-ready: the first rendered block already carries the instrument's sound");
+            (void)r.temporaryWavFile.deleteFile();
+        }
+        {
+            auto cfg = makeExecCfg(sr, "readiness-immediate");
+            FakeSustainToneProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(r.status == proxy_render::ProxyRenderStatus::Succeeded && r.readiness.verified
+                       && r.readiness.passes == 1 + cfg.readiness.settledPasses,
+                   "p1d-ready: an instrument that answers at once is verified after the settle passes");
+            expect(r.readiness.flushReachedSilence && r.readiness.flushResidualDb < -70.0,
+                   "p1d-ready: the stimulus is flushed below the tail threshold before the render");
+            (void)r.temporaryWavFile.deleteFile();
+        }
+        {
+            // DC-parking instrument (organ-dc defect): every note still counts as answering
+            // (AC-coupled decision), while the render honestly fails at the tail cap because the
+            // parked DC never falls under the absolute-peak tail threshold.
+            auto cfg = makeExecCfg(48000.0, "readiness-dc"); // the fake's 1.5 s release is baked at 48 kHz
+            const auto snapDc = makeExecutorSnapshot(48000.0); // three notes on ch1/ch2/ch3
+            FakeDcParkingProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snapDc, cfg, token);
+            expect(r.readiness.attempted && r.readiness.verified && r.readiness.stimulusNotes == 3 && r.readiness.soundingNotes == 3
+                       && !r.readiness.flushReachedSilence,
+                   std::string("p1d-ready: a parked DC offset does not mask later notes (AC-coupled decision); the flush reports it honestly [")
+                       + r.readiness.note.toStdString() + " | " + r.readiness.trace.replace("\n", " / ").toStdString()
+                       + " flushSilent=" + (r.readiness.flushReachedSilence ? "yes" : "no") + "]");
+            expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::TailLimitReached,
+                   "p1d-ready: the DC-parking instrument's render still fails honestly at the tail cap (unchanged policy)");
+        }
+        {
+            // Readiness disabled: the legacy behaviour (render at once) — the late-loading
+            // instrument then renders silence for its first blocks, which the no-output rule
+            // does NOT catch when later notes sound; this documents why readiness exists.
+            auto cfg = makeExecCfg(sr, "readiness-off");
+            cfg.readiness.enabled = false;
+            FakeLateLoadingProc proc;
+            proc.readyAfterBlocks = 40;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+            expect(!r.readiness.attempted && r.readiness.note == "disabled",
+                   "p1d-ready: readiness can be disabled explicitly (diagnostics only)");
+            (void)r.temporaryWavFile.deleteFile();
+        }
+    }
+
+    /// 1.1.14: notes scheduled but nothing above the tail threshold ever produced ⇒ Failed
+    /// NoAudibleOutput, never a silent "Current" asset; the explicit silent generation for an
+    /// EMPTY destination is untouched (tested in testProxyRenderExecutorEmptyDestination).
+    void testProxyRenderExecutorNoAudibleOutput()
+    {
+        const double sr = 8000.0;
+        const auto snap = makeExecutorSnapshot(sr);
+        auto cfg = makeExecCfg(sr, "nooutput");
+        FakeSilentProc proc;
+        proxy_render::ProxyRenderCancellationToken token;
+        const auto r = proxy_render::renderProxyDestination(proc, snap, cfg, token);
+        expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                   && r.failureReason == proxy_render::ProxyRenderFailureReason::NoAudibleOutput,
+               "p1d-nooutput: silence for scheduled notes = Failed NoAudibleOutput");
+        expect(r.readiness.attempted && !r.readiness.verified && r.readiness.soundingNotes == 0,
+               "p1d-nooutput: readiness could not be established (no note answered)");
+        expect(r.temporaryWavFile == juce::File() && !cfg.temporaryWavFile.existsAsFile(),
+               "p1d-nooutput: nothing publishable; the silent artifact is discarded");
+        expect(r.message.contains("no audible output"), "p1d-nooutput: the reason names the problem");
     }
 
     /// Complete happy path: MIDI merge/channels/CC11 delivery, tail completion, WAV
@@ -4854,7 +5014,10 @@ namespace
                    && out2.finalFile == out1.finalFile,
                "p1f-reuse: identical existing generation validated and reused; temp dropped");
 
-        // 3) Collision with a NON-identical existing file fails safely (never overwrite).
+        // 3) Collision with a NON-identical existing file (1.1.14 rule): the occupying file is
+        // never touched; the new render is published under the next free SIBLING name and the
+        // metadata names that file. (Before 1.1.14 this failed forever — and a same-length
+        // different-content file was silently "reused".)
         const juce::String fp3 = "sha256:c0111de";
         const juce::File final3 = proxyDirectory(root).getChildFile(
             generationFileName(TrackId{ 7 }, fp3));
@@ -4863,12 +5026,58 @@ namespace
         expect(p1fWriteWav(temp3, 8000.0, 2048), "p1f-collide: temp written");
         const auto out3 = publishRenderedProxy(root, TrackId{ 7 },
                                                p1fSucceededResult(temp3, fp3, 2048), policies);
-        expect(!out3.ok && out3.error.contains("collision"),
-               "p1f-collide: non-identical existing file fails publication safely");
-        expect(final3.loadFileAsString() == "NOT A WAV" && temp3.existsAsFile(),
-               "p1f-collide: alien file untouched; failed temp left for caller cleanup");
-        (void)temp3.deleteFile();
+        expect(out3.ok && out3.publishedUnderSiblingName && !out3.reusedExistingIdentical
+                   && out3.finalFile.getFileName() == generationSiblingFileName(TrackId{ 7 }, fp3, 2)
+                   && out3.metadata.relativePath == "InstrumentProxies/" + out3.finalFile.getFileName()
+                   && out3.metadata.lengthSamples == 2048 && out3.collisionNote.isNotEmpty(),
+               "p1f-collide: alien file under the canonical name -> published under the sibling name, metadata names it");
+        expect(final3.loadFileAsString() == "NOT A WAV" && !temp3.existsAsFile()
+                   && validatePublishedAsset(root, out3.metadata).ok,
+               "p1f-collide: alien file untouched; the sibling asset validates against its metadata");
+
+        // 3b) Same format AND length but different content (an earlier incomplete render, or a
+        // sample-level-different render of a non-deterministic instrument): NOT reused.
+        const juce::String fp3b = "sha256:5a3e1e";
+        const juce::File final3b = proxyDirectory(root).getChildFile(generationFileName(TrackId{ 7 }, fp3b));
+        {
+            // A valid 32-bit-float stereo WAV of the same length — all zeros ("silent render").
+            (void)final3b.getParentDirectory().createDirectory();
+            juce::WavAudioFormat fmt;
+            auto stream = final3b.createOutputStream();
+            std::unique_ptr<juce::AudioFormatWriter> w(fmt.createWriterFor(stream.release(), 8000.0, 2, 32, {}, 0));
+            juce::AudioBuffer<float> zeros(2, 2048);
+            zeros.clear();
+            expect(w != nullptr && w->writeFromAudioSampleBuffer(zeros, 0, 2048), "p1f-collide: silent same-length file planted");
+        }
+        const juce::File temp3b = tempRenderTarget(root, TrackId{ 7 }, 33);
+        expect(p1fWriteWav(temp3b, 8000.0, 2048), "p1f-collide: real render temp written");
+        const auto out3b = publishRenderedProxy(root, TrackId{ 7 }, p1fSucceededResult(temp3b, fp3b, 2048), policies);
+        expect(out3b.ok && out3b.publishedUnderSiblingName && !out3b.reusedExistingIdentical
+                   && out3b.collisionNote.contains("different content")
+                   && out3b.finalFile != final3b && final3b.existsAsFile(),
+               "p1f-collide: same length + different bytes is NOT reused; published beside the existing file");
+        // 3c) The same render again: the byte-identical sibling is reused (true dedupe).
+        const juce::File temp3c = tempRenderTarget(root, TrackId{ 7 }, 34);
+        expect(p1fWriteWav(temp3c, 8000.0, 2048), "p1f-collide: third temp written");
+        const auto out3c = publishRenderedProxy(root, TrackId{ 7 }, p1fSucceededResult(temp3c, fp3b, 2048), policies);
+        expect(out3c.ok && out3c.reusedExistingIdentical && !out3c.publishedUnderSiblingName
+                   && out3c.finalFile == out3b.finalFile && !temp3c.existsAsFile(),
+               "p1f-collide: a byte-identical sibling is reused, the duplicate temp dropped");
+        // 3d) A different-length render of the same identity: next free sibling name (_3).
+        const juce::File temp3d = tempRenderTarget(root, TrackId{ 7 }, 35);
+        expect(p1fWriteWav(temp3d, 8000.0, 4096), "p1f-collide: longer render temp written");
+        const auto out3d = publishRenderedProxy(root, TrackId{ 7 }, p1fSucceededResult(temp3d, fp3b, 4096), policies);
+        expect(out3d.ok && out3d.publishedUnderSiblingName
+                   && out3d.finalFile.getFileName() == generationSiblingFileName(TrackId{ 7 }, fp3b, 3)
+                   && out3d.metadata.lengthSamples == 4096 && validatePublishedAsset(root, out3d.metadata).ok
+                   && final3b.existsAsFile() && out3b.finalFile.existsAsFile(),
+               "p1f-collide: a different-length render takes the next sibling name; earlier files stay");
+        expect(isSafeProxyRelativePath(out3d.metadata.relativePath), "p1f-collide: sibling relative path is safe");
         (void)final3.deleteFile();
+        (void)out3.finalFile.deleteFile();
+        (void)final3b.deleteFile();
+        (void)out3b.finalFile.deleteFile();
+        (void)out3d.finalFile.deleteFile();
 
         // 4) Corrupt render output is never published (final validation deletes the
         // unreferenced moved file and errors).
@@ -4883,8 +5092,9 @@ namespace
                            .existsAsFile(),
                "p1f-corrupt: corrupt/invalid WAV is never published as a generation");
 
-        // 5) Rename failure (a directory blocks the final name): error, temp retained,
-        // previously published generation (out1) untouched.
+        // 5) A directory blocks the canonical name: never removed (moveFileTo would delete an
+        // empty directory target) — the render goes to the sibling name; the previously
+        // published generation (out1) untouched.
         const juce::String fp5 = "sha256:b10cced";
         const juce::File blocker = proxyDirectory(root).getChildFile(
             generationFileName(TrackId{ 7 }, fp5));
@@ -4893,12 +5103,21 @@ namespace
         expect(p1fWriteWav(temp5, 8000.0, 1024), "p1f-rename: temp written");
         const auto out5 = publishRenderedProxy(root, TrackId{ 7 },
                                                p1fSucceededResult(temp5, fp5, 1024), policies);
-        expect(!out5.ok && temp5.existsAsFile(),
-               "p1f-rename: rename failure reports an error and retains the temp for cleanup");
+        expect(out5.ok && out5.publishedUnderSiblingName && blocker.isDirectory() && !temp5.existsAsFile()
+                   && out5.finalFile.getFileName() == generationSiblingFileName(TrackId{ 7 }, fp5, 2),
+               "p1f-rename: a directory under the canonical name is left alone; the render takes the sibling name");
         expect(validatePublishedAsset(root, out1.metadata).ok,
                "p1f-rename: the previously published generation remains intact");
-        (void)temp5.deleteFile();
+        (void)out5.finalFile.deleteFile();
         (void)blocker.deleteRecursively();
+        // 5b) A genuine rename failure (temp vanished before the move): error, nothing published.
+        const juce::File temp5b = tempRenderTarget(root, TrackId{ 7 }, 55);
+        expect(p1fWriteWav(temp5b, 8000.0, 1024), "p1f-rename: temp written");
+        auto vanished = p1fSucceededResult(temp5b, "sha256:9one", 1024);
+        (void)temp5b.deleteFile();
+        const auto out5b = publishRenderedProxy(root, TrackId{ 7 }, vanished, policies);
+        expect(!out5b.ok && out5b.error.contains("missing"),
+               "p1f-rename: a missing temp artifact fails publication honestly");
 
         // 6) Unsaved project: no permanent path is invented.
         const juce::File temp6 = tempRenderTarget(root, TrackId{ 7 }, 6);
@@ -9141,6 +9360,8 @@ int main()
         testProxyRenderExecutorCancellation();
         testProxyRenderExecutorFailurePaths();
         testProxyRenderExecutorEmptyDestination();
+        testProxyRenderExecutorReadinessLateLoading();
+        testProxyRenderExecutorNoAudibleOutput();
 
     testProxySchedulerFifoSerializationAndThreads();
     testProxySchedulerMissingPrimaryCurrency();

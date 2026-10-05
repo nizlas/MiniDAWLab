@@ -142,6 +142,91 @@ public:
         }
     }
 
+    /// One distinct (channel, note) the content plays, with the velocity of its first occurrence
+    /// — the stimulus set of the readiness verification (ProxyRenderExecutor.h).
+    struct StimulusNote
+    {
+        int midiChannel = 1;
+        int midiNote = 60;
+        int velocity = 100;
+    };
+
+    /// Distinct (channel, note) pairs across all units in timeline order of first occurrence,
+    /// at most `maxCount`. Pure query — emission state is untouched.
+    [[nodiscard]] std::vector<StimulusNote> collectDistinctNoteOns(const std::size_t maxCount) const
+    {
+        std::vector<const BakedNote*> all;
+        for (const auto& u : units_)
+        {
+            for (const auto& n : u.notes)
+            {
+                all.push_back(&n);
+            }
+        }
+        std::stable_sort(all.begin(), all.end(),
+                         [](const BakedNote* a, const BakedNote* b) { return a->absSample < b->absSample; });
+        std::vector<StimulusNote> out;
+        bool seen[16][128] = {};
+        for (const BakedNote* n : all)
+        {
+            const int ch = juce::jlimit(1, 16, n->midiChannel);
+            const int note = juce::jlimit(0, 127, n->midiNote);
+            if (seen[ch - 1][note])
+            {
+                continue;
+            }
+            seen[ch - 1][note] = true;
+            out.push_back({ ch, note, juce::jlimit(1, 127, n->velocity) });
+            if (out.size() >= maxCount)
+            {
+                break;
+            }
+        }
+        return out;
+    }
+
+    /// The controller state the content establishes first (the first value of every CC and
+    /// pitch-bend stream, after the reset prefix) — what the readiness stimulus plays into so an
+    /// instrument whose sound depends on its initial controllers answers as it will in the
+    /// render. Pure query — the per-stream `lastSentValue` emission state is untouched.
+    void emitInitialControllerState(juce::MidiBuffer& out) const
+    {
+        emitResetAndChasePrefix(out);
+        for (const auto& u : units_)
+        {
+            for (const auto& s : u.ccStreams)
+            {
+                if (!s.events.empty())
+                {
+                    out.addEvent(juce::MidiMessage::controllerEvent(s.midiChannel, s.controller, s.events.front().value), 0);
+                }
+            }
+            for (const auto& s : u.pitchBendStreams)
+            {
+                if (!s.events.empty())
+                {
+                    out.addEvent(juce::MidiMessage::pitchWheel(s.midiChannel, juce::jlimit(0, kMidiPitchBendMax, s.events.front().value)), 0);
+                }
+            }
+        }
+    }
+
+    /// All Sound Off / All Notes Off / sustain off on every channel the schedule uses (the flush
+    /// between the readiness stimulus and the render).
+    void emitAllSoundOff(juce::MidiBuffer& out) const
+    {
+        for (int ch = 1; ch <= 16; ++ch)
+        {
+            if (!usedChannels_[(size_t)ch - 1])
+            {
+                continue;
+            }
+            out.addEvent(juce::MidiMessage::controllerEvent(ch, 64, 0), 0);
+            out.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), 0);
+            out.addEvent(juce::MidiMessage::controllerEvent(ch, 123, 0), 0);
+        }
+    }
+
     /// Emit every event due in [blockStart, blockStart + numSamples) into `out` (offsets are
     /// block-relative). Blocks MUST be requested sequentially from 0 — the sequencer carries
     /// pending-note-off and CC-last-sent state across blocks exactly like the live engine.

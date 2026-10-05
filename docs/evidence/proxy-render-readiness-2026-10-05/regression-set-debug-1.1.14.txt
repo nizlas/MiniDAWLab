@@ -1,0 +1,9 @@
+﻿DEBUG proxy-recording [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=proxy-recording totalMs=52420
+      destination=Rendering job: phase=Rendering expected=sha256:490624560840f6cc msg="" renderedMs=0 | identity now=sha256:490624560840f6cc comparable=sha256:320815630cf7e55c rev=83 (job rev=83) published=sha256:0eb66f3d3776bcb2
+      destination=Current job: phase=Published expected=sha256:490624560840f6cc msg="" renderedMs=49322 | identity now=sha256:490624560840f6cc comparable= rev=83 (job rev=83) published=sha256:490624560840f6cc
+DEBUG midi-cycle-takes [pregain-fixture.dalproj] exit=1 :: RESULT: FAIL scenario=midi-cycle-takes totalMs=87449 reason: step "past-end: combined - play a note, Stop; audio and MIDI lengths identical and past the old end" failed: combined run past the end: lengths differ or the take did not cross the old end
+DEBUG live-midi [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=live-midi totalMs=43712
+DEBUG mixdown [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=mixdown-wav totalMs=5096
+DEBUG organ-dc [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=organ-dc totalMs=36991
+DEBUG inspector-panel [TSE_pt2.dalproj] exit=0 :: RESULT: PASS scenario=inspector-panel totalMs=18505
+DEBUG midi-routing [pregain-fixture.dalproj] exit=0 :: RESULT: PASS scenario=midi-routing totalMs=10299

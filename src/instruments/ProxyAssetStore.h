@@ -9,6 +9,11 @@
 // hold proxies). Generation files are content-addressed and IMMUTABLE:
 //
 //   InstrumentProxies/track_<TrackId>_<sanitized-fingerprint>.wav
+//   InstrumentProxies/track_<TrackId>_<sanitized-fingerprint>_<n>.wav   (1.1.14: sibling name
+//     when the canonical name is occupied by a file whose BYTES differ from the new render —
+//     the identity excludes state bytes and plug-in run-to-run variation, so "same name" never
+//     implied "same bytes"; reuse of an existing file requires identical bytes, nothing under an
+//     occupied name is ever overwritten or deleted, and the metadata names the file in use)
 //
 // Temporary render targets live in the SAME directory (same filesystem/volume ⇒
 // same-volume rename) and never match a generation name:
@@ -46,6 +51,7 @@
 #include <juce_core/juce_core.h>
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace proxy_store
@@ -176,12 +182,63 @@ inline constexpr const char* kProxyFolderName = "InstrumentProxies";
 struct ProxyPublishOutcome
 {
     bool ok = false;
-    bool reusedExistingIdentical = false; ///< identical immutable generation already on disk
+    /// A BYTE-IDENTICAL immutable generation was already on disk under the canonical name: the
+    /// new artifact was dropped and the existing file taken into use (true dedupe — content
+    /// compared, not just format and length).
+    bool reusedExistingIdentical = false;
+    /// The canonical name was occupied by a file whose bytes differ from this render (an earlier
+    /// incomplete render of the same identity, a sample-level-different render of a
+    /// non-deterministic instrument, or a foreign/corrupt file): the new asset was published
+    /// under the next free sibling name instead. Nothing was overwritten or deleted.
+    bool publishedUnderSiblingName = false;
+    juce::String collisionNote; ///< why the canonical name could not be reused
     bool waitingForProjectLocation = false; ///< unsaved project: nothing publishable yet
     juce::String error;
     juce::File finalFile;
     ProjectFileProxyMetadataV20 metadata; ///< filled on success (ok == true)
 };
+
+/// Sibling name for a generation whose canonical name is occupied by a non-identical file:
+/// `track_<id>_<fingerprint>_<n>.wav` (same safe character set, same folder).
+[[nodiscard]] inline juce::String generationSiblingFileName(const TrackId trackId,
+                                                            const juce::String& fingerprint,
+                                                            const int n)
+{
+    return "track_" + juce::String((juce::int64)trackId) + "_" + sanitizeFingerprintForFileName(fingerprint)
+           + "_" + juce::String(n) + ".wav";
+}
+
+/// Byte comparison of two files (streamed, early exit). Equal sizes are required first.
+[[nodiscard]] inline bool filesHaveIdenticalBytes(const juce::File& a, const juce::File& b)
+{
+    if (a.getSize() != b.getSize())
+    {
+        return false;
+    }
+    juce::FileInputStream ia(a), ib(b);
+    if (!ia.openedOk() || !ib.openedOk())
+    {
+        return false;
+    }
+    juce::HeapBlock<char> bufA(65536), bufB(65536);
+    for (;;)
+    {
+        const int na = ia.read(bufA, 65536);
+        const int nb = ib.read(bufB, 65536);
+        if (na != nb || na < 0)
+        {
+            return false;
+        }
+        if (na == 0)
+        {
+            return true;
+        }
+        if (std::memcmp(bufA, bufB, (size_t)na) != 0)
+        {
+            return false;
+        }
+    }
+}
 
 [[nodiscard]] inline ProjectFileProxyMetadataV20
     buildGenerationMetadata(const proxy_render::ProxyRenderResult& result,
@@ -261,35 +318,82 @@ struct ProxyPublishOutcome
 
     const juce::File dir = proxyDirectory(projectFolder);
     (void)dir.createDirectory();
-    const juce::String relativePath = generationRelativePath(trackId, result.expectedFingerprint);
-    jassert(isSafeProxyRelativePath(relativePath));
-    const juce::File finalFile = dir.getChildFile(generationFileName(trackId,
-                                                                    result.expectedFingerprint));
     // Same-volume guarantee: temp targets are created inside the proxy directory
     // (tempRenderTarget) so the §16.3 rename below is a same-volume MoveFile.
     jassert(temp.getParentDirectory() == dir);
 
+    // The canonical content-addressed name. The identity deliberately excludes the plug-in's
+    // state BYTES and the plug-in's own run-to-run variation, so two renders of one identity
+    // are not guaranteed byte-identical — and an earlier publication may have been incomplete.
+    // Reuse therefore requires IDENTICAL BYTES; anything else under the name is left untouched
+    // and this render goes to the next free sibling name. The metadata always describes the
+    // file actually taken into use.
+    juce::File finalFile = dir.getChildFile(generationFileName(trackId, result.expectedFingerprint));
+    juce::String fileName = finalFile.getFileName();
+    bool reuse = false;
     if (finalFile.isDirectory())
     {
-        // Never remove/overwrite a foreign object occupying the generation name
-        // (juce::File::moveFileTo would delete an empty directory target).
-        out.error = "generation name is blocked by a foreign directory";
-        return out;
+        out.collisionNote = "canonical name is occupied by a directory";
     }
-    if (finalFile.existsAsFile())
+    else if (finalFile.existsAsFile())
     {
-        // Identical immutable generation already published (same content address):
-        // validate before safe reuse; NEVER overwrite an unrelated/corrupt file.
         const auto v = proxy_render::validateTemporaryWav(finalFile, result.renderSampleRate,
                                                           result.channels,
                                                           result.renderedLengthSamples);
-        if (!v.ok)
+        if (v.ok && filesHaveIdenticalBytes(finalFile, temp))
         {
-            out.error = "generation-name collision with a non-identical existing file: "
-                        + v.error;
+            reuse = true;
+        }
+        else
+        {
+            out.collisionNote = v.ok ? "existing file has the same format and length but different content"
+                                     : "existing file is not this render: " + v.error;
+        }
+    }
+    if (!reuse && out.collisionNote.isNotEmpty())
+    {
+        // Next free sibling name — never remove or overwrite what occupies the canonical one
+        // (juce::File::moveFileTo would even delete an empty directory target).
+        bool found = false;
+        for (int n = 2; n < 1000; ++n)
+        {
+            const juce::File candidate = dir.getChildFile(generationSiblingFileName(trackId, result.expectedFingerprint, n));
+            if (!candidate.exists())
+            {
+                finalFile = candidate;
+                fileName = candidate.getFileName();
+                found = true;
+                break;
+            }
+            if (candidate.existsAsFile())
+            {
+                // An earlier sibling with identical bytes is just as reusable.
+                const auto vs = proxy_render::validateTemporaryWav(candidate, result.renderSampleRate,
+                                                                   result.channels,
+                                                                   result.renderedLengthSamples);
+                if (vs.ok && filesHaveIdenticalBytes(candidate, temp))
+                {
+                    finalFile = candidate;
+                    fileName = candidate.getFileName();
+                    reuse = true;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found)
+        {
+            out.error = "generation-name collision: no free sibling name (" + out.collisionNote + ")";
             return out;
         }
-        (void)temp.deleteFile(); // reuse the existing asset; drop the duplicate temp
+        out.publishedUnderSiblingName = !reuse;
+    }
+    const juce::String relativePath = juce::String(kProxyFolderName) + "/" + fileName;
+    jassert(isSafeProxyRelativePath(relativePath));
+
+    if (reuse)
+    {
+        (void)temp.deleteFile(); // byte-identical asset already published; drop the duplicate temp
         out.reusedExistingIdentical = true;
     }
     else

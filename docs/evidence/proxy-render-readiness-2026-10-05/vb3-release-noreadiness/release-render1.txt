@@ -1,0 +1,5 @@
+release-render1: status=Failed reason=TailLimitReached msg="tail limit reached â render incomplete"
+release-render1: spanEnd=2190667 rendered=3630592 (75.637 s) tail=1440256 (30.005 s) tailCompleted=no peak=-2.0 dBFS blocks=7091 blocksWithMidi=81 midiEvents=199 latency=0/0
+release-render1: timing prepare=236.714 ms, prepare->firstBlock=66.548 ms, render wall=1709.3 ms (44.3x realtime), worker total=1712.67 ms
+release-render1: readiness not attempted passes=0 stimulus=12 sounding=0 wait=0 ms blocks=0 flushResidual=-200.0 dBFS flushSilent=yes | disabled
+release-render1: no artifact (expected for this status)

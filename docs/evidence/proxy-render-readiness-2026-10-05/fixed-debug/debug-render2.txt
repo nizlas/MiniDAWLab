@@ -1,0 +1,58 @@
+debug-render2: status=Succeeded reason=None
+debug-render2: spanEnd=1825333 rendered=2368000 (49.333 s) tail=542720 (11.307 s) tailCompleted=yes peak=-0.3 dBFS blocks=4625 blocksWithMidi=222 midiEvents=336 latency=0/0
+debug-render2: timing prepare=186.065 ms, prepare->firstBlock=84.4898 ms, render wall=1846.98 ms (26.7x realtime), worker total=1917.48 ms
+debug-render2: readiness VERIFIED passes=5 stimulus=11 sounding=11 wait=1216.64 ms blocks=2528 flushResidual=-147.2 dBFS flushSilent=yes | verified: 11/11 notes answer, settled after 5 passes (1209.88 ms)
+debug-render2: artifact C:\Users\nicla\AppData\Local\Temp\dal-proxy-probe\fixed-debug\debug-render2.wav
+debug-render2: length=2368000 (49.333 s) spanEnd=1825333 (38.028 s) peak=-0.3 dBFS firstAudible(-60)=4.002 s lastAbove(-70)=48.322 s | music: peak=-0.3 rms=-19.5 audibleSeconds=35/39 | tail: peak=-3.5 rms=-34.2 | sha256=00e1c27cacc9c94b
+
+per-second profile (peak / rms dBFS, both channels folded):
+s000 peak=-146.1 rms=-167.8
+s001 peak=-200.0 rms=-200.0
+s002 peak=-200.0 rms=-200.0
+s003 peak=-200.0 rms=-200.0
+s004 peak=-0.4 rms=-17.7
+s005 peak=-35.2 rms=-49.2
+s006 peak=-3.8 rms=-29.6
+s007 peak=-33.1 rms=-50.7
+s008 peak=-2.7 rms=-23.3
+s009 peak=-0.5 rms=-16.7
+s010 peak=-0.7 rms=-21.9
+s011 peak=-20.1 rms=-33.3
+s012 peak=-0.3 rms=-16.9
+s013 peak=-1.0 rms=-21.6
+s014 peak=-0.3 rms=-17.6
+s015 peak=-8.6 rms=-24.7
+s016 peak=-0.3 rms=-17.4
+s017 peak=-3.8 rms=-21.7
+s018 peak=-3.6 rms=-18.7
+s019 peak=-3.6 rms=-21.6
+s020 peak=-3.6 rms=-18.6
+s021 peak=-3.6 rms=-20.8
+s022 peak=-1.0 rms=-16.4
+s023 peak=-1.6 rms=-18.1
+s024 peak=-2.8 rms=-17.1
+s025 peak=-1.7 rms=-20.3
+s026 peak=-1.7 rms=-16.8
+s027 peak=-5.4 rms=-21.7
+s028 peak=-2.0 rms=-16.7
+s029 peak=-1.5 rms=-17.3
+s030 peak=-2.4 rms=-18.4
+s031 peak=-1.6 rms=-17.0
+s032 peak=-1.5 rms=-17.7
+s033 peak=-2.9 rms=-19.9
+s034 peak=-1.4 rms=-16.9
+s035 peak=-1.5 rms=-18.4
+s036 peak=-3.2 rms=-17.1
+s037 peak=-1.6 rms=-20.0
+s038 peak=-2.4 rms=-21.5
+s039 peak=-36.4 rms=-53.1
+s040 peak=-47.0 rms=-62.9
+s041 peak=-54.5 rms=-71.0
+s042 peak=-62.0 rms=-77.9
+s043 peak=-67.8 rms=-82.5
+s044 peak=-67.1 rms=-84.0
+s045 peak=-69.0 rms=-84.5
+s046 peak=-69.2 rms=-84.9
+s047 peak=-69.8 rms=-85.1
+s048 peak=-69.3 rms=-85.0
+s049 peak=-70.1 rms=-85.2

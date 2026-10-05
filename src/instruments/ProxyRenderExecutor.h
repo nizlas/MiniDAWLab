@@ -37,6 +37,13 @@
 // LATENCY (§7, PI-014): the plugin's reported latency stays IN the audio — no
 // trim, shift or compensation — and the reported sample count is recorded in the
 // result. Full PDC remains deferred.
+//
+// READINESS (§14.2 step 4b, 1.1.14): before the block loop the prepared instance
+// is asked to answer the content's own distinct notes until its response has
+// settled (`verifyInstrumentReadiness`); an instrument that is still loading
+// its content asynchronously after prepareToPlay therefore no longer renders
+// silence into the asset. A render whose scheduled notes produced nothing above
+// the tail threshold fails with NoAudibleOutput instead of publishing silence.
 
 #include "instruments/ProxyOfflineSequencer.h"
 #include "instruments/ProxyRenderTypes.h"
@@ -45,6 +52,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -159,7 +167,295 @@ struct ProxyRenderExecutionConfig
     /// destination material rendered so far. Must be cheap (production stores to a
     /// scheduler-owned atomic); null = no progress reporting.
     std::function<void(std::int64_t renderedMs)> progressSink;
+    /// Instrument readiness verification before the block loop (ProxyRenderTypes.h).
+    ProxyReadinessPolicy readiness;
 };
+
+//==============================================================================
+// Readiness verification (§14.2 step 4b) — worker thread, exclusive instance
+//==============================================================================
+/// Peak of channels 0/1 of `view` (the recorded boundary), linear.
+[[nodiscard]] inline double stereoBlockPeak(const juce::AudioBuffer<float>& view) noexcept
+{
+    double peak = 0.0;
+    for (int c = 0; c < juce::jmin(kRenderChannels, view.getNumChannels()); ++c)
+    {
+        const float* d = view.getReadPointer(c);
+        for (int i = 0; i < view.getNumSamples(); ++i)
+        {
+            if (std::isfinite(d[i]))
+            {
+                peak = juce::jmax(peak, std::abs((double)d[i]));
+            }
+        }
+    }
+    return peak;
+}
+
+/// AC-coupled peak of channels 0/1 (max |x − block mean| per channel): the "did a note sound"
+/// decision must not be masked by a plug-in that parks a DC offset on its output after playing
+/// (measured: VB3-II holds −4.4 dBFS of DC after note activity — the known organ-dc defect).
+[[nodiscard]] inline double stereoBlockPeakAc(const juce::AudioBuffer<float>& view) noexcept
+{
+    double peak = 0.0;
+    for (int c = 0; c < juce::jmin(kRenderChannels, view.getNumChannels()); ++c)
+    {
+        const float* d = view.getReadPointer(c);
+        const int n = view.getNumSamples();
+        if (n <= 0)
+        {
+            continue;
+        }
+        double mean = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            mean += std::isfinite(d[i]) ? (double)d[i] : 0.0;
+        }
+        mean /= (double)n;
+        for (int i = 0; i < n; ++i)
+        {
+            if (std::isfinite(d[i]))
+            {
+                peak = juce::jmax(peak, std::abs((double)d[i] - mean));
+            }
+        }
+    }
+    return peak;
+}
+
+/// Plays the content's distinct notes into the prepared instance until its response has
+/// settled (see ProxyReadinessPolicy), then lets it settle / flushes it. Returns false ONLY
+/// when cancelled (the caller returns Cancelled); every other outcome is recorded in `outcome`
+/// and the render proceeds. Processes blocks into `scratch` (never written to the WAV).
+template <typename Proc>
+[[nodiscard]] bool verifyInstrumentReadiness(Proc& proc,
+                                             const ProxyOfflineSequencer& sequencer,
+                                             const ProxyRenderExecutionConfig& cfg,
+                                             const ProxyRenderCancellationToken& cancel,
+                                             juce::AudioBuffer<float>& scratch,
+                                             ProxyReadinessOutcome& outcome)
+{
+    const ProxyReadinessPolicy& pol = cfg.readiness;
+    outcome = ProxyReadinessOutcome{};
+    const auto stimulus = sequencer.collectDistinctNoteOns((std::size_t)juce::jmax(1, pol.maxStimulusNotes));
+    outcome.stimulusNotes = (int)stimulus.size();
+    if (!pol.enabled || stimulus.empty())
+    {
+        outcome.note = pol.enabled ? "skipped (content schedules no notes)" : "disabled";
+        return true;
+    }
+    outcome.attempted = true;
+    const double wallStart = juce::Time::getMillisecondCounterHiRes();
+    const double floorLinear = dbToLinear(pol.floorDb);
+    const double tailLinear = dbToLinear(kTailThresholdDb);
+    const int n = cfg.blockSize;
+    const int stimulusBlocks = juce::jmax(1, (int)std::ceil(pol.stimulusSeconds * cfg.renderSampleRate / (double)n));
+    const int settleBlocks = juce::jmax(1, (int)std::ceil(pol.settleSeconds * cfg.renderSampleRate / (double)n));
+    const int totalCh = scratch.getNumChannels();
+    std::vector<float*> chans((size_t)totalCh, nullptr);
+    juce::MidiBuffer midi;
+    double lastBlockPeak = 0.0;   ///< absolute (tail-detector semantics: settle / flush)
+    double lastBlockPeakAc = 0.0; ///< AC-coupled (the "did this note sound" decision)
+
+    const auto processOne = [&](juce::MidiBuffer& m) -> double {
+        for (int c = 0; c < totalCh; ++c)
+        {
+            chans[(size_t)c] = scratch.getWritePointer(c);
+        }
+        juce::AudioBuffer<float> view(chans.data(), totalCh, n);
+        view.clear();
+        proc.processBlock(view, m);
+        ++outcome.blocksProcessed;
+        lastBlockPeak = stereoBlockPeak(view);
+        lastBlockPeakAc = stereoBlockPeakAc(view);
+        return lastBlockPeak;
+    };
+    const auto elapsedMs = [&] { return juce::Time::getMillisecondCounterHiRes() - wallStart; };
+    /// Sleep in cancellable slices; false = cancelled.
+    const auto waitMs = [&](const int ms) -> bool {
+        const double until = juce::Time::getMillisecondCounterHiRes() + (double)ms;
+        while (juce::Time::getMillisecondCounterHiRes() < until)
+        {
+            if (cancel.isCancelled())
+            {
+                return false;
+            }
+            juce::Thread::sleep(juce::jmin(50, ms));
+        }
+        return true;
+    };
+
+    std::vector<bool> everSounded(stimulus.size(), false);
+    int passesWithoutNewNote = 0;
+    bool firstPass = true;
+    double lastSoundMs = -1.0;
+    for (;;)
+    {
+        if (cfg.blockBoundaryPauseGate)
+        {
+            cfg.blockBoundaryPauseGate();
+        }
+        ++outcome.passes;
+        int newNotes = 0;
+        int soundingThisPass = 0;
+        for (std::size_t i = 0; i < stimulus.size(); ++i)
+        {
+            const auto& s = stimulus[i];
+            // Let the previous stimulus settle (AC content under the tail threshold; bounded), so
+            // the rise criterion below judges THIS note and not what is still ringing.
+            for (int b = 0; b < settleBlocks && lastBlockPeakAc >= tailLinear; ++b)
+            {
+                midi.clear();
+                (void)processOne(midi);
+                if (cancel.isCancelled())
+                {
+                    return false;
+                }
+            }
+            if (firstPass && i == 0)
+            {
+                // The content's initial controller state (reset prefix + first CC / wheel values)
+                // in a block of its OWN: an instrument that applies All Sound Off / Reset All
+                // Controllers at block granularity must never see them beside a Note On (measured:
+                // VB3-II then loses the key and the stimulus note never releases).
+                midi.clear();
+                sequencer.emitInitialControllerState(midi);
+                (void)processOne(midi);
+                if (cancel.isCancelled())
+                {
+                    return false;
+                }
+            }
+            midi.clear();
+            const double residual = lastBlockPeakAc;
+            midi.addEvent(juce::MidiMessage::noteOn(s.midiChannel, s.midiNote, (float)s.velocity / 127.0f), 0);
+            double maxPeak = 0.0;
+            for (int b = 0; b < stimulusBlocks; ++b)
+            {
+                (void)processOne(midi);
+                maxPeak = juce::jmax(maxPeak, lastBlockPeakAc);
+                midi.clear();
+                if (cancel.isCancelled())
+                {
+                    return false;
+                }
+            }
+            // Sounding = AC content above the floor AND a clear rise over whatever was still ringing.
+            const bool sounding = maxPeak > floorLinear && maxPeak > residual * 4.0;
+            if (outcome.trace.length() < 4000)
+            {
+                outcome.trace << (i == 0 ? "p" + juce::String(outcome.passes) + ":" : juce::String(" "))
+                              << " ch" << s.midiChannel << "n" << s.midiNote << "="
+                              << juce::String(residual > 0.0 ? 20.0 * std::log10(residual) : -200.0, 0) << "->"
+                              << juce::String(maxPeak > 0.0 ? 20.0 * std::log10(maxPeak) : -200.0, 0) << (sounding ? "*" : "");
+                if (i + 1 == stimulus.size())
+                {
+                    outcome.trace << "\n";
+                }
+            }
+            if (sounding)
+            {
+                ++soundingThisPass;
+                if (!everSounded[i])
+                {
+                    everSounded[i] = true;
+                    ++newNotes;
+                }
+            }
+            // Release the stimulus note exactly like the schedule releases notes: a Note Off with
+            // the default release velocity, nothing else. (Measured: VB3-II freezes a releasing
+            // voice at its current level when All Sound Off arrives during the release — the
+            // controller flush below therefore only ever follows a settled, silent instrument.)
+            midi.clear();
+            midi.addEvent(juce::MidiMessage::noteOff(s.midiChannel, s.midiNote, (juce::uint8)64), 0);
+            (void)processOne(midi);
+            if (cancel.isCancelled())
+            {
+                return false;
+            }
+        }
+        firstPass = false;
+        outcome.soundingNotes = soundingThisPass;
+        if (soundingThisPass > 0)
+        {
+            lastSoundMs = elapsedMs();
+        }
+        passesWithoutNewNote = newNotes == 0 ? passesWithoutNewNote + 1 : 0;
+
+        const int everCount = (int)std::count(everSounded.begin(), everSounded.end(), true);
+        if (everCount > 0 && passesWithoutNewNote >= pol.settledPasses)
+        {
+            outcome.verified = true;
+            outcome.note = "verified: " + juce::String(everCount) + "/" + juce::String((int)stimulus.size())
+                           + " notes answer, settled after " + juce::String(outcome.passes) + " passes ("
+                           + juce::String(elapsedMs(), 0) + " ms)";
+            break;
+        }
+        if (everCount == 0 && elapsedMs() >= (double)pol.maxSilentWaitMs)
+        {
+            outcome.note = "no note produced output within " + juce::String(elapsedMs(), 0) + " ms ("
+                           + juce::String(outcome.passes) + " passes) - rendering unverified";
+            break;
+        }
+        if (elapsedMs() >= (double)pol.maxTotalWaitMs)
+        {
+            outcome.note = "response still changing after " + juce::String(elapsedMs(), 0) + " ms ("
+                           + juce::String(everCount) + "/" + juce::String((int)stimulus.size())
+                           + " notes answer) - rendering unverified";
+            break;
+        }
+        if (!waitMs(pol.passIntervalMs))
+        {
+            return false;
+        }
+    }
+
+    // Flush: every stimulus note has been released; let the instrument settle under the tail
+    // threshold for a full silence window (bounded). Only if it does NOT settle, All Sound Off /
+    // All Notes Off / sustain off are sent as a last resort and the settle is retried briefly.
+    // The render's own reset prefix follows in its first block, on a silent instrument.
+    {
+        const std::int64_t windowBlocks = juce::jmax<std::int64_t>(1, (std::int64_t)std::ceil(kTailSilenceWindowSec * cfg.renderSampleRate / (double)n));
+        const auto settleUntilQuiet = [&](const double seconds) -> bool {
+            const std::int64_t maxBlocks = juce::jmax<std::int64_t>(1, (std::int64_t)std::ceil(seconds * cfg.renderSampleRate / (double)n));
+            std::int64_t quietRun = 0;
+            for (std::int64_t b = 0; b < maxBlocks; ++b)
+            {
+                midi.clear();
+                const double peak = processOne(midi);
+                if (cancel.isCancelled())
+                {
+                    return false;
+                }
+                quietRun = peak < tailLinear ? quietRun + 1 : 0;
+                if (quietRun >= windowBlocks)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        outcome.flushReachedSilence = settleUntilQuiet(pol.flushMaxSeconds);
+        if (cancel.isCancelled())
+        {
+            return false;
+        }
+        if (!outcome.flushReachedSilence)
+        {
+            midi.clear();
+            sequencer.emitAllSoundOff(midi);
+            (void)processOne(midi);
+            outcome.flushReachedSilence = settleUntilQuiet(2.0);
+            if (cancel.isCancelled())
+            {
+                return false;
+            }
+        }
+        outcome.flushResidualDb = lastBlockPeak > 0.0 ? 20.0 * std::log10(lastBlockPeak) : -200.0;
+    }
+    outcome.waitMs = elapsedMs();
+    return true;
+}
 
 //==============================================================================
 // The block loop
@@ -249,6 +545,19 @@ template <typename Proc>
     }
 
     r.pluginLatencySamplesAtStart = proc.getLatencySamples();
+
+    // §14.2 step 4b: the instance answers its own content before the asset is rendered (an
+    // instrument still loading after prepare would otherwise render silence into the asset).
+    if (!verifyInstrumentReadiness(proc, sequencer, cfg, cancel, scratch, r.readiness))
+    {
+        wavWriter.reset();
+        r.status = ProxyRenderStatus::Cancelled;
+        r.failureReason = ProxyRenderFailureReason::None;
+        r.message = "cancelled during readiness verification";
+        r.wallMs = juce::Time::getMillisecondCounterHiRes() - wallStart;
+        return r; // tempGuard deletes the (empty) artifact
+    }
+
     ProxyTailDetector tail(cfg.renderSampleRate);
     const std::int64_t spanEnd = r.spanEndRenderSamples;
 
@@ -407,6 +716,31 @@ template <typename Proc>
         return r;
     }
     r.tailCompleted = true;
+
+    // Notes were scheduled but the instrument never produced material output (nothing above the
+    // tail threshold anywhere): not ready, muted, or content it cannot sound. An asset of silence
+    // would be an incomplete render dressed as Current — it fails here instead (§15.7 keeps the
+    // explicit silent generation for EMPTY destinations only).
+    {
+        std::int64_t noteOns = 0;
+        for (const auto count : r.midi.noteOnsByChannel)
+        {
+            noteOns += count;
+        }
+        if (noteOns > 0 && r.maxPeakLinear < dbToLinear(kTailThresholdDb))
+        {
+            r.status = ProxyRenderStatus::Failed;
+            r.failureReason = ProxyRenderFailureReason::NoAudibleOutput;
+            r.message = "the instrument produced no audible output for its " + juce::String(noteOns)
+                        + " scheduled notes (readiness: " + r.readiness.note + ") - render incomplete, not published";
+            if (cfg.retainFailedTailArtifactForDiagnostics)
+            {
+                r.temporaryWavFile = tempGuard.release();
+                r.wavBytes = r.temporaryWavFile.getSize();
+            }
+            return r;
+        }
+    }
 
     // §8 validation before returning success.
     const WavValidationOutcome v = validateTemporaryWav(tempGuard.file(), cfg.renderSampleRate,

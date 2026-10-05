@@ -35,6 +35,64 @@ inline constexpr int kTailPolicyVersion = 1;
 inline constexpr int kRenderBlockSize = 512;
 inline constexpr int kRenderChannels = 2; ///< proxy v1 asset is stereo (32-bit-float WAV)
 
+//==============================================================================
+// Instrument readiness verification (1.1.14; steering §14.2 step 4b)
+//==============================================================================
+// Why: a restored render instance may still be loading its content asynchronously when
+// `prepareToPlay` returns (measured: Groove Agent SE restores its state synchronously but
+// streams its kit samples in the background for ~1–3 s; a render started immediately after
+// prepare produced digital silence for the first notes — the whole asset in a Release build,
+// the first 6–12 s of material in a Debug build — and that silence was published as Current).
+// Neither the plug-in's state bytes (volatile, growing every call) nor a fixed sleep is a
+// readiness signal, so readiness is established from the instrument's RESPONSE: the content's
+// own distinct notes are played into the prepared instance, one at a time, and the set of notes
+// that produce output is compared across passes separated by a wall-clock interval. The render
+// starts when that set has stopped growing (the instrument answers consistently), the stimulus
+// is flushed with All Sound Off / All Notes Off first. Every bound below is a cap on waiting,
+// never a correctness input; an instrument that answers at once is verified in two passes.
+struct ProxyReadinessPolicy
+{
+    bool enabled = true;
+    /// Material processed per stimulus note before deciding whether it sounds.
+    double stimulusSeconds = 0.25;
+    /// Material (at most) processed before each stimulus note until the previous one has
+    /// decayed under the tail threshold, so the rise criterion judges the new note alone.
+    double settleSeconds = 2.0;
+    /// Output above this (and ≥ 12 dB above the residual before the note) counts as sounding.
+    double floorDb = -90.0;
+    /// Wall-clock wait between passes (the worker sleeps; the message thread keeps running).
+    int passIntervalMs = 250;
+    /// Consecutive passes in which no NEW sounding note appeared ⇒ the response has settled
+    /// (3 × 250 ms = 750 ms of unchanged response; a progressively loading instrument keeps
+    /// adding notes until its content is in).
+    int settledPasses = 3;
+    /// No note has sounded for this long ⇒ stop verifying (the render proceeds; the no-output
+    /// rule below then decides on the actual artifact).
+    int maxSilentWaitMs = 20000;
+    /// Absolute bound of the verification phase (response still changing ⇒ proceed, unverified).
+    int maxTotalWaitMs = 60000;
+    /// Material processed after All Sound Off until the output is back under the tail threshold.
+    double flushMaxSeconds = 12.0;
+    int maxStimulusNotes = 48;
+};
+
+/// Readiness verification outcome recorded in the result (diagnostics; never fingerprinted).
+struct ProxyReadinessOutcome
+{
+    bool attempted = false;
+    bool verified = false;          ///< sounding response settled before the render
+    int passes = 0;
+    int stimulusNotes = 0;
+    int soundingNotes = 0;          ///< in the final pass
+    double waitMs = 0.0;            ///< wall-clock spent (processing + sleeps)
+    std::uint64_t blocksProcessed = 0;
+    double flushResidualDb = -200.0; ///< peak of the last flush block before the render
+    bool flushReachedSilence = true;
+    juce::String note;              ///< human-readable summary
+    /// Per pass, per stimulus note: "residual->peak" in dBFS (diagnostics; bounded length).
+    juce::String trace;
+};
+
 [[nodiscard]] inline double dbToLinear(const double db) noexcept
 {
     return std::pow(10.0, db / 20.0);
@@ -84,7 +142,10 @@ enum class ProxyRenderFailureReason
                             ///< incomplete render; NEVER published, never "complete"
     NonFiniteAudio,         ///< the isolated instance produced NaN/Inf samples
     WavWriteFailed,         ///< temporary WAV could not be created/written
-    WavValidationFailed     ///< §8 post-write validation rejected the artifact
+    WavValidationFailed,    ///< §8 post-write validation rejected the artifact
+    NoAudibleOutput         ///< notes were scheduled but nothing above the tail threshold was
+                            ///< ever produced (instrument not ready, muted or unsupported
+                            ///< content) — an incomplete render, never published as Current
 };
 
 [[nodiscard]] inline const char* toString(const ProxyRenderStatus s) noexcept
@@ -112,6 +173,7 @@ enum class ProxyRenderFailureReason
         case ProxyRenderFailureReason::NonFiniteAudio: return "NonFiniteAudio";
         case ProxyRenderFailureReason::WavWriteFailed: return "WavWriteFailed";
         case ProxyRenderFailureReason::WavValidationFailed: return "WavValidationFailed";
+        case ProxyRenderFailureReason::NoAudibleOutput: return "NoAudibleOutput";
     }
     return "?";
 }
@@ -165,6 +227,9 @@ struct ProxyRenderResult
     // Evidence for thread-affinity assertions in tests/integration logging.
     juce::String workerThreadId;
     double wallMs = 0.0;
+
+    /// Instrument readiness verification before the block loop (1.1.14, §14.2 step 4b).
+    ProxyReadinessOutcome readiness;
 
     /// PI-011 diagnostic evidence (set by the production engine at prepare time): the isolated
     /// render instance pointer differed from the live audio-thread instance pointer. Value-only —

@@ -1,0 +1,63 @@
+release-render1: status=Succeeded reason=None
+release-render1: spanEnd=1825333 rendered=2368000 (49.333 s) tail=542720 (11.307 s) tailCompleted=yes peak=-0.3 dBFS blocks=4625 blocksWithMidi=222 midiEvents=336 latency=0/0
+release-render1: timing prepare=133.96 ms, prepare->firstBlock=78.7341 ms, render wall=2215.33 ms (22.3x realtime), worker total=2229.28 ms
+release-render1: readiness VERIFIED passes=5 stimulus=11 sounding=11 wait=1696.91 ms blocks=9405 flushResidual=-76.9 dBFS flushSilent=yes | verified: 11/11 notes answer, settled after 5 passes (1661.7 ms)
+release-render1: readiness trace p1: ch10n36=-200->-200  ch10n43=-200->-200  ch10n45=-200->-200  ch10n38=-200->-200  ch10n40=-200->-200  ch10n47=-200->-200  ch10n49=-200->-200  ch10n46=-200->-200  ch10n41=-200->-200  ch10n48=-200->-200  ch10n51=-200->-200
+release-render1: readiness trace p2: ch10n36=-200->-0.263638*  ch10n43=-36.5471->-8.46578*  ch10n45=-48.3046->-12.7002*  ch10n38=-60.2157->-16.2459*  ch10n40=-70.559->-4.2092*  ch10n47=-71.0944->-4.05955*  ch10n49=-49.0075->-15.0096*  ch10n46=-39.3226->-21.2552*  ch10n41=-52.5803->-26.6817*  ch10n48=-67.8197->-11.3877*  ch10n51=-46.2056->-14.7231*
+release-render1: readiness trace p3: ch10n36=-50.4751->-1.49183*  ch10n43=-64.4206->-8.5582*  ch10n45=-51.922->-12.699*  ch10n38=-66.6505->-16.2204*  ch10n40=-70.076->-4.19863*  ch10n47=-70.0273->-4.06207*  ch10n49=-49.0448->-15.0071*  ch10n46=-39.3226->-21.2552*  ch10n41=-52.5802->-26.6817*  ch10n48=-67.8197->-11.3925*  ch10n51=-46.2057->-14.723*
+release-render1: readiness trace p4: ch10n36=-50.4751->-1.49444*  ch10n43=-64.4206->-8.56038*  ch10n45=-51.8893->-12.6987*  ch10n38=-66.6502->-16.2203*  ch10n40=-72.8965->-4.19208*  ch10n47=-70.9192->-4.06131*  ch10n49=-49.0448->-15.0086*  ch10n46=-39.3226->-21.2552*  ch10n41=-52.5802->-26.6817*  ch10n48=-67.8197->-11.397*  ch10n51=-46.2056->-14.7229*
+release-render1: readiness trace p5: ch10n36=-50.4751->-1.49335*  ch10n43=-64.4206->-8.55305*  ch10n45=-51.8894->-12.6989*  ch10n38=-66.6499->-16.2206*  ch10n40=-70.0169->-4.2082*  ch10n47=-70.214->-4.06202*  ch10n49=-49.0448->-15.0085*  ch10n46=-39.3226->-21.2552*  ch10n41=-52.5802->-26.6817*  ch10n48=-67.8197->-11.3941*  ch10n51=-46.2057->-14.723*
+release-render1: artifact C:\Users\nicla\AppData\Local\Temp\dal-proxy-probe\final-release\release-render1.wav
+release-render1: length=2368000 (49.333 s) spanEnd=1825333 (38.028 s) peak=-0.3 dBFS firstAudible(-60)=4.002 s lastAbove(-70)=48.322 s | music: peak=-0.3 rms=-19.5 audibleSeconds=35/39 | tail: peak=-3.5 rms=-34.2 | sha256=3806b1a53f54c2d8
+
+per-second profile (peak / rms dBFS, both channels folded):
+s000 peak=-79.1 rms=-115.0
+s001 peak=-200.0 rms=-200.0
+s002 peak=-200.0 rms=-200.0
+s003 peak=-200.0 rms=-200.0
+s004 peak=-0.4 rms=-17.8
+s005 peak=-35.3 rms=-49.1
+s006 peak=-3.8 rms=-29.6
+s007 peak=-33.1 rms=-50.7
+s008 peak=-2.7 rms=-23.3
+s009 peak=-0.5 rms=-16.7
+s010 peak=-0.7 rms=-21.9
+s011 peak=-20.1 rms=-33.3
+s012 peak=-0.3 rms=-16.9
+s013 peak=-1.0 rms=-21.6
+s014 peak=-0.3 rms=-17.6
+s015 peak=-8.6 rms=-24.7
+s016 peak=-0.3 rms=-17.4
+s017 peak=-3.8 rms=-21.7
+s018 peak=-3.6 rms=-18.7
+s019 peak=-3.6 rms=-21.6
+s020 peak=-3.6 rms=-18.6
+s021 peak=-3.6 rms=-20.8
+s022 peak=-1.0 rms=-16.4
+s023 peak=-1.6 rms=-18.1
+s024 peak=-2.8 rms=-17.1
+s025 peak=-1.7 rms=-20.3
+s026 peak=-1.7 rms=-16.8
+s027 peak=-5.4 rms=-21.7
+s028 peak=-2.0 rms=-16.7
+s029 peak=-1.5 rms=-17.3
+s030 peak=-2.4 rms=-18.4
+s031 peak=-1.6 rms=-17.0
+s032 peak=-1.5 rms=-17.7
+s033 peak=-2.9 rms=-19.9
+s034 peak=-1.4 rms=-16.9
+s035 peak=-1.5 rms=-18.4
+s036 peak=-3.2 rms=-17.1
+s037 peak=-1.6 rms=-20.0
+s038 peak=-2.4 rms=-21.6
+s039 peak=-36.4 rms=-53.1
+s040 peak=-47.0 rms=-62.9
+s041 peak=-54.5 rms=-71.0
+s042 peak=-62.0 rms=-77.9
+s043 peak=-67.8 rms=-82.5
+s044 peak=-67.1 rms=-84.0
+s045 peak=-69.0 rms=-84.5
+s046 peak=-69.2 rms=-84.9
+s047 peak=-69.8 rms=-85.1
+s048 peak=-69.3 rms=-85.0
+s049 peak=-70.1 rms=-85.2

@@ -275,6 +275,63 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-proxy-render-probe")
+        {
+            if (!setKind(StabilityScenarioKind::ProxyRenderProbe)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-proxy-render-probe requires <project> <trackId> <outDir>";
+                return {};
+            }
+            if (i + 2 >= args.size())
+            {
+                errorOut = "--stability-proxy-render-probe requires <project> <trackId> <outDir>";
+                return {};
+            }
+            req.probeTrackId = static_cast<TrackId>(args[i + 1].getLargeIntValue());
+            req.probeOutDir = fileFromArg(args[i + 2].unquoted());
+            i += 2;
+        }
+        else if (a == "--repeat")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = "--repeat requires a number";
+                return {};
+            }
+            ++i;
+            req.probeRepeat = juce::jlimit(1, 50, args[i].getIntValue());
+        }
+        else if (a == "--wait-after-prepare")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = "--wait-after-prepare requires milliseconds";
+                return {};
+            }
+            ++i;
+            req.probeWaitAfterPrepareMs = juce::jlimit(0, 600000, args[i].getIntValue());
+        }
+        else if (a == "--publish")
+        {
+            req.probePublish = true;
+        }
+        else if (a == "--state-blob")
+        {
+            if (!nextProjectArg(i, req.probeStateBlobOverride))
+            {
+                errorOut = "--state-blob requires a file path";
+                return {};
+            }
+        }
+        else if (a == "--no-readiness")
+        {
+            req.probeNoReadiness = true;
+        }
+        else if (a == "--realtime-indication")
+        {
+            req.probeRealtimeIndication = true;
+        }
         else if (a == "--midi")
         {
             if (!nextProjectArg(i, req.midiFile))
@@ -367,6 +424,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::LiveMidi: scenarioName_ = "live-midi"; break;
         case StabilityScenarioKind::MidiCycleTakes: scenarioName_ = "midi-cycle-takes"; break;
         case StabilityScenarioKind::ProxyRecording: scenarioName_ = "proxy-recording"; break;
+        case StabilityScenarioKind::ProxyRenderProbe: scenarioName_ = "proxy-render-probe"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -458,6 +516,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::ProxyRecording:
             appendProxyRecordingSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::ProxyRenderProbe:
+            appendProxyRenderProbeSteps(request);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -2856,6 +2917,231 @@ void StabilityScenarioRunner::appendProxyRecordingSteps(const juce::File& projec
                                return true;
                            },
                            300 });
+}
+
+// -----------------------------------------------------------------------------
+// Proxy render probe (`--stability-proxy-render-probe <project> <trackId> <outDir> …`)
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenarioRequest& request)
+{
+    if (hooks_.proxyRenderProbeCapture == nullptr || hooks_.proxyRenderProbePrepare == nullptr
+        || hooks_.proxyRenderProbeStartWorker == nullptr || hooks_.proxyRenderProbeIsDone == nullptr
+        || hooks_.proxyRenderProbeFinish == nullptr || hooks_.proxyRenderProbePublish == nullptr
+        || hooks_.loadProjectFromFile == nullptr || hooks_.saveProject == nullptr)
+    {
+        steps_.push_back(Step{ "proxy-probe: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "proxy-render-probe hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+    const juce::File project = request.projectA;
+    const TrackId tid = request.probeTrackId;
+    const juce::File outDir = request.probeOutDir;
+    const int repeat = request.probeRepeat;
+    const int waitMs = request.probeWaitAfterPrepareMs;
+    const bool publish = request.probePublish;
+    const juce::File blobOverride = request.probeStateBlobOverride;
+    const bool readinessEnabled = !request.probeNoReadiness;
+    const bool nonRealtimeIndication = !request.probeRealtimeIndication;
+#if JUCE_DEBUG
+    const juce::String build = "Debug";
+#else
+    const juce::String build = "Release";
+#endif
+    // The probe copy is KEPT between runs on purpose: a Debug run may publish a generation that a
+    // later Release run then meets on disk (the collision case). Never registered for cleanup.
+    const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-proxyprobe.dalproj");
+
+    steps_.push_back(Step{ "proxy-probe: prepare the sibling probe copy (reused when it already exists)",
+                           [this, project, copy, outDir, build](juce::String& failReason) -> bool {
+                               if (!copy.existsAsFile())
+                               {
+                                   if (!project.copyFileTo(copy))
+                                   {
+                                       failReason = "could not copy the project to " + copy.getFullPathName();
+                                       return false;
+                                   }
+                                   appendStabilityRunLine("  probe copy created: " + copy.getFullPathName());
+                               }
+                               else
+                               {
+                                   appendStabilityRunLine("  probe copy reused (previous run's publication kept): " + copy.getFullPathName());
+                               }
+                               (void)outDir.createDirectory();
+                               if (!outDir.isDirectory())
+                               {
+                                   failReason = "could not create the output folder " + outDir.getFullPathName();
+                                   return false;
+                               }
+                               appendStabilityRunLine("  build=" + build + " outDir=" + outDir.getFullPathName());
+                               return true;
+                           },
+                           100 });
+    steps_.push_back(Step{ "proxy-probe: load the probe copy",
+                           [this, copy](juce::String&) -> bool {
+                               hooks_.loadProjectFromFile(copy);
+                               return true;
+                           },
+                           kSettleAfterLoadMs + 3000 }); // + the plug-ins' asynchronous state restore
+    steps_.push_back(Step{ "proxy-probe: destination row, Manual update mode, frozen identity",
+                           [this, tid, outDir, blobOverride, readinessEnabled, nonRealtimeIndication](juce::String& failReason) -> bool {
+                               bool found = false;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.id == tid)
+                                   {
+                                       found = true;
+                                       appendStabilityRunLine("  destination row " + juce::String((juce::int64)t.id) + " \"" + t.name + "\" kind=" + t.kindName
+                                                              + (hooks_.proxyGenerationInfo ? " | published: " + hooks_.proxyGenerationInfo(t.id) : juce::String())
+                                                              + (hooks_.proxyDestinationStateName ? " | destination=" + hooks_.proxyDestinationStateName(t.id) : juce::String()));
+                                   }
+                               }
+                               if (!found)
+                               {
+                                   failReason = "no track with id " + juce::String((juce::int64)tid) + " in this project";
+                                   return false;
+                               }
+                               if (hooks_.proxySetUpdateModeManual && !hooks_.proxySetUpdateModeManual(tid))
+                               {
+                                   failReason = "could not set the update mode to Manual";
+                                   return false;
+                               }
+                               const juce::String identity = hooks_.proxyRenderProbeCapture(tid, outDir, blobOverride, readinessEnabled, nonRealtimeIndication);
+                               for (const auto& line : juce::StringArray::fromLines(identity))
+                               {
+                                   if (line.isNotEmpty())
+                                   {
+                                       appendStabilityRunLine("  " + line);
+                                   }
+                               }
+                               if (identity.startsWith("ERROR"))
+                               {
+                                   failReason = identity;
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+
+    for (int i = 1; i <= repeat; ++i)
+    {
+        const juce::String label = build.toLowerCase() + "-render" + juce::String(i);
+        steps_.push_back(Step{ "proxy-probe: " + label + " - create + restore + prepare the isolated instance",
+                               [this, waitMs](juce::String& failReason) -> bool {
+                                   if (!hooks_.proxyRenderProbePrepare(failReason))
+                                   {
+                                       return false;
+                                   }
+                                   if (hooks_.proxyRenderProbeInstanceStateHash)
+                                   {
+                                       appendStabilityRunLine("  instance state right after prepare: " + hooks_.proxyRenderProbeInstanceStateHash());
+                                   }
+                                   if (waitMs > 0)
+                                   {
+                                       appendStabilityRunLine("  diagnostic wait after prepare: " + juce::String(waitMs) + " ms (message loop running)");
+                                   }
+                                   return true;
+                               },
+                               10 });
+        // The diagnostic wait is split into 500 ms slices so the instance's state bytes can be
+        // sampled while the plug-in's asynchronous loading proceeds (message loop running).
+        for (int waited = 0; waited < waitMs; waited += 500)
+        {
+            steps_.push_back(Step{ "proxy-probe: " + label + " - diagnostic wait slice (" + juce::String(waited + 500) + " ms)",
+                                   [this](juce::String&) -> bool {
+                                       if (hooks_.proxyRenderProbeInstanceStateHash)
+                                       {
+                                           appendStabilityRunLine("  instance state during the wait: " + hooks_.proxyRenderProbeInstanceStateHash());
+                                       }
+                                       return true;
+                                   },
+                                   juce::jmin(500, waitMs - waited) });
+        }
+        steps_.push_back(Step{ "proxy-probe: " + label + " - start the render worker",
+                               [this](juce::String& failReason) -> bool {
+                                   if (hooks_.proxyRenderProbeInstanceStateHash)
+                                   {
+                                       appendStabilityRunLine("  instance state right before the worker: " + hooks_.proxyRenderProbeInstanceStateHash());
+                                   }
+                                   return hooks_.proxyRenderProbeStartWorker(failReason);
+                               },
+                               300 });
+        constexpr int kPolls = 1200; // 1200 × 500 ms = 10 min upper bound per render
+        auto doneLogged = std::make_shared<bool>(false);
+        auto lastProgress = std::make_shared<std::int64_t>(-1);
+        for (int poll = 1; poll <= kPolls; ++poll)
+        {
+            const bool last = poll == kPolls;
+            steps_.push_back(Step{ "proxy-probe: " + label + " - wait (" + juce::String(poll) + ")",
+                                   [this, last, doneLogged, lastProgress](juce::String& failReason) -> bool {
+                                       if (*doneLogged || hooks_.proxyRenderProbeIsDone())
+                                       {
+                                           *doneLogged = true;
+                                           settleOverrideMsForCurrentStep_ = 10;
+                                           return true;
+                                       }
+                                       if (hooks_.proxyRenderProbeProgressMs)
+                                       {
+                                           const std::int64_t p = hooks_.proxyRenderProbeProgressMs();
+                                           if (p / 10000 != *lastProgress / 10000)
+                                           {
+                                               appendStabilityRunLine("  rendering… " + juce::String(p) + " ms of material");
+                                               *lastProgress = p;
+                                           }
+                                       }
+                                       if (last)
+                                       {
+                                           failReason = "the render did not finish within the probe's time bound";
+                                           return false;
+                                       }
+                                       return true;
+                                   },
+                                   500 });
+        }
+        steps_.push_back(Step{ "proxy-probe: " + label + " - finish, analyze and keep the artifact",
+                               [this, label](juce::String& failReason) -> bool {
+                                   const juce::String summary = hooks_.proxyRenderProbeFinish(label);
+                                   for (const auto& line : juce::StringArray::fromLines(summary))
+                                   {
+                                       if (line.isNotEmpty())
+                                       {
+                                           appendStabilityRunLine("  " + line);
+                                       }
+                                   }
+                                   if (summary.startsWith("ERROR"))
+                                   {
+                                       failReason = summary;
+                                       return false;
+                                   }
+                                   return true;
+                               },
+                               200 });
+        if (publish)
+        {
+            steps_.push_back(Step{ "proxy-probe: " + label + " - publish through the production publication, then save the probe copy",
+                                   [this, tid](juce::String&) -> bool {
+                                       const juce::String outcome = hooks_.proxyRenderProbePublish();
+                                       for (const auto& line : juce::StringArray::fromLines(outcome))
+                                       {
+                                           if (line.isNotEmpty())
+                                           {
+                                               appendStabilityRunLine("  " + line);
+                                           }
+                                       }
+                                       if (hooks_.proxyGenerationInfo && hooks_.proxyDestinationStateName)
+                                       {
+                                           appendStabilityRunLine("  after publish: " + hooks_.proxyGenerationInfo(tid) + " | destination=" + hooks_.proxyDestinationStateName(tid)
+                                                                  + (hooks_.proxyRuntimeStateName ? " runtime=" + hooks_.proxyRuntimeStateName(tid) : juce::String()));
+                                       }
+                                       hooks_.saveProject();
+                                       return true; // the outcome itself is evidence; the comparison is made in the report
+                                   },
+                                   500 });
+        }
+    }
 }
 
 void StabilityScenarioRunner::appendLoadAndVerifySteps(const juce::File& project,

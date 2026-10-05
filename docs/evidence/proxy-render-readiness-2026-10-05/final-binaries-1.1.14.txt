@@ -1,0 +1,14 @@
+﻿DEBUG proxy-recording exit=0 :: RESULT: PASS scenario=proxy-recording totalMs=52380
+      MIDI row armed (idle): GA runtime=ProxyCurrent recordingOverride=no tracks=8 GA clips=1 MIDI-row clips=1 MIDI-row status="" | phase=Published expected=sha256:490624560840f6cc msg="" renderedMs=49322 | identity now=sha256:490624560840f6cc comparable= rev=83 (job rev=83) published=sha256:490624560840f6cc | snapshot: own clips=1 notes=166 | src 9 ch=1  clips=1 notes=48
+DEBUG probe exit=0 :: RESULT: PASS scenario=proxy-render-probe totalMs=75900
+      debug-render1: readiness VERIFIED passes=5 stimulus=11 sounding=11 wait=1991.3 ms blocks=9405 flushResidual=-76.9 dBFS flushSilent=yes | verified: 11/11 notes answer, settled after 5 passes (1925.1 ms)
+      debug-render1: length=2368000 (49.333 s) spanEnd=1825333 (38.028 s) peak=-0.3 dBFS firstAudible(-60)=4.002 s lastAbove(-70)=48.322 s | music: peak=-0.3 rms=-19.5 audibleSeconds=35/39 | tail: peak=-3.5 rms=-34.2 | sha256=3806b1a53f54c2d8
+      publish: OK | canonical generation file existed before=no exists after=yes size=18944104 sha256=3806b1a53f54c2d8
+      publish: metadata now generationId=sha256:7bd0dd458c69b1ec lengthSamples=2368000 relativePath=InstrumentProxies/track_3_sha256_7bd0dd458c69b1ecfbb21e092848df2aff5c2d48048eee66f628595ac7529ae4.wav asset=18944104 bytes assetCheck=ok
+RELEASE proxy-recording exit=0 :: RESULT: PASS scenario=proxy-recording totalMs=51586
+      MIDI row armed (idle): GA runtime=ProxyCurrent recordingOverride=no tracks=8 GA clips=1 MIDI-row clips=1 MIDI-row status="" | phase=Published expected=sha256:490624560840f6cc msg="" renderedMs=49322 | identity now=sha256:490624560840f6cc comparable= rev=83 (job rev=83) published=sha256:490624560840f6cc | snapshot: own clips=1 notes=166 | src 9 ch=1  clips=1 notes=48
+RELEASE probe exit=-1073741819 :: RESULT: PASS scenario=proxy-render-probe totalMs=73803
+      release-render1: readiness VERIFIED passes=5 stimulus=11 sounding=11 wait=1696.91 ms blocks=9405 flushResidual=-76.9 dBFS flushSilent=yes | verified: 11/11 notes answer, settled after 5 passes (1661.7 ms)
+      release-render1: length=2368000 (49.333 s) spanEnd=1825333 (38.028 s) peak=-0.3 dBFS firstAudible(-60)=4.002 s lastAbove(-70)=48.322 s | music: peak=-0.3 rms=-19.5 audibleSeconds=35/39 | tail: peak=-3.5 rms=-34.2 | sha256=3806b1a53f54c2d8
+      publish: OK | canonical generation file existed before=no exists after=yes size=18944104 sha256=3806b1a53f54c2d8
+      publish: metadata now generationId=sha256:7bd0dd458c69b1ec lengthSamples=2368000 relativePath=InstrumentProxies/track_3_sha256_7bd0dd458c69b1ecfbb21e092848df2aff5c2d48048eee66f628595ac7529ae4.wav asset=18944104 bytes assetCheck=ok

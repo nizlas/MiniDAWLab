@@ -1,4 +1,4 @@
-#include <JuceHeader.h>
+﻿#include <JuceHeader.h>
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +43,7 @@
 #include "diagnostics/PlaybackUiLoadLog.h"
 #include "diagnostics/UiPaintLoadCounters.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
+#include "diagnostics/ProxyRenderProbeAnalysis.h"
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
 #include "diagnostics/StabilityScenarioRunner.h"
@@ -4599,6 +4600,287 @@ public:
             }
             return removed;
         };
+        hooks.proxySetUpdateModeManual = [this](const TrackId tid) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid) : nullptr;
+            if (c == nullptr)
+            {
+                return false;
+            }
+            const juce::String manual = proxy_policy::proxyUpdateModePersistedString(proxy_policy::ProxyUpdateMode::Manual);
+            if (c->getProxyUpdateMode() != manual && !c->setProxyUpdateModeFromUi(manual))
+            {
+                return false;
+            }
+            if (proxyUpdatePolicyService_ != nullptr)
+            {
+                proxyUpdatePolicyService_->tick();
+            }
+            return true;
+        };
+        // ---- Proxy render probe (diagnostics) -------------------------------------------------
+        hooks.proxyRenderProbeCapture = [this](const TrackId tid, const juce::File& outDir, const juce::File& blobOverride,
+                                               const bool readinessEnabled, const bool nonRealtimeIndication) -> juce::String {
+            auto& P = proxyRenderProbe_;
+            if (proxyRenderEngine_ == nullptr)
+            {
+                return "ERROR: no proxy render engine";
+            }
+            juce::String err;
+            P.captured = proxyRenderEngine_->captureRequest(tid, err);
+            if (P.captured == nullptr)
+            {
+                return "ERROR: capture failed: " + err;
+            }
+            juce::String overrideNote;
+            if (!readinessEnabled)
+            {
+                static_cast<proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured).request.readiness.enabled = false;
+                overrideNote << "identity: readiness verification DISABLED for this probe (pre-1.1.14 behaviour)\n";
+            }
+            if (!nonRealtimeIndication)
+            {
+                static_cast<proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured).request.nonRealtimeIndication = false;
+                overrideNote << "identity: clone prepared WITHOUT the offline (non-realtime) indication (diagnostic)\n";
+            }
+            if (blobOverride != juce::File())
+            {
+                // Frozen input for a cross-build comparison: the EXACT bytes a previous run dumped.
+                juce::MemoryBlock frozen;
+                if (!blobOverride.existsAsFile() || !blobOverride.loadFileAsData(frozen) || frozen.getSize() == 0)
+                {
+                    return "ERROR: state blob override unreadable: " + blobOverride.getFullPathName();
+                }
+                static_cast<proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured).request.snapshot.pluginStateBlob = frozen;
+                overrideNote = "identity: plugin-state blob OVERRIDDEN from " + blobOverride.getFullPathName() + "\n";
+            }
+            P.destination = tid;
+            P.outDir = outDir;
+#if JUCE_DEBUG
+            P.build = "Debug";
+#else
+            P.build = "Release";
+#endif
+            P.renderIndex = 0;
+            P.hasResult = false;
+            const auto& c = static_cast<const proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured);
+            const auto& req = c.request;
+            const auto& snap = req.snapshot;
+            const juce::MemoryBlock canonical = proxy_fingerprint::serializeCanonicalFingerprintBytes(snap);
+            const juce::String blobHash = snap.pluginStateBlob.getSize() > 0
+                                              ? juce::SHA256(snap.pluginStateBlob.getData(), snap.pluginStateBlob.getSize()).toHexString()
+                                              : juce::String("(empty)");
+            const juce::String canonicalHash = juce::SHA256(canonical.getData(), canonical.getSize()).toHexString();
+            proxy_render::ProxyOfflineSequencer seq(snap, req.renderSampleRate);
+            juce::String initialState;
+            {
+                juce::MidiBuffer init;
+                seq.emitInitialControllerState(init);
+                for (const auto meta : init)
+                {
+                    const juce::MidiMessage m = meta.getMessage();
+                    if (m.isController())
+                    {
+                        initialState << " ch" << m.getChannel() << "cc" << m.getControllerNumber() << "=" << m.getControllerValue();
+                    }
+                    else if (m.isPitchWheel())
+                    {
+                        initialState << " ch" << m.getChannel() << "pb=" << m.getPitchWheelValue();
+                    }
+                }
+            }
+            int destNotes = 0, srcNotes = 0;
+            for (const auto& cl : snap.destinationClips) { destNotes += (int)cl.notes.size(); }
+            for (const auto& s : snap.sources) { for (const auto& cl : s.clips) { srcNotes += (int)cl.notes.size(); } }
+            juce::String t;
+            t << "identity: build=" << P.build << " app=" << juce::String(ProjectInfo::versionString) << " destination=" << juce::String((juce::int64)tid) << "\n"
+              << "identity: fingerprint=" << req.expectedFingerprint << "\n"
+              << "identity: canonical-bytes sha256=" << canonicalHash << " (" << juce::String((juce::int64)canonical.getSize()) << " bytes)\n"
+              << "identity: plugin-state blob sha256=" << blobHash << " (" << juce::String((juce::int64)snap.pluginStateBlob.getSize()) << " bytes)"
+              << " stateRevision=" << juce::String((juce::int64)snap.stateIdentity.primaryStateRevision) << "\n"
+              << "identity: plugin name=\"" << req.pluginDescription.name << "\" version=\"" << req.pluginDescription.version << "\" manufacturer=\""
+              << req.pluginDescription.manufacturerName << "\" format=" << req.pluginDescription.pluginFormatName << " uid=" << juce::String(req.pluginDescription.uniqueId)
+              << " file=" << req.pluginDescription.fileOrIdentifier << "\n"
+              << "identity: renderSampleRate=" << juce::String(req.renderSampleRate) << " renderBlockSize=" << juce::String(req.renderBlockSize)
+              << " timelineReferenceRate=" << juce::String(snap.renderConfig.timelineReferenceRate) << " noteOffGateMs=" << juce::String(snap.renderConfig.noteOffGateMs) << "\n"
+              << "identity: tail policy v" << juce::String(proxy_render::kTailPolicyVersion) << " threshold=" << juce::String(proxy_render::kTailThresholdDb) << " dBFS window="
+              << juce::String(proxy_render::kTailSilenceWindowSec) << " s cap=" << juce::String(proxy_render::kTailMaxSec) << " s | policies latency=v"
+              << juce::String(snap.policies.latencyPolicyVersion) << " tail=v" << juce::String(snap.policies.tailPolicyVersion) << " render=v"
+              << juce::String(snap.policies.renderPolicyVersion) << " format=v" << juce::String(snap.policies.proxyFormatVersion) << "\n"
+              << "identity: content destinationClips=" << juce::String((int)snap.destinationClips.size()) << " notes=" << juce::String(destNotes) << " sources="
+              << juce::String((int)snap.sources.size()) << " sourceNotes=" << juce::String(srcNotes) << " lastRelevantEvent(ref)="
+              << juce::String((juce::int64)snap.spanAndSilence.lastRelevantEventReferenceSample) << " spanEnd(render)=" << juce::String((juce::int64)seq.lastEventRenderSample())
+              << " (" << juce::String((double)seq.lastEventRenderSample() / req.renderSampleRate, 3) << " s)\n"
+              << "identity: readiness initial controller state:" << initialState << "\n"
+              << "identity: temp artifact=" << req.temporaryWavFile.getFullPathName() << "\n"
+              << overrideNote;
+            (void)outDir.createDirectory();
+            (void)outDir.getChildFile("identity-" + P.build.toLowerCase() + ".txt").replaceWithText(t);
+            // Frozen artifacts: the exact state bytes and the canonical snapshot bytes rendered.
+            (void)outDir.getChildFile("state-blob-" + P.build.toLowerCase() + ".bin").replaceWithData(snap.pluginStateBlob.getData(), snap.pluginStateBlob.getSize());
+            (void)outDir.getChildFile("snapshot-canonical-" + P.build.toLowerCase() + ".bin").replaceWithData(canonical.getData(), canonical.getSize());
+            return t;
+        };
+        hooks.proxyRenderProbePrepare = [this](juce::String& failReason) -> bool {
+            auto& P = proxyRenderProbe_;
+            if (P.captured == nullptr || proxyRenderEngine_ == nullptr)
+            {
+                failReason = "nothing captured";
+                return false;
+            }
+            if (P.worker != nullptr || P.prepared != nullptr)
+            {
+                failReason = "a probe render is still in flight";
+                return false;
+            }
+            proxy_render::ProxyRenderResult fail;
+            P.prepareStartMs = juce::Time::getMillisecondCounterHiRes();
+            P.prepared = proxyRenderEngine_->prepare(*P.captured, fail);
+            P.preparedMs = juce::Time::getMillisecondCounterHiRes();
+            if (P.prepared == nullptr)
+            {
+                failReason = "prepare failed: " + fail.message;
+                return false;
+            }
+            ++P.renderIndex;
+            return true;
+        };
+        hooks.proxyRenderProbeInstanceStateHash = [this]() -> juce::String {
+            auto& P = proxyRenderProbe_;
+            if (P.prepared == nullptr)
+            {
+                return "(no prepared instance)";
+            }
+            auto& job = static_cast<proxy_render::AppProxyRenderEngine::PreparedAppJob&>(*P.prepared);
+            if (job.instance_ == nullptr)
+            {
+                return "(no instance)";
+            }
+            juce::MemoryBlock mb;
+            job.instance_->getStateInformation(mb);
+            return "sha256=" + (mb.getSize() > 0 ? juce::SHA256(mb.getData(), mb.getSize()).toHexString() : juce::String("(empty)"))
+                   + " (" + juce::String((juce::int64)mb.getSize()) + " bytes) latency=" + juce::String(job.instance_->getLatencySamples())
+                   + " +" + juce::String(juce::Time::getMillisecondCounterHiRes() - P.preparedMs, 0) + " ms after prepare";
+        };
+        hooks.proxyRenderProbeStartWorker = [this](juce::String& failReason) -> bool {
+            auto& P = proxyRenderProbe_;
+            if (P.prepared == nullptr)
+            {
+                failReason = "no prepared instance";
+                return false;
+            }
+            P.progressMs.store(0);
+            P.worker = std::make_unique<ProxyRenderProbeState::Worker>(*P.prepared, P.progressMs);
+            P.worker->startThread(juce::Thread::Priority::low);
+            return true;
+        };
+        hooks.proxyRenderProbeIsDone = [this]() -> bool {
+            auto& P = proxyRenderProbe_;
+            return P.worker != nullptr && P.worker->done.load(std::memory_order_acquire);
+        };
+        hooks.proxyRenderProbeProgressMs = [this]() -> std::int64_t { return proxyRenderProbe_.progressMs.load(std::memory_order_relaxed); };
+        hooks.proxyRenderProbeFinish = [this](const juce::String& label) -> juce::String {
+            auto& P = proxyRenderProbe_;
+            if (P.worker == nullptr)
+            {
+                return "ERROR: no worker";
+            }
+            P.worker->stopThread(30000);
+            const proxy_render::ProxyRenderResult r = P.worker->result;
+            const double workerStartMs = P.worker->startedMs, workerEndMs = P.worker->endedMs;
+            P.worker.reset();
+            P.prepared.reset(); // isolated instance teardown (message thread)
+            P.lastResult = r;
+            P.hasResult = true;
+            juce::String t;
+            t << label << ": status=" << proxy_render::toString(r.status) << " reason=" << proxy_render::toString(r.failureReason)
+              << (r.message.isNotEmpty() ? " msg=\"" + r.message + "\"" : juce::String()) << "\n"
+              << label << ": spanEnd=" << juce::String(r.spanEndRenderSamples) << " rendered=" << juce::String(r.renderedLengthSamples)
+              << " (" << juce::String((double)r.renderedLengthSamples / juce::jmax(1.0, r.renderSampleRate), 3) << " s) tail=" << juce::String(r.tailLengthSamples)
+              << " (" << juce::String((double)r.tailLengthSamples / juce::jmax(1.0, r.renderSampleRate), 3) << " s) tailCompleted=" << (r.tailCompleted ? "yes" : "no")
+              << " peak=" << juce::String(proxy_probe::linearToDb(r.maxPeakLinear), 1) << " dBFS blocks=" << juce::String((juce::int64)r.blocksProcessed)
+              << " blocksWithMidi=" << juce::String((juce::int64)r.blocksWithMidi) << " midiEvents=" << juce::String((juce::int64)r.midi.totalEvents)
+              << " latency=" << juce::String(r.pluginLatencySamplesAtStart) << "/" << juce::String(r.pluginLatencySamplesAtEnd) << "\n"
+              << label << ": timing prepare=" << juce::String(P.preparedMs - P.prepareStartMs, 0) << " ms, prepare->firstBlock="
+              << juce::String(workerStartMs - P.preparedMs, 0) << " ms, render wall=" << juce::String(r.wallMs, 0) << " ms ("
+              << juce::String(r.wallMs > 0.0 ? (double)r.renderedLengthSamples / juce::jmax(1.0, r.renderSampleRate) * 1000.0 / r.wallMs : 0.0, 1)
+              << "x realtime), worker total=" << juce::String(workerEndMs - workerStartMs, 0) << " ms\n"
+              << label << ": readiness " << (r.readiness.attempted ? (r.readiness.verified ? "VERIFIED" : "unverified") : "not attempted")
+              << " passes=" << r.readiness.passes << " stimulus=" << r.readiness.stimulusNotes << " sounding=" << r.readiness.soundingNotes
+              << " wait=" << juce::String(r.readiness.waitMs, 0) << " ms blocks=" << juce::String((juce::int64)r.readiness.blocksProcessed)
+              << " flushResidual=" << juce::String(r.readiness.flushResidualDb, 1) << " dBFS flushSilent=" << (r.readiness.flushReachedSilence ? "yes" : "no")
+              << " | " << r.readiness.note << "\n";
+            for (const auto& line : juce::StringArray::fromLines(r.readiness.trace))
+            {
+                if (line.isNotEmpty())
+                {
+                    t << label << ": readiness trace " << line << "\n";
+                }
+            }
+            if (r.temporaryWavFile.existsAsFile())
+            {
+                const juce::File kept = P.outDir.getChildFile(label + ".wav");
+                (void)kept.deleteFile();
+                const bool copied = r.temporaryWavFile.copyFileTo(kept);
+                const proxy_probe::WavAnalysis a = proxy_probe::analyzeRenderedWav(kept, r.spanEndRenderSamples);
+                t << label << ": artifact " << (copied ? kept.getFullPathName() : juce::String("COPY FAILED")) << "\n"
+                  << label << ": " << proxy_probe::summarizeAnalysis(a) << "\n";
+                juce::String report = t;
+                report << "\nper-second profile (peak / rms dBFS, both channels folded):\n" << proxy_probe::formatPerSecondProfile(a);
+                (void)P.outDir.getChildFile(label + ".txt").replaceWithText(report);
+            }
+            else
+            {
+                t << label << ": no artifact (" << (r.status == proxy_render::ProxyRenderStatus::Succeeded ? "unexpected" : "expected for this status") << ")\n";
+                (void)P.outDir.getChildFile(label + ".txt").replaceWithText(t);
+            }
+            return t;
+        };
+        hooks.proxyRenderProbePublish = [this]() -> juce::String {
+            auto& P = proxyRenderProbe_;
+            if (!P.hasResult || P.captured == nullptr || proxyRenderEngine_ == nullptr)
+            {
+                return "publish: nothing to publish";
+            }
+            const juce::File finalBefore = [this, &P]() -> juce::File {
+                const juce::File pf = session.getCurrentProjectFile();
+                return pf == juce::File() ? juce::File()
+                                          : proxy_store::proxyDirectory(pf.getParentDirectory())
+                                                .getChildFile(proxy_store::generationFileName(P.destination, P.lastResult.expectedFingerprint));
+            }();
+            const bool existedBefore = finalBefore.existsAsFile();
+            const juce::int64 sizeBefore = existedBefore ? finalBefore.getSize() : 0;
+            const auto fileSha16 = [](const juce::File& f) -> juce::String {
+                juce::FileInputStream in(f);
+                return in.openedOk() ? juce::SHA256(in).toHexString().substring(0, 16) : juce::String("?");
+            };
+            const juce::String canonicalHashBefore = existedBefore ? fileSha16(finalBefore) : juce::String();
+            juce::String err;
+            const bool ok = proxyRenderEngine_->publish(P.destination, *P.captured, P.lastResult, err);
+            juce::String t;
+            t << "publish: " << (ok ? "OK" : "FAILED: " + err) << " | canonical generation file existed before=" << (existedBefore ? "yes" : "no")
+              << (existedBefore ? " size=" + juce::String(sizeBefore) + " sha256=" + canonicalHashBefore : juce::String())
+              << " exists after=" << (finalBefore.existsAsFile() ? "yes" : "no")
+              << (finalBefore.existsAsFile() ? " size=" + juce::String(finalBefore.getSize()) + " sha256=" + fileSha16(finalBefore) : juce::String())
+              << "\n";
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(P.destination) : nullptr;
+            const ProjectFileProxyMetadataV20* const meta = c != nullptr ? c->getProxyMetadata() : nullptr;
+            if (meta != nullptr)
+            {
+                const juce::File asset = proxy_store::resolveProxyRelativePath(session.getCurrentProjectFolder(), meta->relativePath);
+                const auto check = proxy_store::validatePublishedAsset(session.getCurrentProjectFolder(), *meta);
+                t << "publish: metadata now generationId=" << meta->generationId.substring(0, 23) << " lengthSamples=" << juce::String((juce::int64)meta->lengthSamples)
+                  << " relativePath=" << meta->relativePath << " asset=" << (asset.existsAsFile() ? juce::String(asset.getSize()) + " bytes" : juce::String("missing"))
+                  << " assetCheck=" << (check.ok ? "ok" : "FAILED: " + check.error) << "\n";
+            }
+            else
+            {
+                t << "publish: no metadata on the destination\n";
+            }
+            t << "publish: destination=" << proxy_render::toString(proxyRenderScheduler_.destinationState(P.destination)) << "\n";
+            return t;
+        };
         hooks.liveMidiTakePreviewGeometry = [this](const TrackId tid, int& x0, int& x1, float& originX, std::int64_t& visStart,
                                                    double& spp) -> bool {
             if (instrumentTimelineRowCoordinator_ == nullptr)
@@ -5911,6 +6193,43 @@ private:
     /// call detachEngineAndShutdownJobs() before the coordinators are destroyed.
     proxy_render::ProxyRenderScheduler& proxyRenderScheduler_;
     std::unique_ptr<proxy_render::AppProxyRenderEngine> proxyRenderEngine_;
+    /// Diagnostics (`--stability-proxy-render-probe`): one captured request rendered repeatedly
+    /// through the production engine seam with the artifacts kept. Test mode only; the worker is
+    /// joined and the isolated instance torn down on the message thread in `finish`.
+    struct ProxyRenderProbeState
+    {
+        TrackId destination = kInvalidTrackId;
+        juce::File outDir;
+        juce::String build;
+        std::unique_ptr<proxy_render::ProxyCapturedRequest> captured;
+        std::unique_ptr<proxy_render::ProxyPreparedJob> prepared;
+        struct Worker final : juce::Thread
+        {
+            Worker(proxy_render::ProxyPreparedJob& j, std::atomic<std::int64_t>& p)
+                : juce::Thread("ProxyRenderProbeWorker"), job(j), progress(p) {}
+            ~Worker() override { stopThread(30000); }
+            void run() override
+            {
+                startedMs = juce::Time::getMillisecondCounterHiRes();
+                result = job.render(token, {}, progress);
+                endedMs = juce::Time::getMillisecondCounterHiRes();
+                done.store(true, std::memory_order_release);
+            }
+            proxy_render::ProxyPreparedJob& job;
+            std::atomic<std::int64_t>& progress;
+            proxy_render::ProxyRenderCancellationToken token;
+            proxy_render::ProxyRenderResult result;
+            std::atomic<bool> done{ false };
+            double startedMs = 0.0, endedMs = 0.0;
+        };
+        std::unique_ptr<Worker> worker;
+        std::atomic<std::int64_t> progressMs{ 0 };
+        proxy_render::ProxyRenderResult lastResult;
+        bool hasResult = false;
+        double prepareStartMs = 0.0, preparedMs = 0.0;
+        int renderIndex = 0;
+    };
+    ProxyRenderProbeState proxyRenderProbe_;
     /// P1G: playback-source coordination (proxy substitution views + reader lifecycle).
     /// Shut down in the destructor BEFORE the instrument runtime is torn down.
     std::unique_ptr<proxy_playback::ProxyPlaybackCoordinator> proxyPlaybackCoordinator_;

@@ -1,0 +1,10 @@
+identity: build=Release app=1.1.13 destination=5
+identity: fingerprint=sha256:a50cc62af6d332791f3638ddd5f1b93ce982cdf65469c70e2c86fdf67added17
+identity: canonical-bytes sha256=a50cc62af6d332791f3638ddd5f1b93ce982cdf65469c70e2c86fdf67added17 (3414 bytes)
+identity: plugin-state blob sha256=e1d75de06c0beb70f168160bfb2d2c7f54b3d45c8b04cf27a9f0a5ef9352fa98 (10584 bytes) stateRevision=1
+identity: plugin name="VB3-II" version="2.3.1" manufacturer="GenuineSoundware" format=VST3 uid=1204027788 file=C:\Program Files\Common Files\VST3\VB3-II.vst3
+identity: renderSampleRate=48000 renderBlockSize=512 timelineReferenceRate=48000 noteOffGateMs=100
+identity: tail policy v1 threshold=-70 dBFS window=1 s cap=30 s | policies latency=v1 tail=v1 render=v1 format=v1
+identity: content destinationClips=2 notes=97 sources=1 sourceNotes=0 lastRelevantEvent(ref)=2190667 spanEnd(render)=2190667 (45.639 s)
+identity: readiness initial controller state: ch1cc64=0 ch1cc120=0 ch1cc121=0 ch1cc123=0 ch1cc11=71
+identity: temp artifact=C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\InstrumentProxies\tmp_track_5_gen1_1791218162336.wav

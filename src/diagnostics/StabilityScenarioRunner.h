@@ -116,6 +116,16 @@ enum class StabilityScenarioKind
     /// row's own clip silent; Monitor on: live heard, clip silent), the override ends with the
     /// take and real currency decides afterwards. Sibling copy only.
     ProxyRecording,
+    /// `--stability-proxy-render-probe <project> <trackId> <outDir> [--repeat N] [--wait-after-prepare ms]
+    /// [--publish]`: diagnostic — renders ONE destination repeatedly through the production engine
+    /// (capture → isolated instance → worker render), keeps every artifact under `outDir` with a
+    /// content analysis (first audible sample, last sample above the tail threshold, music / tail
+    /// energy, per-second profile), documents the frozen identity (fingerprint, canonical bytes,
+    /// exact plugin-state blob hash, plugin version, rates, block, tail policy), and optionally
+    /// publishes each result through the production publication so a generation-name collision
+    /// is exercised with the FIRST file kept. The project copy is kept between runs (Debug then
+    /// Release against the same proxy directory). Sibling copy only.
+    ProxyRenderProbe,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -183,6 +193,15 @@ struct StabilityScenarioRequest
     juce::File midiFile; // MidiImportAudio (`--midi <file>`); a built-in fixture when absent.
     int iterations = 1;
     bool mixdownMp3 = false; // Mixdown only (`--format mp3`).
+    // ProxyRenderProbe only.
+    TrackId probeTrackId = kInvalidTrackId;
+    juce::File probeOutDir;
+    int probeRepeat = 2;
+    int probeWaitAfterPrepareMs = 0;
+    bool probePublish = false;
+    juce::File probeStateBlobOverride; ///< `--state-blob <file>`: render with these exact state bytes
+    bool probeNoReadiness = false;     ///< `--no-readiness`: reproduce the pre-1.1.14 render (diagnostic)
+    bool probeRealtimeIndication = false; ///< `--realtime-indication`: clone prepared without the offline flag (diagnostic)
 
     [[nodiscard]] bool isActive() const noexcept { return kind != StabilityScenarioKind::None; }
 };
@@ -537,6 +556,30 @@ struct StabilityRunnerHooks
     /// are NOT the published generation (leftovers of earlier test runs; the folder is shared by
     /// the sibling test copy). Returns the number of files removed. Temp project copies only.
     std::function<int(TrackId)> proxyDeleteUnpublishedGenerationFiles;
+    /// Update mode → Manual for a destination through the Inspector's path (temp project only).
+    std::function<bool(TrackId)> proxySetUpdateModeManual;
+
+    // --- Proxy render probe (diagnostics: repeated isolated renders with kept artifacts) ------
+    /// Capture the destination's render request through the production engine (exact state blob,
+    /// snapshot, fingerprint); writes `identity-<build>.txt` into `outDir`; returns the identity
+    /// text, or "ERROR: …".
+    std::function<juce::String(TrackId, const juce::File& outDir, const juce::File& stateBlobOverride, bool readinessEnabled,
+                               bool nonRealtimeIndication)> proxyRenderProbeCapture;
+    /// Create + restore + prepare the isolated render instance for the captured request.
+    std::function<bool(juce::String& failReason)> proxyRenderProbePrepare;
+    /// SHA-256 + size of the prepared isolated instance's CURRENT state bytes (readiness probe).
+    std::function<juce::String()> proxyRenderProbeInstanceStateHash;
+    /// Start the worker render on the prepared instance (the temp artifact is kept for `finish`).
+    std::function<bool(juce::String& failReason)> proxyRenderProbeStartWorker;
+    std::function<bool()> proxyRenderProbeIsDone;
+    /// Progress in rendered milliseconds while the worker runs.
+    std::function<std::int64_t()> proxyRenderProbeProgressMs;
+    /// Join + tear down, copy the artifact to `<outDir>/<label>.wav`, write `<label>.txt`
+    /// (result fields, timings, content analysis, per-second profile); returns a summary line.
+    std::function<juce::String(const juce::String& label)> proxyRenderProbeFinish;
+    /// Publish the last finished result through the production publication (collision rule
+    /// included); returns the outcome + the metadata now describing the destination.
+    std::function<juce::String()> proxyRenderProbePublish;
     /// The audio take's placement compensation (latency store) — separate from the MIDI offset.
     std::function<std::int64_t()> recordingPlacementOffsetSamples;
     std::function<std::int64_t()> getStoredArrangementExtentSamples;
@@ -606,6 +649,7 @@ private:
     void appendMidiCycleTakesSteps(const juce::File& project);
     /// Proxy-backed destinations during recording + schema-1 generations (see `ProxyRecording`).
     void appendProxyRecordingSteps(const juce::File& project);
+    void appendProxyRenderProbeSteps(const StabilityScenarioRequest& request);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

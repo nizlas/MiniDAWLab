@@ -1342,10 +1342,27 @@ the create-on-message / process-on-worker handoff before P1D relies on it.
 3. Restore the snapshotted Primary state.
 4. Prepare the render instance with the selected render configuration (sample rate, block policy;
    offline/non-realtime indication where supported — §15.4).
+4b. **Verify instrument readiness (revision 1.1.14, evidence `docs/PROXY_RENDER_READINESS_2026-10-05.md`).**
+   `prepareToPlay` returning does not mean the instance can sound its restored content: a
+   sample-based instrument may stream its content asynchronously (Groove Agent SE: ~1–3 s on the
+   development machine) and renders digital silence until it has. The worker therefore plays the
+   content's own distinct notes into the prepared instance, one at a time, and repeats the pass
+   (wall-clock interval 250 ms, message thread free) until the set of notes that answer has
+   stopped growing for three passes — the instrument's response has settled — then lets the
+   instrument settle under the tail threshold (All Sound Off only as a last resort) before step 5.
+   Decisions are AC-coupled (a parked DC offset must not mask a note). Bounds are caps on waiting
+   (20 s with no answer at all, 60 s overall), never correctness inputs; an instrument that answers
+   at once is verified in four passes. Neither the plug-in's state bytes (volatile for GA SE) nor a
+   fixed delay is a readiness signal. The outcome is recorded in the result (diagnostics), not in
+   the fingerprint or the metadata.
 5. Process the complete destination MIDI event stream (§8.3 contract).
 6. Apply the defined latency and tail policies (§15.1, §15.2).
 7. Write a temporary proxy asset.
-8. Validate the rendered asset (readable, expected length, format).
+8. Validate the rendered asset (readable, expected length, format) **and its plausibility
+   (1.1.14): notes were scheduled but nothing above the tail threshold was ever produced ⇒
+   `Failed` with reason `NoAudibleOutput` — an incomplete render (instrument not ready, muted, or
+   content it cannot sound) is never published; the explicit silent generation (§15.7) remains the
+   only legitimate silent asset and exists for EMPTY destinations only.**
 9. Verify that the destination's current fingerprint still matches the job.
 10. Publish only if the job remains fingerprint-current (PI-028).
 11. Discard obsolete or failed temporary output safely.
@@ -1547,6 +1564,24 @@ Recorded as deferred future work; **P1 always fully re-renders an affected desti
   ownership + content-addressed generation identity (Locked model: immutable content-addressed
   generations, PID-003).
 * Generations are immutable: a file, once published, is never rewritten in place.
+* **What the name guarantees (clarified 1.1.14, evidence `docs/PROXY_RENDER_READINESS_2026-10-05.md`).**
+  The fingerprint identifies the *render inputs* (§11) — it deliberately excludes the plug-in's
+  state BYTES (volatile for some plug-ins) and the plug-in's own run-to-run variation (H5), and an
+  earlier publication of the same identity may have been incomplete (a render started before the
+  instrument was ready). Two files of one identity are therefore NOT guaranteed byte-identical, and
+  "same name" never implies "same content". Consequences (Locked):
+  * **Reuse of an existing file requires identical bytes.** At publication an existing file under
+    the canonical name is taken into use only when it validates AND its bytes equal the new render's
+    (streamed comparison; equal length is necessary, not sufficient). Format + length alone proved
+    insufficient: a 39 s file of digital silence passed that check.
+  * **Nothing under an occupied name is ever overwritten or deleted.** A non-identical file — an
+    earlier incomplete render, a legitimately different render of a non-deterministic instrument,
+    or a foreign object — stays where it is; the new asset is published under the next free
+    sibling name `track_<TrackId>_<fingerprintHash>_<n>.wav` (same safe character set, same
+    folder), and the metadata names the file actually taken into use (`relativePath`,
+    `lengthSamples`). A byte-identical sibling is reused like the canonical file.
+  * Unreferenced generation files remain subject to the report-only enumeration of §16.4 — the
+    cleanup policy did not change.
 
 ### 16.2 Why immutable generations (Verified constraint)
 
@@ -1560,8 +1595,11 @@ discipline), never in-place replacement.
 1. Worker writes `InstrumentProxies/tmp_<jobId>.wav` (temp name never matches a generation name).
 2. Finalize + validate (§14.2 steps 7–8).
 3. On the message thread: verify job currency (PI-028), then `moveFileTo` the temp to its final
-   generation name (new name ⇒ no collision with any open handle).
-4. Publish the new `ProxyPlaybackView` (R10) and update metadata (R1).
+   generation name (new name ⇒ no collision with any open handle). When the canonical name is
+   occupied: byte-identical ⇒ reuse (temp dropped); otherwise the next free sibling name (§16.1,
+   1.1.14) — never an overwrite.
+4. Publish the new `ProxyPlaybackView` (R10) and update metadata (R1) — the metadata describes
+   the file taken into use.
 5. Retire the superseded generation: remove it only after no acquired view can reference it
    (retirement follows the snapshot-retain discipline of §4.2).
 6. Failure at any step: temp deleted (or swept later); the previous published generation is never

@@ -237,6 +237,7 @@ public:
             cfg.progressSink = [&progressRenderedMs](const std::int64_t renderedMs) {
                 progressRenderedMs.store(renderedMs, std::memory_order_relaxed);
             };
+            cfg.readiness = request_.readiness;
             ProxyRenderResult r
                 = renderProxyDestination(*instance_, request_.snapshot, cfg, cancel);
             r.renderInstanceDistinctFromLive = distinctFromLive_;
@@ -254,7 +255,7 @@ public:
         const auto& c = static_cast<const CapturedAppRequest&>(request);
         auto created = ProxyRenderInstanceLifecycle::createPreparedIsolatedInstance(
             formatManager_, c.request.pluginDescription, c.request.snapshot.pluginStateBlob,
-            c.request.renderSampleRate, c.request.renderBlockSize);
+            c.request.renderSampleRate, c.request.renderBlockSize, c.request.nonRealtimeIndication);
         if (created.instance == nullptr)
         {
             failureOut.status = ProxyRenderStatus::Failed;
@@ -310,8 +311,15 @@ public:
         {
             // Previous generation metadata/asset untouched (structural retention).
             errorOut = outcome.error;
+            juce::Logger::writeToLog("[Proxy] publication FAILED for track " + juce::String((juce::int64)destination)
+                                     + ": " + outcome.error + " (readiness: " + result.readiness.note + ")");
             return false;
         }
+        juce::Logger::writeToLog("[Proxy] published track " + juce::String((juce::int64)destination) + " "
+                                 + outcome.metadata.relativePath + " length=" + juce::String((juce::int64)outcome.metadata.lengthSamples)
+                                 + (outcome.reusedExistingIdentical ? " (byte-identical generation reused)" : "")
+                                 + (outcome.publishedUnderSiblingName ? " (sibling name: " + outcome.collisionNote + ")" : "")
+                                 + " | readiness: " + result.readiness.note);
         // §16.3 step 7: in-memory metadata update AFTER the validated rename. Cache
         // metadata: no musical undo entry, no track-state rewrite; the next normal
         // project save persists it (the save DTO reads these controller fields).
