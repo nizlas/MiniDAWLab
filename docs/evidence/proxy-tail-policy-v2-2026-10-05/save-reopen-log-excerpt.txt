@@ -1,0 +1,38 @@
+﻿2026-10-05T22:34:14.117+02:00   probe copy created: C:\Users\nicla\AppData\Local\Temp\dal-tse-vb3\TSE_pt2-proxyprobe.dalproj
+2026-10-05T22:34:22.016+02:00   destination row 5 "VB3-II" kind=instrument | published: sha256:c8c10aa4202eee4d70fc9b54073aabf610b7ac1de29fa8e68880479c1cff9210 schema=1 pub=975 save=3 | destination=Stale
+2026-10-05T22:34:22.033+02:00   identity: build=Release app=1.1.14 destination=5
+2026-10-05T22:35:38.721+02:00 RESULT: PASS scenario=proxy-render-probe totalMs=85129
+2026-10-05T22:36:18.146+02:00   probe copy reused (previous run's publication kept): C:\Users\nicla\AppData\Local\Temp\dal-tse-vb3\TSE_pt2-proxyprobe.dalproj
+2026-10-05T22:36:25.957+02:00   destination row 5 "VB3-II" kind=instrument | published: sha256:c8c10aa4202eee4d70fc9b54073aabf610b7ac1de29fa8e68880479c1cff9210 schema=1 pub=975 save=3 | destination=Stale
+2026-10-05T22:36:25.976+02:00   identity: build=Release app=1.1.14 destination=5
+2026-10-05T22:37:43.830+02:00   publish: OK | canonical generation file existed before=no exists after=yes size=37347432 sha256=4522ed22b7335d27
+2026-10-05T22:37:43.835+02:00   publish: metadata now generationId=sha256:adcca0502000e0f6 lengthSamples=4668416 relativePath=InstrumentProxies/track_5_sha256_adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082.wav asset=37347432 bytes assetCheck=ok
+2026-10-05T22:37:43.838+02:00   publish: destination=Current
+2026-10-05T22:37:43.841+02:00   after publish: sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 schema=2 pub=1 save=0 | destination=Current runtime=Primary
+2026-10-05T22:37:44.496+02:00 RESULT: PASS scenario=proxy-render-probe totalMs=86912
+2026-10-05T22:37:58.429+02:00   probe copy reused (previous run's publication kept): C:\Users\nicla\AppData\Local\Temp\dal-tse-vb3\TSE_pt2-proxyprobe.dalproj
+2026-10-05T22:38:06.928+02:00   destination row 5 "VB3-II" kind=instrument | published: sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 schema=2 pub=1 save=1 | destination=Current
+2026-10-05T22:38:06.951+02:00   identity: build=Debug app=1.1.14 destination=5
+2026-10-05T22:39:32.065+02:00   publish: OK | canonical generation file existed before=yes size=37347432 sha256=4522ed22b7335d27 exists after=yes size=37347432 sha256=4522ed22b7335d27
+2026-10-05T22:39:32.065+02:00   publish: metadata now generationId=sha256:adcca0502000e0f6 lengthSamples=4668416 relativePath=InstrumentProxies/track_5_sha256_adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082.wav asset=37347432 bytes assetCheck=ok
+2026-10-05T22:39:32.066+02:00   publish: destination=Current
+2026-10-05T22:39:32.067+02:00   after publish: sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 schema=2 pub=1 save=0 | destination=Current runtime=Primary
+2026-10-05T22:39:32.787+02:00 RESULT: PASS scenario=proxy-render-probe totalMs=94879
+2026-10-05T22:44:31.139+02:00 RESULT: FAIL invalid stability arguments: unknown stability flag: --stability-proxy-playback-edges
+2026-10-05T22:46:36.084+02:00   published asset: 4668416 samples @ 48000 Hz -> EOF at timeline 4668416 (97.259 s); device rate 48000 | sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 schema=2 pub=1 save=1
+2026-10-05T22:46:36.740+02:00   PROXY: runtime=ProxyCurrent
+2026-10-05T22:46:59.580+02:00 RESULT: FAIL scenario=proxy-playback-edges totalMs=31710 reason: step "proxy-edges: PROXY - offline mixdown of [EOF-5, EOF+3] through the insert chain" failed: mixdown failed: Set an active loop range before mixdown.
+2026-10-05T22:49:22.277+02:00   published asset: 4668416 samples @ 48000 Hz -> EOF at timeline 4668416 (97.259 s); device rate 48000 | sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 schema=2 pub=1 save=1
+2026-10-05T22:49:22.934+02:00   PROXY: runtime=ProxyCurrent
+2026-10-05T22:50:10.595+02:00 RESULT: PASS scenario=proxy-playback-edges totalMs=56518
+2026-10-05T23:02:11.648+02:00   published asset: 4668416 samples @ 48000 Hz -> EOF at timeline 4668416 (97.259 s); device rate 48000 | sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 schema=2 pub=1 save=1
+2026-10-05T23:02:12.303+02:00   PROXY: runtime=ProxyCurrent
+2026-10-05T23:02:59.952+02:00 RESULT: PASS scenario=proxy-playback-edges totalMs=55828
+2026-10-05T23:06:03.030+02:00   probe copy reused (previous run's publication kept): C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\TSE_pt2-proxyprobe.dalproj
+2026-10-05T23:06:10.091+02:00   identity: build=Release app=1.1.14 destination=3
+2026-10-05T23:07:15.964+02:00   publish: OK | canonical generation file existed before=no exists after=yes size=18944104 sha256=c27c203266df7d6e
+2026-10-05T23:07:15.968+02:00   publish: metadata now generationId=sha256:02b1c97a37c8b4fb lengthSamples=2368000 relativePath=InstrumentProxies/track_3_sha256_02b1c97a37c8b4fb4a5f4d140213be06c762bec2815e9697f19efbbce77a09d1.wav asset=18944104 bytes assetCheck=ok
+2026-10-05T23:07:15.971+02:00   publish: destination=Current
+2026-10-05T23:07:15.974+02:00   after publish: sha256:02b1c97a37c8b4fb4a5f4d140213be06c762bec2815e9697f19efbbce77a09d1 schema=2 pub=83 save=0 | destination=Current runtime=Primary
+2026-10-05T23:07:16.592+02:00 RESULT: PASS scenario=proxy-render-probe totalMs=74117
+2026-10-05T23:06:10.069+02:00   destination row 3 "Track 3" kind=instrument | published: sha256:7bd0dd458c69b1ecfbb21e092848df2aff5c2d48048eee66f628595ac7529ae4 schema=2 pub=83 save=83 | destination=Current

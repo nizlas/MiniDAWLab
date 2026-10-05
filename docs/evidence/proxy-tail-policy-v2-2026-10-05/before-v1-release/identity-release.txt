@@ -1,0 +1,12 @@
+identity: build=Release app=1.1.14 destination=5
+identity: fingerprint=sha256:adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082
+identity: canonical-bytes sha256=adcca0502000e0f69c8f91e0edf8e6c6557090fa05da9f208060d7ebfdf8c082 (5606 bytes)
+identity: plugin-state blob sha256=4772bfb878a1b2f7f50e1c1ee540113c834faa5e63a0af2d715789efd3782007 (10584 bytes) stateRevision=1
+identity: plugin name="VB3-II" version="2.3.1" manufacturer="GenuineSoundware" format=VST3 uid=1204027788 file=C:\Program Files\Common Files\VST3\VB3-II.vst3
+identity: renderSampleRate=48000 renderBlockSize=512 timelineReferenceRate=48000 noteOffGateMs=100
+identity: tail policy v2 threshold=-70 dBFS window=1 s cap=30 s | policies latency=v1 tail=v2 render=v1 format=v1
+identity: content destinationClips=6 notes=159 sources=1 sourceNotes=0 lastRelevantEvent(ref)=4430674 spanEnd(render)=4430674 (92.306 s)
+identity: readiness initial controller state: ch1cc64=0 ch1cc120=0 ch1cc121=0 ch1cc123=0 ch1cc11=71
+identity: temp artifact=C:\Users\nicla\AppData\Local\Temp\dal-tse-vb3\InstrumentProxies\tmp_track_5_gen1_1791232462020.wav
+identity: tail judged on the RAW peak (tail policy v1 behaviour, diagnostic)
+identity: a failed render's artifact is retained for analysis (diagnostic)

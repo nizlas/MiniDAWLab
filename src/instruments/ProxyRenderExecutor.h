@@ -169,64 +169,20 @@ struct ProxyRenderExecutionConfig
     std::function<void(std::int64_t renderedMs)> progressSink;
     /// Instrument readiness verification before the block loop (ProxyRenderTypes.h).
     ProxyReadinessPolicy readiness;
+    /// DIAGNOSTICS ONLY (probe): judge the tail on the raw peak (tail policy v1 behaviour).
+    bool diagnosticAbsolutePeakTail = false;
 };
 
 //==============================================================================
 // Readiness verification (§14.2 step 4b) — worker thread, exclusive instance
 //==============================================================================
-/// Peak of channels 0/1 of `view` (the recorded boundary), linear.
-[[nodiscard]] inline double stereoBlockPeak(const juce::AudioBuffer<float>& view) noexcept
-{
-    double peak = 0.0;
-    for (int c = 0; c < juce::jmin(kRenderChannels, view.getNumChannels()); ++c)
-    {
-        const float* d = view.getReadPointer(c);
-        for (int i = 0; i < view.getNumSamples(); ++i)
-        {
-            if (std::isfinite(d[i]))
-            {
-                peak = juce::jmax(peak, std::abs((double)d[i]));
-            }
-        }
-    }
-    return peak;
-}
-
-/// AC-coupled peak of channels 0/1 (max |x − block mean| per channel): the "did a note sound"
-/// decision must not be masked by a plug-in that parks a DC offset on its output after playing
-/// (measured: VB3-II holds −4.4 dBFS of DC after note activity — the known organ-dc defect).
-[[nodiscard]] inline double stereoBlockPeakAc(const juce::AudioBuffer<float>& view) noexcept
-{
-    double peak = 0.0;
-    for (int c = 0; c < juce::jmin(kRenderChannels, view.getNumChannels()); ++c)
-    {
-        const float* d = view.getReadPointer(c);
-        const int n = view.getNumSamples();
-        if (n <= 0)
-        {
-            continue;
-        }
-        double mean = 0.0;
-        for (int i = 0; i < n; ++i)
-        {
-            mean += std::isfinite(d[i]) ? (double)d[i] : 0.0;
-        }
-        mean /= (double)n;
-        for (int i = 0; i < n; ++i)
-        {
-            if (std::isfinite(d[i]))
-            {
-                peak = juce::jmax(peak, std::abs((double)d[i] - mean));
-            }
-        }
-    }
-    return peak;
-}
-
 /// Plays the content's distinct notes into the prepared instance until its response has
 /// settled (see ProxyReadinessPolicy), then lets it settle / flushes it. Returns false ONLY
 /// when cancelled (the caller returns Cancelled); every other outcome is recorded in `outcome`
 /// and the render proceeds. Processes blocks into `scratch` (never written to the WAV).
+/// All level decisions use the tail policy's DC-tracking meter (`DcTrackingPeakMeter`, same
+/// time constant as the render's detector): a plug-in that parks an offset after playing
+/// (VB3-II: −0.605) neither masks later notes nor prevents the settle before the render.
 template <typename Proc>
 [[nodiscard]] bool verifyInstrumentReadiness(Proc& proc,
                                              const ProxyOfflineSequencer& sequencer,
@@ -254,8 +210,9 @@ template <typename Proc>
     const int totalCh = scratch.getNumChannels();
     std::vector<float*> chans((size_t)totalCh, nullptr);
     juce::MidiBuffer midi;
-    double lastBlockPeak = 0.0;   ///< absolute (tail-detector semantics: settle / flush)
-    double lastBlockPeakAc = 0.0; ///< AC-coupled (the "did this note sound" decision)
+    DcTrackingPeakMeter meter(cfg.renderSampleRate);
+    double lastBlockPeak = 0.0;   ///< raw |x| (diagnostics only)
+    double lastBlockPeakAc = 0.0; ///< DC-tracked residual (every decision below)
 
     const auto processOne = [&](juce::MidiBuffer& m) -> double {
         for (int c = 0; c < totalCh; ++c)
@@ -266,9 +223,11 @@ template <typename Proc>
         view.clear();
         proc.processBlock(view, m);
         ++outcome.blocksProcessed;
-        lastBlockPeak = stereoBlockPeak(view);
-        lastBlockPeakAc = stereoBlockPeakAc(view);
-        return lastBlockPeak;
+        const float* const stereo[2] = { chans[0], chans[1] };
+        const DcTrackingPeakMeter::BlockReading reading = meter.feedBlock(stereo, kRenderChannels, n);
+        lastBlockPeak = reading.rawPeak;
+        lastBlockPeakAc = reading.residualPeak;
+        return lastBlockPeakAc;
     };
     const auto elapsedMs = [&] { return juce::Time::getMillisecondCounterHiRes() - wallStart; };
     /// Sleep in cancellable slices; false = cancelled.
@@ -410,10 +369,12 @@ template <typename Proc>
         }
     }
 
-    // Flush: every stimulus note has been released; let the instrument settle under the tail
-    // threshold for a full silence window (bounded). Only if it does NOT settle, All Sound Off /
-    // All Notes Off / sustain off are sent as a last resort and the settle is retried briefly.
-    // The render's own reset prefix follows in its first block, on a silent instrument.
+    // Flush: every stimulus note has been released; let the instrument settle — DC-tracked
+    // residual under the tail threshold for a full silence window, exactly the render's own tail
+    // criterion (bounded). Only if it does NOT settle, All Sound Off / All Notes Off / sustain
+    // off are sent as a last resort and the settle is retried briefly. The render's own reset
+    // prefix follows in its first block, on an instrument without ringing content (a parked
+    // offset may remain — it is the instrument's state, judged by the same policy as the asset).
     {
         const std::int64_t windowBlocks = juce::jmax<std::int64_t>(1, (std::int64_t)std::ceil(kTailSilenceWindowSec * cfg.renderSampleRate / (double)n));
         const auto settleUntilQuiet = [&](const double seconds) -> bool {
@@ -451,7 +412,10 @@ template <typename Proc>
                 return false;
             }
         }
-        outcome.flushResidualDb = lastBlockPeak > 0.0 ? 20.0 * std::log10(lastBlockPeak) : -200.0;
+        outcome.flushResidualDb = lastBlockPeakAc > 0.0 ? 20.0 * std::log10(lastBlockPeakAc) : -200.0;
+        outcome.flushRawPeakDb = lastBlockPeak > 0.0 ? 20.0 * std::log10(lastBlockPeak) : -200.0;
+        outcome.parkedDcAtRenderStart[0] = meter.dcEstimate(0);
+        outcome.parkedDcAtRenderStart[1] = meter.dcEstimate(1);
     }
     outcome.waitMs = elapsedMs();
     return true;
@@ -559,6 +523,13 @@ template <typename Proc>
     }
 
     ProxyTailDetector tail(cfg.renderSampleRate);
+    tail.setJudgeRawPeakForDiagnostics(cfg.diagnosticAbsolutePeakTail);
+    if (r.readiness.attempted)
+    {
+        // The instrument's offset as the verification left it is a KNOWN state, not content: the
+        // detector starts from it instead of letting the asset's first block look like a step.
+        tail.seedDcEstimate(r.readiness.parkedDcAtRenderStart[0], r.readiness.parkedDcAtRenderStart[1]);
+    }
     const std::int64_t spanEnd = r.spanEndRenderSamples;
 
     std::int64_t pos = 0;
@@ -637,20 +608,16 @@ template <typename Proc>
         proc.processBlock(view, midi);
         ++r.blocksProcessed;
 
-        // Levels + finiteness on the recorded stereo boundary (channels 0/1 only).
-        double blockPeak = 0.0;
+        // Finiteness on the recorded stereo boundary (channels 0/1 only).
         for (int c = 0; c < kRenderChannels; ++c)
         {
             const float* d = view.getReadPointer(c);
             for (int i = 0; i < n; ++i)
             {
-                const float v = d[i];
-                if (!std::isfinite(v))
+                if (!std::isfinite(d[i]))
                 {
                     r.allFinite = false;
-                    continue;
                 }
-                blockPeak = juce::jmax(blockPeak, std::abs((double)v));
             }
         }
         if (!r.allFinite)
@@ -662,7 +629,13 @@ template <typename Proc>
             r.wallMs = juce::Time::getMillisecondCounterHiRes() - wallStart;
             return r;
         }
-        r.maxPeakLinear = juce::jmax(r.maxPeakLinear, blockPeak);
+        if (pos == 0 && n > 0)
+        {
+            r.firstSample[0] = view.getSample(0, 0);
+            r.firstSample[1] = view.getSample(1, 0);
+        }
+        r.lastSample[0] = view.getSample(0, n - 1);
+        r.lastSample[1] = view.getSample(1, n - 1);
 
         // Main stereo pair → temp WAV.
         {
@@ -681,16 +654,23 @@ template <typename Proc>
 
         pos += n;
 
-        // §6 tail phase: after the final relevant event, feed the detector. The whole block
-        // enters the tail once pos passed spanEnd (block granularity — the detector windows
-        // are far larger than one 512-sample block).
-        if (pos > spanEnd)
+        // Tail policy v2: the detector observes EVERY block (its offset estimate must track the
+        // music), and decides only in the tail phase — the whole block enters the tail once pos
+        // passed spanEnd (block granularity; the window is far larger than one block).
         {
-            switch (tail.feedBlock(blockPeak, n))
+            const float* const stereoConst[2] = { viewChans[0], viewChans[1] };
+            const bool inTail = pos > spanEnd;
+            const ProxyTailDetector::Verdict verdict = tail.feedBlock(stereoConst, kRenderChannels, n, inTail);
+            r.maxPeakLinear = juce::jmax(r.maxPeakLinear, tail.lastReading().rawPeak);
+            r.maxResidualPeakLinear = juce::jmax(r.maxResidualPeakLinear, tail.lastReading().residualPeak);
+            if (inTail)
             {
-                case ProxyTailDetector::Verdict::Continue: break;
-                case ProxyTailDetector::Verdict::TailComplete: tailDone = true; break;
-                case ProxyTailDetector::Verdict::CapReached: capReached = true; break;
+                switch (verdict)
+                {
+                    case ProxyTailDetector::Verdict::Continue: break;
+                    case ProxyTailDetector::Verdict::TailComplete: tailDone = true; break;
+                    case ProxyTailDetector::Verdict::CapReached: capReached = true; break;
+                }
             }
         }
     }
@@ -698,6 +678,8 @@ template <typename Proc>
     wavWriter.reset(); // flush + close before validation
     r.renderedLengthSamples = pos;
     r.tailLengthSamples = tail.tailSamplesConsumed();
+    r.dcEstimateAtEnd[0] = tail.dcEstimate(0);
+    r.dcEstimateAtEnd[1] = tail.dcEstimate(1);
     r.pluginLatencySamplesAtEnd = proc.getLatencySamples();
     r.wallMs = juce::Time::getMillisecondCounterHiRes() - wallStart;
 
@@ -717,22 +699,27 @@ template <typename Proc>
     }
     r.tailCompleted = true;
 
-    // Notes were scheduled but the instrument never produced material output (nothing above the
-    // tail threshold anywhere): not ready, muted, or content it cannot sound. An asset of silence
-    // would be an incomplete render dressed as Current — it fails here instead (§15.7 keeps the
-    // explicit silent generation for EMPTY destinations only).
+    // Plausibility (§14.2 step 8): notes were scheduled but the instrument never produced
+    // material output — judged on the DC-TRACKED residual over the RENDER's own blocks (the
+    // readiness stimulus is measured separately and never counts), so an asset carrying only a
+    // parked offset is as implausible as digital silence. Not ready, muted, or content it cannot
+    // sound: an incomplete render dressed as Current — it fails here instead (§15.7 keeps the
+    // explicit silent generation for EMPTY destinations only). A changing offset produces
+    // transients that are real, audible output and therefore count.
     {
         std::int64_t noteOns = 0;
         for (const auto count : r.midi.noteOnsByChannel)
         {
             noteOns += count;
         }
-        if (noteOns > 0 && r.maxPeakLinear < dbToLinear(kTailThresholdDb))
+        if (noteOns > 0 && r.maxResidualPeakLinear < dbToLinear(kTailThresholdDb))
         {
             r.status = ProxyRenderStatus::Failed;
             r.failureReason = ProxyRenderFailureReason::NoAudibleOutput;
             r.message = "the instrument produced no audible output for its " + juce::String(noteOns)
-                        + " scheduled notes (readiness: " + r.readiness.note + ") - render incomplete, not published";
+                        + " scheduled notes (raw peak " + juce::String(r.maxPeakLinear > 0.0 ? 20.0 * std::log10(r.maxPeakLinear) : -200.0, 1)
+                        + " dBFS, DC-tracked residual " + juce::String(r.maxResidualPeakLinear > 0.0 ? 20.0 * std::log10(r.maxResidualPeakLinear) : -200.0, 1)
+                        + " dBFS; readiness: " + r.readiness.note + ") - render incomplete, not published";
             if (cfg.retainFailedTailArtifactForDiagnostics)
             {
                 r.temporaryWavFile = tempGuard.release();

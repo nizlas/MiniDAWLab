@@ -22,9 +22,12 @@
 //   BAND-LIMITED Kaiser-windowed-sinc interpolation evaluated from the ABSOLUTE
 //   position p(t): every output frame depends only on t, never on chunking or fill
 //   history, so seek, loop wrap and re-reads are bit-deterministic by construction.
-//   ratio == 1.0 is a bit-exact copy fast path. Asset samples outside [0, len) read
-//   as exactly 0.0f, so EOF and pre-roll are silence without special cases (§15.6:
-//   no padding is stored).
+//   ratio == 1.0 is a bit-exact copy fast path. Asset samples before 0 read as exactly
+//   0.0f (pre-roll is silence); samples at/after the asset's end read as the asset's
+//   RESTING LEVEL — the mean of its final silence window, exactly 0 for an instrument
+//   that fell silent, the parked offset of an instrument that did not (VB3-II) — so the
+//   proxy continues the instrument's final state past EOF instead of stepping to zero
+//   (1.1.15; §15.6: no padding is stored, the continuation is computed).
 //   NOTE: the mapping is anchored in TIMELINE frames — a device/engine-rate change
 //   alone changes NOTHING here (PI-030): timeline integers are device-rate-agnostic
 //   under TLD-1 and the ring is timeline-domain. Derived state (this reader) can
@@ -94,6 +97,8 @@
 // the stream recovers automatically when the fill catches up. A permanent read
 // failure sets streamFailed() — the coordinator demotes the source to ProxyCorrupt
 // off the audio thread. EOF is a normal state, distinct from underrun.
+
+#include "instruments/ProxyRenderTypes.h" // tail policy constants (resting-level rule)
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_core/juce_core.h>
@@ -320,6 +325,7 @@ public:
         }
         reader_ = std::move(r);
         timelineEof_ = mapping_.timelineEofFrames();
+        measureRestingLevelAtEnd();
     }
 
     /// Destructor closes the file handle — must run OFF the audio thread (see header).
@@ -332,6 +338,17 @@ public:
     [[nodiscard]] juce::String openError() const noexcept { return openError_; }
     [[nodiscard]] const ProxyStreamMapping& mapping() const noexcept { return mapping_; }
     [[nodiscard]] std::int64_t timelineEofFrames() const noexcept { return timelineEof_; }
+    /// [Any thread] The asset's RESTING LEVEL at its end: the per-channel mean of its final
+    /// silence window (tail policy: the render ended because the DC-tracked residual stayed
+    /// under the threshold for that window, so the mean there IS the instrument's parked
+    /// offset — exactly 0 for an instrument that falls silent). Past the asset's end the
+    /// reader continues this level instead of stepping to zero (§15.6 boundary rule, 1.1.15):
+    /// a live instrument that parks an offset after its last note keeps emitting it while the
+    /// transport runs, and the proxy must not invent a step the Primary never produced.
+    [[nodiscard]] float restingLevelAtEnd(const int channel) const noexcept
+    {
+        return channel == 0 ? restingEnd_[0] : restingEnd_[1];
+    }
 
     /// [Any thread] Permanent mid-stream read failure (disk error / file vanished).
     [[nodiscard]] bool streamFailed() const noexcept
@@ -455,10 +472,11 @@ public:
         // Publish the position we want resident so the fill thread tracks/seeks.
         desired_.store(t0, std::memory_order_release);
 
-        // Entirely past EOF: normal silence, no ring dependency, no underrun.
+        // Entirely past EOF: the asset's resting level continues (zero for an instrument that
+        // fell silent), no ring dependency, no underrun.
         if (t0 >= timelineEof_)
         {
-            zeroFill(dstL, dstR, 0, n);
+            restingFill(dstL, dstR, 0, n);
             return true;
         }
 
@@ -469,6 +487,12 @@ public:
         const std::int64_t copyEnd = wantEnd < ve ? wantEnd : ve;
 
         zeroFill(dstL, dstR, 0, n);
+        // The part of this block past EOF continues the resting level (the ring never holds it).
+        if (wantEnd > timelineEof_)
+        {
+            const int off = static_cast<int>(timelineEof_ - t0);
+            restingFill(dstL, dstR, off, n - off);
+        }
         bool full = false;
         if (copyStart < copyEnd)
         {
@@ -507,7 +531,8 @@ public:
                     std::memcpy(dstR, headR_.data() + off, sizeof(float) * run);
                     if (static_cast<int>(run) < n)
                     {
-                        zeroFill(dstL, dstR, static_cast<int>(run), n - static_cast<int>(run));
+                        // Only reachable when effEnd == timelineEof_: the rest is past EOF.
+                        restingFill(dstL, dstR, static_cast<int>(run), n - static_cast<int>(run));
                     }
                     if (headSeq_.load(std::memory_order_acquire) == seq0)
                     {
@@ -661,6 +686,71 @@ private:
         std::memset(r + off, 0, sizeof(float) * static_cast<size_t>(n));
     }
 
+    /// Past-EOF continuation: the asset's resting level (see restingLevelAtEnd).
+    void restingFill(float* l, float* r, const int off, const int n) const noexcept
+    {
+        if (n <= 0)
+        {
+            return;
+        }
+        if (restingEnd_[0] == 0.0f && restingEnd_[1] == 0.0f)
+        {
+            zeroFill(l, r, off, n);
+            return;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            l[off + i] = restingEnd_[0];
+            r[off + i] = restingEnd_[1];
+        }
+    }
+
+    /// [Message thread, ctor] Mean of the asset's final silence window per channel (bounded
+    /// read of at most one window; failures leave the level at zero — the pre-1.1.15 behaviour).
+    void measureRestingLevelAtEnd() noexcept
+    {
+        restingEnd_[0] = restingEnd_[1] = 0.0f;
+        if (reader_ == nullptr || mapping_.assetLengthFrames <= 0)
+        {
+            return;
+        }
+        const std::int64_t len = mapping_.assetLengthFrames;
+        const std::int64_t window = static_cast<std::int64_t>(std::llround(proxy_render::kTailSilenceWindowSec * mapping_.assetRate));
+        const std::int64_t count = std::min<std::int64_t>(len, std::max<std::int64_t>(1, window));
+        const std::int64_t start = len - count;
+        double sum[2] = { 0.0, 0.0 };
+        std::int64_t done = 0;
+        while (done < count)
+        {
+            const int run = static_cast<int>(std::min<std::int64_t>(count - done, static_cast<std::int64_t>(assetL_.size())));
+            float* chans[2] = { assetL_.data(), assetR_.data() };
+            if (!reader_->read(chans, 2, start + done, run))
+            {
+                restingEnd_[0] = restingEnd_[1] = 0.0f;
+                return;
+            }
+            if (reader_->numChannels < 2)
+            {
+                std::memcpy(assetR_.data(), assetL_.data(), sizeof(float) * static_cast<size_t>(run));
+            }
+            for (int i = 0; i < run; ++i)
+            {
+                sum[0] += std::isfinite(assetL_[static_cast<size_t>(i)]) ? assetL_[static_cast<size_t>(i)] : 0.0f;
+                sum[1] += std::isfinite(assetR_[static_cast<size_t>(i)]) ? assetR_[static_cast<size_t>(i)] : 0.0f;
+            }
+            done += run;
+        }
+        restingEnd_[0] = static_cast<float>(sum[0] / static_cast<double>(count));
+        restingEnd_[1] = static_cast<float>(sum[1] / static_cast<double>(count));
+        // A level under the tail threshold is silence by policy: keep exact zero there so the
+        // overwhelming majority of assets behave bit-identically to before.
+        const float threshold = static_cast<float>(proxy_render::dbToLinear(proxy_render::kTailThresholdDb));
+        if (std::abs(restingEnd_[0]) < threshold && std::abs(restingEnd_[1]) < threshold)
+        {
+            restingEnd_[0] = restingEnd_[1] = 0.0f;
+        }
+    }
+
     void copyFromRing(const std::int64_t from, const std::int64_t to, float* dstL,
                       float* dstR) noexcept
     {
@@ -737,15 +827,19 @@ private:
             {
                 const std::int64_t ai = t - aStart;
                 const bool in = t >= 0 && t < len && ai >= 0 && ai < aCount;
-                dstL[out] = in ? srcL[static_cast<size_t>(ai)] : 0.0f;
-                dstR[out] = in ? srcR[static_cast<size_t>(ai)] : 0.0f;
+                // Past the asset's end the resting level continues; pre-roll stays zero.
+                dstL[out] = in ? srcL[static_cast<size_t>(ai)] : (t >= len ? restingEnd_[0] : 0.0f);
+                dstR[out] = in ? srcR[static_cast<size_t>(ai)] : (t >= len ? restingEnd_[1] : 0.0f);
                 continue;
             }
             const double p = static_cast<double>(t) * ratio;
-            std::int64_t i0 = static_cast<std::int64_t>(std::ceil(p - halfSupport));
-            std::int64_t i1 = static_cast<std::int64_t>(std::floor(p + halfSupport));
-            // Samples outside [0, len) are exactly zero — skip them entirely. The
-            // scratch window always covers [i0, i1] within [0, len) by construction.
+            const std::int64_t i0Full = static_cast<std::int64_t>(std::ceil(p - halfSupport));
+            const std::int64_t i1Full = static_cast<std::int64_t>(std::floor(p + halfSupport));
+            std::int64_t i0 = i0Full;
+            std::int64_t i1 = i1Full;
+            // Samples before the asset are exactly zero — skipped. Samples AFTER its end carry
+            // the resting level (continuation, see restingLevelAtEnd): their kernel weight is
+            // accumulated separately below. The scratch window covers [i0, i1] within [0, len).
             if (i0 < 0)
             {
                 i0 = 0;
@@ -768,6 +862,20 @@ private:
                     = static_cast<double>(tbl[k] + frac * (tbl[k + 1] - tbl[k]));
                 accL += static_cast<double>(srcL[rel]) * w;
                 accR += static_cast<double>(srcR[rel]) * w;
+            }
+            if (i1Full >= len && (restingEnd_[0] != 0.0f || restingEnd_[1] != 0.0f))
+            {
+                double wPast = 0.0;
+                double ap = (static_cast<double>(len) - p) * idxStep;
+                for (std::int64_t i = len; i <= i1Full; ++i, ap += idxStep)
+                {
+                    const double idx = ap < 0.0 ? -ap : ap;
+                    const auto k = static_cast<int>(idx);
+                    const auto frac = static_cast<float>(idx - static_cast<double>(k));
+                    wPast += static_cast<double>(tbl[k] + frac * (tbl[k + 1] - tbl[k]));
+                }
+                accL += static_cast<double>(restingEnd_[0]) * wPast;
+                accR += static_cast<double>(restingEnd_[1]) * wPast;
             }
             dstL[out] = static_cast<float>(accL * stretch);
             dstR[out] = static_cast<float>(accR * stretch);
@@ -845,6 +953,9 @@ private:
     bool openFailed_ = false;
     juce::String openError_;
     std::int64_t timelineEof_ = 0;
+    /// Resting level at the asset's end per channel (immutable after the ctor; read by the
+    /// audio thread as plain floats — written once before publication).
+    float restingEnd_[2] = { 0.0f, 0.0f };
 
     std::vector<float> ringL_, ringR_;   ///< preallocated timeline-domain ring
     std::vector<float> assetL_, assetR_; ///< preallocated fill/conversion scratch

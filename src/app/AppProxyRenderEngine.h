@@ -114,18 +114,28 @@ public:
         // The identity a render performed now would carry: ALWAYS the current schema (the same
         // computation `captureRequest` stamps on a job, so job currency compares like with like).
         id.expectedFingerprint = proxy_fingerprint::computeFingerprint(snap);
-        // The PUBLISHED generation may have been recorded under the additive schema 1; it stays
-        // comparable — and Current without a re-render — only while the current content is
-        // provably layer-insensitive (identical audible result). That second reading is kept
-        // apart from the render identity; otherwise the generation derives Stale.
+        // The PUBLISHED generation may have been recorded under the additive schema 1 (comparable
+        // only while the current content is provably layer-insensitive) and/or under older but
+        // still comparable policy versions (tail policy v1 → v2, 1.1.15). That second reading —
+        // the current content under the generation's recorded schema + policies — is kept apart
+        // from the render identity; without it the generation derives Stale.
         if (auto* controller = deps_.controllerForTrack ? deps_.controllerForTrack(destination) : nullptr)
         {
             if (const ProjectFileProxyMetadataV20* const meta = controller->getProxyMetadata())
             {
                 const std::uint32_t comparable = proxy_playback::comparableFingerprintSchemaFor(*meta, snap);
-                if (comparable != 0 && comparable != proxy_fingerprint::kFingerprintSchemaVersion)
+                proxy_snapshot::SnapshotPolicies recorded;
+                const bool policiesComparable = proxy_playback::comparableRenderPoliciesFor(*meta, recorded);
+                const bool policiesDiffer = recorded.latencyPolicyVersion != snap.policies.latencyPolicyVersion
+                                            || recorded.tailPolicyVersion != snap.policies.tailPolicyVersion
+                                            || recorded.renderPolicyVersion != snap.policies.renderPolicyVersion
+                                            || recorded.proxyFormatVersion != snap.policies.proxyFormatVersion;
+                if (comparable != 0 && policiesComparable
+                    && (comparable != proxy_fingerprint::kFingerprintSchemaVersion || policiesDiffer))
                 {
-                    id.publishedComparableFingerprint = proxy_fingerprint::computeFingerprint(snap, comparable);
+                    proxy_snapshot::ProxyRenderSnapshot recordedView = snap;
+                    recordedView.policies = recorded;
+                    id.publishedComparableFingerprint = proxy_fingerprint::computeFingerprint(recordedView, comparable);
                 }
             }
         }
@@ -238,6 +248,8 @@ public:
                 progressRenderedMs.store(renderedMs, std::memory_order_relaxed);
             };
             cfg.readiness = request_.readiness;
+            cfg.diagnosticAbsolutePeakTail = request_.diagnosticAbsolutePeakTail;
+            cfg.retainFailedTailArtifactForDiagnostics = request_.retainFailedArtifactForDiagnostics;
             ProxyRenderResult r
                 = renderProxyDestination(*instance_, request_.snapshot, cfg, cancel);
             r.renderInstanceDistinctFromLive = distinctFromLive_;

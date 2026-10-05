@@ -1,0 +1,10 @@
+identity: build=Release app=1.1.14 destination=3
+identity: fingerprint=sha256:02b1c97a37c8b4fb4a5f4d140213be06c762bec2815e9697f19efbbce77a09d1
+identity: canonical-bytes sha256=02b1c97a37c8b4fb4a5f4d140213be06c762bec2815e9697f19efbbce77a09d1 (5589 bytes)
+identity: plugin-state blob sha256=aa397eea7fb5a8f25784c030d7d87470bfa81eeb723994179f694fc23034f0b1 (148576 bytes) stateRevision=83
+identity: plugin name="Groove Agent SE" version="5.2.20" manufacturer="Steinberg Media Technologies" format=VST3 uid=-953287163 file=C:\Program Files\Common Files\VST3\Steinberg\Groove Agent SE.vst3\Contents\x86_64-win\Groove Agent SE.vst3
+identity: renderSampleRate=48000 renderBlockSize=512 timelineReferenceRate=48000 noteOffGateMs=100
+identity: tail policy v2 threshold=-70 dBFS window=1 s cap=30 s | policies latency=v1 tail=v2 render=v1 format=v1
+identity: content destinationClips=1 notes=166 sources=0 sourceNotes=0 lastRelevantEvent(ref)=1825333 spanEnd(render)=1825333 (38.028 s)
+identity: readiness initial controller state: ch10cc64=0 ch10cc120=0 ch10cc121=0 ch10cc123=0
+identity: temp artifact=C:\Users\nicla\AppData\Local\Temp\dal-tse-copy\InstrumentProxies\tmp_track_3_gen1_1791234370075.wav

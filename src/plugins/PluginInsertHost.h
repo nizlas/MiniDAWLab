@@ -204,6 +204,9 @@ public:
         /// material where a peak hold is not.
         double rmsBeforeFirstInsert = 0.0;
         double rmsAfterLastInsert = 0.0;
+        /// Mean sample value per channel (L, R) BEFORE the first insert over the window — the
+        /// offset the instrument / proxy delivered at the chain boundary (no mid-sum).
+        double dcBeforeFirstInsert[2] = { 0.0, 0.0 };
         std::uint32_t preStageBlocks = 0;
         std::uint32_t postStageBlocks = 0;
     };
@@ -365,6 +368,7 @@ private:
     std::atomic<double> insertLevelTapSumSqAfter_{ 0.0 };
     std::atomic<std::uint64_t> insertLevelTapSamplesBefore_{ 0 };
     std::atomic<std::uint64_t> insertLevelTapSamplesAfter_{ 0 };
+    std::atomic<double> insertLevelTapSumBefore_[2]{ 0.0, 0.0 };
     /// [Audio thread] Fold the scratch peak and sum of squares of the first `numSamples` into the
     /// tap accumulators (relaxed CAS max / fetch_add; no locks, no allocation).
     void audioThread_foldScratchLevelsInto(std::atomic<float>& peakHold,

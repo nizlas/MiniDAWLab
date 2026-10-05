@@ -56,6 +56,9 @@ struct ProxyRenderRequest
     ProxyReadinessPolicy readiness;
     /// Offline (non-realtime) indication to the plug-in (§15.4). Diagnostics may clear it.
     bool nonRealtimeIndication = true;
+    /// DIAGNOSTICS ONLY (probe): tail policy v1 behaviour / keep a failed artifact for analysis.
+    bool diagnosticAbsolutePeakTail = false;
+    bool retainFailedArtifactForDiagnostics = false;
 };
 
 //==============================================================================
@@ -268,6 +271,8 @@ private:
             cfg.expectedFingerprint = job.request_.expectedFingerprint;
             cfg.primarySemanticRevision = job.request_.primarySemanticRevision;
             cfg.readiness = job.request_.readiness;
+            cfg.diagnosticAbsolutePeakTail = job.request_.diagnosticAbsolutePeakTail;
+            cfg.retainFailedTailArtifactForDiagnostics = job.request_.retainFailedArtifactForDiagnostics;
             result = renderProxyDestination(*job.instance_, job.request_.snapshot, cfg,
                                             job.cancelToken_);
             done.store(true, std::memory_order_release);

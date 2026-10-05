@@ -129,14 +129,45 @@ struct ProxyPlaybackView
     return 0;
 }
 
+/// [Message thread] The policy versions (F12/F13) a generation was published under, when they
+/// are still COMPARABLE with the current renderer; false = not comparable (⇒ Stale).
+///   * identical versions ⇒ comparable;
+///   * tail policy v1 (absolute-peak detector, revision 6) with current v2 (DC-tracked
+///     detector, 1.1.15): comparable. v2 differs from v1 only in how the END of the asset is
+///     found — a v1 generation that completed did so because its output fell below the threshold
+///     on the raw peak, which v2 would have accepted at the same or an earlier point with the
+///     same musical content; v2 additionally completes where v1 failed (a parked offset). No
+///     v1 generation therefore carries an audible result v2 would reject, and no re-render is
+///     needed on its account. Any other version drift is not comparable.
+/// Metadata without recorded versions (0) is read as v1 of each policy (the only versions that
+/// existed before they were recorded).
+[[nodiscard]] inline bool comparableRenderPoliciesFor(const ProjectFileProxyMetadataV20& meta,
+                                                      proxy_snapshot::SnapshotPolicies& out) noexcept
+{
+    const proxy_snapshot::SnapshotPolicies current;
+    const auto recordedOr1 = [](const int v) { return v > 0 ? v : 1; };
+    out.latencyPolicyVersion = recordedOr1(meta.latencyPolicyVersion);
+    out.tailPolicyVersion = recordedOr1(meta.tailPolicyVersion);
+    out.renderPolicyVersion = recordedOr1(meta.renderPolicyVersion);
+    out.proxyFormatVersion = recordedOr1(meta.proxyFormatVersion);
+    if (out.latencyPolicyVersion != current.latencyPolicyVersion
+        || out.renderPolicyVersion != current.renderPolicyVersion
+        || out.proxyFormatVersion != current.proxyFormatVersion)
+    {
+        return false;
+    }
+    return out.tailPolicyVersion == current.tailPolicyVersion
+           || (out.tailPolicyVersion == 1 && current.tailPolicyVersion == 2);
+}
+
 /// [Message thread] §12.3 recomputation for the missing-Primary case: identical
 /// BuildInputs to production capture, except every non-musical input (plugin
-/// identity, state revision, render config, pairing byte) comes from the
-/// generation's persisted v20 record instead of the live host. Returns an empty
-/// string when the metadata carries no recorded identity (pre-P1G metadata) or
-/// when its schema is not comparable with the current content (see
-/// `comparableFingerprintSchemaFor`) — callers MUST treat that as not-verifiable
-/// (Stale), never as a match.
+/// identity, state revision, render config, pairing byte, policy versions) comes
+/// from the generation's persisted v20 record instead of the live host. Returns an
+/// empty string when the metadata carries no recorded identity (pre-P1G metadata)
+/// or when its schema / policy versions are not comparable with the current
+/// renderer (see `comparableFingerprintSchemaFor`, `comparableRenderPoliciesFor`) —
+/// callers MUST treat that as not-verifiable (Stale), never as a match.
 [[nodiscard]] inline juce::String computeExpectedFingerprintUnderRecordedConfig(
     const SessionSnapshot& sessionSnap,
     const TrackId destination,
@@ -164,6 +195,11 @@ struct ProxyPlaybackView
     in.renderConfig.noteOffGateMs = meta.noteOffGateMs;
     // Production constant (§15.7 conservative default) — matches capture-time inputs.
     in.instrumentClassifiedHostEventDriven = false;
+    // The generation's RECORDED policy versions (F12/F13), when still comparable.
+    if (!comparableRenderPoliciesFor(meta, in.policies))
+    {
+        return {};
+    }
     const proxy_snapshot::ProxyRenderSnapshot snap
         = proxy_snapshot::buildProxyRenderSnapshot(sessionSnap, destination, clipsForTrack, in);
     const std::uint32_t schema = comparableFingerprintSchemaFor(meta, snap);

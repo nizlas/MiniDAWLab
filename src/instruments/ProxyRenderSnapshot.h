@@ -21,6 +21,7 @@
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h" // InstrumentMidiClip (plain data)
 #include "instruments/MidiDependencyEnumeration.h"
+#include "instruments/ProxyRenderTypes.h"          // kTailPolicyVersion (F12 default)
 #include "io/ProjectFile.h"                        // ProjectFileGenericVst3DescriptorV1 (F1)
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
@@ -116,11 +117,13 @@ namespace proxy_snapshot
         int noteOffGateMs = 100;        // F10 gate rule input (Verified)
     };
 
-    /// F12/F13 — policy versions (Locked inclusions).
+    /// F12/F13 — policy versions (Locked inclusions). The tail policy version follows the
+    /// production detector (`proxy_render::kTailPolicyVersion`); a generation's RECORDED versions
+    /// are persisted in its metadata and used for currency recomputation (§12.3).
     struct SnapshotPolicies
     {
         int latencyPolicyVersion = 1;
-        int tailPolicyVersion = 1;
+        int tailPolicyVersion = proxy_render::kTailPolicyVersion;
         int renderPolicyVersion = 1;
         int proxyFormatVersion = 1;
     };

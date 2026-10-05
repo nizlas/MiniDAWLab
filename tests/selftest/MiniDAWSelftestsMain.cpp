@@ -1612,7 +1612,7 @@ namespace
         }
         {
             ProxyFixture f = makeOrganFixture();
-            f.inputs.policies.tailPolicyVersion = 2;
+            f.inputs.policies.tailPolicyVersion = proxy_render::kTailPolicyVersion + 1;
             expectChanges(f, "the tail-policy version changes (F12)");
         }
         {
@@ -3020,67 +3020,191 @@ namespace
     }
 
     /// Locked tail policy v1 (−70 dBFS peak / 1.0 s window / 30 s cap; §15.2).
+    /// Synthetic stereo signal fed block by block into the tail detector. `signal(t, ch)` returns the
+    /// sample at time t (seconds) for channel ch; `musicSeconds` of material are observed as the
+    /// music phase (offset tracking), then tail blocks until the verdict. Returns the tail length in
+    /// seconds (negative = CapReached, −1000 = never decided within 40 s).
+    struct TailRun
+    {
+        proxy_render::ProxyTailDetector::Verdict verdict = proxy_render::ProxyTailDetector::Verdict::Continue;
+        double tailSeconds = 0.0;
+    };
+
+    template <typename SignalFn>
+    [[nodiscard]] TailRun runTailDetector(const double sr, const int block, const double musicSeconds, SignalFn signal)
+    {
+        using proxy_render::ProxyTailDetector;
+        ProxyTailDetector d(sr);
+        std::vector<float> l((size_t)block), r((size_t)block);
+        const float* chans[2] = { l.data(), r.data() };
+        std::int64_t pos = 0;
+        TailRun out;
+        const std::int64_t musicSamples = (std::int64_t)std::llround(musicSeconds * sr);
+        const std::int64_t hardStop = (std::int64_t)std::llround((musicSeconds + 40.0) * sr);
+        while (pos < hardStop)
+        {
+            for (int i = 0; i < block; ++i)
+            {
+                const double t = (double)(pos + i) / sr;
+                l[(size_t)i] = (float)signal(t, 0);
+                r[(size_t)i] = (float)signal(t, 1);
+            }
+            const bool inTail = pos >= musicSamples;
+            out.verdict = d.feedBlock(chans, 2, block, inTail);
+            pos += block;
+            if (inTail && out.verdict != ProxyTailDetector::Verdict::Continue)
+            {
+                out.tailSeconds = (double)d.tailSamplesConsumed() / sr;
+                return out;
+            }
+        }
+        out.tailSeconds = -1000.0;
+        return out;
+    }
+
+    /// Tail policy v2: the DC-tracked detector. Deterministic synthetic signals, several sample
+    /// rates and block sizes; expectations carry a tolerance of one block plus, for the slow
+    /// waves, one half period (the per-block peak sees a low-frequency wave's crest at most half a
+    /// period late).
     void testProxyTailDetectorPolicy()
     {
         using proxy_render::ProxyTailDetector;
-        const double sr = 48000.0;
-        const double loud = proxy_render::dbToLinear(-40.0);
-        const double quiet = proxy_render::dbToLinear(-80.0);
+        constexpr double kPi = 3.14159265358979323846;
+        const double thresholdLin = proxy_render::dbToLinear(proxy_render::kTailThresholdDb);
+        const double rates[] = { 8000.0, 44100.0, 48000.0, 96000.0 };
+        const int blocks[] = { 64, 512, 1024 };
 
+        for (const double sr : rates)
         {
-            // 0.5 s loud tail, then quiet: completes when the 1.0 s window fills.
-            ProxyTailDetector d(sr);
-            std::int64_t fed = 0;
-            auto verdict = ProxyTailDetector::Verdict::Continue;
-            while (verdict == ProxyTailDetector::Verdict::Continue)
+            for (const int block : blocks)
             {
-                verdict = d.feedBlock(fed < (std::int64_t)(0.5 * sr) ? loud : quiet, 512);
-                fed += 512;
+                const double blockSec = (double)block / sr;
+                const std::string where = " [sr=" + std::to_string((int)sr) + " block=" + std::to_string(block) + "]";
+                const double loud = proxy_render::dbToLinear(-40.0);
+                const double quiet = proxy_render::dbToLinear(-80.0);
+
+                // 1) 0.5 s loud tone then quiet tone: completes when the 1.0 s window fills (v1 behaviour kept).
+                {
+                    const TailRun run = runTailDetector(sr, block, 0.0, [&](const double t, int) {
+                        return (t < 0.5 ? loud : quiet) * std::sin(2.0 * kPi * 440.0 * t);
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete && run.tailSeconds > 1.5 - 1e-9
+                               && run.tailSeconds < 1.5 + 2.0 * blockSec + 1e-9,
+                           "p1d-tail: decaying signal completes = material 0.5 s + 1.0 s window" + where);
+                }
+                // 2) Window restarts after a re-rise above the threshold.
+                {
+                    const TailRun run = runTailDetector(sr, block, 0.0, [&](const double t, int) {
+                        const bool loudNow = t < 0.5 || (t >= 1.2 && t < 1.3);
+                        return (loudNow ? loud : quiet) * std::sin(2.0 * kPi * 440.0 * t);
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete && run.tailSeconds > 2.3 - 1e-9
+                               && run.tailSeconds < 2.3 + 2.0 * blockSec + 1e-9,
+                           "p1d-tail: continuous-window requirement restarts after a re-rise" + where);
+                }
+                // 3) Material tone for the whole cap => CapReached (an honest incomplete render).
+                {
+                    const TailRun run = runTailDetector(sr, block, 0.0, [&](const double t, int) {
+                        return loud * std::sin(2.0 * kPi * 440.0 * t);
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::CapReached,
+                           "p1d-tail: a tail that never decays reaches the cap = CapReached, never complete" + where);
+                }
+                // 4) A varying floor AT the threshold is NOT silence (strict below-threshold contract;
+                //    0.01 dB above it so float quantisation and the offset estimator's ripple on a
+                //    Nyquist-rate square wave (a·A/2, largest at 8 kHz) cannot land below).
+                {
+                    const TailRun run = runTailDetector(sr, block, 0.0, [&](const double t, int) {
+                        return ((std::llround(t * sr) & 1) ? -1.0 : 1.0) * thresholdLin * (1.0 + 1e-3);
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::CapReached,
+                           "p1d-tail: a varying floor at -70 dBFS never qualifies as silence" + where);
+                }
+                // 5) CONSTANT DC only (different per channel, R negative): can never hold the tail open.
+                //    (6 s of music phase: the offset estimate has tracked the parked value long before the
+                //    tail begins, exactly as it has after a whole song.)
+                {
+                    const TailRun run = runTailDetector(sr, block, 6.0, [&](double, const int ch) {
+                        return ch == 0 ? 0.605 : -0.3;
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete && run.tailSeconds > 1.0 - 1e-9
+                               && run.tailSeconds < 1.0 + 2.0 * blockSec + 1e-9,
+                           "p1d-tail: a parked constant offset completes after exactly the silence window" + where);
+                }
+                // 6) DC + decaying tone vs the same tone without DC: identical completion (one block tolerance).
+                {
+                    const auto decaying = [&](const double t) { return 0.1 * std::exp(-t / 0.5) * std::sin(2.0 * kPi * 330.0 * t); };
+                    const TailRun withDc = runTailDetector(sr, block, 6.0, [&](const double t, int) {
+                        return -0.605 + (t >= 6.0 ? decaying(t - 6.0) : 0.1 * std::sin(2.0 * kPi * 330.0 * t));
+                    });
+                    const TailRun noDc = runTailDetector(sr, block, 6.0, [&](const double t, int) {
+                        return t >= 6.0 ? decaying(t - 6.0) : 0.1 * std::sin(2.0 * kPi * 330.0 * t);
+                    });
+                    // 0.1 -> threshold 3.16e-4: ln(316)*0.5 = 2.88 s of decay + 1.0 s window.
+                    expect(withDc.verdict == ProxyTailDetector::Verdict::TailComplete && noDc.verdict == ProxyTailDetector::Verdict::TailComplete
+                               && std::abs(withDc.tailSeconds - noDc.tailSeconds) <= blockSec + 1e-9
+                               && noDc.tailSeconds > 3.7 && noDc.tailSeconds < 4.1,
+                           "p1d-tail: a parked offset does not change when a decaying tone completes" + where);
+                }
+                // 7) Offset STEP at the tail start (VB3-II shape: +0.25 while playing, -0.59 after note-off):
+                //    the step transient decays with the meter's time constant; completes, bounded, far below the cap.
+                {
+                    const TailRun run = runTailDetector(sr, block, 2.0, [&](const double t, int) {
+                        return t < 2.0 ? 0.25 + 0.05 * std::sin(2.0 * kPi * 220.0 * t) : -0.59;
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete && run.tailSeconds > 3.0 && run.tailSeconds < 6.5,
+                           "p1d-tail: an offset step at note-off is a bounded transient, not a 30 s tail" + where);
+                }
+                // 8) Slow musical tails are preserved: a 5 / 10 / 20 / 40 Hz wave decaying to the threshold at T.
+                for (const double hz : { 5.0, 10.0, 20.0, 40.0 })
+                {
+                    const double a0 = proxy_render::dbToLinear(-30.0);
+                    const double tau = 0.6;
+                    const double T = std::log(a0 / thresholdLin) * tau; // when the envelope crosses the threshold
+                    const TailRun run = runTailDetector(sr, block, 1.0, [&](const double t, int) {
+                        return t < 1.0 ? a0 * std::sin(2.0 * kPi * hz * t)
+                                       : a0 * std::exp(-(t - 1.0) / tau) * std::sin(2.0 * kPi * hz * t);
+                    });
+                    const double halfPeriod = 0.5 / hz;
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete
+                               && run.tailSeconds >= T + 1.0 - halfPeriod - blockSec - 1e-9
+                               && run.tailSeconds <= T + 1.0 + halfPeriod + 2.0 * blockSec + 1e-9,
+                           "p1d-tail: a slow " + std::to_string((int)hz) + " Hz tail is kept until it really fades" + where);
+                }
+                // 9) Anti-phase channels (L = -R): a mid-sum would cancel; the per-channel judgement does not.
+                {
+                    const TailRun run = runTailDetector(sr, block, 0.0, [&](const double t, const int ch) {
+                        const double v = (t < 0.5 ? loud : quiet) * std::sin(2.0 * kPi * 440.0 * t);
+                        return ch == 0 ? v : -v;
+                    });
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete && run.tailSeconds > 1.5 - 1e-9
+                               && run.tailSeconds < 1.5 + 2.0 * blockSec + 1e-9,
+                           "p1d-tail: anti-phase stereo content is judged per channel (no cancellation)" + where);
+                }
+                // 10) Content on ONE channel over a different offset on each: judged by the louder channel.
+                {
+                    const TailRun run = runTailDetector(sr, block, 6.0, [&](const double t, const int ch) {
+                        const double dc = ch == 0 ? 0.6 : -0.3;
+                        const double tone = ch == 1 ? (t < 6.5 ? loud : quiet) * std::sin(2.0 * kPi * 440.0 * t) : 0.0;
+                        return dc + tone;
+                    });
+                    // The music/tail boundary rounds up to a block, so the tail may read one block short.
+                    expect(run.verdict == ProxyTailDetector::Verdict::TailComplete && run.tailSeconds > 1.5 - blockSec - 1e-9
+                               && run.tailSeconds < 1.5 + 2.0 * blockSec + 1e-9,
+                           "p1d-tail: a tone on one channel over per-channel offsets ends the tail when IT fades" + where
+                               + " tail=" + std::to_string(run.tailSeconds));
+                }
             }
-            expect(verdict == ProxyTailDetector::Verdict::TailComplete,
-                   "p1d-tail: decaying signal completes the tail");
-            const double tailSec = (double)d.tailSamplesConsumed() / sr;
-            expect(tailSec > 1.45 && tailSec < 1.60,
-                   "p1d-tail: tail = material 0.5s + 1.0s continuous silence window");
         }
+        // 11) Non-finite samples are skipped by the meter (the executor fails the render separately).
         {
-            // Window restarts after a re-rise above the threshold.
-            ProxyTailDetector d(sr);
-            std::int64_t fed = 0;
-            auto verdict = ProxyTailDetector::Verdict::Continue;
-            while (verdict == ProxyTailDetector::Verdict::Continue)
-            {
-                const double t = (double)fed / sr;
-                const bool loudNow = t < 0.5 || (t >= 1.2 && t < 1.3); // burst inside the window
-                verdict = d.feedBlock(loudNow ? loud : quiet, 512);
-                fed += 512;
-            }
-            const double tailSec = (double)d.tailSamplesConsumed() / sr;
-            expect(verdict == ProxyTailDetector::Verdict::TailComplete && tailSec > 2.25
-                       && tailSec < 2.45,
-                   "p1d-tail: continuous-window requirement restarts after a re-rise");
-        }
-        {
-            // Material output for the whole 30 s cap ⇒ CapReached (diagnosed incomplete).
-            ProxyTailDetector d(sr);
-            auto verdict = ProxyTailDetector::Verdict::Continue;
-            while (verdict == ProxyTailDetector::Verdict::Continue)
-            {
-                verdict = d.feedBlock(loud, 4096);
-            }
-            expect(verdict == ProxyTailDetector::Verdict::CapReached,
-                   "p1d-tail: 30s cap with material output = CapReached, never complete");
-        }
-        {
-            // Exactly-at-threshold peak is NOT silence (strict below-threshold contract).
-            ProxyTailDetector d(sr);
-            auto verdict = ProxyTailDetector::Verdict::Continue;
-            while (verdict == ProxyTailDetector::Verdict::Continue)
-            {
-                verdict = d.feedBlock(proxy_render::dbToLinear(-70.0), 4096);
-            }
-            expect(verdict == ProxyTailDetector::Verdict::CapReached,
-                   "p1d-tail: a floor at exactly -70 dBFS never qualifies as silence");
+            proxy_render::DcTrackingPeakMeter meter(48000.0);
+            float l[4] = { 0.5f, std::numeric_limits<float>::quiet_NaN(), 0.5f, std::numeric_limits<float>::infinity() };
+            float r[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            const float* chans[2] = { l, r };
+            const auto reading = meter.feedBlock(chans, 2, 4);
+            expect(std::isfinite(reading.residualPeak) && std::isfinite(reading.dcAtEnd[0]) && reading.rawPeak <= 0.5 + 1e-6,
+                   "p1d-tail: the meter stays finite on NaN/Inf input");
         }
     }
 
@@ -3282,6 +3406,62 @@ namespace
         }
     };
 
+    /// An instrument that answers notes with NOTHING but a parked offset: silence before the first
+    /// note, then a constant −0.6 forever (no tone at all). Scheduled notes + only DC must never
+    /// pass the plausibility rule.
+    struct FakeDcOnlyProc : FakeProcBase
+    {
+        bool playedOnce = false;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
+        {
+            noteBlock(b);
+            for (const auto meta : midi)
+            {
+                if (meta.numBytes >= 3 && (meta.data[0] & 0xF0) == 0x90 && meta.data[2] > 0)
+                {
+                    playedOnce = true;
+                }
+            }
+            b.clear();
+            if (playedOnce)
+            {
+                for (int c = 0; c < juce::jmin(2, b.getNumChannels()); ++c)
+                {
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                    {
+                        b.setSample(c, i, -0.6f);
+                    }
+                }
+            }
+        }
+    };
+
+    /// An instrument that answers the FIRST `answerNoteOns` Note Ons (enough for the readiness
+    /// stimulus) and nothing afterwards: the readiness probe's own sound must never count as
+    /// proof that the render carried the music.
+    struct FakeProbeOnlyProc : FakeSustainToneProc
+    {
+        int answerNoteOns = 40;
+        int noteOnsSeen = 0;
+
+        void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer& midi)
+        {
+            for (const auto meta : midi)
+            {
+                if (meta.numBytes >= 3 && (meta.data[0] & 0xF0) == 0x90 && meta.data[2] > 0)
+                {
+                    ++noteOnsSeen;
+                }
+            }
+            FakeSustainToneProc::processBlock(b, midi);
+            if (noteOnsSeen > answerNoteOns)
+            {
+                b.clear();
+            }
+        }
+    };
+
     /// An instrument that restores its state synchronously but loads its content
     /// asynchronously: silent for `readyAfterBlocks` processed blocks (any stimulus), then it
     /// answers like FakeSustainToneProc. Models the measured Groove Agent SE behaviour.
@@ -3299,8 +3479,12 @@ namespace
         }
     };
 
+    /// Material output forever: a −20 dBFS Nyquist square wave (a VARYING signal — a constant level
+    /// would be an offset, which tail policy v2 rightly does not count as a tail).
     struct FakeNeverSilentProc : FakeProcBase
     {
+        std::int64_t pos = 0;
+
         void processBlock(juce::AudioBuffer<float>& b, juce::MidiBuffer&)
         {
             noteBlock(b);
@@ -3308,9 +3492,10 @@ namespace
             {
                 for (int i = 0; i < b.getNumSamples(); ++i)
                 {
-                    b.setSample(c, i, 0.1f); // -20 dBFS forever
+                    b.setSample(c, i, ((pos + i) & 1) ? -0.1f : 0.1f);
                 }
             }
+            pos += b.getNumSamples();
         }
     };
 
@@ -3463,22 +3648,63 @@ namespace
             (void)r.temporaryWavFile.deleteFile();
         }
         {
-            // DC-parking instrument (organ-dc defect): every note still counts as answering
-            // (AC-coupled decision), while the render honestly fails at the tail cap because the
-            // parked DC never falls under the absolute-peak tail threshold.
+            // DC-parking instrument (organ-dc defect, VB3-II shape): every note counts as answering
+            // (DC-tracked decision), the readiness settle completes with the offset parked, and
+            // under tail policy v2 the render SUCCEEDS — the parked offset cannot hold the tail open
+            // — with the tones on top of the offset judged as real content.
             auto cfg = makeExecCfg(48000.0, "readiness-dc"); // the fake's 1.5 s release is baked at 48 kHz
             const auto snapDc = makeExecutorSnapshot(48000.0); // three notes on ch1/ch2/ch3
             FakeDcParkingProc proc;
             proxy_render::ProxyRenderCancellationToken token;
             const auto r = proxy_render::renderProxyDestination(proc, snapDc, cfg, token);
             expect(r.readiness.attempted && r.readiness.verified && r.readiness.stimulusNotes == 3 && r.readiness.soundingNotes == 3
-                       && !r.readiness.flushReachedSilence,
-                   std::string("p1d-ready: a parked DC offset does not mask later notes (AC-coupled decision); the flush reports it honestly [")
+                       && r.readiness.flushReachedSilence && r.readiness.flushRawPeakDb > -10.0
+                       && std::abs(r.readiness.parkedDcAtRenderStart[0] + 0.6) < 0.02,
+                   std::string("p1d-ready: a parked DC offset neither masks notes nor blocks the settle; the parked value is reported [")
                        + r.readiness.note.toStdString() + " | " + r.readiness.trace.replace("\n", " / ").toStdString()
-                       + " flushSilent=" + (r.readiness.flushReachedSilence ? "yes" : "no") + "]");
+                       + " flushSilent=" + (r.readiness.flushReachedSilence ? "yes" : "no") + " flushRaw=" + juce::String(r.readiness.flushRawPeakDb, 1).toStdString() + "]");
+            expect(r.status == proxy_render::ProxyRenderStatus::Succeeded && r.tailCompleted,
+                   std::string("p1d-tail2: tones over a parked offset render to completion (tail policy v2) [status=")
+                       + proxy_render::toString(r.status) + " " + proxy_render::toString(r.failureReason) + " tail=" + juce::String((double)r.tailLengthSamples / 48000.0, 2).toStdString() + "s]");
+            // The fake's 1.5 s release + the 1.0 s window; the offset is already tracked by then.
+            const double tailSec = (double)r.tailLengthSamples / 48000.0;
+            expect(tailSec > 2.4 && tailSec < 2.7 && r.maxResidualPeakLinear > 0.4 && r.maxPeakLinear > 1.0
+                       && std::abs(r.dcEstimateAtEnd[0] + 0.6) < 0.02 && std::abs((double)r.lastSample[0] + 0.6) < 1e-3,
+                   "p1d-tail2: the tail ends on the music's decay, the raw peak shows the offset, the residual the music; the asset ends ON the parked offset");
+            (void)r.temporaryWavFile.deleteFile();
+        }
+        {
+            // Scheduled notes answered with nothing but a constant offset: NoAudibleOutput (the
+            // raw peak is −4.4 dBFS, the DC-tracked residual is silence).
+            auto cfg = makeExecCfg(48000.0, "dc-only");
+            const auto snapDc = makeExecutorSnapshot(48000.0);
+            FakeDcOnlyProc proc;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snapDc, cfg, token);
             expect(r.status == proxy_render::ProxyRenderStatus::Failed
-                       && r.failureReason == proxy_render::ProxyRenderFailureReason::TailLimitReached,
-                   "p1d-ready: the DC-parking instrument's render still fails honestly at the tail cap (unchanged policy)");
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::NoAudibleOutput
+                       && r.maxPeakLinear > 0.5 && r.maxResidualPeakLinear < proxy_render::dbToLinear(-70.0),
+                   std::string("p1d-nooutput: notes answered with constant DC only = NoAudibleOutput (raw peak high, residual silent) [")
+                       + proxy_render::toString(r.status) + " " + proxy_render::toString(r.failureReason) + "]");
+            expect(!cfg.temporaryWavFile.existsAsFile(), "p1d-nooutput: the DC-only artifact is discarded");
+        }
+        {
+            // The readiness probe's own sound is never evidence for the render: an instrument that
+            // answers the stimulus but goes silent before the music fails NoAudibleOutput.
+            auto cfg = makeExecCfg(48000.0, "probe-only");
+            cfg.readiness.maxSilentWaitMs = 10000;
+            auto snapOne = makeExecutorSnapshot(48000.0);
+            snapOne.sources.clear(); // one stimulus note: readiness needs 1 + settledPasses Note Ons
+            FakeProbeOnlyProc proc;
+            proc.answerNoteOns = 1 + cfg.readiness.settledPasses;
+            proxy_render::ProxyRenderCancellationToken token;
+            const auto r = proxy_render::renderProxyDestination(proc, snapOne, cfg, token);
+            expect(r.readiness.attempted && r.readiness.verified,
+                   std::string("p1d-nooutput: the probe-only instrument passes readiness [") + r.readiness.note.toStdString() + "]");
+            expect(r.status == proxy_render::ProxyRenderStatus::Failed
+                       && r.failureReason == proxy_render::ProxyRenderFailureReason::NoAudibleOutput,
+                   std::string("p1d-nooutput: ...but its silent render is still refused: probe sound is not render evidence [")
+                       + proxy_render::toString(r.failureReason) + "]");
         }
         {
             // Readiness disabled: the legacy behaviour (render at once) — the late-loading
@@ -5604,6 +5830,125 @@ namespace
         svc.unregisterReader(shared.get());
     }
 
+    /// Write a 32-bit-float stereo asset: `secondsOfTone` of a −20 dBFS tone over per-channel
+    /// offsets, then `secondsOfRest` of the bare offsets (what a DC-parking instrument's tail
+    /// policy v2 asset ends with).
+    [[nodiscard]] bool writeDcTailAsset(const juce::File& target, const double rate, const double secondsOfTone,
+                                        const double secondsOfRest, const float dcL, const float dcR)
+    {
+        (void)target.deleteFile();
+        juce::WavAudioFormat fmt;
+        auto stream = target.createOutputStream();
+        if (stream == nullptr)
+        {
+            return false;
+        }
+        std::unique_ptr<juce::AudioFormatWriter> w(fmt.createWriterFor(stream.release(), rate, 2, 32, {}, 0));
+        if (w == nullptr)
+        {
+            return false;
+        }
+        const std::int64_t toneLen = (std::int64_t)std::llround(secondsOfTone * rate);
+        const std::int64_t len = toneLen + (std::int64_t)std::llround(secondsOfRest * rate);
+        juce::AudioBuffer<float> buf(2, 4096);
+        for (std::int64_t done = 0; done < len;)
+        {
+            const int run = (int)std::min<std::int64_t>(4096, len - done);
+            for (int i = 0; i < run; ++i)
+            {
+                const std::int64_t s = done + i;
+                const float tone = s < toneLen ? 0.1f * std::sin(2.0f * 3.14159265f * 440.0f * (float)s / (float)rate) : 0.0f;
+                buf.setSample(0, i, dcL + tone);
+                buf.setSample(1, i, dcR + tone);
+            }
+            if (!w->writeFromAudioSampleBuffer(buf, 0, run))
+            {
+                return false;
+            }
+            done += run;
+        }
+        return true;
+    }
+
+    /// 1.1.15 boundary rule: past the asset's end the reader continues the asset's resting
+    /// level (its final silence window's mean) instead of stepping to zero; an asset that ends
+    /// silent keeps serving exact zeros (bit-identical to before).
+    void testProxyPlaybackReaderRestingLevelContinuation()
+    {
+        const juce::File root = spike03Root();
+        // Same rate: a DC-parking asset (L -0.605, R -0.3) ending after 1.5 s of bare offset.
+        {
+            const juce::File wav = root.getChildFile("resting-48k.wav");
+            expect(writeDcTailAsset(wav, 48000.0, 2.0, 1.5, -0.605f, -0.3f), "resting: asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 48000.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = (std::int64_t)(3.5 * 48000.0);
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            expect(!reader->openFailed(), "resting: open succeeds");
+            expect(std::abs(reader->restingLevelAtEnd(0) + 0.605f) < 1e-4f && std::abs(reader->restingLevelAtEnd(1) + 0.3f) < 1e-4f,
+                   "resting: the resting level is the per-channel mean of the final silence window");
+            svc.registerReader(reader);
+            // A block straddling EOF: the pre-EOF part is the asset, the post-EOF part the resting level — no step.
+            const std::int64_t eof = m.timelineEofFrames();
+            expect(reader->messageThread_ensureRangeReady(eof - 256, 512, 5000), "resting: range resident");
+            std::vector<float> l(512, 9.0f), r(512, 9.0f);
+            expect(reader->audioThread_fetch(eof - 256, l.data(), r.data(), 512), "resting: straddling fetch fully served");
+            bool continuous = true;
+            for (int i = 0; i < 512; ++i)
+            {
+                continuous = continuous && std::abs(l[(size_t)i] + 0.605f) < 1e-4f && std::abs(r[(size_t)i] + 0.3f) < 1e-4f;
+            }
+            expect(continuous, "resting: no step at EOF — the offset continues across the boundary");
+            // Entirely past EOF.
+            expect(reader->audioThread_fetch(eof + 48000, l.data(), r.data(), 512) && std::abs(l[0] + 0.605f) < 1e-4f
+                       && std::abs(r[511] + 0.3f) < 1e-4f && reader->underrunCount() == 0,
+                   "resting: far past EOF the resting level is still served (no underrun)");
+            svc.unregisterReader(reader.get());
+        }
+        // Cross rate (44.1 kHz asset on a 48 kHz timeline): the band-limited conversion must not
+        // dip toward zero at the asset's edge either — the samples around EOF stay at the level.
+        {
+            const juce::File wav = root.getChildFile("resting-441.wav");
+            expect(writeDcTailAsset(wav, 44100.0, 2.0, 1.5, -0.605f, -0.605f), "resting-xr: asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 44100.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = (std::int64_t)(3.5 * 44100.0);
+            proxy_playback::ProxyPlaybackIoService svc;
+            auto reader = std::make_shared<proxy_playback::ProxyPlaybackReader>(wav, m);
+            expect(!reader->openFailed(), "resting-xr: open succeeds");
+            svc.registerReader(reader);
+            const std::int64_t eof = m.timelineEofFrames();
+            expect(reader->messageThread_ensureRangeReady(eof - 1024, 2048, 5000), "resting-xr: range resident");
+            std::vector<float> l(2048, 9.0f), r(2048, 9.0f);
+            expect(reader->audioThread_fetch(eof - 1024, l.data(), r.data(), 2048), "resting-xr: straddling fetch served");
+            float worst = 0.0f;
+            for (int i = 0; i < 2048; ++i)
+            {
+                worst = std::max(worst, std::abs(l[(size_t)i] + 0.605f));
+            }
+            expect(worst < 2e-3f, "resting-xr: the converted edge stays within 2e-3 of the resting level (no dip to zero) worst=" + std::to_string(worst));
+            svc.unregisterReader(reader.get());
+        }
+        // An asset that ends silent keeps the exact-zero EOF behaviour.
+        {
+            const juce::File wav = root.getChildFile("resting-silent.wav");
+            expect(writeDcTailAsset(wav, 48000.0, 1.0, 1.0, 0.0f, 0.0f), "resting-silent: asset written");
+            proxy_playback::ProxyStreamMapping m;
+            m.assetRate = 48000.0;
+            m.timelineRate = 48000.0;
+            m.assetLengthFrames = 96000;
+            proxy_playback::ProxyPlaybackReader reader(wav, m);
+            expect(!reader.openFailed() && reader.restingLevelAtEnd(0) == 0.0f && reader.restingLevelAtEnd(1) == 0.0f,
+                   "resting-silent: a silent-ending asset has an exact-zero resting level");
+            std::vector<float> l(512, 9.0f), r(512, 9.0f);
+            expect(reader.audioThread_fetch(96000 + 5, l.data(), r.data(), 512) && l[0] == 0.0f && r[511] == 0.0f,
+                   "resting-silent: past EOF serves exact zeros (unchanged behaviour)");
+        }
+    }
+
     void testProxyPlaybackReaderSixteenReadersBounded()
     {
         // Production-resampler configuration (44.1 kHz assets on a 48 kHz timeline):
@@ -6424,6 +6769,11 @@ namespace
         m.timelineReferenceRate = f.inputs.renderConfig.timelineReferenceRate;
         m.renderBlockSize = f.inputs.renderConfig.renderBlockSize;
         m.noteOffGateMs = f.inputs.renderConfig.noteOffGateMs;
+        // Recorded policy versions (F12/F13) — production metadata always carries them.
+        m.latencyPolicyVersion = f.inputs.policies.latencyPolicyVersion;
+        m.tailPolicyVersion = f.inputs.policies.tailPolicyVersion;
+        m.renderPolicyVersion = f.inputs.policies.renderPolicyVersion;
+        m.proxyFormatVersion = f.inputs.policies.proxyFormatVersion;
         return m;
     }
 
@@ -6780,6 +7130,43 @@ namespace
                 *snap, TrackId{ 1 }, p1gClipsFn(f), metaVersion, 48000.0);
         expect(withOtherVersion != meta.generationId,
                "p1g-currency: recorded plugin-version drift breaks currency");
+
+        // ---- Tail policy v1 generations after the v2 detector (1.1.15) ----
+        // A generation recorded under tail policy v1 is COMPARABLE: recomputed under its recorded
+        // versions it reproduces its own id (stays Current, no re-render); other policy drift does not.
+        {
+            auto snapV1Inputs = f.inputs;
+            snapV1Inputs.policies.tailPolicyVersion = 1;
+            const auto snapV1 = proxy_snapshot::buildProxyRenderSnapshot(*snap, TrackId{ 1 }, p1gClipsFn(f), snapV1Inputs);
+            auto metaTailV1 = meta;
+            metaTailV1.tailPolicyVersion = 1;
+            metaTailV1.generationId = proxy_fingerprint::computeFingerprint(snapV1);
+            expect(metaTailV1.generationId != meta.generationId, "tail-compat: tail policy v1 and v2 ids differ (F12)");
+            proxy_snapshot::SnapshotPolicies recorded;
+            expect(proxy_playback::comparableRenderPoliciesFor(metaTailV1, recorded) && recorded.tailPolicyVersion == 1,
+                   "tail-compat: a tail-policy-v1 generation is comparable under its recorded versions");
+            const juce::String recomputedTailV1 = proxy_playback::computeExpectedFingerprintUnderRecordedConfig(
+                *snap, TrackId{ 1 }, p1gClipsFn(f), metaTailV1, 48000.0);
+            expect(recomputedTailV1.isNotEmpty() && recomputedTailV1 == metaTailV1.generationId,
+                   "tail-compat: a tail-policy-v1 generation stays Current on a machine without the Primary");
+            auto metaUnrecorded = metaTailV1;
+            metaUnrecorded.tailPolicyVersion = 0; // never recorded = the only version that existed then (v1)
+            metaUnrecorded.latencyPolicyVersion = 0;
+            metaUnrecorded.renderPolicyVersion = 0;
+            metaUnrecorded.proxyFormatVersion = 0;
+            expect(proxy_playback::computeExpectedFingerprintUnderRecordedConfig(*snap, TrackId{ 1 }, p1gClipsFn(f), metaUnrecorded, 48000.0)
+                       == metaTailV1.generationId,
+                   "tail-compat: unrecorded policy versions read as v1");
+            auto metaOtherDrift = meta;
+            metaOtherDrift.renderPolicyVersion = 7;
+            expect(!proxy_playback::comparableRenderPoliciesFor(metaOtherDrift, recorded)
+                       && proxy_playback::computeExpectedFingerprintUnderRecordedConfig(*snap, TrackId{ 1 }, p1gClipsFn(f), metaOtherDrift, 48000.0).isEmpty(),
+                   "tail-compat: any other policy drift is not comparable (Stale)");
+            auto metaFuture = meta;
+            metaFuture.tailPolicyVersion = 3;
+            expect(!proxy_playback::comparableRenderPoliciesFor(metaFuture, recorded),
+                   "tail-compat: an unknown (newer) tail policy is not comparable");
+        }
 
         // No recorded identity (pre-P1G metadata) -> not verifiable (empty), never a match.
         auto metaNoIdentity = meta;
@@ -9385,6 +9772,7 @@ int main()
     testProxyPlaybackReaderCrossRateMappingDeterministic();
     testProxyPlaybackReaderSeekLoopDeterministic();
     testProxyPlaybackReaderUnderrunVsEof();
+    testProxyPlaybackReaderRestingLevelContinuation();
     testProxyPlaybackReaderSixteenReadersBounded();
     testProxyPlaybackReaderRetirementReleasesHandle();
     testProxyPlaybackReaderOpenValidation();

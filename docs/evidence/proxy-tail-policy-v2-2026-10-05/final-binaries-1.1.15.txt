@@ -1,0 +1,6 @@
+﻿.\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe | FileVersion=1.1.15 | bytes=9397248 | written=2026-10-05T23:17:54 | sha256=5EEAF7B0E3C69ABE651FB9DB2A175A47B1D0E7ACAA39E2B21DFC28F33BA7FD96
+.\build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe | FileVersion=1.1.15 | bytes=39100416 | written=2026-10-05T23:18:38 | sha256=6F355648B8E85BC5BAF1B9E95C37770289AD6EE0D6D74C51EFE1C5382B71CA12
+.\dist\DanielssonsAudioLab-1.1.15-Setup.exe | FileVersion=                     | bytes=23549657 | written=2026-10-05T23:19:27 | sha256=F2C3895014D9AC6913AD8ECE1FF6876DE170825D3BC4C06A3EB74897CC0C90CA
+.\dist\DanielssonsAudioLab-1.1.15.zip | FileVersion= | bytes=4636724 | written=2026-10-05T23:19:23 | sha256=FCC173811EB2719383D26C1C88ECE7C977EB3930E0765104A80519F801572B0D
+packaged MiniDAWLab.exe in the zip: byte-identical to the Release build (sha256 5EEAF7B0...A7FD96); ASIO SDK: MINIDAW_ASIO_SDK_DIR=external_tools/asiosdk (both trees)
+MiniDAWSelftests (Debug, after the final build): 3478 checks, 0 failures

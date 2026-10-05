@@ -292,6 +292,18 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
             req.probeOutDir = fileFromArg(args[i + 2].unquoted());
             i += 2;
         }
+        else if (a == "--stability-proxy-playback-edges")
+        {
+            if (!setKind(StabilityScenarioKind::ProxyPlaybackEdges)) { return {}; }
+            if (!nextProjectArg(i, req.projectA) || i + 2 >= args.size())
+            {
+                errorOut = "--stability-proxy-playback-edges requires <project> <trackId> <outDir>";
+                return {};
+            }
+            req.probeTrackId = static_cast<TrackId>(args[i + 1].getLargeIntValue());
+            req.probeOutDir = fileFromArg(args[i + 2].unquoted());
+            i += 2;
+        }
         else if (a == "--repeat")
         {
             if (i + 1 >= args.size())
@@ -331,6 +343,14 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
         else if (a == "--realtime-indication")
         {
             req.probeRealtimeIndication = true;
+        }
+        else if (a == "--tail-policy-v1")
+        {
+            req.probeTailPolicyV1 = true;
+        }
+        else if (a == "--retain-failed")
+        {
+            req.probeRetainFailed = true;
         }
         else if (a == "--midi")
         {
@@ -425,6 +445,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::MidiCycleTakes: scenarioName_ = "midi-cycle-takes"; break;
         case StabilityScenarioKind::ProxyRecording: scenarioName_ = "proxy-recording"; break;
         case StabilityScenarioKind::ProxyRenderProbe: scenarioName_ = "proxy-render-probe"; break;
+        case StabilityScenarioKind::ProxyPlaybackEdges: scenarioName_ = "proxy-playback-edges"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -519,6 +540,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::ProxyRenderProbe:
             appendProxyRenderProbeSteps(request);
+            break;
+        case StabilityScenarioKind::ProxyPlaybackEdges:
+            appendProxyPlaybackEdgesSteps(request);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -2943,9 +2967,12 @@ void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenari
     const int repeat = request.probeRepeat;
     const int waitMs = request.probeWaitAfterPrepareMs;
     const bool publish = request.probePublish;
-    const juce::File blobOverride = request.probeStateBlobOverride;
-    const bool readinessEnabled = !request.probeNoReadiness;
-    const bool nonRealtimeIndication = !request.probeRealtimeIndication;
+    StabilityRunnerHooks::ProxyRenderProbeOptions probeOptions;
+    probeOptions.stateBlobOverride = request.probeStateBlobOverride;
+    probeOptions.readinessEnabled = !request.probeNoReadiness;
+    probeOptions.nonRealtimeIndication = !request.probeRealtimeIndication;
+    probeOptions.tailPolicyV1 = request.probeTailPolicyV1;
+    probeOptions.retainFailedArtifact = request.probeRetainFailed;
 #if JUCE_DEBUG
     const juce::String build = "Debug";
 #else
@@ -2987,7 +3014,7 @@ void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenari
                            },
                            kSettleAfterLoadMs + 3000 }); // + the plug-ins' asynchronous state restore
     steps_.push_back(Step{ "proxy-probe: destination row, Manual update mode, frozen identity",
-                           [this, tid, outDir, blobOverride, readinessEnabled, nonRealtimeIndication](juce::String& failReason) -> bool {
+                           [this, tid, outDir, probeOptions](juce::String& failReason) -> bool {
                                bool found = false;
                                for (const StabilityTrackInfo& t : hooks_.listAllTracks())
                                {
@@ -3009,7 +3036,7 @@ void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenari
                                    failReason = "could not set the update mode to Manual";
                                    return false;
                                }
-                               const juce::String identity = hooks_.proxyRenderProbeCapture(tid, outDir, blobOverride, readinessEnabled, nonRealtimeIndication);
+                               const juce::String identity = hooks_.proxyRenderProbeCapture(tid, outDir, probeOptions);
                                for (const auto& line : juce::StringArray::fromLines(identity))
                                {
                                    if (line.isNotEmpty())
@@ -3142,6 +3169,290 @@ void StabilityScenarioRunner::appendProxyRenderProbeSteps(const StabilityScenari
                                    500 });
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Proxy playback edges (`--stability-proxy-playback-edges <project> <trackId> <outDir>`)
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendProxyPlaybackEdgesSteps(const StabilityScenarioRequest& request)
+{
+    if (hooks_.loadProjectFromFile == nullptr || hooks_.listAllTracks == nullptr || hooks_.setMeteredTrack == nullptr
+        || hooks_.drainTrackMeter == nullptr || hooks_.drainMasterMeter == nullptr || hooks_.setInsertLevelTapTrack == nullptr
+        || hooks_.readAndResetInsertLevelTap == nullptr || hooks_.readAndResetInsertLevelTapFull == nullptr
+        || hooks_.seekTransportTo == nullptr || hooks_.setPlaybackActive == nullptr
+        || hooks_.setCycleEnabled == nullptr || hooks_.setLocatorsSamples == nullptr || hooks_.proxyForcePrimaryUnavailable == nullptr
+        || hooks_.proxyRuntimeStateName == nullptr || hooks_.getDeviceSampleRate == nullptr || hooks_.runMixdownBlocking == nullptr
+        || hooks_.proxyPublishedAssetShape == nullptr)
+    {
+        steps_.push_back(Step{ "proxy-edges: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "proxy-playback-edges hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+    const juce::File project = request.projectA;
+    const TrackId tid = request.probeTrackId;
+    const juce::File outDir = request.probeOutDir;
+    const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-proxyedges.dalproj");
+    auto report = std::make_shared<juce::StringArray>();
+    auto eofSamples = std::make_shared<std::int64_t>(0);
+    auto sr = std::make_shared<double>(48000.0);
+    const auto say = [this, report](const juce::String& line) {
+        appendStabilityRunLine("  " + line);
+        report->add(line);
+    };
+
+    steps_.push_back(Step{ "proxy-edges: sibling copy + load",
+                           [this, project, copy, outDir](juce::String& failReason) -> bool {
+                               (void)copy.deleteFile();
+                               if (!project.copyFileTo(copy))
+                               {
+                                   failReason = "could not copy the project";
+                                   return false;
+                               }
+                               (void)outDir.createDirectory();
+                               hooks_.loadProjectFromFile(copy);
+                               return true;
+                           },
+                           kSettleAfterLoadMs + 3000 });
+    steps_.push_back(Step{ "proxy-edges: destination, published asset, meters and insert tap on the row",
+                           [this, tid, eofSamples, sr, say](juce::String& failReason) -> bool {
+                               bool found = false;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.id == tid)
+                                   {
+                                       found = true;
+                                       say("row " + juce::String((juce::int64)t.id) + " \"" + t.name + "\" " + (hooks_.describeTrackForDiagnostics ? hooks_.describeTrackForDiagnostics(t.id) : juce::String()));
+                                   }
+                               }
+                               if (!found)
+                               {
+                                   failReason = "no track with id " + juce::String((juce::int64)tid);
+                                   return false;
+                               }
+                               std::int64_t len = 0;
+                               double rate = 0.0;
+                               if (!hooks_.proxyPublishedAssetShape(tid, len, rate) || len <= 0)
+                               {
+                                   failReason = "the destination has no published proxy generation to play";
+                                   return false;
+                               }
+                               *sr = hooks_.getDeviceSampleRate() > 0.0 ? hooks_.getDeviceSampleRate() : 48000.0;
+                               *eofSamples = (std::int64_t)std::llround((double)len * (*sr) / rate);
+                               say("published asset: " + juce::String(len) + " samples @ " + juce::String(rate) + " Hz -> EOF at timeline "
+                                   + juce::String(*eofSamples) + " (" + juce::String((double)*eofSamples / *sr, 3) + " s); device rate " + juce::String(*sr)
+                                   + (hooks_.proxyGenerationInfo ? " | " + hooks_.proxyGenerationInfo(tid) : juce::String()));
+                               double firstOn = 0.0, lastOff = 0.0;
+                               if (hooks_.proxyTrackNoteSpanSeconds && hooks_.proxyTrackNoteSpanSeconds(tid, firstOn, lastOff))
+                               {
+                                   say("destination notes: first note-on at " + juce::String(firstOn, 3) + " s, last note-off at " + juce::String(lastOff, 3)
+                                       + " s (the 1.0-3.5 s windows below are " + (firstOn > 3.5 ? "BEFORE the first note: lead-in only" : "inside the music") + ")");
+                               }
+                               hooks_.setPlaybackActive(false);
+                               hooks_.setCycleEnabled(false);
+                               hooks_.setMeteredTrack(tid);
+                               hooks_.setInsertLevelTapTrack(tid);
+                               (void)hooks_.drainTrackMeter();
+                               (void)hooks_.drainMasterMeter();
+                               float b, a;
+                               double rb, ra;
+                               std::uint32_t pb, pa;
+                               hooks_.readAndResetInsertLevelTap(b, a, rb, ra, pb, pa);
+                               return true;
+                           },
+                           300 });
+
+    // One measurement window: arm (drain), settle, read; the reading names pre-insert peak (the
+    // instrument boundary = what the proxy / Primary produced), post-strip peak/DC/first/last (after
+    // the user's insert chain, fader, pan) and the Stereo Out peak.
+    const auto window = [this, tid, say](const juce::String& label, const int settleMs) {
+        steps_.push_back(Step{ "proxy-edges: " + label + " - arm window",
+                               [this](juce::String&) -> bool {
+                                   (void)hooks_.drainTrackMeter();
+                                   (void)hooks_.drainMasterMeter();
+                                   float b, a;
+                                   double rb, ra;
+                                   std::uint32_t pb, pa;
+                                   hooks_.readAndResetInsertLevelTap(b, a, rb, ra, pb, pa);
+                                   return true;
+                               },
+                               settleMs });
+        steps_.push_back(Step{ "proxy-edges: " + label + " - read",
+                               [this, label, say](juce::String&) -> bool {
+                                   const StabilityLevelStats t = hooks_.drainTrackMeter();
+                                   const StabilityLevelStats m = hooks_.drainMasterMeter();
+                                   const StabilityRunnerHooks::InsertTapReading tap = hooks_.readAndResetInsertLevelTapFull();
+                                   const float before = tap.peakBefore;
+                                   const double rmsBefore = tap.rmsBefore;
+                                   const auto db = [](const double v) { return v > 0.0 ? juce::String(20.0 * std::log10(v), 1) : juce::String("-inf"); };
+                                   say(label + ": pre-insert peak=" + juce::String(before, 4) + " (" + db(before) + " dBFS) rms=" + juce::String(rmsBefore, 4)
+                                       + " dc L/R=" + juce::String(tap.dcBefore[0], 4) + "/" + juce::String(tap.dcBefore[1], 4)
+                                       + " | post-strip peak L/R=" + juce::String(t.peak[0], 4) + "/" + juce::String(t.peak[1], 4) + " (" + db(juce::jmax(t.peak[0], t.peak[1]))
+                                       + " dBFS) dc L/R=" + juce::String(t.dcOffset[0], 4) + "/" + juce::String(t.dcOffset[1], 4) + " first L=" + juce::String(t.firstSample[0], 4)
+                                       + " last L=" + juce::String(t.lastSample[0], 4) + " frames=" + juce::String((juce::int64)t.frames)
+                                       + " | stereo out peak=" + juce::String(juce::jmax(m.peak[0], m.peak[1]), 4) + " dc=" + juce::String(m.dcOffset[0], 4));
+                                   return true;
+                               },
+                               50 });
+    };
+    const auto seekSeconds = [this, sr](const double seconds) { hooks_.seekTransportTo((std::int64_t)std::llround(seconds * *sr)); };
+    const auto eofSec = [eofSamples, sr]() { return (double)*eofSamples / *sr; };
+
+    for (const bool proxyPath : { true, false })
+    {
+        const juce::String tag = proxyPath ? "PROXY" : "PRIMARY";
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - select the source (" + (proxyPath ? "Primary forced unavailable -> proxy" : "Primary available") + ")",
+                               [this, tid, proxyPath, tag, say](juce::String& failReason) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   hooks_.setCycleEnabled(false);
+                                   hooks_.proxyForcePrimaryUnavailable(tid, proxyPath);
+                                   juce::Thread::sleep(300);
+                                   const juce::String runtime = hooks_.proxyRuntimeStateName(tid);
+                                   say(tag + ": runtime=" + runtime);
+                                   if (proxyPath && runtime != "ProxyCurrent")
+                                   {
+                                       failReason = "the proxy is not the source (runtime=" + runtime + ")";
+                                       return false;
+                                   }
+                                   if (!proxyPath && runtime != "Primary")
+                                   {
+                                       failReason = "the Primary is not the source (runtime=" + runtime + ")";
+                                       return false;
+                                   }
+                                   hooks_.seekTransportTo(0);
+                                   return true;
+                               },
+                               500 });
+        window(tag + " stopped at 0 (1 s)", 1000);
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - seek 1.0 s, Play",
+                               [this, seekSeconds](juce::String&) -> bool {
+                                   seekSeconds(1.0);
+                                   juce::Thread::sleep(100);
+                                   hooks_.setPlaybackActive(true);
+                                   return true;
+                               },
+                               10 });
+        window(tag + " play start at 1.0 s (first 0.5 s)", 500);
+        window(tag + " playing 1.5-3.5 s", 2000);
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - seek to EOF - 3 s while playing",
+                               [this, seekSeconds, eofSec](juce::String&) -> bool {
+                                   seekSeconds(eofSec() - 3.0);
+                                   return true;
+                               },
+                               400 });
+        window(tag + " EOF-2.6 .. EOF-0.6 s (reverb decaying)", 2000);
+        window(tag + " EOF-0.6 .. EOF+1.4 s (crossing the asset end)", 2000);
+        window(tag + " EOF+1.4 .. EOF+3.4 s (continued transport past the end)", 2000);
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - Stop past the end",
+                               [this](juce::String&) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   return true;
+                               },
+                               10 });
+        window(tag + " first 0.5 s after Stop", 500);
+        window(tag + " stopped, 0.5-2.5 s after Stop", 2000);
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - Play again past the end",
+                               [this](juce::String&) -> bool {
+                                   hooks_.setPlaybackActive(true);
+                                   return true;
+                               },
+                               10 });
+        window(tag + " restart past the end (first 0.5 s)", 500);
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - Stop, loop [EOF-3, EOF+2], Cycle on, Play from EOF-3",
+                               [this, eofSamples, sr, seekSeconds, eofSec](juce::String&) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   const std::int64_t l = *eofSamples - (std::int64_t)std::llround(3.0 * *sr);
+                                   const std::int64_t r = *eofSamples + (std::int64_t)std::llround(2.0 * *sr);
+                                   hooks_.setLocatorsSamples(l, r);
+                                   hooks_.setCycleEnabled(true);
+                                   seekSeconds(eofSec() - 3.0);
+                                   juce::Thread::sleep(100);
+                                   hooks_.setPlaybackActive(true);
+                                   return true;
+                               },
+                               5200 });
+        window(tag + " loop: window containing the wrap from EOF+2 back to EOF-3", 2000);
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - Stop, Cycle off",
+                               [this](juce::String&) -> bool {
+                                   hooks_.setPlaybackActive(false);
+                                   hooks_.setCycleEnabled(false);
+                                   return true;
+                               },
+                               300 });
+        steps_.push_back(Step{ "proxy-edges: " + tag + " - offline mixdown of [EOF-5, EOF+3] through the insert chain",
+                               [this, tag, outDir, eofSamples, sr, say](juce::String& failReason) -> bool {
+                                   const std::int64_t l = *eofSamples - (std::int64_t)std::llround(5.0 * *sr);
+                                   const std::int64_t r = *eofSamples + (std::int64_t)std::llround(3.0 * *sr);
+                                   hooks_.setLocatorsSamples(l, r);
+                                   hooks_.setCycleEnabled(true); // the mixdown renders the ACTIVE loop range
+                                   const juce::File wav = outDir.getChildFile("mixdown-" + tag.toLowerCase() + "-eof.wav");
+                                   (void)wav.deleteFile();
+                                   const juce::Result res = hooks_.runMixdownBlocking(wav, false);
+                                   hooks_.setCycleEnabled(false);
+                                   if (res.failed())
+                                   {
+                                       failReason = "mixdown failed: " + res.getErrorMessage();
+                                       return false;
+                                   }
+                                   // Analyse the Stereo Out around the EOF crossing: the largest sample-to-sample
+                                   // jump and the level per channel in 0.5 s slices.
+                                   juce::WavAudioFormat fmt;
+                                   std::unique_ptr<juce::AudioFormatReader> reader(fmt.createReaderFor(wav.createInputStream().release(), true));
+                                   if (reader == nullptr)
+                                   {
+                                       failReason = "mixdown WAV unreadable";
+                                       return false;
+                                   }
+                                   const int nch = juce::jmin(2, (int)reader->numChannels);
+                                   const std::int64_t n = (std::int64_t)reader->lengthInSamples;
+                                   juce::AudioBuffer<float> buf(nch, (int)juce::jmin<std::int64_t>(n, 1 << 22));
+                                   reader->read(&buf, 0, buf.getNumSamples(), 0, true, nch > 1);
+                                   const std::int64_t eofInFile = *eofSamples - l; // timeline EOF relative to the mixdown start
+                                   juce::String slices;
+                                   const int slice = (int)std::llround(0.5 * *sr);
+                                   double maxJumpNearEof = 0.0, maxJumpElsewhere = 0.0;
+                                   std::int64_t jumpAt = -1;
+                                   for (int c = 0; c < nch; ++c)
+                                   {
+                                       const float* d = buf.getReadPointer(c);
+                                       for (int i = 1; i < buf.getNumSamples(); ++i)
+                                       {
+                                           const double j = std::abs((double)d[i] - (double)d[i - 1]);
+                                           const bool nearEof = std::abs((std::int64_t)i - eofInFile) < (std::int64_t)(0.5 * *sr);
+                                           if (nearEof && j > maxJumpNearEof) { maxJumpNearEof = j; jumpAt = i; }
+                                           if (!nearEof && j > maxJumpElsewhere) { maxJumpElsewhere = j; }
+                                       }
+                                   }
+                                   for (int s = 0; s * slice < buf.getNumSamples(); ++s)
+                                   {
+                                       const int start = s * slice;
+                                       const int count = juce::jmin(slice, buf.getNumSamples() - start);
+                                       double peak = 0.0, sum = 0.0;
+                                       for (int c = 0; c < nch; ++c)
+                                       {
+                                           const float* d = buf.getReadPointer(c);
+                                           for (int i = 0; i < count; ++i) { peak = juce::jmax(peak, std::abs((double)d[start + i])); if (c == 0) { sum += d[start + i]; } }
+                                       }
+                                       slices << " [" << juce::String((double)(start) / *sr - 5.0, 1) << "s peak=" << juce::String(peak > 0 ? 20.0 * std::log10(peak) : -200.0, 1)
+                                              << " dcL=" << juce::String(sum / juce::jmax(1, count), 4) << "]";
+                                   }
+                                   say(tag + " mixdown [EOF-5, EOF+3] (Stereo Out, after inserts): " + juce::String(n) + " samples, largest sample-to-sample jump within +-0.5 s of EOF = "
+                                       + juce::String(maxJumpNearEof, 5) + (jumpAt >= 0 ? " at " + juce::String((double)(jumpAt - eofInFile) / *sr, 3) + " s from EOF" : juce::String())
+                                       + ", elsewhere = " + juce::String(maxJumpElsewhere, 5) + " | 0.5 s slices (t rel. EOF):" + slices);
+                                   return true;
+                               },
+                               500 });
+    }
+    steps_.push_back(Step{ "proxy-edges: write the report",
+                           [this, outDir, report, tid](juce::String&) -> bool {
+                               hooks_.proxyForcePrimaryUnavailable(tid, false);
+                               (void)outDir.getChildFile("proxy-playback-edges.txt").replaceWithText(report->joinIntoString("\n") + "\n");
+                               return true;
+                           },
+                           100 });
 }
 
 void StabilityScenarioRunner::appendLoadAndVerifySteps(const juce::File& project,

@@ -1,0 +1,63 @@
+release-render1: status=Succeeded reason=None
+release-render1: spanEnd=1825333 rendered=2368000 (49.333 s) tail=542720 (11.307 s) tailCompleted=yes rawPeak=-0.3 dBFS residualPeak=-0.3 dBFS dcAtEnd L/R=0.0000/0.0000 first L/R=-0.0000/-0.0000 last L/R=-0.0000/0.0001 blocks=4625 blocksWithMidi=222 midiEvents=336 latency=0/0
+release-render1: timing prepare=146.328 ms, prepare->firstBlock=76.2117 ms, render wall=2347.48 ms (21.0x realtime), worker total=2362.84 ms
+release-render1: readiness VERIFIED passes=5 stimulus=11 sounding=11 wait=1787.87 ms blocks=9432 flushResidual=-76.9 dBFS flushRaw=-76.9 dBFS flushSilent=yes parkedDc L/R=-0.0000/-0.0000 | verified: 11/11 notes answer, settled after 5 passes (1749.37 ms)
+release-render1: readiness trace p1: ch10n36=-200->-200  ch10n43=-200->-200  ch10n45=-200->-200  ch10n38=-200->-200  ch10n40=-200->-200  ch10n47=-200->-200  ch10n49=-200->-200  ch10n46=-200->-200  ch10n41=-200->-200  ch10n48=-200->-200  ch10n51=-200->-200
+release-render1: readiness trace p2: ch10n36=-200->-0.29724*  ch10n43=-36.2038->-8.69623*  ch10n45=-48.075->-12.7538*  ch10n38=-60.3508->-16.4662*  ch10n40=-77.3295->-4.13014*  ch10n47=-71.4734->-2.7205*  ch10n49=-49.6648->-14.9758*  ch10n46=-39.3526->-21.2282*  ch10n41=-52.5993->-26.6807*  ch10n48=-67.7406->-11.4513*  ch10n51=-46.4176->-14.7245*
+release-render1: readiness trace p3: ch10n36=-50.3745->-3.2985*  ch10n43=-64.5454->-8.82774*  ch10n45=-51.4727->-12.7501*  ch10n38=-66.4975->-16.4399*  ch10n40=-73.2085->-4.12237*  ch10n47=-71.3196->-2.72001*  ch10n49=-49.6423->-14.9746*  ch10n46=-39.3526->-21.2282*  ch10n41=-52.5992->-26.6807*  ch10n48=-67.7406->-11.4562*  ch10n51=-46.4176->-14.7246*
+release-render1: readiness trace p4: ch10n36=-50.3746->-3.29999*  ch10n43=-64.5453->-8.83032*  ch10n45=-51.4977->-12.7498*  ch10n38=-66.4968->-16.4402*  ch10n40=-73.0672->-4.11612*  ch10n47=-71.4415->-2.71998*  ch10n49=-49.6423->-14.9761*  ch10n46=-39.3526->-21.2282*  ch10n41=-52.5992->-26.6807*  ch10n48=-67.7406->-11.4607*  ch10n51=-46.4175->-14.7245*
+release-render1: readiness trace p5: ch10n36=-50.3746->-3.29714*  ch10n43=-64.5455->-8.8235*  ch10n45=-51.4605->-12.7501*  ch10n38=-66.4965->-16.4394*  ch10n40=-73.1989->-4.13412*  ch10n47=-71.4965->-2.71994*  ch10n49=-49.6423->-14.976*  ch10n46=-39.3526->-21.2282*  ch10n41=-52.5992->-26.6807*  ch10n48=-67.7406->-11.4578*  ch10n51=-46.4176->-14.7246*
+release-render1: artifact C:\Users\nicla\AppData\Local\Temp\dal-vb3-dc\ga-regression-release\release-render1.wav
+release-render1: length=2368000 (49.333 s) spanEnd=1825333 (38.028 s) rawPeak=-0.3 dBFS firstAudible(res>-60)=4.002 s lastAbove(res>=-70)=48.322 s lastRawAbove(-70)=48.322 s | music: rawPeak=-0.3 resPeak=-0.3 rms=-19.5 audibleSeconds=35/39 | tail: rawPeak=-3.5 resPeak=-3.5 rms=-34.2 | edges: first L/R=-0.0000/-0.0000 last L/R=-0.0000/0.0001 dcFirstSec L/R=0.0000/-0.0000 dcLastSec L/R=0.0000/-0.0000 | sha256=c27c203266df7d6e
+
+per-second profile (peak / rms dBFS, both channels folded):
+s000 L raw=-80.3 dc=0.0000 ac=-116.8 res=-80.3 | R raw=-79.1 dc=-0.0000 ac=-113.8 res=-79.1
+s001 L raw=-200.0 dc=0.0000 ac=-200.0 res=-169.1 | R raw=-200.0 dc=0.0000 ac=-200.0 res=-157.0
+s002 L raw=-200.0 dc=0.0000 ac=-200.0 res=-186.5 | R raw=-200.0 dc=0.0000 ac=-200.0 res=-174.3
+s003 L raw=-200.0 dc=0.0000 ac=-200.0 res=-200.0 | R raw=-200.0 dc=0.0000 ac=-200.0 res=-191.7
+s004 L raw=-3.6 dc=-0.0000 ac=-18.7 res=-3.6 | R raw=-0.4 dc=-0.0001 ac=-17.0 res=-0.4
+s005 L raw=-35.4 dc=-0.0000 ac=-49.3 res=-35.3 | R raw=-35.4 dc=0.0000 ac=-49.0 res=-35.4
+s006 L raw=-3.8 dc=0.0000 ac=-29.4 res=-3.8 | R raw=-4.4 dc=0.0000 ac=-29.9 res=-4.4
+s007 L raw=-34.3 dc=-0.0000 ac=-50.3 res=-34.3 | R raw=-33.1 dc=-0.0000 ac=-51.1 res=-33.1
+s008 L raw=-10.2 dc=0.0002 ac=-27.5 res=-10.2 | R raw=-2.7 dc=0.0004 ac=-21.2 res=-2.7
+s009 L raw=-4.3 dc=-0.0002 ac=-18.7 res=-4.4 | R raw=-0.5 dc=-0.0002 ac=-15.4 res=-0.5
+s010 L raw=-2.6 dc=0.0001 ac=-26.5 res=-2.6 | R raw=-0.7 dc=0.0000 ac=-19.8 res=-0.7
+s011 L raw=-26.3 dc=-0.0001 ac=-38.4 res=-26.3 | R raw=-20.1 dc=-0.0002 ac=-31.0 res=-20.1
+s012 L raw=-3.5 dc=0.0003 ac=-19.3 res=-3.5 | R raw=-0.3 dc=0.0005 ac=-15.3 res=-0.3
+s013 L raw=-3.4 dc=0.0000 ac=-25.7 res=-3.4 | R raw=-1.0 dc=0.0001 ac=-19.5 res=-1.0
+s014 L raw=-3.5 dc=-0.0000 ac=-19.9 res=-3.5 | R raw=-0.3 dc=0.0003 ac=-16.1 res=-0.3
+s015 L raw=-10.8 dc=0.0003 ac=-28.2 res=-10.8 | R raw=-8.6 dc=0.0001 ac=-22.8 res=-8.6
+s016 L raw=-2.4 dc=0.0002 ac=-18.4 res=-2.3 | R raw=-0.3 dc=0.0002 ac=-16.6 res=-0.3
+s017 L raw=-3.8 dc=0.0000 ac=-21.7 res=-3.8 | R raw=-3.8 dc=0.0000 ac=-21.8 res=-3.8
+s018 L raw=-3.6 dc=-0.0000 ac=-18.7 res=-3.6 | R raw=-3.6 dc=-0.0000 ac=-18.7 res=-3.6
+s019 L raw=-3.6 dc=0.0001 ac=-21.6 res=-3.6 | R raw=-3.6 dc=0.0001 ac=-21.6 res=-3.6
+s020 L raw=-3.6 dc=-0.0000 ac=-18.6 res=-3.6 | R raw=-3.6 dc=-0.0000 ac=-18.7 res=-3.6
+s021 L raw=-3.6 dc=0.0001 ac=-20.7 res=-3.6 | R raw=-3.6 dc=0.0001 ac=-20.9 res=-3.6
+s022 L raw=-4.3 dc=-0.0000 ac=-19.4 res=-4.3 | R raw=-1.0 dc=-0.0001 ac=-14.6 res=-1.0
+s023 L raw=-1.6 dc=0.0002 ac=-18.2 res=-1.6 | R raw=-2.0 dc=0.0002 ac=-18.1 res=-2.0
+s024 L raw=-3.2 dc=-0.0004 ac=-17.1 res=-3.1 | R raw=-2.8 dc=-0.0004 ac=-17.1 res=-2.8
+s025 L raw=-1.7 dc=0.0005 ac=-20.3 res=-1.7 | R raw=-1.8 dc=0.0005 ac=-20.3 res=-1.8
+s026 L raw=-1.7 dc=0.0000 ac=-16.8 res=-1.7 | R raw=-1.7 dc=0.0001 ac=-16.9 res=-1.7
+s027 L raw=-5.6 dc=0.0001 ac=-21.1 res=-5.6 | R raw=-5.4 dc=0.0001 ac=-22.3 res=-5.4
+s028 L raw=-2.0 dc=-0.0003 ac=-16.7 res=-2.0 | R raw=-2.6 dc=-0.0004 ac=-16.7 res=-2.6
+s029 L raw=-1.5 dc=0.0005 ac=-17.3 res=-1.5 | R raw=-1.6 dc=0.0005 ac=-17.4 res=-1.6
+s030 L raw=-3.4 dc=0.0001 ac=-18.4 res=-3.4 | R raw=-2.4 dc=0.0000 ac=-18.4 res=-2.4
+s031 L raw=-1.6 dc=-0.0002 ac=-16.9 res=-1.6 | R raw=-1.6 dc=-0.0002 ac=-17.0 res=-1.6
+s032 L raw=-2.2 dc=0.0004 ac=-17.7 res=-2.2 | R raw=-1.5 dc=0.0004 ac=-17.7 res=-1.5
+s033 L raw=-3.2 dc=0.0001 ac=-19.9 res=-3.2 | R raw=-2.9 dc=0.0001 ac=-19.8 res=-2.9
+s034 L raw=-1.4 dc=0.0000 ac=-16.9 res=-1.4 | R raw=-2.0 dc=0.0000 ac=-16.9 res=-2.0
+s035 L raw=-1.5 dc=0.0001 ac=-18.3 res=-1.5 | R raw=-1.6 dc=0.0001 ac=-18.4 res=-1.6
+s036 L raw=-3.5 dc=-0.0004 ac=-17.1 res=-3.5 | R raw=-3.2 dc=-0.0004 ac=-17.1 res=-3.2
+s037 L raw=-1.6 dc=0.0005 ac=-20.0 res=-1.6 | R raw=-1.6 dc=0.0005 ac=-20.1 res=-1.6
+s038 L raw=-3.3 dc=0.0000 ac=-21.6 res=-3.3 | R raw=-2.4 dc=-0.0000 ac=-21.5 res=-2.4
+s039 L raw=-40.6 dc=-0.0000 ac=-56.1 res=-40.7 | R raw=-36.4 dc=-0.0000 ac=-51.4 res=-36.4
+s040 L raw=-53.6 dc=0.0000 ac=-68.1 res=-53.6 | R raw=-47.0 dc=-0.0000 ac=-60.5 res=-47.0
+s041 L raw=-63.0 dc=-0.0000 ac=-76.4 res=-63.0 | R raw=-54.5 dc=-0.0000 ac=-68.6 res=-54.5
+s042 L raw=-67.2 dc=-0.0000 ac=-82.0 res=-67.2 | R raw=-62.0 dc=0.0000 ac=-75.8 res=-62.0
+s043 L raw=-69.0 dc=0.0000 ac=-84.4 res=-69.0 | R raw=-67.8 dc=-0.0000 ac=-81.2 res=-67.8
+s044 L raw=-69.6 dc=0.0000 ac=-84.9 res=-69.6 | R raw=-67.1 dc=0.0000 ac=-83.4 res=-67.1
+s045 L raw=-69.0 dc=0.0000 ac=-84.9 res=-69.0 | R raw=-69.3 dc=-0.0000 ac=-84.2 res=-69.3
+s046 L raw=-69.8 dc=0.0000 ac=-85.1 res=-69.8 | R raw=-69.2 dc=0.0000 ac=-84.7 res=-69.2
+s047 L raw=-69.8 dc=0.0000 ac=-85.1 res=-69.8 | R raw=-70.4 dc=-0.0000 ac=-85.1 res=-70.4
+s048 L raw=-69.3 dc=-0.0000 ac=-85.1 res=-69.3 | R raw=-70.0 dc=0.0000 ac=-85.0 res=-70.0
+s049 L raw=-70.7 dc=0.0000 ac=-85.1 res=-70.7 | R raw=-70.1 dc=-0.0000 ac=-85.2 res=-70.1

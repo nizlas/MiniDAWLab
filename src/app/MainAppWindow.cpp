@@ -3589,6 +3589,19 @@ public:
             pre = s.preStageBlocks;
             post = s.postStageBlocks;
         };
+        hooks.readAndResetInsertLevelTapFull = [this]() -> StabilityRunnerHooks::InsertTapReading {
+            const PluginInsertHost::InsertLevelTapSnapshot s = pluginHost_.readAndResetInsertLevelTapForDiagnostics();
+            StabilityRunnerHooks::InsertTapReading r;
+            r.peakBefore = s.peakBeforeFirstInsert;
+            r.peakAfter = s.peakAfterLastInsert;
+            r.rmsBefore = s.rmsBeforeFirstInsert;
+            r.rmsAfter = s.rmsAfterLastInsert;
+            r.dcBefore[0] = s.dcBeforeFirstInsert[0];
+            r.dcBefore[1] = s.dcBeforeFirstInsert[1];
+            r.preBlocks = s.preStageBlocks;
+            r.postBlocks = s.postStageBlocks;
+            return r;
+        };
         hooks.seekTransportTo = [this](const std::int64_t sample) { transport.requestSeek(sample); };
 
         // --- Inserts scenario (same entry points as the VST3 picker / Inspector rows) -------------
@@ -4581,6 +4594,52 @@ public:
             }
             return out;
         };
+        hooks.proxyPublishedAssetShape = [this](const TrackId tid, std::int64_t& lengthSamples, double& sampleRate) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid) : nullptr;
+            const ProjectFileProxyMetadataV20* const meta = c != nullptr ? c->getProxyMetadata() : nullptr;
+            if (meta == nullptr || meta->silentGeneration)
+            {
+                return false;
+            }
+            lengthSamples = meta->lengthSamples;
+            sampleRate = meta->sampleRate;
+            return lengthSamples > 0 && sampleRate > 0.0;
+        };
+        hooks.proxyTrackNoteSpanSeconds = [this](const TrackId tid, double& firstNoteOnSec, double& lastNoteOffSec) -> bool {
+            InstrumentTrackController* const c
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentControllerForTrack(tid) : nullptr;
+            if (c == nullptr)
+            {
+                return false;
+            }
+            const double refRate = session.timelineSampleRateOr(48000.0);
+            std::int64_t first = std::numeric_limits<std::int64_t>::max(), last = -1;
+            for (const auto& clip : c->getClips())
+            {
+                if (clip == nullptr)
+                {
+                    continue;
+                }
+                const double bpm = clip->pattern.bpm > 0.0 ? clip->pattern.bpm : 110.0;
+                const int tpq = clip->pattern.ticksPerQuarter > 0 ? clip->pattern.ticksPerQuarter : 960;
+                for (const auto& n : clip->pattern.timelineNotes)
+                {
+                    const std::int64_t on = clip->timelineAnchorSamples + ticksToRelativeSamples(n.startTick, bpm, tpq, refRate);
+                    const std::int64_t off = clip->timelineAnchorSamples
+                                             + ticksToRelativeSamples(n.startTick + juce::jmax<std::int64_t>(1, n.durationTicks), bpm, tpq, refRate);
+                    first = juce::jmin(first, on);
+                    last = juce::jmax(last, off);
+                }
+            }
+            if (last < 0)
+            {
+                return false;
+            }
+            firstNoteOnSec = (double)first / refRate;
+            lastNoteOffSec = (double)last / refRate;
+            return true;
+        };
         hooks.proxyDeleteUnpublishedGenerationFiles = [this](const TrackId tid) -> int {
             const juce::File pf = session.getCurrentProjectFile();
             if (pf == juce::File() || proxyRenderEngine_ == nullptr)
@@ -4619,8 +4678,11 @@ public:
             return true;
         };
         // ---- Proxy render probe (diagnostics) -------------------------------------------------
-        hooks.proxyRenderProbeCapture = [this](const TrackId tid, const juce::File& outDir, const juce::File& blobOverride,
-                                               const bool readinessEnabled, const bool nonRealtimeIndication) -> juce::String {
+        hooks.proxyRenderProbeCapture = [this](const TrackId tid, const juce::File& outDir,
+                                               const StabilityRunnerHooks::ProxyRenderProbeOptions& options) -> juce::String {
+            const juce::File& blobOverride = options.stateBlobOverride;
+            const bool readinessEnabled = options.readinessEnabled;
+            const bool nonRealtimeIndication = options.nonRealtimeIndication;
             auto& P = proxyRenderProbe_;
             if (proxyRenderEngine_ == nullptr)
             {
@@ -4642,6 +4704,16 @@ public:
             {
                 static_cast<proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured).request.nonRealtimeIndication = false;
                 overrideNote << "identity: clone prepared WITHOUT the offline (non-realtime) indication (diagnostic)\n";
+            }
+            if (options.tailPolicyV1)
+            {
+                static_cast<proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured).request.diagnosticAbsolutePeakTail = true;
+                overrideNote << "identity: tail judged on the RAW peak (tail policy v1 behaviour, diagnostic)\n";
+            }
+            if (options.retainFailedArtifact)
+            {
+                static_cast<proxy_render::AppProxyRenderEngine::CapturedAppRequest&>(*P.captured).request.retainFailedArtifactForDiagnostics = true;
+                overrideNote << "identity: a failed render's artifact is retained for analysis (diagnostic)\n";
             }
             if (blobOverride != juce::File())
             {
@@ -4798,7 +4870,11 @@ public:
               << label << ": spanEnd=" << juce::String(r.spanEndRenderSamples) << " rendered=" << juce::String(r.renderedLengthSamples)
               << " (" << juce::String((double)r.renderedLengthSamples / juce::jmax(1.0, r.renderSampleRate), 3) << " s) tail=" << juce::String(r.tailLengthSamples)
               << " (" << juce::String((double)r.tailLengthSamples / juce::jmax(1.0, r.renderSampleRate), 3) << " s) tailCompleted=" << (r.tailCompleted ? "yes" : "no")
-              << " peak=" << juce::String(proxy_probe::linearToDb(r.maxPeakLinear), 1) << " dBFS blocks=" << juce::String((juce::int64)r.blocksProcessed)
+              << " rawPeak=" << juce::String(proxy_probe::linearToDb(r.maxPeakLinear), 1) << " dBFS residualPeak="
+              << juce::String(proxy_probe::linearToDb(r.maxResidualPeakLinear), 1) << " dBFS dcAtEnd L/R=" << juce::String(r.dcEstimateAtEnd[0], 4)
+              << "/" << juce::String(r.dcEstimateAtEnd[1], 4) << " first L/R=" << juce::String(r.firstSample[0], 4) << "/" << juce::String(r.firstSample[1], 4)
+              << " last L/R=" << juce::String(r.lastSample[0], 4) << "/" << juce::String(r.lastSample[1], 4)
+              << " blocks=" << juce::String((juce::int64)r.blocksProcessed)
               << " blocksWithMidi=" << juce::String((juce::int64)r.blocksWithMidi) << " midiEvents=" << juce::String((juce::int64)r.midi.totalEvents)
               << " latency=" << juce::String(r.pluginLatencySamplesAtStart) << "/" << juce::String(r.pluginLatencySamplesAtEnd) << "\n"
               << label << ": timing prepare=" << juce::String(P.preparedMs - P.prepareStartMs, 0) << " ms, prepare->firstBlock="
@@ -4808,7 +4884,9 @@ public:
               << label << ": readiness " << (r.readiness.attempted ? (r.readiness.verified ? "VERIFIED" : "unverified") : "not attempted")
               << " passes=" << r.readiness.passes << " stimulus=" << r.readiness.stimulusNotes << " sounding=" << r.readiness.soundingNotes
               << " wait=" << juce::String(r.readiness.waitMs, 0) << " ms blocks=" << juce::String((juce::int64)r.readiness.blocksProcessed)
-              << " flushResidual=" << juce::String(r.readiness.flushResidualDb, 1) << " dBFS flushSilent=" << (r.readiness.flushReachedSilence ? "yes" : "no")
+              << " flushResidual=" << juce::String(r.readiness.flushResidualDb, 1) << " dBFS flushRaw=" << juce::String(r.readiness.flushRawPeakDb, 1)
+              << " dBFS flushSilent=" << (r.readiness.flushReachedSilence ? "yes" : "no") << " parkedDc L/R="
+              << juce::String(r.readiness.parkedDcAtRenderStart[0], 4) << "/" << juce::String(r.readiness.parkedDcAtRenderStart[1], 4)
               << " | " << r.readiness.note << "\n";
             for (const auto& line : juce::StringArray::fromLines(r.readiness.trace))
             {
@@ -4825,6 +4903,11 @@ public:
                 const proxy_probe::WavAnalysis a = proxy_probe::analyzeRenderedWav(kept, r.spanEndRenderSamples);
                 t << label << ": artifact " << (copied ? kept.getFullPathName() : juce::String("COPY FAILED")) << "\n"
                   << label << ": " << proxy_probe::summarizeAnalysis(a) << "\n";
+                if (r.status != proxy_render::ProxyRenderStatus::Succeeded)
+                {
+                    (void)r.temporaryWavFile.deleteFile(); // retained only for this copy; never left in the project folder
+                    P.lastResult.temporaryWavFile = juce::File();
+                }
                 juce::String report = t;
                 report << "\nper-second profile (peak / rms dBFS, both channels folded):\n" << proxy_probe::formatPerSecondProfile(a);
                 (void)P.outDir.getChildFile(label + ".txt").replaceWithText(report);

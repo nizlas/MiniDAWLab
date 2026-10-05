@@ -1362,7 +1362,9 @@ the create-on-message / process-on-worker handoff before P1D relies on it.
    (1.1.14): notes were scheduled but nothing above the tail threshold was ever produced ⇒
    `Failed` with reason `NoAudibleOutput` — an incomplete render (instrument not ready, muted, or
    content it cannot sound) is never published; the explicit silent generation (§15.7) remains the
-   only legitimate silent asset and exists for EMPTY destinations only.**
+   only legitimate silent asset and exists for EMPTY destinations only.** Since tail-policy v2
+   (1.1.15) "above the tail threshold" means the DC-tracked residual (§15.2): a parked offset
+   alone is `NoAudibleOutput`; the readiness stimulus never counts.
 9. Verify that the destination's current fingerprint still matches the job.
 10. Publish only if the job remains fingerprint-current (PI-028).
 11. Discard obsolete or failed temporary output safely.
@@ -1448,6 +1450,37 @@ stopping. Generation/staleness precedents to imitate: `Session::loadGeneration_`
 * `tailPolicyVersion` MUST be in the fingerprint (F12); changing X/Y/Z bumps it ⇒ deterministic
   staleness.
 
+**Tail-policy v2 (Locked, 2026-10-05 — `kTailPolicyVersion = 2`; report
+`docs/PROXY_TAIL_POLICY_V2_2026-10-05.md`).** X/Y/Z are unchanged (−70 dBFS / 1.0 s / 30 s); what
+is judged changed from the raw absolute peak to the **DC-tracked residual peak**:
+
+* Each channel carries a running offset estimate `dc[n] = dc[n−1] + a·(x[n] − dc[n−1])` with
+  `a = 1 − exp(−1 / (τ·fs))`, τ = 0.5 s (corner ≈ 0.32 Hz; attenuates 5 Hz by ≈ −24 dB, 40 Hz by
+  ≈ −42 dB). The judged value of a block is `max |x[n] − dc[n]|` over the block, **per channel,
+  louder channel wins** — never a stereo mid-sum (anti-phase and unequal L/R offsets are judged
+  honestly). The estimate is continuous across blocks and across the music→tail boundary, so a
+  constant offset parked by the instrument (VB3-II: −0.605 after any note) does not keep the tail
+  alive, while a real reverb — including its bass and slow components — still has to decay below
+  X for the whole window Y. A block mean is never subtracted from the audio: the detector only
+  *judges*; the rendered samples are written untouched.
+* The window Y is counted in rendered samples; a block that straddles the music→tail boundary is
+  judged whole (block-boundary tolerance ≤ one render block in the accepted tail length).
+* The readiness verification's settle and flush use the same meter (its parked offset is handed
+  to the render as the detector's seed, so the asset's first sample is not a step the detector
+  has to let decay). Nothing of the readiness stimulus is in the asset.
+* **Plausibility (§14.2 step 8) judges the residual as well**: a render whose own blocks never
+  exceed X in residual terms — scheduled notes with no response, or an offset only — fails with
+  `NoAudibleOutput`. A constant offset is never "audible output".
+* Reaching Z with residual output still above X remains an honest `TailLimitReached`; non-finite
+  samples still fail the render.
+* **Comparability of older generations:** a generation recorded under tail-policy v1 (or with no
+  recorded policy versions — read as v1) is treated as **comparable** with v2: whatever v1 accepted
+  (silence in raw terms) v2 accepts as well, with the same end point. Such a generation keeps its
+  status (`Current` when everything else matches) on load — also on a machine without the Primary —
+  and is **not** re-rendered automatically; a manual *Render now* publishes a new generation under a
+  new name (the policy versions are fingerprinted, F12) and the old file is kept. Any other policy
+  drift is not comparable and reads as `Stale`.
+
 ### 15.3 Sample rate (Locked policy — OI-001 resolved by review; adaptation mechanism OI-002)
 
 Human review rejected "rate mismatch ⇒ stale/silent". Cross-sample-rate proxy playback is a
@@ -1518,8 +1551,17 @@ is folded into `renderPolicyVersion`.
   render-relevant destination MIDI/CC event and its detected tail (§15.2).
 * **The published audio asset ends when the accepted tail completes.** It MUST NOT be zero-padded
   to the project or song end.
-* Proxy playback past the asset's EOF produces silence through the normal track path — no special
-  end-of-asset handling, no synthesized padding.
+* Proxy playback past the asset's EOF continues at the asset's **resting level** through the
+  normal track path (Locked, 2026-10-05; replaces "produces silence"): the reader measures the
+  mean of each channel's final 1.0 s (the accepted silence window) when the asset is opened and
+  holds that value past EOF — zero when both channels' means are below the tail threshold, so a
+  normal (offset-free) proxy still ends in digital silence. Rationale: with tail-policy v2 an
+  asset may legitimately end on a parked instrument offset (VB3-II: −0.605); a hard return to zero
+  at EOF would be a new step the Primary never produces. The resting level is a *boundary rule of
+  the reader* (exact-copy and resampled paths alike; the pre-roll before sample 0 stays zero) — no
+  padding is synthesized into the asset and no processing is applied across the proxy. The step
+  at **transport Start/Stop** inside an offset region remains open (report §6 of
+  `docs/PROXY_TAIL_POLICY_V2_2026-10-05.md`).
 * A shorter or longer render-relevant event span changes the snapshot's span end and therefore the
   fingerprint (the span end is snapshot data).
 

@@ -126,6 +126,14 @@ enum class StabilityScenarioKind
     /// is exercised with the FIRST file kept. The project copy is kept between runs (Debug then
     /// Release against the same proxy directory). Sibling copy only.
     ProxyRenderProbe,
+    /// `--stability-proxy-playback-edges <project> <trackId> <outDir>`: diagnostic — with the
+    /// destination's PUBLISHED proxy forced as the transport source, measures the row's
+    /// pre-insert and post-strip (after the user's insert chain) levels and the Stereo Out in
+    /// windows around play start, the asset's end (EOF), continued transport past EOF, Stop,
+    /// restart, a loop wrap across EOF, and an offline mixdown across EOF; then the same
+    /// windows through the Primary for comparison. Reports peaks / DC / first / last samples per
+    /// window and analyses the mixdown WAV around EOF. Sibling copy only.
+    ProxyPlaybackEdges,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -202,6 +210,8 @@ struct StabilityScenarioRequest
     juce::File probeStateBlobOverride; ///< `--state-blob <file>`: render with these exact state bytes
     bool probeNoReadiness = false;     ///< `--no-readiness`: reproduce the pre-1.1.14 render (diagnostic)
     bool probeRealtimeIndication = false; ///< `--realtime-indication`: clone prepared without the offline flag (diagnostic)
+    bool probeTailPolicyV1 = false;    ///< `--tail-policy-v1`: judge the tail on the raw peak (pre-1.1.15 detector)
+    bool probeRetainFailed = false;    ///< `--retain-failed`: keep a failed render's artifact for analysis
 
     [[nodiscard]] bool isActive() const noexcept { return kind != StabilityScenarioKind::None; }
 };
@@ -354,6 +364,19 @@ struct StabilityRunnerHooks
     std::function<void(float& peakBefore, float& peakAfter, double& rmsBefore, double& rmsAfter,
                        std::uint32_t& preBlocks, std::uint32_t& postBlocks)>
         readAndResetInsertLevelTap;
+    /// Same tap, full reading: adds the per-channel mean (DC) BEFORE the first insert — the offset
+    /// the instrument / proxy delivered at the chain boundary (L and R separately).
+    struct InsertTapReading
+    {
+        float peakBefore = 0.0f;
+        float peakAfter = 0.0f;
+        double rmsBefore = 0.0;
+        double rmsAfter = 0.0;
+        double dcBefore[2] = { 0.0, 0.0 };
+        std::uint32_t preBlocks = 0;
+        std::uint32_t postBlocks = 0;
+    };
+    std::function<InsertTapReading()> readAndResetInsertLevelTapFull;
     /// Transport seek request (consumed by the audio callback at the next block).
     std::function<void(std::int64_t)> seekTransportTo;
 
@@ -552,6 +575,11 @@ struct StabilityRunnerHooks
     std::function<juce::String(TrackId)> proxyJobStatusText;
     /// The destination's proxy render snapshot sources ("own clips=N notes=M | src <id> ch=.. clips=.. notes=.. …").
     std::function<juce::String(TrackId)> proxySnapshotSourcesText;
+    /// Published generation length in asset samples and its sample rate ("len=… rate=…"); empty = none.
+    std::function<bool(TrackId, std::int64_t& lengthSamples, double& sampleRate)> proxyPublishedAssetShape;
+    /// First note-on / last note-off of the destination's own clips in timeline seconds (false
+    /// when the row has no notes). Used to place measurement windows around real content.
+    std::function<bool(TrackId, double& firstNoteOnSec, double& lastNoteOffSec)> proxyTrackNoteSpanSeconds;
     /// Delete generation files of one row in the loaded project's `InstrumentProxies` folder that
     /// are NOT the published generation (leftovers of earlier test runs; the folder is shared by
     /// the sibling test copy). Returns the number of files removed. Temp project copies only.
@@ -563,8 +591,15 @@ struct StabilityRunnerHooks
     /// Capture the destination's render request through the production engine (exact state blob,
     /// snapshot, fingerprint); writes `identity-<build>.txt` into `outDir`; returns the identity
     /// text, or "ERROR: …".
-    std::function<juce::String(TrackId, const juce::File& outDir, const juce::File& stateBlobOverride, bool readinessEnabled,
-                               bool nonRealtimeIndication)> proxyRenderProbeCapture;
+    struct ProxyRenderProbeOptions
+    {
+        juce::File stateBlobOverride;
+        bool readinessEnabled = true;
+        bool nonRealtimeIndication = true;
+        bool tailPolicyV1 = false;
+        bool retainFailedArtifact = false;
+    };
+    std::function<juce::String(TrackId, const juce::File& outDir, const ProxyRenderProbeOptions&)> proxyRenderProbeCapture;
     /// Create + restore + prepare the isolated render instance for the captured request.
     std::function<bool(juce::String& failReason)> proxyRenderProbePrepare;
     /// SHA-256 + size of the prepared isolated instance's CURRENT state bytes (readiness probe).
@@ -650,6 +685,7 @@ private:
     /// Proxy-backed destinations during recording + schema-1 generations (see `ProxyRecording`).
     void appendProxyRecordingSteps(const juce::File& project);
     void appendProxyRenderProbeSteps(const StabilityScenarioRequest& request);
+    void appendProxyPlaybackEdgesSteps(const StabilityScenarioRequest& request);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

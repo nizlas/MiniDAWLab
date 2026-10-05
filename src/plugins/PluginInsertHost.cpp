@@ -1524,6 +1524,16 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
     {
         audioThread_foldScratchLevelsInto(insertLevelTapPeakBefore_, insertLevelTapSumSqBefore_,
                                           insertLevelTapSamplesBefore_, n);
+        for (int c = 0; c < 2 && c < kInsertChannels && c < scratch_.getNumChannels(); ++c)
+        {
+            const float* const row = scratch_.getReadPointer(c);
+            double sum = 0.0;
+            for (int i = 0; row != nullptr && i < n; ++i)
+            {
+                sum += static_cast<double>(row[i]);
+            }
+            insertLevelTapSumBefore_[c].fetch_add(sum, std::memory_order_relaxed);
+        }
         insertLevelTapPreBlocks_.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -1610,6 +1620,13 @@ PluginInsertHost::InsertLevelTapSnapshot PluginInsertHost::readAndResetInsertLev
     const std::uint64_t nAfter = insertLevelTapSamplesAfter_.exchange(0, std::memory_order_relaxed);
     s.rmsBeforeFirstInsert = nBefore > 0 ? std::sqrt(sumBefore / static_cast<double>(nBefore)) : 0.0;
     s.rmsAfterLastInsert = nAfter > 0 ? std::sqrt(sumAfter / static_cast<double>(nAfter)) : 0.0;
+    // `nBefore` counts both channels' samples; each channel saw nBefore / kInsertChannels.
+    const double perChannel = nBefore > 0 ? static_cast<double>(nBefore) / static_cast<double>(juce::jmax(1, kInsertChannels)) : 0.0;
+    for (int c = 0; c < 2; ++c)
+    {
+        const double sum = insertLevelTapSumBefore_[c].exchange(0.0, std::memory_order_relaxed);
+        s.dcBeforeFirstInsert[c] = perChannel > 0.0 ? sum / perChannel : 0.0;
+    }
     return s;
 }
 

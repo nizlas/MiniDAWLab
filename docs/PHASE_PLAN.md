@@ -21,6 +21,8 @@ Suggested next candidates (each its **own slice** unless the user bundles explic
 
 | Item | Notes |
 |------|--------|
+| **Proxy transport Start/Stop step (open defect from the 1.1.15 DC task)** | A proxy whose asset sits on an instrument offset (VB3-II −0.605) steps 0 ↔ −0.605 at the proxy boundary on Play / Stop / restart; through the user's 10 Hz low-cut this is a ≈ −19 dBFS (unity) pulse the Primary does not produce (its offset persists while stopped). Fix belongs in proxy *transport* behaviour (idle output while stopped — offset continuity), not in the asset or the inserts; a ramp cannot hide it through a 10 Hz high-pass. Measured: `docs/PROXY_TAIL_POLICY_V2_2026-10-05.md` §6, `docs/evidence/proxy-tail-policy-v2-2026-10-05/edges-release/`. |
+| **Proxy playback-edge comparison with the Primary playing its last notes** | The edge scenario seeks into the tail, where the Primary plays nothing; a like-for-like Primary tail (play from before the last notes through EOF) and the Primary's own offset onset at the first note were not measured (side finding of the 1.1.15 task). |
 | **Diagnostic log gating** | Keep always-on logs from spamming normal users; compile‑time / config gates where appropriate ([`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) — diagnostics). |
 | **Stale singleton‑era comments** | Align headers/comments with **`TrackId`‑keyed**, multi‑instrument reality; [`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md). |
 | **Dead helper cleanup** | Remove unused helpers naming “primary” / single‑slot-era APIs where safe ([`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) — naming debt). |
