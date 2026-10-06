@@ -22,6 +22,9 @@ struct InspectorInsertRow
     InsertSlotId slotId = kInvalidInsertSlotId;
     InsertStage stage = InsertStage::Post;
     juce::String displayName;
+    /// The slot's plug-in could not be instantiated (bundle missing / failed); the display name
+    /// already carries the "(unavailable)" suffix — the flag lets a view colour the row.
+    bool unavailable = false;
 };
 
 /// [Message thread] Optional plugin-insert actions for the active track (wired from Main).
@@ -118,6 +121,8 @@ public:
     void typePreGainTextLikeKeyboardForStabilityTest(const juce::String& text);
     [[nodiscard]] juce::String getPreGainFieldTextForStabilityTest() const { return preGainDbEditor_.getText(); }
     [[nodiscard]] bool isPreGainFieldVisibleForStabilityTest() const { return preGainDbEditor_.isVisible(); }
+    /// [Stability] The pan field's current value (what the Inspector shows for the active row).
+    [[nodiscard]] float getPanValueForStabilityTest() const noexcept { return panField_.getPan(); }
 
     /// [Message thread] Undoable **audio input** assignment (`TrackLanesEditCoordinator`):
     /// recording + monitoring source for audio rows only (the control is hidden elsewhere).

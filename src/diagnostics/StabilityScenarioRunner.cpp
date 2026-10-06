@@ -4148,8 +4148,272 @@ void StabilityScenarioRunner::appendMixerSteps(const juce::File& project)
                                return true;
                            },
                            600 });
-    steps_.push_back(Step{ "mixer: hide the window at the end",
+    // 11. (1.1.17) The Inspector's pan control inside a NON-active strip: handler-level drag.
+    steps_.push_back(Step{ "mixer: pan drag on a non-active strip (press stick, drag, release) reaches that row; Inspector shows the same",
+                           [this, M, say, audioTid, otherTid, evidenceDir](juce::String& failReason) -> bool {
+                               if (M.stripPanDragLikeMouse == nullptr || M.stripPanValue == nullptr || M.inspectorPanValue == nullptr)
+                               {
+                                   say("pan hooks missing: skipped");
+                                   return true;
+                               }
+                               if (*otherTid != kInvalidTrackId)
+                               {
+                                   hooks_.activateTrackLikeHeaderClick(*otherTid);
+                               }
+                               (void)M.stripPanSet(*audioTid, 0.0f);
+                               if (!M.stripPanDragLikeMouse(*audioTid, -0.6f))
+                               {
+                                   failReason = "pan drag could not run on the audio strip";
+                                   return false;
+                               }
+                               const juce::String afterLeft = hooks_.describeTrackForDiagnostics(*audioTid);
+                               const float stripLeft = M.stripPanValue(*audioTid);
+                               (void)M.capturePng(evidenceDir->getChildFile("mixer-pan-left.png"));
+                               (void)M.stripPanDragLikeMouse(*audioTid, 0.75f);
+                               const juce::String afterRight = hooks_.describeTrackForDiagnostics(*audioTid);
+                               const float stripRight = M.stripPanValue(*audioTid);
+                               (void)M.capturePng(evidenceDir->getChildFile("mixer-pan-right.png"));
+                               say("pan drag left: strip=" + juce::String(stripLeft, 2) + " | " + afterLeft);
+                               say("pan drag right: strip=" + juce::String(stripRight, 2) + " | " + afterRight);
+                               if (stripLeft > -0.4f || stripRight < 0.5f || !afterLeft.contains("pan=-0.") || !afterRight.contains("pan=0."))
+                               {
+                                   failReason = "the pan drag did not reach the audio row";
+                                   return false;
+                               }
+                               hooks_.activateTrackLikeHeaderClick(*audioTid);
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "mixer: Inspector pan equals the strip's pan for the now-active row; back to centre via Ctrl-click path",
+                           [this, M, say, audioTid, evidenceDir](juce::String& failReason) -> bool {
+                               if (M.stripPanValue == nullptr || M.inspectorPanValue == nullptr)
+                               {
+                                   return true;
+                               }
+                               const float strip = M.stripPanValue(*audioTid);
+                               const float inspector = M.inspectorPanValue();
+                               say("pan: strip=" + juce::String(strip, 3) + " inspector=" + juce::String(inspector, 3));
+                               if (std::abs(strip - inspector) > 1.0e-3f)
+                               {
+                                   failReason = "Inspector and mixer pan differ";
+                                   return false;
+                               }
+                               (void)M.stripPanSet(*audioTid, 0.0f);
+                               (void)M.capturePng(evidenceDir->getChildFile("mixer-pan-centre.png"));
+                               return true;
+                           },
+                           300 });
+
+    // 12. (1.1.17) Dividers: with a 900 px window (spare height above the fader minimum) drag the
+    // Pre|Post inserts divider and the Sends|faders divider; alignment holds.
+    auto boundsBeforeDividers = std::make_shared<juce::Rectangle<int>>();
+    steps_.push_back(Step{ "mixer: window 900 px high, then drag Pre|Post inserts down 54 px and Sends|faders down 60 px",
+                           [this, M, say, verifyAndCapture, boundsBeforeDividers](juce::String& failReason) -> bool {
+                               if (M.dragDivider == nullptr || M.dividerCount == nullptr || M.sectionHeightsText == nullptr)
+                               {
+                                   say("divider hooks missing: skipped");
+                                   return true;
+                               }
+                               *boundsBeforeDividers = M.windowBounds();
+                               M.setWindowBounds(boundsBeforeDividers->withHeight(900));
+                               if (M.resetSectionHeights != nullptr)
+                               {
+                                   M.resetSectionHeights(); // known start (a previous run may have persisted heights)
+                               }
+                               say("heights before: " + M.sectionHeightsText() + " dividers=" + juce::String(M.dividerCount()));
+                               // Divider order with every section shown: 0 routing|preGain, 1 preGain|preInserts,
+                               // 2 preInserts|postInserts, 3 postInserts|sends, 4 sends|lower.
+                               if (M.dividerCount() != 5)
+                               {
+                                   failReason = "expected five dividers with every section shown, got " + juce::String(M.dividerCount());
+                                   return false;
+                               }
+                               if (!M.dragDivider(2, 54))
+                               {
+                                   failReason = "divider 2 (Pre | Post inserts) could not be dragged";
+                                   return false;
+                               }
+                               say("after Pre|Post drag (+54; Post stops at its minimum): " + M.sectionHeightsText());
+                               if (!M.dragDivider(4, 60))
+                               {
+                                   failReason = "divider 4 (Sends | faders) could not be dragged";
+                                   return false;
+                               }
+                               say("after Sends|faders drag (+60): " + M.sectionHeightsText());
+                               if (!M.sectionHeightsText().contains("preInserts=87") || !M.sectionHeightsText().contains("postInserts=51")
+                                   || !M.sectionHeightsText().contains("sends=155"))
+                               {
+                                   failReason = "divider drags did not redistribute as expected";
+                                   return false;
+                               }
+                               return verifyAndCapture("dividers-dragged", failReason);
+                           },
+                           400 });
+    steps_.push_back(Step{ "mixer: hiding Post inserts removes its divider; the Pre inserts height is kept when it returns",
+                           [this, M, say, verifyAndCapture](juce::String& failReason) -> bool {
+                               if (M.dragDivider == nullptr)
+                               {
+                                   return true;
+                               }
+                               const juce::String before = M.sectionHeightsText();
+                               const int dividersBefore = M.dividerCount();
+                               M.clickSectionToggle("postInserts");
+                               const int dividersHidden = M.dividerCount();
+                               const bool okHidden = verifyAndCapture("post-inserts-hidden", failReason);
+                               M.clickSectionToggle("postInserts");
+                               const juce::String after = M.sectionHeightsText();
+                               say("dividers " + juce::String(dividersBefore) + " -> " + juce::String(dividersHidden) + " -> " + juce::String(M.dividerCount())
+                                   + "; heights before \"" + before + "\" after \"" + after + "\"");
+                               if (!okHidden)
+                               {
+                                   return false;
+                               }
+                               if (dividersHidden != dividersBefore - 1 || M.dividerCount() != dividersBefore || before != after)
+                               {
+                                   failReason = "divider count / kept heights wrong across hide + show";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           300 });
+
+    // 13. (1.1.17) Six inserts in one stage: all reachable through the scrolling list.
+    const juce::File delayBundle("C:\\Program Files\\Common Files\\VST3\\DALMonoDelay.vst3");
+    steps_.push_back(Step{ "mixer: add six Post inserts (DAL Mono Delay) to the audio row through the picker's call",
+                           [this, M, say, audioTid, delayBundle](juce::String& failReason) -> bool {
+                               if (hooks_.addInsertLikePicker == nullptr || M.stripInsertRowCount == nullptr)
+                               {
+                                   say("insert hooks missing: skipped");
+                                   return true;
+                               }
+                               if (!delayBundle.exists())
+                               {
+                                   say("DAL Mono Delay bundle not installed: six-insert check skipped");
+                                   return true;
+                               }
+                               for (int i = 0; i < 6; ++i)
+                               {
+                                   const juce::Result r = hooks_.addInsertLikePicker(*audioTid, false, delayBundle);
+                                   if (r.failed())
+                                   {
+                                       failReason = "adding insert " + juce::String(i + 1) + " failed: " + r.getErrorMessage();
+                                       return false;
+                                   }
+                               }
+                               return true;
+                           },
+                           700 });
+    steps_.push_back(Step{ "mixer: the strip lists all six, the band shows fewer, the list scrolls to the last and the last row acts on its own slot",
+                           [this, M, say, audioTid, delayBundle, verifyAndCapture](juce::String& failReason) -> bool {
+                               if (hooks_.addInsertLikePicker == nullptr || M.stripInsertRowCount == nullptr || !delayBundle.exists())
+                               {
+                                   return true;
+                               }
+                               const int rows = M.stripInsertRowCount(*audioTid, false);
+                               const int visibleBefore = M.stripVisibleInsertRowCount(*audioTid, false);
+                               const bool scrollable = M.stripInsertListScrollable(*audioTid, false);
+                               say("post inserts: rows=" + juce::String(rows) + " visible=" + juce::String(visibleBefore) + " scrollable=" + juce::String(scrollable ? "yes" : "no")
+                                   + " " + M.stripInsertListAndAddBounds(*audioTid, false));
+                               if (rows < 6)
+                               {
+                                   failReason = "the strip does not list every insert (" + juce::String(rows) + ")";
+                                   return false;
+                               }
+                               if (!scrollable || visibleBefore >= rows)
+                               {
+                                   failReason = "six inserts in a default band must scroll";
+                                   return false;
+                               }
+                               if (!M.stripScrollInsertListToRow(*audioTid, false, rows - 1))
+                               {
+                                   failReason = "could not scroll the list to the last row";
+                                   return false;
+                               }
+                               if (!verifyAndCapture("six-inserts-scrolled", failReason))
+                               {
+                                   return false;
+                               }
+                               // Remove the LAST row through the strip's menu action: the host must lose exactly
+                               // that slot (the row carried its own slot id).
+                               const juce::String hostBefore = hooks_.describeTrackForDiagnostics(*audioTid);
+                               if (!M.stripInsertMenuAction(*audioTid, false, rows - 1, 5))
+                               {
+                                   failReason = "remove action on the last row refused";
+                                   return false;
+                               }
+                               say("host before remove: " + hostBefore);
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "mixer: after the remove the strip has five rows; dragging the band taller shows them all",
+                           [this, M, say, audioTid, delayBundle, verifyAndCapture](juce::String& failReason) -> bool {
+                               if (hooks_.addInsertLikePicker == nullptr || M.stripInsertRowCount == nullptr || !delayBundle.exists())
+                               {
+                                   return true;
+                               }
+                               const int rows = M.stripInsertRowCount(*audioTid, false);
+                               say("post inserts after remove: rows=" + juce::String(rows) + " | " + hooks_.describeTrackForDiagnostics(*audioTid));
+                               if (rows != 5)
+                               {
+                                   failReason = "expected five rows after removing one";
+                                   return false;
+                               }
+                               // Grow the Post inserts band: divider 3 is postInserts|sends — dragging it down
+                               // takes the height Sends gained above (Sends keeps at least its four slots).
+                               (void)M.dragDivider(3, 90);
+                               const int visible = M.stripVisibleInsertRowCount(*audioTid, false);
+                               say("after dragging the band taller: " + M.sectionHeightsText() + " visible rows=" + juce::String(visible));
+                               if (visible < 4)
+                               {
+                                   failReason = "a taller band did not reveal more rows";
+                                   return false;
+                               }
+                               return verifyAndCapture("six-inserts-tall-band", failReason);
+                           },
+                           400 });
+
+    // 14. (1.1.17) Section heights persist; a low window scrolls instead of overwriting them.
+    steps_.push_back(Step{ "mixer: section heights are stored in ui-layout.xml; a 500 px window keeps them and scrolls",
+                           [this, M, say, boundsBeforeDividers, verifyAndCapture](juce::String& failReason) -> bool {
+                               if (M.sectionHeightsText == nullptr)
+                               {
+                                   return true;
+                               }
+                               UiLayoutSettingsStore fresh(UiLayoutSettingsStore::defaultFile());
+                               fresh.loadFromFile();
+                               const auto pre = fresh.getMixerSectionHeightPx("preInserts");
+                               const auto post = fresh.getMixerSectionHeightPx("postInserts");
+                               say("stored heights: preInserts=" + (pre ? juce::String(*pre) : juce::String("(absent)")) + " postInserts="
+                                   + (post ? juce::String(*post) : juce::String("(absent)")) + " | live: " + M.sectionHeightsText());
+                               if (!pre || !post)
+                               {
+                                   failReason = "section heights were not persisted after the drags";
+                                   return false;
+                               }
+                               M.setWindowBounds(boundsBeforeDividers->withHeight(500));
+                               const juce::String low = M.sectionHeightsText();
+                               say("500 px window: " + low);
+                               const bool lowOk = verifyAndCapture("low-window-500", failReason);
+                               M.setWindowBounds(*boundsBeforeDividers);
+                               if (!lowOk)
+                               {
+                                   return false;
+                               }
+                               if (!low.contains("postInserts=" + juce::String(*post)))
+                               {
+                                   failReason = "a low window changed the stored section heights";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+
+    steps_.push_back(Step{ "mixer: default section heights again, hide the window at the end",
                            [M](juce::String&) -> bool {
+                               if (M.resetSectionHeights != nullptr)
+                               {
+                                   M.resetSectionHeights();
+                               }
                                if (M.isVisible())
                                {
                                    M.toggleLikeF3();

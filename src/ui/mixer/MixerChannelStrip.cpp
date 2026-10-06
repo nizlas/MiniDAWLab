@@ -12,18 +12,22 @@ namespace
     using namespace mixer_layout;
     using namespace track_strip_glyphs;
 
-    constexpr juce::uint32 kStripBgArgb = 0xff232528;
-    constexpr juce::uint32 kHeaderActiveArgb = 0xff2a4a5a;
-    constexpr juce::uint32 kHeaderInactiveArgb = 0xff2b2e33;
+    /// Lower band (fader / meter) keeps the Inspector channel panel's dark plate.
+    constexpr juce::uint32 kLowerBandBgArgb = 0xff232528;
     constexpr juce::uint32 kSeparatorArgb = 0xff3a3d42;
-    constexpr juce::uint32 kCaptionTextArgb = 0xff9aa3ad;
+    constexpr juce::uint32 kCaptionTextArgb = 0xffb4bcc6;
     constexpr juce::uint32 kNameTextArgb = 0xfff5f5f5;
-    constexpr juce::uint32 kDimTextArgb = 0xff6f757d;
-    constexpr juce::uint32 kActiveStripeArgb = 0xff00bfff; // deepskyblue, like the active header stripe
-    constexpr juce::uint32 kInsertUnavailableTextArgb = 0xffe0a040;
+    constexpr juce::uint32 kDimTextArgb = 0xff8a9099;
+    /// Pre inserts (before the fader): a clear but muted blue; Post inserts (after): muted orange.
+    constexpr juce::uint32 kPreInsertRowArgb = 0xff2f4f70;
+    constexpr juce::uint32 kPostInsertRowArgb = 0xff7a4a22;
+    constexpr juce::uint32 kInsertRowTextArgb = 0xfff2f6f9;
+    constexpr juce::uint32 kInsertUnavailableTextArgb = 0xffffc9a0;
+    constexpr juce::uint32 kInsertUnavailableOutlineArgb = 0xffd05050;
 
     constexpr int kCellSizePx = 20;
     constexpr int kCellGapPx = 3;
+    constexpr int kInsertListScrollBarPx = 8;
 
     void styleSectionCaption(juce::Label& l, const juce::String& text)
     {
@@ -59,7 +63,7 @@ namespace
         }
         for (size_t i = 0; i < a.size(); ++i)
         {
-            if (a[i].slotId != b[i].slotId || a[i].stage != b[i].stage || a[i].displayName != b[i].displayName)
+            if (a[i].slotId != b[i].slotId || a[i].stage != b[i].stage || a[i].displayName != b[i].displayName || a[i].unavailable != b[i].unavailable)
             {
                 return false;
             }
@@ -74,7 +78,7 @@ void MixerChannelStrip::CellButton::paint(juce::Graphics& g)
 {
     StripButtonState s = state_;
     s.hovered = hover_;
-    drawStripButton(g, squareCellBody(getLocalBounds()), s, juce::Colour(0xff1b1d20));
+    drawStripButton(g, squareCellBody(getLocalBounds()), s, juce::Colour(kCtlNeutralEdgeArgb));
 }
 
 void MixerChannelStrip::CellButton::mouseUp(const juce::MouseEvent& e)
@@ -109,15 +113,15 @@ MixerChannelStrip::MixerChannelStrip(const TrackId trackId, const MixerStripBind
 {
     setOpaque(true);
 
-    // Header -----------------------------------------------------------------------------------
-    nameLabel_.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    nameLabel_.setColour(juce::Label::textColourId, juce::Colour(kNameTextArgb));
+    // Header (same plate, stripe, name colour and font as the arrangement track header) ---------
+    nameLabel_.setFont(juce::FontOptions(kHeaderNameFontHeight));
+    nameLabel_.setColour(juce::Label::textColourId, headerNameColour());
     nameLabel_.setJustificationType(juce::Justification::centredLeft);
     nameLabel_.setMinimumHorizontalScale(0.6f);
     nameLabel_.setInterceptsMouseClicks(false, false); // clicks fall through to the strip (activate)
     addAndMakeVisible(nameLabel_);
     kindLabel_.setFont(juce::FontOptions(9.0f, juce::Font::bold));
-    kindLabel_.setColour(juce::Label::textColourId, juce::Colour(kCaptionTextArgb));
+    kindLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffcccccc));
     kindLabel_.setJustificationType(juce::Justification::centredLeft);
     kindLabel_.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(kindLabel_);
@@ -169,41 +173,26 @@ MixerChannelStrip::MixerChannelStrip(const TrackId trackId, const MixerStripBind
     styleSmallCaption(preGainUnitLabel_, "dB");
     addChildComponent(preGainUnitLabel_);
 
-    // Inserts ----------------------------------------------------------------------------------
-    for (InsertStageUi* stageUi : { &preInserts_, &postInserts_ })
+    // Inserts: caption + scrolling list (one row per insert) + "+ Add" outside the list ------------
+    for (InsertStageUi* ui : { &preInserts_, &postInserts_ })
     {
-        const InsertStage stage = stageUi == &preInserts_ ? InsertStage::Pre : InsertStage::Post;
-        styleSectionCaption(stageUi->caption, stage == InsertStage::Pre ? "PRE INSERTS" : "POST INSERTS");
-        addChildComponent(stageUi->caption);
-        for (int r = 0; r < kInsertRowsPerStage; ++r)
-        {
-            auto b = std::make_unique<InsertRowButton>();
-            b->setConnectedEdges(0);
-            b->onClick = [this, stage, r] {
-                InsertStageUi& ui = stage == InsertStage::Pre ? preInserts_ : postInserts_;
-                const InsertSlotId sid = ui.rowSlots[static_cast<size_t>(r)];
-                if (sid != kInvalidInsertSlotId && bindings_.inserts.requestEdit)
-                {
-                    bindings_.inserts.requestEdit(trackId_, sid);
-                }
-            };
-            b->onRightClick = [this, stage, r](const juce::MouseEvent& e) { showInsertRowMenu(stage, r, e); };
-            addChildComponent(*b);
-            stageUi->rows[static_cast<size_t>(r)] = std::move(b);
-            stageUi->rowSlots[static_cast<size_t>(r)] = kInvalidInsertSlotId;
-        }
-        styleSmallCaption(stageUi->moreLabel, {});
-        stageUi->moreLabel.setJustificationType(juce::Justification::centred);
-        addChildComponent(stageUi->moreLabel);
-        stageUi->addButton.setButtonText("+ Add");
-        stageUi->addButton.setTooltip(stage == InsertStage::Pre ? "Add a Pre insert (VST3)" : "Add a Post insert (VST3)");
-        stageUi->addButton.onClick = [this, stage] {
+        const InsertStage stage = ui == &preInserts_ ? InsertStage::Pre : InsertStage::Post;
+        styleSectionCaption(ui->caption, stage == InsertStage::Pre ? "PRE INSERTS" : "POST INSERTS");
+        addChildComponent(ui->caption);
+        ui->listViewport.setViewedComponent(&ui->listContent, false);
+        ui->listViewport.setScrollBarsShown(true, false);
+        ui->listViewport.setScrollBarThickness(kInsertListScrollBarPx);
+        ui->listViewport.setScrollOnDragMode(juce::Viewport::ScrollOnDragMode::never);
+        addChildComponent(ui->listViewport);
+        ui->addButton.setButtonText("+ Add");
+        ui->addButton.setTooltip(stage == InsertStage::Pre ? "Add a Pre insert (VST3)" : "Add a Post insert (VST3)");
+        ui->addButton.onClick = [this, stage] {
             if (bindings_.inserts.requestAdd)
             {
                 bindings_.inserts.requestAdd(trackId_, stage);
             }
         };
-        addChildComponent(stageUi->addButton);
+        addChildComponent(ui->addButton);
     }
 
     // Sends ------------------------------------------------------------------------------------
@@ -235,7 +224,9 @@ MixerChannelStrip::MixerChannelStrip(const TrackId trackId, const MixerStripBind
     styleSmallCaption(sendsExtraLabel_, {});
     addChildComponent(sendsExtraLabel_);
 
-    // Fader / pan / meter ----------------------------------------------------------------------
+    // Pan / fader / meter ----------------------------------------------------------------------
+    styleSmallCaption(panCaption_, "Pan");
+    addChildComponent(panCaption_);
     pan_.onPanChanged = [this](const float pan) {
         if (!panGuard_ && bindings_.setStereoPan)
         {
@@ -285,6 +276,20 @@ void MixerChannelStrip::applyLayout(const ComputedLayout& layout)
     resized();
 }
 
+void MixerChannelStrip::layoutInsertList(InsertStageUi& ui)
+{
+    const int n = static_cast<int>(ui.rows.size());
+    const int viewW = ui.listViewport.getWidth();
+    const int viewH = ui.listViewport.getHeight();
+    const bool needsBar = n * kInsertRowHeightPx > viewH;
+    const int rowW = juce::jmax(0, viewW - (needsBar ? kInsertListScrollBarPx : 0));
+    ui.listContent.setSize(juce::jmax(1, rowW), juce::jmax(1, n * kInsertRowHeightPx));
+    for (int r = 0; r < n; ++r)
+    {
+        ui.rows[static_cast<size_t>(r)]->setBounds(0, r * kInsertRowHeightPx, rowW, kInsertRowHeightPx - 1);
+    }
+}
+
 void MixerChannelStrip::resized()
 {
     const ComputedLayout& L = layout_;
@@ -293,10 +298,14 @@ void MixerChannelStrip::resized()
     {
         auto h = L.header;
         h.removeFromTop(2);
-        nameLabel_.setBounds(h.removeFromTop(kHeaderNameRowHeightPx));
-        kindLabel_.setBounds(h.removeFromTop(kHeaderKindRowHeightPx));
+        auto nameRow = h.removeFromTop(kHeaderNameRowHeightPx);
+        nameRow.removeFromLeft(kHeaderActiveStripeWidthPx + 2); // keep the name clear of the active stripe
+        nameLabel_.setBounds(nameRow);
+        auto kindRow = h.removeFromTop(kHeaderKindRowHeightPx);
+        kindRow.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
+        kindLabel_.setBounds(kindRow);
         auto cells = h.removeFromTop(kHeaderButtonsRowHeightPx);
-        // Cells in a fixed order; invisible ones take no space.
+        cells.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
         for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
         {
             if (!c->isVisible())
@@ -353,7 +362,7 @@ void MixerChannelStrip::resized()
         }
     }
 
-    // Inserts
+    // Inserts: caption at the top, "+ Add" at the bottom, the list takes the rest and scrolls.
     const bool audioPath = kind_ != TrackKind::Midi;
     for (InsertStageUi* ui : { &preInserts_, &postInserts_ })
     {
@@ -361,32 +370,16 @@ void MixerChannelStrip::resized()
         const bool show = !b.isEmpty() && audioPath;
         ui->caption.setVisible(show);
         ui->addButton.setVisible(show);
+        ui->listViewport.setVisible(show);
         if (!show)
         {
-            for (auto& r : ui->rows)
-            {
-                r->setVisible(false);
-            }
-            ui->moreLabel.setVisible(false);
             continue;
         }
         ui->caption.setBounds(b.removeFromTop(kSectionCaptionHeightPx));
-        const int shownRows = static_cast<int>(ui->lastRows.size());
-        const bool overflow = shownRows > kInsertRowsPerStage;
-        for (int r = 0; r < kInsertRowsPerStage; ++r)
-        {
-            auto rowArea = b.removeFromTop(kInsertRowHeightPx).reduced(0, 1);
-            const bool lastRowIsMore = overflow && r == kInsertRowsPerStage - 1;
-            const bool rowVisible = r < shownRows && !lastRowIsMore;
-            ui->rows[static_cast<size_t>(r)]->setVisible(rowVisible);
-            ui->rows[static_cast<size_t>(r)]->setBounds(rowArea);
-            if (lastRowIsMore)
-            {
-                ui->moreLabel.setBounds(rowArea);
-            }
-        }
-        ui->moreLabel.setVisible(overflow);
-        ui->addButton.setBounds(b.removeFromTop(kInsertRowHeightPx).reduced(0, 1));
+        ui->addButton.setBounds(b.removeFromBottom(kInsertAddRowHeightPx).reduced(0, 1));
+        b.removeFromBottom(1);
+        ui->listViewport.setBounds(b.withHeight(juce::jmax(0, b.getHeight())));
+        layoutInsertList(*ui);
     }
 
     // Sends
@@ -419,36 +412,46 @@ void MixerChannelStrip::resized()
         }
     }
 
-    // Lower band: pan + fader | meter
+    // Lower band: one caption row ("Pan" left, "Out" over the meter column), the Inspector's pan
+    // field across the whole band (the Inspector gives it its full column width too), then the
+    // fader column at the left and the meter column at the right, both starting on the same y.
     {
-        auto fb = L.band(Section::Faders);
+        const auto fb = L.band(Section::Faders);
+        const auto mb = L.band(Section::Meters);
         const bool showFader = !fb.isEmpty() && audioPath;
+        const bool showMeter = !mb.isEmpty() && audioPath;
+        panCaption_.setVisible(showFader);
         pan_.setVisible(showFader);
         fader_.setVisible(showFader);
-        if (showFader)
-        {
-            pan_.setBounds(fb.removeFromTop(kPanRowHeightPx).reduced(2, 1));
-            fb.removeFromTop(2);
-            // The fader column is centred inside its band (wide scale + travel = 52 px).
-            const int faderW = juce::jmin(fb.getWidth(), ChannelFaderComponent::preferredWidth());
-            fader_.setBounds(fb.getX() + (fb.getWidth() - faderW) / 2, fb.getY(), faderW, fb.getHeight());
-        }
-        auto mb = L.band(Section::Meters);
-        const bool showMeter = !mb.isEmpty() && audioPath;
         meterCaption_.setVisible(showMeter);
         meter_.setVisible(showMeter);
-        if (showMeter)
+        if (showFader || showMeter)
         {
-            meterCaption_.setBounds(mb.removeFromTop(kSectionCaptionHeightPx));
-            // Align the meter bars with the fader travel: skip the pan row height on the fader side.
+            auto band = L.lowerBand;
+            auto captionRow = band.removeFromTop(kPanCaptionHeightPx);
+            if (showMeter)
+            {
+                meterCaption_.setBounds(captionRow.withX(mb.getX()).withWidth(mb.getWidth()));
+            }
             if (showFader)
             {
-                mb.removeFromTop(juce::jmax(0, kPanRowHeightPx + 2 - kSectionCaptionHeightPx));
+                panCaption_.setBounds(captionRow.withWidth(showMeter ? juce::jmax(10, mb.getX() - captionRow.getX()) : captionRow.getWidth()));
+                pan_.setBounds(band.removeFromTop(kPanFieldHeightPx));
+                band.removeFromTop(2);
             }
-            const int meterW = juce::jmin(mb.getWidth(), LevelMeterComponent::preferredWidthFor(2, mb.getWidth() >= 44));
-            meter_.setShowScale(true);
-            meter_.setShowScaleLabels(mb.getWidth() >= 44);
-            meter_.setBounds(mb.getX() + (mb.getWidth() - meterW) / 2, mb.getY(), meterW, mb.getHeight());
+            if (showFader)
+            {
+                // The fader column is centred inside its band (wide scale + travel = 52 px).
+                const int faderW = juce::jmin(fb.getWidth(), ChannelFaderComponent::preferredWidth());
+                fader_.setBounds(fb.getX() + (fb.getWidth() - faderW) / 2, band.getY(), faderW, band.getHeight());
+            }
+            if (showMeter)
+            {
+                const int meterW = juce::jmin(mb.getWidth(), LevelMeterComponent::preferredWidthFor(2, mb.getWidth() >= 44));
+                meter_.setShowScale(true);
+                meter_.setShowScaleLabels(mb.getWidth() >= 44);
+                meter_.setBounds(mb.getX() + (mb.getWidth() - meterW) / 2, band.getY(), meterW, band.getHeight());
+            }
         }
     }
 }
@@ -457,33 +460,18 @@ void MixerChannelStrip::resized()
 
 void MixerChannelStrip::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(kStripBgArgb));
-    // Header plate (active rows use the arrangement header's active colour and stripe).
-    const juce::Rectangle<int> header(0, 0, getWidth(), layout_.header.getBottom() + 2);
-    g.setColour(juce::Colour(isActive_ ? kHeaderActiveArgb : kHeaderInactiveArgb));
-    g.fillRect(header);
-    if (isActive_)
-    {
-        g.setColour(juce::Colour(kActiveStripeArgb));
-        g.fillRect(header.withHeight(3));
-    }
-    // Section separators.
-    g.setColour(juce::Colour(kSeparatorArgb));
-    for (int i = 0; i < kSectionCount; ++i)
-    {
-        const auto b = layout_.bands[static_cast<size_t>(i)];
-        const Section s = static_cast<Section>(i);
-        if (b.isEmpty() || s == Section::Faders || s == Section::Meters)
-        {
-            continue;
-        }
-        g.fillRect(b.getX(), b.getY() - 2, b.getWidth(), 1);
-    }
+    // Upper sections: the Inspector column's lighter plate; lower band: the channel panel's dark plate.
+    const juce::Colour inspectorBg = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId);
+    g.fillAll(inspectorBg);
     if (!layout_.lowerBand.isEmpty())
     {
-        g.fillRect(layout_.lowerBand.getX(), layout_.lowerBand.getY() - 2, layout_.lowerBand.getWidth(), 1);
+        g.setColour(juce::Colour(kLowerBandBgArgb));
+        g.fillRect(juce::Rectangle<int>(0, layout_.lowerBand.getY() - kSectionGapPx / 2, getWidth(), getHeight() - (layout_.lowerBand.getY() - kSectionGapPx / 2)));
     }
+    // Header plate: identical colours / stripe to the arrangement header.
+    drawHeaderPlate(g, juce::Rectangle<int>(0, 0, getWidth(), layout_.header.getBottom() + 2), isActive_);
     // Right edge.
+    g.setColour(juce::Colour(kSeparatorArgb));
     g.fillRect(getWidth() - 1, 0, 1, getHeight());
     // Dimmed placeholders for bands this kind does not use (keeps the alignment legible).
     g.setColour(juce::Colour(kDimTextArgb));
@@ -601,10 +589,12 @@ void MixerChannelStrip::applyKindLayout(const TrackKind kind)
     armCell_.setVisible(audioRow || instrumentRow || midiRow);
     meterCaption_.setText(isMaster_ ? "Stereo Out" : "Out", juce::dontSendNotification);
     meter_.clear();
-    preInserts_.lastRows.clear();
-    preInserts_.populated = false;
-    postInserts_.lastRows.clear();
-    postInserts_.populated = false;
+    for (InsertStageUi* ui : { &preInserts_, &postInserts_ })
+    {
+        ui->lastRows.clear();
+        ui->populated = false;
+        ui->rows.clear();
+    }
     resized();
     repaint();
 }
@@ -859,7 +849,7 @@ void MixerChannelStrip::routingRowChanged(const int rowIndex)
 
 void MixerChannelStrip::refreshInserts(const InsertStage stage, const std::vector<InspectorInsertRow>& rows)
 {
-    InsertStageUi& ui = stage == InsertStage::Pre ? preInserts_ : postInserts_;
+    InsertStageUi& ui = stageUi(stage);
     if (ui.populated && insertRowsEqual(ui.lastRows, rows))
     {
         return;
@@ -867,39 +857,69 @@ void MixerChannelStrip::refreshInserts(const InsertStage stage, const std::vecto
     ui.populated = true;
     ui.lastRows = rows;
     const int n = static_cast<int>(rows.size());
-    const bool overflow = n > kInsertRowsPerStage;
-    for (int r = 0; r < kInsertRowsPerStage; ++r)
+    // One row component per insert: reuse existing ones by position, create / drop the rest.
+    // Every row carries its own slot id, so the click / menu never act on a stale neighbour.
+    while (static_cast<int>(ui.rows.size()) > n)
+    {
+        ui.rows.pop_back();
+    }
+    while (static_cast<int>(ui.rows.size()) < n)
+    {
+        auto b = std::make_unique<InsertRowButton>();
+        b->setConnectedEdges(0);
+        InsertRowButton* const raw = b.get();
+        b->onClick = [this, raw] {
+            if (raw->slotId != kInvalidInsertSlotId && bindings_.inserts.requestEdit)
+            {
+                bindings_.inserts.requestEdit(trackId_, raw->slotId);
+            }
+        };
+        b->onRightClick = [this, stage, raw](const juce::MouseEvent& e) {
+            // Resolve the row's current index at click time (rows may have moved since creation).
+            InsertStageUi& u = stageUi(stage);
+            for (int r = 0; r < static_cast<int>(u.rows.size()); ++r)
+            {
+                if (u.rows[static_cast<size_t>(r)].get() == raw)
+                {
+                    showInsertRowMenu(stage, r, e);
+                    return;
+                }
+            }
+        };
+        ui.listContent.addAndMakeVisible(*b);
+        ui.rows.push_back(std::move(b));
+    }
+    const juce::Colour face(stage == InsertStage::Pre ? kPreInsertRowArgb : kPostInsertRowArgb);
+    for (int r = 0; r < n; ++r)
     {
         InsertRowButton& b = *ui.rows[static_cast<size_t>(r)];
-        const bool lastRowIsMore = overflow && r == kInsertRowsPerStage - 1;
-        if (r < n && !lastRowIsMore)
-        {
-            const InspectorInsertRow& row = rows[static_cast<size_t>(r)];
-            ui.rowSlots[static_cast<size_t>(r)] = row.slotId;
-            b.setButtonText(row.displayName);
-            b.setTooltip(row.displayName + " — click: open editor; right-click: move / stage / remove");
-            const bool unavailable = row.displayName.endsWithIgnoreCase("(unavailable)");
-            b.setColour(juce::TextButton::textColourOffId, juce::Colour(unavailable ? kInsertUnavailableTextArgb : kNameTextArgb));
-        }
-        else
-        {
-            ui.rowSlots[static_cast<size_t>(r)] = kInvalidInsertSlotId;
-            b.setButtonText({});
-        }
+        const InspectorInsertRow& row = rows[static_cast<size_t>(r)];
+        b.slotId = row.slotId;
+        b.setButtonText(row.displayName);
+        b.setTooltip(row.displayName + (row.unavailable ? " (plug-in could not be loaded; the slot keeps its saved state)" : juce::String())
+                     + " — click: open editor; right-click: move / stage / remove");
+        b.setColour(juce::TextButton::buttonColourId, row.unavailable ? face.darker(0.35f) : face);
+        b.setColour(juce::TextButton::buttonOnColourId, face);
+        b.setColour(juce::TextButton::textColourOffId, juce::Colour(row.unavailable ? kInsertUnavailableTextArgb : kInsertRowTextArgb));
+        b.setColour(juce::ComboBox::outlineColourId, row.unavailable ? juce::Colour(kInsertUnavailableOutlineArgb) : face.darker(0.4f));
     }
-    ui.moreLabel.setText(overflow ? "+" + juce::String(n - (kInsertRowsPerStage - 1)) + " more (Inspector)" : juce::String(), juce::dontSendNotification);
-    resized();
+    layoutInsertList(ui);
+    repaint();
 }
 
 void MixerChannelStrip::showInsertRowMenu(const InsertStage stage, const int rowIndex, const juce::MouseEvent&)
 {
-    InsertStageUi& ui = stage == InsertStage::Pre ? preInserts_ : postInserts_;
-    const InsertSlotId sid = ui.rowSlots[static_cast<size_t>(rowIndex)];
+    InsertStageUi& ui = stageUi(stage);
+    if (rowIndex < 0 || rowIndex >= static_cast<int>(ui.rows.size()))
+    {
+        return;
+    }
+    const InsertSlotId sid = ui.rows[static_cast<size_t>(rowIndex)]->slotId;
     if (sid == kInvalidInsertSlotId)
     {
         return;
     }
-    const int countInStage = static_cast<int>(ui.lastRows.size());
+    const int countInStage = static_cast<int>(ui.rows.size());
     juce::PopupMenu menu;
     menu.addItem(1, "Open editor", bindings_.inserts.requestEdit != nullptr);
     menu.addSeparator();
@@ -910,27 +930,37 @@ void MixerChannelStrip::showInsertRowMenu(const InsertStage stage, const int row
     menu.addItem(5, "Remove insert", bindings_.inserts.requestRemove != nullptr);
     juce::Component::SafePointer<MixerChannelStrip> self(this);
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(ui.rows[static_cast<size_t>(rowIndex)].get()),
-                       [self, stage, rowIndex](const int result) {
-                           if (self != nullptr && result > 0)
+                       [self, stage, sid](const int result) {
+                           if (self == nullptr || result <= 0)
                            {
-                               (void)self->performInsertRowAction(stage, rowIndex, result);
+                               return;
+                           }
+                           // Re-resolve the row by its slot id: the list may have changed while the menu was open.
+                           InsertStageUi& u = self->stageUi(stage);
+                           for (int r = 0; r < static_cast<int>(u.rows.size()); ++r)
+                           {
+                               if (u.rows[static_cast<size_t>(r)]->slotId == sid)
+                               {
+                                   (void)self->performInsertRowAction(stage, r, result);
+                                   return;
+                               }
                            }
                        });
 }
 
 bool MixerChannelStrip::performInsertRowAction(const InsertStage stage, const int rowIndex, const int actionId)
 {
-    if (rowIndex < 0 || rowIndex >= kInsertRowsPerStage)
+    InsertStageUi& ui = stageUi(stage);
+    if (rowIndex < 0 || rowIndex >= static_cast<int>(ui.rows.size()))
     {
         return false;
     }
-    InsertStageUi& ui = stage == InsertStage::Pre ? preInserts_ : postInserts_;
-    const InsertSlotId sid = ui.rowSlots[static_cast<size_t>(rowIndex)];
+    const InsertSlotId sid = ui.rows[static_cast<size_t>(rowIndex)]->slotId;
     if (sid == kInvalidInsertSlotId)
     {
         return false;
     }
-    const int otherStageCount = static_cast<int>((stage == InsertStage::Pre ? postInserts_ : preInserts_).lastRows.size());
+    const int otherStageCount = static_cast<int>(stageUi(stage == InsertStage::Pre ? InsertStage::Post : InsertStage::Pre).rows.size());
     const TrackId tid = trackId_;
     switch (actionId)
     {
@@ -943,7 +973,11 @@ bool MixerChannelStrip::performInsertRowAction(const InsertStage stage, const in
         return false;
     case 3:
         // Gap below the next row (gap indices count rows before removal).
-        if (bindings_.inserts.requestReorderInStage) { bindings_.inserts.requestReorderInStage(tid, sid, rowIndex + 2); return true; }
+        if (bindings_.inserts.requestReorderInStage && rowIndex + 1 < static_cast<int>(ui.rows.size()))
+        {
+            bindings_.inserts.requestReorderInStage(tid, sid, rowIndex + 2);
+            return true;
+        }
         return false;
     case 4:
         if (bindings_.inserts.requestMoveToStageAtGap)
@@ -1212,21 +1246,70 @@ void MixerChannelStrip::commitPreGainText(const juce::String& text)
     commitPreGain();
 }
 
+int MixerChannelStrip::insertRowCount(const InsertStage stage) const
+{
+    return static_cast<int>(stageUi(stage).rows.size());
+}
+
 int MixerChannelStrip::visibleInsertRowCount(const InsertStage stage) const
 {
-    const InsertStageUi& ui = stage == InsertStage::Pre ? preInserts_ : postInserts_;
+    const InsertStageUi& ui = stageUi(stage);
+    if (!ui.listViewport.isVisible())
+    {
+        return 0;
+    }
+    // Rows FULLY inside the viewport's capacity (its own height, not the content-limited view area).
+    const juce::Rectangle<int> visible(0, ui.listViewport.getViewPositionY(), ui.listViewport.getWidth(), ui.listViewport.getHeight());
     int n = 0;
     for (const auto& r : ui.rows)
     {
-        n += r->isVisible() ? 1 : 0;
+        n += visible.contains(r->getBounds()) ? 1 : 0;
     }
     return n;
 }
 
 juce::String MixerChannelStrip::insertRowText(const InsertStage stage, const int row) const
 {
-    const InsertStageUi& ui = stage == InsertStage::Pre ? preInserts_ : postInserts_;
-    return row >= 0 && row < kInsertRowsPerStage ? ui.rows[static_cast<size_t>(row)]->getButtonText() : juce::String();
+    const InsertStageUi& ui = stageUi(stage);
+    return row >= 0 && row < static_cast<int>(ui.rows.size()) ? ui.rows[static_cast<size_t>(row)]->getButtonText() : juce::String();
+}
+
+bool MixerChannelStrip::isInsertListScrollable(const InsertStage stage) const
+{
+    const InsertStageUi& ui = stageUi(stage);
+    return ui.listViewport.isVisible() && static_cast<int>(ui.rows.size()) * kInsertRowHeightPx > ui.listViewport.getHeight();
+}
+
+bool MixerChannelStrip::scrollInsertListToRow(const InsertStage stage, const int row)
+{
+    InsertStageUi& ui = stageUi(stage);
+    if (row < 0 || row >= static_cast<int>(ui.rows.size()))
+    {
+        return false;
+    }
+    const juce::Rectangle<int> b = ui.rows[static_cast<size_t>(row)]->getBounds();
+    const int viewH = ui.listViewport.getHeight();
+    int y = ui.listViewport.getViewPositionY();
+    if (b.getY() < y)
+    {
+        y = b.getY();
+    }
+    else if (b.getBottom() > y + viewH)
+    {
+        y = b.getBottom() - viewH;
+    }
+    ui.listViewport.setViewPosition(0, juce::jmax(0, y));
+    return true;
+}
+
+juce::Rectangle<int> MixerChannelStrip::insertListBounds(const InsertStage stage) const
+{
+    return stageUi(stage).listViewport.getBounds();
+}
+
+juce::Rectangle<int> MixerChannelStrip::insertAddButtonBounds(const InsertStage stage) const
+{
+    return stageUi(stage).addButton.getBounds();
 }
 
 bool MixerChannelStrip::sendRowVisible(const int row) const
@@ -1354,12 +1437,26 @@ bool MixerChannelStrip::verifyChildrenInsideBands(juce::String& report) const
     for (const InsertStageUi* ui : { &preInserts_, &postInserts_ })
     {
         const auto band = layout_.band(ui == &preInserts_ ? Section::PreInserts : Section::PostInserts);
-        for (const auto& r : ui->rows)
-        {
-            check(*r, "insert row", band);
-        }
+        check(ui->caption, "insert caption", band);
+        check(ui->listViewport, "insert list", band);
         check(ui->addButton, "insert add", band);
-        check(ui->moreLabel, "insert more", band);
+        // Rows are clipped by their viewport: a row must never be laid out outside the list column.
+        if (ui->listViewport.isVisible())
+        {
+            for (const auto& r : ui->rows)
+            {
+                if (r->getX() < 0 || r->getRight() > ui->listContent.getWidth())
+                {
+                    report << "    " << nameLabel_.getText() << ": insert row leaves the list column\n";
+                    ok = false;
+                }
+            }
+            if (ui->listViewport.getHeight() < kInsertRowHeightPx)
+            {
+                report << "    " << nameLabel_.getText() << ": insert list shows less than one row (" << ui->listViewport.getHeight() << " px)\n";
+                ok = false;
+            }
+        }
     }
     for (int r = 0; r < kSendRows; ++r)
     {
@@ -1367,9 +1464,21 @@ bool MixerChannelStrip::verifyChildrenInsideBands(juce::String& report) const
         check(sends_[static_cast<size_t>(r)].dest, "send destination", layout_.band(Section::Sends));
         check(sends_[static_cast<size_t>(r)].amount, "send amount", layout_.band(Section::Sends));
     }
-    check(pan_, "pan", layout_.band(Section::Faders));
+    check(panCaption_, "pan caption", layout_.lowerBand);
+    check(meterCaption_, "meter caption", layout_.lowerBand);
+    check(pan_, "pan", layout_.lowerBand);
     check(fader_, "fader", layout_.band(Section::Faders));
     check(meter_, "meter", layout_.band(Section::Meters));
+    if (fader_.isVisible() && meter_.isVisible() && fader_.getY() != meter_.getY())
+    {
+        report << "    " << nameLabel_.getText() << ": fader and meter do not start on the same y\n";
+        ok = false;
+    }
+    if (pan_.isVisible() && pan_.getHeight() != kPanFieldHeightPx)
+    {
+        report << "    " << nameLabel_.getText() << ": pan field is " << pan_.getHeight() << " px, the Inspector's is " << kPanFieldHeightPx << "\n";
+        ok = false;
+    }
     if (fader_.isVisible() && fader_.getHeight() < 60)
     {
         report << "    " << nameLabel_.getText() << ": fader too short (" << fader_.getHeight() << " px)\n";

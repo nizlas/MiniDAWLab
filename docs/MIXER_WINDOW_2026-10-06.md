@@ -101,10 +101,54 @@ Mixer` menu tick. Not performed: listening; a real mouse drag on a mixer fader.
 
 ## 4. Known limitations
 
-* Insert reordering in the mixer is a context menu, not drag-and-drop; more than three inserts
-  per stage show "+N more (Inspector)".
+* Insert reordering in the mixer is a context menu, not drag-and-drop (since 1.1.17 every insert
+  of a chain is listed; the list scrolls).
 * The mixer polls at 10 Hz like the Inspector; a change made in one view appears in the other on
   the next tick (≤ 100 ms).
 * `--stability-live-midi` on the TSE copy fails a pre-existing header-cell geometry check for
   the fixture's MIDI rows (project-dependent lane height); the scenario passes on its own
   fixture. Recorded in the backlog, untouched here.
+
+## 5. 1.1.17 — visual consistency, the Inspector's pan, draggable section dividers, unlimited inserts
+
+**What changed (UI only; engine, plug-in lifecycle, routing, metering and project data untouched).**
+
+* **Pan**: the strip's pan is the Inspector's own `InspectorPanControl`, now at the Inspector's
+  36 px height and the full band width (1.1.16 gave it 22 px, which hid the stick and the blue
+  fill). Stick above the readout, the same drag / Ctrl-click reset / double-click text entry, the
+  same blue fill from the centre, bound to the strip's TrackId.
+* **Colours**: header plate = the arrangement header's (`drawHeaderPlate`, shared with
+  `TrackHeaderView`); upper sections = the Inspector column's plate; fader / meter band keeps the
+  channel panel's dark plate; Pre insert rows muted blue, Post rows muted orange (before / after
+  the fader); unavailable plug-ins: red outline + pale text + the host's "(unavailable)" suffix.
+* **Dividers**: grey lines in every gap between consecutive visible bands and against the fader /
+  meter band, running across the strips, their gaps and Stereo Out; dragging (vertical resize
+  cursor, ±5 px hit zone) moves height between the two adjacent bands through one central layout
+  for every strip; routing / pre-gain / sends keep their full content height as minimum, insert
+  bands can shrink to caption + one row + "+ Add" (the list scrolls), faders keep ≥ 118 px; the
+  last divider grows a section only into the fader band's spare height; a hidden section leaves
+  no divider and returns at its stored height; a low window scrolls instead of rewriting heights.
+* **Inserts**: every insert of a chain is a row in a scrolling list (`juce::Viewport`, rows
+  clipped at the list edge for painting and hit-testing, wheel consumed only while the list can
+  scroll); the band height decides how many rows are visible; caption and "+ Add" stay outside
+  the list; each row carries its `InsertSlotId` and the context menu re-resolves the slot when it
+  closes, so reused rows never act on another plug-in.
+* **Persistence**: `MIXER_SECTION_HEIGHTS` in `ui-layout.xml` (one write per completed drag),
+  bounds / flags / header width unchanged, defaults for older files, invalid values clamped.
+
+**Verified** (`--stability-mixer`, Debug and Release, PASS; `MixerFocusedTests` 107 checks; PNGs
+in `docs/evidence/mixer-1.1.17-2026-10-06/`):
+
+| Check | Result |
+|---|---|
+| Handler-level press / drag / release on the stick of a NON-active strip (synthesized `MouseEvent`s on the real `InspectorPanControl`) | pan −0.60 then +0.75 on that row only; the Inspector shows the same value once the row is active (0.750 = 0.750); Ctrl-click → centre (focused test) |
+| Pan field geometry | 36 px like the Inspector, full band width; `mixer-pan-left/right/centre.png` show stick, blue fill from the centre and readout |
+| Dividers with a 900 px window | 5 dividers with every section shown; Pre|Post +54 px → Pre 87 / Post 51 (Post stops at its minimum); Sends|faders +60 → Sends 155; hiding Post inserts → 4 dividers and the kept heights return on show; alignment (`verifyLayout`) holds in every state |
+| Six Post inserts (DAL Mono Delay) on the audio row | 6 rows listed, 1 visible in the 51 px band, list scrollable, scroll to the last row, "Remove" on the last row removes exactly its slot (5 remain in order), Post|Sends +90 → 111 px band shows 4 rows |
+| Persistence | `MIXER_SECTION_HEIGHTS preInserts=87 postInserts=111` stored after the drags; a 500 px window keeps them (strip 727 px, scroll) and `TRACK_HEADER_COLUMN` stays |
+| Meters while playing | unchanged: three rows + Stereo Out, Inspector = mixer on the active row |
+
+Real OS mouse input (cursor shape on a divider, a human drag) was not automated — the drag model
+runs through the overlay's own handlers in the tests and the scenario. Manual check: hover the
+thin grey line between two sections (↕ cursor), drag down/up, see every strip and Stereo Out move
+together; hover the pan stick, drag left / right, Ctrl-click to centre.

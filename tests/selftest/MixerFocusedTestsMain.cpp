@@ -27,8 +27,10 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <vector>
 
 namespace
@@ -195,6 +197,70 @@ namespace
         check(f.bands == a.bands && f.header == a.header, "layout: identical inputs -> identical bands (alignment across strips)");
     }
 
+    // --- Section heights + dividers --------------------------------------------------------------------
+    void testDividers()
+    {
+        using namespace mixer_layout;
+        SectionVisibility all;
+        SectionHeights h;
+        check(h.get(Section::PreInserts) == kInsertsDefaultSectionHeightPx && h.get(Section::Routing) == kRoutingSectionHeightPx,
+              "heights: defaults = two insert rows, routing / pre-gain / sends at their full content height");
+        h.set(Section::PreInserts, 10);
+        check(h.get(Section::PreInserts) == kInsertsMinSectionHeightPx, "heights: a too-small stored height clamps to the minimum (controls stay reachable)");
+        h.set(Section::Routing, 50);
+        check(h.get(Section::Routing) == kRoutingSectionHeightPx, "heights: routing can never shrink below its four rows");
+        h.set(Section::Faders, 300);
+        check(h.get(Section::Faders) == 0, "heights: the lower band has no stored height");
+        h = SectionHeights{};
+
+        const ComputedLayout L = computeLayout(all, h, kStripWidthPx, 900);
+        const std::vector<Divider> d = dividersFor(L, all);
+        check(d.size() == 5, "dividers: five with every section shown (4 between upper bands + 1 to the lower band)");
+        check(d[0].above == Section::Routing && d[0].below == Section::PreGain && d[4].above == Section::Sends && d[4].below == Section::Count,
+              "dividers: ordered top to bottom, last one against the lower band");
+        check(d[2].lineY > L.band(Section::PreInserts).getBottom() - 1 && d[2].lineY < L.band(Section::PostInserts).getY(),
+              "dividers: a line sits in the gap between its two bands");
+
+        // Hide Post inserts: its divider disappears, no empty band remains.
+        SectionVisibility noPost = all;
+        noPost.set(Section::PostInserts, false);
+        const ComputedLayout L2 = computeLayout(noPost, h, kStripWidthPx, 900);
+        const std::vector<Divider> d2 = dividersFor(L2, noPost);
+        check(d2.size() == 4 && d2[2].above == Section::PreInserts && d2[2].below == Section::Sends,
+              "dividers: a hidden section leaves no divider and its neighbours meet");
+        check(L2.band(Section::PostInserts).isEmpty() && L2.band(Section::Sends).getY() == L2.band(Section::PreInserts).getBottom() + kSectionGapPx,
+              "dividers: no empty band where the hidden section was");
+
+        // Drag Pre|Post down: Pre grows, Post shrinks, total constant, Post never below minimum.
+        const SectionHeights after = applyDividerDrag(h, all, d[2], 54, 900);
+        check(after.get(Section::PreInserts) + after.get(Section::PostInserts) == h.get(Section::PreInserts) + h.get(Section::PostInserts),
+              "drag: height moves between the two adjacent bands (total constant)");
+        check(after.get(Section::PostInserts) == kInsertsMinSectionHeightPx && after.get(Section::PreInserts) == 2 * kInsertsDefaultSectionHeightPx - kInsertsMinSectionHeightPx,
+              "drag: the band below stops at its minimum, the band above gets the rest");
+        const SectionHeights up = applyDividerDrag(after, all, d[2], -200, 900);
+        check(up.get(Section::PreInserts) == kInsertsMinSectionHeightPx && up.get(Section::PostInserts) == 2 * kInsertsDefaultSectionHeightPx - kInsertsMinSectionHeightPx,
+              "drag: upwards the band above stops at ITS minimum");
+        // Routing | Pre-gain: both at their minimum -> nothing to redistribute.
+        check(applyDividerDrag(h, all, d[0], 30, 900) == h && applyDividerDrag(h, all, d[0], -30, 900) == h,
+              "drag: two bands at their minimum cannot move their divider");
+        // Against the lower band: grow Sends into the fader band's spare height only.
+        const int spare = L.lowerBand.getHeight() - kLowerBandMinHeightPx;
+        check(spare > 0, "drag: a 900 px strip has spare fader height");
+        const SectionHeights grown = applyDividerDrag(h, all, d[4], 10000, 900);
+        check(grown.get(Section::Sends) == kSendsSectionHeightPx + spare, "drag: the last divider grows the band above only into the fader band's spare height");
+        const ComputedLayout L3 = computeLayout(all, grown, kStripWidthPx, 900);
+        check(L3.lowerBand.getHeight() == kLowerBandMinHeightPx && L3.totalHeight == 900, "drag: faders keep their usable minimum, the strip does not grow");
+        // In a low window (no spare) the last divider can only shrink the band above.
+        const SectionHeights low = applyDividerDrag(grown, all, d[4], 100, 300);
+        check(low == grown, "drag: without spare height the band above cannot grow");
+        const SectionHeights shrunk = applyDividerDrag(grown, all, d[4], -10000, 300);
+        check(shrunk.get(Section::Sends) == kSendsSectionHeightPx, "drag: shrinking back down to the minimum always works");
+        // Stored heights are display-clamped, never rewritten, by a low window.
+        const ComputedLayout L4 = computeLayout(all, grown, kStripWidthPx, 300);
+        check(L4.totalHeight == minimumStripHeight(all, grown) && L4.band(Section::Sends).getHeight() == grown.get(Section::Sends),
+              "layout: a low window keeps the desired heights and grows the strip (owner scrolls)");
+    }
+
     // --- MixerChannelStrip (offscreen) ------------------------------------------------------------
     struct StripHarness
     {
@@ -255,8 +321,26 @@ namespace
             bindings.isMonitorOn = [](TrackId) { return false; };
             bindings.armAvailable = [](TrackId) { return true; };
             bindings.isRecordArmed = [](TrackId) { return false; };
-            bindings.inserts.getInsertRows = [](TrackId) { return std::vector<InspectorInsertRow>{}; };
+            // Fake insert chain per track: `insertRows[tid]`; the seam records every action's ids.
+            bindings.inserts.getInsertRows = [this](const TrackId id) {
+                const auto it = insertRows.find(id);
+                return it != insertRows.end() ? it->second : std::vector<InspectorInsertRow>{};
+            };
+            bindings.inserts.requestEdit = [this](const TrackId id, const InsertSlotId sid) { calls.push_back("edit:" + juce::String((juce::int64)id) + ":" + juce::String((juce::int64)sid)); };
+            bindings.inserts.requestRemove = [this](const TrackId id, const InsertSlotId sid) {
+                calls.push_back("remove:" + juce::String((juce::int64)id) + ":" + juce::String((juce::int64)sid));
+                auto& rows = insertRows[id];
+                rows.erase(std::remove_if(rows.begin(), rows.end(), [sid](const InspectorInsertRow& r) { return r.slotId == sid; }), rows.end());
+            };
+            bindings.inserts.requestReorderInStage = [this](const TrackId id, const InsertSlotId sid, const int gap) {
+                calls.push_back("reorder:" + juce::String((juce::int64)id) + ":" + juce::String((juce::int64)sid) + ":" + juce::String(gap));
+            };
+            bindings.inserts.requestMoveToStageAtGap = [this](const TrackId id, const InsertSlotId sid, const InsertStage st, const int gap) {
+                calls.push_back("stage:" + juce::String((juce::int64)id) + ":" + juce::String((juce::int64)sid) + ":" + juce::String(st == InsertStage::Pre ? "pre" : "post") + ":" + juce::String(gap));
+            };
         }
+
+        std::map<TrackId, std::vector<InspectorInsertRow>> insertRows;
 
         std::shared_ptr<const SessionSnapshot> snap() const { return session.loadSessionSnapshotForAudioThread(); }
         const Track& track(const TrackId id) const
@@ -313,7 +397,8 @@ namespace
         check(h.session.getActiveTrackId() == h.a, "strip: no action required changing the active track");
         strip.refreshFromSession(*h.snap(), false);
         juce::String report;
-        check(strip.verifyChildrenInsideBands(report), ("strip: every visible control lies inside its band (audio)\n" + report).toRawUTF8());
+        const bool audioBandsOk = strip.verifyChildrenInsideBands(report);
+        check(audioBandsOk, ("strip: every visible control lies inside its band (audio)\n" + report).toRawUTF8());
 
         // Refresh never fights the user: a value field with focus is left alone (simulated by the
         // guard path: dragging flag is private, so exercise the text path through commit instead).
@@ -364,7 +449,8 @@ namespace
         masterStrip.collectMeterInterest(masterInterest);
         check(masterInterest.empty(), "strip: the Stereo Out strip never claims a bank slot (its window is the master's)");
         report.clear();
-        check(masterStrip.verifyChildrenInsideBands(report), ("strip: every visible control inside its band (Stereo Out)\n" + report).toRawUTF8());
+        const bool masterBandsOk = masterStrip.verifyChildrenInsideBands(report);
+        check(masterBandsOk, ("strip: every visible control inside its band (Stereo Out)\n" + report).toRawUTF8());
 
         MixerChannelStrip midiStrip(h.midi, h.bindings, &hub);
         midiStrip.setBounds(0, 0, mixer_layout::kStripWidthPx, 760);
@@ -379,6 +465,78 @@ namespace
         check(midiStrip.baseButtonVisible(track_strip_glyphs::StripButtonKind::Power) && midiStrip.baseButtonVisible(track_strip_glyphs::StripButtonKind::Monitor)
                   && midiStrip.baseButtonVisible(track_strip_glyphs::StripButtonKind::Arm),
               "strip: MIDI row keeps Power / Mute / Monitor / R");
+
+        // Pan: the Inspector's component at the Inspector's 36 px; a handler-level drag on the stick
+        // of this NON-active strip pans track B (press on the stick, drag to the x for -0.5, release).
+        check(strip.pan().isVisible() && strip.pan().getHeight() == mixer_layout::kPanFieldHeightPx, "pan: the strip gives the Inspector's pan field its 36 px");
+        {
+            InspectorPanControl& pan = strip.pan();
+            strip.pan().setPan(0.0f, juce::dontSendNotification);
+            const juce::Rectangle<int> hit = pan.getMarkerHitRectForTest();
+            check(!hit.isEmpty(), "pan: the stick has a hit zone at 36 px");
+            const auto src = juce::Desktop::getInstance().getMainMouseSource();
+            const auto now = juce::Time::getCurrentTime();
+            const juce::Point<float> down = hit.getCentre().toFloat();
+            pan.mouseDown(juce::MouseEvent(src, down, juce::ModifierKeys::leftButtonModifier, 0.f, 0.f, 0.f, 0.f, 0.f, &pan, &pan, now, down, now, 1, false));
+            const juce::Point<float> to(pan.xForPanForTest(-0.5f), down.y);
+            pan.mouseDrag(juce::MouseEvent(src, to, juce::ModifierKeys::leftButtonModifier, 0.f, 0.f, 0.f, 0.f, 0.f, &pan, &pan, now, down, now, 1, true));
+            pan.mouseUp(juce::MouseEvent(src, to, juce::ModifierKeys(), 0.f, 0.f, 0.f, 0.f, 0.f, &pan, &pan, now, down, now, 1, false));
+            check(std::abs(h.track(h.b).getStereoPan() + 0.5f) < 0.03f, "pan: a stick drag on the strip pans track B (not the active track A)");
+            check(std::abs(h.track(h.a).getStereoPan()) < 1e-6f, "pan: track A untouched by B's drag");
+            // Ctrl-click = centre, exactly as in the Inspector.
+            pan.mouseDown(juce::MouseEvent(src, down, juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::ctrlModifier, 0.f, 0.f, 0.f, 0.f, 0.f, &pan, &pan, now, down, now, 1, false));
+            pan.mouseUp(juce::MouseEvent(src, down, juce::ModifierKeys(), 0.f, 0.f, 0.f, 0.f, 0.f, &pan, &pan, now, down, now, 1, false));
+            check(std::abs(h.track(h.b).getStereoPan()) < 1e-6f, "pan: Ctrl-click resets track B to centre");
+        }
+
+        // Inserts: six Post rows → every row exists, the default band shows two, the list scrolls,
+        // the last row's menu action acts on ITS slot (not a reused neighbour's).
+        {
+            std::vector<InspectorInsertRow> rows;
+            for (int i = 0; i < 6; ++i)
+            {
+                InspectorInsertRow r;
+                r.slotId = static_cast<InsertSlotId>(100 + i);
+                r.stage = InsertStage::Post;
+                r.displayName = "Delay " + juce::String(i + 1);
+                r.unavailable = (i == 3);
+                rows.push_back(r);
+            }
+            h.insertRows[h.b] = rows;
+            strip.refreshFromSession(*h.snap(), false);
+            check(strip.insertRowCount(InsertStage::Post) == 6, "inserts: all six rows exist in the strip");
+            check(strip.visibleInsertRowCount(InsertStage::Post) == 2 && strip.isInsertListScrollable(InsertStage::Post),
+                  "inserts: the default band shows two rows and the list scrolls");
+            check(strip.insertAddButtonBounds(InsertStage::Post).getY() >= strip.insertListBounds(InsertStage::Post).getBottom(),
+                  "inserts: '+ Add' sits below the list, outside it");
+            check(strip.scrollInsertListToRow(InsertStage::Post, 5) && strip.visibleInsertRowCount(InsertStage::Post) == 2,
+                  "inserts: scrolling to the last row keeps two rows visible");
+            h.calls.clear();
+            check(strip.performInsertRowAction(InsertStage::Post, 5, 1) && h.calls.back() == "edit:" + juce::String((juce::int64)h.b) + ":105",
+                  "inserts: the last row opens ITS slot (105) on track B");
+            check(strip.performInsertRowAction(InsertStage::Post, 5, 4) && h.calls.back() == "stage:" + juce::String((juce::int64)h.b) + ":105:pre:0",
+                  "inserts: 'move to Pre' sends the row's slot to the end of the empty Pre chain");
+            check(strip.performInsertRowAction(InsertStage::Post, 2, 3) && h.calls.back() == "reorder:" + juce::String((juce::int64)h.b) + ":102:4",
+                  "inserts: 'move down' reorders the row's own slot");
+            check(!strip.performInsertRowAction(InsertStage::Post, 5, 3), "inserts: 'move down' on the last row is refused");
+            check(strip.performInsertRowAction(InsertStage::Post, 5, 5) && h.calls.back() == "remove:" + juce::String((juce::int64)h.b) + ":105",
+                  "inserts: 'remove' on the last row removes slot 105");
+            strip.refreshFromSession(*h.snap(), false);
+            check(strip.insertRowCount(InsertStage::Post) == 5 && strip.insertRowText(InsertStage::Post, 4) == "Delay 5",
+                  "inserts: after the remove the strip shows the five remaining rows in order");
+            // A taller band shows more rows: grow Post inserts through the layout model.
+            mixer_layout::SectionHeights tall;
+            tall.set(mixer_layout::Section::PostInserts, mixer_layout::kInsertsFixedChromeHeightPx + 5 * mixer_layout::kInsertRowHeightPx);
+            strip.setBounds(0, 0, mixer_layout::kStripWidthPx, 900);
+            strip.applyLayout(mixer_layout::computeLayout(all, tall, mixer_layout::kStripWidthPx, 900));
+            check(strip.visibleInsertRowCount(InsertStage::Post) == 5 && !strip.isInsertListScrollable(InsertStage::Post),
+                  "inserts: a band of five rows shows all five without a scroll bar");
+            juce::String report2;
+            const bool tallOk = strip.verifyChildrenInsideBands(report2);
+            check(tallOk, ("inserts: list and add button inside the band at every height\n" + report2).toRawUTF8());
+            strip.setBounds(0, 0, mixer_layout::kStripWidthPx, 760);
+            strip.applyLayout(layout);
+        }
 
         // Orphaning: a deleted row marks its strip.
         h.session.removeTrack(h.b);
@@ -428,6 +586,7 @@ int main()
     testTrackMeterBank();
     testLevelMeterHub();
     testSectionLayout();
+    testDividers();
     testStripBinding();
     testLayoutStore();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);

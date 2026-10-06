@@ -1,0 +1,14 @@
+﻿Danielssons Audio Lab 1.1.17 - final binaries (2026-10-06)
+
+Release exe : C:\Users\nicla\development\MiniDAWLab\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe
+  SHA256    : D0C55EEB7B4F3E172C91F64542FAD51C8F7644F5D6D2154C21571D85DF2FAB6D
+  version   : 1.1.17
+Debug exe   : C:\Users\nicla\development\MiniDAWLab\build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe
+  SHA256    : 2A58E657C872C9EBB50013628A9F138DD8186F8C497E5D55C5F9C65672C83D7A
+  version   : 1.1.17
+Installer   : C:\Users\nicla\development\MiniDAWLab\dist\DanielssonsAudioLab-1.1.17-Setup.exe
+  SHA256    : 7272B4A75E25D3FA5D722F108C5BD2596D1832FB6C7E8B9B874C1837BAB9C09E
+Portable zip: C:\Users\nicla\development\MiniDAWLab\dist\DanielssonsAudioLab-1.1.17.zip
+  SHA256    : 3D15AAE7E584037188FF648429EA43580544072D286D67E6013532A4082881B2
+  exe inside zip SHA256 equals Release build: True
+  staged exe SHA256 equals Release build    : True

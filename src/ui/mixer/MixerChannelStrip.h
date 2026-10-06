@@ -92,8 +92,17 @@ public:
     [[nodiscard]] juce::String preGainText() const { return preGainEditor_.getText(); }
     bool isPreGainVisible() const { return preGainEditor_.isVisible(); }
     void commitPreGainText(const juce::String& text);
+    /// Number of insert rows in the stage's list (every insert of the chain has a row).
+    [[nodiscard]] int insertRowCount(InsertStage stage) const;
+    /// Rows at least partly inside the list's visible area (what the band height lets you see).
     [[nodiscard]] int visibleInsertRowCount(InsertStage stage) const;
     [[nodiscard]] juce::String insertRowText(InsertStage stage, int row) const;
+    [[nodiscard]] bool isInsertListScrollable(InsertStage stage) const;
+    /// Scroll the stage's list so `row` is visible (false when there is no such row).
+    bool scrollInsertListToRow(InsertStage stage, int row);
+    /// Bounds of the stage's list viewport and the add button, in strip coordinates (tests).
+    [[nodiscard]] juce::Rectangle<int> insertListBounds(InsertStage stage) const;
+    [[nodiscard]] juce::Rectangle<int> insertAddButtonBounds(InsertStage stage) const;
     /// The insert row context-menu actions (1 open editor, 2 move up, 3 move down, 4 move to the
     /// other stage, 5 remove) — the menu calls this; tests call it directly. False = not applicable.
     bool performInsertRowAction(InsertStage stage, int row, int actionId);
@@ -134,11 +143,13 @@ private:
         bool hover_ = false;
     };
 
-    /// One insert row: click opens the editor, right-click offers move / stage / remove.
+    /// One insert row: click opens the editor, right-click offers move / stage / remove. Keeps
+    /// the slot it stands for, so a reused row can never act on another plug-in.
     class InsertRowButton final : public juce::TextButton
     {
     public:
         InsertRowButton() = default;
+        InsertSlotId slotId = kInvalidInsertSlotId;
         std::function<void(const juce::MouseEvent&)> onRightClick;
         void mouseUp(const juce::MouseEvent& e) override;
     };
@@ -177,12 +188,14 @@ private:
         bool guard = false;
     };
 
+    /// One stage's UI: caption and "+ Add" outside the list; the list itself is a vertical
+    /// `Viewport` over a column with one row button per insert (scrolls when the band is low).
     struct InsertStageUi
     {
         juce::Label caption;
-        std::array<std::unique_ptr<InsertRowButton>, mixer_layout::kInsertRowsPerStage> rows;
-        std::array<InsertSlotId, mixer_layout::kInsertRowsPerStage> rowSlots{};
-        juce::Label moreLabel;
+        juce::Viewport listViewport;
+        juce::Component listContent;
+        std::vector<std::unique_ptr<InsertRowButton>> rows;
         juce::TextButton addButton;
         std::vector<InspectorInsertRow> lastRows;
         bool populated = false;
@@ -194,7 +207,10 @@ private:
     void applyKindLayout(TrackKind kind);
     void refreshBaseButtons(const Track& track);
     void refreshInserts(InsertStage stage, const std::vector<InspectorInsertRow>& rows);
+    void layoutInsertList(InsertStageUi& ui);
     void showInsertRowMenu(InsertStage stage, int row, const juce::MouseEvent& e);
+    [[nodiscard]] InsertStageUi& stageUi(InsertStage stage) noexcept { return stage == InsertStage::Pre ? preInserts_ : postInserts_; }
+    [[nodiscard]] const InsertStageUi& stageUi(InsertStage stage) const noexcept { return stage == InsertStage::Pre ? preInserts_ : postInserts_; }
     void refreshSends(const Track& track, const SessionSnapshot& snap);
     void sendDestinationChanged(int row);
     void commitSendAmount(int row);
@@ -238,6 +254,9 @@ private:
     juce::Label sendsCaption_;
     std::array<SendRow, mixer_layout::kSendRows> sends_;
     juce::Label sendsExtraLabel_;
+    juce::Label panCaption_;
+    /// The Inspector's own pan field (same component, same 36 px height): stick + blue fill from
+    /// the centre + readout, drag / Ctrl-click / double-click text entry exactly as there.
     InspectorPanControl pan_;
     ChannelFaderComponent fader_;
     juce::Label meterCaption_;

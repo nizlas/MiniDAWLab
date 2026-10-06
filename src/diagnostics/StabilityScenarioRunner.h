@@ -690,6 +690,22 @@ struct StabilityRunnerHooks
         std::function<juce::String()> stripKindTexts; ///< "id:KIND,id:KIND,…" in strip order
         /// Add a Group row exactly like the add-track menu (temp copy only); returns its id.
         std::function<TrackId()> addGroupTrackLikeUi;
+        // --- 1.1.17: section heights / dividers, scrolling insert lists, the Inspector's pan ------
+        std::function<int(TrackId, bool preStage)> stripInsertRowCount;
+        std::function<int(TrackId, bool preStage)> stripVisibleInsertRowCount;
+        std::function<bool(TrackId, bool preStage)> stripInsertListScrollable;
+        std::function<bool(TrackId, bool preStage, int row)> stripScrollInsertListToRow;
+        std::function<juce::String(TrackId, bool preStage)> stripInsertListAndAddBounds;
+        std::function<int()> dividerCount;
+        /// Drag divider `index` by `deltaY` through the content's own drag path (model + callbacks).
+        std::function<bool(int index, int deltaY)> dragDivider;
+        std::function<juce::String()> sectionHeightsText;
+        /// Back to the default heights (and persist them) so a run starts from a known layout.
+        std::function<void()> resetSectionHeights;
+        std::function<float(TrackId)> stripPanValue;
+        std::function<float()> inspectorPanValue;
+        /// Handler-level press / drag / release on the strip's own pan control towards `targetPan`.
+        std::function<bool(TrackId, float targetPan)> stripPanDragLikeMouse;
     };
     MixerHooks mixer;
 };

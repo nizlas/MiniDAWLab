@@ -1,0 +1,112 @@
+﻿[ ok ] bank: three rows metered without overflow
+[ ok ] bank: membership follows the published set
+[ ok ] bank: audio-thread lookup uses the cached map
+[ ok ] bank: row 20 drained its own window
+[ ok ] bank: row 30 drained its own window
+[ ok ] bank: a row nothing was folded into reads empty
+[ ok ] bank: drain resets the window
+[ ok ] bank: re-publish keeps / frees / assigns
+[ ok ] bank: a retained row keeps its pending window across re-publish
+[ ok ] bank: new row empty, dropped row gone
+[ ok ] bank: folding an unmetered row is a no-op
+[ ok ] bank: overflow reports the rows that could not be metered
+[ ok ] bank: exactly kMaxSlots rows metered when full
+[ ok ] bank: empty publish frees everything
+[ ok ] hub: interest = union of the listeners, sorted, master excluded
+[ ok ] hub: both views received row 5's window exactly once
+[ ok ] hub: the two views saw the identical window (no one drained the other's peak)
+[ ok ] hub: every listener gets every drained row (views filter by their own id)
+[ ok ] hub: the Stereo Out window arrives under the Master row's id
+[ ok ] hub: one animation tick per listener per hub tick
+[ ok ] hub: an empty window is not delivered
+[ ok ] hub: overload acknowledgement reaches every view
+[ ok ] hub: a hidden mixer removes its rows from the metered set
+[ ok ] hub: no listeners -> nothing metered
+[ ok ] layout: with room the lower band stretches to fill the strip
+[ ok ] layout: a low window yields the minimum stack (owner scrolls)
+[ ok ] layout: every section fits the default 720 px window above the scroll bar
+[ ok ] layout: faders left, meters right in the lower band
+[ ok ] layout: a hidden section takes no space and the following sections move up
+[ ok ] layout: faders alone take the whole lower band
+[ ok ] layout: everything hidden leaves the header only
+[ ok ] layout: identical inputs -> identical bands (alignment across strips)
+[ ok ] heights: defaults = two insert rows, routing / pre-gain / sends at their full content height
+[ ok ] heights: a too-small stored height clamps to the minimum (controls stay reachable)
+[ ok ] heights: routing can never shrink below its four rows
+[ ok ] heights: the lower band has no stored height
+[ ok ] dividers: five with every section shown (4 between upper bands + 1 to the lower band)
+[ ok ] dividers: ordered top to bottom, last one against the lower band
+[ ok ] dividers: a line sits in the gap between its two bands
+[ ok ] dividers: a hidden section leaves no divider and its neighbours meet
+[ ok ] dividers: no empty band where the hidden section was
+[ ok ] drag: height moves between the two adjacent bands (total constant)
+[ ok ] drag: the band below stops at its minimum, the band above gets the rest
+[ ok ] drag: upwards the band above stops at ITS minimum
+[ ok ] drag: two bands at their minimum cannot move their divider
+[ ok ] drag: a 900 px strip has spare fader height
+[ ok ] drag: the last divider grows the band above only into the fader band's spare height
+[ ok ] drag: faders keep their usable minimum, the strip does not grow
+[ ok ] drag: without spare height the band above cannot grow
+[ ok ] drag: shrinking back down to the minimum always works
+[ ok ] layout: a low window keeps the desired heights and grows the strip (owner scrolls)
+[ ok ] strip: shows its own row's name and kind
+[ ok ] strip: track A stays the active track throughout
+[ ok ] strip: typed fader value reaches track B's session gain
+[ ok ] strip: the active track A is untouched by B's fader
+[ ok ] strip: pan reaches track B
+[ ok ] strip: pre-gain commit reaches track B with canonical text
+[ ok ] strip: audio row offers Audio Input + Audio Output
+[ ok ] strip: the stereo pair is offered like the Inspector lists it
+[ ok ] strip: audio input pick reaches track B
+[ ok ] strip: the group is offered as an output
+[ ok ] strip: output routing reaches track B
+[ ok ] strip: the group is offered as a send destination
+[ ok ] strip: send destination pick inserts the send on track B
+[ ok ] strip: send amount reaches track B's send with canonical text
+[ ok ] strip: Mute toggles track B
+[ ok ] strip: every action carried track B's id (never the active track)
+[ ok ] strip: no action required changing the active track
+[ ok ] strip: every visible control lies inside its band (audio)
+
+[ ok ] strip: a session change made elsewhere is mirrored by the strip (fader back to 0 dB)
+[ ok ] strip: an unseen strip reports no meter interest (no audio-thread cost)
+[ ok ] strip: an over-full-scale window latches the lamp
+[ ok ] strip: lamp click clears the latch and the hub round trip returns
+[ ok ] strip: an acknowledgement from another view clears this strip's latch
+[ ok ] strip: group row = Audio Output, no pre-gain, no arm / monitor / power, Mute present
+[ ok ] strip: group row offers sends
+[ ok ] strip: Stereo Out shows the device output as information
+[ ok ] strip: Stereo Out has fader + meter, no sends, no pre-gain
+[ ok ] strip: the Stereo Out strip never claims a bank slot (its window is the master's)
+[ ok ] strip: every visible control inside its band (Stereo Out)
+
+[ ok ] strip: MIDI row = MIDI Input, Input Channel, MIDI To, MIDI Channel
+[ ok ] strip: MIDI row has no fader, pan, meter, sends or inserts
+[ ok ] strip: MIDI row keeps Power / Mute / Monitor / R
+[ ok ] pan: the strip gives the Inspector's pan field its 36 px
+[ ok ] pan: the stick has a hit zone at 36 px
+[ ok ] pan: a stick drag on the strip pans track B (not the active track A)
+[ ok ] pan: track A untouched by B's drag
+[ ok ] pan: Ctrl-click resets track B to centre
+[ ok ] inserts: all six rows exist in the strip
+[ ok ] inserts: the default band shows two rows and the list scrolls
+[ ok ] inserts: '+ Add' sits below the list, outside it
+[ ok ] inserts: scrolling to the last row keeps two rows visible
+[ ok ] inserts: the last row opens ITS slot (105) on track B
+[ ok ] inserts: 'move to Pre' sends the row's slot to the end of the empty Pre chain
+[ ok ] inserts: 'move down' reorders the row's own slot
+[ ok ] inserts: 'move down' on the last row is refused
+[ ok ] inserts: 'remove' on the last row removes slot 105
+[ ok ] inserts: after the remove the strip shows the five remaining rows in order
+[ ok ] inserts: a band of five rows shows all five without a scroll bar
+[ ok ] inserts: list and add button inside the band at every height
+
+[ ok ] strip: a row that left the snapshot marks its strip orphaned
+[ ok ] store: absent file -> no mixer values
+[ ok ] store: header width survives beside the mixer values
+[ ok ] store: mixer bounds round trip
+[ ok ] store: section flags round trip; unset keys stay absent
+[ ok ] store: malformed mixer bounds ignored, header width kept
+[ ok ] store: non 0/1 flags ignored, valid ones kept
+
+107 checks, 0 failure(s)

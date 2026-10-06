@@ -34,6 +34,12 @@ public:
     [[nodiscard]] bool hitTest(int x, int y) override;
     [[nodiscard]] juce::MouseCursor getMouseCursor() override;
 
+    /// Test surfaces (handler-level gestures): the stick's hit rectangle in local coordinates and
+    /// the local x the marker sits at for a pan value — a synthesized press / drag / release on
+    /// these runs the exact mouse code path.
+    [[nodiscard]] juce::Rectangle<int> getMarkerHitRectForTest() const { return getMarkerHitRect(); }
+    [[nodiscard]] float xForPanForTest(const float pan) const { return computeLayout().markerXForPan(pan); }
+
 private:
     struct Layout final
     {

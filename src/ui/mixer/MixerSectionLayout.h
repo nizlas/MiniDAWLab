@@ -6,20 +6,25 @@
 //
 // ROLE
 //   The mixer's sections (Routing, Pre-gain, Pre inserts, Post inserts, Sends, Faders, Meters)
-//   can each be shown or minimised, GLOBALLY for all strips. This header turns the visibility
-//   flags and the available height into one list of section bands (y ranges) that every strip —
-//   the scrolling ones and the fixed Stereo Out — applies verbatim, so a row's own content
-//   (fewer routing rows, no inserts, no sends) can never move its fader relative to the
-//   neighbours. Pure geometry; no components, no session.
+//   can each be shown or minimised, GLOBALLY for all strips, and the upper sections have one
+//   shared, user-draggable height each (`SectionHeights`). This header turns the visibility
+//   flags, the heights and the available strip height into one list of section bands (y
+//   ranges) that every strip — the scrolling ones and the fixed Stereo Out — applies verbatim,
+//   so a row's own content (fewer routing rows, no inserts, no sends) can never move its fader
+//   relative to the neighbours. It also describes the DIVIDERS between consecutive visible bands
+//   and how a drag on one of them redistributes height. Pure geometry; no components, no session.
 //
 // SIZES (logical px)
-//   Strip width 150 (inside the requested 140–160 window) and fixed band heights per section;
-//   the lower band (fader + pan at the left, output meter at the right) takes whatever height
-//   remains, never less than `kLowerBandMinHeightPx` — the common vertical scroll bar appears
-//   when the window is lower than the stack.
+//   Strip width 150 (inside the requested 140–160 window). Upper sections have a minimum that
+//   keeps their controls reachable (Routing: all four selector rows; Pre-gain: its row; Sends:
+//   the four slots; inserts: caption + one row + the add button — the list scrolls) and a stored
+//   desired height (defaults below). The lower band (pan + fader at the left, output meter at the
+//   right) takes whatever height remains, never less than `kLowerBandMinHeightPx` — the common
+//   vertical scroll bar appears when the window is lower than the stack.
 // =============================================================================
 
 #include <array>
+#include <vector>
 #include <juce_graphics/juce_graphics.h>
 
 namespace mixer_layout
@@ -72,6 +77,12 @@ inline constexpr int kSectionCount = static_cast<int>(Section::Count);
     return "";
 }
 
+/// The sections stacked above the lower band, in order (Faders / Meters share the lower band).
+[[nodiscard]] inline constexpr bool isUpperSection(const Section s) noexcept
+{
+    return s == Section::Routing || s == Section::PreGain || s == Section::PreInserts || s == Section::PostInserts || s == Section::Sends;
+}
+
 struct SectionVisibility
 {
     std::array<bool, kSectionCount> shown{ { true, true, true, true, true, true, true } };
@@ -106,29 +117,40 @@ inline constexpr int kRoutingSectionHeightPx = kSectionCaptionHeightPx + kRoutin
 inline constexpr int kPreGainValueRowHeightPx = 20;
 inline constexpr int kPreGainSectionHeightPx = kSectionCaptionHeightPx + kPreGainValueRowHeightPx + 1;
 
-/// Inserts (per stage): caption, `kInsertRowsPerStage` rows, one add row.
-inline constexpr int kInsertRowsPerStage = 3;
+/// Inserts (per stage): caption, a SCROLLING list of rows (every insert of the chain), one add
+/// row outside the list. The band height decides how many rows are visible.
 inline constexpr int kInsertRowHeightPx = 18;
-inline constexpr int kInsertsSectionHeightPx = kSectionCaptionHeightPx + kInsertRowsPerStage * kInsertRowHeightPx + kInsertRowHeightPx + 2;
+inline constexpr int kInsertAddRowHeightPx = 18;
+inline constexpr int kInsertsFixedChromeHeightPx = kSectionCaptionHeightPx + kInsertAddRowHeightPx + 2;
+/// Minimum: caption + one row + add. Default: two rows visible.
+inline constexpr int kInsertsMinSectionHeightPx = kInsertsFixedChromeHeightPx + kInsertRowHeightPx;
+inline constexpr int kInsertsDefaultSectionHeightPx = kInsertsFixedChromeHeightPx + 2 * kInsertRowHeightPx;
 
 /// Sends: caption + four one-line rows (enable | destination | amount).
 inline constexpr int kSendRows = 4;
 inline constexpr int kSendRowHeightPx = 20;
 inline constexpr int kSendsSectionHeightPx = kSectionCaptionHeightPx + kSendRows * kSendRowHeightPx + 2;
 
-/// Lower band: pan row above the fader; the meter shares the band on the right. With every
-/// section shown the stack is 678 px: it fits the default 720 px window above its scroll bar.
-inline constexpr int kPanRowHeightPx = 24;
-inline constexpr int kLowerBandMinHeightPx = 144;
+/// Lower band: "Pan" caption + the Inspector's pan field (36 px, identical component and size)
+/// above the fader; the meter shares the band on the right. The minimum keeps ≥ 118 px of fader.
+inline constexpr int kPanCaptionHeightPx = kSectionCaptionHeightPx;
+inline constexpr int kPanFieldHeightPx = 36;
+inline constexpr int kPanRowHeightPx = kPanCaptionHeightPx + kPanFieldHeightPx;
+inline constexpr int kFaderMinHeightPx = 118;
+inline constexpr int kLowerBandMinHeightPx = kPanRowHeightPx + 2 + kFaderMinHeightPx;
 
-[[nodiscard]] inline int fixedSectionHeight(const Section s) noexcept
+/// Upper bound for a stored / dragged section height (sanity clamp, not a design limit).
+inline constexpr int kSectionHeightMaxPx = 2000;
+
+/// Minimum height that keeps a section's controls reachable.
+[[nodiscard]] inline constexpr int minimumSectionHeight(const Section s) noexcept
 {
     switch (s)
     {
     case Section::Routing: return kRoutingSectionHeightPx;
     case Section::PreGain: return kPreGainSectionHeightPx;
-    case Section::PreInserts: return kInsertsSectionHeightPx;
-    case Section::PostInserts: return kInsertsSectionHeightPx;
+    case Section::PreInserts:
+    case Section::PostInserts: return kInsertsMinSectionHeightPx;
     case Section::Sends: return kSendsSectionHeightPx;
     case Section::Faders:
     case Section::Meters:
@@ -136,6 +158,42 @@ inline constexpr int kLowerBandMinHeightPx = 144;
     }
     return 0;
 }
+
+/// Default (first-run) height of an upper section.
+[[nodiscard]] inline constexpr int defaultSectionHeight(const Section s) noexcept
+{
+    switch (s)
+    {
+    case Section::PreInserts:
+    case Section::PostInserts: return kInsertsDefaultSectionHeightPx;
+    default: return minimumSectionHeight(s);
+    }
+}
+
+/// Clamp a stored / dragged height to the usable range of a section.
+[[nodiscard]] inline constexpr int clampSectionHeight(const Section s, const int px) noexcept
+{
+    const int lo = minimumSectionHeight(s);
+    return px < lo ? lo : (px > kSectionHeightMaxPx ? kSectionHeightMaxPx : px);
+}
+
+/// The user's desired heights of the upper sections (shared by every strip; persisted).
+struct SectionHeights
+{
+    std::array<int, kSectionCount> px{};
+
+    SectionHeights() noexcept
+    {
+        for (int i = 0; i < kSectionCount; ++i)
+        {
+            px[static_cast<size_t>(i)] = defaultSectionHeight(static_cast<Section>(i));
+        }
+    }
+    [[nodiscard]] int get(const Section s) const noexcept { return px[static_cast<size_t>(s)]; }
+    void set(const Section s, const int v) noexcept { px[static_cast<size_t>(s)] = isUpperSection(s) ? clampSectionHeight(s, v) : 0; }
+    [[nodiscard]] bool operator==(const SectionHeights& o) const noexcept { return px == o.px; }
+    [[nodiscard]] bool operator!=(const SectionHeights& o) const noexcept { return !(*this == o); }
+};
 
 /// The bands every strip applies. A hidden section has an empty band (height 0).
 struct ComputedLayout
@@ -149,33 +207,33 @@ struct ComputedLayout
     [[nodiscard]] juce::Rectangle<int> band(const Section s) const noexcept { return bands[static_cast<size_t>(s)]; }
 };
 
-/// Height the fixed sections need (header included) for the given visibility, without the
-/// lower band.
-[[nodiscard]] inline int fixedStackHeight(const SectionVisibility& v) noexcept
+/// Height the fixed part of the stack needs (header + visible upper sections) for the given
+/// visibility and heights, without the lower band.
+[[nodiscard]] inline int fixedStackHeight(const SectionVisibility& v, const SectionHeights& h) noexcept
 {
-    int h = kStripPadPx + kHeaderHeightPx;
+    int total = kStripPadPx + kHeaderHeightPx;
     for (int i = 0; i < kSectionCount; ++i)
     {
         const Section s = static_cast<Section>(i);
-        if (s == Section::Faders || s == Section::Meters || !v.get(s))
+        if (!isUpperSection(s) || !v.get(s))
         {
             continue;
         }
-        h += kSectionGapPx + fixedSectionHeight(s);
+        total += kSectionGapPx + clampSectionHeight(s, h.get(s));
     }
-    return h;
+    return total;
 }
 
 /// Minimum strip height (lower band at its minimum when any of Faders / Meters is shown).
-[[nodiscard]] inline int minimumStripHeight(const SectionVisibility& v) noexcept
+[[nodiscard]] inline int minimumStripHeight(const SectionVisibility& v, const SectionHeights& h) noexcept
 {
     const bool lower = v.get(Section::Faders) || v.get(Section::Meters);
-    return fixedStackHeight(v) + (lower ? kSectionGapPx + kLowerBandMinHeightPx : 0) + kStripPadPx;
+    return fixedStackHeight(v, h) + (lower ? kSectionGapPx + kLowerBandMinHeightPx : 0) + kStripPadPx;
 }
 
 /// Lay the sections out in `availableHeight` (the strip's height). When the window is lower
 /// than `minimumStripHeight`, the result is taller than `availableHeight` and the owner scrolls.
-[[nodiscard]] inline ComputedLayout computeLayout(const SectionVisibility& v, const int stripWidth, const int availableHeight) noexcept
+[[nodiscard]] inline ComputedLayout computeLayout(const SectionVisibility& v, const SectionHeights& h, const int stripWidth, const int availableHeight) noexcept
 {
     ComputedLayout out;
     const int x = kStripPadPx;
@@ -186,7 +244,7 @@ struct ComputedLayout
     for (int i = 0; i < kSectionCount; ++i)
     {
         const Section s = static_cast<Section>(i);
-        if (s == Section::Faders || s == Section::Meters)
+        if (!isUpperSection(s))
         {
             continue;
         }
@@ -196,8 +254,9 @@ struct ComputedLayout
             continue;
         }
         y += kSectionGapPx;
-        out.bands[static_cast<size_t>(i)] = juce::Rectangle<int>(x, y, w, fixedSectionHeight(s));
-        y += fixedSectionHeight(s);
+        const int bandH = clampSectionHeight(s, h.get(s));
+        out.bands[static_cast<size_t>(i)] = juce::Rectangle<int>(x, y, w, bandH);
+        y += bandH;
     }
     const bool showFaders = v.get(Section::Faders);
     const bool showMeters = v.get(Section::Meters);
@@ -228,6 +287,97 @@ struct ComputedLayout
     y += kStripPadPx;
     out.totalHeight = y;
     return out;
+}
+
+/// Backwards-compatible overload: default heights.
+[[nodiscard]] inline ComputedLayout computeLayout(const SectionVisibility& v, const int stripWidth, const int availableHeight) noexcept
+{
+    return computeLayout(v, SectionHeights{}, stripWidth, availableHeight);
+}
+[[nodiscard]] inline int minimumStripHeight(const SectionVisibility& v) noexcept
+{
+    return minimumStripHeight(v, SectionHeights{});
+}
+
+// --- dividers -----------------------------------------------------------------------------------
+
+/// One draggable divider: the gap between two consecutive VISIBLE bands. `below == Section::Count`
+/// means the lower (fader / meter) band.
+struct Divider
+{
+    Section above = Section::Routing;
+    Section below = Section::Count;
+    /// y of the thin line in strip coordinates (centre of the gap).
+    int lineY = 0;
+};
+
+/// The dividers of a layout, top to bottom. Hidden sections never produce a divider; the last
+/// one separates the last visible upper band from the lower band when that band is shown.
+[[nodiscard]] inline std::vector<Divider> dividersFor(const ComputedLayout& layout, const SectionVisibility& v)
+{
+    std::vector<Divider> out;
+    Section previous = Section::Count;
+    for (int i = 0; i < kSectionCount; ++i)
+    {
+        const Section s = static_cast<Section>(i);
+        if (!isUpperSection(s) || !v.get(s))
+        {
+            continue;
+        }
+        if (previous != Section::Count)
+        {
+            out.push_back({ previous, s, layout.band(s).getY() - kSectionGapPx / 2 });
+        }
+        previous = s;
+    }
+    if (previous != Section::Count && !layout.lowerBand.isEmpty())
+    {
+        out.push_back({ previous, Section::Count, layout.lowerBand.getY() - kSectionGapPx / 2 });
+    }
+    return out;
+}
+
+/// Apply a drag of `deltaY` px on `divider` (positive = down): height moves between the two
+/// adjacent bands so the total stays put. Against the lower band the upper section can grow only
+/// into the lower band's spare height (never into a scroll) and shrink down to its minimum.
+[[nodiscard]] inline SectionHeights applyDividerDrag(const SectionHeights& heights,
+                                                     const SectionVisibility& v,
+                                                     const Divider& divider,
+                                                     const int deltaY,
+                                                     const int availableHeight) noexcept
+{
+    SectionHeights next = heights;
+    if (!isUpperSection(divider.above) || !v.get(divider.above))
+    {
+        return next;
+    }
+    const int above = clampSectionHeight(divider.above, heights.get(divider.above));
+    if (divider.below != Section::Count)
+    {
+        if (!isUpperSection(divider.below) || !v.get(divider.below))
+        {
+            return next;
+        }
+        const int below = clampSectionHeight(divider.below, heights.get(divider.below));
+        const int total = above + below;
+        const int minAbove = minimumSectionHeight(divider.above);
+        const int maxAbove = total - minimumSectionHeight(divider.below);
+        if (maxAbove < minAbove)
+        {
+            return next; // both already at their minimum: nothing to redistribute
+        }
+        const int newAbove = juce::jlimit(minAbove, maxAbove, above + deltaY);
+        next.set(divider.above, newAbove);
+        next.set(divider.below, total - newAbove);
+        return next;
+    }
+    // Against the lower band.
+    const ComputedLayout current = computeLayout(v, heights, kStripWidthPx, availableHeight);
+    const int spare = juce::jmax(0, current.lowerBand.getHeight() - kLowerBandMinHeightPx);
+    const int minAbove = minimumSectionHeight(divider.above);
+    const int maxAbove = above + spare;
+    next.set(divider.above, juce::jlimit(minAbove, juce::jmax(minAbove, maxAbove), above + deltaY));
+    return next;
 }
 
 } // namespace mixer_layout

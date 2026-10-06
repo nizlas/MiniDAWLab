@@ -823,21 +823,17 @@ void TrackHeaderView::paint(juce::Graphics& g)
     auto const active = m.active;
 
     auto const b = getLocalBounds();
-    g.setColour(active ? juce::Colour(0xff2a4a5a) : juce::Colour(0xff333333));
-    g.fillRect(b);
-    if (active)
-    {
-        g.setColour(juce::Colours::deepskyblue);
-        g.fillRect(b.getX(), b.getY(), kHeaderActiveStripeWidthPx, b.getHeight());
-    }
+    // Plate colours / stripe shared with the mixer strip headers (`TrackStripButtonGlyphs.h`).
+    static_assert(kHeaderActiveStripeWidthPx == track_strip_glyphs::kHeaderActiveStripeWidthPx, "header stripe width is shared");
+    drawHeaderPlate(g, b, active);
 
     auto const layout = computeHeaderContentLayout();
     auto nameArea = layout.nameTextBounds;
     if (!nameArea.isEmpty()
         && (trackNameEditor_ == nullptr || !trackNameEditor_->isVisible()))
     {
-        g.setColour(juce::Colours::whitesmoke);
-        g.setFont(14.0f);
+        g.setColour(headerNameColour());
+        g.setFont(kHeaderNameFontHeight);
         if (m.subtitle.isEmpty())
         {
             g.drawFittedText(m.name, nameArea, juce::Justification::centredLeft, 1);
@@ -864,7 +860,7 @@ void TrackHeaderView::paint(juce::Graphics& g)
         g.fillEllipse(dot.toFloat());
     }
 
-    juce::Colour const ctlNeutralEdge(0xd0161616);
+    juce::Colour const ctlNeutralEdge(kCtlNeutralEdgeArgb);
 
     auto const chrome = visibleChromeBoundsExcludingResizeBand();
     if (!layout.controlStripBounds.getIntersection(chrome).isEmpty())

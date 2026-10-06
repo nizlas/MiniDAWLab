@@ -2277,6 +2277,18 @@ public:
             }
             uiLayoutSettings_.save();
         };
+        // Shared section heights: written once per completed divider drag (never per mouse move).
+        mixerWindow_->content().onSectionHeightsChanged = [this](const mixer_layout::SectionHeights& h) {
+            for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+            {
+                const auto s = static_cast<mixer_layout::Section>(i);
+                if (mixer_layout::isUpperSection(s))
+                {
+                    uiLayoutSettings_.setMixerSectionHeightPx(mixer_layout::sectionKey(s), h.get(s));
+                }
+            }
+            uiLayoutSettings_.save();
+        };
         mixerWindow_->onVisibilityChanged = [this](bool) {
             if (menuBar_ != nullptr)
             {
@@ -6420,6 +6432,7 @@ private:
             mixerWindow_->applyStoredBounds(*bounds);
         }
         mixer_layout::SectionVisibility v;
+        mixer_layout::SectionHeights heights; // defaults for older files without heights
         for (int i = 0; i < mixer_layout::kSectionCount; ++i)
         {
             const auto s = static_cast<mixer_layout::Section>(i);
@@ -6427,8 +6440,16 @@ private:
             {
                 v.set(s, *shown);
             }
+            if (mixer_layout::isUpperSection(s))
+            {
+                if (const auto px = uiLayoutSettings_.getMixerSectionHeightPx(mixer_layout::sectionKey(s)))
+                {
+                    heights.set(s, *px); // clamped to the section's usable range by `set`
+                }
+            }
         }
         mixerWindow_->content().setSectionVisibility(v);
+        mixerWindow_->content().setSectionHeights(heights);
         // The VST3 picker anchors its chooser at the mixer content when an insert is added there.
         if (vst3PluginPickerCoordinator_ != nullptr)
         {
@@ -6645,16 +6666,100 @@ private:
             }
             for (const InsertStage st : { InsertStage::Pre, InsertStage::Post })
             {
-                for (int r = 0; r < mixer_layout::kInsertRowsPerStage; ++r)
+                for (int r = 0; r < s->insertRowCount(st); ++r)
                 {
-                    const juce::String t = s->insertRowText(st, r);
-                    if (t.isNotEmpty())
-                    {
-                        out << (st == InsertStage::Pre ? "Pre:" : "Post:") << t << " ";
-                    }
+                    out << (st == InsertStage::Pre ? "Pre:" : "Post:") << s->insertRowText(st, r) << " ";
                 }
             }
             return out;
+        };
+        M.stripInsertRowCount = [strip](const TrackId tid, const bool preStage) -> int {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->insertRowCount(preStage ? InsertStage::Pre : InsertStage::Post) : 0;
+        };
+        M.stripVisibleInsertRowCount = [strip](const TrackId tid, const bool preStage) -> int {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->visibleInsertRowCount(preStage ? InsertStage::Pre : InsertStage::Post) : 0;
+        };
+        M.stripInsertListScrollable = [strip](const TrackId tid, const bool preStage) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->isInsertListScrollable(preStage ? InsertStage::Pre : InsertStage::Post);
+        };
+        M.stripScrollInsertListToRow = [strip](const TrackId tid, const bool preStage, const int row) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->scrollInsertListToRow(preStage ? InsertStage::Pre : InsertStage::Post, row);
+        };
+        M.stripInsertListAndAddBounds = [strip](const TrackId tid, const bool preStage) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr)
+            {
+                return {};
+            }
+            const InsertStage st = preStage ? InsertStage::Pre : InsertStage::Post;
+            return "list " + s->insertListBounds(st).toString() + " add " + s->insertAddButtonBounds(st).toString();
+        };
+        M.dividerCount = [this] { return mixerWindow_ != nullptr ? (int)mixerWindow_->content().currentDividers().size() : 0; };
+        M.resetSectionHeights = [this] {
+            if (mixerWindow_ != nullptr)
+            {
+                mixerWindow_->content().setSectionHeights(mixer_layout::SectionHeights{});
+                if (mixerWindow_->content().onSectionHeightsChanged)
+                {
+                    mixerWindow_->content().onSectionHeightsChanged(mixerWindow_->content().sectionHeights());
+                }
+            }
+        };
+        M.dragDivider = [this](const int index, const int deltaY) {
+            return mixerWindow_ != nullptr && mixerWindow_->content().dragDividerForTest(index, deltaY);
+        };
+        M.sectionHeightsText = [this]() -> juce::String {
+            juce::String s;
+            if (mixerWindow_ == nullptr)
+            {
+                return s;
+            }
+            const auto& h = mixerWindow_->content().sectionHeights();
+            for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+            {
+                const auto sec = static_cast<mixer_layout::Section>(i);
+                if (mixer_layout::isUpperSection(sec))
+                {
+                    s << mixer_layout::sectionKey(sec) << "=" << h.get(sec) << " ";
+                }
+            }
+            s << "strip=" << mixerWindow_->content().currentStripHeight();
+            return s;
+        };
+        M.stripPanValue = [strip](const TrackId tid) -> float {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->pan().getPan() : 0.0f;
+        };
+        M.inspectorPanValue = [this] { return inspectorView_.getPanValueForStabilityTest(); };
+        M.stripPanDragLikeMouse = [strip](const TrackId tid, const float targetPan) -> bool {
+            // Handler-level mouse gesture on the strip's OWN pan control: press on the stick, drag
+            // to the x that maps to `targetPan`, release — the same code path a real pointer runs.
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr || !s->pan().isVisible())
+            {
+                return false;
+            }
+            InspectorPanControl& pan = s->pan();
+            const juce::Rectangle<int> hit = pan.getMarkerHitRectForTest();
+            if (hit.isEmpty())
+            {
+                return false;
+            }
+            const auto now = juce::Time::getCurrentTime();
+            const auto& src = juce::Desktop::getInstance().getMainMouseSource();
+            const juce::Point<float> down = hit.getCentre().toFloat();
+            const juce::MouseEvent downEvent(src, down, juce::ModifierKeys::leftButtonModifier, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &pan, &pan, now, down, now, 1, false);
+            pan.mouseDown(downEvent);
+            const juce::Point<float> to(pan.xForPanForTest(targetPan), down.y);
+            const juce::MouseEvent dragEvent(src, to, juce::ModifierKeys::leftButtonModifier, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &pan, &pan, now, down, now, 1, true);
+            pan.mouseDrag(dragEvent);
+            const juce::MouseEvent upEvent(src, to, juce::ModifierKeys(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, &pan, &pan, now, down, now, 1, false);
+            pan.mouseUp(upEvent);
+            return true;
         };
         M.stripInsertMenuAction = [strip](const TrackId tid, const bool preStage, const int row, const int actionId) -> bool {
             MixerChannelStrip* const s = strip(tid);

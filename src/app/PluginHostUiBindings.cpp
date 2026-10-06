@@ -23,6 +23,7 @@ InspectorPluginHost PluginHostUiBindings::makeInsertSeam(PluginInsertHost& plugi
                 ir.slotId = rv.slotId;
                 ir.stage = rv.stage;
                 ir.displayName = rv.displayName;
+                ir.unavailable = rv.unavailable;
                 rows.push_back(std::move(ir));
             }
             return rows;

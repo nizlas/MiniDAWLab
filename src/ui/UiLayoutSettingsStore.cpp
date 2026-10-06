@@ -9,7 +9,9 @@ namespace
     constexpr const char* kWidthAttribute = "widthPx";
     constexpr const char* kMixerWindowTag = "MIXER_WINDOW";
     constexpr const char* kMixerSectionsTag = "MIXER_SECTIONS";
+    constexpr const char* kMixerSectionHeightsTag = "MIXER_SECTION_HEIGHTS";
     constexpr int kMixerBoundsLimitPx = 20000;
+    constexpr int kMixerSectionHeightLimitPx = 5000;
 
     /// Strict integer attribute (optional leading '-', digits only) — anything else is absent.
     [[nodiscard]] std::optional<int> strictIntAttribute(const juce::XmlElement& e, const char* name)
@@ -45,6 +47,7 @@ void UiLayoutSettingsStore::loadFromFile()
     trackHeaderColumnWidthPx_.reset();
     mixerWindowBounds_.reset();
     mixerSectionShown_.clear();
+    mixerSectionHeightPx_.clear();
     if (!persistenceFile_.existsAsFile())
     {
         return;
@@ -100,6 +103,22 @@ void UiLayoutSettingsStore::loadFromFile()
             }
         }
     }
+    if (const juce::XmlElement* mh = xml->getChildByName(juce::StringRef(kMixerSectionHeightsTag)))
+    {
+        for (int i = 0; i < mh->getNumAttributes(); ++i)
+        {
+            const auto v = strictIntAttribute(*mh, mh->getAttributeName(i).toRawUTF8());
+            // Strictly positive and sane; anything else is absent (the mixer applies its default).
+            if (v && *v > 0 && *v <= kMixerSectionHeightLimitPx)
+            {
+                mixerSectionHeightPx_[mh->getAttributeName(i)] = *v;
+            }
+            else
+            {
+                juce::Logger::writeToLog("[UiLayout] ignoring invalid mixer section height \"" + mh->getAttributeValue(i) + "\" for " + mh->getAttributeName(i));
+            }
+        }
+    }
 }
 
 void UiLayoutSettingsStore::setTrackHeaderColumnWidthPx(const int widthPx) noexcept
@@ -136,6 +155,24 @@ void UiLayoutSettingsStore::setMixerSectionShown(const juce::String& key, const 
     }
 }
 
+std::optional<int> UiLayoutSettingsStore::getMixerSectionHeightPx(const juce::String& key) const
+{
+    const auto it = mixerSectionHeightPx_.find(key);
+    if (it == mixerSectionHeightPx_.end())
+    {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+void UiLayoutSettingsStore::setMixerSectionHeightPx(const juce::String& key, const int heightPx)
+{
+    if (key.isNotEmpty() && heightPx > 0 && heightPx <= kMixerSectionHeightLimitPx)
+    {
+        mixerSectionHeightPx_[key] = heightPx;
+    }
+}
+
 void UiLayoutSettingsStore::save()
 {
     juce::XmlElement root(kRootTag);
@@ -159,6 +196,14 @@ void UiLayoutSettingsStore::save()
         for (const auto& [key, shown] : mixerSectionShown_)
         {
             ms->setAttribute(key, shown ? "1" : "0");
+        }
+    }
+    if (!mixerSectionHeightPx_.empty())
+    {
+        auto* mh = root.createNewChildElement(kMixerSectionHeightsTag);
+        for (const auto& [key, px] : mixerSectionHeightPx_)
+        {
+            mh->setAttribute(key, px);
         }
     }
     const juce::File parent = persistenceFile_.getParentDirectory();

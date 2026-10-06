@@ -60,6 +60,11 @@ public:
     [[nodiscard]] std::optional<bool> getMixerSectionShown(const juce::String& key) const;
     void setMixerSectionShown(const juce::String& key, bool shown);
 
+    /// Shared mixer section heights in logical px by the same keys (upper sections only); absent
+    /// = the mixer's default. Callers clamp to the section's usable range.
+    [[nodiscard]] std::optional<int> getMixerSectionHeightPx(const juce::String& key) const;
+    void setMixerSectionHeightPx(const juce::String& key, int heightPx);
+
     /// Writes the whole file (creates the folder if needed). Logs and keeps going on failure.
     void save();
 
@@ -70,4 +75,5 @@ private:
     std::optional<int> trackHeaderColumnWidthPx_;
     std::optional<juce::Rectangle<int>> mixerWindowBounds_;
     std::map<juce::String, bool> mixerSectionShown_;
+    std::map<juce::String, int> mixerSectionHeightPx_;
 };

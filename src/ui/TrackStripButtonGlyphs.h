@@ -39,6 +39,34 @@ inline constexpr juce::uint32 kGlyphDisabledArgb = 0xff7a7a7a;
 inline constexpr juce::uint32 kEdgeInactiveStrokeArgb = 0xc0222222;
 inline constexpr float kCubaseCtlCornerRadMax = 2.85f;
 
+// --- the track header plate (arrangement headers AND mixer strip headers) -----------------------
+/// Active / inactive header fill, the 4 px active stripe at the left edge, the name text.
+inline constexpr juce::uint32 kHeaderActiveFillArgb = 0xff2a4a5a;
+inline constexpr juce::uint32 kHeaderInactiveFillArgb = 0xff333333;
+inline constexpr int kHeaderActiveStripeWidthPx = 4;
+inline constexpr float kHeaderNameFontHeight = 14.0f;
+/// Neutral edge stroke the header strip hands to `drawStripButton`.
+inline constexpr juce::uint32 kCtlNeutralEdgeArgb = 0xd0161616;
+
+[[nodiscard]] inline juce::Colour headerActiveStripeColour() noexcept { return juce::Colours::deepskyblue; }
+[[nodiscard]] inline juce::Colour headerNameColour() noexcept { return juce::Colours::whitesmoke; }
+[[nodiscard]] inline juce::Colour headerFillColour(const bool active) noexcept
+{
+    return juce::Colour(active ? kHeaderActiveFillArgb : kHeaderInactiveFillArgb);
+}
+
+/// Paint the header plate exactly like `TrackHeaderView` does: fill + the active stripe.
+inline void drawHeaderPlate(juce::Graphics& g, const juce::Rectangle<int> bounds, const bool active)
+{
+    g.setColour(headerFillColour(active));
+    g.fillRect(bounds);
+    if (active)
+    {
+        g.setColour(headerActiveStripeColour());
+        g.fillRect(bounds.getX(), bounds.getY(), kHeaderActiveStripeWidthPx, bounds.getHeight());
+    }
+}
+
 [[nodiscard]] inline float cubaseCornerRadiusForSquare(const float side) noexcept
 {
     return juce::jlimit(1.4f, kCubaseCtlCornerRadMax, side * 0.16f);
