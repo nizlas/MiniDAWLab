@@ -196,6 +196,17 @@ bool MainWindow::routeShortcut(const juce::KeyPress& key)
         }
     }
 
+    // F3: show / hide the mixer window. Not text input, so it works with any focus.
+    if (key.isKeyCode(juce::KeyPress::F3Key) && !key.getModifiers().isAnyModifierKeyDown())
+    {
+        if (shortcutTargetFromContent_ != nullptr)
+        {
+            shortcutTargetFromContent_->invokeToggleMixerWindowFromWindowShortcut();
+            return true;
+        }
+        return false;
+    }
+
     const bool editorHasFocus = (dynamic_cast<juce::TextEditor*>(juce::Component::getCurrentlyFocusedComponent())
                                 != nullptr);
     if constexpr (undo_diagnostic::kUndoDiag)

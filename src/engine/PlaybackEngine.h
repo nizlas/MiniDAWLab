@@ -50,6 +50,7 @@
 
 #include "domain/Track.h"
 #include "engine/LevelMeterAccumulator.h"
+#include "engine/TrackMeterBank.h"
 #include "engine/LiveMidiInputBus.h"
 #include "engine/PlaybackMixHelpers.h"
 #include "engine/RoutingPlan.h"
@@ -295,6 +296,22 @@ public:
     [[nodiscard]] level_meter::Reading drainMeteredTrackLevelsForDiagnostics() noexcept { return trackMeterDiag_.drainAndReset(); }
     [[nodiscard]] level_meter::Reading drainMasterOutputLevelsForDiagnostics() noexcept { return masterMeterDiag_.drainAndReset(); }
 
+    // -----------------------------------------------------------------------
+    // Concurrent per-row meters (mixer + Inspector through the UI's LevelMeterHub)
+    // -----------------------------------------------------------------------
+    // The same post-strip stage as the single track meter above, for MANY rows at once
+    // (`engine/TrackMeterBank.h`). The message thread names the metered rows; the audio thread
+    // folds each rendered row that has a slot. The Master row is not in the bank — its level is
+    // `drainMasterOutputLevels()`. These windows belong to the UI hub only: the diagnostics
+    // windows above are never drained by the mixer.
+
+    /// [Message thread] Exactly these rows are metered concurrently from now on (rows that stay
+    /// keep their pending window). Returns how many rows could not be metered (bank full).
+    int setConcurrentlyMeteredTracks(const std::vector<TrackId>& trackIds) { return trackMeterBank_.setMeteredTracks(trackIds); }
+    /// [Message thread] One row's window since the previous drain (empty when not metered).
+    [[nodiscard]] level_meter::Reading drainConcurrentTrackLevels(const TrackId trackId) noexcept { return trackMeterBank_.drainAndReset(trackId); }
+    [[nodiscard]] bool isConcurrentlyMetered(const TrackId trackId) const noexcept { return trackMeterBank_.isMetered(trackId); }
+
     /// [Any thread] Same acquire-load discipline as instrument snapshot reads inside the device callback.
     [[nodiscard]] std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>
         loadExperimentalInstrumentPlaybackSnapshotForAudioThread() const noexcept;
@@ -470,17 +487,31 @@ private:
     level_meter::Accumulator masterMeterDiag_;
     level_meter::Accumulator trackMeterDiag_;
     std::atomic<std::int64_t> meteredTrackId_{ static_cast<std::int64_t>(kInvalidTrackId) };
-    /// [Audio thread] Fold a track's post-strip stage when it is the metered row (no-op otherwise).
+    /// Concurrent per-row meters for the mixer / Inspector hub (see the public section). The
+    /// audio thread caches its slot map once per callback (`audioThread_beginBlock`).
+    level_meter::TrackMeterBank trackMeterBank_;
+    /// [Audio thread] Fold a track's post-strip stage into the single metered-row accumulators
+    /// and / or its concurrent slot. The block statistics are computed at most once per stage.
     void audioThread_foldTrackMeterIfMetered(TrackId trackId,
                                              const float* stageL,
                                              const float* stageR,
                                              int numSamples) noexcept
     {
-        if (static_cast<std::int64_t>(trackId) == meteredTrackId_.load(std::memory_order_relaxed))
+        const bool singleMetered = static_cast<std::int64_t>(trackId) == meteredTrackId_.load(std::memory_order_relaxed);
+        const bool bankMetered = trackMeterBank_.audioThread_isMetered(trackId);
+        if (!singleMetered && !bankMetered)
         {
-            const level_meter::BlockStats stats = level_meter::analyzeBlock(stageL, stageR, numSamples);
+            return;
+        }
+        const level_meter::BlockStats stats = level_meter::analyzeBlock(stageL, stageR, numSamples);
+        if (singleMetered)
+        {
             trackMeter_.audioThread_foldStats(stats);
             trackMeterDiag_.audioThread_foldStats(stats);
+        }
+        if (bankMetered)
+        {
+            trackMeterBank_.audioThread_foldStats(trackId, stats);
         }
     }
 

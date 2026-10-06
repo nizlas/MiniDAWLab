@@ -1,0 +1,135 @@
+﻿2026-10-06T08:17:28.085+02:00 scenario start: mixer iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-tse-vb3\TSE_pt2.dalproj
+2026-10-06T08:17:28.093+02:00 steps queued: 37 (delete-loop iterations expand at plan time)
+2026-10-06T08:17:28.605+02:00 step begin: mixer: sibling copy
+2026-10-06T08:17:28.616+02:00 step end ok: mixer: sibling copy elapsedMs=3
+2026-10-06T08:17:28.759+02:00 step begin: mixer: load TSE_pt2-mixer.dalproj
+2026-10-06T08:17:31.589+02:00 step end ok: mixer: load TSE_pt2-mixer.dalproj elapsedMs=2823
+2026-10-06T08:17:34.032+02:00 step begin: mixer: verify loaded
+2026-10-06T08:17:34.034+02:00   track count after load: 7
+2026-10-06T08:17:34.039+02:00 step end ok: mixer: verify loaded elapsedMs=2
+2026-10-06T08:17:34.323+02:00 step begin: mixer: F3 shows the window (one instance), F3 hides, F3 shows again
+2026-10-06T08:17:34.457+02:00   mixer visible after F3; instances=1 hidden after second F3=yes instances after third F3=1
+2026-10-06T08:17:34.463+02:00 step end ok: mixer: F3 shows the window (one instance), F3 hides, F3 shows again elapsedMs=134
+2026-10-06T08:17:35.093+02:00 step begin: mixer: add a Group row when the project has none (routing / send target)
+2026-10-06T08:17:35.099+02:00   added group row 9
+2026-10-06T08:17:35.104+02:00 step end ok: mixer: add a Group row when the project has none (routing / send target) elapsedMs=5
+2026-10-06T08:17:35.608+02:00 step begin: mixer: strips follow the arrangement order; every kind present; Stereo Out fixed
+2026-10-06T08:17:35.612+02:00   strips: 1:AUDIO(Track 1) 3:INSTRUMENT(Track 3) 4:AUDIO(Track 4) 5:INSTRUMENT(VB3-II) 7:MIDI(MIDI 1) 8:INSTRUMENT(Track 8) 9:GROUP(Group 1) | master 2:STEREO OUT
+2026-10-06T08:17:35.616+02:00   horizontal scroll to x=27; Stereo Out strip at 1730 366 150 678 -> 1730 366 150 678
+2026-10-06T08:17:35.619+02:00       mixer window 680 336 1200 720 visible=yes
+2026-10-06T08:17:35.621+02:00       mixer content 0 0 1200 720 toolbar h=30 strips viewport 0 30 1044 690 master viewport 1050 30 150 690
+2026-10-06T08:17:35.624+02:00       strip height 678 (minimum 678), 7 strips + master
+2026-10-06T08:17:35.626+02:00       section Routing=shown  section Pre-gain=shown  section Pre inserts=shown  section Post inserts=shown  section Sends=shown  section Faders=shown  section Meters=shown
+2026-10-06T08:17:35.762+02:00   evidence: C:\Users\nicla\AppData\Local\Temp\dal-stability-mixer\mixer-all-sections-scrolled.png
+2026-10-06T08:17:35.769+02:00 step end ok: mixer: strips follow the arrangement order; every kind present; Stereo Out fixed elapsedMs=153
+2026-10-06T08:17:36.194+02:00 step begin: mixer: hide Routing, Pre inserts, Post inserts, Sends through the toolbar
+2026-10-06T08:17:36.219+02:00   sections: routing=0 preGain=1 preInserts=0 postInserts=0 sends=0 faders=1 meters=1 
+2026-10-06T08:17:36.224+02:00 step end ok: mixer: hide Routing, Pre inserts, Post inserts, Sends through the toolbar elapsedMs=25
+2026-10-06T08:17:36.669+02:00 step begin: mixer: layout with faders + meters only
+2026-10-06T08:17:36.673+02:00       mixer window 680 336 1200 720 visible=yes
+2026-10-06T08:17:36.676+02:00       mixer content 0 0 1200 720 toolbar h=30 strips viewport 0 30 1044 690 master viewport 1050 30 150 690
+2026-10-06T08:17:36.679+02:00       strip height 678 (minimum 252), 7 strips + master
+2026-10-06T08:17:36.682+02:00       section Routing=hidden  section Pre-gain=shown  section Pre inserts=hidden  section Post inserts=hidden  section Sends=hidden  section Faders=shown  section Meters=shown
+2026-10-06T08:17:36.789+02:00   evidence: C:\Users\nicla\AppData\Local\Temp\dal-stability-mixer\mixer-faders-meters.png
+2026-10-06T08:17:36.797+02:00 step end ok: mixer: layout with faders + meters only elapsedMs=121
+2026-10-06T08:17:37.005+02:00 step begin: mixer: hide Meters too (faders alone), then Faders alone hidden (meters alone)
+2026-10-06T08:17:37.014+02:00       mixer window 680 336 1200 720 visible=yes
+2026-10-06T08:17:37.017+02:00       mixer content 0 0 1200 720 toolbar h=30 strips viewport 0 30 1044 690 master viewport 1050 30 150 690
+2026-10-06T08:17:37.019+02:00       strip height 678 (minimum 252), 7 strips + master
+2026-10-06T08:17:37.022+02:00       section Routing=hidden  section Pre-gain=shown  section Pre inserts=hidden  section Post inserts=hidden  section Sends=hidden  section Faders=shown  section Meters=hidden
+2026-10-06T08:17:37.132+02:00   evidence: C:\Users\nicla\AppData\Local\Temp\dal-stability-mixer\mixer-faders-only.png
+2026-10-06T08:17:37.145+02:00       mixer window 680 336 1200 720 visible=yes
+2026-10-06T08:17:37.147+02:00       mixer content 0 0 1200 720 toolbar h=30 strips viewport 0 30 1044 690 master viewport 1050 30 150 690
+2026-10-06T08:17:37.150+02:00       strip height 678 (minimum 252), 7 strips + master
+2026-10-06T08:17:37.153+02:00       section Routing=hidden  section Pre-gain=shown  section Pre inserts=hidden  section Post inserts=hidden  section Sends=hidden  section Faders=hidden  section Meters=shown
+2026-10-06T08:17:37.259+02:00   evidence: C:\Users\nicla\AppData\Local\Temp\dal-stability-mixer\mixer-meters-only.png
+2026-10-06T08:17:37.272+02:00 step end ok: mixer: hide Meters too (faders alone), then Faders alone hidden (meters alone) elapsedMs=259
+2026-10-06T08:17:37.590+02:00 step begin: mixer: show every section again
+2026-10-06T08:17:37.617+02:00       mixer window 680 336 1200 720 visible=yes
+2026-10-06T08:17:37.619+02:00       mixer content 0 0 1200 720 toolbar h=30 strips viewport 0 30 1044 690 master viewport 1050 30 150 690
+2026-10-06T08:17:37.622+02:00       strip height 678 (minimum 678), 7 strips + master
+2026-10-06T08:17:37.624+02:00       section Routing=shown  section Pre-gain=shown  section Pre inserts=shown  section Post inserts=shown  section Sends=shown  section Faders=shown  section Meters=shown
+2026-10-06T08:17:37.759+02:00   evidence: C:\Users\nicla\AppData\Local\Temp\dal-stability-mixer\mixer-all-sections.png
+2026-10-06T08:17:37.766+02:00 step end ok: mixer: show every section again elapsedMs=169
+2026-10-06T08:17:38.189+02:00 step begin: mixer: activate another row, then edit the audio row's fader / pan / pre-gain / routing / send through its strip
+2026-10-06T08:17:38.196+02:00   fader typed -6 on the audio strip: session gain 1.000 -> 0.501 (expected 0.501); other (active) row 0.708 -> 0.708
+2026-10-06T08:17:38.200+02:00   after pan 0.5 / pre-gain +3: track 1 kind=audio name="Track 1" muted=YES off=no fader=0.501 preGainDb=3.00 pan=0.50 output=2 monitor=off inserts=[] chainActiveForAudioThread=no
+2026-10-06T08:17:38.207+02:00   audio output Stereo Out -> Group 1 | track 1 kind=audio name="Track 1" muted=YES off=no fader=0.501 preGainDb=3.00 pan=0.50 output=9 monitor=off inserts=[] chainActiveForAudioThread=no
+2026-10-06T08:17:38.212+02:00   send 1 -> Group 1 amount -6.00
+2026-10-06T08:17:38.217+02:00 step end ok: mixer: activate another row, then edit the audio row's fader / pan / pre-gain / routing / send through its strip elapsedMs=22
+2026-10-06T08:17:38.671+02:00 step begin: mixer: the strip's selectors show the committed routing / send after the poll
+2026-10-06T08:17:38.676+02:00   audio row now: track 1 kind=audio name="Track 1" muted=YES off=no fader=0.501 preGainDb=3.00 pan=0.50 output=9 monitor=off inserts=[] chainActiveForAudioThread=no | strip output "Group 1" send 1 "Group 1" -6.00
+2026-10-06T08:17:38.682+02:00 step end ok: mixer: the strip's selectors show the committed routing / send after the poll elapsedMs=3
+2026-10-06T08:17:38.939+02:00 step begin: mixer: activate the audio row like a header click
+2026-10-06T08:17:38.950+02:00 step end ok: mixer: activate the audio row like a header click elapsedMs=4
+2026-10-06T08:17:39.257+02:00 step begin: mixer: the Inspector shows the same values as the strip for the now-active audio row
+2026-10-06T08:17:39.262+02:00   Inspector fader "-6.00" / strip "-6.00"; Inspector pre-gain "+3.0" / strip "+3.0"
+2026-10-06T08:17:39.268+02:00 step end ok: mixer: the Inspector shows the same values as the strip for the now-active audio row elapsedMs=4
+2026-10-06T08:17:39.700+02:00 step begin: mixer: insert row 'move to the other stage' through the strip
+2026-10-06T08:17:39.703+02:00   row 4 strip inserts: Pre:AmpliTube 4  | host: track 4 kind=audio name="Track 4" muted=YES off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Pre:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-06T08:17:39.711+02:00 step end ok: mixer: insert row 'move to the other stage' through the strip elapsedMs=4
+2026-10-06T08:17:40.121+02:00 step begin: mixer: the strip and the host show the moved insert; undo
+2026-10-06T08:17:40.128+02:00   after 'move to other stage': Post:AmpliTube 4  | host: track 4 kind=audio name="Track 4" muted=YES off=no fader=1.000 preGainDb=-24.00 pan=0.00 output=2 monitor=off inserts=[Post:AmpliTube 4] chainActiveForAudioThread=yes
+2026-10-06T08:17:42.497+02:00 step end ok: mixer: the strip and the host show the moved insert; undo elapsedMs=2367
+2026-10-06T08:17:43.028+02:00 step begin: mixer: undo restored the insert stages on the strip
+2026-10-06T08:17:43.033+02:00   after undo: Pre:AmpliTube 4 
+2026-10-06T08:17:43.039+02:00 step end ok: mixer: undo restored the insert stages on the strip elapsedMs=2
+2026-10-06T08:17:43.283+02:00 step begin: mixer: Mute through the strip
+2026-10-06T08:17:43.287+02:00   mute was on | track 1 kind=audio name="Track 1" muted=no off=no fader=0.501 preGainDb=3.00 pan=0.50 output=9 monitor=off inserts=[] chainActiveForAudioThread=no
+2026-10-06T08:17:43.294+02:00 step end ok: mixer: Mute through the strip elapsedMs=4
+2026-10-06T08:17:43.624+02:00 step begin: mixer: the strip shows the toggled mute; toggle back
+2026-10-06T08:17:43.628+02:00   mute now off | track 1 kind=audio name="Track 1" muted=no off=no fader=0.501 preGainDb=3.00 pan=0.50 output=9 monitor=off inserts=[] chainActiveForAudioThread=no
+2026-10-06T08:17:43.637+02:00 step end ok: mixer: the strip shows the toggled mute; toggle back elapsedMs=5
+2026-10-06T08:17:43.970+02:00 step begin: mixer: play from 24 s with the instrument row active
+2026-10-06T08:17:43.979+02:00   playing from 24 s at 48000 Hz
+2026-10-06T08:17:43.986+02:00 step end ok: mixer: play from 24 s with the instrument row active elapsedMs=10
+2026-10-06T08:17:47.492+02:00 step begin: mixer: two rows + Stereo Out meter concurrently; Inspector and mixer agree on the active row
+2026-10-06T08:17:47.495+02:00   held peaks: Track 1=0.000 Track 3=0.578 Track 4=0.000 VB3-II=0.176 MIDI 1=0.000 Track 8=0.148 Group 1=0.000 Stereo Out=0.343 
+2026-10-06T08:17:47.498+02:00   Stereo Out held=0.343 | active row 3: Inspector held=0.578 mixer held=0.578 | hub interest: 1 3 4 5 8 9 
+2026-10-06T08:17:47.501+02:00       mixer window 680 336 1200 720 visible=yes
+2026-10-06T08:17:47.503+02:00       mixer content 0 0 1200 720 toolbar h=30 strips viewport 0 30 1044 690 master viewport 1050 30 150 690
+2026-10-06T08:17:47.505+02:00       strip height 678 (minimum 678), 7 strips + master
+2026-10-06T08:17:47.507+02:00       section Routing=shown  section Pre-gain=shown  section Pre inserts=shown  section Post inserts=shown  section Sends=shown  section Faders=shown  section Meters=shown
+2026-10-06T08:17:47.635+02:00   evidence: C:\Users\nicla\AppData\Local\Temp\dal-stability-mixer\mixer-playing.png
+2026-10-06T08:17:47.643+02:00 step end ok: mixer: two rows + Stereo Out meter concurrently; Inspector and mixer agree on the active row elapsedMs=145
+2026-10-06T08:17:47.749+02:00 step begin: mixer: toggle the window while playing (1/5)
+2026-10-06T08:17:47.764+02:00 step end ok: mixer: toggle the window while playing (1/5) elapsedMs=8
+2026-10-06T08:17:47.949+02:00 step begin: mixer: toggle the window while playing (2/5)
+2026-10-06T08:17:48.011+02:00 step end ok: mixer: toggle the window while playing (2/5) elapsedMs=54
+2026-10-06T08:17:48.186+02:00 step begin: mixer: toggle the window while playing (3/5)
+2026-10-06T08:17:48.201+02:00 step end ok: mixer: toggle the window while playing (3/5) elapsedMs=8
+2026-10-06T08:17:48.391+02:00 step begin: mixer: toggle the window while playing (4/5)
+2026-10-06T08:17:48.451+02:00 step end ok: mixer: toggle the window while playing (4/5) elapsedMs=53
+2026-10-06T08:17:48.617+02:00 step begin: mixer: toggle the window while playing (5/5)
+2026-10-06T08:17:48.631+02:00 step end ok: mixer: toggle the window while playing (5/5) elapsedMs=8
+2026-10-06T08:17:48.820+02:00 step begin: mixer: hidden -> no metered mixer rows; shown again -> runtime fingerprint unchanged
+2026-10-06T08:17:48.881+02:00   runtime before: intent=1 chains=5:1,8:1,4:1, instruments=3:21cd3eb45d0/21cd3eacea0,5:21ce5aca210/21cda158cf0,8:21ce4132230/21ce445e050,
+2026-10-06T08:17:48.884+02:00   runtime after:  intent=1 chains=5:1,8:1,4:1, instruments=3:21cd3eb45d0/21cd3eacea0,5:21ce5aca210/21cda158cf0,8:21ce4132230/21ce445e050, | metered rows while hidden: 1 (the Inspector's row only)
+2026-10-06T08:17:48.889+02:00 step end ok: mixer: hidden -> no metered mixer rows; shown again -> runtime fingerprint unchanged elapsedMs=62
+2026-10-06T08:17:49.317+02:00 step begin: mixer: delete a row through the header's Delete Track path
+2026-10-06T08:17:51.146+02:00 step end ok: mixer: delete a row through the header's Delete Track path elapsedMs=1821
+2026-10-06T08:17:51.772+02:00 step begin: mixer: the deleted row's strip is gone; undo
+2026-10-06T08:17:51.777+02:00   strips 7 -> 6; deleted row strip gone=yes
+2026-10-06T08:17:52.744+02:00 step end ok: mixer: the deleted row's strip is gone; undo elapsedMs=965
+2026-10-06T08:17:53.582+02:00 step begin: mixer: undo brought the strip back
+2026-10-06T08:17:53.587+02:00   after undo: 7 strips: 1:AUDIO(Track 1) 3:INSTRUMENT(Track 3) 4:AUDIO(Track 4) 5:INSTRUMENT(VB3-II) 7:MIDI(MIDI 1) 8:INSTRUMENT(Track 8) 9:GROUP(Group 1) | master 2:STEREO OUT
+2026-10-06T08:17:53.592+02:00 step end ok: mixer: undo brought the strip back elapsedMs=3
+2026-10-06T08:17:53.838+02:00 step begin: mixer: save the copy
+2026-10-06T08:17:54.019+02:00 step end ok: mixer: save the copy elapsedMs=173
+2026-10-06T08:17:54.547+02:00 step begin: mixer-reload: load TSE_pt2-mixer.dalproj
+2026-10-06T08:18:01.476+02:00 step end ok: mixer-reload: load TSE_pt2-mixer.dalproj elapsedMs=6922
+2026-10-06T08:18:03.857+02:00 step begin: mixer-reload: verify loaded
+2026-10-06T08:18:03.860+02:00   track count after load: 8
+2026-10-06T08:18:03.865+02:00 step end ok: mixer-reload: verify loaded elapsedMs=2
+2026-10-06T08:18:04.225+02:00 step begin: mixer: strips and the metered set were rebuilt for the reloaded project
+2026-10-06T08:18:04.229+02:00   strips after reload: 1:AUDIO(Track 1) 3:INSTRUMENT(Track 3) 4:AUDIO(Track 4) 5:INSTRUMENT(VB3-II) 7:MIDI(MIDI 1) 8:INSTRUMENT(Track 8) 9:GROUP(Group 1) | master 2:STEREO OUT | metered rows all in snapshot: yes
+2026-10-06T08:18:04.235+02:00 step end ok: mixer: strips and the metered set were rebuilt for the reloaded project elapsedMs=3
+2026-10-06T08:18:04.665+02:00 step begin: mixer: move / resize the window and hide Sends
+2026-10-06T08:18:04.678+02:00   window 680 336 1200 720 -> 700 346 1000 640, sends hidden
+2026-10-06T08:18:04.685+02:00 step end ok: mixer: move / resize the window and hide Sends elapsedMs=12
+2026-10-06T08:18:05.636+02:00 step begin: mixer: ui-layout.xml stores the bounds and the Sends flag and keeps the header width
+2026-10-06T08:18:05.641+02:00   stored bounds 700 346 1000 640 (window 700 346 1000 640); sends=0; header width 149
+2026-10-06T08:18:05.657+02:00 step end ok: mixer: ui-layout.xml stores the bounds and the Sends flag and keeps the header width elapsedMs=14
+2026-10-06T08:18:06.293+02:00 step begin: mixer: hide the window at the end
+2026-10-06T08:18:06.308+02:00 step end ok: mixer: hide the window at the end elapsedMs=9
+2026-10-06T08:18:06.549+02:00 RESULT: PASS scenario=mixer totalMs=38466

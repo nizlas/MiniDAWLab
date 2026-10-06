@@ -2,6 +2,7 @@
 
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
+#include "ui/UiLayoutSettingsStore.h"
 #include "ui/experimental/ExperimentalMidiPattern.h"
 
 #include <atomic>
@@ -239,6 +240,15 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
                 return {};
             }
         }
+        else if (a == "--stability-mixer")
+        {
+            if (!setKind(StabilityScenarioKind::Mixer)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-mixer requires a project path";
+                return {};
+            }
+        }
         else if (a == "--stability-organ-dc")
         {
             if (!setKind(StabilityScenarioKind::OrganDc)) { return {}; }
@@ -446,6 +456,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::ProxyRecording: scenarioName_ = "proxy-recording"; break;
         case StabilityScenarioKind::ProxyRenderProbe: scenarioName_ = "proxy-render-probe"; break;
         case StabilityScenarioKind::ProxyPlaybackEdges: scenarioName_ = "proxy-playback-edges"; break;
+        case StabilityScenarioKind::Mixer: scenarioName_ = "mixer"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -543,6 +554,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::ProxyPlaybackEdges:
             appendProxyPlaybackEdgesSteps(request);
+            break;
+        case StabilityScenarioKind::Mixer:
+            appendMixerSteps(request.projectA);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -3453,6 +3467,696 @@ void StabilityScenarioRunner::appendProxyPlaybackEdgesSteps(const StabilityScena
                                return true;
                            },
                            100 });
+}
+
+// -----------------------------------------------------------------------------
+// Mixer window (`--stability-mixer <project>`)
+// -----------------------------------------------------------------------------
+void StabilityScenarioRunner::appendMixerSteps(const juce::File& project)
+{
+    const StabilityRunnerHooks::MixerHooks& M = hooks_.mixer;
+    if (M.toggleLikeF3 == nullptr || M.isVisible == nullptr || M.windowInstanceCount == nullptr || M.capturePng == nullptr
+        || M.verifyLayout == nullptr || M.stripOrder == nullptr || M.masterStripScreenBounds == nullptr
+        || M.scrollStripsToRight == nullptr || M.clickSectionToggle == nullptr || M.sectionShown == nullptr
+        || M.stripFaderType == nullptr || M.stripPanSet == nullptr || M.stripChooseRouting == nullptr
+        || M.stripRoutingText == nullptr || M.stripChooseSendDestination == nullptr || M.stripSendDestinationText == nullptr
+        || M.stripCommitSendAmount == nullptr || M.stripSendAmountText == nullptr || M.stripCommitPreGain == nullptr
+        || M.stripPreGainText == nullptr || M.stripInsertRowsText == nullptr || M.stripInsertMenuAction == nullptr
+        || M.stripClickButton == nullptr || M.stripButtonActive == nullptr || M.stripButtonVisible == nullptr
+        || M.stripMeterHeldPeak == nullptr || M.inspectorMeterHeldPeak == nullptr || M.meterHubInterest == nullptr
+        || M.windowBounds == nullptr || M.setWindowBounds == nullptr || M.audioRuntimeFingerprint == nullptr
+        || M.stripKindTexts == nullptr || M.stripFaderValueText == nullptr || M.stripRoutingCaption == nullptr
+        || M.stripMeterOverloadLatched == nullptr || M.stripClickMeter == nullptr || M.inspectorMeterOverloadLatched == nullptr
+        || hooks_.listAllTracks == nullptr || hooks_.getTrackChannelFaderGain == nullptr || hooks_.activateTrackLikeHeaderClick == nullptr
+        || hooks_.describeTrackForDiagnostics == nullptr || hooks_.inspectorFaderValueText == nullptr || hooks_.requestDeleteTrack == nullptr
+        || hooks_.invokeUndo == nullptr || hooks_.seekTransportTo == nullptr || hooks_.setPlaybackActive == nullptr
+        || hooks_.getActiveLoopSpan == nullptr || hooks_.loadProjectFromFile == nullptr || hooks_.saveProject == nullptr)
+    {
+        steps_.push_back(Step{ "mixer: hooks missing",
+                               [](juce::String& failReason) -> bool {
+                                   failReason = "mixer hooks not installed";
+                                   return false;
+                               },
+                               0 });
+        return;
+    }
+
+    auto evidenceDir = std::make_shared<juce::File>(
+        juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-stability-mixer"));
+    (void)evidenceDir->deleteRecursively();
+    (void)evidenceDir->createDirectory();
+    // Sibling copy: every edit below lands in the copy, the user's project is never written.
+    const juce::File copy = project.getSiblingFile(project.getFileNameWithoutExtension() + "-mixer.dalproj");
+    steps_.push_back(Step{ "mixer: sibling copy",
+                           [project, copy](juce::String& failReason) -> bool {
+                               (void)copy.deleteFile();
+                               if (!project.copyFileTo(copy))
+                               {
+                                   failReason = "could not copy the project";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           100 });
+    appendLoadAndVerifySteps(copy, "mixer");
+
+    const auto say = [this](const juce::String& line) { appendStabilityRunLine("  " + line); };
+    const auto verifyAndCapture = [this, evidenceDir, M](const juce::String& label, juce::String& failReason) -> bool {
+        juce::String report;
+        const bool ok = M.verifyLayout(report, failReason);
+        for (const auto& line : juce::StringArray::fromLines(report))
+        {
+            if (line.isNotEmpty())
+            {
+                appendStabilityRunLine("    " + line);
+            }
+        }
+        const juce::File png = evidenceDir->getChildFile("mixer-" + label + ".png");
+        if (M.capturePng(png))
+        {
+            appendStabilityRunLine("  evidence: " + png.getFullPathName());
+        }
+        return ok;
+    };
+    auto audioTid = std::make_shared<TrackId>(kInvalidTrackId);
+    auto otherTid = std::make_shared<TrackId>(kInvalidTrackId);
+    auto groupName = std::make_shared<juce::String>();
+    auto instrumentTid = std::make_shared<TrackId>(kInvalidTrackId);
+    auto faderBefore = std::make_shared<float>(1.0f);
+    auto otherFaderBefore = std::make_shared<float>(1.0f);
+    auto insertTid = std::make_shared<TrackId>(kInvalidTrackId);
+    auto insertRowsBefore = std::make_shared<juce::String>();
+    auto fingerprintBefore = std::make_shared<juce::String>();
+    auto boundsBefore = std::make_shared<juce::Rectangle<int>>();
+    auto sectionFlagsBefore = std::make_shared<std::vector<bool>>();
+    const juce::StringArray sectionKeys{ "routing", "preGain", "preInserts", "postInserts", "sends", "faders", "meters" };
+
+    // 1. F3 / close / reopen — one instance.
+    steps_.push_back(Step{ "mixer: F3 shows the window (one instance), F3 hides, F3 shows again",
+                           [this, M, say](juce::String& failReason) -> bool {
+                               if (M.isVisible())
+                               {
+                                   M.toggleLikeF3();
+                               }
+                               M.toggleLikeF3();
+                               if (!M.isVisible())
+                               {
+                                   failReason = "F3 did not show the mixer";
+                                   return false;
+                               }
+                               const int n1 = M.windowInstanceCount();
+                               M.toggleLikeF3();
+                               const bool hidden = !M.isVisible();
+                               M.toggleLikeF3();
+                               const int n2 = M.windowInstanceCount();
+                               say("mixer visible after F3; instances=" + juce::String(n1) + " hidden after second F3=" + juce::String(hidden ? "yes" : "no")
+                                   + " instances after third F3=" + juce::String(n2));
+                               if (!hidden || n1 != 1 || n2 != 1 || !M.isVisible())
+                               {
+                                   failReason = "F3 toggle / single instance failed";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+
+    // 1b. A Group row (send / output target) when the project has none — added like the menu does.
+    steps_.push_back(Step{ "mixer: add a Group row when the project has none (routing / send target)",
+                           [this, M, say](juce::String& failReason) -> bool {
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "group")
+                                   {
+                                       say("group row present: " + t.name);
+                                       return true;
+                                   }
+                               }
+                               if (M.addGroupTrackLikeUi == nullptr)
+                               {
+                                   say("no group and no add hook: routing / send checks will be skipped");
+                                   return true;
+                               }
+                               const TrackId gid = M.addGroupTrackLikeUi();
+                               if (gid == kInvalidTrackId)
+                               {
+                                   failReason = "could not add a Group row";
+                                   return false;
+                               }
+                               say("added group row " + juce::String((juce::int64)gid));
+                               return true;
+                           },
+                           500 });
+
+    // 2. Strips per kind, arrangement order, fixed Stereo Out.
+    steps_.push_back(Step{ "mixer: strips follow the arrangement order; every kind present; Stereo Out fixed",
+                           [this, M, say, verifyAndCapture, audioTid, otherTid, groupName, instrumentTid, insertTid](juce::String& failReason) -> bool {
+                               std::vector<TrackId> expected;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "master")
+                                   {
+                                       continue;
+                                   }
+                                   expected.push_back(t.id);
+                                   if (t.kindName == "audio" && *audioTid == kInvalidTrackId)
+                                   {
+                                       *audioTid = t.id;
+                                   }
+                                   else if (t.kindName == "group" && groupName->isEmpty())
+                                   {
+                                       *groupName = t.name;
+                                   }
+                                   if (t.kindName == "instrument" && *instrumentTid == kInvalidTrackId)
+                                   {
+                                       *instrumentTid = t.id;
+                                   }
+                                   const juce::String desc = hooks_.describeTrackForDiagnostics(t.id);
+                                   if (*insertTid == kInvalidTrackId && desc.contains("inserts=[") && !desc.contains("inserts=[]"))
+                                   {
+                                       *insertTid = t.id;
+                                   }
+                               }
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName != "master" && t.id != *audioTid && *otherTid == kInvalidTrackId)
+                                   {
+                                       *otherTid = t.id;
+                                   }
+                               }
+                               const std::vector<TrackId> order = M.stripOrder();
+                               say("strips: " + M.stripKindTexts());
+                               if (order != expected)
+                               {
+                                   failReason = "strip order differs from the arrangement order";
+                                   return false;
+                               }
+                               const juce::Rectangle<int> masterBefore = M.masterStripScreenBounds();
+                               const int scrolledX = M.scrollStripsToRight();
+                               const juce::Rectangle<int> masterAfter = M.masterStripScreenBounds();
+                               say("horizontal scroll to x=" + juce::String(scrolledX) + "; Stereo Out strip at " + masterBefore.toString() + " -> " + masterAfter.toString());
+                               if (masterBefore.isEmpty() || masterBefore != masterAfter)
+                               {
+                                   failReason = "the Stereo Out strip moved with the horizontal scroll";
+                                   return false;
+                               }
+                               return verifyAndCapture("all-sections-scrolled", failReason);
+                           },
+                           400 });
+
+    // 3. Section toggles: hide routing / inserts / sends → aligned faders + meters; then restore.
+    steps_.push_back(Step{ "mixer: hide Routing, Pre inserts, Post inserts, Sends through the toolbar",
+                           [this, M, say, sectionKeys, sectionFlagsBefore](juce::String& failReason) -> bool {
+                               sectionFlagsBefore->clear();
+                               for (const auto& k : sectionKeys)
+                               {
+                                   sectionFlagsBefore->push_back(M.sectionShown(k));
+                               }
+                               for (const char* k : { "routing", "preInserts", "postInserts", "sends" })
+                               {
+                                   if (M.sectionShown(k))
+                                   {
+                                       M.clickSectionToggle(k);
+                                   }
+                               }
+                               juce::String flags;
+                               for (const auto& k : sectionKeys)
+                               {
+                                   flags << k << "=" << (M.sectionShown(k) ? "1" : "0") << " ";
+                               }
+                               say("sections: " + flags);
+                               if (M.sectionShown("routing") || M.sectionShown("sends") || !M.sectionShown("faders") || !M.sectionShown("meters"))
+                               {
+                                   failReason = "section toggles did not apply independently";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "mixer: layout with faders + meters only",
+                           [verifyAndCapture](juce::String& failReason) -> bool { return verifyAndCapture("faders-meters", failReason); },
+                           200 });
+    steps_.push_back(Step{ "mixer: hide Meters too (faders alone), then Faders alone hidden (meters alone)",
+                           [this, M, verifyAndCapture](juce::String& failReason) -> bool {
+                               M.clickSectionToggle("meters");
+                               if (!verifyAndCapture("faders-only", failReason))
+                               {
+                                   return false;
+                               }
+                               M.clickSectionToggle("meters");
+                               M.clickSectionToggle("faders");
+                               if (!verifyAndCapture("meters-only", failReason))
+                               {
+                                   return false;
+                               }
+                               M.clickSectionToggle("faders");
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "mixer: show every section again",
+                           [this, M, sectionKeys, verifyAndCapture](juce::String& failReason) -> bool {
+                               for (const auto& k : sectionKeys)
+                               {
+                                   if (!M.sectionShown(k))
+                                   {
+                                       M.clickSectionToggle(k);
+                                   }
+                               }
+                               return verifyAndCapture("all-sections", failReason);
+                           },
+                           400 });
+
+    // 4. TrackId binding: edit a NON-active row through its strip; the session and the Inspector follow.
+    steps_.push_back(Step{ "mixer: activate another row, then edit the audio row's fader / pan / pre-gain / routing / send through its strip",
+                           [this, M, say, audioTid, otherTid, groupName, faderBefore, otherFaderBefore](juce::String& failReason) -> bool {
+                               if (*audioTid == kInvalidTrackId)
+                               {
+                                   failReason = "no audio row in this project";
+                                   return false;
+                               }
+                               if (*otherTid != kInvalidTrackId)
+                               {
+                                   hooks_.activateTrackLikeHeaderClick(*otherTid);
+                                   *otherFaderBefore = hooks_.getTrackChannelFaderGain(*otherTid);
+                               }
+                               *faderBefore = hooks_.getTrackChannelFaderGain(*audioTid);
+                               if (!M.stripFaderType(*audioTid, "-6"))
+                               {
+                                   failReason = "no strip for the audio row";
+                                   return false;
+                               }
+                               const float gainAfter = hooks_.getTrackChannelFaderGain(*audioTid);
+                               const float otherAfter = *otherTid != kInvalidTrackId ? hooks_.getTrackChannelFaderGain(*otherTid) : 0.0f;
+                               say("fader typed -6 on the audio strip: session gain " + juce::String(*faderBefore, 3) + " -> " + juce::String(gainAfter, 3)
+                                   + " (expected 0.501); other (active) row " + juce::String(*otherFaderBefore, 3) + " -> " + juce::String(otherAfter, 3));
+                               if (std::abs(gainAfter - 0.501f) > 0.01f)
+                               {
+                                   failReason = "the typed fader value did not reach the audio row's session gain";
+                                   return false;
+                               }
+                               if (*otherTid != kInvalidTrackId && std::abs(otherAfter - *otherFaderBefore) > 1.0e-6f)
+                               {
+                                   failReason = "the active (other) row's gain changed";
+                                   return false;
+                               }
+                               (void)M.stripPanSet(*audioTid, 0.5f);
+                               (void)M.stripCommitPreGain(*audioTid, "+3");
+                               const juce::String desc = hooks_.describeTrackForDiagnostics(*audioTid);
+                               say("after pan 0.5 / pre-gain +3: " + desc);
+                               if (!desc.contains("pan=0.50") || !desc.contains("preGainDb=3.00"))
+                               {
+                                   failReason = "pan / pre-gain did not reach the audio row";
+                                   return false;
+                               }
+                               if (groupName->isNotEmpty())
+                               {
+                                   const juce::String routingBefore = M.stripRoutingText(*audioTid, 1);
+                                   if (!M.stripChooseRouting(*audioTid, 1, *groupName))
+                                   {
+                                       failReason = "the group is not offered as the audio row's output";
+                                       return false;
+                                   }
+                                   say("audio output " + routingBefore + " -> " + M.stripRoutingText(*audioTid, 1) + " | " + hooks_.describeTrackForDiagnostics(*audioTid));
+                                   if (!M.stripChooseSendDestination(*audioTid, 0, *groupName))
+                                   {
+                                       failReason = "the group is not offered as a send destination";
+                                       return false;
+                                   }
+                                   (void)M.stripCommitSendAmount(*audioTid, 0, "-6");
+                                   say("send 1 -> " + M.stripSendDestinationText(*audioTid, 0) + " amount " + M.stripSendAmountText(*audioTid, 0));
+                               }
+                               else
+                               {
+                                   say("no Group row: routing / send edits skipped");
+                               }
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "mixer: the strip's selectors show the committed routing / send after the poll",
+                           [this, M, say, audioTid, groupName](juce::String& failReason) -> bool {
+                               const juce::String desc = hooks_.describeTrackForDiagnostics(*audioTid);
+                               say("audio row now: " + desc + " | strip output \"" + M.stripRoutingText(*audioTid, 1) + "\" send 1 \""
+                                   + M.stripSendDestinationText(*audioTid, 0) + "\" " + M.stripSendAmountText(*audioTid, 0));
+                               if (groupName->isNotEmpty())
+                               {
+                                   if (M.stripRoutingText(*audioTid, 1) != *groupName)
+                                   {
+                                       failReason = "the output selector does not show the routing edit";
+                                       return false;
+                                   }
+                                   if (M.stripSendDestinationText(*audioTid, 0) != *groupName || !M.stripSendAmountText(*audioTid, 0).startsWith("-6.0"))
+                                   {
+                                       failReason = "the send row does not show the send edit";
+                                       return false;
+                                   }
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "mixer: activate the audio row like a header click",
+                           [this, audioTid](juce::String&) -> bool {
+                               hooks_.activateTrackLikeHeaderClick(*audioTid);
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "mixer: the Inspector shows the same values as the strip for the now-active audio row",
+                           [this, M, say, audioTid](juce::String& failReason) -> bool {
+                               const juce::String inspectorFader = hooks_.inspectorFaderValueText();
+                               const juce::String stripFader = M.stripFaderValueText(*audioTid);
+                               const juce::String inspectorPreGain = hooks_.inspectorPreGainFieldText ? hooks_.inspectorPreGainFieldText() : juce::String("?");
+                               say("Inspector fader \"" + inspectorFader + "\" / strip \"" + stripFader + "\"; Inspector pre-gain \"" + inspectorPreGain
+                                   + "\" / strip \"" + M.stripPreGainText(*audioTid) + "\"");
+                               if (inspectorFader != stripFader || !inspectorFader.contains("-6"))
+                               {
+                                   failReason = "Inspector and mixer fader texts differ";
+                                   return false;
+                               }
+                               if (hooks_.inspectorPreGainFieldText && inspectorPreGain != M.stripPreGainText(*audioTid))
+                               {
+                                   failReason = "Inspector and mixer pre-gain texts differ";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           400 });
+
+    // 5. Insert row actions through the strip (stage move, then undo).
+    steps_.push_back(Step{ "mixer: insert row 'move to the other stage' through the strip",
+                           [this, M, say, insertTid, insertRowsBefore](juce::String& failReason) -> bool {
+                               if (*insertTid == kInvalidTrackId)
+                               {
+                                   say("no row with inserts in this project: insert actions skipped");
+                                   return true;
+                               }
+                               *insertRowsBefore = M.stripInsertRowsText(*insertTid);
+                               say("row " + juce::String((juce::int64)*insertTid) + " strip inserts: " + *insertRowsBefore + " | host: " + hooks_.describeTrackForDiagnostics(*insertTid));
+                               const bool pre = insertRowsBefore->startsWith("Pre:");
+                               if (!M.stripInsertMenuAction(*insertTid, pre, 0, 4))
+                               {
+                                   failReason = "insert menu action refused";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           400 });
+    steps_.push_back(Step{ "mixer: the strip and the host show the moved insert; undo",
+                           [this, M, say, insertTid, insertRowsBefore](juce::String& failReason) -> bool {
+                               if (*insertTid == kInvalidTrackId)
+                               {
+                                   return true;
+                               }
+                               const juce::String after = M.stripInsertRowsText(*insertTid);
+                               say("after 'move to other stage': " + after + " | host: " + hooks_.describeTrackForDiagnostics(*insertTid));
+                               if (after == *insertRowsBefore)
+                               {
+                                   failReason = "the stage move did not change the row's inserts";
+                                   return false;
+                               }
+                               hooks_.invokeUndo();
+                               return true;
+                           },
+                           500 });
+    steps_.push_back(Step{ "mixer: undo restored the insert stages on the strip",
+                           [this, M, say, insertTid, insertRowsBefore](juce::String& failReason) -> bool {
+                               if (*insertTid == kInvalidTrackId)
+                               {
+                                   return true;
+                               }
+                               const juce::String restored = M.stripInsertRowsText(*insertTid);
+                               say("after undo: " + restored);
+                               if (restored != *insertRowsBefore)
+                               {
+                                   failReason = "undo did not restore the insert stages";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+
+    // 6. Base buttons through the strip.
+    auto muteBefore = std::make_shared<bool>(false);
+    steps_.push_back(Step{ "mixer: Mute through the strip",
+                           [this, M, say, audioTid, muteBefore](juce::String&) -> bool {
+                               *muteBefore = M.stripButtonActive(*audioTid, "mute");
+                               (void)M.stripClickButton(*audioTid, "mute");
+                               say("mute was " + juce::String(*muteBefore ? "on" : "off") + " | " + hooks_.describeTrackForDiagnostics(*audioTid));
+                               return true;
+                           },
+                           300 });
+    steps_.push_back(Step{ "mixer: the strip shows the toggled mute; toggle back",
+                           [this, M, say, audioTid, muteBefore](juce::String& failReason) -> bool {
+                               const bool after = M.stripButtonActive(*audioTid, "mute");
+                               const juce::String desc = hooks_.describeTrackForDiagnostics(*audioTid);
+                               say("mute now " + juce::String(after ? "on" : "off") + " | " + desc);
+                               if (after == *muteBefore || !desc.contains(after ? "muted=yes" : "muted=no"))
+                               {
+                                   failReason = "mute did not toggle through the strip";
+                                   return false;
+                               }
+                               (void)M.stripClickButton(*audioTid, "mute");
+                               return true;
+                           },
+                           300 });
+
+    // 7. Concurrent meters while playing.
+    steps_.push_back(Step{ "mixer: play from 24 s with the instrument row active",
+                           [this, M, say, instrumentTid, audioTid, fingerprintBefore](juce::String&) -> bool {
+                               const TrackId active = *instrumentTid != kInvalidTrackId ? *instrumentTid : *audioTid;
+                               hooks_.activateTrackLikeHeaderClick(active);
+                               // 24 s into the arrangement: inside the material of the test projects used here
+                               // (the loop span is only "active" with Cycle on, so seek by the device rate).
+                               const double sr = hooks_.getDeviceSampleRate != nullptr && hooks_.getDeviceSampleRate() > 0.0 ? hooks_.getDeviceSampleRate() : 48000.0;
+                               hooks_.seekTransportTo((std::int64_t)(24.0 * sr));
+                               hooks_.setPlaybackActive(true);
+                               *fingerprintBefore = M.audioRuntimeFingerprint();
+                               say("playing from 24 s at " + juce::String(sr) + " Hz");
+                               return true;
+                           },
+                           3500 });
+    steps_.push_back(Step{ "mixer: two rows + Stereo Out meter concurrently; Inspector and mixer agree on the active row",
+                           [this, M, say, verifyAndCapture, instrumentTid, audioTid](juce::String& failReason) -> bool {
+                               std::vector<TrackId> signalRows;
+                               TrackId master = kInvalidTrackId;
+                               juce::String levels;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName == "master")
+                                   {
+                                       master = t.id;
+                                   }
+                                   const float held = M.stripMeterHeldPeak(t.id);
+                                   levels << t.name << "=" << juce::String(held, 3) << " ";
+                                   if (t.kindName != "master" && held > 0.001f)
+                                   {
+                                       signalRows.push_back(t.id);
+                                   }
+                               }
+                               say("held peaks: " + levels);
+                               const float masterHeld = master != kInvalidTrackId ? M.stripMeterHeldPeak(master) : 0.0f;
+                               const TrackId active = *instrumentTid != kInvalidTrackId ? *instrumentTid : *audioTid;
+                               const float inspectorHeld = M.inspectorMeterHeldPeak();
+                               const float stripHeld = M.stripMeterHeldPeak(active);
+                               const std::vector<TrackId> interest = M.meterHubInterest();
+                               juce::String interestText;
+                               for (const TrackId id : interest)
+                               {
+                                   interestText << juce::String((juce::int64)id) << " ";
+                               }
+                               say("Stereo Out held=" + juce::String(masterHeld, 3) + " | active row " + juce::String((juce::int64)active) + ": Inspector held="
+                                   + juce::String(inspectorHeld, 3) + " mixer held=" + juce::String(stripHeld, 3) + " | hub interest: " + interestText);
+                               if (!verifyAndCapture("playing", failReason))
+                               {
+                                   return false;
+                               }
+                               if (signalRows.size() < 2)
+                               {
+                                   failReason = "fewer than two rows show signal while playing";
+                                   return false;
+                               }
+                               if (masterHeld <= 0.001f)
+                               {
+                                   failReason = "the Stereo Out strip shows no signal";
+                                   return false;
+                               }
+                               if (std::abs(inspectorHeld - stripHeld) > 0.05f * juce::jmax(0.02f, stripHeld))
+                               {
+                                   failReason = "Inspector and mixer meters of the active row disagree";
+                                   return false;
+                               }
+                               if (std::find(interest.begin(), interest.end(), active) == interest.end())
+                               {
+                                   failReason = "the active row is not in the hub's metered set";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           100 });
+
+    // 8. Open / close while playing leaves the audio runtime untouched.
+    for (int i = 0; i < 5; ++i)
+    {
+        steps_.push_back(Step{ "mixer: toggle the window while playing (" + juce::String(i + 1) + "/5)",
+                               [M](juce::String&) -> bool {
+                                   M.toggleLikeF3();
+                                   return true;
+                               },
+                               150 });
+    }
+    steps_.push_back(Step{ "mixer: hidden -> no metered mixer rows; shown again -> runtime fingerprint unchanged",
+                           [this, M, say, fingerprintBefore](juce::String& failReason) -> bool {
+                               if (M.isVisible())
+                               {
+                                   M.toggleLikeF3();
+                               }
+                               const int hiddenInterest = (int)M.meterHubInterest().size();
+                               M.toggleLikeF3();
+                               const juce::String after = M.audioRuntimeFingerprint();
+                               say("runtime before: " + *fingerprintBefore);
+                               say("runtime after:  " + after + " | metered rows while hidden: " + juce::String(hiddenInterest) + " (the Inspector's row only)");
+                               hooks_.setPlaybackActive(false);
+                               if (after != *fingerprintBefore)
+                               {
+                                   failReason = "the audio runtime fingerprint changed across mixer open / close";
+                                   return false;
+                               }
+                               if (hiddenInterest > 1)
+                               {
+                                   failReason = "hidden mixer still meters rows";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           400 });
+
+    // 9. Track deletion and project reload.
+    auto stripsBeforeDelete = std::make_shared<int>(0);
+    steps_.push_back(Step{ "mixer: delete a row through the header's Delete Track path",
+                           [this, M, say, otherTid, stripsBeforeDelete](juce::String&) -> bool {
+                               *stripsBeforeDelete = (int)M.stripOrder().size();
+                               if (*otherTid == kInvalidTrackId)
+                               {
+                                   say("only one non-master row: deletion check skipped");
+                                   return true;
+                               }
+                               hooks_.requestDeleteTrack(*otherTid);
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "mixer: the deleted row's strip is gone; undo",
+                           [this, M, say, otherTid, stripsBeforeDelete](juce::String& failReason) -> bool {
+                               if (*otherTid == kInvalidTrackId)
+                               {
+                                   return true;
+                               }
+                               const std::vector<TrackId> order = M.stripOrder();
+                               const bool gone = std::find(order.begin(), order.end(), *otherTid) == order.end();
+                               say("strips " + juce::String(*stripsBeforeDelete) + " -> " + juce::String((int)order.size()) + "; deleted row strip gone=" + juce::String(gone ? "yes" : "no"));
+                               if (!gone || (int)order.size() != *stripsBeforeDelete - 1)
+                               {
+                                   failReason = "the deleted row's strip did not disappear";
+                                   return false;
+                               }
+                               hooks_.invokeUndo();
+                               return true;
+                           },
+                           800 });
+    steps_.push_back(Step{ "mixer: undo brought the strip back",
+                           [this, M, say, otherTid, stripsBeforeDelete](juce::String& failReason) -> bool {
+                               if (*otherTid == kInvalidTrackId)
+                               {
+                                   return true;
+                               }
+                               const std::vector<TrackId> restored = M.stripOrder();
+                               say("after undo: " + juce::String((int)restored.size()) + " strips: " + M.stripKindTexts());
+                               if ((int)restored.size() != *stripsBeforeDelete)
+                               {
+                                   failReason = "undo did not restore the strip";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           200 });
+    steps_.push_back(Step{ "mixer: save the copy",
+                           [this](juce::String&) -> bool {
+                               hooks_.saveProject();
+                               return true;
+                           },
+                           500 });
+    appendLoadAndVerifySteps(copy, "mixer-reload");
+    steps_.push_back(Step{ "mixer: strips and the metered set were rebuilt for the reloaded project",
+                           [this, M, say](juce::String& failReason) -> bool {
+                               std::vector<TrackId> expected;
+                               for (const StabilityTrackInfo& t : hooks_.listAllTracks())
+                               {
+                                   if (t.kindName != "master")
+                                   {
+                                       expected.push_back(t.id);
+                                   }
+                               }
+                               const std::vector<TrackId> order = M.stripOrder();
+                               const std::vector<TrackId> interest = M.meterHubInterest();
+                               bool interestOk = true;
+                               for (const TrackId id : interest)
+                               {
+                                   if (std::find(expected.begin(), expected.end(), id) == expected.end())
+                                   {
+                                       interestOk = false;
+                                   }
+                               }
+                               say("strips after reload: " + M.stripKindTexts() + " | metered rows all in snapshot: " + juce::String(interestOk ? "yes" : "no"));
+                               if (order != expected || !interestOk)
+                               {
+                                   failReason = "strips / metered rows do not match the reloaded project";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           400 });
+
+    // 10. Persistence of bounds + section flags; header width untouched.
+    steps_.push_back(Step{ "mixer: move / resize the window and hide Sends",
+                           [this, M, say, boundsBefore](juce::String&) -> bool {
+                               if (!M.isVisible())
+                               {
+                                   M.toggleLikeF3();
+                               }
+                               *boundsBefore = M.windowBounds();
+                               const juce::Rectangle<int> target = boundsBefore->withSize(1000, 640).translated(20, 10);
+                               M.setWindowBounds(target);
+                               M.clickSectionToggle("sends");
+                               say("window " + boundsBefore->toString() + " -> " + M.windowBounds().toString() + ", sends hidden");
+                               return true;
+                           },
+                           900 }); // > the 300 ms bounds settle
+    steps_.push_back(Step{ "mixer: ui-layout.xml stores the bounds and the Sends flag and keeps the header width",
+                           [this, M, say, boundsBefore](juce::String& failReason) -> bool {
+                               const juce::File file = UiLayoutSettingsStore::defaultFile();
+                               UiLayoutSettingsStore fresh(file);
+                               fresh.loadFromFile();
+                               const auto stored = fresh.getMixerWindowBounds();
+                               const auto sends = fresh.getMixerSectionShown("sends");
+                               const auto headerW = fresh.getTrackHeaderColumnWidthPx();
+                               say("stored bounds " + (stored ? stored->toString() : juce::String("(none)")) + " (window " + M.windowBounds().toString()
+                                   + "); sends=" + (sends ? juce::String(*sends ? "1" : "0") : juce::String("(absent)")) + "; header width "
+                                   + (headerW ? juce::String(*headerW) : juce::String("(absent)")));
+                               M.clickSectionToggle("sends");
+                               M.setWindowBounds(*boundsBefore);
+                               if (!stored || stored->getWidth() != 1000 || stored->getHeight() != 640 || !sends || *sends)
+                               {
+                                   failReason = "mixer bounds / section flag were not persisted as expected";
+                                   return false;
+                               }
+                               return true;
+                           },
+                           600 });
+    steps_.push_back(Step{ "mixer: hide the window at the end",
+                           [M](juce::String&) -> bool {
+                               if (M.isVisible())
+                               {
+                                   M.toggleLikeF3();
+                               }
+                               return true;
+                           },
+                           200 });
 }
 
 void StabilityScenarioRunner::appendLoadAndVerifySteps(const juce::File& project,

@@ -652,9 +652,13 @@ void TrackLanesEditCoordinator::install()
     };
 
     trackLanesView_.setOnUndoableRenameTrackRequested(renameTrack);
+    trackEditActions_.renameTrack = renameTrack;
     inspectorView_.setRenameTrackHandler(renameTrack);
 
-    inspectorView_.setRoutedOutputHandler([this](const TrackId trackId, const TrackId destId) {
+    // Every handler below is stored in `trackEditActions_` FIRST and then handed to the
+    // Inspector, so the mixer strips (bound by explicit TrackId) and the Inspector run the
+    // identical undoable path.
+    trackEditActions_.setRoutedOutput = [this](const TrackId trackId, const TrackId destId) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {
             return;
@@ -678,12 +682,13 @@ void TrackLanesEditCoordinator::install()
                     callbacks_, trackLanesView_, rulerView_, inspectorView_);
                 return true;
             });
-    });
+    };
+    inspectorView_.setRoutedOutputHandler(trackEditActions_.setRoutedOutput);
 
     // Pre-gain (audio rows): one text commit / one Ctrl+click reset = one undo step. A no-op
     // value (setter returns false) records nothing, so repeated commits of the same number
     // do not pollute the undo stack.
-    inspectorView_.setPreGainHandler([this](const TrackId trackId, const float preGainDb) {
+    trackEditActions_.setPreGainDb = [this](const TrackId trackId, const float preGainDb) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {
             return;
@@ -693,30 +698,31 @@ void TrackLanesEditCoordinator::install()
             [this, trackId, preGainDb]() -> bool {
                 return session_.setTrackPreGainDb(trackId, preGainDb);
             });
-    });
+    };
+    inspectorView_.setPreGainHandler(trackEditActions_.setPreGainDb);
 
     // Audio input assignment (audio rows): a normal undoable project edit. A no-op pick (setter
     // returns false) records nothing. Blocked while recording so an active take's capture source
     // cannot change mid-flight.
-    inspectorView_.setAudioInputHandler(
-        [this](const TrackId trackId, const TrackInputAssignment assignment) {
-            if (callbacks_.isRecording() || callbacks_.isCountInActive())
-            {
-                return;
-            }
-            callbacks_.executeUndoableSessionEdit(
-                "Set audio input",
-                [this, trackId, assignment]() -> bool {
-                    if (!session_.setTrackInputAssignment(trackId, assignment))
-                    {
-                        return false;
-                    }
-                    inspectorView_.refreshFromSession();
-                    return true;
-                });
-        });
+    trackEditActions_.setAudioInput = [this](const TrackId trackId, const TrackInputAssignment assignment) {
+        if (callbacks_.isRecording() || callbacks_.isCountInActive())
+        {
+            return;
+        }
+        callbacks_.executeUndoableSessionEdit(
+            "Set audio input",
+            [this, trackId, assignment]() -> bool {
+                if (!session_.setTrackInputAssignment(trackId, assignment))
+                {
+                    return false;
+                }
+                inspectorView_.refreshFromSession();
+                return true;
+            });
+    };
+    inspectorView_.setAudioInputHandler(trackEditActions_.setAudioInput);
 
-    inspectorView_.setMidiOutputChannelHandler([this](const TrackId trackId, const int channel) {
+    trackEditActions_.setMidiOutputChannel = [this](const TrackId trackId, const int channel) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {
             return;
@@ -742,9 +748,10 @@ void TrackLanesEditCoordinator::install()
                 inspectorView_.refreshFromSession();
                 return true;
             });
-    });
+    };
+    inspectorView_.setMidiOutputChannelHandler(trackEditActions_.setMidiOutputChannel);
 
-    inspectorView_.setMidiInputHandler([this](const TrackId trackId, const TrackMidiInputAssignment assignment) {
+    trackEditActions_.setMidiInput = [this](const TrackId trackId, const TrackMidiInputAssignment assignment) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {
             return;
@@ -766,9 +773,10 @@ void TrackLanesEditCoordinator::install()
                 inspectorView_.refreshFromSession();
                 return true;
             });
-    });
+    };
+    inspectorView_.setMidiInputHandler(trackEditActions_.setMidiInput);
 
-    inspectorView_.setMidiDestinationHandler([this](const TrackId trackId, const TrackId destTrackId) {
+    trackEditActions_.setMidiDestination = [this](const TrackId trackId, const TrackId destTrackId) {
         if (callbacks_.isRecording() || callbacks_.isCountInActive())
         {
             return;
@@ -790,10 +798,11 @@ void TrackLanesEditCoordinator::install()
                 inspectorView_.refreshFromSession();
                 return true;
             });
-    });
+    };
+    inspectorView_.setMidiDestinationHandler(trackEditActions_.setMidiDestination);
 
-    inspectorView_.setTrackSendHandlers(
-        [this](const TrackId trackId, const int sendRowIndex, const TrackId destTrackId) {
+    trackEditActions_.setSendDestination
+        = [this](const TrackId trackId, const int sendRowIndex, const TrackId destTrackId) {
             if (callbacks_.isRecording() || callbacks_.isCountInActive())
             {
                 return;
@@ -813,8 +822,9 @@ void TrackLanesEditCoordinator::install()
                         callbacks_, trackLanesView_, rulerView_, inspectorView_);
                     return true;
                 });
-        },
-        [this](const TrackId trackId, const int sendRowIndex, const float amountLinear) {
+        };
+    trackEditActions_.setSendAmount
+        = [this](const TrackId trackId, const int sendRowIndex, const float amountLinear) {
             if (callbacks_.isRecording() || callbacks_.isCountInActive())
             {
                 return;
@@ -843,8 +853,9 @@ void TrackLanesEditCoordinator::install()
                         callbacks_, trackLanesView_, rulerView_, inspectorView_);
                     return true;
                 });
-        },
-        [this](const TrackId trackId, const int sendRowIndex, const bool enabled) {
+        };
+    trackEditActions_.setSendEnabled
+        = [this](const TrackId trackId, const int sendRowIndex, const bool enabled) {
             if (callbacks_.isRecording() || callbacks_.isCountInActive())
             {
                 return;
@@ -873,7 +884,10 @@ void TrackLanesEditCoordinator::install()
                         callbacks_, trackLanesView_, rulerView_, inspectorView_);
                     return true;
                 });
-        });
+        };
+    inspectorView_.setTrackSendHandlers(trackEditActions_.setSendDestination,
+                                        trackEditActions_.setSendAmount,
+                                        trackEditActions_.setSendEnabled);
 
     // UI-only mutex with the instrument timeline header row. Audio headers paint inactive
     // when the instrument row is the UI-active row; clicking any audio header clears it.

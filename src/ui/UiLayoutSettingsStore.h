@@ -6,8 +6,9 @@
 //
 // ROLE
 //   Small XML store for workstation-level layout preferences that are NOT part of a project:
-//   today the shared track-header column width. Lives next to the other app-level settings in
-//   `%APPDATA%\MiniDAWLab\` (`audio-device.xml`, `audio-latency.xml`) as `ui-layout.xml`.
+//   the shared track-header column width, the mixer window's bounds and the mixer's global
+//   section flags. Lives next to the other app-level settings in `%APPDATA%\MiniDAWLab\`
+//   (`audio-device.xml`, `audio-latency.xml`) as `ui-layout.xml`.
 //
 // SCOPE DECISION
 //   Project files persist *project-bound* window state (main-window bounds, follow toggle, MIDI
@@ -25,7 +26,9 @@
 // =============================================================================
 
 #include <juce_core/juce_core.h>
+#include <juce_graphics/juce_graphics.h>
 
+#include <map>
 #include <optional>
 
 class UiLayoutSettingsStore
@@ -47,6 +50,16 @@ public:
     /// In-memory only; call `save()` to write (one write per gesture end).
     void setTrackHeaderColumnWidthPx(int widthPx) noexcept;
 
+    /// Mixer window bounds (logical px, screen coordinates) when a valid rectangle was stored.
+    /// Callers clamp to the available displays on restore.
+    [[nodiscard]] std::optional<juce::Rectangle<int>> getMixerWindowBounds() const noexcept { return mixerWindowBounds_; }
+    void setMixerWindowBounds(juce::Rectangle<int> bounds) noexcept;
+
+    /// Global mixer section flags by stable key ("routing", "preGain", "preInserts",
+    /// "postInserts", "sends", "faders", "meters"); absent = the mixer's default (shown).
+    [[nodiscard]] std::optional<bool> getMixerSectionShown(const juce::String& key) const;
+    void setMixerSectionShown(const juce::String& key, bool shown);
+
     /// Writes the whole file (creates the folder if needed). Logs and keeps going on failure.
     void save();
 
@@ -55,4 +68,6 @@ public:
 private:
     juce::File persistenceFile_;
     std::optional<int> trackHeaderColumnWidthPx_;
+    std::optional<juce::Rectangle<int>> mixerWindowBounds_;
+    std::map<juce::String, bool> mixerSectionShown_;
 };

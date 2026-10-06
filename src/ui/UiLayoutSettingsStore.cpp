@@ -1,10 +1,31 @@
 #include "ui/UiLayoutSettingsStore.h"
 
+#include <cstdlib>
+
 namespace
 {
     constexpr const char* kRootTag = "UI_LAYOUT";
     constexpr const char* kTrackHeaderColumnTag = "TRACK_HEADER_COLUMN";
     constexpr const char* kWidthAttribute = "widthPx";
+    constexpr const char* kMixerWindowTag = "MIXER_WINDOW";
+    constexpr const char* kMixerSectionsTag = "MIXER_SECTIONS";
+    constexpr int kMixerBoundsLimitPx = 20000;
+
+    /// Strict integer attribute (optional leading '-', digits only) — anything else is absent.
+    [[nodiscard]] std::optional<int> strictIntAttribute(const juce::XmlElement& e, const char* name)
+    {
+        const juce::String raw = e.getStringAttribute(name).trim();
+        if (raw.isEmpty())
+        {
+            return std::nullopt;
+        }
+        const juce::String digits = raw.startsWithChar('-') ? raw.substring(1) : raw;
+        if (digits.isEmpty() || !digits.containsOnly("0123456789"))
+        {
+            return std::nullopt;
+        }
+        return raw.getIntValue();
+    }
 } // namespace
 
 UiLayoutSettingsStore::UiLayoutSettingsStore(juce::File persistenceFile)
@@ -22,6 +43,8 @@ juce::File UiLayoutSettingsStore::defaultFile()
 void UiLayoutSettingsStore::loadFromFile()
 {
     trackHeaderColumnWidthPx_.reset();
+    mixerWindowBounds_.reset();
+    mixerSectionShown_.clear();
     if (!persistenceFile_.existsAsFile())
     {
         return;
@@ -50,6 +73,33 @@ void UiLayoutSettingsStore::loadFromFile()
             juce::Logger::writeToLog("[UiLayout] ignoring invalid track header column width \"" + raw + "\"");
         }
     }
+    if (const juce::XmlElement* mw = xml->getChildByName(juce::StringRef(kMixerWindowTag)))
+    {
+        const auto x = strictIntAttribute(*mw, "x");
+        const auto y = strictIntAttribute(*mw, "y");
+        const auto w = strictIntAttribute(*mw, "width");
+        const auto h = strictIntAttribute(*mw, "height");
+        if (x && y && w && h && *w > 0 && *h > 0 && *w <= kMixerBoundsLimitPx && *h <= kMixerBoundsLimitPx
+            && std::abs(*x) <= kMixerBoundsLimitPx && std::abs(*y) <= kMixerBoundsLimitPx)
+        {
+            mixerWindowBounds_ = juce::Rectangle<int>(*x, *y, *w, *h);
+        }
+        else
+        {
+            juce::Logger::writeToLog("[UiLayout] ignoring invalid mixer window bounds; defaults apply");
+        }
+    }
+    if (const juce::XmlElement* ms = xml->getChildByName(juce::StringRef(kMixerSectionsTag)))
+    {
+        for (int i = 0; i < ms->getNumAttributes(); ++i)
+        {
+            const juce::String value = ms->getAttributeValue(i).trim();
+            if (value == "1" || value == "0")
+            {
+                mixerSectionShown_[ms->getAttributeName(i)] = (value == "1");
+            }
+        }
+    }
 }
 
 void UiLayoutSettingsStore::setTrackHeaderColumnWidthPx(const int widthPx) noexcept
@@ -57,6 +107,32 @@ void UiLayoutSettingsStore::setTrackHeaderColumnWidthPx(const int widthPx) noexc
     if (widthPx > 0)
     {
         trackHeaderColumnWidthPx_ = widthPx;
+    }
+}
+
+void UiLayoutSettingsStore::setMixerWindowBounds(const juce::Rectangle<int> bounds) noexcept
+{
+    if (bounds.getWidth() > 0 && bounds.getHeight() > 0)
+    {
+        mixerWindowBounds_ = bounds;
+    }
+}
+
+std::optional<bool> UiLayoutSettingsStore::getMixerSectionShown(const juce::String& key) const
+{
+    const auto it = mixerSectionShown_.find(key);
+    if (it == mixerSectionShown_.end())
+    {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+void UiLayoutSettingsStore::setMixerSectionShown(const juce::String& key, const bool shown)
+{
+    if (key.isNotEmpty())
+    {
+        mixerSectionShown_[key] = shown;
     }
 }
 
@@ -68,6 +144,22 @@ void UiLayoutSettingsStore::save()
     {
         auto* col = root.createNewChildElement(kTrackHeaderColumnTag);
         col->setAttribute(kWidthAttribute, juce::String(*trackHeaderColumnWidthPx_));
+    }
+    if (mixerWindowBounds_.has_value())
+    {
+        auto* mw = root.createNewChildElement(kMixerWindowTag);
+        mw->setAttribute("x", mixerWindowBounds_->getX());
+        mw->setAttribute("y", mixerWindowBounds_->getY());
+        mw->setAttribute("width", mixerWindowBounds_->getWidth());
+        mw->setAttribute("height", mixerWindowBounds_->getHeight());
+    }
+    if (!mixerSectionShown_.empty())
+    {
+        auto* ms = root.createNewChildElement(kMixerSectionsTag);
+        for (const auto& [key, shown] : mixerSectionShown_)
+        {
+            ms->setAttribute(key, shown ? "1" : "0");
+        }
     }
     const juce::File parent = persistenceFile_.getParentDirectory();
     if (!parent.isDirectory() && !parent.createDirectory())

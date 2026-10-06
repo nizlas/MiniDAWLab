@@ -1,0 +1,6 @@
+.\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe | FileVersion=1.1.16 | bytes=9678848 | written=2026-10-06T08:40:29 | sha256=BB2E76917D24D4089F7C056AF3C7DFC427F2D73015FBE489F90A555720C7484B
+.\build\ninja-debug\MiniDAWLab_artefacts\Debug\MiniDAWLab.exe | FileVersion=1.1.16 | bytes=39965696 | written=2026-10-06T08:41:00 | sha256=EB3A616D3AC9D06F7003C643F369FC312BA1081F741053E37FE01A1822BD30D4
+.\dist\DanielssonsAudioLab-1.1.16-Setup.exe | FileVersion=                     | bytes=23610517 | written=2026-10-06T08:45:14 | sha256=11EA5AD59E23ADDBAAE9F8FD92CAA4518CC8742147AB531F86E298F28AAF16CE
+.\dist\DanielssonsAudioLab-1.1.16.zip | FileVersion= | bytes=4730488 | written=2026-10-06T08:45:11 | sha256=F93159D587D3D974850845600D66B3682DFBCF04B81F76EE4D2E0291489BE86A
+packaged MiniDAWLab.exe in the zip: byte-identical to the Release build; ASIO SDK: MINIDAW_ASIO_SDK_DIR=external_tools/asiosdk (both trees)
+MixerFocusedTests (Debug): 71 checks, 0 failures; --stability-mixer PASS on Debug and Release

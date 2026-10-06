@@ -43,6 +43,14 @@ ChannelStripPanel::ChannelStripPanel(Session& session)
     addAndMakeVisible(fader_);
 
     outputMeter_.setTooltip("Audio output of the selected track after inserts, fader and pan (Stereo Out: the final master signal before the audio device). Sample peak in dBFS; the number is the held peak and is not capped at 0. Click to reset the overload lamp.");
+    // The lamp click clears this meter; the hub forwards the acknowledgement to every other
+    // view showing the same row (mixer strip), so the two never disagree about an overload.
+    outputMeter_.onOverloadLatchReset = [this] {
+        if (meterHub_ != nullptr && shownTrackId_ != kInvalidTrackId)
+        {
+            meterHub_->acknowledgeOverload(shownTrackId_);
+        }
+    };
     addAndMakeVisible(outputMeter_);
 
     startTimerHz(kTimerHz);
@@ -51,19 +59,54 @@ ChannelStripPanel::ChannelStripPanel(Session& session)
 ChannelStripPanel::~ChannelStripPanel()
 {
     stopTimer();
-    if (hooks_.setMeteredTrack != nullptr)
+    setMeterHub(nullptr);
+}
+
+void ChannelStripPanel::setMeterHub(LevelMeterHub* const hub)
+{
+    if (meterHub_ == hub)
     {
-        hooks_.setMeteredTrack(kInvalidTrackId);
+        return;
+    }
+    if (meterHub_ != nullptr)
+    {
+        meterHub_->removeListener(this);
+    }
+    meterHub_ = hub;
+    if (meterHub_ != nullptr)
+    {
+        meterHub_->addListener(this);
     }
 }
 
-void ChannelStripPanel::setHooks(Hooks hooks)
+void ChannelStripPanel::collectMeterInterest(std::vector<TrackId>& out)
 {
-    hooks_ = std::move(hooks);
-    if (hooks_.setMeteredTrack != nullptr)
+    // The Master row needs no bank slot (its window is the Stereo Out accumulator).
+    if (trackStripVisible_ && !shownIsMaster_ && shownTrackId_ != kInvalidTrackId)
     {
-        hooks_.setMeteredTrack(trackStripVisible_ && !shownIsMaster_ ? shownTrackId_ : kInvalidTrackId);
+        out.push_back(shownTrackId_);
     }
+}
+
+void ChannelStripPanel::meterWindowArrived(const TrackId trackId, const level_meter::Reading& reading, const double nowSeconds)
+{
+    if (trackStripVisible_ && trackId == shownTrackId_ && trackId != kInvalidTrackId)
+    {
+        outputMeter_.pushReading(reading, nowSeconds);
+    }
+}
+
+void ChannelStripPanel::meterOverloadAcknowledged(const TrackId trackId)
+{
+    if (trackId == shownTrackId_)
+    {
+        outputMeter_.resetOverloadLatch(/*notifyOwner*/ false); // came from the hub: never echo back
+    }
+}
+
+void ChannelStripPanel::meterTick(double)
+{
+    // The panel animates on its own timer (it also polls the session there).
 }
 
 void ChannelStripPanel::applyModeForTrack(const Track* const track)
@@ -78,12 +121,12 @@ void ChannelStripPanel::applyModeForTrack(const Track* const track)
         shownTrackId_ = id;
         shownIsMaster_ = isMaster;
         trackStripVisible_ = hasAudioPath;
-        // Never show the previous row's levels: clear the UI meter and re-point the engine tap.
-        // The master row reads the Stereo Out accumulator instead (no track tap needed).
+        // Never show the previous row's levels: clear the UI meter and let the hub re-point the
+        // engine's meter interest (the master row reads the Stereo Out window instead).
         outputMeter_.clear();
-        if (hooks_.setMeteredTrack != nullptr)
+        if (meterHub_ != nullptr)
         {
-            hooks_.setMeteredTrack(hasAudioPath && !isMaster ? id : kInvalidTrackId);
+            meterHub_->refreshInterestNow();
         }
         meterCaption_.setText(isMaster ? "Stereo Out" : "Out", juce::dontSendNotification);
         resized();
@@ -129,29 +172,10 @@ void ChannelStripPanel::refreshFromSession()
 
 void ChannelStripPanel::timerCallback()
 {
+    // Readings arrive from the hub (`meterWindowArrived`); this tick only follows the session
+    // (row switch, fader value) and animates the meter's fall / hold.
     refreshFromSession();
-    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    if (trackStripVisible_)
-    {
-        if (shownIsMaster_)
-        {
-            if (hooks_.drainMasterMeter != nullptr)
-            {
-                outputMeter_.pushReading(hooks_.drainMasterMeter(), now);
-            }
-        }
-        else if (hooks_.drainTrackMeter != nullptr)
-        {
-            outputMeter_.pushReading(hooks_.drainTrackMeter(), now);
-        }
-    }
-    else if (hooks_.drainMasterMeter != nullptr)
-    {
-        // Not displayed, but keep the UI window drained so the engine accumulator never carries a
-        // stale maximum into the moment the master row is selected again.
-        (void)hooks_.drainMasterMeter();
-    }
-    outputMeter_.tick(now);
+    outputMeter_.tick(juce::Time::getMillisecondCounterHiRes() * 0.001);
 }
 
 void ChannelStripPanel::paint(juce::Graphics& g)

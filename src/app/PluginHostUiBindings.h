@@ -4,9 +4,10 @@
 
 #include <vector>
 
+#include "ui/InspectorView.h" // InspectorPluginHost
+
 class PluginInsertHost;
 class TrackLanesView;
-class InspectorView;
 class Vst3PluginPickerCoordinator;
 
 /// Installs `PluginInsertHost` callbacks on `TrackLanesView` headers and `InspectorView` (no ownership).
@@ -24,4 +25,11 @@ public:
     };
 
     static void install(Refs refs);
+
+    /// The TrackId + InsertSlotId insert seam (rows, add through the VST3 picker anchored at
+    /// `pickerAnchor`, open editor, remove, move / reorder) — the Inspector installs it on
+    /// itself and the mixer strips receive the same functions.
+    [[nodiscard]] static InspectorPluginHost makeInsertSeam(PluginInsertHost& pluginHost,
+                                                           Vst3PluginPickerCoordinator& picker,
+                                                           juce::Component* pickerAnchor);
 };

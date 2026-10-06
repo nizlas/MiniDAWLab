@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "app/TrackEditActions.h"
 #include "domain/PlacedClip.h"
 #include "domain/SessionHistory.h"
 #include "domain/Track.h"
@@ -99,6 +100,10 @@ public:
     /// `InstrumentTimelineRowCoordinator`, `MidiEditorPresenter`) are constructed.
     void install();
 
+    /// [Message thread] The undoable per-track channel edits `install()` built (the Inspector's
+    /// handlers are these very functions). The mixer binds its strips to them with explicit ids.
+    [[nodiscard]] const TrackEditActions& trackEditActions() const noexcept { return trackEditActions_; }
+
     /// [Message thread] Undo of Delete Track (instrument): the session row is already restored from
     /// the timeline snapshot; recreate the runtime from the captured project row via the same
     /// restore path project load uses (realtime-gated; plugin reload may fall back to a
@@ -118,4 +123,5 @@ private:
     TimelineRulerView& rulerView_;
     InspectorView& inspectorView_;
     Callbacks callbacks_;
+    TrackEditActions trackEditActions_;
 };

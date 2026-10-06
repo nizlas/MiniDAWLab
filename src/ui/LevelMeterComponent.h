@@ -54,8 +54,10 @@ public:
     void tick(double nowSeconds);
     /// Track switch / project replace: forgets everything, including the overload latch.
     void clear();
-    /// Clears only the overload latch (also what a click on the meter does).
-    void resetOverloadLatch();
+    /// Clears only the overload latch (also what a click on the meter does). `notifyOwner` fires
+    /// `onOverloadLatchReset`; pass false when applying an acknowledgement that came FROM the
+    /// owner / another view (the meter hub), so the acknowledgement does not echo back.
+    void resetOverloadLatch(bool notifyOwner = true);
 
     /// 1 or 2 bars. Mono shows ONE bar — never an invented second channel.
     void setChannelCount(int channels);

@@ -82,8 +82,10 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
 #include "ui/InspectorPanel.h"
+#include "ui/LevelMeterHub.h"
 #include "ui/TrackLanesView.h"
 #include "ui/UiLayoutSettingsStore.h"
+#include "ui/mixer/MixerWindow.h"
 #include "ui/EditToolIconStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
@@ -364,13 +366,19 @@ public:
         , inspectorResizeSplitter_(*this)
         , inspectorCollapsedKnob_(*this)
     {
-        // Channel panel meters: drained from the engine's realtime-safe accumulators on the
-        // panel's own 30 Hz timer; the panel tells the engine which row to meter.
-        inspectorPanel_.channelPanel().setHooks(ChannelStripPanel::Hooks{
-            [this] { return playbackEngine_.drainMeteredTrackLevels(); },
+        // Level meters: ONE hub drains the engine's concurrent per-row accumulators (and the
+        // Stereo Out window) at 30 Hz and hands every window to each view that shows the row —
+        // the Inspector channel panel and the mixer strips never drain the engine themselves.
+        levelMeterHub_.setEngineHooks(LevelMeterHub::EngineHooks{
+            [this](const std::vector<TrackId>& ids) { return playbackEngine_.setConcurrentlyMeteredTracks(ids); },
+            [this](const TrackId tid) { return playbackEngine_.drainConcurrentTrackLevels(tid); },
             [this] { return playbackEngine_.drainMasterOutputLevels(); },
-            [this](const TrackId tid) { playbackEngine_.setMeteredTrackForUi(tid); },
+            [this]() -> TrackId {
+                const auto snap = session.loadSessionSnapshotForAudioThread();
+                return snap != nullptr ? snap->findCanonicalMasterTrackId() : kInvalidTrackId;
+            },
         });
+        inspectorPanel_.channelPanel().setMeterHub(&levelMeterHub_);
         // Shared track-header column width: app-wide preference (`%APPDATA%\MiniDAWLab\ui-layout.xml`),
         // restored before the first layout; absent/invalid ⇒ the view's default. Persisted once per
         // completed drag of the header/timeline boundary handle (no I/O per mouse move, no undo step).
@@ -1844,6 +1852,8 @@ public:
             [this] { startPreparePortableProjectFlow(); },
             [this] { showAudioSettingsDialog(); },
             [this] { showHelpMenuPopup(); },
+            [this] { invokeToggleMixerWindowFromWindowShortcut(); },
+            [this] { return mixerWindow_ != nullptr && mixerWindow_->isVisible(); },
         });
         menuBar_ = std::make_unique<juce::MenuBarComponent>(mainMenuModel_.get());
         addAndMakeVisible(*menuBar_);
@@ -2236,31 +2246,44 @@ public:
         });
 
         // Audio Input selector (Inspector, audio rows): the combo lists the ACTIVE device's
-        // enabled physical input channels by name. Message-thread only.
-        inspectorView_.setAudioInputDeviceSnapshotProvider(
-            [this]() -> InspectorAudioInputDeviceSnapshot {
-                InspectorAudioInputDeviceSnapshot snap;
-                if (juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice())
-                {
-                    snap.deviceAvailable = true;
-                    snap.physicalInputNames = dev->getInputChannelNames();
-                    snap.activeInputChannels = dev->getActiveInputChannels();
-                }
-                return snap;
-            });
-        inspectorView_.setMidiInputSnapshotProvider([this](const TrackId tid) -> InspectorMidiInputSnapshot {
-            InspectorMidiInputSnapshot snap;
-            if (liveMidiInputCoordinator_ == nullptr)
-            {
-                return snap;
-            }
-            for (const auto& d : liveMidiInputCoordinator_->availableDevicesFor(tid))
-            {
-                snap.devices.push_back({ d.identifier, d.name, d.present });
-            }
-            snap.statusLine = liveMidiInputCoordinator_->describeInputStatus(tid);
-            return snap;
+        // enabled physical input channels by name. Message-thread only. The mixer strips read
+        // the same two snapshots (`makeAudioInputDeviceSnapshot`, `makeMidiInputSnapshotForTrack`).
+        inspectorView_.setAudioInputDeviceSnapshotProvider([this] { return makeAudioInputDeviceSnapshot(); });
+        inspectorView_.setMidiInputSnapshotProvider([this](const TrackId tid) { return makeMidiInputSnapshotForTrack(tid); });
+
+        // Mixer window (F3 / Window > Mixer): one instance for the app lifetime, hidden until
+        // asked for; its strips are bound to explicit TrackIds through `mixerBindings_` — the
+        // Inspector's undoable actions, the headers' button paths and the insert seam.
+        buildMixerStripBindings();
+        mixerWindow_ = std::make_unique<MixerWindow>(mixerBindings_, &levelMeterHub_, MixerWindow::Shortcuts{
+            [this] { invokeToggleMixerWindowFromWindowShortcut(); },
+            [this] { invokeSaveProjectFromWindowShortcut(); },
+            [this] { invokeUndoFromWindowShortcut(); },
+            [this] { invokeRedoFromWindowShortcut(); },
+            [this] { invokeRecordToggleFromWindowShortcut(); },
+            [this] { invokeJumpToLeftLocatorFromWindowShortcut(); },
+            [this] { invokePlayPauseToggleFromWindowShortcut(); },
         });
+        restoreMixerLayoutFromSettings();
+        mixerWindow_->onBoundsSettled = [this](const juce::Rectangle<int> b) {
+            uiLayoutSettings_.setMixerWindowBounds(b);
+            uiLayoutSettings_.save();
+        };
+        mixerWindow_->content().onSectionVisibilityChanged = [this](const mixer_layout::SectionVisibility& v) {
+            for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+            {
+                const auto s = static_cast<mixer_layout::Section>(i);
+                uiLayoutSettings_.setMixerSectionShown(mixer_layout::sectionKey(s), v.get(s));
+            }
+            uiLayoutSettings_.save();
+        };
+        mixerWindow_->onVisibilityChanged = [this](bool) {
+            if (menuBar_ != nullptr)
+            {
+                menuBar_->repaint(); // the Window > Mixer tick follows the real state
+            }
+            levelMeterHub_.refreshInterestNow();
+        };
 
         if (instrumentTimelineRowCoordinator_ != nullptr)
         {
@@ -2419,6 +2442,16 @@ public:
         if (projectIoCoordinator_ != nullptr)
         {
             projectIoCoordinator_->saveProject();
+        }
+    }
+
+    // [Message thread] F3 / Window > Mixer: show or hide the one mixer window. Nothing else
+    // changes — no transport, recording, plug-in or audio state is touched by the toggle.
+    void invokeToggleMixerWindowFromWindowShortcut() override
+    {
+        if (mixerWindow_ != nullptr)
+        {
+            mixerWindow_->toggleMixer();
         }
     }
 
@@ -3811,7 +3844,7 @@ public:
             report << "active track " << juce::String((juce::int64)active) << " kind=" << (int)kind << " name=\"" << panel.getNameText()
                    << "\" fader=" << (panel.isFaderVisible() ? "shown" : "hidden") << " outputMeter="
                    << (panel.outputMeter().isVisible() ? (panel.isShowingMaster() ? "shown(StereoOut)" : "shown(track)") : "hidden")
-                   << " metered=" << juce::String((juce::int64)playbackEngine_.getMeteredTrackForUi())
+                   << " metered(hub)=" << (expectTrackTap ? (playbackEngine_.isConcurrentlyMetered(active) ? "yes" : "NO") : "n/a")
                    << " faderText=\"" << panel.fader().getValueFieldText() << "\"\n";
             const juce::Rectangle<int> col = inspectorPanel_.getLocalBounds();
             if (!col.contains(vp.getBounds()))
@@ -3831,7 +3864,9 @@ public:
                     failReason = "scroll area does not take the whole column when no channel panel is shown";
                     return false;
                 }
-                if (playbackEngine_.getMeteredTrackForUi() != kInvalidTrackId)
+                // With no audio row selected the Inspector reports no meter interest; only a
+                // visible mixer may keep rows metered (the hub publishes the union).
+                if (!levelMeterHub_.publishedInterest().empty() && (mixerWindow_ == nullptr || !mixerWindow_->isVisible()))
                 {
                     failReason = "engine still meters a track although no audio row is selected";
                     return false;
@@ -3869,10 +3904,16 @@ public:
                 failReason = "output meter source wrong (master vs track)";
                 return false;
             }
-            if (playbackEngine_.getMeteredTrackForUi() != expectedMetered)
+            // The hub publishes the Inspector's row to the engine's concurrent meter bank (the
+            // master row reads the Stereo Out window and needs no bank slot).
+            if (expectedMetered != kInvalidTrackId && !playbackEngine_.isConcurrentlyMetered(expectedMetered))
             {
-                failReason = "engine meters track " + juce::String((juce::int64)playbackEngine_.getMeteredTrackForUi()) + ", expected "
-                             + juce::String((juce::int64)expectedMetered);
+                failReason = "engine does not meter the selected track " + juce::String((juce::int64)expectedMetered) + " for the Inspector";
+                return false;
+            }
+            if (expectedMetered == kInvalidTrackId && kind == TrackKind::Master && playbackEngine_.isConcurrentlyMetered(active))
+            {
+                failReason = "the master row must not take a track meter slot";
                 return false;
             }
             // Children inside the panel, non-overlapping, and the fader text equals the session gain.
@@ -3965,6 +4006,8 @@ public:
                 tlw->setSize(w, h);
             }
         };
+
+        installMixerStabilityHooks(hooks);
 
         hooks.captureArrangementPng = [this](const juce::File& png) -> bool {
             const juce::Image img = createComponentSnapshot(getLocalBounds(), true, 1.0f);
@@ -6132,6 +6175,558 @@ private:
         return ctx;
     }
 
+    // --- Mixer bindings (explicit TrackId; the same production paths the Inspector / headers use) ----
+
+    /// [Message thread] The ACTIVE audio device's input channels (Inspector + mixer Audio Input).
+    [[nodiscard]] InspectorAudioInputDeviceSnapshot makeAudioInputDeviceSnapshot() const
+    {
+        InspectorAudioInputDeviceSnapshot snap;
+        if (juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice())
+        {
+            snap.deviceAvailable = true;
+            snap.physicalInputNames = dev->getInputChannelNames();
+            snap.activeInputChannels = dev->getActiveInputChannels();
+        }
+        return snap;
+    }
+
+    /// [Message thread] MIDI devices + status line for a row (Inspector + mixer MIDI Input).
+    [[nodiscard]] InspectorMidiInputSnapshot makeMidiInputSnapshotForTrack(const TrackId tid) const
+    {
+        InspectorMidiInputSnapshot snap;
+        if (liveMidiInputCoordinator_ == nullptr)
+        {
+            return snap;
+        }
+        for (const auto& d : liveMidiInputCoordinator_->availableDevicesFor(tid))
+        {
+            snap.devices.push_back({ d.identifier, d.name, d.present });
+        }
+        snap.statusLine = liveMidiInputCoordinator_->describeInputStatus(tid);
+        return snap;
+    }
+
+    [[nodiscard]] TrackKind trackKindOf(const TrackId tid) const
+    {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int idx = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+        return idx >= 0 ? snap->getTrack(idx).getKind() : TrackKind::Audio;
+    }
+
+    /// [Message thread] Repaint everything that mirrors a row's mute / power / monitor / arm /
+    /// activation after a mixer button (headers, instrument rows, Inspector).
+    void refreshRowChromeAfterMixerAction()
+    {
+        trackLanesView.syncTracksFromSession();
+        trackLanesView.repaint();
+        if (instrumentTimelineRowCoordinator_ != nullptr)
+        {
+            instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+        }
+        inspectorView_.refreshFromSession();
+    }
+
+    /// [Message thread] Activate a row exactly like its header's name click (audio headers:
+    /// session active + keyed instrument controllers deactivated; instrument / MIDI rows: that
+    /// row's controller active exclusively), then refresh the Inspector and the arrangement.
+    void activateTrackLikeHeaderClickForMixer(const TrackId tid)
+    {
+        if (instrumentRuntimeCoordinator_ == nullptr)
+        {
+            session.setActiveTrack(tid);
+            inspectorView_.refreshFromSession();
+            trackLanesView.repaint();
+            return;
+        }
+        if (instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) != nullptr)
+        {
+            instrumentRuntimeCoordinator_->deactivateAllKeyedAndStagingControllers();
+            session.setActiveTrack(tid);
+            instrumentRuntimeCoordinator_->setKeyedInstrumentControllersActiveExclusive(tid);
+        }
+        else
+        {
+            session.setActiveTrack(tid);
+            instrumentRuntimeCoordinator_->deactivateKeyedInstrumentControllersOnly();
+        }
+        refreshRowChromeAfterMixerAction();
+    }
+
+    void buildMixerStripBindings()
+    {
+        MixerStripBindings& b = mixerBindings_;
+        b.loadSnapshot = [this] { return session.loadSessionSnapshotForAudioThread(); };
+        b.activeTrackId = [this] { return session.getActiveTrackId(); };
+        b.audioInputDeviceSnapshot = [this] { return makeAudioInputDeviceSnapshot(); };
+        b.midiInputSnapshot = [this](const TrackId tid) { return makeMidiInputSnapshotForTrack(tid); };
+        b.deviceOutputDescription = [this]() -> juce::String {
+            juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice();
+            if (dev == nullptr)
+            {
+                return "(no audio device)";
+            }
+            const juce::StringArray names = dev->getOutputChannelNames();
+            const juce::BigInteger active = dev->getActiveOutputChannels();
+            juce::String chans;
+            for (int p = active.findNextSetBit(0); p >= 0; p = active.findNextSetBit(p + 1))
+            {
+                if (chans.isNotEmpty())
+                {
+                    chans << " + ";
+                }
+                chans << (p < names.size() && names[p].isNotEmpty() ? names[p] : "Out " + juce::String(p + 1));
+            }
+            return dev->getName() + (chans.isNotEmpty() ? ": " + chans : juce::String());
+        };
+        b.activateTrack = [this](const TrackId tid) { activateTrackLikeHeaderClickForMixer(tid); };
+        if (trackLanesEditCoordinator_ != nullptr)
+        {
+            b.edits = trackLanesEditCoordinator_->trackEditActions();
+        }
+        // Direct channel writes — the same setters the Inspector channel panel / pan field use.
+        b.setChannelFaderGain = [this](const TrackId tid, const float g) { session.setTrackChannelFaderGain(tid, g); };
+        b.setStereoPan = [this](const TrackId tid, const float p) { session.setTrackStereoPan(tid, p); };
+
+        // Mute / Power: instrument and MIDI rows go through their controller (it mirrors the
+        // flag into the session and republishes its render snapshot — the header's path); other
+        // rows write the session directly like the audio / group / master headers.
+        b.toggleMute = [this](const TrackId tid) {
+            InstrumentTrackController* const ctl
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (ctl != nullptr)
+            {
+                ctl->setMuted(!ctl->isMuted());
+            }
+            else if (const auto snap = session.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx >= 0)
+                {
+                    session.setTrackMuted(tid, !snap->getTrack(idx).isMuted());
+                }
+            }
+            activateTrackLikeHeaderClickForMixer(tid);
+        };
+        b.isPowerInteractable = [this] { return !trackLanesView.isStructuralTimelineEditBlocked(); };
+        b.togglePower = [this](const TrackId tid) -> bool {
+            if (trackLanesView.isStructuralTimelineEditBlocked())
+            {
+                return false; // never while playing, recording or counting in (header rule)
+            }
+            InstrumentTrackController* const ctl
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid) : nullptr;
+            if (ctl != nullptr)
+            {
+                ctl->setPowerOn(!ctl->isPowerOn());
+            }
+            else if (const auto snap = session.loadSessionSnapshotForAudioThread())
+            {
+                const int idx = snap->findTrackIndexById(tid);
+                if (idx < 0 || snap->getTrack(idx).getKind() == TrackKind::Master)
+                {
+                    return false;
+                }
+                session.setTrackOff(tid, !snap->getTrack(idx).isTrackOff());
+            }
+            activateTrackLikeHeaderClickForMixer(tid);
+            return true;
+        };
+        // Monitor / Arm: audio rows = engine input monitoring + RecorderService arm; Instrument /
+        // Midi rows = the live-MIDI coordinator's runtime flags. Runtime only, never undoable.
+        b.monitorAvailable = [this](const TrackId tid) {
+            const TrackKind k = trackKindOf(tid);
+            return k == TrackKind::Audio || (trackKindAcceptsLiveMidiInput(k) && liveMidiInputCoordinator_ != nullptr);
+        };
+        b.isMonitorOn = [this](const TrackId tid) {
+            if (trackKindOf(tid) == TrackKind::Audio)
+            {
+                return playbackEngine_.isTrackInputMonitoringEnabled(tid);
+            }
+            return liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isMonitorEnabled(tid);
+        };
+        b.toggleMonitor = [this](const TrackId tid) {
+            if (trackKindOf(tid) == TrackKind::Audio)
+            {
+                playbackEngine_.setTrackInputMonitoringEnabled(tid, !playbackEngine_.isTrackInputMonitoringEnabled(tid));
+            }
+            else if (liveMidiInputCoordinator_ != nullptr)
+            {
+                liveMidiInputCoordinator_->setMonitorEnabled(tid, !liveMidiInputCoordinator_->isMonitorEnabled(tid));
+            }
+            activateTrackLikeHeaderClickForMixer(tid);
+        };
+        b.armAvailable = [this](const TrackId tid) {
+            const TrackKind k = trackKindOf(tid);
+            return trackKindAcceptsRecordArm(k) || (trackKindAcceptsLiveMidiInput(k) && liveMidiInputCoordinator_ != nullptr);
+        };
+        b.isRecordArmed = [this](const TrackId tid) {
+            if (trackKindOf(tid) == TrackKind::Audio)
+            {
+                return recorder_.getArmedTrackId() == tid;
+            }
+            return liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isRecordArmed(tid);
+        };
+        b.toggleRecordArm = [this](const TrackId tid) {
+            if (trackKindOf(tid) == TrackKind::Audio)
+            {
+                if (recorder_.getArmedTrackId() == tid)
+                {
+                    recorder_.disarm();
+                }
+                else
+                {
+                    recorder_.armForRecording(tid);
+                }
+            }
+            else if (liveMidiInputCoordinator_ != nullptr)
+            {
+                liveMidiInputCoordinator_->setRecordArmed(tid, !liveMidiInputCoordinator_->isRecordArmed(tid));
+            }
+            activateTrackLikeHeaderClickForMixer(tid);
+        };
+        b.instrumentEditorAvailable = [this](const TrackId tid) {
+            ExperimentalInstrumentHost* const h
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid) : nullptr;
+            return h != nullptr && h->hasInstrument();
+        };
+        b.openInstrumentEditor = [this](const TrackId tid) {
+            if (ExperimentalInstrumentHost* const h
+                = instrumentRuntimeCoordinator_ != nullptr ? instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid) : nullptr)
+            {
+                h->openNativeEditor();
+            }
+        };
+        b.instrumentAlternativesAvailable = [this](const TrackId tid) { return trackKindOf(tid) == TrackKind::Instrument; };
+        b.showInstrumentAlternatives = [this](const TrackId tid, const juce::Rectangle<int> anchor) {
+            instrument_alternatives_popup::show(tid, anchor, instrumentProxyUiHost_, instrumentSecondaryUiHost_);
+        };
+        if (vst3PluginPickerCoordinator_ != nullptr)
+        {
+            // The picker is anchored at the mixer content once the window exists (set below).
+            b.inserts = PluginHostUiBindings::makeInsertSeam(pluginHost_, *vst3PluginPickerCoordinator_, nullptr);
+        }
+    }
+
+    /// [Message thread] Restore the mixer's machine-local layout (bounds clamped to a display,
+    /// section flags) from `ui-layout.xml`; absent values keep the defaults.
+    void restoreMixerLayoutFromSettings()
+    {
+        if (mixerWindow_ == nullptr)
+        {
+            return;
+        }
+        if (const auto bounds = uiLayoutSettings_.getMixerWindowBounds())
+        {
+            mixerWindow_->applyStoredBounds(*bounds);
+        }
+        mixer_layout::SectionVisibility v;
+        for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+        {
+            const auto s = static_cast<mixer_layout::Section>(i);
+            if (const auto shown = uiLayoutSettings_.getMixerSectionShown(mixer_layout::sectionKey(s)))
+            {
+                v.set(s, *shown);
+            }
+        }
+        mixerWindow_->content().setSectionVisibility(v);
+        // The VST3 picker anchors its chooser at the mixer content when an insert is added there.
+        if (vst3PluginPickerCoordinator_ != nullptr)
+        {
+            mixerBindings_.inserts = PluginHostUiBindings::makeInsertSeam(pluginHost_, *vst3PluginPickerCoordinator_, &mixerWindow_->content());
+        }
+    }
+
+    /// [Message thread] `--stability-mixer` hooks: every one drives the REAL window / strips.
+    void installMixerStabilityHooks(StabilityRunnerHooks& hooks)
+    {
+        using track_strip_glyphs::StripButtonKind;
+        auto& M = hooks.mixer;
+        const auto strip = [this](const TrackId tid) -> MixerChannelStrip* {
+            return mixerWindow_ != nullptr ? mixerWindow_->content().stripForTrack(tid) : nullptr;
+        };
+        const auto buttonKind = [](const juce::String& name, StripButtonKind& out) -> bool {
+            if (name == "power") { out = StripButtonKind::Power; return true; }
+            if (name == "mute") { out = StripButtonKind::Mute; return true; }
+            if (name == "monitor") { out = StripButtonKind::Monitor; return true; }
+            if (name == "arm") { out = StripButtonKind::Arm; return true; }
+            if (name == "editor") { out = StripButtonKind::InstrumentEditor; return true; }
+            if (name == "alternatives") { out = StripButtonKind::Alternatives; return true; }
+            return false;
+        };
+        const auto sectionFromKey = [](const juce::String& key, mixer_layout::Section& out) -> bool {
+            for (int i = 0; i < mixer_layout::kSectionCount; ++i)
+            {
+                const auto s = static_cast<mixer_layout::Section>(i);
+                if (key == mixer_layout::sectionKey(s))
+                {
+                    out = s;
+                    return true;
+                }
+            }
+            return false;
+        };
+        M.toggleLikeF3 = [this] { invokeToggleMixerWindowFromWindowShortcut(); };
+        M.isVisible = [this] { return mixerWindow_ != nullptr && mixerWindow_->isVisible(); };
+        M.addGroupTrackLikeUi = [this]() -> TrackId {
+            // Same sequence as the add-track menu's "Group" entry.
+            session.addGroupTrack();
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            inspectorView_.refreshFromSession();
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            TrackId newest = kInvalidTrackId;
+            for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                if (t.getKind() == TrackKind::Group && t.getId() > newest)
+                {
+                    newest = t.getId();
+                }
+            }
+            return newest;
+        };
+        M.windowInstanceCount = [] {
+            int n = 0;
+            auto& desktop = juce::Desktop::getInstance();
+            for (int i = 0; i < desktop.getNumComponents(); ++i)
+            {
+                if (auto* dw = dynamic_cast<juce::DocumentWindow*>(desktop.getComponent(i)))
+                {
+                    n += dw->getName() == "Mixer" ? 1 : 0;
+                }
+            }
+            return n;
+        };
+        M.capturePng = [this](const juce::File& png) -> bool {
+            if (mixerWindow_ == nullptr)
+            {
+                return false;
+            }
+            MixerContentComponent& c = mixerWindow_->content();
+            const juce::Image img = c.createComponentSnapshot(c.getLocalBounds(), true, 1.0f);
+            if (!img.isValid())
+            {
+                return false;
+            }
+            (void)png.deleteFile();
+            juce::FileOutputStream out(png);
+            if (!out.openedOk())
+            {
+                return false;
+            }
+            juce::PNGImageFormat fmt;
+            return fmt.writeImageToStream(img, out);
+        };
+        M.verifyLayout = [this](juce::String& report, juce::String& failReason) -> bool {
+            if (mixerWindow_ == nullptr)
+            {
+                failReason = "no mixer window";
+                return false;
+            }
+            report << "  mixer window " << mixerWindow_->getBounds().toString() << " visible=" << (mixerWindow_->isVisible() ? "yes" : "no") << "\n";
+            return mixerWindow_->content().verifyLayout(report, failReason);
+        };
+        M.stripOrder = [this] { return mixerWindow_ != nullptr ? mixerWindow_->content().stripOrder() : std::vector<TrackId>{}; };
+        M.stripKindTexts = [this]() -> juce::String {
+            juce::String s;
+            if (mixerWindow_ == nullptr)
+            {
+                return s;
+            }
+            for (const TrackId id : mixerWindow_->content().stripOrder())
+            {
+                if (auto* st = mixerWindow_->content().stripForTrack(id))
+                {
+                    s << juce::String((juce::int64)id) << ":" << st->kindText() << "(" << st->nameText() << ") ";
+                }
+            }
+            if (auto* m = mixerWindow_->content().masterStrip())
+            {
+                s << "| master " << juce::String((juce::int64)m->trackId()) << ":" << m->kindText();
+            }
+            return s;
+        };
+        M.masterStripScreenBounds = [this] { return mixerWindow_ != nullptr ? mixerWindow_->content().masterStripScreenBounds() : juce::Rectangle<int>(); };
+        M.scrollStripsToRight = [this]() -> int {
+            if (mixerWindow_ == nullptr)
+            {
+                return 0;
+            }
+            juce::Viewport& vp = mixerWindow_->content().stripsViewport();
+            const int maxX = juce::jmax(0, vp.getViewedComponent()->getWidth() - vp.getViewWidth());
+            vp.setViewPosition(maxX, vp.getViewPositionY());
+            return vp.getViewPositionX();
+        };
+        M.clickSectionToggle = [this, sectionFromKey](const juce::String& key) {
+            mixer_layout::Section s;
+            if (mixerWindow_ != nullptr && sectionFromKey(key, s))
+            {
+                mixerWindow_->content().clickSectionToggleForTest(s);
+            }
+        };
+        M.sectionShown = [this, sectionFromKey](const juce::String& key) -> bool {
+            mixer_layout::Section s;
+            return mixerWindow_ != nullptr && sectionFromKey(key, s) && mixerWindow_->content().sectionVisibility().get(s);
+        };
+        M.stripFaderType = [strip](const TrackId tid, const juce::String& text) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr)
+            {
+                return false;
+            }
+            s->fader().commitTypedValue(text);
+            return true;
+        };
+        M.stripFaderValueText = [strip](const TrackId tid) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->fader().getValueFieldText() : juce::String();
+        };
+        M.stripPanSet = [strip](const TrackId tid, const float pan) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr)
+            {
+                return false;
+            }
+            s->pan().setPan(pan, juce::sendNotificationSync);
+            return true;
+        };
+        M.stripChooseRouting = [strip](const TrackId tid, const int row, const juce::String& text) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->chooseRoutingByText(row, text);
+        };
+        M.stripRoutingText = [strip](const TrackId tid, const int row) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->routingText(row) : juce::String();
+        };
+        M.stripRoutingCaption = [strip](const TrackId tid, const int row) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->routingCaption(row) : juce::String();
+        };
+        M.stripChooseSendDestination = [strip](const TrackId tid, const int row, const juce::String& text) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->chooseSendDestinationByText(row, text);
+        };
+        M.stripSendDestinationText = [strip](const TrackId tid, const int row) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->sendDestinationText(row) : juce::String();
+        };
+        M.stripCommitSendAmount = [strip](const TrackId tid, const int row, const juce::String& text) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr)
+            {
+                return false;
+            }
+            s->commitSendAmountText(row, text);
+            return true;
+        };
+        M.stripSendAmountText = [strip](const TrackId tid, const int row) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->sendAmountText(row) : juce::String();
+        };
+        M.stripCommitPreGain = [strip](const TrackId tid, const juce::String& text) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr)
+            {
+                return false;
+            }
+            s->commitPreGainText(text);
+            return true;
+        };
+        M.stripPreGainText = [strip](const TrackId tid) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr ? s->preGainText() : juce::String();
+        };
+        M.stripInsertRowsText = [strip](const TrackId tid) -> juce::String {
+            MixerChannelStrip* const s = strip(tid);
+            juce::String out;
+            if (s == nullptr)
+            {
+                return out;
+            }
+            for (const InsertStage st : { InsertStage::Pre, InsertStage::Post })
+            {
+                for (int r = 0; r < mixer_layout::kInsertRowsPerStage; ++r)
+                {
+                    const juce::String t = s->insertRowText(st, r);
+                    if (t.isNotEmpty())
+                    {
+                        out << (st == InsertStage::Pre ? "Pre:" : "Post:") << t << " ";
+                    }
+                }
+            }
+            return out;
+        };
+        M.stripInsertMenuAction = [strip](const TrackId tid, const bool preStage, const int row, const int actionId) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->performInsertRowAction(preStage ? InsertStage::Pre : InsertStage::Post, row, actionId);
+        };
+        M.stripClickButton = [strip, buttonKind](const TrackId tid, const juce::String& button) -> bool {
+            StripButtonKind kind;
+            MixerChannelStrip* const s = strip(tid);
+            if (s == nullptr || !buttonKind(button, kind) || !s->baseButtonVisible(kind))
+            {
+                return false;
+            }
+            s->clickBaseButtonForTest(kind);
+            return true;
+        };
+        M.stripButtonActive = [strip, buttonKind](const TrackId tid, const juce::String& button) -> bool {
+            StripButtonKind kind;
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && buttonKind(button, kind) && s->baseButtonActive(kind);
+        };
+        M.stripButtonVisible = [strip, buttonKind](const TrackId tid, const juce::String& button) -> bool {
+            StripButtonKind kind;
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && buttonKind(button, kind) && s->baseButtonVisible(kind);
+        };
+        M.stripMeterHeldPeak = [strip](const TrackId tid) -> float {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->meter().isVisible() ? s->meter().getHeldPeakLinear() : 0.0f;
+        };
+        M.stripMeterOverloadLatched = [strip](const TrackId tid) -> bool {
+            MixerChannelStrip* const s = strip(tid);
+            return s != nullptr && s->meter().isOverloadLatched();
+        };
+        M.stripClickMeter = [strip](const TrackId tid) {
+            if (MixerChannelStrip* const s = strip(tid))
+            {
+                s->meter().resetOverloadLatch(); // same as a lamp click: notifies the hub
+            }
+        };
+        M.inspectorMeterHeldPeak = [this] { return inspectorPanel_.channelPanel().outputMeter().getHeldPeakLinear(); };
+        M.inspectorMeterOverloadLatched = [this] { return inspectorPanel_.channelPanel().outputMeter().isOverloadLatched(); };
+        M.meterHubInterest = [this] { return levelMeterHub_.publishedInterest(); };
+        M.windowBounds = [this] { return mixerWindow_ != nullptr ? mixerWindow_->getBounds() : juce::Rectangle<int>(); };
+        M.setWindowBounds = [this](const juce::Rectangle<int> b) {
+            if (mixerWindow_ != nullptr)
+            {
+                mixerWindow_->setBounds(b);
+            }
+        };
+        M.audioRuntimeFingerprint = [this]() -> juce::String {
+            juce::String s;
+            s << "intent=" << static_cast<int>(transport.readPlaybackIntentForUi());
+            const auto load = playbackEngine_.snapshotAudioCallbackLoadAndReset();
+            juce::ignoreUnused(load); // the window is reset so the NEXT read measures the toggling period
+            s << " chains=";
+            for (const auto& [tid, ptrs] : pluginHost_.exportChainInstancePointersForDiagnostics())
+            {
+                s << juce::String((juce::int64)tid) << ":" << juce::String((int)ptrs.size()) << ",";
+            }
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                s << " instruments=";
+                for (const auto& [tid, host, ctl] : instrumentRuntimeCoordinator_->exportKeyedRuntimePointersForDiagnostics())
+                {
+                    s << juce::String((juce::int64)tid) << ":" << juce::String::toHexString((juce::pointer_sized_int)host) << "/"
+                      << juce::String::toHexString((juce::pointer_sized_int)ctl) << ",";
+                }
+            }
+            return s;
+        };
+    }
+
     void refreshInstrumentUi()
     {
         instrumentTimelineRowCoordinator_->syncInstrumentTimelineRowAttachmentToSession();
@@ -6433,6 +7028,10 @@ private:
     /// first frame). The MIDI lanes' running-take preview reads it so its right edge and the
     /// playhead line come from one value — the overlay stays the only clock sampler.
     double lastPlayheadFrameDisplaySamples_ = std::numeric_limits<double>::quiet_NaN();
+    /// Level-meter hub (30 Hz drain of the engine's per-row accumulators, fan-out to the Inspector
+    /// channel panel and the mixer strips). Declared BEFORE the views that subscribe to it so it
+    /// outlives them (they unsubscribe in their destructors).
+    LevelMeterHub levelMeterHub_;
     /// Inspector column: scrollable `InspectorView` + fixed `ChannelStripPanel`. `inspectorView_`
     /// is a reference into the panel so the many existing call sites stay unchanged.
     InspectorPanel inspectorPanel_;
@@ -6453,10 +7052,16 @@ private:
     /// Destroyed before `trackLanesView` / `instrumentRuntimeCoordinator_` reverse dtors run (non-owning refs).
     std::unique_ptr<ArrangementEventSelectionCoordinator> arrangementEventSelectionCoordinator_;
 
-    /// Declared LAST among data members (after `trackLanesView`, `rulerView`, `inspectorView_`)
-    /// so it is destroyed FIRST in reverse-declaration order, while every UI object it borrows
-    /// is still alive. See `TrackLanesEditCoordinator` ctor — it stores `&` to those views.
+    /// Declared after `trackLanesView`, `rulerView`, `inspectorView_` so it is destroyed before
+    /// them in reverse-declaration order, while every UI object it borrows is still alive. See
+    /// `TrackLanesEditCoordinator` ctor — it stores `&` to those views.
     std::unique_ptr<TrackLanesEditCoordinator> trackLanesEditCoordinator_;
+
+    /// Mixer window + the explicit-TrackId bindings its strips call. Declared LAST: the bindings
+    /// hold copies of the edit coordinator's actions and lambdas into every coordinator above,
+    /// so the window (and its strips, which also unsubscribe from the hub) must die first.
+    MixerStripBindings mixerBindings_;
+    std::unique_ptr<MixerWindow> mixerWindow_;
 
     /// Shared Phase B.1 many-to-one capture assertions, run after the realtime playback pass and
     /// again after the offline mixdown pass: all three source streams reach the ONE destination,

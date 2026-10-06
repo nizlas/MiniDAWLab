@@ -5,6 +5,8 @@
 #include "domain/Session.h"
 #include "domain/SessionRouting.h"
 #include "domain/SessionSnapshot.h"
+#include "ui/TrackChannelOptions.h"
+#include "ui/TrackValueFieldText.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -19,138 +21,8 @@ namespace
     constexpr int kGapValueToDbSuffix = 4;
     constexpr int kDbUnitLabelWidth = 22;
     constexpr int kDbValueFieldHeight = 24;
-    [[nodiscard]] juce::String utf8InfinityChar()
-    {
-        return juce::String(juce::CharPointer_UTF8("\xe2\x88\x9e"));
-    }
-
-    [[nodiscard]] juce::String stripDbUnitSuffix(juce::String s)
-    {
-        s = s.trim();
-        if (s.endsWithIgnoreCase("db"))
-            s = s.substring(0, s.length() - 2).trimEnd();
-        return s.trim();
-    }
-
-    [[nodiscard]] bool isNegativeInfinityText(const juce::String& stripped)
-    {
-        const juce::String t = stripped.trim();
-        juce::String compact = t.toLowerCase();
-        compact = compact.removeCharacters(" \t");
-        if (compact == "-inf" || compact == "-infinity")
-            return true;
-        const juce::String inf = utf8InfinityChar();
-        return t == (juce::String("-") + inf);
-    }
-
-    /// Pre-gain field text: signed 1-decimal dB ("+6.0" / "-3.5" / "0.0"), unit label outside.
-    [[nodiscard]] juce::String formatPreGainDbToValueFieldOnly(const float preGainDb)
-    {
-        const double d = juce::jlimit(static_cast<double>(kTrackPreGainDbMin),
-                                      static_cast<double>(kTrackPreGainDbMax),
-                                      static_cast<double>(preGainDb));
-        if (std::fabs(d) <= 0.00005)
-            return juce::String("0.0");
-        if (d < 0.0)
-            return juce::String(d, 1);
-        return "+" + juce::String(d, 1);
-    }
-
-    /// Accepts "3", "+3", "-12.5", optional "dB" suffix; clamps to [-24, +24]. False = keep old.
-    [[nodiscard]] bool tryParsePreGainDbText(const juce::String raw, float& outPreGainDb)
-    {
-        const juce::String strippedUnit = stripDbUnitSuffix(raw);
-        if (strippedUnit.isEmpty())
-            return false;
-
-        const std::string buf = strippedUnit.toStdString();
-        char* endPtr = nullptr;
-        const double v = std::strtod(buf.c_str(), &endPtr);
-        if (endPtr == buf.c_str())
-            return false;
-        while (endPtr != buf.c_str() + buf.size()
-               && std::isspace(static_cast<unsigned char>(*endPtr)))
-        {
-            ++endPtr;
-        }
-        if (endPtr != buf.c_str() + buf.size())
-            return false;
-
-        outPreGainDb = sanitizeTrackPreGainDb(static_cast<float>(v));
-        return true;
-    }
-
-    constexpr double kSendAmountMinDb = -60.0;
-    constexpr double kSendAmountMaxDb = 6.02;
-    constexpr float kSendAmountDriftEps = 5.0e-5f;
-
-    [[nodiscard]] juce::String formatSendLinearToDbField(const float amountLinear)
-    {
-        const float clamped = clampTrackSendAmountLinear(amountLinear);
-        if (clamped <= 0.0f)
-        {
-            return juce::String("-Inf");
-        }
-        const float db = juce::Decibels::gainToDecibels(
-            clamped, static_cast<float>(kSendAmountMinDb));
-        const double d = juce::jlimit(kSendAmountMinDb, kSendAmountMaxDb, static_cast<double>(db));
-        if (std::fabs(d) <= 0.00005)
-        {
-            return juce::String("0.00");
-        }
-        if (d > 0.00005)
-        {
-            return juce::String("+") + juce::String(d, 2);
-        }
-        return juce::String(d, 2);
-    }
-
-    [[nodiscard]] bool tryParseSendAmountText(const juce::String raw, float& outLinear)
-    {
-        const juce::String strippedUnit = stripDbUnitSuffix(raw);
-        if (strippedUnit.isEmpty())
-        {
-            return false;
-        }
-        if (isNegativeInfinityText(strippedUnit))
-        {
-            outLinear = 0.0f;
-            return true;
-        }
-        const std::string buf = strippedUnit.toStdString();
-        char* endPtr = nullptr;
-        const double v = std::strtod(buf.c_str(), &endPtr);
-        if (endPtr == buf.c_str())
-        {
-            return false;
-        }
-        while (endPtr != buf.c_str() + buf.size()
-               && std::isspace(static_cast<unsigned char>(*endPtr)))
-        {
-            ++endPtr;
-        }
-        if (endPtr != buf.c_str() + buf.size())
-        {
-            return false;
-        }
-        double db = v;
-        if (db < kSendAmountMinDb)
-        {
-            db = kSendAmountMinDb;
-        }
-        if (db > kSendAmountMaxDb)
-        {
-            db = kSendAmountMaxDb;
-        }
-        if (db <= kSendAmountMinDb + 1.0e-9)
-        {
-            outLinear = 0.0f;
-            return true;
-        }
-        outLinear = clampTrackSendAmountLinear(juce::Decibels::decibelsToGain(
-            static_cast<float>(db), static_cast<float>(kSendAmountMinDb)));
-        return true;
-    }
+    // dB value-field texts shared with the mixer strips (`ui/TrackValueFieldText.h`).
+    using namespace track_value_text;
 
 
 #if defined(_MSC_VER)
@@ -1391,92 +1263,18 @@ void InspectorView::setSendAmountEditorText(const int sendRowIndex, const float 
 
 void InspectorView::populateAudioInputCombo(const Track& track)
 {
+    // Items and wording come from the shared builder (the mixer strips list the same entries):
+    // Default / No input / every ENABLED mono channel / even-aligned stereo pairs / the saved
+    // assignment marked "(unavailable)" when this device cannot deliver it.
     inputComboGuard_ = true;
-    inputComboBox_.clear(juce::dontSendNotification);
-    inputComboValues_.clear();
-
     InspectorAudioInputDeviceSnapshot dev;
     if (audioInputDeviceSnapshotProvider_ != nullptr)
     {
         dev = audioInputDeviceSnapshotProvider_();
     }
-
-    const TrackInputAssignment current = track.getInputAssignment();
-    int selectId = 0;
-    const auto addItem = [this, &current, &selectId](const TrackInputAssignment& value,
-                                                     const juce::String& label) {
-        inputComboValues_.push_back(value);
-        const int itemId = static_cast<int>(inputComboValues_.size());
-        inputComboBox_.addItem(label, itemId);
-        if (value == current)
-        {
-            selectId = itemId;
-        }
-    };
-    // Physical channel label: 1-based number plus the device's own channel name when known.
-    const auto physicalLabel = [&dev](const int phys) {
-        juce::String s = "In " + juce::String(phys + 1);
-        if (phys >= 0 && phys < dev.physicalInputNames.size()
-            && dev.physicalInputNames[phys].isNotEmpty())
-        {
-            s << ": " << dev.physicalInputNames[phys];
-        }
-        return s;
-    };
-
-    // The legacy-compatible default keeps older projects' established recording source: whatever
-    // the device's first enabled input is on THIS machine (mono).
-    addItem({ TrackInputKind::DefaultFirstInput, -1, -1 }, "Default (first available input)");
-    addItem({ TrackInputKind::None, -1, -1 }, "No input");
-
-    if (dev.deviceAvailable)
-    {
-        // Every ENABLED physical input as a mono source (packed callback positions are derived
-        // from the same enabled set in the engine).
-        for (int p = dev.activeInputChannels.findNextSetBit(0); p >= 0;
-             p = dev.activeInputChannels.findNextSetBit(p + 1))
-        {
-            addItem({ TrackInputKind::Mono, p, -1 }, "Mono — " + physicalLabel(p));
-        }
-        // Even-aligned adjacent pairs (1+2, 3+4, …) where BOTH channels are enabled, with both
-        // channel names spelled out.
-        const int highest = dev.activeInputChannels.getHighestBit();
-        for (int p = 0; p + 1 <= highest; p += 2)
-        {
-            if (dev.activeInputChannels[p] && dev.activeInputChannels[p + 1])
-            {
-                addItem({ TrackInputKind::StereoPair, p, p + 1 },
-                        "Stereo — " + physicalLabel(p) + " + " + physicalLabel(p + 1));
-            }
-        }
-    }
-
-    // A saved assignment whose channel(s) are not present/enabled on this device stays visible,
-    // selected and clearly marked — it supplies silence and is preserved verbatim so returning to
-    // the original device resolves it again (never silently replaced with another input).
-    if (selectId == 0)
-    {
-        juce::String label;
-        switch (current.kind)
-        {
-        case TrackInputKind::Mono:
-            label = "Mono — " + physicalLabel(current.physicalChannelA) + " (unavailable)";
-            break;
-        case TrackInputKind::StereoPair:
-            label = "Stereo — " + physicalLabel(current.physicalChannelA) + " + "
-                    + physicalLabel(current.physicalChannelB) + " (unavailable)";
-            break;
-        case TrackInputKind::DefaultFirstInput:
-        case TrackInputKind::None:
-        default:
-            label = "(unavailable)";
-            break;
-        }
-        addItem(current, label);
-        selectId = static_cast<int>(inputComboValues_.size());
-    }
-
-    inputComboBox_.setSelectedId(selectId, juce::dontSendNotification);
+    const auto list = track_channel_options::audioInputOptions(track, dev);
+    inputComboValues_ = list.values;
+    track_channel_options::applyToCombo(inputComboBox_, list);
     inputComboGuard_ = false;
 }
 
@@ -1516,54 +1314,16 @@ void InspectorView::populateMidiInputControls(const Track& track)
     }
     const TrackMidiInputAssignment current = track.getMidiInputAssignment();
 
-    // ---- device ----
+    // ---- device (shared builder: None / All MIDI inputs / devices, "(missing)" kept selected) ----
     midiInputComboGuard_ = true;
-    midiInputComboBox_.clear(juce::dontSendNotification);
-    midiInputComboValues_.clear();
-    int selectId = 0;
-    const auto sameDevice = [&current](const TrackMidiInputAssignment& v) {
-        return v.mode == current.mode
-               && (v.mode != TrackMidiInputMode::Device || v.deviceIdentifier == current.deviceIdentifier);
-    };
-    const auto addItem = [this, &sameDevice, &selectId](TrackMidiInputAssignment value, const juce::String& label) {
-        midiInputComboValues_.push_back(value);
-        const int itemId = static_cast<int>(midiInputComboValues_.size());
-        midiInputComboBox_.addItem(label, itemId);
-        if (sameDevice(value))
-        {
-            selectId = itemId;
-        }
-    };
-    addItem({ TrackMidiInputMode::None, {}, {}, kTrackMidiInputChannelAll }, "None");
-    addItem({ TrackMidiInputMode::AllEnabled, {}, {}, kTrackMidiInputChannelAll }, "All MIDI inputs");
-    for (const auto& d : snap.devices)
-    {
-        TrackMidiInputAssignment v;
-        v.mode = TrackMidiInputMode::Device;
-        v.deviceIdentifier = d.identifier;
-        v.deviceName = d.name;
-        addItem(v, d.present ? d.name : (d.name + " (missing)"));
-    }
-    if (selectId == 0 && current.mode == TrackMidiInputMode::Device)
-    {
-        // Saved device not listed by the provider at all: still visible and selected.
-        addItem(current, (current.deviceName.isNotEmpty() ? current.deviceName : current.deviceIdentifier)
-                             + " (missing)");
-        selectId = static_cast<int>(midiInputComboValues_.size());
-    }
-    midiInputComboBox_.setSelectedId(selectId > 0 ? selectId : 1, juce::dontSendNotification);
+    const auto deviceList = track_channel_options::midiInputDeviceOptions(track, snap);
+    midiInputComboValues_ = deviceList.values;
+    track_channel_options::applyToCombo(midiInputComboBox_, deviceList);
     midiInputComboGuard_ = false;
 
-    // ---- channel filter ----
+    // ---- channel filter (item ids 1 = All, 2 … 17 = channel 1 … 16, as before) ----
     midiInputChannelComboGuard_ = true;
-    midiInputChannelComboBox_.clear(juce::dontSendNotification);
-    midiInputChannelComboBox_.addItem("All", 1);
-    for (int ch = 1; ch <= 16; ++ch)
-    {
-        midiInputChannelComboBox_.addItem(juce::String(ch), ch + 1);
-    }
-    midiInputChannelComboBox_.setSelectedId(
-        current.channelFilter == kTrackMidiInputChannelAll ? 1 : current.channelFilter + 1, juce::dontSendNotification);
+    track_channel_options::applyToCombo(midiInputChannelComboBox_, track_channel_options::midiInputChannelFilterOptions(track));
     midiInputChannelComboBox_.setEnabled(current.mode != TrackMidiInputMode::None);
     midiInputChannelComboGuard_ = false;
 
@@ -1585,56 +1345,22 @@ void InspectorView::populateSendDestCombo(const int sendRowIndex,
     }
     SendRowUi& ui = sendRows_[sendRowIndex];
     ui.comboGuard = true;
-    ui.destCombo.clear(juce::dontSendNotification);
-    ui.destIds.clear();
-    ui.destCombo.addItem("(none)", 1);
-    ui.destIds.push_back(kInvalidTrackId);
-
-    const std::shared_ptr<const SessionSnapshot> routeSnap
-        = session_.loadSessionSnapshotForAudioThread();
+    const std::shared_ptr<const SessionSnapshot> routeSnap = session_.loadSessionSnapshotForAudioThread();
     if (routeSnap != nullptr)
     {
-        const std::vector<TrackId> legal
-            = session_routing::legalSendDestinations(*routeSnap, activeTrackId);
-        TrackId currentDest = kInvalidTrackId;
-        const int sendIndex = findTrackSendVectorIndexForUiSlot(track.getSends(), sendRowIndex);
-        if (sendIndex >= 0)
-        {
-            currentDest = track.getSend(sendIndex).destTrackId;
-        }
-        int selectId = 1;
-        for (const TrackId destId : legal)
-        {
-            juce::String label;
-            const int dix = routeSnap->findTrackIndexById(destId);
-            if (dix >= 0)
-            {
-                label = routeSnap->getTrack(dix).getName();
-            }
-            else
-            {
-                label = juce::String("Track ") + juce::String((juce::int64)destId);
-            }
-            const int itemId = static_cast<int>(ui.destIds.size()) + 1;
-            ui.destIds.push_back(destId);
-            ui.destCombo.addItem(label, itemId);
-            if (destId == currentDest)
-            {
-                selectId = itemId;
-            }
-        }
-        if (sendIndex >= 0 && currentDest != kInvalidTrackId
-            && std::find(legal.begin(), legal.end(), currentDest) == legal.end())
-        {
-            const int dix = routeSnap->findTrackIndexById(currentDest);
-            juce::String label = (dix >= 0) ? routeSnap->getTrack(dix).getName()
-                                            : juce::String("Track ") + juce::String((juce::int64)currentDest);
-            const int itemId = static_cast<int>(ui.destIds.size()) + 1;
-            ui.destIds.push_back(currentDest);
-            ui.destCombo.addItem(label + " (stored)", itemId);
-            selectId = itemId;
-        }
-        ui.destCombo.setSelectedId(selectId, juce::dontSendNotification);
+        // Shared builder: "(none)", the legal Group destinations, a no-longer-legal stored
+        // destination appended as "<name> (stored)" and selected.
+        juce::ignoreUnused(activeTrackId);
+        const auto list = track_channel_options::sendDestinationOptions(*routeSnap, track, sendRowIndex);
+        ui.destIds = list.values;
+        track_channel_options::applyToCombo(ui.destCombo, list);
+    }
+    else
+    {
+        ui.destCombo.clear(juce::dontSendNotification);
+        ui.destIds.assign(1, kInvalidTrackId);
+        ui.destCombo.addItem("(none)", 1);
+        ui.destCombo.setSelectedId(1, juce::dontSendNotification);
     }
     ui.comboGuard = false;
 }
@@ -2065,71 +1791,26 @@ void InspectorView::refreshFromSession()
     {
         midiInputStatusLabel_.setText({}, juce::dontSendNotification);
     }
+    // The three selectors below are filled from the shared builders (`ui/TrackChannelOptions.h`)
+    // so the mixer strips list exactly the same items in the same order.
     if (showMidiChannel)
     {
-        midiChannelComboGuard_ = true;
-        midiChannelComboBox_.clear(juce::dontSendNotification);
-        midiChannelComboValues_.clear();
-        const int current = tr.getMidiOutputChannel();
-        int selectId = 0;
-        const auto addChannelItem = [this, current, &selectId](const int value,
-                                                              const juce::String& label) {
-            midiChannelComboValues_.push_back(value);
-            const int itemId = static_cast<int>(midiChannelComboValues_.size());
-            midiChannelComboBox_.addItem(label, itemId);
-            if (value == current)
-            {
-                selectId = itemId;
-            }
-        };
         // "Preserve" is the wording used by the MIDI help page and the editor's channel readout:
         // the setting preserves each event's stored channel rather than choosing one.
-        addChannelItem(kTrackMidiOutputChannelAny, "Any (Preserve)");
-        for (int ch = kTrackMidiOutputChannelMin; ch <= kTrackMidiOutputChannelMax; ++ch)
-        {
-            addChannelItem(ch,
-                           ch == kTrackMidiOutputChannelDrums ? juce::String("10 (drums)")
-                                                              : juce::String(ch));
-        }
-        if (selectId > 0)
-        {
-            midiChannelComboBox_.setSelectedId(selectId, juce::dontSendNotification);
-        }
+        midiChannelComboGuard_ = true;
+        const auto list = track_channel_options::midiOutputChannelOptions(tr);
+        midiChannelComboValues_ = list.values;
+        track_channel_options::applyToCombo(midiChannelComboBox_, list);
         midiChannelComboGuard_ = false;
     }
 
     if (showMidiDest)
     {
-        midiDestComboGuard_ = true;
-        midiDestComboBox_.clear(juce::dontSendNotification);
-        midiDestComboValues_.clear();
-        const TrackId currentDest = tr.getMidiDestinationTrackId();
-        int selectId = 0;
-        const auto addDestItem = [this, currentDest, &selectId](const TrackId destId,
-                                                                const juce::String& label) {
-            midiDestComboValues_.push_back(destId);
-            const int itemId = static_cast<int>(midiDestComboValues_.size());
-            midiDestComboBox_.addItem(label, itemId);
-            if (destId == currentDest)
-            {
-                selectId = itemId;
-            }
-        };
-        addDestItem(kInvalidTrackId, "No destination (silent)");
-        if (const auto destSnap = session_.loadSessionSnapshotForAudioThread())
-        {
-            for (int di = 0; di < destSnap->getNumTracks(); ++di)
-            {
-                const Track& cand = destSnap->getTrack(di);
-                if (cand.getKind() != TrackKind::Instrument)
-                {
-                    continue;
-                }
-                addDestItem(cand.getId(), cand.getName());
-            }
-        }
         // A stale destination (row deleted/re-kinded) falls back to the "No destination" item.
-        midiDestComboBox_.setSelectedId(selectId > 0 ? selectId : 1, juce::dontSendNotification);
+        midiDestComboGuard_ = true;
+        const auto list = track_channel_options::midiDestinationOptions(*snap, tr);
+        midiDestComboValues_ = list.values;
+        track_channel_options::applyToCombo(midiDestComboBox_, list);
         midiDestComboGuard_ = false;
     }
 
@@ -2141,46 +1822,9 @@ void InspectorView::refreshFromSession()
     if (showOutputRouting)
     {
         outputComboGuard_ = true;
-        outputComboBox_.clear(juce::dontSendNotification);
-        outputComboDestIds_.clear();
-        const std::shared_ptr<const SessionSnapshot> routeSnap
-            = session_.loadSessionSnapshotForAudioThread();
-        if (routeSnap != nullptr)
-        {
-            const std::vector<TrackId> legal
-                = session_routing::legalOutputDestinations(*routeSnap, active);
-            int selectId = 0;
-            const TrackId currentOut = tr.getRoutedOutputTrackId();
-            for (size_t li = 0; li < legal.size(); ++li)
-            {
-                const TrackId destId = legal[li];
-                outputComboDestIds_.push_back(destId);
-                juce::String label;
-                const int dix = routeSnap->findTrackIndexById(destId);
-                if (dix >= 0 && routeSnap->getTrack(dix).getKind() == TrackKind::Master)
-                {
-                    label = juce::String(kMasterTrackDisplayName);
-                }
-                else if (dix >= 0)
-                {
-                    label = routeSnap->getTrack(dix).getName();
-                }
-                else
-                {
-                    label = juce::String("Track ") + juce::String((juce::int64)destId);
-                }
-                const int itemId = static_cast<int>(li) + 1;
-                outputComboBox_.addItem(label, itemId);
-                if (destId == currentOut)
-                {
-                    selectId = itemId;
-                }
-            }
-            if (selectId > 0)
-            {
-                outputComboBox_.setSelectedId(selectId, juce::dontSendNotification);
-            }
-        }
+        const auto list = track_channel_options::audioOutputOptions(*snap, tr);
+        outputComboDestIds_ = list.values;
+        track_channel_options::applyToCombo(outputComboBox_, list);
         outputComboGuard_ = false;
     }
 

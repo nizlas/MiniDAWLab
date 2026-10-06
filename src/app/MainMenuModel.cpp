@@ -10,7 +10,7 @@ MainMenuModel::MainMenuModel(MainMenuActions actions)
 
 juce::StringArray MainMenuModel::getMenuBarNames()
 {
-    return { "File", "Audio", "Help" };
+    return { "File", "Audio", "Window", "Help" };
 }
 
 juce::PopupMenu MainMenuModel::getMenuForIndex(const int topLevelMenuIndex,
@@ -37,6 +37,16 @@ juce::PopupMenu MainMenuModel::getMenuForIndex(const int topLevelMenuIndex,
         return m;
     }
     case 2: {
+        juce::PopupMenu m;
+        juce::PopupMenu::Item mixer(juce::String("Mixer"));
+        mixer.itemID = static_cast<int>(MainMenuCommandId::WindowMixer);
+        mixer.shortcutKeyDescription = "F3";
+        mixer.isTicked = actions_.isMixerWindowVisible != nullptr && actions_.isMixerWindowVisible();
+        mixer.isEnabled = actions_.toggleMixerWindow != nullptr;
+        m.addItem(mixer);
+        return m;
+    }
+    case 3: {
         juce::PopupMenu m;
         m.addItem(static_cast<int>(MainMenuCommandId::HelpRoot), "Help...");
         return m;
@@ -86,6 +96,12 @@ void MainMenuModel::menuItemSelected(const int menuItemID, const int topLevelMen
         if (actions_.openHelp != nullptr)
         {
             actions_.openHelp();
+        }
+        return;
+    case static_cast<int>(MainMenuCommandId::WindowMixer):
+        if (actions_.toggleMixerWindow != nullptr)
+        {
+            actions_.toggleMixerWindow();
         }
         return;
     default:

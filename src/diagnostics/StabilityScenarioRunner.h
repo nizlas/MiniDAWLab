@@ -134,6 +134,16 @@ enum class StabilityScenarioKind
     /// windows through the Primary for comparison. Reports peaks / DC / first / last samples per
     /// window and analyses the mixdown WAV around EOF. Sibling copy only.
     ProxyPlaybackEdges,
+    /// `--stability-mixer <project>`: the mixer window in the real app — F3 / close / reopen with
+    /// one instance, every row kind as a strip in arrangement order with the Stereo Out strip
+    /// fixed at the right across horizontal scrolling, independent section toggles with aligned
+    /// strips (geometry verified, PNG evidence), fader / pan / routing / send / pre-gain / insert
+    /// edits through the strips of a NON-active row reaching that TrackId and the Inspector,
+    /// concurrent meters (two rows + Stereo Out, Inspector and mixer agreeing on one row), audio
+    /// runtime untouched by open / close, strips following track deletion and a project switch,
+    /// and the machine-local layout persistence (bounds + section flags, header width kept).
+    /// Sibling copy only.
+    Mixer,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -626,6 +636,62 @@ struct StabilityRunnerHooks
     /// Stop / restart the audio device (device-loss handling during a take).
     std::function<bool()> closeAudioDeviceForTest;
     std::function<bool(juce::String& failReason)> restartAudioDeviceForTest;
+
+    // --- Mixer scenario (`--stability-mixer`) ------------------------------------------------------
+    /// Every hook drives the REAL mixer window / strips (the user's controls through their own
+    /// notification paths); strips are addressed by TrackId.
+    struct MixerHooks
+    {
+        std::function<void()> toggleLikeF3;
+        std::function<bool()> isVisible;
+        /// Number of top-level windows titled "Mixer" on the desktop (single-instance check).
+        std::function<int()> windowInstanceCount;
+        std::function<bool(const juce::File& png)> capturePng;
+        std::function<bool(juce::String& report, juce::String& failReason)> verifyLayout;
+        std::function<std::vector<TrackId>()> stripOrder;
+        std::function<juce::Rectangle<int>()> masterStripScreenBounds;
+        /// Scroll the strips viewport fully to the right (returns the new x position).
+        std::function<int()> scrollStripsToRight;
+        std::function<void(const juce::String& sectionKey)> clickSectionToggle;
+        std::function<bool(const juce::String& sectionKey)> sectionShown;
+        std::function<bool(TrackId, const juce::String& text)> stripFaderType;
+        std::function<juce::String(TrackId)> stripFaderValueText;
+        std::function<bool(TrackId, float pan)> stripPanSet;
+        std::function<bool(TrackId, int row, const juce::String& itemText)> stripChooseRouting;
+        std::function<juce::String(TrackId, int row)> stripRoutingText;
+        std::function<juce::String(TrackId, int row)> stripRoutingCaption;
+        std::function<bool(TrackId, int row, const juce::String& itemText)> stripChooseSendDestination;
+        std::function<juce::String(TrackId, int row)> stripSendDestinationText;
+        std::function<bool(TrackId, int row, const juce::String& text)> stripCommitSendAmount;
+        std::function<juce::String(TrackId, int row)> stripSendAmountText;
+        std::function<bool(TrackId, const juce::String& text)> stripCommitPreGain;
+        std::function<juce::String(TrackId)> stripPreGainText;
+        /// "Pre:<name> Post:<name> …" as the strip shows it (same format as describeTrackForDiagnostics).
+        std::function<juce::String(TrackId)> stripInsertRowsText;
+        /// Run an insert row's context-menu action (1 open, 2 up, 3 down, 4 other stage, 5 remove).
+        std::function<bool(TrackId, bool preStage, int row, int actionId)> stripInsertMenuAction;
+        /// Click a base button ("power" / "mute" / "monitor" / "arm") through the cell's own click.
+        std::function<bool(TrackId, const juce::String& button)> stripClickButton;
+        std::function<bool(TrackId, const juce::String& button)> stripButtonActive;
+        std::function<bool(TrackId, const juce::String& button)> stripButtonVisible;
+        std::function<float(TrackId)> stripMeterHeldPeak;
+        std::function<bool(TrackId)> stripMeterOverloadLatched;
+        /// Click the strip's meter lamp (acknowledgement) through the component's own mouse path.
+        std::function<void(TrackId)> stripClickMeter;
+        std::function<float()> inspectorMeterHeldPeak;
+        std::function<bool()> inspectorMeterOverloadLatched;
+        /// Rows currently published to the engine by the meter hub.
+        std::function<std::vector<TrackId>()> meterHubInterest;
+        std::function<juce::Rectangle<int>()> windowBounds;
+        std::function<void(juce::Rectangle<int>)> setWindowBounds;
+        /// Transport intent + plug-in instance pointers + callback overrun count: a fingerprint of
+        /// the audio runtime that opening / closing the mixer must not change.
+        std::function<juce::String()> audioRuntimeFingerprint;
+        std::function<juce::String()> stripKindTexts; ///< "id:KIND,id:KIND,…" in strip order
+        /// Add a Group row exactly like the add-track menu (temp copy only); returns its id.
+        std::function<TrackId()> addGroupTrackLikeUi;
+    };
+    MixerHooks mixer;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -676,6 +742,7 @@ private:
     void appendExportLevelsSteps(const juce::File& project);
     /// Inspector channel panel: modes per row kind, meters, latch, fader paths, scrolling, low window.
     void appendInspectorPanelSteps(const juce::File& project);
+    void appendMixerSteps(const juce::File& project);
     /// Organ residual DC / AC before, during and after mute with the transport stopped (+ after playback).
     void appendOrganDcSteps(const juce::File& project);
     /// Live MIDI input: monitoring, routing, a recorded take, persistence, export, undo, guards.

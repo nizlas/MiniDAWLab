@@ -16,6 +16,10 @@ struct MainMenuActions
     std::function<void()> preparePortableProject;
     std::function<void()> openAudioSettings;
     std::function<void()> openHelp;
+    /// Window > Mixer (F3): show / hide the single mixer window.
+    std::function<void()> toggleMixerWindow;
+    /// Whether the mixer window is visible right now (ticks the menu item).
+    std::function<bool()> isMixerWindowVisible;
 };
 
 enum class MainMenuCommandId : int
@@ -26,9 +30,10 @@ enum class MainMenuCommandId : int
     FilePreparePortableProject = 4,
     AudioSettings = 10,
     HelpRoot = 20,
+    WindowMixer = 30,
 };
 
-/// Standard top-level menu bar (File / Audio / Help) for the main transport shell.
+/// Standard top-level menu bar (File / Audio / Window / Help) for the main transport shell.
 class MainMenuModel final : public juce::MenuBarModel
 {
 public:

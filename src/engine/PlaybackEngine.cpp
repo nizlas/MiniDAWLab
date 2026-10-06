@@ -921,6 +921,9 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     setCallbackPhase(AudioCallbackPhase::LoadSnapshot);
     const std::shared_ptr<const SessionSnapshot> sessionSnap = session_.loadSessionSnapshotForAudioThread();
+    // Concurrent meters: one acquire-load of the slot map for this block (the fold points below
+    // only compare ids against the cached view).
+    trackMeterBank_.audioThread_beginBlock();
     /// [Audio thread] Same publish discipline as Session: acquire-load retains a const view for this block only.
     // Live input monitoring (Monitor button): one acquire-loaded immutable view per block. Used to
     // (a) suppress monitored tracks' clip playback in the segment renderers and (b) drive the

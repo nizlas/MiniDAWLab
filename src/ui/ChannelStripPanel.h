@@ -18,12 +18,13 @@
 //     the owner hides it (MIDI rows get no fader; no MIDI volume function is introduced).
 //
 // DATA FLOW
-//   A 30 Hz timer drains the engine's accumulators through injected hooks (owner wires them to
-//   `PlaybackEngine::drainMeteredTrackLevels` / `drainMasterOutputLevels`) and tells the engine which
-//   row to meter (`setMeteredTrack`). The engine keeps folding the Stereo Out accumulator whether or
-//   not it is displayed (export diagnostics and the master row's meter read it). Track switch, delete
-//   and project replace go through `refreshFromSession`, which re-points the tap and clears the meter
-//   so the previous row's data is never shown. No audio-thread code lives here.
+//   The panel is a `LevelMeterHub::Listener`: it reports the row it shows as its meter interest
+//   and receives that row's drained windows from the hub (the Master row's window is the Stereo
+//   Out accumulator, delivered under the Master row's id). It never drains the engine itself, so
+//   the mixer can show the same row at the same time without either view losing a peak. Track
+//   switch, delete and project replace go through `refreshFromSession`, which changes the
+//   interest and clears the meter so the previous row's data is never shown. A 30 Hz timer polls
+//   the session (fader value / row kind) and animates the meter. No audio-thread code lives here.
 //
 // THREADING
 //   [Message thread] only.
@@ -33,6 +34,7 @@
 #include "engine/LevelMeterAccumulator.h"
 #include "ui/ChannelFaderComponent.h"
 #include "ui/LevelMeterComponent.h"
+#include "ui/LevelMeterHub.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -41,20 +43,22 @@
 class Session;
 
 class ChannelStripPanel final : public juce::Component,
+                                public LevelMeterHub::Listener,
                                 private juce::Timer
 {
 public:
-    struct Hooks
-    {
-        std::function<level_meter::Reading()> drainTrackMeter;
-        std::function<level_meter::Reading()> drainMasterMeter;
-        std::function<void(TrackId)> setMeteredTrack;
-    };
-
     explicit ChannelStripPanel(Session& session);
     ~ChannelStripPanel() override;
 
-    void setHooks(Hooks hooks);
+    /// Attach to the app's meter hub (owner wires it once; nullptr detaches). The hub outlives
+    /// the panel; the panel removes itself in its destructor.
+    void setMeterHub(LevelMeterHub* hub);
+
+    // --- LevelMeterHub::Listener -------------------------------------------------------------------
+    void collectMeterInterest(std::vector<TrackId>& out) override;
+    void meterWindowArrived(TrackId trackId, const level_meter::Reading& reading, double nowSeconds) override;
+    void meterOverloadAcknowledged(TrackId trackId) override;
+    void meterTick(double nowSeconds) override;
 
     /// Re-reads the active row / fader value / kind from the published snapshot (also runs on the
     /// panel's own tick, so callers may but need not call it after an edit).
@@ -91,7 +95,7 @@ private:
     void applyModeForTrack(const Track* track);
 
     Session& session_;
-    Hooks hooks_;
+    LevelMeterHub* meterHub_ = nullptr;
     juce::Label nameLabel_;
     juce::Label meterCaption_;
     ChannelFaderComponent fader_;

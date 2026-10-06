@@ -180,7 +180,7 @@ void LevelMeterComponent::clear()
     repaint();
 }
 
-void LevelMeterComponent::resetOverloadLatch()
+void LevelMeterComponent::resetOverloadLatch(const bool notifyOwner)
 {
     overloadLatched_ = false;
     overloadSamples_ = 0;
@@ -192,7 +192,7 @@ void LevelMeterComponent::resetOverloadLatch()
         heldPeak_[ch] = 0.0f;
     }
     repaint();
-    if (onOverloadLatchReset != nullptr)
+    if (notifyOwner && onOverloadLatchReset != nullptr)
     {
         onOverloadLatchReset();
     }

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.15 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.16 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -127,6 +127,10 @@ target_sources(MiniDAWLab PRIVATE
     src/ui/ChannelStripPanel.cpp
     src/ui/ChannelFaderComponent.cpp
     src/ui/LevelMeterComponent.cpp
+    src/ui/LevelMeterHub.cpp
+    src/ui/mixer/MixerChannelStrip.cpp
+    src/ui/mixer/MixerContentComponent.cpp
+    src/ui/mixer/MixerWindow.cpp
     src/ui/InstrumentAlternativesPopup.cpp
     src/ui/TimelineViewportModel.cpp
     src/ui/TrackLanesView.cpp
@@ -527,6 +531,51 @@ target_include_directories(WaveformReloadFocusedTests PRIVATE ${CMAKE_CURRENT_SO
 target_compile_definitions(WaveformReloadFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
     JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
 target_link_libraries(WaveformReloadFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_basics
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+
+# -----------------------------------------------------------------------------
+# MixerFocusedTests: the mixer slice without a window or a device — TrackMeterBank slots and
+# drains, LevelMeterHub fan-out (Inspector + mixer receive every window once, Master under its id,
+# hidden views cost nothing, acknowledgement), MixerSectionLayout alignment, an OFFSCREEN
+# MixerChannelStrip bound to a non-active TrackId editing only that row through the production
+# Session setters, per-kind controls, and the ui-layout.xml mixer round trip. Plugin / instrument
+# entry points Session.cpp references are satisfied by never-executed link stubs in the test main.
+# -----------------------------------------------------------------------------
+juce_add_console_app(MixerFocusedTests PRODUCT_NAME "MixerFocusedTests")
+target_sources(MixerFocusedTests PRIVATE
+    tests/selftest/MixerFocusedTestsMain.cpp
+    src/domain/Session.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/transport/Transport.cpp
+    src/ui/ChannelFaderComponent.cpp
+    src/ui/InspectorPanControl.cpp
+    src/ui/LevelMeterComponent.cpp
+    src/ui/LevelMeterHub.cpp
+    src/ui/UiLayoutSettingsStore.cpp
+    src/ui/mixer/MixerChannelStrip.cpp)
+target_include_directories(MixerFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(MixerFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(MixerFocusedTests
     PRIVATE
         juce::juce_audio_basics
         juce::juce_audio_formats
