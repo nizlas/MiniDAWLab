@@ -14,6 +14,7 @@
 #if JUCE_WINDOWS
  #define WIN32_LEAN_AND_MEAN
  #include <windows.h>
+ #include <psapi.h> // K32GetProcessMemoryInfo (perf-profile process sample; kernel32 export)
 #endif
 
 namespace
@@ -314,6 +315,36 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
             req.probeOutDir = fileFromArg(args[i + 2].unquoted());
             i += 2;
         }
+        else if (a == "--stability-perf-profile")
+        {
+            if (!setKind(StabilityScenarioKind::PerfProfile)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-perf-profile requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--seconds" || a == "--warmup" || a == "--buffer" || a == "--start-seconds")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = a + " requires a number";
+                return {};
+            }
+            ++i;
+            if (a == "--seconds") { req.perfSeconds = juce::jlimit(5, 600, args[i].getIntValue()); }
+            else if (a == "--warmup") { req.perfWarmupSeconds = juce::jlimit(0, 120, args[i].getIntValue()); }
+            else if (a == "--buffer") { req.perfRequestedBufferSize = juce::jlimit(0, 8192, args[i].getIntValue()); }
+            else { req.perfStartSeconds = juce::jmax(0.0, args[i].getDoubleValue()); }
+        }
+        else if (a == "--mixer-open")
+        {
+            req.perfMixerOpen = true;
+        }
+        else if (a == "--profile-off")
+        {
+            req.perfProfilerOff = true;
+        }
         else if (a == "--repeat")
         {
             if (i + 1 >= args.size())
@@ -457,6 +488,7 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::ProxyRenderProbe: scenarioName_ = "proxy-render-probe"; break;
         case StabilityScenarioKind::ProxyPlaybackEdges: scenarioName_ = "proxy-playback-edges"; break;
         case StabilityScenarioKind::Mixer: scenarioName_ = "mixer"; break;
+        case StabilityScenarioKind::PerfProfile: scenarioName_ = "perf-profile"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -557,6 +589,9 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::Mixer:
             appendMixerSteps(request.projectA);
+            break;
+        case StabilityScenarioKind::PerfProfile:
+            appendPerfProfileSteps(request);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");
@@ -8931,4 +8966,254 @@ void StabilityScenarioRunner::appendMidiEditorMoveCrashSteps(const juce::File& p
                                return true;
                            },
                            600 });
+}
+
+// -----------------------------------------------------------------------------
+// Performance profile (`--stability-perf-profile <project>`)
+// -----------------------------------------------------------------------------
+namespace
+{
+    /// Process + system CPU / memory as seen from the message thread (Win32; diagnostics only).
+    struct PerfProcessSample
+    {
+        bool valid = false;
+        double processCpuMs = 0.0;   ///< kernel + user time of this process
+        double systemBusyMs = 0.0;   ///< all cores: kernel (incl. idle) + user − idle
+        double systemTotalMs = 0.0;  ///< all cores: kernel + user
+        double wallMs = 0.0;
+        std::uint64_t workingSetBytes = 0;
+        std::uint64_t privateBytes = 0;
+        std::uint64_t pageFaults = 0; ///< soft + hard (Win32 does not separate them here)
+    };
+
+    [[nodiscard]] PerfProcessSample samplePerfProcess() noexcept
+    {
+        PerfProcessSample s;
+#if JUCE_WINDOWS
+        FILETIME create{}, exitT{}, kernel{}, user{};
+        FILETIME sIdle{}, sKernel{}, sUser{};
+        const auto toMs = [](const FILETIME& ft) noexcept -> double {
+            ULARGE_INTEGER u;
+            u.LowPart = ft.dwLowDateTime;
+            u.HighPart = ft.dwHighDateTime;
+            return (double)u.QuadPart / 10000.0; // 100 ns units
+        };
+        if (::GetProcessTimes(::GetCurrentProcess(), &create, &exitT, &kernel, &user) != 0)
+        {
+            s.processCpuMs = toMs(kernel) + toMs(user);
+            s.valid = true;
+        }
+        if (::GetSystemTimes(&sIdle, &sKernel, &sUser) != 0)
+        {
+            s.systemTotalMs = toMs(sKernel) + toMs(sUser);
+            s.systemBusyMs = s.systemTotalMs - toMs(sIdle);
+        }
+        PROCESS_MEMORY_COUNTERS_EX pmc{};
+        pmc.cb = sizeof(pmc);
+        if (::K32GetProcessMemoryInfo(::GetCurrentProcess(),
+                                      reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)) != 0)
+        {
+            s.workingSetBytes = (std::uint64_t)pmc.WorkingSetSize;
+            s.privateBytes = (std::uint64_t)pmc.PrivateUsage;
+            s.pageFaults = (std::uint64_t)pmc.PageFaultCount;
+        }
+#endif
+        s.wallMs = juce::Time::getMillisecondCounterHiRes();
+        return s;
+    }
+
+    [[nodiscard]] juce::String perfMb(const std::uint64_t bytes)
+    {
+        return juce::String((double)bytes / (1024.0 * 1024.0), 0) + " MB";
+    }
+} // namespace
+
+void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequest& request)
+{
+    const juce::File project = request.projectA;
+    const int measureSeconds = request.perfSeconds;
+    const int warmupSeconds = request.perfWarmupSeconds;
+    const double startSeconds = request.perfStartSeconds;
+    const int requestedBuffer = request.perfRequestedBufferSize;
+    const bool mixerOpen = request.perfMixerOpen;
+    const bool profilerOn = !request.perfProfilerOff;
+
+    auto say = [this](const juce::String& s) { appendStabilityRunLine("  " + s); };
+    auto baseline = std::make_shared<PerfProcessSample>();
+    auto underrunBaseline = std::make_shared<std::int64_t>(0);
+    auto playheadBaseline = std::make_shared<std::int64_t>(0);
+    auto mixerOpenedHere = std::make_shared<bool>(false);
+
+    appendLoadAndVerifySteps(project, "perf-profile");
+
+    steps_.push_back(Step{ "perf-profile: settle after load (plug-ins / proxies ready)",
+                           [](juce::String&) -> bool { return true; },
+                           8000 });
+
+    steps_.push_back(Step{ "perf-profile: runtime conditions" + juce::String(requestedBuffer > 0 ? " + buffer request" : ""),
+                           [this, say, requestedBuffer](juce::String& failReason) -> bool {
+                               if (!hooks_.perf.describeRuntime)
+                               {
+                                   failReason = "perf hooks not installed";
+                                   return false;
+                               }
+                               say(hooks_.perf.describeRuntime());
+                               if (requestedBuffer > 0 && hooks_.perf.requestDeviceBufferSize)
+                               {
+                                   juce::String detail;
+                                   const int actual = hooks_.perf.requestDeviceBufferSize(requestedBuffer, detail);
+                                   say("buffer request " + juce::String(requestedBuffer) + " -> actual "
+                                       + juce::String(actual) + " | " + detail);
+                               }
+                               return true;
+                           },
+                           requestedBuffer > 0 ? 4000 : 300 });
+
+    steps_.push_back(Step{ "perf-profile: project load (loaded vs processed)",
+                           [this, say](juce::String&) -> bool {
+                               if (hooks_.perf.describeRuntime)
+                               {
+                                   say(hooks_.perf.describeRuntime()); // after a possible device restart
+                               }
+                               if (hooks_.perf.describeProjectLoad)
+                               {
+                                   say(hooks_.perf.describeProjectLoad());
+                               }
+                               return true;
+                           },
+                           300 });
+
+    steps_.push_back(Step{ juce::String("perf-profile: mixer window ") + (mixerOpen ? "OPEN" : "closed"),
+                           [this, say, mixerOpen, mixerOpenedHere](juce::String&) -> bool {
+                               const auto& M = hooks_.mixer;
+                               if (!M.toggleLikeF3 || !M.isVisible)
+                               {
+                                   say("mixer hooks absent; window state unchanged");
+                                   return true;
+                               }
+                               if (M.isVisible() != mixerOpen)
+                               {
+                                   M.toggleLikeF3();
+                                   *mixerOpenedHere = mixerOpen;
+                               }
+                               say(juce::String("mixer visible=") + (M.isVisible() ? "yes" : "no"));
+                               return true;
+                           },
+                           mixerOpen ? 1500 : 300 });
+
+    steps_.push_back(Step{ "perf-profile: start playback (warm-up " + juce::String(warmupSeconds) + " s)",
+                           [this, say, startSeconds, profilerOn](juce::String&) -> bool {
+                               const double sr = hooks_.getDeviceSampleRate ? hooks_.getDeviceSampleRate() : 48000.0;
+                               const auto startSample = (std::int64_t)(startSeconds * (sr > 0.0 ? sr : 48000.0));
+                               if (hooks_.seekTransportTo)
+                               {
+                                   hooks_.seekTransportTo(startSample);
+                               }
+                               say("start at " + juce::String(startSeconds, 2) + " s (sample " + juce::String(startSample)
+                                   + ") cycle=" + (hooks_.isCycleEnabled && hooks_.isCycleEnabled() ? "on" : "off")
+                                   + " profiler=" + (profilerOn ? "ON" : "off"));
+                               if (hooks_.perf.setProfilerEnabled)
+                               {
+                                   hooks_.perf.setProfilerEnabled(profilerOn);
+                               }
+                               hooks_.setPlaybackActive(true);
+                               return true;
+                           },
+                           juce::jmax(200, warmupSeconds * 1000) });
+
+    steps_.push_back(Step{ "perf-profile: measurement window begins (" + juce::String(measureSeconds) + " s)",
+                           [this, say, baseline, underrunBaseline, playheadBaseline](juce::String&) -> bool {
+                               if (hooks_.perf.resetMeasurementWindows)
+                               {
+                                   hooks_.perf.resetMeasurementWindows();
+                               }
+                               int proxySelected = 0;
+                               *underrunBaseline = hooks_.perf.proxyUnderrunTotal ? hooks_.perf.proxyUnderrunTotal(proxySelected) : 0;
+                               *playheadBaseline = hooks_.getTransportPlayheadSamples ? hooks_.getTransportPlayheadSamples() : 0;
+                               *baseline = samplePerfProcess();
+                               say("window start: playhead=" + juce::String(*playheadBaseline)
+                                   + " proxyUnderrunsSoFar=" + juce::String(*underrunBaseline)
+                                   + " proxySelected=" + juce::String(proxySelected)
+                                   + " workingSet=" + perfMb(baseline->workingSetBytes)
+                                   + " private=" + perfMb(baseline->privateBytes));
+                               return true;
+                           },
+                           juce::jmax(1000, measureSeconds * 1000) });
+
+    steps_.push_back(Step{ "perf-profile: collect",
+                           [this, say, baseline, underrunBaseline, playheadBaseline, measureSeconds, profilerOn](juce::String&) -> bool {
+                               const PerfProcessSample now = samplePerfProcess();
+                               const double wall = now.wallMs - baseline->wallMs;
+                               const int cores = juce::SystemStats::getNumCpus();
+                               const double procCpuPctOfOneCore = wall > 0.0 ? 100.0 * (now.processCpuMs - baseline->processCpuMs) / wall : 0.0;
+                               const double sysBusyPct = (now.systemTotalMs - baseline->systemTotalMs) > 0.0
+                                                             ? 100.0 * (now.systemBusyMs - baseline->systemBusyMs)
+                                                                   / (now.systemTotalMs - baseline->systemTotalMs)
+                                                             : 0.0;
+                               const std::int64_t playheadNow = hooks_.getTransportPlayheadSamples ? hooks_.getTransportPlayheadSamples() : 0;
+                               say("window end: wall=" + juce::String(wall / 1000.0, 2) + " s playhead=" + juce::String(playheadNow)
+                                   + " (started " + juce::String(*playheadBaseline) + ")");
+                               if (hooks_.perf.audioLoadText)
+                               {
+                                   say("engine: " + hooks_.perf.audioLoadText());
+                               }
+                               const float peak = hooks_.readOutputPeakHoldAndReset ? hooks_.readOutputPeakHoldAndReset() : -1.0f;
+                               juce::String master;
+                               if (hooks_.drainMasterMeter)
+                               {
+                                   const StabilityLevelStats m = hooks_.drainMasterMeter();
+                                   master = " masterPeakL/R=" + juce::String(m.peak[0], 3) + "/" + juce::String(m.peak[1], 3)
+                                            + " oversL/R=" + juce::String((int)m.overs[0]) + "/" + juce::String((int)m.overs[1])
+                                            + " rmsL/R=" + juce::String(m.rms[0], 4) + "/" + juce::String(m.rms[1], 4)
+                                            + " nonFinite=" + juce::String((int)m.nonFinite);
+                               }
+                               say("output: peakHold=" + juce::String(peak, 3) + master);
+                               int proxySelected = 0;
+                               const std::int64_t underruns = hooks_.perf.proxyUnderrunTotal ? hooks_.perf.proxyUnderrunTotal(proxySelected) : 0;
+                               say("proxy: selectedDestinations=" + juce::String(proxySelected)
+                                   + " underrunsInWindow=" + juce::String(underruns - *underrunBaseline)
+                                   + " (total " + juce::String(underruns) + ")");
+                               if (hooks_.perf.instrumentActivityText)
+                               {
+                                   say("instruments: " + hooks_.perf.instrumentActivityText());
+                               }
+                               say("process: cpu=" + juce::String(procCpuPctOfOneCore, 1) + "% of one core ("
+                                   + juce::String(cores > 0 ? procCpuPctOfOneCore / (double)cores : 0.0, 1) + "% of " + juce::String(cores)
+                                   + " cores) systemBusy=" + juce::String(sysBusyPct, 1) + "%"
+                                   + " workingSet=" + perfMb(now.workingSetBytes) + " private=" + perfMb(now.privateBytes)
+                                   + " pageFaultsInWindow=" + juce::String((juce::int64)(now.pageFaults - baseline->pageFaults))
+                                   + " (soft+hard; " + juce::String(wall > 0.0 ? (double)(now.pageFaults - baseline->pageFaults) * 1000.0 / wall : 0.0, 0)
+                                   + "/s)");
+                               if (profilerOn && hooks_.perf.profilerReportText)
+                               {
+                                   const juce::String report = hooks_.perf.profilerReportText(12);
+                                   juce::StringArray lines;
+                                   lines.addLines(report);
+                                   for (const auto& l : lines)
+                                   {
+                                       if (l.isNotEmpty())
+                                       {
+                                           say("profile: " + l);
+                                       }
+                                   }
+                               }
+                               juce::ignoreUnused(measureSeconds);
+                               return true;
+                           },
+                           200 });
+
+    steps_.push_back(Step{ "perf-profile: stop playback, profiler off",
+                           [this, mixerOpenedHere](juce::String&) -> bool {
+                               hooks_.setPlaybackActive(false);
+                               if (hooks_.perf.setProfilerEnabled)
+                               {
+                                   hooks_.perf.setProfilerEnabled(false);
+                               }
+                               if (*mixerOpenedHere && hooks_.mixer.isVisible && hooks_.mixer.isVisible() && hooks_.mixer.toggleLikeF3)
+                               {
+                                   hooks_.mixer.toggleLikeF3();
+                               }
+                               return true;
+                           },
+                           800 });
 }

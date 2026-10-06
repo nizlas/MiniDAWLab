@@ -44,6 +44,7 @@
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "diagnostics/AudioThreadProfiler.h"
 #include "diagnostics/ExperimentalPlaybackRoutingLog.h"
 #include "instruments/InstrumentTrackController.h"
 #include "plugins/ExperimentalInstrumentHost.h"
@@ -811,17 +812,32 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     // Load diagnostics: two clock reads per block, folded into relaxed counters on the way out
     // (covers the early-return offline-gate path as well). Never read for synchronization.
+    // Opt-in profiler (`--stability-perf-profile`): one relaxed load when off; when on, the
+    // block's start is registered here and its category / phase breakdown folded on exit.
+    audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
+    const bool prof = profiler.audioThread_enabled();
     struct AudioCallbackLoadScope
     {
         PlaybackEngine& engine_;
         const int blockSamples_;
         const std::int64_t startTicks_;
+        const bool profiling_;
         ~AudioCallbackLoadScope() noexcept
         {
             engine_.audioThread_accumulateCallbackLoad(blockSamples_, startTicks_);
+            if (profiling_)
+            {
+                audio_profiler::AudioThreadProfiler::get().audioThread_endBlock(
+                    startTicks_, blockSamples_,
+                    engine_.deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed));
+            }
         }
     };
-    const AudioCallbackLoadScope loadScope { *this, numSamples, juce::Time::getHighResolutionTicks() };
+    const AudioCallbackLoadScope loadScope { *this, numSamples, juce::Time::getHighResolutionTicks(), prof };
+    if (prof)
+    {
+        profiler.audioThread_beginBlock(loadScope.startTicks_);
+    }
 
     // Output-peak diagnostics: runs on every return path (including the gate-silence path, where
     // the cleared buffers correctly fold a peak of 0). Relaxed atomics; never for synchronization.
@@ -970,7 +986,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     if (allowInstrumentProcessing)
     {
         setCallbackPhase(AudioCallbackPhase::InstrumentBeginBlock);
+        const std::int64_t tPhase = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
         invokeExperimentalInstrumentBeginBlocks(instrumentSnap.get(), deviceBlockSizeInFrames);
+        if (prof)
+        {
+            profiler.audioThread_addPhase(audio_profiler::Phase::InstrumentBeginBlock, tPhase);
+        }
     }
 
     const PlaybackIntent playbackIntent = transport_.audioThread_loadIntent();
@@ -986,6 +1007,20 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     // suspended the hosts are not driven, so pending input is dropped instead of piling up.
     if (live_midi::LiveMidiInputBus* const bus = liveMidiBus_.load(std::memory_order_acquire))
     {
+        const std::int64_t tPhase = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
+        struct PhaseEnd
+        {
+            bool on;
+            std::int64_t t0;
+            ~PhaseEnd() noexcept
+            {
+                if (on)
+                {
+                    audio_profiler::AudioThreadProfiler::get().audioThread_addPhase(
+                        audio_profiler::Phase::LiveMidi, t0);
+                }
+            }
+        } const phaseEnd { prof, tPhase };
         if (allowInstrumentProcessing && instrumentSnap != nullptr)
         {
             live_midi::BlockContext ctx;
@@ -1717,9 +1752,25 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 
     const auto mixInstrumentsAndFinalizeMaster = [&]() noexcept
     {
+        using audio_profiler::Phase;
+        std::int64_t tPhase = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
         renderLiveInputMonitoringPass();
+        if (prof)
+        {
+            profiler.audioThread_addPhase(Phase::Monitor, tPhase);
+            tPhase = audio_profiler::AudioThreadProfiler::ticks();
+        }
         mixKeyedInstrumentLanesIntoOutputsIfAny();
+        if (prof)
+        {
+            profiler.audioThread_addPhase(Phase::InstrumentMix, tPhase);
+            tPhase = audio_profiler::AudioThreadProfiler::ticks();
+        }
         finalizeRoutingToDevice();
+        if (prof)
+        {
+            profiler.audioThread_addPhase(Phase::Finalize, tPhase);
+        }
     };
 
     if (sessionSnap == nullptr || deviceBlockSizeInFrames <= 0
@@ -1813,6 +1864,7 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         const std::int64_t timelineStartAudible = renderBase + silenceFrames;
         jassert(timelineStartAudible >= 0);
         const int silencePrefix = static_cast<int>(silenceFrames);
+        std::int64_t tPhase = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
 
         // Clip sources can be split at cycle boundaries. Refresh before their Pre/Post chains so
         // a plug-in sees the actual sub-block start, never a stale prior loop position.
@@ -1917,6 +1969,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                          -1,
                                                                          &preGainRampState_,
                                                                          monitorPtr);
+        }
+
+        if (prof)
+        {
+            profiler.audioThread_addPhase(audio_profiler::Phase::ClipRender, tPhase);
+            tPhase = audio_profiler::AudioThreadProfiler::ticks();
         }
 
         // Timeline order: dispatch transport MIDI toward each Instrument row that has a playback entry.
@@ -2038,6 +2096,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                 nullptr);
                 src.midiController->audioThread_setLastRoutedDestTrackId(destEntry->trackId);
             }
+        }
+        if (prof)
+        {
+            profiler.audioThread_addPhase(audio_profiler::Phase::MidiSchedule, tPhase);
         }
     };
 

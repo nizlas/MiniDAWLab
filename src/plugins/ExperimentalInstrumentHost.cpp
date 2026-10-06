@@ -10,6 +10,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "plugins/ExperimentalInstrumentHost.h"
 
+#include "diagnostics/AudioThreadProfiler.h"
 #include "domain/TrackStereoPan.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -3768,9 +3769,17 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         // Production mix step is the extracted (selftest-covered) pure function:
         // COPY semantics into scratch, zeros outside playing segments, silent
         // generation zeros, per-block peak. EOF/pre-readiness silence lives in the reader.
+        audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
+        const bool prof = profiler.audioThread_enabled();
+        const std::int64_t tProf = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
         const proxy_playback::ProxyMixOutcome outcome
             = proxy_playback::renderProxySegmentsToStereoScratch(
                 *proxyView, proxySegments_, proxySegmentCount_, L, R, numSamples);
+        if (prof)
+        {
+            profiler.audioThread_addInstance(audioProfileSlot_.load(std::memory_order_relaxed),
+                                             audio_profiler::Category::ProxyMix, tProf);
+        }
 
         if (outcome.producedBlock)
         {
@@ -3906,7 +3915,15 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         // already fingerprinted). RAII — restores the previous thread-local context on exit.
         const mini_daw::PrimaryLiveProcessScope liveScope(this, !blockMidi.isEmpty());
         juce::ScopedNoDenormals noDenormals;
+        audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
+        const bool prof = profiler.audioThread_enabled();
+        const std::int64_t tProf = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
         inst.processBlock(view, blockMidi);
+        if (prof)
+        {
+            profiler.audioThread_addInstance(audioProfileSlot_.load(std::memory_order_relaxed),
+                                             audio_profiler::Category::InstrumentPlugin, tProf);
+        }
     }
 
     const float* L = scratch_.getReadPointer(0);

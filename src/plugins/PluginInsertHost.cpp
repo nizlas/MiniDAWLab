@@ -4,6 +4,7 @@
 
 #include "plugins/PluginInsertHost.h"
 
+#include "diagnostics/AudioThreadProfiler.h"
 #include "plugins/PluginEditorWindows.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -1139,6 +1140,10 @@ void PluginInsertHost::rebuildAudioThreadMapAndPublish()
             sp.processor = live.instance.get();
             sp.layoutOk = live.layoutOk;
             sp.stage = live.stage;
+            // Message thread: name the instance for the opt-in profiler (bounded table; −1 when full).
+            sp.profileSlot = audio_profiler::AudioThreadProfiler::get().registerInstance(
+                audio_profiler::Category::InsertPlugin, kv.first, live.slotId,
+                live.instance->getName() + (live.stage == InsertStage::Pre ? " [Pre]" : " [Post]"));
             e.slots.push_back(sp);
         }
         if (!e.slots.empty())
@@ -1539,6 +1544,8 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
 
     juce::AudioBuffer<float> view(scratchPtrs_.data(), kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
+    audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
+    const bool prof = profiler.audioThread_enabled();
     int slotIndex = -1;
     for (const auto& sp : hit->slots)
     {
@@ -1553,7 +1560,12 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
                                         std::memory_order_relaxed);
         audioThreadInsertSlotIndex_.store(slotIndex, std::memory_order_relaxed);
         audioThreadInsertStage_.store(static_cast<int>(stage), std::memory_order_relaxed);
+        const std::int64_t tProf = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
         sp.processor->processBlock(view, midiScratch_);
+        if (prof)
+        {
+            profiler.audioThread_addInstance(sp.profileSlot, audio_profiler::Category::InsertPlugin, tProf);
+        }
         audioThreadInsertTrackId_.store(-1, std::memory_order_relaxed);
         audioThreadInsertSlotIndex_.store(-1, std::memory_order_relaxed);
         audioThreadInsertStage_.store(-1, std::memory_order_relaxed);

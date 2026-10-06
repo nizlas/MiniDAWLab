@@ -39,6 +39,7 @@
 #include "app/InstrumentRuntimeCoordinator.h"
 #include "app/InstrumentTimelineRowCoordinator.h"
 #include "app/AudioMixdownExporter.h"
+#include "diagnostics/AudioThreadProfiler.h"
 #include "diagnostics/DiagnosticBuildFlags.h"
 #include "diagnostics/PlaybackUiLoadLog.h"
 #include "diagnostics/UiPaintLoadCounters.h"
@@ -4020,6 +4021,7 @@ public:
         };
 
         installMixerStabilityHooks(hooks);
+        installPerfProfileStabilityHooks(hooks);
 
         hooks.captureArrangementPng = [this](const juce::File& png) -> bool {
             const juce::Image img = createComponentSnapshot(getLocalBounds(), true, 1.0f);
@@ -6458,6 +6460,285 @@ private:
     }
 
     /// [Message thread] `--stability-mixer` hooks: every one drives the REAL window / strips.
+    /// [Message thread] `--stability-perf-profile` hooks: runtime description, device buffer
+    /// request, loaded-vs-processed inventory, the opt-in audio profiler and the engine's load
+    /// window. Diagnostics only — every reader here is the engine's / hosts' existing relaxed
+    /// counter or the profiler's message-thread snapshot.
+    void installPerfProfileStabilityHooks(StabilityRunnerHooks& hooks)
+    {
+        auto& P = hooks.perf;
+        P.describeRuntime = [this]() -> juce::String {
+            juce::String s;
+            s << "exe=" << juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName()
+              << " version=" << (juce::JUCEApplication::getInstance() != nullptr
+                                     ? juce::JUCEApplication::getInstance()->getApplicationVersion()
+                                     : juce::String("?"))
+#if defined(NDEBUG)
+              << " config=Release"
+#else
+              << " config=Debug"
+#endif
+              << " | cpu=\"" << juce::SystemStats::getCpuModel() << "\" physicalCores="
+              << juce::SystemStats::getNumPhysicalCpus() << " logicalCores=" << juce::SystemStats::getNumCpus()
+              << " ram=" << juce::SystemStats::getMemorySizeInMegabytes() << " MB"
+              << " | " << mini_daw::describeActiveAudioDeviceOneLine(deviceManager);
+            if (juce::AudioIODevice* const dev = deviceManager.getCurrentAudioDevice())
+            {
+                s << " | offeredBufferSizes=";
+                const juce::Array<int> sizes = dev->getAvailableBufferSizes();
+                for (int i = 0; i < sizes.size(); ++i)
+                {
+                    s << (i > 0 ? "," : "") << sizes[i];
+                }
+                s << " default=" << dev->getDefaultBufferSize();
+            }
+            return s;
+        };
+        P.requestDeviceBufferSize = [this](const int requested, juce::String& detail) -> int {
+            juce::AudioIODevice* const before = deviceManager.getCurrentAudioDevice();
+            if (before == nullptr)
+            {
+                detail = "no active device";
+                return 0;
+            }
+            const int was = before->getCurrentBufferSizeSamples();
+            auto setup = deviceManager.getAudioDeviceSetup();
+            setup.bufferSize = requested;
+            const juce::String err = deviceManager.setAudioDeviceSetup(setup, true);
+            juce::AudioIODevice* const after = deviceManager.getCurrentAudioDevice();
+            const int now = after != nullptr ? after->getCurrentBufferSizeSamples() : 0;
+            detail = "was " + juce::String(was) + (err.isNotEmpty() ? " error: " + err : juce::String(" ok"))
+                     + (now == requested ? " (applied)" : " (driver kept its own size)");
+            return now;
+        };
+        P.describeProjectLoad = [this]() -> juce::String {
+            juce::String s;
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            int audio = 0, instrument = 0, midi = 0, group = 0, master = 0, muted = 0, off = 0;
+            for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
+            {
+                const Track& t = snap->getTrack(i);
+                switch (t.getKind())
+                {
+                    case TrackKind::Audio: ++audio; break;
+                    case TrackKind::Instrument: ++instrument; break;
+                    case TrackKind::Midi: ++midi; break;
+                    case TrackKind::Group: ++group; break;
+                    case TrackKind::Master: ++master; break;
+                }
+                muted += t.isMuted() ? 1 : 0;
+                off += t.isTrackOff() ? 1 : 0;
+            }
+            s << "tracks: audio=" << audio << " instrument=" << instrument << " midi=" << midi << " group=" << group
+              << " master=" << master << " (muted=" << muted << " off=" << off << ")";
+            int hostsLoaded = 0, hostsEmpty = 0, proxySelected = 0, secondaryLoaded = 0, registryEntries = 0;
+            juce::String proxyStates;
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                for (const auto& [tid, hostPtr, ctlPtr] : instrumentRuntimeCoordinator_->exportKeyedRuntimePointersForDiagnostics())
+                {
+                    juce::ignoreUnused(hostPtr, ctlPtr);
+                    ++registryEntries;
+                    ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid);
+                    if (h != nullptr && h->hasInstrument()) { ++hostsLoaded; } else { ++hostsEmpty; }
+                    if (ExperimentalInstrumentHost* const sec = instrumentRuntimeCoordinator_->getSecondaryInstrumentHostForTrack(tid);
+                        sec != nullptr && sec->hasInstrument())
+                    {
+                        ++secondaryLoaded;
+                    }
+                    if (proxyPlaybackCoordinator_ != nullptr)
+                    {
+                        const auto view = proxyPlaybackCoordinator_->publishedViewForTrack(tid);
+                        if (view != nullptr && view->useProxy)
+                        {
+                            ++proxySelected;
+                        }
+                        const juce::String st = proxy_playback::proxyPlaybackSourceStateName(
+                            proxyPlaybackCoordinator_->runtimeStateForTrack(tid));
+                        proxyStates << (proxyStates.isEmpty() ? "" : ",") << juce::String((juce::int64)tid) << ":" << st;
+                    }
+                }
+            }
+            int insertInstances = 0, insertChains = 0;
+            for (const auto& [tid, ptrs] : pluginHost_.exportChainInstancePointersForDiagnostics())
+            {
+                juce::ignoreUnused(tid);
+                ++insertChains;
+                insertInstances += (int)ptrs.size();
+            }
+            s << " | instrument registry entries=" << registryEntries << " primaryLoaded=" << hostsLoaded
+              << " primaryEmpty=" << hostsEmpty << " proxySelected=" << proxySelected
+              << " secondaryLoaded(notProcessedWhilePlaying)=" << secondaryLoaded
+              << " | insert chains=" << insertChains << " instances=" << insertInstances
+              << " | proxy states: " << proxyStates;
+            return s;
+        };
+        P.setProfilerEnabled = [](const bool on) { audio_profiler::AudioThreadProfiler::get().setEnabled(on); };
+        P.resetMeasurementWindows = [this] {
+            (void)playbackEngine_.snapshotAudioCallbackLoadAndReset();
+            (void)audio_profiler::AudioThreadProfiler::get().snapshotAndReset();
+            (void)playbackEngine_.readAndResetOutputPeakHoldForDiagnostics();
+            (void)playbackEngine_.drainMasterOutputLevelsForDiagnostics();
+        };
+        P.audioLoadText = [this]() -> juce::String {
+            const auto a = playbackEngine_.snapshotAudioCallbackLoadAndReset();
+            const double budgetMs = (a.sampleRate > 0.0 && a.lastBlockSamples > 0)
+                                        ? 1000.0 * (double)a.lastBlockSamples / a.sampleRate
+                                        : 0.0;
+            juce::String s;
+            s << "blocks=" << (juce::int64)a.blocks << " block=" << a.lastBlockSamples << " sr=" << juce::String(a.sampleRate, 0)
+              << " budgetMs=" << juce::String(budgetMs, 3)
+              << " ms(min/mean/max)=" << juce::String(a.minMs, 3) << "/" << juce::String(a.meanMs, 3) << "/" << juce::String(a.maxMs, 3)
+              << " budget%(mean/max)=" << juce::String(a.meanBudgetPercent, 1) << "/" << juce::String(a.maxBudgetPercent, 1)
+              << " nearOverruns(>70%)=" << (int)a.nearOverruns << " overruns(>=100%)=" << (int)a.overruns;
+            return s;
+        };
+        P.profilerReportText = [this](const int topN) -> juce::String {
+            using audio_profiler::AudioThreadProfiler;
+            using audio_profiler::Category;
+            const AudioThreadProfiler::Report r = AudioThreadProfiler::get().snapshotAndReset();
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const auto trackLabel = [&snap](const TrackId tid) -> juce::String {
+                const int idx = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+                return idx >= 0 ? snap->getTrack(idx).getName() : juce::String("?");
+            };
+            const double blocks = (double)juce::jmax<std::uint64_t>(1, r.blocks);
+            juce::String s;
+            s << "blocks=" << (juce::int64)r.blocks << " callback ms(mean/max)=" << juce::String(r.totalSumMs / blocks, 3) << "/"
+              << juce::String(r.totalMaxMs, 3) << "\n";
+            for (int c = 0; c < AudioThreadProfiler::kCategories; ++c)
+            {
+                const auto cat = static_cast<Category>(c);
+                s << "category " << audio_profiler::categoryName(cat)
+                  << ": perBlock ms(mean/max)=" << juce::String(r.categorySumMs[(size_t)c] / blocks, 3) << "/"
+                  << juce::String(r.categoryMaxMs[(size_t)c], 3)
+                  << " callsPerBlock=" << juce::String((double)r.categoryCalls[(size_t)c] / blocks, 1)
+                  << " shareOfCallback=" << juce::String(r.totalSumMs > 0.0 ? 100.0 * r.categorySumMs[(size_t)c] / r.totalSumMs : 0.0, 1)
+                  << "%\n";
+            }
+            s << "remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)="
+              << juce::String(r.remainderSumMs / blocks, 3) << "/" << juce::String(r.remainderMaxMs, 3)
+              << " shareOfCallback=" << juce::String(r.totalSumMs > 0.0 ? 100.0 * r.remainderSumMs / r.totalSumMs : 0.0, 1) << "%\n";
+            for (int p = 0; p < AudioThreadProfiler::kPhases; ++p)
+            {
+                s << "phase " << audio_profiler::phaseName(static_cast<audio_profiler::Phase>(p))
+                  << ": perBlock ms(mean/max)=" << juce::String(r.phaseSumMs[(size_t)p] / blocks, 3) << "/"
+                  << juce::String(r.phaseMaxMs[(size_t)p], 3) << "\n";
+            }
+            s << "worst block: total=" << juce::String(r.worstTotalMs, 3) << " ms (" << r.worstBlockSamples << " samples) ="
+              << " instrument-plugin " << juce::String(r.worstCategoryMs[0], 3)
+              << " + proxy-mix " << juce::String(r.worstCategoryMs[1], 3)
+              << " + insert-plugin " << juce::String(r.worstCategoryMs[2], 3)
+              << " + remainder " << juce::String(r.worstRemainderMs, 3) << "\n";
+            s << "callback start intervals: n=" << (juce::int64)r.intervals
+              << " ms(mean/max)=" << juce::String(r.intervals > 0 ? r.intervalSumMs / (double)r.intervals : 0.0, 3) << "/"
+              << juce::String(r.intervalMaxMs, 3) << " lateStarts(>1.25x period)=" << (int)r.lateStarts << "\n";
+            std::vector<AudioThreadProfiler::InstanceReport> inst = r.instances;
+            std::sort(inst.begin(), inst.end(), [](const auto& a, const auto& b) { return a.totalMs() > b.totalMs(); });
+            int shown = 0;
+            double shownSum = 0.0;
+            int active = 0;
+            for (const auto& ir : inst)
+            {
+                if (ir.totalCalls() > 0)
+                {
+                    ++active;
+                }
+            }
+            s << "instances with calls=" << active << " of registered " << (int)inst.size() << "; top " << topN << " by summed ms:\n";
+            for (const auto& ir : inst)
+            {
+                if (shown >= topN || ir.totalCalls() == 0)
+                {
+                    break;
+                }
+                ++shown;
+                shownSum += ir.totalMs();
+                const int c = ir.calls[0] > 0 ? 0 : (ir.calls[1] > 0 ? 1 : 2);
+                s << "  #" << shown << " track " << (juce::int64)ir.trackId << " \"" << trackLabel(ir.trackId) << "\""
+                  << (ir.category == Category::InsertPlugin ? " insert slot " + juce::String((juce::int64)ir.slotId) : juce::String(""))
+                  << " plugin \"" << ir.name << "\" mode=" << audio_profiler::categoryName(static_cast<Category>(c))
+                  << " calls=" << (juce::int64)ir.totalCalls()
+                  << " meanPerCall=" << juce::String(1000.0 * ir.totalMs() / (double)ir.totalCalls(), 1) << " us"
+                  << " maxCall=" << juce::String(juce::jmax(ir.maxMs[0], juce::jmax(ir.maxMs[1], ir.maxMs[2])), 3) << " ms"
+                  << " perBlock=" << juce::String(ir.totalMs() / blocks, 3) << " ms"
+                  << " share=" << juce::String(r.totalSumMs > 0.0 ? 100.0 * ir.totalMs() / r.totalSumMs : 0.0, 1) << "%\n";
+            }
+            s << "top " << shown << " together = " << juce::String(r.totalSumMs > 0.0 ? 100.0 * shownSum / r.totalSumMs : 0.0, 1)
+              << "% of callback time\n";
+            // Per plug-in family totals (same name across instances) — where the budget goes by product.
+            std::map<juce::String, std::pair<int, double>> families;
+            for (const auto& ir : inst)
+            {
+                if (ir.totalCalls() == 0)
+                {
+                    continue;
+                }
+                auto& f = families[ir.name];
+                f.first += 1;
+                f.second += ir.totalMs();
+            }
+            std::vector<std::pair<juce::String, std::pair<int, double>>> fam(families.begin(), families.end());
+            std::sort(fam.begin(), fam.end(), [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+            s << "by plug-in (instances, perBlock ms, share):";
+            for (const auto& f : fam)
+            {
+                s << " [" << f.first << " x" << f.second.first << " " << juce::String(f.second.second / blocks, 3) << " ms "
+                  << juce::String(r.totalSumMs > 0.0 ? 100.0 * f.second.second / r.totalSumMs : 0.0, 1) << "%]";
+            }
+            return s;
+        };
+        P.proxyUnderrunTotal = [this](int& proxySelectedCount) -> std::int64_t {
+            proxySelectedCount = 0;
+            std::int64_t total = 0;
+            if (instrumentRuntimeCoordinator_ == nullptr || proxyPlaybackCoordinator_ == nullptr)
+            {
+                return 0;
+            }
+            for (const auto& [tid, hostPtr, ctlPtr] : instrumentRuntimeCoordinator_->exportKeyedRuntimePointersForDiagnostics())
+            {
+                juce::ignoreUnused(hostPtr, ctlPtr);
+                const auto view = proxyPlaybackCoordinator_->publishedViewForTrack(tid);
+                if (view == nullptr)
+                {
+                    continue;
+                }
+                if (view->useProxy)
+                {
+                    ++proxySelectedCount;
+                }
+                if (view->reader != nullptr)
+                {
+                    total += (std::int64_t)view->reader->underrunCount();
+                }
+            }
+            return total;
+        };
+        P.instrumentActivityText = [this]() -> juce::String {
+            int live = 0, proxied = 0, idle = 0;
+            if (instrumentRuntimeCoordinator_ != nullptr)
+            {
+                for (const auto& [tid, hostPtr, ctlPtr] : instrumentRuntimeCoordinator_->exportKeyedRuntimePointersForDiagnostics())
+                {
+                    juce::ignoreUnused(hostPtr, ctlPtr);
+                    ExperimentalInstrumentHost* const h = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid);
+                    if (h == nullptr)
+                    {
+                        continue;
+                    }
+                    const bool l = h->readRtActivitySnapshotForDiagnostics().processOkBlocks > 0;
+                    const bool p = h->getProxyBlocksMixedCountRelaxed() > 0;
+                    live += l ? 1 : 0;
+                    proxied += p ? 1 : 0;
+                    idle += (!l && !p) ? 1 : 0;
+                }
+            }
+            return "hosts with live processBlock blocks=" + juce::String(live) + " hosts with proxy-mixed blocks="
+                   + juce::String(proxied) + " hosts with neither=" + juce::String(idle)
+                   + " (cumulative since device start; a host can appear in both after a source switch)";
+        };
+    }
+
     void installMixerStabilityHooks(StabilityRunnerHooks& hooks)
     {
         using track_strip_glyphs::StripButtonKind;

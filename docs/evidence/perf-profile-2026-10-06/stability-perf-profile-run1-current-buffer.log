@@ -1,0 +1,69 @@
+2026-10-06T20:58:29.852+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-06T20:58:33.050+02:00 ================================================================
+2026-10-06T20:58:33.052+02:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks\TSE_pt2_100tracks.dalproj
+2026-10-06T20:58:33.055+02:00 steps queued: 10 (delete-loop iterations expand at plan time)
+2026-10-06T20:58:33.578+02:00 step begin: perf-profile: load TSE_pt2_100tracks.dalproj
+2026-10-06T20:58:57.390+02:00 step end ok: perf-profile: load TSE_pt2_100tracks.dalproj elapsedMs=23805
+2026-10-06T20:58:57.433+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-06T20:59:26.662+02:00 step begin: perf-profile: verify loaded
+2026-10-06T20:59:26.664+02:00   track count after load: 101
+2026-10-06T20:59:26.669+02:00 step end ok: perf-profile: verify loaded elapsedMs=2
+2026-10-06T20:59:27.015+02:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-10-06T20:59:27.028+02:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-06T20:59:35.067+02:00 step begin: perf-profile: runtime conditions
+2026-10-06T20:59:35.070+02:00   exe=C:\Users\nicla\development\MiniDAWLab\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.1.17 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-06T20:59:35.077+02:00 step end ok: perf-profile: runtime conditions elapsedMs=3
+2026-10-06T20:59:35.423+02:00 step begin: perf-profile: project load (loaded vs processed)
+2026-10-06T20:59:35.426+02:00   exe=C:\Users\nicla\development\MiniDAWLab\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.1.17 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-06T20:59:35.429+02:00   tracks: audio=36 instrument=48 midi=16 group=0 master=1 (muted=36 off=0) | instrument registry entries=48 primaryLoaded=48 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=50 instances=50 | proxy states: 3:Primary,5:Primary,80:Primary,16:Primary,72:Primary,8:Primary,82:Primary,18:Primary,74:Primary,10:Primary,76:Primary,12:Primary,78:Primary,14:Primary,84:Primary,20:Primary,86:Primary,22:Primary,88:Primary,24:Primary,90:Primary,26:Primary,92:Primary,28:Primary,94:Primary,30:Primary,96:Primary,32:Primary,98:Primary,34:Primary,36:Primary,38:Primary,40:Primary,42:Primary,44:Primary,46:Primary,48:Primary,50:Primary,52:Primary,54:Primary,56:Primary,58:Primary,60:Primary,62:Primary,64:Primary,66:Primary,68:Primary,70:Primary
+2026-10-06T20:59:35.436+02:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=6
+2026-10-06T20:59:35.783+02:00 step begin: perf-profile: mixer window closed
+2026-10-06T20:59:35.787+02:00   mixer visible=no
+2026-10-06T20:59:35.794+02:00 step end ok: perf-profile: mixer window closed elapsedMs=3
+2026-10-06T20:59:36.141+02:00 step begin: perf-profile: start playback (warm-up 5 s)
+2026-10-06T20:59:36.144+02:00   start at 0.00 s (sample 0) cycle=on profiler=ON
+2026-10-06T20:59:36.151+02:00 step end ok: perf-profile: start playback (warm-up 5 s) elapsedMs=3
+2026-10-06T20:59:41.179+02:00 step begin: perf-profile: measurement window begins (45 s)
+2026-10-06T20:59:41.183+02:00   window start: playhead=230400 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=9398.2 MB private=9666.9 MB
+2026-10-06T20:59:41.189+02:00 step end ok: perf-profile: measurement window begins (45 s) elapsedMs=3
+2026-10-06T21:00:26.199+02:00 step begin: perf-profile: collect
+2026-10-06T21:00:26.202+02:00   window end: wall=45.02 s playhead=1784832 (started 230400)
+2026-10-06T21:00:26.204+02:00   engine: blocks=3036 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=11.560/14.804/19.849 budget%(mean/max)=138.8/186.1 nearOverruns(>70%)=0 overruns(>=100%)=3036
+2026-10-06T21:00:26.206+02:00   output: peakHold=0.372 masterPeakL/R=0.345/0.372 oversL/R=0/0 rmsL/R=0.0426/0.0468 nonFinite=0
+2026-10-06T21:00:26.209+02:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-10-06T21:00:26.211+02:00   instruments: hosts with live processBlock blocks=48 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-10-06T21:00:26.214+02:00   process: cpu=155.4% of one core (6.5% of 24 cores) systemBusy=43.2% workingSet=9391.44 MB private=9660.14 MB pageFaultsInWindow=212 (soft+hard; 4.7091/s)
+2026-10-06T21:00:26.218+02:00   profile: blocks=3037 callback ms(mean/max)=14.805/19.849
+2026-10-06T21:00:26.220+02:00   profile: category instrument-plugin: perBlock ms(mean/max)=13.766/18.597 callsPerBlock=48.0 shareOfCallback=93.0%
+2026-10-06T21:00:26.222+02:00   profile: category proxy-mix: perBlock ms(mean/max)=0.000/0.000 callsPerBlock=0.0 shareOfCallback=0.0%
+2026-10-06T21:00:26.224+02:00   profile: category insert-plugin: perBlock ms(mean/max)=0.472/1.713 callsPerBlock=32.0 shareOfCallback=3.2%
+2026-10-06T21:00:26.227+02:00   profile: remainder (DAL work outside plug-in / proxy calls): perBlock ms(mean/max)=0.567/1.412 shareOfCallback=3.8%
+2026-10-06T21:00:26.229+02:00   profile: phase instrument-begin-block: perBlock ms(mean/max)=0.016/0.292
+2026-10-06T21:00:26.232+02:00   profile: phase live-midi: perBlock ms(mean/max)=0.003/0.025
+2026-10-06T21:00:26.235+02:00   profile: phase clip-render(incl. audio inserts): perBlock ms(mean/max)=0.047/0.154
+2026-10-06T21:00:26.237+02:00   profile: phase midi-schedule: perBlock ms(mean/max)=0.045/0.583
+2026-10-06T21:00:26.238+02:00   profile: phase monitor: perBlock ms(mean/max)=0.000/0.001
+2026-10-06T21:00:26.240+02:00   profile: phase instrument-mix(incl. inserts): perBlock ms(mean/max)=14.685/19.719
+2026-10-06T21:00:26.242+02:00   profile: phase finalize(buses incl. inserts): perBlock ms(mean/max)=0.002/0.007
+2026-10-06T21:00:26.245+02:00   profile: worst block: total=19.849 ms (512 samples) = instrument-plugin 18.597 + proxy-mix 0.000 + insert-plugin 0.559 + remainder 0.694
+2026-10-06T21:00:26.248+02:00   profile: callback start intervals: n=3037 ms(mean/max)=14.831/19.881 lateStarts(>1.25x period)=2560
+2026-10-06T21:00:26.251+02:00   profile: instances with calls=80 of registered 98; top 12 by summed ms:
+2026-10-06T21:00:26.254+02:00   profile:   #1 track 96 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3037 meanPerCall=471.0 us maxCall=1.841 ms perBlock=0.471 ms share=3.2%
+2026-10-06T21:00:26.256+02:00   profile:   #2 track 42 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=467.2 us maxCall=1.460 ms perBlock=0.467 ms share=3.2%
+2026-10-06T21:00:26.258+02:00   profile:   #3 track 36 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3037 meanPerCall=466.7 us maxCall=1.613 ms perBlock=0.467 ms share=3.2%
+2026-10-06T21:00:26.263+02:00   profile:   #4 track 30 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3037 meanPerCall=463.9 us maxCall=1.884 ms perBlock=0.464 ms share=3.1%
+2026-10-06T21:00:26.266+02:00   profile:   #5 track 48 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=463.5 us maxCall=1.548 ms perBlock=0.463 ms share=3.1%
+2026-10-06T21:00:26.269+02:00   profile:   #6 track 5 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3037 meanPerCall=462.4 us maxCall=1.038 ms perBlock=0.462 ms share=3.1%
+2026-10-06T21:00:26.271+02:00   profile:   #7 track 84 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=462.1 us maxCall=1.406 ms perBlock=0.462 ms share=3.1%
+2026-10-06T21:00:26.273+02:00   profile:   #8 track 66 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=459.9 us maxCall=1.506 ms perBlock=0.460 ms share=3.1%
+2026-10-06T21:00:26.277+02:00   profile:   #9 track 12 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3037 meanPerCall=459.3 us maxCall=1.155 ms perBlock=0.459 ms share=3.1%
+2026-10-06T21:00:26.280+02:00   profile:   #10 track 54 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=459.2 us maxCall=1.701 ms perBlock=0.459 ms share=3.1%
+2026-10-06T21:00:26.283+02:00   profile:   #11 track 90 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=457.7 us maxCall=1.169 ms perBlock=0.458 ms share=3.1%
+2026-10-06T21:00:26.285+02:00   profile:   #12 track 60 "VB3-II" plugin "VB3-II" mode=instrument-plugin calls=3036 meanPerCall=457.6 us maxCall=1.492 ms perBlock=0.457 ms share=3.1%
+2026-10-06T21:00:26.287+02:00   profile: top 12 together = 37.5% of callback time
+2026-10-06T21:00:26.290+02:00   profile: by plug-in (instances, perBlock ms, share): [VB3-II x16 7.359 ms 49.7%] [Groove Agent SE x16 5.045 ms 34.1%] [HALion Sonic x16 1.360 ms 9.2%] [Pro-Q 3 [Post] x16 0.287 ms 1.9%] [DAL Mono Delay [Post] x16 0.185 ms 1.2%]
+2026-10-06T21:00:26.298+02:00 step end ok: perf-profile: collect elapsedMs=91
+2026-10-06T21:00:26.505+02:00 step begin: perf-profile: stop playback, profiler off
+2026-10-06T21:00:26.512+02:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-10-06T21:00:27.320+02:00 RESULT: PASS scenario=perf-profile totalMs=114269
+2026-10-06T21:00:47.329+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)

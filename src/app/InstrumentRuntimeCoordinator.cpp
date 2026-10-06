@@ -2,6 +2,7 @@
 
 #include <map>
 
+#include "diagnostics/AudioThreadProfiler.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "domain/Session.h"
@@ -1163,6 +1164,19 @@ void InstrumentRuntimeCoordinator::updateExperimentalPlaybackBridgeAfterRegistry
             if (e.trackId == playbackKey)
             {
                 return;
+            }
+        }
+        // Opt-in audio profiler: name the transport host (slot 0) and the audition host (slot 1)
+        // under this TrackId so their processBlock / proxy-mix time is attributable (message thread).
+        {
+            auto& profiler = audio_profiler::AudioThreadProfiler::get();
+            host->setAudioProfileSlot(profiler.registerInstance(
+                audio_profiler::Category::InstrumentPlugin, playbackKey, 0, host->getInstrumentNameForUi()));
+            if (auditionHost != nullptr && auditionHost != host)
+            {
+                auditionHost->setAudioProfileSlot(profiler.registerInstance(
+                    audio_profiler::Category::InstrumentPlugin, playbackKey, 1,
+                    auditionHost->getInstrumentNameForUi() + " [audition]"));
             }
         }
         entries.push_back(

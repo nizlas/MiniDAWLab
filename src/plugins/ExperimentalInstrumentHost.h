@@ -326,6 +326,10 @@ public:
         return rtProxyBlocksMixed_.load(std::memory_order_relaxed);
     }
 
+    /// [Message thread] Opt-in audio profiler (`diagnostics/AudioThreadProfiler.h`): the instance
+    /// index this host folds its `processBlock` / proxy-mix time into; −1 = unattributed.
+    void setAudioProfileSlot(const int slot) noexcept { audioProfileSlot_.store(slot, std::memory_order_relaxed); }
+
     /// Diagnostics: peak |sample| of the most recent proxy block (pre-strip). Relaxed.
     [[nodiscard]] float getProxyLastBlockPeakForDiagnostics() const noexcept;
 
@@ -474,6 +478,8 @@ private:
     int proxySegmentCount_ = 0;                                     // audio thread only
     std::atomic<std::uint64_t> rtProxyBlocksMixed_{ 0 };
     std::atomic<std::uint64_t> rtProxyBranchBlocks_{ 0 };
+    /// Opt-in profiler instance index (see `setAudioProfileSlot`); read relaxed per block.
+    std::atomic<int> audioProfileSlot_{ -1 };
     std::atomic<std::uint64_t> rtProxySegmentsDropped_{ 0 };
     std::atomic<std::uint32_t> rtProxyLastPeakBits_{ 0 }; // bitwise float
     std::atomic<std::int64_t> rtProxyLoopStart_{ -1 };    // prepared transport cycle

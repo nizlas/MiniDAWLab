@@ -144,6 +144,16 @@ enum class StabilityScenarioKind
     /// and the machine-local layout persistence (bounds + section flags, header width kept).
     /// Sibling copy only.
     Mixer,
+    /// `--stability-perf-profile <project> [--seconds N] [--warmup N] [--start-seconds S]
+    /// [--buffer N] [--mixer-open] [--profile-off]`: diagnostic — loads the project, documents the
+    /// runtime (build, CPU, device, ACTUAL buffer size after an optional request, loaded vs
+    /// processed instruments / inserts / proxies), plays from `S` with the project's cycle state,
+    /// discards a warm-up window, then measures `N` seconds: engine callback load (mean / max /
+    /// budget share / overruns / late starts), the opt-in audio profiler's per-category, per-phase
+    /// and per-instance costs (`diagnostics/AudioThreadProfiler.h`), proxy underrun deltas, the
+    /// output peak / overs, and the process' CPU / memory / page faults. Nothing is saved; use a
+    /// temp project copy (a device-setup request can dirty the session).
+    PerfProfile,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -222,6 +232,13 @@ struct StabilityScenarioRequest
     bool probeRealtimeIndication = false; ///< `--realtime-indication`: clone prepared without the offline flag (diagnostic)
     bool probeTailPolicyV1 = false;    ///< `--tail-policy-v1`: judge the tail on the raw peak (pre-1.1.15 detector)
     bool probeRetainFailed = false;    ///< `--retain-failed`: keep a failed render's artifact for analysis
+    // PerfProfile only.
+    int perfSeconds = 45;              ///< `--seconds N`: measured window after the warm-up
+    int perfWarmupSeconds = 5;         ///< `--warmup N`: discarded after playback start
+    double perfStartSeconds = 0.0;     ///< `--start-seconds S`: transport start point
+    int perfRequestedBufferSize = 0;   ///< `--buffer N`: ask the device for this block size (0 = keep)
+    bool perfMixerOpen = false;        ///< `--mixer-open`: measure with the mixer window shown
+    bool perfProfilerOff = false;      ///< `--profile-off`: engine load only (profiler overhead check)
 
     [[nodiscard]] bool isActive() const noexcept { return kind != StabilityScenarioKind::None; }
 };
@@ -708,6 +725,33 @@ struct StabilityRunnerHooks
         std::function<bool(TrackId, float targetPan)> stripPanDragLikeMouse;
     };
     MixerHooks mixer;
+
+    // --- Performance profile (`--stability-perf-profile`) ------------------------------------------
+    struct PerfHooks
+    {
+        /// Exe / version / build configuration, CPU / RAM, the active device (backend, name, rate,
+        /// ACTUAL buffer, latency, the driver's offered buffer sizes).
+        std::function<juce::String()> describeRuntime;
+        /// Ask the device manager for `requested` samples per block (same `setAudioDeviceSetup`
+        /// path as the settings UI); returns the ACTUAL block size afterwards + a detail line.
+        std::function<int(int requested, juce::String& detail)> requestDeviceBufferSize;
+        /// Track counts per kind; instrument hosts loaded / proxy-selected / Secondary loaded;
+        /// insert plug-in instances; MIDI source rows.
+        std::function<juce::String()> describeProjectLoad;
+        std::function<void(bool)> setProfilerEnabled;
+        /// Clear every measurement window (engine load, profiler, output peak hold, master meter).
+        std::function<void()> resetMeasurementWindows;
+        /// `PlaybackEngine::snapshotAudioCallbackLoadAndReset` as one line.
+        std::function<juce::String()> audioLoadText;
+        /// Profiler report: categories, phases, worst block, late starts, top-`topN` instances.
+        std::function<juce::String(int topN)> profilerReportText;
+        /// Sum of proxy-reader underruns over every destination with a reader (and how many
+        /// destinations currently select Proxy).
+        std::function<std::int64_t(int& proxySelectedCount)> proxyUnderrunTotal;
+        /// Hosts that processed live blocks / mixed proxy blocks since the device started.
+        std::function<juce::String()> instrumentActivityText;
+    };
+    PerfHooks perf;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -769,6 +813,8 @@ private:
     void appendProxyRecordingSteps(const juce::File& project);
     void appendProxyRenderProbeSteps(const StabilityScenarioRequest& request);
     void appendProxyPlaybackEdgesSteps(const StabilityScenarioRequest& request);
+    /// Audio-thread cost profile of one playback window (see `StabilityScenarioKind::PerfProfile`).
+    void appendPerfProfileSteps(const StabilityScenarioRequest& request);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

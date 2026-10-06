@@ -73,6 +73,8 @@ struct PluginAudioThreadMap
         juce::AudioProcessor* processor = nullptr;
         bool layoutOk = false;
         InsertStage stage = InsertStage::Post;
+        /// Opt-in audio profiler instance index (`diagnostics/AudioThreadProfiler.h`); −1 = none.
+        int profileSlot = -1;
     };
 
     struct Entry

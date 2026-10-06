@@ -1,0 +1,40 @@
+2026-10-06T21:02:02.245+02:00 stability test mode active (prompts auto-answer deterministically)
+2026-10-06T21:02:05.293+02:00 ================================================================
+2026-10-06T21:02:05.295+02:00 scenario start: perf-profile iterations=1 projectA=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks\TSE_pt2_100tracks.dalproj
+2026-10-06T21:02:05.297+02:00 steps queued: 10 (delete-loop iterations expand at plan time)
+2026-10-06T21:02:05.848+02:00 step begin: perf-profile: load TSE_pt2_100tracks.dalproj
+2026-10-06T21:02:28.592+02:00 step end ok: perf-profile: load TSE_pt2_100tracks.dalproj elapsedMs=22738
+2026-10-06T21:02:28.636+02:00   [LiveMidi] input opened: "Babyface Midi Port 1" (\\?\usb#vid_2a39&pid_3fc0#3a17a1b250b3200#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\ffusbmidi1)
+2026-10-06T21:03:01.105+02:00 step begin: perf-profile: verify loaded
+2026-10-06T21:03:01.107+02:00   track count after load: 101
+2026-10-06T21:03:01.112+02:00 step end ok: perf-profile: verify loaded elapsedMs=2
+2026-10-06T21:03:01.456+02:00 step begin: perf-profile: settle after load (plug-ins / proxies ready)
+2026-10-06T21:03:01.466+02:00 step end ok: perf-profile: settle after load (plug-ins / proxies ready) elapsedMs=0
+2026-10-06T21:03:09.488+02:00 step begin: perf-profile: runtime conditions
+2026-10-06T21:03:09.490+02:00   exe=C:\Users\nicla\development\MiniDAWLab\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.1.17 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-06T21:03:09.496+02:00 step end ok: perf-profile: runtime conditions elapsedMs=3
+2026-10-06T21:03:09.843+02:00 step begin: perf-profile: project load (loaded vs processed)
+2026-10-06T21:03:09.846+02:00   exe=C:\Users\nicla\development\MiniDAWLab\build\ninja-release\MiniDAWLab_artefacts\Release\MiniDAWLab.exe version=1.1.17 config=Release | cpu="Intel(R) Core(TM) Ultra 9 275HX" physicalCores=24 logicalCores=24 ram=97599 MB | [JUCE active] ASIO | "ASIO Fireface USB" | 48000 Hz | buf 512 | in: Analog 1 (1), Analog 2 (1), Analog 3 (1), Analog 4 (1) (lat 535 (~11.15 ms)) | out: Analog 1 (1), Analog 2 (1) (lat 552 (~11.50 ms)) | offeredBufferSizes=512 default=512
+2026-10-06T21:03:09.848+02:00   tracks: audio=36 instrument=48 midi=16 group=0 master=1 (muted=36 off=0) | instrument registry entries=48 primaryLoaded=48 primaryEmpty=0 proxySelected=0 secondaryLoaded(notProcessedWhilePlaying)=0 | insert chains=50 instances=50 | proxy states: 3:Primary,5:Primary,80:Primary,16:Primary,72:Primary,8:Primary,82:Primary,18:Primary,74:Primary,10:Primary,76:Primary,12:Primary,78:Primary,14:Primary,84:Primary,20:Primary,86:Primary,22:Primary,88:Primary,24:Primary,90:Primary,26:Primary,92:Primary,28:Primary,94:Primary,30:Primary,96:Primary,32:Primary,98:Primary,34:Primary,36:Primary,38:Primary,40:Primary,42:Primary,44:Primary,46:Primary,48:Primary,50:Primary,52:Primary,54:Primary,56:Primary,58:Primary,60:Primary,62:Primary,64:Primary,66:Primary,68:Primary,70:Primary
+2026-10-06T21:03:09.854+02:00 step end ok: perf-profile: project load (loaded vs processed) elapsedMs=4
+2026-10-06T21:03:10.200+02:00 step begin: perf-profile: mixer window closed
+2026-10-06T21:03:10.203+02:00   mixer visible=no
+2026-10-06T21:03:10.209+02:00 step end ok: perf-profile: mixer window closed elapsedMs=2
+2026-10-06T21:03:10.554+02:00 step begin: perf-profile: start playback (warm-up 5 s)
+2026-10-06T21:03:10.557+02:00   start at 0.00 s (sample 0) cycle=on profiler=off
+2026-10-06T21:03:10.563+02:00 step end ok: perf-profile: start playback (warm-up 5 s) elapsedMs=2
+2026-10-06T21:03:15.604+02:00 step begin: perf-profile: measurement window begins (45 s)
+2026-10-06T21:03:15.609+02:00   window start: playhead=231424 proxyUnderrunsSoFar=0 proxySelected=0 workingSet=9352.78 MB private=9618.19 MB
+2026-10-06T21:03:15.615+02:00 step end ok: perf-profile: measurement window begins (45 s) elapsedMs=3
+2026-10-06T21:04:00.649+02:00 step begin: perf-profile: collect
+2026-10-06T21:04:00.652+02:00   window end: wall=45.04 s playhead=1952768 (started 231424)
+2026-10-06T21:04:00.654+02:00   engine: blocks=3362 block=512 sr=48000 budgetMs=10.667 ms(min/mean/max)=9.234/13.347/21.437 budget%(mean/max)=125.1/201.0 nearOverruns(>70%)=125 overruns(>=100%)=3237
+2026-10-06T21:04:00.656+02:00   output: peakHold=0.372 masterPeakL/R=0.338/0.372 oversL/R=0/0 rmsL/R=0.0415/0.0454 nonFinite=0
+2026-10-06T21:04:00.658+02:00   proxy: selectedDestinations=0 underrunsInWindow=0 (total 0)
+2026-10-06T21:04:00.660+02:00   instruments: hosts with live processBlock blocks=48 hosts with proxy-mixed blocks=0 hosts with neither=0 (cumulative since device start; a host can appear in both after a source switch)
+2026-10-06T21:04:00.663+02:00   process: cpu=150.9% of one core (6.3% of 24 cores) systemBusy=27.6% workingSet=9348.88 MB private=9612.44 MB pageFaultsInWindow=4266 (soft+hard; 94.7087/s)
+2026-10-06T21:04:00.668+02:00 step end ok: perf-profile: collect elapsedMs=13
+2026-10-06T21:04:00.904+02:00 step begin: perf-profile: stop playback, profiler off
+2026-10-06T21:04:00.910+02:00 step end ok: perf-profile: stop playback, profiler off elapsedMs=0
+2026-10-06T21:04:01.724+02:00 RESULT: PASS scenario=perf-profile totalMs=116431
+2026-10-06T21:04:21.736+02:00 WARNING: clean shutdown did not complete within 20s - forcing process exit (see drain timeout=YES lines in track-delete-diag.log)
