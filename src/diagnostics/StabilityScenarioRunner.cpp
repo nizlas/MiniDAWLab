@@ -341,6 +341,23 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
         {
             req.perfMixerOpen = true;
         }
+        else if (a == "--generation")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = "--generation requires parallel, serial or ab";
+                return {};
+            }
+            ++i;
+            if (args[i].equalsIgnoreCase("serial")) { req.perfGeneration = StabilityScenarioRequest::PerfGeneration::Serial; }
+            else if (args[i].equalsIgnoreCase("ab")) { req.perfGeneration = StabilityScenarioRequest::PerfGeneration::AB; }
+            else if (args[i].equalsIgnoreCase("parallel")) { req.perfGeneration = StabilityScenarioRequest::PerfGeneration::AsConfigured; }
+            else
+            {
+                errorOut = "--generation must be parallel, serial or ab (got \"" + args[i] + "\")";
+                return {};
+            }
+        }
         else if (a == "--profile-off")
         {
             req.perfProfilerOff = true;
@@ -9037,6 +9054,8 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
     const int requestedBuffer = request.perfRequestedBufferSize;
     const bool mixerOpen = request.perfMixerOpen;
     const bool profilerOn = !request.perfProfilerOff;
+    using PerfGeneration = StabilityScenarioRequest::PerfGeneration;
+    const PerfGeneration generation = request.perfGeneration;
 
     auto say = [this](const juce::String& s) { appendStabilityRunLine("  " + s); };
     auto baseline = std::make_shared<PerfProcessSample>();
@@ -9101,17 +9120,24 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                            },
                            mixerOpen ? 1500 : 300 });
 
+    const bool firstWindowSerial = generation != PerfGeneration::AsConfigured; // Serial or A of AB
     steps_.push_back(Step{ "perf-profile: start playback (warm-up " + juce::String(warmupSeconds) + " s)",
-                           [this, say, startSeconds, profilerOn](juce::String&) -> bool {
+                           [this, say, startSeconds, profilerOn, firstWindowSerial](juce::String&) -> bool {
                                const double sr = hooks_.getDeviceSampleRate ? hooks_.getDeviceSampleRate() : 48000.0;
                                const auto startSample = (std::int64_t)(startSeconds * (sr > 0.0 ? sr : 48000.0));
                                if (hooks_.seekTransportTo)
                                {
                                    hooks_.seekTransportTo(startSample);
                                }
+                               if (hooks_.perf.setGenerationSerial)
+                               {
+                                   hooks_.perf.setGenerationSerial(firstWindowSerial);
+                               }
                                say("start at " + juce::String(startSeconds, 2) + " s (sample " + juce::String(startSample)
                                    + ") cycle=" + (hooks_.isCycleEnabled && hooks_.isCycleEnabled() ? "on" : "off")
-                                   + " profiler=" + (profilerOn ? "ON" : "off"));
+                                   + " profiler=" + (profilerOn ? "ON" : "off")
+                                   + " generation=" + (firstWindowSerial ? "SERIAL (forced)" : "as configured")
+                                   + (hooks_.perf.renderPoolText ? " | " + hooks_.perf.renderPoolText() : juce::String()));
                                if (hooks_.perf.setProfilerEnabled)
                                {
                                    hooks_.perf.setProfilerEnabled(profilerOn);
@@ -9121,7 +9147,23 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                            },
                            juce::jmax(200, warmupSeconds * 1000) });
 
-    steps_.push_back(Step{ "perf-profile: measurement window begins (" + juce::String(measureSeconds) + " s)",
+    // One measurement window = begin (reset) + collect. Appended once, or twice for the A/B mode
+    // (A = serial forced, B = the configured pool) with a short re-warm-up between them.
+    const auto appendWindow = [&](const juce::String& label, const bool serialHint, const bool switchBefore) {
+    if (switchBefore)
+    {
+        steps_.push_back(Step{ "perf-profile: " + label + " — switch generation to " + (serialHint ? "SERIAL" : "PARALLEL") + " (re-warm-up)",
+                               [this, say, serialHint](juce::String&) -> bool {
+                                   if (hooks_.perf.setGenerationSerial)
+                                   {
+                                       hooks_.perf.setGenerationSerial(serialHint);
+                                   }
+                                   say(juce::String("generation now ") + (serialHint ? "SERIAL (forced)" : "as configured"));
+                                   return true;
+                               },
+                               3000 });
+    }
+    steps_.push_back(Step{ "perf-profile: " + label + " measurement window begins (" + juce::String(measureSeconds) + " s)",
                            [this, say, baseline, underrunBaseline, playheadBaseline](juce::String&) -> bool {
                                if (hooks_.perf.resetMeasurementWindows)
                                {
@@ -9140,8 +9182,9 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                            },
                            juce::jmax(1000, measureSeconds * 1000) });
 
-    steps_.push_back(Step{ "perf-profile: collect",
-                           [this, say, baseline, underrunBaseline, playheadBaseline, measureSeconds, profilerOn](juce::String&) -> bool {
+    steps_.push_back(Step{ "perf-profile: " + label + " collect",
+                           [this, say, baseline, underrunBaseline, playheadBaseline, measureSeconds, profilerOn, label](juce::String&) -> bool {
+                               say("=== window: " + label + " ===");
                                const PerfProcessSample now = samplePerfProcess();
                                const double wall = now.wallMs - baseline->wallMs;
                                const int cores = juce::SystemStats::getNumCpus();
@@ -9177,6 +9220,10 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                {
                                    say("instruments: " + hooks_.perf.instrumentActivityText());
                                }
+                               if (hooks_.perf.renderPoolText)
+                               {
+                                   say("render pool: " + hooks_.perf.renderPoolText());
+                               }
                                say("process: cpu=" + juce::String(procCpuPctOfOneCore, 1) + "% of one core ("
                                    + juce::String(cores > 0 ? procCpuPctOfOneCore / (double)cores : 0.0, 1) + "% of " + juce::String(cores)
                                    + " cores) systemBusy=" + juce::String(sysBusyPct, 1) + "%"
@@ -9201,6 +9248,17 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                return true;
                            },
                            200 });
+    };
+
+    if (generation == PerfGeneration::AB)
+    {
+        appendWindow("A/serial", true, false);
+        appendWindow("B/parallel", false, true);
+    }
+    else
+    {
+        appendWindow(generation == PerfGeneration::Serial ? "serial" : "configured", firstWindowSerial, false);
+    }
 
     steps_.push_back(Step{ "perf-profile: stop playback, profiler off",
                            [this, mixerOpenedHere](juce::String&) -> bool {
@@ -9208,6 +9266,10 @@ void StabilityScenarioRunner::appendPerfProfileSteps(const StabilityScenarioRequ
                                if (hooks_.perf.setProfilerEnabled)
                                {
                                    hooks_.perf.setProfilerEnabled(false);
+                               }
+                               if (hooks_.perf.setGenerationSerial)
+                               {
+                                   hooks_.perf.setGenerationSerial(false);
                                }
                                if (*mixerOpenedHere && hooks_.mixer.isVisible && hooks_.mixer.isVisible() && hooks_.mixer.toggleLikeF3)
                                {

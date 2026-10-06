@@ -6625,11 +6625,22 @@ private:
                   << ": perBlock ms(mean/max)=" << juce::String(r.phaseSumMs[(size_t)p] / blocks, 3) << "/"
                   << juce::String(r.phaseMaxMs[(size_t)p], 3) << "\n";
             }
-            s << "worst block: total=" << juce::String(r.worstTotalMs, 3) << " ms (" << r.worstBlockSamples << " samples) ="
-              << " instrument-plugin " << juce::String(r.worstCategoryMs[0], 3)
-              << " + proxy-mix " << juce::String(r.worstCategoryMs[1], 3)
-              << " + insert-plugin " << juce::String(r.worstCategoryMs[2], 3)
-              << " + remainder " << juce::String(r.worstRemainderMs, 3) << "\n";
+            s << "worst block: total=" << juce::String(r.worstTotalMs, 3) << " ms (" << r.worstBlockSamples << " samples):"
+              << " instrument-plugin CPU " << juce::String(r.worstCategoryMs[0], 3)
+              << " | proxy-mix " << juce::String(r.worstCategoryMs[1], 3)
+              << " | insert-plugin " << juce::String(r.worstCategoryMs[2], 3)
+              << " | generation-section wall " << juce::String(r.worstParallelWallMs, 3)
+              << " | remainder " << juce::String(r.worstRemainderMs, 3) << "\n";
+            const double parBlocks = (double)juce::jmax<std::uint64_t>(1, r.parallelBlocks);
+            s << "generation section (dispatch -> join): wall perBlock ms(mean/max)=" << juce::String(r.parallelWallSumMs / blocks, 3)
+              << "/" << juce::String(r.parallelWallMaxMs, 3)
+              << " callbackIdleWait ms(mean/max)=" << juce::String(r.parallelWaitSumMs / blocks, 3) << "/" << juce::String(r.parallelWaitMaxMs, 3)
+              << " jobsPerBlock=" << juce::String((double)r.parallelJobs / blocks, 1)
+              << " parallelBlocks=" << (juce::int64)r.parallelBlocks << " of " << (juce::int64)r.blocks
+              << " effectiveParallelism(instrumentCPU/sectionWall)="
+              << juce::String(r.parallelWallSumMs > 0.0 ? r.categorySumMs[0] / r.parallelWallSumMs : 0.0, 2)
+              << " (parallel blocks only: " << juce::String(r.parallelBlocks > 0 ? (r.categorySumMs[0] / blocks) / (r.parallelWallSumMs / parBlocks) : 0.0, 2) << ")\n";
+            s << "NOTE: category instrument-plugin is SUMMED CPU time across render threads; the callback's elapsed time for that work is the generation-section wall.\n";
             s << "callback start intervals: n=" << (juce::int64)r.intervals
               << " ms(mean/max)=" << juce::String(r.intervals > 0 ? r.intervalSumMs / (double)r.intervals : 0.0, 3) << "/"
               << juce::String(r.intervalMaxMs, 3) << " lateStarts(>1.25x period)=" << (int)r.lateStarts << "\n";
@@ -6714,6 +6725,21 @@ private:
             }
             return total;
         };
+        P.renderPoolText = [this]() -> juce::String {
+            const auto st = playbackEngine_.instrumentRenderPoolStats();
+            juce::String s;
+            s << "workers=" << playbackEngine_.instrumentRenderWorkerCount()
+              << " (threads incl. callback=" << (playbackEngine_.instrumentRenderWorkerCount() + 1) << ")"
+              << " serialForced=" << (playbackEngine_.isInstrumentRenderSerialForDiagnostics() ? "yes" : "no")
+              << " parallelBlocks=" << (juce::int64)st.parallelBlocks << " serialBlocks=" << (juce::int64)st.serialBlocks
+              << " jobsByCallback=" << (juce::int64)st.jobsRunByCallback << " jobsByWorkers=" << (juce::int64)st.jobsRunByWorkers
+              << " joinKernelWaits=" << (juce::int64)st.joinWaits
+              << " lastDispatchWallMs=" << juce::String(st.lastDispatchWallMs, 3)
+              << " lastJoinWaitMs=" << juce::String(st.lastJoinWaitMs, 3)
+              << " (cumulative since start)";
+            return s;
+        };
+        P.setGenerationSerial = [this](const bool serial) { playbackEngine_.setInstrumentRenderSerialForDiagnostics(serial); };
         P.instrumentActivityText = [this]() -> juce::String {
             int live = 0, proxied = 0, idle = 0;
             if (instrumentRuntimeCoordinator_ != nullptr)

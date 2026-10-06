@@ -1,5 +1,9 @@
 # Audio-thread cost profile — the 100-track load-test project (2026-10-06)
 
+> Follow-up (1.1.18): recommendation 1 was implemented — see
+> [`docs/PARALLEL_INSTRUMENT_RENDERING_2026-10-06.md`](PARALLEL_INSTRUMENT_RENDERING_2026-10-06.md)
+> (callback mean 9.9 → 2.1 ms at 512, 0 overruns, same build serial vs parallel).
+
 **Question.** Why does the 100-track project crackle, and where does the callback time go?
 
 **Answer in one paragraph.** The audio callback is a single thread that processes every

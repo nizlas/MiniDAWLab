@@ -74,6 +74,7 @@ Treat the device callback as a **hard realtime environment**:
 
 - Prefer **no** file I/O, decode setup, UI, waveform builds, heavyweight allocation, mutex/condition-variable waits, or unclear cross-thread mutation on that path unless explicitly documented and justified.
 - If additional threads or queues appear, document **producer/consumer**, **blocking**, **loss**, **ordering**, and **what the callback may touch** **before** coding.
+- **Approved realtime helpers (1.1.18):** the live-instrument **render pool** is the one such set of threads today. Its contract — jobs confined to the dispatching callback, per-host buffers, futex-style wake / completion with a bounded spin, no allocation / lock / I/O on the workers, serial fallback through the same code — is documented in [`src/engine/InstrumentRenderPool.h`](../src/engine/InstrumentRenderPool.h) and [`docs/CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) ("Composition and threads"). Anything that would let a worker outlive its callback or touch session / host lifecycle is outside this approval.
 
 Legacy cross-thread summaries (Phase 1 message thread vs audio thread) distill to: **callbacks read published views and advance time; session and heavy I/O stay off that path** except for the approved handoffs.
 

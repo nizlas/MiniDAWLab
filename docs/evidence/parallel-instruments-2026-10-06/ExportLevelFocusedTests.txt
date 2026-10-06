@@ -1,0 +1,52 @@
+[PASS] meter: peak hold keeps the loudest sample across blocks (a short peak survives a slower UI)
+[PASS] meter: overs count samples above full scale per channel
+[PASS] meter: block/sample/channel bookkeeping
+[PASS] meter: drain resets the window
+[PASS] meter: mono fold reports one channel
+[PASS] meter: NaN is reported, never hidden
+[PASS] meter: dBFS text keeps the sign and never caps a value above 0 dBFS
+[PASS] fader scale: +6 dB at top, -inf at bottom
+[PASS] fader scale: round trip at 6.0 dB (pos 1.000)
+[PASS] fader scale: round trip at 3.0 dB (pos 0.890)
+[PASS] fader scale: round trip at 0.0 dB (pos 0.780)
+[PASS] fader scale: round trip at -3.0 dB (pos 0.700)
+[PASS] fader scale: round trip at -6.0 dB (pos 0.620)
+[PASS] fader scale: round trip at -10.0 dB (pos 0.540)
+[PASS] fader scale: round trip at -20.0 dB (pos 0.370)
+[PASS] fader scale: round trip at -30.0 dB (pos 0.260)
+[PASS] fader scale: round trip at -40.0 dB (pos 0.170)
+[PASS] fader scale: round trip at -50.0 dB (pos 0.090)
+[PASS] fader scale: the 0 .. -20 dB mixing range occupies most of the travel (graded like the reference)
+[PASS] fader scale: more travel per dB near 0 dB than near the bottom
+[PASS] fader scale: bottom = exactly zero linear gain (-inf)
+[PASS] fader scale: 0 dB = unity gain
+[PASS] fader scale: top = +6 dB (1.995)
+[PASS] fader scale: linear gain -> position (0 -> bottom, 1 -> 0 dB mark)
+[PASS] fader scale: gain text -inf / 0.00 / +6.00 / -6.02
+[PASS] fader scale: parse -inf -> 0 linear
+[PASS] fader scale: parse +6 -> 1.995
+[PASS] fader scale: parse 12 clamps to +6 dB
+[PASS] fader scale: parse '-3 dB'
+[PASS] fader scale: garbage is rejected (field keeps the old value)
+[PASS] fader persistence: saved
+[PASS] fader persistence: -inf is stored as linear 0, never as Infinity/NaN text
+[PASS] fader persistence: reloaded
+[PASS] fader persistence: -inf (0 linear) survives
+[PASS] fader persistence: +6 dB survives
+[PASS] fader persistence: 0 dB survives
+[PASS] fixture: take A on track 1
+[PASS] fixture: take B on track 2
+[PASS] fixture: master row present
+       0 dB: realtime peak=1.24102 offline peak=1.24102 max|rt-off|=0.0000000
+[PASS] deterministic mix: realtime callback and offline render are sample-identical
+           expected peak order ~1.3000 (pan law centre gain 1.0000)
+[PASS] deterministic mix: two 0 dB tones sum to a hot level (overload is REAL mix content, not a path bug)
+       master -12 dB: offline ratio=0.25119 realtime ratio=0.25119
+[PASS] master fader: offline render scales by exactly the fader gain
+[PASS] master fader: realtime output scales by exactly the fader gain
+[PASS] master fader: both paths still sample-identical
+[PASS] track fader + pan: both paths sample-identical
+[PASS] mute: both paths sample-identical
+[PASS] mute + hard-left pan: right channel silent, left carries track 1 only
+
+47 checks, 0 failure(s)

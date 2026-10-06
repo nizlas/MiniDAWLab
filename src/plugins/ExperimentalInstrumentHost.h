@@ -163,6 +163,13 @@ public:
     /// [Message thread, engine stopped/gated] Install (or clear with `nullptr`) the capture sink.
     /// While installed, the process boundary assembles and delivers the merged MIDI buffer even
     /// when no plugin instance is loaded (audio output is produced only by a real instrument).
+    /// [Message thread, tests only] Install an already-created plug-in instance as this host's
+    /// Primary without any VST3 loading: runs the production bus negotiation / prepareToPlay
+    /// (`tryPrepareInstrumentLayout`), publishes the active slot and sizes the scratch exactly like
+    /// the load paths. Used by the parallel-generation focused test with a deterministic
+    /// instrument. Returns false (instance released) when the layout is unusable.
+    [[nodiscard]] bool installInstrumentInstanceForTests(std::unique_ptr<juce::AudioPluginInstance> instance);
+
     void installMidiDeliveryCaptureSinkForTests(MidiDeliveryCaptureSink* sinkOrNull) noexcept
     {
         midiCaptureSink_.store(sinkOrNull, std::memory_order_release);
@@ -330,6 +337,30 @@ public:
     /// index this host folds its `processBlock` / proxy-mix time into; −1 = unattributed.
     void setAudioProfileSlot(const int slot) noexcept { audioProfileSlot_.store(slot, std::memory_order_relaxed); }
 
+    // -----------------------------------------------------------------------
+    // Generation stage split (parallel instrument rendering — engine/InstrumentRenderPool.h)
+    // -----------------------------------------------------------------------
+    /// [Audio thread, or exactly ONE render worker for this host per block] Render this block's
+    /// instrument-generation stage into the host's own scratch: proxy mix, or the MIDI merge +
+    /// live `processBlock`. Idempotent per block (`audioThread_beginAudioBlock` resets); the
+    /// strip's add step (`audioThread_processBlockAndAddToOutputs`) renders itself when nothing
+    /// has rendered yet (serial path) and otherwise only applies gain / pan — the same body in
+    /// both cases. Never runs concurrently with itself (the pool claims a host once per block and
+    /// the callback waits for every job before any add step).
+    void audioThread_renderGenerationStageForBlock(int numSamples) noexcept;
+    /// [Audio thread] True when the currently published view selects Proxy (the dispatcher keeps
+    /// proxy-backed hosts on the callback thread; the render body re-latches the view itself).
+    [[nodiscard]] bool audioThread_isProxySelectedNow() const noexcept
+    {
+        const auto view = proxyPlaybackView_.load(std::memory_order_acquire);
+        return view != nullptr && view->useProxy;
+    }
+    /// [Any thread] Wall ticks of the most recent generation-stage render (job ordering: longest first).
+    [[nodiscard]] std::int64_t audioThread_lastRenderTicksRelaxed() const noexcept
+    {
+        return rtLastRenderTicks_.load(std::memory_order_relaxed);
+    }
+
     /// Diagnostics: peak |sample| of the most recent proxy block (pre-strip). Relaxed.
     [[nodiscard]] float getProxyLastBlockPeakForDiagnostics() const noexcept;
 
@@ -456,6 +487,18 @@ private:
     juce::MidiBuffer rtBlockMidi_;
     std::atomic<std::uint64_t> rtTransportMidiAddEventDiscarded_{ 0 };
     int audioCallbackBlockSamples_ = 0;
+
+    /// Generation-stage state for the current block (see `audioThread_renderGenerationStageForBlock`):
+    /// written by the one thread that renders this host in the block, read by the add step after
+    /// the engine's job join; reset in `audioThread_beginAudioBlock`.
+    void audioThread_renderGenerationStageImpl(int numSamples) noexcept;
+    bool rtStageRendered_ = false;
+    bool rtStageHasAudio_ = false;
+    int rtStageSamples_ = 0;
+    /// Host-owned MIDI merge / remap buffers (capacity kept across blocks → allocation-free).
+    juce::MidiBuffer rtMergedMidi_;
+    juce::MidiBuffer rtRemappedMidi_;
+    std::atomic<std::int64_t> rtLastRenderTicks_{ 0 };
 
     /// Test-only capture sink for the MIDI delivery boundary (null in production).
     std::atomic<MidiDeliveryCaptureSink*> midiCaptureSink_{ nullptr };

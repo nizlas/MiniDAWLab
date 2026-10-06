@@ -1,0 +1,54 @@
+InstrumentParallelFocusedTests (block 512, 48000 Hz)
+
+-- serial vs parallel: identical output, one processBlock per host per block --
+[ ok ] override: engine created 4 render workers
+[ ok ] serial hint: every block ran the generation stage serially on the callback thread
+[info] parallel stats: parallelBlocks=47 serialBlocks=1 jobsByCallback=98 jobsByWorkers=238
+[ ok ] parallel: every block after the first (no estimate yet) was dispatched to the pool
+[ ok ] parallel: worker threads ran generation jobs
+[ ok ] parallel: exactly 7 jobs per block (8 rows − Off; the instrument-less host is a trivial job; muted included)
+[ ok ] fixture produces audible output
+[info] serial vs parallel max |diff| = 0 (peak 0.671)
+[ ok ] serial and parallel device output are bit-identical (sum order unchanged)
+[ ok ] live row: instance processed exactly once per block
+[ ok ] muted row: instance processed every block (gain 0, state kept)
+[ ok ] Off row: instance never processed
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] muted row: instance processed every block (gain 0, state kept)
+[ ok ] Off row: instance never processed
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] live row: instance processed exactly once per block
+[ ok ] no instance was ever processed re-entrantly / concurrently
+[ ok ] no instance was processed twice in one block
+
+-- small workload fallback + 0-worker override --
+[ ok ] summed work below the threshold: generation stays serial without waking workers
+[ ok ] override 0: no worker threads
+[ ok ] override 0: every block serial
+[ ok ] no overlaps in the serial variants
+
+-- offline mixdown (serial by contract) vs realtime --
+[ ok ] offline gate engaged
+[ ok ] offline gate released
+[ ok ] offline render never used the pool
+[info] realtime(parallel) vs offline max |diff| = 0
+[ ok ] offline instrument output equals the realtime (parallel) output
+[ ok ] offline: each instance rendered once per offline block
+
+-- publish-before-destroy / device stop-start under a running device thread --
+[info] swaps=52 callbacks=2715 drainTimeouts=0
+[ ok ] stress ran: dozens of host swaps under a cycling device
+[ ok ] every publish-before-destroy drain completed (jobs never outlive the callback)
+[ ok ] no instance destroyed while inside processBlock
+[ ok ] no prepare / release overlapped processBlock
+[ ok ] no concurrent processBlock on one instance during the stress
+[ ok ] no instance processed twice in one block during the stress
+[ ok ] stress covered both the parallel and the forced-serial path
+
+39 checks, 0 failure(s)

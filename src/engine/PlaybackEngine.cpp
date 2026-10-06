@@ -341,8 +341,16 @@ PlaybackEngine::PlaybackEngine(Transport& transport, Session& session, RecorderS
     , pluginHost_(pluginHost)
 {
     ensureMasterScratchCapacity(kOfflineMixdownBlockCapSamples);
+    // Generation-stage worker pool: sized once here (message thread, no device running yet).
+    // `--instrument-workers N` overrides the conservative machine default; 0 = serial.
+    const int override = instrument_render::configuredWorkerCountOverride();
+    const int workers = override >= 0 ? override : instrument_render::defaultWorkerCount();
+    instrumentRenderPool_ = std::make_unique<instrument_render::InstrumentRenderPool>();
+    instrumentRenderPool_->setWorkerCount(workers);
 }
 
+// Tear order (see the header): Main removes the audio callback before destroying the engine, so
+// no dispatch can be in flight here; the pool's destructor joins its idle workers.
 PlaybackEngine::~PlaybackEngine() = default;
 
 void PlaybackEngine::publishExperimentalInstrumentPlaybackSnapshot(
@@ -1441,6 +1449,70 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
 #if !defined(NDEBUG)
             static TrackId loggedMissingPlaybackBindingOnce = kInvalidTrackId;
 #endif
+            // GENERATION STAGE (parallel): every MIDI source of this block has been scheduled into
+            // the hosts above (segments, MIDI rows, live input, stop-edge flushes), so each live
+            // instrument's `processBlock` is now independent. One job per host renders into the
+            // host's own scratch across the render pool; the callback thread joins before the row
+            // loop below, which then applies inserts / fader / pan / meters / routing and sums in
+            // the unchanged row order. Exactly the rows the loop will process are dispatched (an
+            // Off row is skipped, a muted row still processes — same gate as the strip); proxy-
+            // backed hosts stay on this thread (their mix is a copy, their Primary must not run).
+            if (instrumentRenderPool_ != nullptr && numSamples > 0)
+            {
+                using instrument_render::InstrumentRenderPool;
+                const bool stripHasScratch = postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
+                                             && postStripStageCapacity_ >= numSamples;
+                const bool auditionActive = stripHasScratch && playbackIntent != PlaybackIntent::Playing;
+                int jobCount = 0;
+                const auto addJob = [&](ExperimentalInstrumentHost* const h) noexcept {
+                    if (h == nullptr || jobCount >= InstrumentRenderPool::kMaxJobs || h->audioThread_isProxySelectedNow())
+                    {
+                        return;
+                    }
+                    for (int k = 0; k < jobCount; ++k)
+                    {
+                        if (instrumentRenderJobs_[(size_t)k].host == h)
+                        {
+                            return; // never two jobs for one instance
+                        }
+                    }
+                    auto& j = instrumentRenderJobs_[(size_t)jobCount++];
+                    j.host = h;
+                    j.numSamples = numSamples;
+                    j.lastRenderTicks = h->audioThread_lastRenderTicksRelaxed();
+                };
+                for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
+                {
+                    const Track& tr = sessionSnap->getTrack(ti);
+                    if (tr.getKind() != TrackKind::Instrument || tr.isTrackOff())
+                    {
+                        continue;
+                    }
+                    const ExperimentalInstrumentPlaybackEntry* const entry
+                        = playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
+                    if (entry == nullptr || entry->host == nullptr)
+                    {
+                        continue;
+                    }
+                    addJob(entry->host);
+                    if (auditionActive && entry->auditionHost != nullptr && entry->auditionHost != entry->host)
+                    {
+                        addJob(entry->auditionHost);
+                    }
+                }
+                if (jobCount > 0)
+                {
+                    instrumentRenderPool_->audioThread_runJobs(instrumentRenderJobs_.data(), jobCount,
+                                                                instrumentRenderSerialHint_.load(std::memory_order_relaxed));
+                    if (prof)
+                    {
+                        profiler.audioThread_noteGenerationSection(instrumentRenderPool_->lastRunWallMs(),
+                                                                   instrumentRenderPool_->lastRunJoinWaitMs(),
+                                                                   jobCount,
+                                                                   instrumentRenderPool_->lastRunWasParallel());
+                    }
+                }
+            }
             // MIX ORDER: iterate `sessionSnap` rows in timeline order — each instrument lane mixes in
             // placement order alongside audio tracks; lookup `instrumentSnap.entries` **by TrackId**
             // (snapshot may carry one entry per hosted instrument lane).

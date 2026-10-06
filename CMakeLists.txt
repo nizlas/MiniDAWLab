@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MiniDAWLab VERSION 1.1.17 LANGUAGES C CXX)
+project(MiniDAWLab VERSION 1.1.18 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -106,6 +106,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/PlaybackMixHelpers.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/InstrumentRenderPool.cpp
     src/app/AudioMixdownExporter.cpp
     src/app/AudioMixdownProgressWindow.cpp
     src/app/Mp3LameEncoder.cpp
@@ -398,6 +399,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/RecorderService.cpp
@@ -428,6 +430,70 @@ if (MSVC)
 endif()
 # PlaybackEngine.cpp includes app/ShortcutDiagnostics.h, which uses the generated JuceHeader.h.
 juce_generate_juce_header(ExportLevelFocusedTests)
+
+# -----------------------------------------------------------------------------
+# InstrumentParallelFocusedTests: parallel live-instrument generation (engine/InstrumentRenderPool).
+# The PRODUCTION PlaybackEngine callback + REAL ExperimentalInstrumentHost objects carrying a
+# deterministic test instrument (host test seam, no VST3): serial vs parallel bit-identity, one
+# processBlock per host per block, Off / muted / instrument-less rows, Group + send routing, the
+# small-workload fallback and the 0-worker override, offline mixdown parity, publish-before-destroy
+# and device stop / start under a running device thread. Device-free, deterministic.
+# -----------------------------------------------------------------------------
+juce_add_console_app(InstrumentParallelFocusedTests PRODUCT_NAME "InstrumentParallelFocusedTests")
+target_sources(InstrumentParallelFocusedTests PRIVATE
+    tests/selftest/InstrumentParallelFocusedTestsMain.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/diagnostics/PlaybackUiLoadLog.cpp
+    src/diagnostics/ExperimentalPlaybackRoutingLog.cpp
+    src/diagnostics/DrumNameDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/PlaybackEngine.cpp
+    src/engine/InstrumentRenderPool.cpp
+    src/engine/PlaybackMixHelpers.cpp
+    src/engine/RoutingPlanBuilder.cpp
+    src/engine/RecorderService.cpp
+    src/engine/CountInClickOutput.cpp
+    src/engine/LiveMidiInputBus.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/ExperimentalInstrumentHost.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/plugins/Vst3ChildProcessScan.cpp
+    src/plugins/PluginDiscovery.cpp
+    src/plugins/InstrumentCatalog.cpp
+    src/ui/experimental/ExperimentalMidiPatternPlayer.cpp
+    src/transport/Transport.cpp)
+target_include_directories(InstrumentParallelFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(InstrumentParallelFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_MP3AUDIOFORMAT=1)
+target_link_libraries(InstrumentParallelFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_audio_utils
+        juce::juce_cryptography
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(InstrumentParallelFocusedTests PRIVATE /wd4458)
+endif()
+juce_generate_juce_header(InstrumentParallelFocusedTests)
 
 # -----------------------------------------------------------------------------
 # LiveMidiRecordingFocusedTests: live MIDI input slice — the realtime LiveMidiInputBus (device-thread

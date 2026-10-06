@@ -1653,6 +1653,39 @@ ExperimentalInstrumentHost::~ExperimentalInstrumentHost()
     writeExperimentalInstrumentLogLine("shutdown: ExperimentalInstrumentHost destroyed");
 }
 
+bool ExperimentalInstrumentHost::installInstrumentInstanceForTests(std::unique_ptr<juce::AudioPluginInstance> instance)
+{
+    if (instance == nullptr)
+    {
+        return false;
+    }
+    if (!tryPrepareInstrumentLayout(*instance, sampleRate_, blockSize_))
+    {
+        instance->releaseResources();
+        return false;
+    }
+    // Same publish + scratch sequence as the production load paths (test-only entry; no catalog,
+    // no state restore, no editor).
+    auto owner = std::make_shared<InstrumentOwner>();
+    owner->inst = std::move(instance);
+    owner->layoutOk = true;
+    owner->inst->addListener(&primaryRevisionBumpListener_);
+    primarySemanticRevision_.bump();
+    std::atomic_store_explicit(&activeOwner_, owner, std::memory_order_release);
+
+    const int totalCh = owner->inst->getTotalNumOutputChannels();
+    const int scratchCh = juce::jmax(kStereoChannels, totalCh);
+    const int rows = effectiveBs(blockSize_);
+    scratch_.setSize(scratchCh, rows, false, true, true);
+    scratchPtrs_.clear();
+    scratchPtrs_.reserve((size_t)scratchCh);
+    for (int c = 0; c < scratchCh; ++c)
+    {
+        scratchPtrs_.push_back(scratch_.getWritePointer(c));
+    }
+    return true;
+}
+
 void ExperimentalInstrumentHost::clearControllerWireCallbacks() noexcept
 {
     onPluginPitchNamesCacheMayHaveChanged_ = {};
@@ -1776,6 +1809,9 @@ void ExperimentalInstrumentHost::audioThread_beginAudioBlock(int numSamples) noe
 {
     audioCallbackBlockSamples_ = juce::jmax(0, numSamples);
     proxySegmentCount_ = 0; // P1G: per-block segment scratch (audio thread only)
+    rtStageRendered_ = false; // generation stage not yet produced for this block
+    rtStageHasAudio_ = false;
+    rtStageSamples_ = 0;
 }
 
 void ExperimentalInstrumentHost::setProxyPlaybackView(
@@ -3642,6 +3678,13 @@ void ExperimentalInstrumentHost::prepareForDevice(const double sampleRate, const
         midiIo_->uiPendingMidi.clear();
     }
     rtBlockMidi_.clear();
+    // Pre-size the per-block merge / remap buffers so the realtime merge allocates nothing
+    // (a dense block of chords + CC stays far below this; `clear()` keeps the capacity).
+    constexpr int kMergedMidiReserveBytes = 8192;
+    rtMergedMidi_.ensureSize(kMergedMidiReserveBytes);
+    rtRemappedMidi_.ensureSize(kMergedMidiReserveBytes);
+    rtMergedMidi_.clear();
+    rtRemappedMidi_.clear();
 
     auto owner = std::atomic_load_explicit(&activeOwner_, std::memory_order_acquire);
     if (owner != nullptr && owner->inst != nullptr && owner->layoutOk)
@@ -3705,6 +3748,24 @@ void ExperimentalInstrumentHost::releaseResources()
     }
 }
 
+void ExperimentalInstrumentHost::audioThread_renderGenerationStageForBlock(const int numSamples) noexcept
+{
+    // Idempotent per block: the parallel dispatcher renders here on a worker (exactly one claimant
+    // per host per block — see InstrumentRenderPool), the strip's add step then finds the stage
+    // ready; on the serial path the add step itself triggers the render. Both paths run the same
+    // body below, so there is one musical logic and no second engine.
+    if (rtStageRendered_ || numSamples <= 0)
+    {
+        return;
+    }
+    rtStageRendered_ = true;
+    rtStageHasAudio_ = false;
+    rtStageSamples_ = numSamples;
+    const std::int64_t tRender = juce::Time::getHighResolutionTicks();
+    audioThread_renderGenerationStageImpl(numSamples);
+    rtLastRenderTicks_.store(juce::Time::getHighResolutionTicks() - tRender, std::memory_order_relaxed);
+}
+
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* const* outputChannelData,
                                                                          const int numOutputChannels,
                                                                          const int numSamples,
@@ -3716,7 +3777,29 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
         rtDiag_skipBadIoArgs_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    audioThread_renderGenerationStageForBlock(numSamples);
+    if (!rtStageHasAudio_ || rtStageSamples_ < numSamples)
+    {
+        return; // silence for this block (proxy produced nothing, missing Primary, capture-only, …)
+    }
+    const float* const L = scratch_.getReadPointer(0);
+    const float* const R = scratch_.getReadPointer(1);
+    if (L == nullptr || R == nullptr)
+    {
+        return;
+    }
+    const float g = juce::jmax(0.0f, outputGain);
+    addFirstStereoBusToDeviceOutputs(L, R, numSamples, numOutputChannels, outputChannelData,
+                                     g * trackPanLawGainLeft(stereoPan),
+                                     g * trackPanLawGainRight(stereoPan));
+}
 
+void ExperimentalInstrumentHost::audioThread_renderGenerationStageImpl(const int numSamples) noexcept
+{
+    // Produces this block's instrument-generation stage in `scratch_` channels 0/1 and sets
+    // `rtStageHasAudio_` when they hold valid audio. Runs on the audio thread or on ONE render
+    // worker for this host; never concurrently with itself (the pool claims each host once per
+    // block and the callback waits for every job before the add step).
     // ---------------------------------------------------------------- P1G proxy source
     // Latch the published source decision once per block (block-boundary switch — §12.2;
     // Primary and Proxy are never mixed inside one block). When Proxy is selected, ONLY the
@@ -3787,12 +3870,7 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
             std::memcpy(&peakBits, &outcome.peak, sizeof(float));
             rtProxyLastPeakBits_.store(peakBits, std::memory_order_relaxed);
             rtProxyBlocksMixed_.fetch_add(1, std::memory_order_relaxed);
-
-            const float g = juce::jmax(0.0f, outputGain);
-            addFirstStereoBusToDeviceOutputs(L, R, numSamples, numOutputChannels,
-                                             outputChannelData,
-                                             g * trackPanLawGainLeft(stereoPan),
-                                             g * trackPanLawGainRight(stereoPan));
+            rtStageHasAudio_ = true; // the add step applies gain / pan from scratch_ L/R
         }
         return; // Proxy replaced the instrument-generation stage for this whole block.
     }
@@ -3829,7 +3907,10 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     // consumes. This is the many-to-one MIDI delivery boundary: everything routed at this host —
     // its own lane's clips, `TrackKind::Midi` sources, live preview — has already been appended to
     // `rtBlockMidi_` in deterministic schedule order, and the instrument is processed exactly once.
-    juce::MidiBuffer blockMidi;
+    // `rtMergedMidi_` is a host-owned buffer that keeps its capacity (`clear()` never frees), so
+    // the merge is allocation-free at steady state on the audio thread and on a render worker.
+    juce::MidiBuffer& blockMidi = rtMergedMidi_;
+    blockMidi.clear();
     if (midiIo_ != nullptr)
     {
         const juce::ScopedLock sl(midiIo_->midiLock);
@@ -3845,9 +3926,9 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     const int forcedCh = forcedMidiChannelForDelivery_.load(std::memory_order_relaxed);
     if (secondary_midi::isForcedChannelValid(forcedCh) && !blockMidi.isEmpty())
     {
-        juce::MidiBuffer remapped;
-        secondary_midi::applySecondaryChannelMapping(remapped, blockMidi, forcedCh);
-        blockMidi.swapWith(remapped);
+        rtRemappedMidi_.clear();
+        secondary_midi::applySecondaryChannelMapping(rtRemappedMidi_, blockMidi, forcedCh);
+        blockMidi.swapWith(rtRemappedMidi_);
     }
 
     rtMidiDeliveryBoundaryBlocks_.fetch_add(1, std::memory_order_relaxed);
@@ -3947,9 +4028,5 @@ void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* 
     rtDiag_lastScratchAllZero_.store(peak <= kEpsilon ? 1 : 0, std::memory_order_relaxed);
 
     rtDiag_processOkBlocks_.fetch_add(1, std::memory_order_relaxed);
-
-    const float g = juce::jmax(0.0f, outputGain);
-    const float pL = trackPanLawGainLeft(stereoPan);
-    const float pR = trackPanLawGainRight(stereoPan);
-    addFirstStereoBusToDeviceOutputs(L, R, n, numOutputChannels, outputChannelData, g * pL, g * pR);
+    rtStageHasAudio_ = true; // scratch_ L/R hold the instance's output; the add step applies gain / pan
 }

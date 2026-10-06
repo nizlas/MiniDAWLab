@@ -150,6 +150,24 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
 
     writeLastOperationBreadcrumb("app startup begin");
 
+    // Diagnostic override for the live-instrument render pool (engine/InstrumentRenderPool.h):
+    // `--instrument-workers N` (0 = serial generation on the callback thread). Read once here,
+    // before the engine is constructed; absent = the conservative machine default.
+    {
+        const juce::StringArray args = getCommandLineParameterArray();
+        for (int i = 0; i + 1 < args.size(); ++i)
+        {
+            if (args[i] == "--instrument-workers")
+            {
+                const int n = juce::jlimit(0, instrument_render::InstrumentRenderPool::kMaxWorkers,
+                                           args[i + 1].getIntValue());
+                instrument_render::setConfiguredWorkerCountOverride(n);
+                juce::Logger::writeToLog("[engine] instrument render workers override: " + juce::String(n));
+                break;
+            }
+        }
+    }
+
     // Domain objects first: the engine only holds references; safe because we create them
     // in dependency order and tear down in reverse in shutdown.
     transport = std::make_unique<Transport>();

@@ -42,6 +42,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -49,6 +50,7 @@
 #include <vector>
 
 #include "domain/Track.h"
+#include "engine/InstrumentRenderPool.h"
 #include "engine/LevelMeterAccumulator.h"
 #include "engine/TrackMeterBank.h"
 #include "engine/LiveMidiInputBus.h"
@@ -243,6 +245,37 @@ public:
 
     /// [Message thread] Read and clear the accumulated audio callback load window.
     [[nodiscard]] AudioCallbackLoadSnapshot snapshotAudioCallbackLoadAndReset() noexcept;
+
+    // -----------------------------------------------------------------------
+    // Parallel live-instrument generation (engine/InstrumentRenderPool.h)
+    // -----------------------------------------------------------------------
+    // Inside `mixKeyedInstrumentLanesIntoOutputsIfAny` — after every MIDI source of the block has
+    // been scheduled into the hosts — the generation stage of each live instrument row (host
+    // `processBlock` into the host's own scratch) runs as one job per host across the pool, the
+    // callback thread participating and waiting for the last job. The rows' inserts, fader / mute
+    // / pan, meters, routing and summing then run exactly as before, in row order, on the callback
+    // thread. Proxy-backed hosts, the sessionless fallback and the offline mixdown stay serial.
+    // The pool is sized once at construction: `--instrument-workers N` (0 = serial) or
+    // `instrument_render::defaultWorkerCount()`.
+    [[nodiscard]] int instrumentRenderWorkerCount() const noexcept
+    {
+        return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->workerCount() : 0;
+    }
+    [[nodiscard]] instrument_render::InstrumentRenderPool::Stats instrumentRenderPoolStats() const noexcept
+    {
+        return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->statsRelaxed()
+                                                : instrument_render::InstrumentRenderPool::Stats{};
+    }
+    /// [Message thread] Diagnostic A/B inside one process: force the serial generation path for
+    /// the following blocks (the same code runs on the callback thread). Relaxed atomic.
+    void setInstrumentRenderSerialForDiagnostics(const bool serial) noexcept
+    {
+        instrumentRenderSerialHint_.store(serial, std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool isInstrumentRenderSerialForDiagnostics() const noexcept
+    {
+        return instrumentRenderSerialHint_.load(std::memory_order_relaxed);
+    }
 
     /// [Any thread] Monotonic count of device-callback entries (relaxed). Two reads that differ
     /// prove the callback is still cycling; equal reads across a wait mean it has stopped.
@@ -454,6 +487,12 @@ private:
     RecorderService* const recorder_;
     CountInClickOutput* const countIn_;
     PluginInsertHost* const pluginHost_;
+    /// Fixed worker pool + preallocated job descriptors for the generation stage (see the public
+    /// section). The job array is written by the callback thread before each dispatch and never
+    /// touched by workers outside a dispatch → join window.
+    std::unique_ptr<instrument_render::InstrumentRenderPool> instrumentRenderPool_;
+    std::array<instrument_render::RenderJob, instrument_render::InstrumentRenderPool::kMaxJobs> instrumentRenderJobs_{};
+    std::atomic<bool> instrumentRenderSerialHint_{ false };
     /// [Audio thread] acquire-load retains const snapshot — same handoff discipline as Session.
     std::atomic<std::shared_ptr<const ExperimentalInstrumentPlaybackSnapshot>>
         experimentalInstrumentPlaybackSnapshot_;

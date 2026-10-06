@@ -239,6 +239,11 @@ struct StabilityScenarioRequest
     int perfRequestedBufferSize = 0;   ///< `--buffer N`: ask the device for this block size (0 = keep)
     bool perfMixerOpen = false;        ///< `--mixer-open`: measure with the mixer window shown
     bool perfProfilerOff = false;      ///< `--profile-off`: engine load only (profiler overhead check)
+    /// `--generation parallel|serial|ab`: instrument generation as configured (pool), forced
+    /// serial on the callback thread, or BOTH windows back to back in one process (A = serial,
+    /// B = parallel) for a like-for-like comparison.
+    enum class PerfGeneration : int { AsConfigured = 0, Serial, AB };
+    PerfGeneration perfGeneration = PerfGeneration::AsConfigured;
 
     [[nodiscard]] bool isActive() const noexcept { return kind != StabilityScenarioKind::None; }
 };
@@ -750,6 +755,10 @@ struct StabilityRunnerHooks
         std::function<std::int64_t(int& proxySelectedCount)> proxyUnderrunTotal;
         /// Hosts that processed live blocks / mixed proxy blocks since the device started.
         std::function<juce::String()> instrumentActivityText;
+        /// Render pool: worker count + dispatch statistics (`PlaybackEngine::instrumentRenderPoolStats`).
+        std::function<juce::String()> renderPoolText;
+        /// Force the serial generation path (`PlaybackEngine::setInstrumentRenderSerialForDiagnostics`).
+        std::function<void(bool)> setGenerationSerial;
     };
     PerfHooks perf;
 };
