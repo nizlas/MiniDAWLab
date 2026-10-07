@@ -26,6 +26,11 @@ namespace track_strip_glyphs
 inline constexpr juce::uint32 kPowerOnArgb = 0xff2d9d53;
 inline constexpr juce::uint32 kPowerStandbyArgb = 0xff5a5858;
 inline constexpr juce::uint32 kMuteOnArgb = 0xffc6a42a;
+/// Solo: explicit S on = red (distinct from Record-arm's kArmOnArgb so both can light together).
+inline constexpr juce::uint32 kSoloOnArgb = 0xffd2402e;
+/// M face while a track is SILENCED BY SOLO without being stored-muted: a clearly distinct,
+/// dimmed mute tint (darker desaturated gold — "effectively muted, but not your Mute flag").
+inline constexpr juce::uint32 kMuteSoloSilencedFaceArgb = 0xff80702f;
 inline constexpr juce::uint32 kMonitorOnArgb = 0xffe07b18;
 inline constexpr juce::uint32 kArmOnArgb = 0xffd01818;
 inline constexpr juce::uint32 kNeutralFaceArgb = 0xff5a5858;
@@ -252,6 +257,7 @@ enum class StripButtonKind
     Monitor,
     Arm,
     Alternatives,
+    Solo,
 };
 
 /// Complete state of one cell as the two views describe it.
@@ -259,9 +265,38 @@ struct StripButtonState
 {
     StripButtonKind kind = StripButtonKind::Mute;
     bool enabled = true;      ///< clickable (false = dimmed, non-interactive face)
-    bool active = false;      ///< mute on / monitor on / armed; for Power: the row is ON
+    bool active = false;      ///< mute on / monitor on / armed / explicit solo; for Power: row ON
     bool hovered = false;
+    /// Mute cell only: the row is silenced BY SOLO while not stored-muted — the face uses the
+    /// distinct dimmed tint (`kMuteSoloSilencedFaceArgb`) instead of the neutral face.
+    bool soloSilenced = false;
+    /// Mute cell only: draw the small lock marking (solo active ⇒ mute changes are locked).
+    /// The effective state colours stay readable; the lock never obscures the "M".
+    bool lockMarked = false;
 };
+
+/// Small drawn padlock in the cell's top-right corner (no image assets). Sized so the centred
+/// letter stays fully readable even in the minimum 22 px cell.
+inline void drawSmallLockGlyph(juce::Graphics& g, const juce::Rectangle<int> bodyPx)
+{
+    const float side = juce::jmin((float)bodyPx.getWidth(), (float)bodyPx.getHeight());
+    if (side < 12.0f)
+    {
+        return;
+    }
+    const float lockW = juce::jlimit(4.0f, 6.0f, side * 0.30f);
+    const float bodyH = lockW * 0.72f;
+    const float shackleR = lockW * 0.32f;
+    const float x1 = (float)bodyPx.getRight() - lockW - 1.5f;
+    const float yBody = (float)bodyPx.getY() + 1.5f + shackleR;
+    const juce::Colour lockCol(0xe6101010);
+    g.setColour(lockCol);
+    juce::Path shackle;
+    shackle.addCentredArc(x1 + lockW * 0.5f, yBody, shackleR, shackleR, 0.0f,
+                          juce::degreesToRadians(-90.0f), juce::degreesToRadians(90.0f), true);
+    g.strokePath(shackle, juce::PathStrokeType(1.1f));
+    g.fillRoundedRectangle(x1, yBody, lockW, bodyH, 0.8f);
+}
 
 /// Draw one complete cell exactly like the track header strip does. `bodyPx` is the square body
 /// (already inset from the cell); `ctlEdgeNeutral` is the neutral edge stroke of the host view.
@@ -286,7 +321,18 @@ inline void drawStripButton(juce::Graphics& g, const juce::Rectangle<int> bodyPx
         drawPowerGlyphInSquare(g, nonLetterGlyphAreaFromSquareBodyPx(bodyPx), juce::Colour(kGlyphLightArgb));
         break;
     case StripButtonKind::Mute:
-        if (s.enabled)
+        if (s.lockMarked)
+        {
+            // Solo active: Mute is locked but the cell still shows the EFFECTIVE state — stored
+            // mute keeps its colour, solo-silenced rows get the distinct dimmed tint, audible rows
+            // the neutral face. Never the generic disabled gray (the state must stay readable).
+            const juce::Colour face(s.active ? kMuteOnArgb
+                                             : (s.soloSilenced ? kMuteSoloSilencedFaceArgb : kNeutralFaceArgb));
+            drawStandardStripButtonFace(g, rf, face, edgeInactive, false);
+            drawStripLetter(g, bodyPx, "M", juce::Colour(s.active ? kGlyphOnLetterDarkArgb : kGlyphOffLetterArgb));
+            drawSmallLockGlyph(g, bodyPx);
+        }
+        else if (s.enabled)
         {
             drawStandardStripButtonFace(g, rf, juce::Colour(s.active ? kMuteOnArgb : kNeutralFaceArgb), ctlEdgeNeutral, hoverBrighten);
             drawStripLetter(g, bodyPx, "M", juce::Colour(s.active ? kGlyphOnLetterDarkArgb : kGlyphOffLetterArgb));
@@ -295,6 +341,18 @@ inline void drawStripButton(juce::Graphics& g, const juce::Rectangle<int> bodyPx
         {
             drawStandardStripButtonFace(g, rf, juce::Colour(kDisabledFaceArgb), edgeInactive, false);
             drawStripLetter(g, bodyPx, "M", juce::Colour(kGlyphDisabledArgb));
+        }
+        break;
+    case StripButtonKind::Solo:
+        if (s.enabled)
+        {
+            drawStandardStripButtonFace(g, rf, juce::Colour(s.active ? kSoloOnArgb : kNeutralFaceArgb), ctlEdgeNeutral, hoverBrighten);
+            drawStripLetter(g, bodyPx, "S", juce::Colour(s.active ? 0xfff8f8ff : kGlyphOffLetterArgb));
+        }
+        else
+        {
+            drawStandardStripButtonFace(g, rf, juce::Colour(kDisabledFaceArgb), edgeInactive, false);
+            drawStripLetter(g, bodyPx, "S", juce::Colour(kGlyphDisabledArgb));
         }
         break;
     case StripButtonKind::Monitor:

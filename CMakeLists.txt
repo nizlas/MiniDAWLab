@@ -48,6 +48,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/MainMenuModel.cpp
     src/app/MainWindow.cpp
     src/app/ClipPasteboardController.cpp
+    src/app/SoloCoordinator.cpp
     src/app/UndoRedoCoordinator.cpp
     src/app/AudioClipImportCoordinator.cpp
     src/app/InstrumentMidiImportCoordinator.cpp

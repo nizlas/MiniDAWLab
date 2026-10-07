@@ -33,6 +33,7 @@
 #include "instruments/InstrumentTrackController.h"
 #include "engine/RecorderService.h"
 #include "ui/ClipWaveformView.h"
+#include "ui/SoloUiHooks.h"
 #include "ui/TrackHeaderView.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -96,9 +97,11 @@ public:
     // persists it app-wide (`UiLayoutSettingsStore`). Never per track, never changed by names.
     // Limits are logical (DPI-independent) px derived from the real control-strip layout.
     // -------------------------------------------------------------------------------------------
-    /// 132 px: the widest button row ([Instrument][Power][Mute][Monitor][Arm]) fully inside the chrome.
+    /// 154 px: the widest button row ([Instrument][Power][Mute][Solo][Monitor][Arm]) fully inside
+    /// the chrome. Saved preferences below this (pre-Solo layouts stored 132 … 144) clamp UP on
+    /// load/display via `clampHeaderColumnWidthForTotalWidth`; larger saved widths are preserved.
     static constexpr int kTrackHeaderColumnMinWidthPx = TrackHeaderView::kMinimumHeaderColumnWidthPx;
-    /// 144 px: minimum + 12 px margin.
+    /// 166 px: minimum + 12 px margin.
     static constexpr int kTrackHeaderColumnDefaultWidthPx = TrackHeaderView::kDefaultHeaderColumnWidthPx;
     static constexpr int kTrackHeaderColumnMaxWidthPx = 480;
     /// Lane area kept visible right of the column on narrow windows (effective width clamps to it).
@@ -338,6 +341,12 @@ public:
     void setInputMonitoringHooks(std::function<bool(TrackId)> isMonitored,
                                  std::function<void(TrackId)> toggleMonitor) noexcept;
 
+    /// Solo hooks for audio / group / master headers (`SoloUiHooks`): display state feeds the S
+    /// cell + locked-M rendering, `toggleSolo` forwards S clicks to the app's SoloCoordinator.
+    /// Unwired ⇒ no S cell and unchanged Mute chrome. Instrument/Midi rows get the same hooks via
+    /// `InstrumentTimelineRowCoordinator`.
+    void setSoloUiHooks(SoloUiHooks hooks) noexcept;
+
     /// Optional: after an audio clip lane clears peer waveform selections on mouse-down, invoke this
     /// so MIDI clip selections can be cleared without threading instrument details into `ClipWaveformView`.
     void setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept;
@@ -552,6 +561,7 @@ private:
     std::function<void(TrackId)> onDuplicateTrackRequested_;
     std::function<bool(TrackId)> isTrackInputMonitoredFn_;
     std::function<void(TrackId)> toggleTrackInputMonitorFn_;
+    SoloUiHooks soloUiHooks_{};
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;
     std::function<bool(PlacedClipId, ClipTrimEdge, std::int64_t)> onUndoableClipTrimRequested_;
     std::function<bool(PlacedClipId, juce::String)> onUndoableClipRenameRequested_;

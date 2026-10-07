@@ -239,6 +239,7 @@ private:
     CellButton instrumentEditorCell_{ track_strip_glyphs::StripButtonKind::InstrumentEditor };
     CellButton powerCell_{ track_strip_glyphs::StripButtonKind::Power };
     CellButton muteCell_{ track_strip_glyphs::StripButtonKind::Mute };
+    CellButton soloCell_{ track_strip_glyphs::StripButtonKind::Solo };
     CellButton monitorCell_{ track_strip_glyphs::StripButtonKind::Monitor };
     CellButton armCell_{ track_strip_glyphs::StripButtonKind::Arm };
     CellButton alternativesCell_{ track_strip_glyphs::StripButtonKind::Alternatives };

@@ -94,7 +94,10 @@ struct SectionVisibility
 };
 
 // --- fixed geometry -----------------------------------------------------------------------------
-inline constexpr int kStripWidthPx = 150;
+/// Widened 150 → 174 by the Solo slice: the instrument strip's base-button row grew to seven
+/// cells ([Instrument][Power][M][S][Monitor][R][Alternatives] = 7×20 + 6×3 px) which, plus the
+/// 4 px pads and the 6 px stripe inset, needs ≥172 px. Every band derives from this constant.
+inline constexpr int kStripWidthPx = 174;
 inline constexpr int kStripGapPx = 3;
 inline constexpr int kStripPadPx = 4;
 inline constexpr int kSectionGapPx = 4;

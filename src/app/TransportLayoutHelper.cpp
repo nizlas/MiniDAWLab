@@ -4,6 +4,7 @@
 #include "ui/EditToolIconStrip.h"
 #include "ui/InspectorView.h"
 #include "ui/PlayheadOverlay.h"
+#include "ui/SoloMemoryStrip.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
@@ -46,6 +47,28 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
     }
     r.countInStatusLabel.setBounds(row.removeFromRight(kCountInLabelWidth).reduced(4, 0));
 
+    // Solo memory strip (spec §3): in THIS toolbar band, directly above the track-header column
+    // and following its width. The lanes' horizontal span is known already (only vertical bands
+    // have been consumed from `area`), so the strip can be placed before the lanes themselves.
+    juce::Rectangle<int> soloMemStripBounds;
+    if (r.soloMemoryStrip != nullptr)
+    {
+        const int lanesLeftX = (r.inspectorCurrentWidth > 0) ? (area.getX() + r.inspectorCurrentWidth) : 0;
+        int lanesRightX = area.getRight();
+        if (r.arrangementVerticalScrollBar != nullptr)
+        {
+            lanesRightX -= juce::jmin(kArrangementVerticalScrollBarWidthPx,
+                                      juce::jmax(0, lanesRightX - lanesLeftX));
+        }
+        const int lanesW = juce::jmax(0, lanesRightX - lanesLeftX);
+        const int headerW =
+            juce::jmin(r.trackLanesView.effectiveTrackHeaderColumnWidthPxForTotalWidth(lanesW), lanesW);
+        soloMemStripBounds = juce::Rectangle<int>(lanesLeftX, fullToolbarRow.getY(), headerW,
+                                                  fullToolbarRow.getHeight());
+        r.soloMemoryStrip->setBounds(soloMemStripBounds);
+        r.soloMemoryStrip->setVisible(headerW > 0);
+    }
+
     {
         const int pw = EditToolIconStrip::preferredWidth();
         const int ph = EditToolIconStrip::preferredHeight();
@@ -57,7 +80,9 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
                                    fullToolbarRow.getCentreY() - useH / 2,
                                    pw,
                                    useH);
-        const int minX = fullToolbarRow.getX();
+        // Never under the solo-memory strip: clamp the tool strip's left edge past it.
+        const int minX = soloMemStripBounds.isEmpty() ? fullToolbarRow.getX()
+                                                      : (soloMemStripBounds.getRight() + 8);
         const int maxX = fullToolbarRow.getRight() - reservedRight - pw;
         if (maxX >= minX)
         {

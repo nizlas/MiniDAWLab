@@ -937,6 +937,24 @@ void TrackLanesView::setInputMonitoringHooks(std::function<bool(TrackId)> isMoni
     toggleTrackInputMonitorFn_ = std::move(toggleMonitor);
 }
 
+void TrackLanesView::setSoloUiHooks(SoloUiHooks hooks) noexcept
+{
+    soloUiHooks_ = std::move(hooks);
+    for (auto& h : headers_)
+    {
+        h->repaint();
+    }
+    for (auto& h : masterHeaders_)
+    {
+        h->repaint();
+    }
+    for (auto& [tid, h] : groupHeaders_)
+    {
+        juce::ignoreUnused(tid);
+        h->repaint();
+    }
+}
+
 void TrackLanesView::setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept
 {
     onAudioClipMouseDownClearForeignSelections_ = std::move(fn);
@@ -1350,6 +1368,14 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                                  && toggleTrackInputMonitorFn_ != nullptr;
             m.monitorEnabled = m.monitorAvailable && isTrackInputMonitoredFn_(tid);
             m.monitorInteractable = true;
+            if (soloUiHooks_.displayState != nullptr)
+            {
+                const TrackSoloDisplayState st = soloUiHooks_.displayState(tid);
+                m.soloAvailable = true;
+                m.soloed = st.soloed;
+                m.soloSilenced = st.soloSilenced;
+                m.muteLockedBySolo = st.muteLocked;
+            }
             return m;
         };
 
@@ -1410,6 +1436,19 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 }
             }
             session_.setTrackMuted(tid, nowMuted);
+            onArm();
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onToggleSolo = [this, tid, onActive, onArm] {
+            if (soloUiHooks_.toggleSolo != nullptr)
+            {
+                soloUiHooks_.toggleSolo(tid);
+            }
             onArm();
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)
@@ -1783,6 +1822,14 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
         }
         m.powerInteractable = false;
         m.muteInteractable = true;
+        // Master: never an S cell (`soloAvailable` stays false), but its M still shows the
+        // effective state + lock while solo is active elsewhere (mute edits are globally locked).
+        if (soloUiHooks_.displayState != nullptr)
+        {
+            const TrackSoloDisplayState st = soloUiHooks_.displayState(tid);
+            m.soloSilenced = st.soloSilenced;
+            m.muteLockedBySolo = st.muteLocked;
+        }
         return m;
     };
 
@@ -1886,6 +1933,14 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                 }
             }
             m.muteInteractable = true;
+            if (soloUiHooks_.displayState != nullptr)
+            {
+                const TrackSoloDisplayState st = soloUiHooks_.displayState(tid);
+                m.soloAvailable = true; // group rows solo (mute-only chrome becomes [M][S])
+                m.soloed = st.soloed;
+                m.soloSilenced = st.soloSilenced;
+                m.muteLockedBySolo = st.muteLocked;
+            }
             return m;
         };
 
@@ -1909,6 +1964,18 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                 }
             }
             session_.setTrackMuted(tid, nowMuted);
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onToggleSolo = [this, tid, onActive] {
+            if (soloUiHooks_.toggleSolo != nullptr)
+            {
+                soloUiHooks_.toggleSolo(tid);
+            }
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)
             {

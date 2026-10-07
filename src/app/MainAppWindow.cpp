@@ -27,6 +27,7 @@
 #include "app/TrackLanesEditCoordinator.h"
 #include "app/TransportLayoutHelper.h"
 #include "app/TransportPlayPauseStopController.h"
+#include "app/SoloCoordinator.h"
 #include "app/UndoRedoCoordinator.h"
 #include "app/ShortcutDiagnostics.h"
 #include "app/TransportControlsFactory.h"
@@ -88,6 +89,7 @@
 #include "ui/UiLayoutSettingsStore.h"
 #include "ui/mixer/MixerWindow.h"
 #include "ui/EditToolIconStrip.h"
+#include "ui/SoloMemoryStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
 #include "ui/InstrumentAlternativesPopup.h"
@@ -547,6 +549,12 @@ public:
                     }
                 },
                 [this] { return isProjectLoadInProgress(); },
+                [this] {
+                    if (soloCoordinator_ != nullptr)
+                    {
+                        soloCoordinator_->republishDerivedView();
+                    }
+                },
             });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
@@ -793,6 +801,13 @@ public:
                 return liveMidiInputCoordinator_ != nullptr
                        && liveMidiInputCoordinator_->liveRecordingRequestedForDestination(tid);
             };
+            // Solo (spec §5): PARTIAL isolation inside a proxied destination (own clips gated, or
+            // a gated subset of its routed sources) forces the safe Secondary live path — a proxy
+            // mixes the full material and cannot isolate. Whole-destination solo never sets this,
+            // so a valid proxy keeps playing for it. Stored proxy identity/currency is untouched.
+            pbDeps.soloIsolationRequested = [this](const TrackId tid) {
+                return soloCoordinator_ != nullptr && soloCoordinator_->soloIsolationRequested(tid);
+            };
             proxyPlaybackCoordinator_
                 = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
         }
@@ -839,6 +854,46 @@ public:
                     }
                 },
             });
+        // ---- Solo (spec §§1–7): ONE command path for every S button and the memory strip, plus
+        // the derived `SoloMuteView` publish flow. Built after the proxy / undo / live-MIDI
+        // coordinators it consults (all access is null-checked for teardown safety anyway).
+        soloCoordinator_ = std::make_unique<SoloCoordinator>(
+            session,
+            playbackEngine_,
+            SoloCoordinator::Callbacks{
+                [this](const TrackId tid) {
+                    return proxyPlaybackCoordinator_ != nullptr
+                           && proxyPlaybackCoordinator_->isPlayingProxy(tid);
+                },
+                [this](const TrackId tid) {
+                    // Same lazy-ensure the proxy coordinator's SecondaryLive override uses.
+                    return instrumentRuntimeCoordinator_ != nullptr
+                           && instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid);
+                },
+                [this](const TrackId tid) {
+                    if (proxyPlaybackCoordinator_ != nullptr)
+                    {
+                        proxyPlaybackCoordinator_->refreshDestination(tid);
+                    }
+                },
+                [this] { refreshAllSoloUi(); },
+                [](const juce::String& reason) {
+                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Solo", reason);
+                },
+                [this](const juce::String& label, const int memoryIndex, std::function<bool()> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->executeUndoableSoloMemoryEdit(label, memoryIndex,
+                                                                            std::move(mutator));
+                    }
+                    else if (mutator != nullptr)
+                    {
+                        juce::ignoreUnused(mutator());
+                    }
+                },
+            });
+        trackLanesView.setSoloUiHooks(makeSoloUiHooks());
+
         recordingCoordinator_->setRecordStartBlockedPredicate([this]() -> juce::String {
             return isProjectLoadInProgress() ? juce::String("A project is still opening. Wait until it has finished loading.")
                                              : juce::String();
@@ -1493,6 +1548,8 @@ public:
                 },
                 [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); },
             });
+        // Solo: Instrument + Midi rows consume the same seam as the audio / group headers.
+        instrumentTimelineRowCoordinator_->setSoloUiHooks(makeSoloUiHooks());
         // Live MIDI: Monitor / Arm cells of Instrument + Midi rows read and toggle the runtime
         // flags owned by the live-MIDI coordinator (independent of row selection and of each other).
         instrumentTimelineRowCoordinator_->setLiveMidiCallbacks(
@@ -1875,6 +1932,19 @@ public:
         editToolIconStrip_.onToolSelected = [this](EditTool t) { applyEditToolSelection(t); };
         addAndMakeVisible(editToolIconStrip_);
 
+        // Solo memory strip (spec §3): four toggle buttons above the track-header column, laid
+        // out by `applyTransportControlsLayout`. All semantics live in `SoloCoordinator`.
+        soloMemoryStrip_.activeMemoryIndexProvider = [this] {
+            return soloCoordinator_ != nullptr ? soloCoordinator_->activeSoloMemoryIndex() : -1;
+        };
+        soloMemoryStrip_.onMemoryButtonClick = [this](const int memoryIndex) {
+            if (soloCoordinator_ != nullptr)
+            {
+                soloCoordinator_->handleSoloMemoryButtonClick(memoryIndex);
+            }
+        };
+        addAndMakeVisible(soloMemoryStrip_);
+
         configureArrangementMusicalControls();
         addAndMakeVisible(arrangementBpmLabel_);
         addAndMakeVisible(arrangementBpmEditor_);
@@ -2052,6 +2122,13 @@ public:
                 // P1H onProjectLoaded: capture asset source hints for later Save As rehoming.
                 [this](const juce::File& projectFolder) {
                     captureProxyAssetSourceHints(projectFolder);
+                    // Solo: the session reset its transient solo state and adopted the loaded
+                    // memories — republish so the engine drops any previous project's view and
+                    // the S cells / memory strip repaint (memory buttons all off after load).
+                    if (soloCoordinator_ != nullptr)
+                    {
+                        soloCoordinator_->republishDerivedView();
+                    }
                 },
                 // P1H §18.2 onSuccessfulUserSave: queue proxy work per destination update mode
                 // (On Save queues stale destinations; Auto queues only already-eligible work;
@@ -5625,6 +5702,7 @@ public:
             inspectorCollapsedKnob_,
             lanePlayheadOverlay_.get(),
             &arrangementVerticalScrollBar_,
+            &soloMemoryStrip_,
         });
     }
 
@@ -6337,6 +6415,56 @@ private:
         refreshRowChromeAfterMixerAction();
     }
 
+    /// ONE solo seam for every consumer (arrangement headers, instrument/MIDI rows, mixer strips):
+    /// display state from the coordinator's published picture, S clicks into its command path.
+    [[nodiscard]] SoloUiHooks makeSoloUiHooks()
+    {
+        SoloUiHooks hooks;
+        hooks.displayState = [this](const TrackId tid) {
+            TrackSoloDisplayState st;
+            if (soloCoordinator_ == nullptr)
+            {
+                return st;
+            }
+            st.soloed = soloCoordinator_->isTrackExplicitlySoloed(tid);
+            st.muteLocked = soloCoordinator_->isMuteChangeLocked();
+            if (st.muteLocked
+                && soloCoordinator_->audioDecisionForTrack(tid) == SoloTrackAudioDecision::ForcedSilent)
+            {
+                // Silenced BY SOLO and not stored-muted ⇒ the distinct dimmed M tint. A
+                // stored-muted row keeps its normal mute colours (plus the lock).
+                bool storedMuted = false;
+                if (const auto snap = session.loadSessionSnapshotForAudioThread())
+                {
+                    const int idx = snap->findTrackIndexById(tid);
+                    storedMuted = idx >= 0 && snap->getTrack(idx).isMuted();
+                }
+                st.soloSilenced = !storedMuted;
+            }
+            return st;
+        };
+        hooks.toggleSolo = [this](const TrackId tid) {
+            if (soloCoordinator_ != nullptr)
+            {
+                juce::ignoreUnused(soloCoordinator_->toggleTrackSolo(tid));
+            }
+        };
+        return hooks;
+    }
+
+    /// Repaint everything that shows solo state. The mixer strips follow on their own 10 Hz
+    /// refresh poll (same discipline as every other mixer state change).
+    void refreshAllSoloUi()
+    {
+        trackLanesView.repaint();
+        if (instrumentTimelineRowCoordinator_ != nullptr)
+        {
+            instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+        }
+        soloMemoryStrip_.repaint();
+        inspectorView_.refreshFromSession();
+    }
+
     void buildMixerStripBindings()
     {
         MixerStripBindings& b = mixerBindings_;
@@ -6392,6 +6520,8 @@ private:
             }
             activateTrackLikeHeaderClickForMixer(tid);
         };
+        // Solo: the same seam the arrangement headers use (S cell + locked-M rendering).
+        b.solo = makeSoloUiHooks();
         b.isPowerInteractable = [this] { return !trackLanesView.isStructuralTimelineEditBlocked(); };
         b.togglePower = [this](const TrackId tid) -> bool {
             if (trackLanesView.isStructuralTimelineEditBlocked())
@@ -7835,6 +7965,9 @@ private:
     std::unique_ptr<RecordingCoordinator> recordingCoordinator_;
     std::unique_ptr<TransportPlayPauseStopController> transportPlayPauseStopController_;
     std::unique_ptr<UndoRedoCoordinator> undoRedoCoordinator_;
+    /// Solo commands + derived-view publish (S buttons, memory strip, mute lock, proxy refusal).
+    /// Declared after the undo/proxy coordinators it talks to (all access is null-checked).
+    std::unique_ptr<SoloCoordinator> soloCoordinator_;
     std::unique_ptr<ClipPasteboardController> clipPasteboardController_;
     std::unique_ptr<AudioClipImportCoordinator> audioClipImportCoordinator_;
     std::unique_ptr<InstrumentMidiImportCoordinator> instrumentMidiImportCoordinator_;
@@ -7859,6 +7992,8 @@ private:
 
     AddTrackCornerGlyphButton addTrackCornerPlusButton_;
     EditToolIconStrip editToolIconStrip_;
+    /// Spec §3: the four Solo-memory buttons above the track-header column (main window only).
+    SoloMemoryStrip soloMemoryStrip_;
     juce::Label arrangementBpmLabel_;
     juce::TextEditor arrangementBpmEditor_;
     juce::ComboBox arrangementTimeSignatureCombo_;

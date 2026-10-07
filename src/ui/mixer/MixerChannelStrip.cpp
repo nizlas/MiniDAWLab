@@ -130,6 +130,7 @@ MixerChannelStrip::MixerChannelStrip(const TrackId trackId, const MixerStripBind
     instrumentEditorCell_.setTooltip("Open the instrument's editor");
     powerCell_.onClick = [this] { if (bindings_.togglePower) (void)bindings_.togglePower(trackId_); };
     muteCell_.onClick = [this] { if (bindings_.toggleMute) bindings_.toggleMute(trackId_); };
+    soloCell_.onClick = [this] { if (bindings_.solo.toggleSolo) bindings_.solo.toggleSolo(trackId_); };
     monitorCell_.onClick = [this] { if (bindings_.toggleMonitor) bindings_.toggleMonitor(trackId_); };
     armCell_.onClick = [this] { if (bindings_.toggleRecordArm) bindings_.toggleRecordArm(trackId_); };
     alternativesCell_.onClick = [this] {
@@ -138,7 +139,7 @@ MixerChannelStrip::MixerChannelStrip(const TrackId trackId, const MixerStripBind
             bindings_.showInstrumentAlternatives(trackId_, alternativesCell_.getScreenBounds());
         }
     };
-    for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+    for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
     {
         addChildComponent(*c);
     }
@@ -306,7 +307,7 @@ void MixerChannelStrip::resized()
         kindLabel_.setBounds(kindRow);
         auto cells = h.removeFromTop(kHeaderButtonsRowHeightPx);
         cells.removeFromLeft(kHeaderActiveStripeWidthPx + 2);
-        for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+        for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
         {
             if (!c->isVisible())
             {
@@ -585,6 +586,9 @@ void MixerChannelStrip::applyKindLayout(const TrackKind kind)
     alternativesCell_.setVisible(instrumentRow);
     powerCell_.setVisible(audioRow || instrumentRow || midiRow);
     muteCell_.setVisible(true);
+    // S on every strip kind except Stereo Out (spec §4); hidden until the solo seam is wired.
+    soloCell_.setVisible(!isMaster_ && bindings_.solo.toggleSolo != nullptr
+                         && bindings_.solo.displayState != nullptr);
     monitorCell_.setVisible(audioRow || instrumentRow || midiRow);
     armCell_.setVisible(audioRow || instrumentRow || midiRow);
     meterCaption_.setText(isMaster_ ? "Stereo Out" : "Out", juce::dontSendNotification);
@@ -689,8 +693,23 @@ void MixerChannelStrip::refreshBaseButtons(const Track& tr)
     const bool powerInteractable = bindings_.isPowerInteractable ? bindings_.isPowerInteractable() : true;
     setState(powerCell_, powerInteractable, !tr.isTrackOff());
     powerCell_.setTooltip(tr.isTrackOff() ? "Track is OFF (click to switch on)" : "Track is ON (click to switch off; not while playing or recording)");
-    setState(muteCell_, true, tr.isMuted());
-    muteCell_.setTooltip(tr.isMuted() ? "Muted (click to unmute)" : "Mute");
+    const TrackSoloDisplayState soloSt = bindings_.solo.displayState != nullptr
+                                             ? bindings_.solo.displayState(trackId_)
+                                             : TrackSoloDisplayState{};
+    // Mute shows the EFFECTIVE state while solo is active: locked (non-interactive), stored-mute
+    // colours kept, solo-silenced rows get the distinct dimmed tint plus the small lock glyph.
+    if (muteCell_.state_.soloSilenced != soloSt.soloSilenced
+        || muteCell_.state_.lockMarked != soloSt.muteLocked)
+    {
+        muteCell_.state_.soloSilenced = soloSt.soloSilenced;
+        muteCell_.state_.lockMarked = soloSt.muteLocked;
+        muteCell_.repaint();
+    }
+    setState(muteCell_, !soloSt.muteLocked, tr.isMuted());
+    muteCell_.setTooltip(soloSt.muteLocked ? "Mute is locked while Solo is active"
+                                           : (tr.isMuted() ? "Muted (click to unmute)" : "Mute"));
+    setState(soloCell_, true, soloSt.soloed);
+    soloCell_.setTooltip(soloSt.soloed ? "Soloed (click to un-solo)" : "Solo");
     const bool monitorAvail = bindings_.monitorAvailable ? bindings_.monitorAvailable(trackId_) : false;
     setState(monitorCell_, monitorAvail, monitorAvail && bindings_.isMonitorOn && bindings_.isMonitorOn(trackId_));
     monitorCell_.setTooltip(kind_ == TrackKind::Audio ? "Input monitoring" : "Live MIDI monitoring");
@@ -1362,7 +1381,7 @@ void MixerChannelStrip::commitSendAmountText(const int row, const juce::String& 
 
 void MixerChannelStrip::clickBaseButtonForTest(const StripButtonKind kind)
 {
-    for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+    for (CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
     {
         if (c->state_.kind == kind && c->isVisible() && c->state_.enabled && c->onClick != nullptr)
         {
@@ -1373,7 +1392,7 @@ void MixerChannelStrip::clickBaseButtonForTest(const StripButtonKind kind)
 
 bool MixerChannelStrip::baseButtonVisible(const StripButtonKind kind) const
 {
-    for (const CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+    for (const CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
     {
         if (c->state_.kind == kind)
         {
@@ -1385,7 +1404,7 @@ bool MixerChannelStrip::baseButtonVisible(const StripButtonKind kind) const
 
 bool MixerChannelStrip::baseButtonActive(const StripButtonKind kind) const
 {
-    for (const CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+    for (const CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
     {
         if (c->state_.kind == kind)
         {
@@ -1423,7 +1442,7 @@ bool MixerChannelStrip::verifyChildrenInsideBands(juce::String& report) const
     };
     check(nameLabel_, "name", layout_.header);
     check(kindLabel_, "kind", layout_.header);
-    for (const CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &monitorCell_, &armCell_, &alternativesCell_ })
+    for (const CellButton* c : { &instrumentEditorCell_, &powerCell_, &muteCell_, &soloCell_, &monitorCell_, &armCell_, &alternativesCell_ })
     {
         check(*c, "base button", layout_.header);
     }

@@ -219,8 +219,8 @@ void testDerivedLimits()
          + ", active left trim=" + juce::String(TrackHeaderView::kHeaderNameTrimLeftActivePx) + " => min column="
          + juce::String(TrackHeaderView::kMinimumHeaderColumnWidthPx) + " px, default=" + juce::String(TrackHeaderView::kDefaultHeaderColumnWidthPx)
          + " px (logical / DPI-independent)");
-    expect(TrackHeaderView::kMinimumHeaderColumnWidthPx == 132, "limits: minimum column width is 8 + 6 + 5*22 + 8 = 132 px");
-    expect(TrackHeaderView::kDefaultHeaderColumnWidthPx == 144, "limits: default column width is minimum + 12 = 144 px");
+    expect(TrackHeaderView::kMinimumHeaderColumnWidthPx == 154, "limits: minimum column width is 8 + 6 + 6*22 + 8 = 154 px (Solo added a 6th cell)");
+    expect(TrackHeaderView::kDefaultHeaderColumnWidthPx == 166, "limits: default column width is minimum + 12 = 166 px");
     expect(TrackLanesView::kTrackHeaderColumnMinWidthPx == TrackHeaderView::kMinimumHeaderColumnWidthPx
                && TrackLanesView::kTrackHeaderColumnDefaultWidthPx == TrackHeaderView::kDefaultHeaderColumnWidthPx,
            "limits: TrackLanesView shares the header-derived limits (one source of truth)");
@@ -334,12 +334,18 @@ void testNamesNeverChangeLayout()
 void testClampFormula()
 {
     using V = TrackLanesView;
-    expect(V::clampHeaderColumnWidthForTotalWidth(144, 1200) == 144, "clamp: default fits on a wide view");
-    expect(V::clampHeaderColumnWidthForTotalWidth(100, 1200) == 132, "clamp: below minimum -> minimum (132)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(166, 1200) == 166, "clamp: default fits on a wide view");
+    expect(V::clampHeaderColumnWidthForTotalWidth(100, 1200) == 154, "clamp: below minimum -> minimum (154)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(132, 1200) == 154,
+           "clamp: a saved pre-Solo minimum width (132) is raised to the new minimum (154)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(144, 1200) == 154,
+           "clamp: a saved pre-Solo default width (144) is raised to the new minimum (154)");
     expect(V::clampHeaderColumnWidthForTotalWidth(240, 1200) == 240, "clamp: wide preference honoured when it fits");
-    expect(V::clampHeaderColumnWidthForTotalWidth(240, 300) == 140,
-           "clamp: narrow view keeps 160 px of lane area (300 - 160 = 140) before honouring the preference");
-    expect(V::clampHeaderColumnWidthForTotalWidth(240, 250) == 132,
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 340) == 180,
+           "clamp: narrow view keeps 160 px of lane area (340 - 160 = 180) before honouring the preference");
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 300) == 154,
+           "clamp: when the 160 px lane reservation would push below the minimum, the minimum wins (300 - 160 = 140 < 154)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 250) == 154,
            "clamp: very narrow view never goes below the minimum while the view is at least that wide");
     expect(V::clampHeaderColumnWidthForTotalWidth(240, 100) == 100, "clamp: a view narrower than the minimum gets the whole view");
     expect(V::clampHeaderColumnWidthForTotalWidth(240, 0) == 0, "clamp: zero-width view -> 0");

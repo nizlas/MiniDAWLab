@@ -1954,6 +1954,14 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             m.monitorEnabled = false;
             m.monitorInteractable = false;
         }
+        if (callbacks_.soloUiHooks.displayState != nullptr)
+        {
+            const TrackSoloDisplayState st = callbacks_.soloUiHooks.displayState(laneTid);
+            m.soloAvailable = true; // Instrument AND Midi rows solo
+            m.soloed = st.soloed;
+            m.soloSilenced = st.soloSilenced;
+            m.muteLockedBySolo = st.muteLocked;
+        }
         return m;
     };
 
@@ -1972,6 +1980,14 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
     };
     callbacks.onToggleMute = [ctl, laneTid, this, repaintExtras] {
         ctl->setMuted(!ctl->isMuted());
+        session_.setActiveTrack(laneTid);
+        repaintExtras();
+    };
+    callbacks.onToggleSolo = [laneTid, this, repaintExtras] {
+        if (callbacks_.soloUiHooks.toggleSolo != nullptr)
+        {
+            callbacks_.soloUiHooks.toggleSolo(laneTid);
+        }
         session_.setActiveTrack(laneTid);
         repaintExtras();
     };

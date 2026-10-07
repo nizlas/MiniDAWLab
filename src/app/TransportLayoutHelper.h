@@ -9,6 +9,7 @@ class TrackLanesView;
 class InspectorView;
 class PlayheadOverlay;
 class EditToolIconStrip;
+class SoloMemoryStrip;
 
 namespace mini_daw_app_transport
 {
@@ -58,6 +59,11 @@ struct TransportLayoutRefs
     /// Vertical arrangement scrollbar (right of the track rows, below the timeline gutter). May be
     /// null; when its range says everything fits it is hidden and the column is not reserved.
     juce::ScrollBar* arrangementVerticalScrollBar;
+
+    /// Solo memory buttons (spec §3): placed in the toolbar band directly above the track-header
+    /// column, same height as the Pointer/Split tool row, following the header-column width. May
+    /// be null (not constructed); the tool strip's left clamp then falls back to the row edge.
+    SoloMemoryStrip* soloMemoryStrip = nullptr;
 };
 
 /// Width of the vertical scrollbar column reserved right of the arrangement when it is shown.
