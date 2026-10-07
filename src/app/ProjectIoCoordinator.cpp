@@ -551,6 +551,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             midiEditorWorkspace = callbacks_.getMidiEditorWorkspaceForProjectSave();
         }
+        std::optional<ProjectFileTrackRowHeightsV1> trackRowHeights;
+        if (callbacks_.getTrackRowHeightsForProjectSave != nullptr)
+        {
+            trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: "
                                      + session_.getCurrentProjectFile().getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
@@ -563,7 +568,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             snapRoot.resolutionKey,
             mainWinBounds,
             midiEditorWinBounds,
-            midiEditorWorkspace);
+            midiEditorWorkspace,
+            trackRowHeights);
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -687,6 +693,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         {
             midiEditorWorkspace = callbacks_.getMidiEditorWorkspaceForProjectSave();
         }
+        std::optional<ProjectFileTrackRowHeightsV1> trackRowHeights;
+        if (callbacks_.getTrackRowHeightsForProjectSave != nullptr)
+        {
+            trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
+        }
         writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
         const juce::Result r = session_.saveProjectToFile(
             transport_,
@@ -698,7 +709,8 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             snapRoot.resolutionKey,
             mainWinBounds,
             midiEditorWinBounds,
-            midiEditorWorkspace);
+            midiEditorWorkspace,
+            trackRowHeights);
         if (!r.wasOk())
         {
             writeLastOperationBreadcrumb("project save failed");
@@ -1581,6 +1593,12 @@ void ProjectIoCoordinator::loadJob_runNextUnit()
             {
                 callbacks_.applyMainWindowBoundsFromLoadedProject(j.parsed);
             }
+            // Row heights (v26): always invoked — pre-v26 files carry no keys and reset the
+            // arrangement to the Medium default, reproducing their historical look exactly.
+            if (callbacks_.applyTrackRowHeightsFromLoadedProject != nullptr)
+            {
+                callbacks_.applyTrackRowHeightsFromLoadedProject(j.parsed);
+            }
             // Conny 1B: reopen the MIDI editor when the project saved it as open (after the session,
             // instrument runtimes, clips and main window are all restored). Skips safely when the
             // saved track/clip no longer exists; never opens plugin editor windows.
@@ -2037,6 +2055,11 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     const juce::File normalProjectFile = session_.getCurrentProjectFile();
     writeLastOperationBreadcrumb("autosave start (" + reason + "): "
                                  + autosaveFile.getFullPathName());
+    std::optional<ProjectFileTrackRowHeightsV1> trackRowHeights;
+    if (callbacks_.getTrackRowHeightsForProjectSave != nullptr)
+    {
+        trackRowHeights = callbacks_.getTrackRowHeightsForProjectSave();
+    }
     const juce::Result r = session_.saveProjectToFile(
         transport_,
         autosaveFile,
@@ -2047,7 +2070,8 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
         snapRoot.resolutionKey,
         mainWinBounds,
         midiEditorWinBounds,
-        midiEditorWorkspace);
+        midiEditorWorkspace,
+        trackRowHeights);
     session_.setCurrentProjectFile(normalProjectFile);
 
     const int elapsedMs = static_cast<int>(juce::Time::getMillisecondCounterHiRes() - t0 + 0.5);

@@ -48,6 +48,7 @@ target_sources(MiniDAWLab PRIVATE
     src/app/MainMenuModel.cpp
     src/app/MainWindow.cpp
     src/app/ClipPasteboardController.cpp
+    src/app/SoloCoordinator.cpp
     src/app/UndoRedoCoordinator.cpp
     src/app/AudioClipImportCoordinator.cpp
     src/app/InstrumentMidiImportCoordinator.cpp
@@ -105,6 +106,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/CountInClickOutput.cpp
     src/playback/ExperimentalInstrumentPlaybackBridge.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/InstrumentRenderPool.cpp
@@ -236,6 +238,7 @@ target_sources(InputRoutingFocusedTests PRIVATE
     src/domain/SessionSnapshot.cpp
     src/domain/SessionRouting.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RecorderService.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
@@ -331,6 +334,7 @@ target_sources(MixdownPreGainFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
@@ -428,6 +432,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/engine/PlaybackEngine.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/RecorderService.cpp
     src/engine/CountInClickOutput.cpp
@@ -486,6 +491,7 @@ target_sources(InstrumentParallelFocusedTests PRIVATE
     src/engine/PlaybackEngine.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/RecorderService.cpp
     src/engine/CountInClickOutput.cpp
@@ -564,8 +570,9 @@ endif()
 # -----------------------------------------------------------------------------
 # TrackHeaderColumnFocusedTests: the shared track-header column width. Drives the PRODUCTION
 # TrackHeaderView geometry + offscreen paint per row-kind model at the old 120 px (negative control:
-# the clipped Arm cell the user reported), the new minimum (132) and default (144), the pure clamp
-# formula every boundary-sharing view uses, and the app-wide UiLayoutSettingsStore round trip.
+# the clipped Arm cell the user reported), the current minimum (154) and default (166, both grew
+# when the Solo cell was added), the pure clamp formula every boundary-sharing view uses (including
+# clamping old narrower saved widths UP), and the app-wide UiLayoutSettingsStore round trip.
 # No audio device, no window, no VST3 hosting.
 # -----------------------------------------------------------------------------
 juce_add_console_app(TrackHeaderColumnFocusedTests PRODUCT_NAME "TrackHeaderColumnFocusedTests")
@@ -636,6 +643,63 @@ target_link_libraries(WaveformReloadFocusedTests
 )
 
 # -----------------------------------------------------------------------------
+# TrackRowHeightFocusedTests: shared track heights Small/Medium/Large. Drives the PRODUCTION
+# TrackLanesView offscreen (real Session / Transport / vertical scroll model): preset commands
+# change every row kind incl. off-viewport rows, individual resize min = Small with Custom status,
+# new-track default = last chosen preset, Duplicate keeps the source height, v26 persistence
+# (root trackRowHeightPreset + tracks[].rowHeight) incl. pre-v26 and malformed values, and the
+# production vertical-layout verification after mid-list resizes. No audio device, no window, no
+# VST3 hosting (plugin/instrument entry points are satisfied by never-executed link stubs).
+# -----------------------------------------------------------------------------
+juce_add_console_app(TrackRowHeightFocusedTests PRODUCT_NAME "TrackRowHeightFocusedTests")
+target_sources(TrackRowHeightFocusedTests PRIVATE
+    tests/selftest/TrackRowHeightFocusedTestsMain.cpp
+    src/app/TransportLayoutHelper.cpp
+    src/audio/LatencySettingsStore.cpp
+    src/domain/Session.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/RecorderService.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/AudioWaveformCache.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/transport/Transport.cpp
+    src/ui/ClipWaveformView.cpp
+    src/ui/CollapsibleSideStrip.cpp
+    src/ui/EditToolIconStrip.cpp
+    src/ui/ToolStripIconImages.cpp
+    src/ui/TimelineViewportModel.cpp
+    src/ui/TimelineRulerView.cpp
+    src/ui/TimelineLocatorPainter.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/TrackLanesView.cpp
+    src/ui/UiPlayheadClock.cpp
+    src/ui/ForbiddenCursor.cpp)
+target_include_directories(TrackRowHeightFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(TrackRowHeightFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+juce_generate_juce_header(TrackRowHeightFocusedTests)
+target_link_libraries(TrackRowHeightFocusedTests
+    PRIVATE
+        MiniDAWLabToolStripIcons # EditToolIconStrip icons (toolbar layout test)
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_basics
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+
+# -----------------------------------------------------------------------------
 # MixerFocusedTests: the mixer slice without a window or a device — TrackMeterBank slots and
 # drains, LevelMeterHub fan-out (Inspector + mixer receive every window once, Master under its id,
 # hidden views cost nothing, acknowledgement), MixerSectionLayout alignment, an OFFSCREEN
@@ -679,6 +743,123 @@ target_link_libraries(MixerFocusedTests
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+# -----------------------------------------------------------------------------
+# SoloFocusedTests: the Solo listening layer + four persistent Solo memories — the production
+# Session solo commands (five separate sets, Mute lock in the command path), the pure
+# deriveSoloMuteView routing closure (downstream chain + sends, Group feeder closure passing
+# stored Mute, MIDI carrier/suppression, Off rules, stale ids), v25 soloMemories persistence
+# through the production save/load (incl. pre-v25 and malformed files), the narrow solo-memory
+# undo through the REAL UndoRedoCoordinator, and the S-cell / SoloMemoryStrip geometry offscreen.
+# No audio device, no window, no VST3 hosting (instrument entry points Session.cpp references are
+# satisfied by never-executed link stubs in the test main).
+# -----------------------------------------------------------------------------
+juce_add_console_app(SoloFocusedTests PRODUCT_NAME "SoloFocusedTests")
+target_sources(SoloFocusedTests PRIVATE
+    tests/selftest/SoloFocusedTestsMain.cpp
+    src/app/UndoRedoCoordinator.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/SoloMuteView.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/ForbiddenCursor.cpp)
+target_include_directories(SoloFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(SoloFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(SoloFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(SoloFocusedTests PRIVATE /wd4458)
+endif()
+# UndoRedoCoordinator.h includes the generated JuceHeader.h.
+juce_generate_juce_header(SoloFocusedTests)
+
+# -----------------------------------------------------------------------------
+# CollapsibleTrackGroupFocusedTests: purely visual collapsible track groups — the production
+# TrackLanesView offscreen (header multi-selection, create validation, 4 px collapsed mini-view
+# with pixel-sampled grey clip intervals under zoom/scroll, group handle placement + short-click/
+# long-press actions, the shared scroll model with anchoring/clamping), Session membership rules
+# (Duplicate, delete + snapshot restore, visual dissolve, reorder veto), the narrow group-metadata
+# undo through the REAL UndoRedoCoordinator, and v27 persistence (round trip, pre-v27, malformed
+# metadata safe fallback). No audio device, no window, no instrument runtime (instrument entry
+# points referenced by the linked sources are satisfied by never-executed link stubs).
+# -----------------------------------------------------------------------------
+juce_add_console_app(CollapsibleTrackGroupFocusedTests PRODUCT_NAME "CollapsibleTrackGroupFocusedTests")
+target_sources(CollapsibleTrackGroupFocusedTests PRIVATE
+    tests/selftest/CollapsibleTrackGroupFocusedTestsMain.cpp
+    src/app/UndoRedoCoordinator.cpp
+    src/audio/LatencySettingsStore.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/RecorderService.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/AudioWaveformCache.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp
+    src/ui/ClipWaveformView.cpp
+    src/ui/TimelineViewportModel.cpp
+    src/ui/TimelineRulerView.cpp
+    src/ui/TimelineLocatorPainter.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/TrackLanesView.cpp
+    src/ui/UiPlayheadClock.cpp
+    src/ui/ForbiddenCursor.cpp)
+target_include_directories(CollapsibleTrackGroupFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(CollapsibleTrackGroupFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(CollapsibleTrackGroupFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_basics
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(CollapsibleTrackGroupFocusedTests PRIVATE /wd4458)
+endif()
+# UndoRedoCoordinator.h includes the generated JuceHeader.h.
+juce_generate_juce_header(CollapsibleTrackGroupFocusedTests)
 
 # JUCE juce_VST3PluginFormat.cpp + VST3 SDK headers: local `iid` triggers MSVC C4458 (hides base member).
 # Safe to silence; module sources compile as part of this target.

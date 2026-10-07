@@ -508,6 +508,21 @@ bool PlaybackEngine::isTrackInputMonitoringEnabled(const TrackId trackId) const 
     return snap != nullptr && snap->contains(trackId);
 }
 
+void PlaybackEngine::publishSoloMuteView(std::shared_ptr<const SoloMuteView> view) noexcept
+{
+    // An inactive view is equivalent to null — normalize so the callback's null-check is enough.
+    if (view != nullptr && !view->soloActive)
+    {
+        view = nullptr;
+    }
+    soloMuteView_.store(std::move(view), std::memory_order_release);
+}
+
+std::shared_ptr<const SoloMuteView> PlaybackEngine::currentSoloMuteView() const noexcept
+{
+    return soloMuteView_.load(std::memory_order_acquire);
+}
+
 void PlaybackEngine::setLiveMidiInputBus(live_midi::LiveMidiInputBus* bus) noexcept
 {
     liveMidiBus_.store(bus, std::memory_order_release);
@@ -956,6 +971,12 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         = liveInputMonitorSnapshot_.load(std::memory_order_acquire);
     const playback_mix_helpers::LiveInputMonitorSnapshot* const monitorPtr
         = (monitorSnap != nullptr && monitorSnap->count > 0) ? monitorSnap.get() : nullptr;
+    // Solo (derived listening view): ONE acquire per callback — every strip and every MIDI gate
+    // in this block sees the same consistent decision (block-boundary publication, spec §6).
+    const std::shared_ptr<const SoloMuteView> soloViewSnap
+        = soloMuteView_.load(std::memory_order_acquire);
+    const SoloMuteView* const soloView
+        = (soloViewSnap != nullptr && soloViewSnap->soloActive) ? soloViewSnap.get() : nullptr;
     const bool allowInstrumentProcessing
         = !instrumentProcessingSuspended_.load(std::memory_order_acquire);
 
@@ -1348,7 +1369,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                postStripStagePtrs_[1],
                                                                                0,
                                                                                numSamples,
-                                                                               pluginHost_);
+                                                                               pluginHost_,
+                                                                               soloView);
                 // Group rows meter their bus strip output here; the Master row's meter is the
                 // device-output Stereo Out meter (folded once per callback), never duplicated.
                 if (busTr.getKind() == TrackKind::Group)
@@ -1407,14 +1429,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                           numSamples,
                                                                           numOutputChannels,
                                                                           outputChannelData,
-                                                                          pluginHost_);
+                                                                          pluginHost_,
+                                                                          soloView);
                 }
                 else if (step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
                 {
                     float* const destStereo[2] = { rp->busScratchL[(size_t)step.destBusIndex],
                                                    rp->busScratchR[(size_t)step.destBusIndex] };
                     playback_mix_helpers::processBusChannelStripToOutputs(
-                        busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_);
+                        busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_, soloView);
                 }
             }
             return;
@@ -1428,7 +1451,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                   numSamples,
                                                                   numOutputChannels,
                                                                   outputChannelData,
-                                                                  pluginHost_);
+                                                                  pluginHost_,
+                                                                  soloView);
         }
     };
 
@@ -1567,8 +1591,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 // transport) and the strip folds the output with gain 0. Skipping the host here
                 // (pre-1.1.9) let the scheduled MIDI pile up in the host's per-block buffer for as
                 // long as the row stayed muted (audio-thread allocation, then a burst of stale
-                // events on unmute) and froze the plug-in mid-state.
-                const float fader = tr.isMuted() ? 0.0f : tr.getChannelFaderGain();
+                // events on unmute) and froze the plug-in mid-state. Solo layers on top as an
+                // effective-mute decision; stored flags untouched.
+                const float fader = solo_mute_view::effectiveTrackMuted(soloView, tr)
+                                        ? 0.0f
+                                        : tr.getChannelFaderGain();
 
                 const float pkBeforeThisMix = (routePlayEdgeDiag && sx >= 0)
                                                   ? peakAbsStereoDevice(outputChannelData, numOutputChannels, numSamples)
@@ -1607,7 +1634,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                         // P2 audition gate (PID-008): the Secondary audition instance sounds only
                         // while the transport is NOT playing — never layered over transport
                         // playback. Block-boundary decision on this thread; no republish races.
-                        playbackIntent != PlaybackIntent::Playing ? entry->auditionHost : nullptr);
+                        playbackIntent != PlaybackIntent::Playing ? entry->auditionHost : nullptr,
+                        soloView);
                     audioThread_foldTrackMeterIfMetered(
                         tr.getId(), postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
                     if (rp != nullptr && srcStep != nullptr && srcStep->destBusIndex >= 0
@@ -1773,7 +1801,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 postStripStagePtrs_[0],
                 postStripStagePtrs_[1],
                 pluginHost_,
-                &preGainRampState_);
+                &preGainRampState_,
+                soloView);
             audioThread_foldTrackMeterIfMetered(
                 tr.getId(), postStripStagePtrs_[0], postStripStagePtrs_[1], numSamples);
 
@@ -1988,7 +2017,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     omitClipPlaybackForTrack,
                     timelineEnd,
                     step.trackIndex,
-                    &preGainRampState_);
+                    &preGainRampState_,
+                    soloView);
                 audioThread_foldTrackMeterIfMetered(srcTr.getId(),
                                                     postStripStagePtrs_[0] + destFrame,
                                                     postStripStagePtrs_[1] + destFrame,
@@ -2024,7 +2054,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                              timelineEnd,
                                                                              step.trackIndex,
                                                                              &preGainRampState_,
-                                                                             monitorPtr);
+                                                                             monitorPtr,
+                                                                             soloView);
             }
         }
         else
@@ -2040,7 +2071,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                          timelineEnd,
                                                                          -1,
                                                                          &preGainRampState_,
-                                                                         monitorPtr);
+                                                                         monitorPtr,
+                                                                         soloView);
         }
 
         if (prof)
@@ -2087,7 +2119,15 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                      outFrame0 + silencePrefix,
                                                                                      segDisc,
                                                                                      deviceBlockSizeInFrames,
-                                                                                     emitPtr);
+                                                                                     emitPtr,
+                                                                                     // Solo: an open CARRIER strip must not leak the
+                                                                                     // destination's own clips (see SoloMuteView).
+                                                                                     solo_mute_view::transportClipsSuppressedBySolo(
+                                                                                         soloView, itr.getId()),
+                                                                                     // Solo: explicitly soloed but base-muted lane
+                                                                                     // still delivers its events.
+                                                                                     solo_mute_view::trackForcedAudibleBySolo(
+                                                                                         soloView, itr.getId()));
 
                 // P1G: note the audible timeline segment for proxy substitution — consumed by
                 // the host only when its published playback view selects Proxy for this block.
@@ -2165,7 +2205,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                 outFrame0 + silencePrefix,
                                                                                 segDisc,
                                                                                 deviceBlockSizeInFrames,
-                                                                                nullptr);
+                                                                                nullptr,
+                                                                                // Solo: non-soloed MIDI source into an OPEN
+                                                                                // destination strip must stay silent.
+                                                                                solo_mute_view::routedMidiSourceSuppressedBySolo(
+                                                                                    soloView, src.trackId),
+                                                                                solo_mute_view::trackForcedAudibleBySolo(
+                                                                                    soloView, src.trackId));
                 src.midiController->audioThread_setLastRoutedDestTrackId(destEntry->trackId);
             }
         }
@@ -2449,6 +2495,14 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
     {
         invokeExperimentalInstrumentBeginBlocks(instrumentSnap, numSamples);
     }
+    // Solo: offline mixdown follows the CURRENT audible solo picture (spec §6) through the same
+    // derived view the realtime path consumes — one acquire per offline block. Proxy RENDERING
+    // (ProxyRenderExecutor) is a separate path and never sees this view: a proxy always renders
+    // its intended full material.
+    const std::shared_ptr<const SoloMuteView> soloViewSnap
+        = soloMuteView_.load(std::memory_order_acquire);
+    const SoloMuteView* const soloView
+        = (soloViewSnap != nullptr && soloViewSnap->soloActive) ? soloViewSnap.get() : nullptr;
     const int offlineCap = juce::jmax(numSamples, kOfflineMixdownBlockCapSamples);
     ensureMasterScratchCapacity(offlineCap);
     ensurePostStripStageScratchCapacity(offlineCap);
@@ -2559,7 +2613,9 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                     pluginHost_,
                     kInvalidTrackId,
                     sessionSnap.getArrangementExtentSamples(),
-                    step.trackIndex);
+                    step.trackIndex,
+                    nullptr,
+                    soloView);
                 playback_mix_helpers::fanPostStripStageToDryAndSends(postStripStagePtrs_[0],
                                                                        postStripStagePtrs_[1],
                                                                        destFrame,
@@ -2589,7 +2645,10 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                              pluginHost_,
                                                                              kInvalidTrackId,
                                                                              sessionSnap.getArrangementExtentSamples(),
-                                                                             step.trackIndex);
+                                                                             step.trackIndex,
+                                                                             nullptr,
+                                                                             nullptr,
+                                                                             soloView);
             }
         }
         else
@@ -2602,7 +2661,11 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                          mixSumTarget,
                                                                          pluginHost_,
                                                                          kInvalidTrackId,
-                                                                         sessionSnap.getArrangementExtentSamples());
+                                                                         sessionSnap.getArrangementExtentSamples(),
+                                                                         -1,
+                                                                         nullptr,
+                                                                         nullptr,
+                                                                         soloView);
         }
 
         if (instrumentSnap != nullptr)
@@ -2628,7 +2691,11 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                    silencePrefix,
                                                                                    instrumentForceDiscontinuity,
                                                                                    numSamples,
-                                                                                   nullptr);
+                                                                                   nullptr,
+                                                                                   solo_mute_view::transportClipsSuppressedBySolo(
+                                                                                       soloView, itr.getId()),
+                                                                                   solo_mute_view::trackForcedAudibleBySolo(
+                                                                                       soloView, itr.getId()));
 
                 // P1G: offline mixdown uses the same authoritative source selection — the host
                 // substitutes the current proxy for this segment when its view selects Proxy.
@@ -2674,7 +2741,11 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                 silencePrefix,
                                                                                 instrumentForceDiscontinuity,
                                                                                 numSamples,
-                                                                                nullptr);
+                                                                                nullptr,
+                                                                                solo_mute_view::routedMidiSourceSuppressedBySolo(
+                                                                                    soloView, src.trackId),
+                                                                                solo_mute_view::trackForcedAudibleBySolo(
+                                                                                    soloView, src.trackId));
             }
         }
     }
@@ -2701,8 +2772,10 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
             }
             // Same as the realtime path: mute / fader −∞ are gain 0, the host still processes so
             // the offline render consumes exactly the MIDI it schedules (no leftover burst into
-            // the realtime callback after the export).
-            const float fader = tr.isMuted() ? 0.0f : tr.getChannelFaderGain();
+            // the realtime callback after the export). Solo layers on top as effective mute.
+            const float fader = solo_mute_view::effectiveTrackMuted(soloView, tr)
+                                    ? 0.0f
+                                    : tr.getChannelFaderGain();
 
             const RoutingPlan::SourceStep* srcStep = nullptr;
             if (rp != nullptr)
@@ -2725,7 +2798,9 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                postStripStagePtrs_[1],
                                                                                0,
                                                                                numSamples,
-                                                                               pluginHost_);
+                                                                               pluginHost_,
+                                                                               nullptr,
+                                                                               soloView);
                 if (rp != nullptr && srcStep != nullptr && srcStep->destBusIndex >= 0
                     && srcStep->destBusIndex < static_cast<int>(rp->busScratchL.size()))
                 {
@@ -2826,7 +2901,8 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                            postStripStagePtrs_[1],
                                                                            0,
                                                                            numSamples,
-                                                                           pluginHost_);
+                                                                           pluginHost_,
+                                                                           soloView);
             if (step.destBusIndex < 0)
             {
                 playback_mix_helpers::addPostStripStageToDeviceOutputs(
@@ -2873,14 +2949,15 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                       numSamples,
                                                                       2,
                                                                       stereoOutputLR,
-                                                                      pluginHost_);
+                                                                      pluginHost_,
+                                                                      soloView);
             }
             else if (step.destBusIndex < static_cast<int>(rp->busScratchL.size()))
             {
                 float* const destStereo[2] = { rp->busScratchL[(size_t)step.destBusIndex],
                                                rp->busScratchR[(size_t)step.destBusIndex] };
                 playback_mix_helpers::processBusChannelStripToOutputs(
-                    busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_);
+                    busTr, busStereo, 0, numSamples, 2, destStereo, pluginHost_, soloView);
             }
         }
     }
@@ -2892,7 +2969,8 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                               numSamples,
                                                               2,
                                                               stereoOutputLR,
-                                                              pluginHost_);
+                                                              pluginHost_,
+                                                              soloView);
     }
 }
 

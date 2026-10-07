@@ -402,7 +402,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             const std::int64_t timelineEnd,
                                             const int onlyTrackIndex,
                                             PreGainRampState* const preGainRamp,
-                                            const LiveInputMonitorSnapshot* const monitored) noexcept
+                                            const LiveInputMonitorSnapshot* const monitored,
+                                            const SoloMuteView* const soloView) noexcept
 {
     if (audibleRun <= 0)
     {
@@ -436,9 +437,12 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
         {
             continue;
         }
+        // Solo-aware effective mute (`SoloMuteView`): stored flags untouched; a muted-like track
+        // keeps processing with gain 0 (same 1.1.9 discipline as plain Mute).
+        const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, tr);
         const float storedFaderGain = tr.getChannelFaderGain();
-        const float effectiveGain = tr.isMuted() ? 0.0f : storedFaderGain;
-        if (!tr.isMuted() && storedFaderGain <= 0.0f)
+        const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
+        if (!effectiveMuted && storedFaderGain <= 0.0f)
         {
             continue;
         }
@@ -540,7 +544,8 @@ void processBusChannelStripToOutputs(const Track& busTrack,
                                      const int numSamples,
                                      const int numOutputChannels,
                                      float* const* outputChannelData,
-                                     PluginInsertHost* pluginHost) noexcept
+                                     PluginInsertHost* pluginHost,
+                                     const SoloMuteView* const soloView) noexcept
 {
     if (numSamples <= 0 || busScratchStereo == nullptr || outputChannelData == nullptr)
     {
@@ -551,9 +556,10 @@ void processBusChannelStripToOutputs(const Track& busTrack,
         return;
     }
 
+    const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, busTrack);
     const float storedFaderGain = busTrack.getChannelFaderGain();
-    const float effectiveGain = busTrack.isMuted() ? 0.0f : storedFaderGain;
-    if (!busTrack.isMuted() && storedFaderGain <= 0.0f)
+    const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
+    if (!effectiveMuted && storedFaderGain <= 0.0f)
     {
         return;
     }
@@ -732,7 +738,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               const TrackId omitClipPlaybackForTrack,
                                               const std::int64_t timelineEnd,
                                               const int trackIndex,
-                                              PreGainRampState* const preGainRamp) noexcept
+                                              PreGainRampState* const preGainRamp,
+                                              const SoloMuteView* const soloView) noexcept
 {
     if (audibleRun <= 0 || stageL == nullptr || stageR == nullptr || trackIndex < 0
         || trackIndex >= sessionSnap.getNumTracks())
@@ -753,9 +760,10 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
     {
         return;
     }
+    const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, tr);
     const float storedFaderGain = tr.getChannelFaderGain();
-    const float effectiveGain = tr.isMuted() ? 0.0f : storedFaderGain;
-    if (!tr.isMuted() && storedFaderGain <= 0.0f)
+    const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
+    if (!effectiveMuted && storedFaderGain <= 0.0f)
     {
         return;
     }
@@ -854,7 +862,8 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
                                                   float* stageL,
                                                   float* stageR,
                                                   PluginInsertHost* pluginHost,
-                                                  PreGainRampState* const preGainRamp) noexcept
+                                                  PreGainRampState* const preGainRamp,
+                                                  const SoloMuteView* const soloView) noexcept
 {
     if (numSamples <= 0 || stageL == nullptr || stageR == nullptr)
     {
@@ -864,9 +873,13 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& tr,
     {
         return;
     }
+    // Solo silences non-included tracks' MONITORING the same way it silences their clip playback
+    // (the monitor signal flows through this same strip); recording capture stays raw/pre-strip,
+    // so a take is never discarded or attenuated because its monitoring was solo-silenced.
+    const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, tr);
     const float storedFaderGain = tr.getChannelFaderGain();
-    const float effectiveGain = tr.isMuted() ? 0.0f : storedFaderGain;
-    if (!tr.isMuted() && storedFaderGain <= 0.0f)
+    const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
+    if (!effectiveMuted && storedFaderGain <= 0.0f)
     {
         return;
     }
@@ -948,7 +961,8 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               const int destOutFrame0,
                                               const int numSamples,
                                               PluginInsertHost* pluginHost,
-                                              ExperimentalInstrumentHost* auditionHost) noexcept
+                                              ExperimentalInstrumentHost* auditionHost,
+                                              const SoloMuteView* const soloView) noexcept
 {
     if (host == nullptr || numSamples <= 0 || stageL == nullptr || stageR == nullptr)
     {
@@ -961,9 +975,10 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
     }
     // Mute and a fader at −∞ both fold the host's output with gain 0 — the instrument itself keeps
     // processing (MIDI consumed, state follows the transport) exactly like an audible row. Only a
-    // track that is OFF skips the host.
+    // track that is OFF skips the host. Solo layers on top the same way (effective mute).
+    const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, track);
     const float storedFaderGain = track.getChannelFaderGain();
-    const float effectiveGain = track.isMuted() ? 0.0f : juce::jmax(0.0f, storedFaderGain);
+    const float effectiveGain = effectiveMuted ? 0.0f : juce::jmax(0.0f, storedFaderGain);
 
     const TrackId trackId = track.getId();
     const bool useInsert
@@ -1013,7 +1028,8 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
                                               float* stageR,
                                               const int destOutFrame0,
                                               const int numSamples,
-                                              PluginInsertHost* pluginHost) noexcept
+                                              PluginInsertHost* pluginHost,
+                                              const SoloMuteView* const soloView) noexcept
 {
     if (numSamples <= 0 || busInputStereo == nullptr || stageL == nullptr || stageR == nullptr)
     {
@@ -1025,9 +1041,10 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
         return;
     }
 
+    const bool effectiveMuted = solo_mute_view::effectiveTrackMuted(soloView, busTrack);
     const float storedFaderGain = busTrack.getChannelFaderGain();
-    const float effectiveGain = busTrack.isMuted() ? 0.0f : storedFaderGain;
-    if (!busTrack.isMuted() && storedFaderGain <= 0.0f)
+    const float effectiveGain = effectiveMuted ? 0.0f : storedFaderGain;
+    if (!effectiveMuted && storedFaderGain <= 0.0f)
     {
         clearStereoScratch(stageL, stageR, numSamples);
         return;

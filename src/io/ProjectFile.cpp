@@ -12,6 +12,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -115,23 +116,23 @@ namespace
         for (const auto& c : t.clips)
         {
             juce::DynamicObject::Ptr co = new juce::DynamicObject();
-            co->setProperty("id", static_cast<std::int64_t>(c.id));
-            co->setProperty("startSample", c.startSample);
+            co->setProperty("id", static_cast<juce::int64>(c.id));
+            co->setProperty("startSample", static_cast<juce::int64>(c.startSample));
             co->setProperty("sourcePath", c.sourcePath);
             if (c.visibleLengthSamples > 0)
             {
-                co->setProperty("visibleLengthSamples", static_cast<std::int64_t>(c.visibleLengthSamples));
+                co->setProperty("visibleLengthSamples", static_cast<juce::int64>(c.visibleLengthSamples));
             }
             if (c.leftTrimSamples > 0)
             {
-                co->setProperty("leftTrimSamples", static_cast<std::int64_t>(c.leftTrimSamples));
+                co->setProperty("leftTrimSamples", static_cast<juce::int64>(c.leftTrimSamples));
             }
             if (c.hasMaterialWindowInFile)
             {
-                co->setProperty("materialWindowStartSamples", static_cast<std::int64_t>(c.materialWindowStartSamples));
+                co->setProperty("materialWindowStartSamples", static_cast<juce::int64>(c.materialWindowStartSamples));
                 co->setProperty(
                     "materialWindowEndExclusiveSamples",
-                    static_cast<std::int64_t>(c.materialWindowEndExclusiveSamples));
+                    static_cast<juce::int64>(c.materialWindowEndExclusiveSamples));
             }
             if (c.name.trim().isNotEmpty())
             {
@@ -140,7 +141,7 @@ namespace
             clipVars.add(juce::var(co.get()));
         }
         juce::DynamicObject::Ptr to = new juce::DynamicObject();
-        to->setProperty("id", static_cast<std::int64_t>(t.id));
+        to->setProperty("id", static_cast<juce::int64>(t.id));
         to->setProperty("name", t.name);
         if (fileVersion >= 13)
         {
@@ -221,12 +222,18 @@ namespace
             && t.midiDestinationTrackId != kInvalidTrackId)
         {
             // Absent key = None; identity-based (never a list index or name).
-            to->setProperty("midiTo", static_cast<std::int64_t>(t.midiDestinationTrackId));
+            to->setProperty("midiTo", static_cast<juce::int64>(t.midiDestinationTrackId));
+        }
+        if (fileVersion >= 26 && t.rowHeightPx > 0)
+        {
+            // v26 additive: the row's actual arrangement height in px. Absent key (and 0) = use
+            // the project's preset default on load; the UI apply clamps to the valid range.
+            to->setProperty("rowHeight", t.rowHeightPx);
         }
         if (fileVersion >= 14 && !t.kind.equalsIgnoreCase("master") && t.routedOutputTrackId != kInvalidTrackId)
         {
             juce::DynamicObject::Ptr outObj = new juce::DynamicObject();
-            outObj->setProperty("trackId", static_cast<std::int64_t>(t.routedOutputTrackId));
+            outObj->setProperty("trackId", static_cast<juce::int64>(t.routedOutputTrackId));
             to->setProperty("output", juce::var(outObj.get()));
         }
         if (fileVersion >= 15 && !t.sends.empty())
@@ -239,8 +246,8 @@ namespace
                     continue;
                 }
                 juce::DynamicObject::Ptr so = new juce::DynamicObject();
-                so->setProperty("slot", static_cast<std::int64_t>(s.uiSlotIndex));
-                so->setProperty("destTrackId", static_cast<std::int64_t>(s.destTrackId));
+                so->setProperty("slot", static_cast<juce::int64>(s.uiSlotIndex));
+                so->setProperty("destTrackId", static_cast<juce::int64>(s.destTrackId));
                 so->setProperty("amount", (double)s.amount);
                 if (!s.enabled)
                 {
@@ -263,7 +270,7 @@ namespace
                 for (const auto& in : t.inserts)
                 {
                     juce::DynamicObject::Ptr io = new juce::DynamicObject();
-                    io->setProperty("slotId", static_cast<std::int64_t>(in.slotId));
+                    io->setProperty("slotId", static_cast<juce::int64>(in.slotId));
                     io->setProperty("stage", in.stage == InsertStage::Pre ? "pre" : "post");
                     io->setProperty("pluginVst3Path", in.pluginVst3Path);
                     if (in.pluginIdentifier.isNotEmpty())
@@ -300,7 +307,7 @@ namespace
         if (v.isInt64() || v.isInt())
         {
             ok = true;
-            return static_cast<std::int64_t>(v);
+            return static_cast<std::int64_t>(static_cast<juce::int64>(v));
         }
         if (v.isString())
         {
@@ -1192,10 +1199,10 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
 
     juce::DynamicObject::Ptr root = new juce::DynamicObject();
     root->setProperty("version", data.version);
-    root->setProperty("nextPlacedClipId", static_cast<std::int64_t>(data.nextPlacedClipId));
-    root->setProperty("nextTrackId", static_cast<std::int64_t>(data.nextTrackId));
-    root->setProperty("activeTrackId", static_cast<std::int64_t>(data.activeTrackId));
-    root->setProperty("playheadSamples", data.playheadSamples);
+    root->setProperty("nextPlacedClipId", static_cast<juce::int64>(data.nextPlacedClipId));
+    root->setProperty("nextTrackId", static_cast<juce::int64>(data.nextTrackId));
+    root->setProperty("activeTrackId", static_cast<juce::int64>(data.activeTrackId));
+    root->setProperty("playheadSamples", static_cast<juce::int64>(data.playheadSamples));
     root->setProperty("deviceSampleRateAtSave", data.deviceSampleRateAtSave);
     if (data.version >= 20)
     {
@@ -1209,22 +1216,78 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
     }
     if (data.version >= 3)
     {
-        root->setProperty("arrangementExtentSamples", data.arrangementExtentSamples);
+        root->setProperty("arrangementExtentSamples", static_cast<juce::int64>(data.arrangementExtentSamples));
     }
     if (data.version >= 6)
     {
         if (data.leftLocatorSamples != 0)
         {
-            root->setProperty("leftLocatorSamples", data.leftLocatorSamples);
+            root->setProperty("leftLocatorSamples", static_cast<juce::int64>(data.leftLocatorSamples));
         }
         if (data.rightLocatorSamples != 0)
         {
-            root->setProperty("rightLocatorSamples", data.rightLocatorSamples);
+            root->setProperty("rightLocatorSamples", static_cast<juce::int64>(data.rightLocatorSamples));
         }
     }
     if (data.version >= 10 && data.cycleEnabled)
     {
         root->setProperty("cycleEnabled", true);
+    }
+    if (data.version >= 25)
+    {
+        // v25 additive: four persisted Solo memories (explicit TrackId sets). Omit the key when
+        // every memory is empty so a project without solo memories serializes like v24 apart from
+        // the version number. Temporary solo set / active selection / derived states are never written.
+        bool anySoloMemoryNonEmpty = false;
+        for (const auto& mem : data.soloMemories)
+        {
+            anySoloMemoryNonEmpty = anySoloMemoryNonEmpty || !mem.empty();
+        }
+        if (anySoloMemoryNonEmpty)
+        {
+            juce::Array<juce::var> memoriesVar;
+            for (const auto& mem : data.soloMemories)
+            {
+                juce::Array<juce::var> idsVar;
+                for (const TrackId id : mem)
+                {
+                    idsVar.add(static_cast<juce::int64>(id));
+                }
+                memoriesVar.add(juce::var(idsVar));
+            }
+            root->setProperty("soloMemories", juce::var(memoriesVar));
+        }
+    }
+    if (data.version >= 26 && data.trackRowHeightPreset.isNotEmpty())
+    {
+        // v26 additive: last chosen shared track-height preset. Omitted when unset (the UI always
+        // passes a key, so this covers only writers without row-height data); absent → Medium.
+        root->setProperty("trackRowHeightPreset", data.trackRowHeightPreset);
+    }
+    if (data.version >= 27 && !data.visualTrackGroups.empty())
+    {
+        // v27 additive: purely visual collapsible track groups. Omitted when no group exists so a
+        // project without groups serializes like v26 apart from the version number. Only identity
+        // (name), membership (TrackIds), and the collapsed display state are written — member row
+        // heights stay on `tracks[].rowHeight` and are NEVER rewritten by collapse state.
+        juce::Array<juce::var> groupsVar;
+        for (const ProjectFileVisualTrackGroupV1& g : data.visualTrackGroups)
+        {
+            juce::DynamicObject::Ptr gv = new juce::DynamicObject();
+            gv->setProperty("name", g.name);
+            if (g.collapsed)
+            {
+                gv->setProperty("collapsed", true);
+            }
+            juce::Array<juce::var> idsVar;
+            for (const TrackId id : g.memberTrackIds)
+            {
+                idsVar.add(static_cast<juce::int64>(id));
+            }
+            gv->setProperty("memberTrackIds", juce::var(idsVar));
+            groupsVar.add(juce::var(gv.get()));
+        }
+        root->setProperty("visualTrackGroups", juce::var(groupsVar));
     }
     root->setProperty("bpm", data.bpm);
     root->setProperty("timeSignatureNumerator", data.timeSignatureNumerator);
@@ -1304,7 +1367,7 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             eo->setProperty("requiredKitName", et.requiredKitName);
             if (data.version >= 13 && et.trackId != 0 && et.trackId != kInvalidTrackId)
             {
-                eo->setProperty("trackId", static_cast<std::int64_t>(et.trackId));
+                eo->setProperty("trackId", static_cast<juce::int64>(et.trackId));
             }
             if (et.pluginBundlePath.isNotEmpty())
             {
@@ -1463,7 +1526,7 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             for (const auto& cl : et.clips)
             {
                 juce::DynamicObject::Ptr co = new juce::DynamicObject();
-                co->setProperty("id", static_cast<std::int64_t>(cl.id));
+                co->setProperty("id", static_cast<juce::int64>(cl.id));
                 co->setProperty("name", cl.name);
                 if (std::isfinite(cl.bpm))
                 {
@@ -1757,6 +1820,105 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         else if (cv.isInt() || cv.isInt64() || cv.isDouble())
         {
             out.cycleEnabled = static_cast<int>(static_cast<double>(cv) + 0.5) != 0;
+        }
+    }
+
+    // v25 optional `soloMemories`: array of up to four arrays of TrackIds. Absent key (every
+    // pre-v25 file) or any malformed shape degrades to empty memories — never a read failure.
+    // Duplicates are dropped here; existence against `tracks` is validated by `Session` on apply.
+    for (auto& mem : out.soloMemories)
+    {
+        mem.clear();
+    }
+    {
+        const juce::var& smv = root.getProperty("soloMemories", {});
+        if (const juce::Array<juce::var>* memories = smv.getArray())
+        {
+            const int memoryCount = std::min(static_cast<int>(memories->size()),
+                                             ProjectFileV1::kSoloMemoryCount);
+            for (int m = 0; m < memoryCount; ++m)
+            {
+                const juce::Array<juce::var>* ids = (*memories)[m].getArray();
+                if (ids == nullptr)
+                {
+                    continue;
+                }
+                std::vector<TrackId>& memOut = out.soloMemories[static_cast<std::size_t>(m)];
+                for (const juce::var& idVar : *ids)
+                {
+                    if (!(idVar.isInt64() || idVar.isInt() || idVar.isDouble()))
+                    {
+                        continue;
+                    }
+                    const std::int64_t raw = static_cast<std::int64_t>(static_cast<double>(idVar));
+                    if (raw <= 0)
+                    {
+                        continue;
+                    }
+                    const TrackId id = static_cast<TrackId>(raw);
+                    if (std::find(memOut.begin(), memOut.end(), id) == memOut.end())
+                    {
+                        memOut.push_back(id);
+                    }
+                }
+            }
+        }
+    }
+
+    // v26 optional `trackRowHeightPreset`: stored raw; absent key (every pre-v26 file), an empty
+    // string or any unknown value is interpreted as Medium by the UI apply — never a read failure.
+    out.trackRowHeightPreset = root.getProperty("trackRowHeightPreset", {}).toString().trim();
+
+    // v27 optional `visualTrackGroups`: array of { name, collapsed, memberTrackIds[] }. Absent key
+    // (every pre-v27 file) or any malformed shape degrades to no groups — never a read failure.
+    // Duplicate/invalid ids are dropped here; existence, contiguity, overlap and the ≥2-member
+    // rule are validated by `Session` on apply (invalid group → normal visible tracks).
+    out.visualTrackGroups.clear();
+    {
+        const juce::var& vgv = root.getProperty("visualTrackGroups", {});
+        if (const juce::Array<juce::var>* groups = vgv.getArray())
+        {
+            for (const juce::var& gVar : *groups)
+            {
+                const juce::DynamicObject* gObj = gVar.getDynamicObject();
+                if (gObj == nullptr)
+                {
+                    continue;
+                }
+                ProjectFileVisualTrackGroupV1 g;
+                g.name = gObj->getProperty("name").toString().trim();
+                const juce::var& cv = gObj->getProperty("collapsed");
+                g.collapsed = cv.isBool() ? static_cast<bool>(cv)
+                                          : ((cv.isInt() || cv.isInt64() || cv.isDouble())
+                                                 && static_cast<double>(cv) != 0.0);
+                const juce::Array<juce::var>* ids = gObj->getProperty("memberTrackIds").getArray();
+                if (ids == nullptr)
+                {
+                    continue;
+                }
+                for (const juce::var& idVar : *ids)
+                {
+                    if (!(idVar.isInt64() || idVar.isInt() || idVar.isDouble()))
+                    {
+                        continue;
+                    }
+                    const std::int64_t raw = static_cast<std::int64_t>(static_cast<double>(idVar));
+                    if (raw <= 0)
+                    {
+                        continue;
+                    }
+                    const TrackId id = static_cast<TrackId>(raw);
+                    if (std::find(g.memberTrackIds.begin(), g.memberTrackIds.end(), id)
+                        == g.memberTrackIds.end())
+                    {
+                        g.memberTrackIds.push_back(id);
+                    }
+                }
+                if (!g.memberTrackIds.empty())
+                {
+                    out.visualTrackGroups.push_back(std::move(g));
+                }
+            }
         }
     }
 
@@ -2110,6 +2272,18 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             else if (mv.isInt() || mv.isInt64() || mv.isDouble())
                 trk.muted = static_cast<int>(static_cast<double>(mv) + 0.5) != 0;
         }
+        {
+            // v26 optional `rowHeight` (any version reads it): numeric and positive, else 0 =
+            // absent → preset default. Range clamping to [Small, max] happens in the UI apply.
+            const juce::var& rhv = tv.getProperty("rowHeight", {});
+            if (rhv.isInt() || rhv.isInt64() || rhv.isDouble())
+            {
+                const double raw = static_cast<double>(rhv);
+                trk.rowHeightPx = (std::isfinite(raw) && raw > 0.0 && raw < 100000.0)
+                                      ? static_cast<int>(raw + 0.5)
+                                      : 0;
+            }
+        }
         if (trk.kind.equalsIgnoreCase("master"))
         {
             trk.off = false;
@@ -2142,7 +2316,7 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
             {
                 if (const auto* outObj = outV.getDynamicObject())
                 {
-                    const TrackId parsed = static_cast<TrackId>((std::uint64_t)(std::int64_t)outObj->getProperty(
+                    const TrackId parsed = static_cast<TrackId>((std::uint64_t)(juce::int64)outObj->getProperty(
                         "trackId"));
                     if (parsed != kInvalidTrackId)
                     {
@@ -2176,7 +2350,7 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                             continue;
                         }
                         const TrackId destId
-                            = static_cast<TrackId>((std::uint64_t)(std::int64_t)destV);
+                            = static_cast<TrackId>((std::uint64_t)(juce::int64)destV);
                         if (destId == kInvalidTrackId)
                         {
                             continue;
@@ -2186,7 +2360,7 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                         const juce::var& slotV = so->getProperty("slot");
                         if (slotV.isInt() || slotV.isInt64())
                         {
-                            sendRow.uiSlotIndex = static_cast<int>((std::int64_t)slotV);
+                            sendRow.uiSlotIndex = static_cast<int>((juce::int64)slotV);
                         }
                         else
                         {

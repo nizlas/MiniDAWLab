@@ -3,7 +3,7 @@
 // =============================================================================
 // TrackHeaderView — shared track header chrome (audio + experimental instrument)
 // =============================================================================
-// Visual: top row — name (+ optional subtitle); below — left-aligned **[Instrument][Power][M][R]** strip (audio: no Instrument).
+// Visual: top row — name (+ optional subtitle); below — left-aligned **[Instrument][Power][M][S][R]** strip (audio: no Instrument).
 // State comes from `TrackHeaderModelProvider`; actions from `TrackHeaderCallbacks`.
 // Optional `TrackHeaderDragHost` + non-`kInvalidTrackId` `dragTrackId` enable header-drag reorder
 // (`setHeaderReorderDrag` can attach drag after construction for experimental instrument shells).
@@ -48,6 +48,16 @@ struct TrackHeaderModel
     bool powerInteractable = true;
     bool muteInteractable = true;
     bool armInteractable = true;
+    /// Solo cell (S, right of Mute). All row kinds except Master/Stereo Out set this true; the
+    /// cell is also omitted when `callbacks.onToggleSolo` is unset (incremental wiring safety).
+    bool soloAvailable = false;
+    /// Explicit membership in the CURRENT solo set (red S). Derived pass-through is never red.
+    bool soloed = false;
+    /// Row is silenced BY SOLO while not stored-muted: the M face uses the distinct dimmed tint.
+    bool soloSilenced = false;
+    /// Solo active anywhere ⇒ Mute edits are locked (command path refuses). The M cell shows the
+    /// effective state with a small lock instead of the generic disabled face, and ignores clicks.
+    bool muteLockedBySolo = false;
     /// When false, Power and Arm cells are omitted from the strip (no greyed placeholders). Used for
     /// `TrackKind::Master` / Stereo Out and `TrackKind::Group` — bus rows use mute-only header chrome.
     bool showRecordAndPowerStripCells = true;
@@ -73,6 +83,13 @@ struct TrackHeaderModel
     /// Live MIDI arrived for this row within the last ~150 ms: a small green dot is painted at
     /// the right end of the name row (discreet activity indicator, never a dialog).
     bool midiActivity = false;
+    /// Header MULTI-selection membership (visual-group creation): a subtle blue wash + hairline
+    /// over the header plate. Independent of `active` — the active-track stripe keeps its own
+    /// look and the Inspector keeps following the single active track.
+    bool headerMultiSelected = false;
+    /// Visual track group membership: a discreet vertical marker along the header's left edge,
+    /// drawn right of the 4 px active stripe so neither it nor any button is obscured.
+    bool visualGroupMember = false;
 };
 
 using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;
@@ -81,9 +98,16 @@ struct TrackHeaderCallbacks
 {
     /// Left-click on name row / drag surface (not on **[Instrument][Power][Mute][R]** strip). Null = no-op.
     std::function<void()> onActivateName;
+    /// Header multi-selection click, dispatched with `onActivateName` from the same press:
+    /// `shiftRange` = shift held (select the contiguous range from the selection anchor);
+    /// otherwise the click selects exactly this header and moves the anchor. Null = no multi-
+    /// selection (clip selection, height drag, and reorder behave exactly as before).
+    std::function<void(bool shiftRange)> onHeaderSelectionClick;
     /// Return true if the click was handled (blocks promoting to header-drag); false = ignored.
     std::function<bool()> onTogglePower;
     std::function<void()> onToggleMute;
+    /// Solo toggle (S cell). Omit (or leave `soloAvailable` false) to hide the cell (Master row).
+    std::function<void()> onToggleSolo;
     std::function<void()> onToggleArm;
     /// Input-monitoring toggle (audio rows; cell omitted when unset or `monitorAvailable` false).
     std::function<void()> onToggleMonitor;
@@ -115,17 +139,17 @@ public:
     static constexpr int kHeaderOuterPadXPx = 8;
     static constexpr int kHeaderNameTrimLeftActivePx = 6;
     static constexpr int kHeaderNameTrimLeftInactivePx = 4;
-    /// Widest control row any row kind can show: [Instrument][Power][Mute][Monitor][Arm] on an
-    /// instrument destination row (audio rows show 4, group/master 1).
-    static constexpr int kMaxStripControlCellCount = 5;
+    /// Widest control row any row kind can show: [Instrument][Power][Mute][Solo][Monitor][Arm] on
+    /// an instrument destination row (audio rows show 5, group 2, master 1).
+    static constexpr int kMaxStripControlCellCount = 6;
     /// Minimum header-column width at which that widest row still ends inside the chrome with the
-    /// standard right pad — in logical (DPI-independent) px: 8 + 6 + 5 × 22 + 8 = 132. Below this
+    /// standard right pad — in logical (DPI-independent) px: 8 + 6 + 6 × 22 + 8 = 154. Below this
     /// the right-most strip cell would be clipped (the 1.1.6 report: Monitor pushed Arm off-edge at
-    /// the old fixed 120 px column).
+    /// the old fixed 120 px column; the Solo slice widened the row by one more cell).
     static constexpr int kMinimumHeaderColumnWidthPx
         = kHeaderOuterPadXPx + kHeaderNameTrimLeftActivePx + kMaxStripControlCellCount * kStripControlCellWidthPx
           + kHeaderOuterPadXPx;
-    /// Default column width: the minimum plus a 12 px visual margin (144 px) so the strip never
+    /// Default column width: the minimum plus a 12 px visual margin (166 px) so the strip never
     /// hugs the boundary / drag handle and the name has a little more room.
     static constexpr int kDefaultHeaderColumnWidthPx = kMinimumHeaderColumnWidthPx + 12;
     /// Deep-sky-blue left-edge stripe painted when the row is the UI-active row.
@@ -156,7 +180,11 @@ public:
 
     /// After a row-height drag ends: snap to name-only or full name+buttons using the 50% visibility rule.
     /// `hasSubtitle` selects the taller name block (instrument subtitle). Must match header paint geometry.
-    /// `globalMinRowPx` must be <= the name-only ideal (`minimumRowHeightPxForNameOnlyLayout`) so the collapsed snap can stick.
+    /// NOTE: since the shared Small preset became the global drag minimum (`globalMinRowPx` =
+    /// `track_row_heights::kSmallRowHeightPx` >= the full name+buttons ideal of every row kind),
+    /// the name-only collapse branch below the full ideal is unreachable from the app's drag path
+    /// — heights pass through clamped unchanged. The branch is kept for the pure-function contract
+    /// (and callers passing a smaller explicit minimum, e.g. tests).
     [[nodiscard]] static int snapTrackHeaderRowHeightAfterResize(int heightPx,
                                                                  bool hasSubtitle,
                                                                  int globalMinRowPx,
@@ -207,6 +235,7 @@ public:
     /// layout verification (non-overlap / visibility checks in the focused UI render tests).
     [[nodiscard]] juce::Rectangle<int> getPowerButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMuteButtonBounds() const noexcept;
+    [[nodiscard]] juce::Rectangle<int> getSoloButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getMonitorButtonBounds() const noexcept;
     [[nodiscard]] juce::Rectangle<int> getArmButtonBounds() const noexcept;
 
@@ -216,6 +245,7 @@ public:
     bool clickMonitorCellLikeMouseForStabilityTest();
     bool clickArmCellLikeMouseForStabilityTest();
     bool clickMuteCellLikeMouseForStabilityTest();
+    bool clickSoloCellLikeMouseForStabilityTest();
     bool clickPowerCellLikeMouseForStabilityTest();
     /// [Stability] Open the header context menu exactly like a right-button press at the header
     /// centre (`mouseDown` with popup modifiers → the owner's `onShowContextMenu`). False when no
@@ -228,6 +258,7 @@ private:
         None,
         Arm,
         Mute,
+        Solo,
         Power,
         Monitor,
         RowResize,
@@ -239,6 +270,8 @@ private:
         InstrumentEditor,
         Power,
         Mute,
+        /// Explicit solo (red S, right of Mute) — every row kind except Master/Stereo Out.
+        Solo,
         /// Input monitoring (speaker glyph, orange when on) — audio rows, left of Arm.
         Monitor,
         Arm,
@@ -256,6 +289,10 @@ private:
         /// State for palette only (`Power`=standby/off, `Mute`=muted, `Arm`=armed). Instrument ignores bits.
         bool powerStandby = false;
         bool muteActive = false;
+        /// Mute cell while solo is active: effective-state display + lock marking (`TrackStripButtonGlyphs`).
+        bool muteSoloSilenced = false;
+        bool muteLocked = false;
+        bool soloActive = false;
         bool armActive = false;
         bool monitorActive = false;
         juce::Rectangle<int> cellBounds;
@@ -275,6 +312,7 @@ private:
     /// Union of control cells (left-aligned strip); strip metrics / painting only (resize hit-test does not use this).
     [[nodiscard]] juce::Rectangle<int> getRightControlsStripBounds() const noexcept;
     [[nodiscard]] bool hasInstrumentEditorCell() const noexcept;
+    [[nodiscard]] bool hasSoloCell() const noexcept;
     [[nodiscard]] bool hasMonitorCell() const noexcept;
     [[nodiscard]] bool hasAlternativesCell() const noexcept;
     /// Bounds of the strip cell at left-to-right `index` (empty when the strip is empty).

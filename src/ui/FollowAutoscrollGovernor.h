@@ -74,7 +74,11 @@ public:
         double userGestureHoldoffMs = 250.0;
     };
 
-    explicit FollowAutoscrollGovernor(const Policy policy = {}) noexcept : policy_(policy) {}
+    // Two constructors instead of one defaulted-argument constructor: GCC rejects using the
+    // nested aggregate's default member initializers in a default argument inside the enclosing
+    // class definition (GCC bug 88165) — MSVC accepted `Policy policy = {}`.
+    FollowAutoscrollGovernor() noexcept {}
+    explicit FollowAutoscrollGovernor(const Policy policy) noexcept : policy_(policy) {}
 
     /// Call once per UI frame tick (frame callback / animation timer), before any page decision in
     /// that tick. Measures the frame interval and clears the clean-frame debt when on time.

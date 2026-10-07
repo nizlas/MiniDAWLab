@@ -615,6 +615,13 @@ void InstrumentTrackController::setMuted(const bool muted) noexcept
     {
         return;
     }
+    // SOLO LOCK (spec §2): `Session::setTrackMuted` refuses while Solo is active; refuse here too
+    // so this controller's mirrored flag (baked into `playbackEnabled`) can never diverge from the
+    // stored Track flag. Project load/undo restore `muted_` directly, never through this command.
+    if (session_ != nullptr && session_->isMuteChangeLockedBySolo())
+    {
+        return;
+    }
     muted_ = muted;
     if (session_ != nullptr && experimentalDomainTrackId_ != kInvalidTrackId)
     {
@@ -2650,6 +2657,7 @@ void InstrumentTrackController::publishRenderSnapshot()
     // Primary was missing even though the loaded Secondary was the active transport host —
     // while plugin-less routed MIDI sources (no host of their own) kept sounding.
     snap->playbackEnabled = trackActive_ && powerOn_ && !muted_;
+    snap->playbackEnabledIgnoringMute = trackActive_ && powerOn_;
 
     // ---- Layering (MidiLayeredRenderBake.h): the clip stack is `clips_` in stored order, last =
     // topmost. Each clip's audible spans are its window minus the windows of the clips above it;
@@ -3028,7 +3036,9 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     const int bufferOffsetInDevice,
     const bool forceDiscontinuity,
     const int deviceBlockNumSamples,
-    int* outMidiEventsEmitted) noexcept
+    int* outMidiEventsEmitted,
+    const bool soloSuppressNewEvents,
+    const bool soloForceAudibleOverridesMute) noexcept
 {
     if (segNumSamples <= 0 || deviceBlockNumSamples <= 0)
     {
@@ -3073,7 +3083,19 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
         rtCcLastSentValue_.fill(-1);
         rtPitchBendLastSentValue_.fill(-1);
     }
-    const bool discontinuity = forceDiscontinuity || revBump || gap || hostSwapChase;
+    // Solo gating transition (ON or OFF) = discontinuity: suppression turning ON flushes this
+    // source's pending note-offs at once (no hanging notes, no leak of its remaining tail into
+    // the soloed picture); turning OFF re-chases CC state so resumed delivery is consistent.
+    const bool soloGateChanged = (soloSuppressNewEvents != rtLastSoloSuppressNewEvents_)
+                                 || (soloForceAudibleOverridesMute != rtLastSoloForceAudible_);
+    rtLastSoloSuppressNewEvents_ = soloSuppressNewEvents;
+    rtLastSoloForceAudible_ = soloForceAudibleOverridesMute;
+    if (soloGateChanged)
+    {
+        rtCcLastSentValue_.fill(-1);
+        rtPitchBendLastSentValue_.fill(-1);
+    }
+    const bool discontinuity = forceDiscontinuity || revBump || gap || hostSwapChase || soloGateChanged;
 
     if (discontinuity)
     {
@@ -3119,8 +3141,11 @@ void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(
     // always flushed so mute/off/host-swap never strands sounding notes. A live-MIDI take on this
     // source row suppresses its own clips the same way (earlier takes must not double the live
     // performance; other rows into the same instrument keep playing).
-    if (!snap->playbackEnabled || !host.acceptsTransportMidi()
-        || rtSuppressTransportClipsForRecording_.load(std::memory_order_acquire))
+    const bool trackStateGate = soloForceAudibleOverridesMute ? snap->playbackEnabledIgnoringMute
+                                                              : snap->playbackEnabled;
+    if (!trackStateGate || !host.acceptsTransportMidi()
+        || rtSuppressTransportClipsForRecording_.load(std::memory_order_acquire)
+        || soloSuppressNewEvents)
     {
         return;
     }

@@ -38,6 +38,7 @@
 #include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "domain/VisualTrackGroup.h"
 #include "domain/AudioMixdownProjectSettings.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginTrackSlot.h"
@@ -45,6 +46,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -248,7 +250,108 @@ public:
     // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.
+    // SOLO LOCK: while Solo is active (`isSoloActive()`), this command REFUSES every change —
+    // the common command path is locked, not just the buttons (spec §2). Project load and undo
+    // restore stored mute flags through snapshot replacement (`applyLoadedProjectModel` /
+    // `restoreSessionSnapshotForUndo`), which never pass through here and are never blocked.
     void setTrackMuted(TrackId trackId, bool muted) noexcept;
+
+    // ------------------------------------------------------------------ Solo
+    // Solo is a temporary LISTENING layer on top of the stored Mute flags: five separate sets of
+    // explicitly soloed TrackIds — ONE temporary set plus FOUR persistent memories (1 … 4).
+    // Exactly one set is "current" at a time: no memory selected (index -1) → the temporary set;
+    // memory 0 … 3 selected → that memory. S buttons always show and edit the current set.
+    // All of this state is message-thread-owned and NOT part of `SessionSnapshot` (like
+    // `activeTrackId_`): the engine consumes a separately published derived view, stored Mute
+    // flags are never rewritten, and whole-session undo snapshots never carry solo state.
+    // Persistence: ONLY the four memories are saved (project v25); the temporary set, the active
+    // selection, and all derived states are reset on load (`resetTransientSoloStateForProjectLoad`).
+    static constexpr int kSoloMemoryCount = 4;
+
+    /// Active memory index 0 … 3, or -1 when the temporary set is current.
+    [[nodiscard]] int getActiveSoloMemoryIndex() const noexcept { return activeSoloMemoryIndex_; }
+    /// [Message thread] Select a memory (0 … 3) or -1 for the temporary set. Switching NEVER
+    /// copies content between sets and never touches the stored sets. Out-of-range → no-op.
+    void setActiveSoloMemoryIndex(int indexOrMinusOne) noexcept;
+
+    /// Raw stored content of the current set (may contain ids of deleted tracks; see
+    /// `getEffectiveSoloedTrackIds` for the validity-filtered view).
+    [[nodiscard]] std::vector<TrackId> getCurrentSoloSetTrackIds() const;
+    [[nodiscard]] std::vector<TrackId> getSoloMemoryTrackIds(int memoryIndex) const;
+    /// [Message thread] Replace one memory's content (narrow undo + project load). Deduplicates;
+    /// invalid ids (0) dropped. Out-of-range index → no-op. Does NOT change the active selection.
+    void setSoloMemoryTrackIds(int memoryIndex, std::vector<TrackId> ids) noexcept;
+
+    /// True when `trackId` is explicitly in the CURRENT set (raw membership; red S face).
+    [[nodiscard]] bool isTrackInCurrentSoloSet(TrackId trackId) const noexcept;
+    /// [Message thread] Toggle explicit membership of `trackId` in the current set. Refuses ids
+    /// not in the current snapshot and the Master row (no S on Stereo Out). Returns true when the
+    /// set changed. When a memory is current this edits the MEMORY directly (callers wrap it in
+    /// the narrow solo-memory undo command); edits of the temporary set are not undoable.
+    [[nodiscard]] bool toggleTrackInCurrentSoloSet(TrackId trackId) noexcept;
+
+    /// Current set filtered to tracks that exist in the current snapshot (deduplicated). Stale
+    /// ids of deleted tracks are invisible here — no ghost solo — but stay stored so undoing a
+    /// track deletion restores membership without any extra bookkeeping.
+    [[nodiscard]] std::vector<TrackId> getEffectiveSoloedTrackIds() const;
+    /// Solo is ACTIVE only when the current set contains ≥1 existing track. A selected but empty
+    /// (or fully stale) memory does not restrict playback and does not lock Mute.
+    [[nodiscard]] bool isSoloActive() const noexcept;
+    /// Normal Mute changes are locked exactly while Solo is active (spec §2).
+    [[nodiscard]] bool isMuteChangeLockedBySolo() const noexcept { return isSoloActive(); }
+
+    /// [Message thread] Project load/new: temporary set cleared, no memory selected. The four
+    /// memories are NOT touched here — the load path assigns them from the parsed file.
+    void resetTransientSoloStateForProjectLoad() noexcept;
+
+    // --------------------------------------------------- Visual track groups
+    // Purely visual collapsible groups of adjacent arrangement tracks (see `VisualTrackGroup.h`).
+    // Message-thread state OUTSIDE `SessionSnapshot`, exactly like the Solo sets: stored member
+    // lists tolerate stale ids of deleted tracks (undoing a deletion restores membership for
+    // free); display and persistence filter to tracks existing in the current snapshot and only
+    // treat a group as *displayable* when ≥2 effective members are contiguous in snapshot order.
+    // None of these commands publish a snapshot — the audio model is never touched.
+
+    /// All stored groups (raw; may contain stale member ids and currently non-displayable groups).
+    [[nodiscard]] const std::vector<VisualTrackGroup>& getVisualTrackGroups() const noexcept
+    {
+        return visualTrackGroups_;
+    }
+    /// [Message thread] Replace ALL group state (narrow undo restore + project load). No validation
+    /// beyond dropping invalid member ids — callers pass states previously produced by this class.
+    void setAllVisualTrackGroups(std::vector<VisualTrackGroup> groups) noexcept;
+
+    /// [Message thread] Create a group of `memberTrackIds` (any order; stored in snapshot order).
+    /// Refuses (returns nullopt, nothing changed) unless the members are ≥2 EXISTING non-Master
+    /// tracks, contiguous in snapshot order, and none is already an effective member of another
+    /// group. Empty/whitespace name → "Group <n>". Created expanded. Returns the new group id.
+    [[nodiscard]] std::optional<int> createVisualTrackGroup(juce::String name,
+                                                            std::vector<TrackId> memberTrackIds) noexcept;
+    /// [Message thread] Rename one group (trimmed; empty after trim or unknown id → no-op).
+    void renameVisualTrackGroup(int groupId, juce::String newName) noexcept;
+    /// [Message thread] Collapse/expand one group (display state only). Unknown id → no-op.
+    /// Returns true when the stored state changed.
+    [[nodiscard]] bool setVisualTrackGroupCollapsed(int groupId, bool collapsed) noexcept;
+    /// [Message thread] Ungroup: remove the group's metadata only. Tracks and clips are untouched.
+    void removeVisualTrackGroup(int groupId) noexcept;
+
+    /// Group by id, or nullptr (pointer invalidated by the next group mutation).
+    [[nodiscard]] const VisualTrackGroup* findVisualTrackGroupById(int groupId) const noexcept;
+    /// Stored members filtered to tracks existing in the current snapshot, in SNAPSHOT order.
+    [[nodiscard]] std::vector<TrackId> getEffectiveVisualGroupMemberTrackIds(int groupId) const;
+    /// True when the group currently qualifies for display: ≥2 effective members, contiguous in
+    /// snapshot order. Non-displayable groups render as normal tracks (safe fallback) and are
+    /// dropped on save.
+    [[nodiscard]] bool isVisualTrackGroupDisplayable(int groupId) const;
+    /// The group whose EFFECTIVE membership contains `trackId` (groups never overlap on effective
+    /// members), or nullopt.
+    [[nodiscard]] std::optional<int> findVisualTrackGroupIdContainingTrack(TrackId trackId) const;
+
+    /// [Message thread] Would `moveTrack(movedTrackId, destIndex)` break any displayable group's
+    /// contiguity (or split a group by landing inside it)? Returns the violated group's name for
+    /// the UI refusal message, or nullopt when the move is safe. Pure check — no state change.
+    [[nodiscard]] std::optional<juce::String> checkTrackMoveAgainstVisualGroups(TrackId movedTrackId,
+                                                                                int destIndex) const;
 
     /// [Message thread] MIDI output channel for this row's own timeline MIDI:
     /// `kTrackMidiOutputChannelAny` preserves each event's stored channel, 1 … 16 remaps every
@@ -364,7 +467,10 @@ public:
         juce::String arrangementSnapResolutionKey = "1_4",
         std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave = std::nullopt,
         std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave = std::nullopt,
-        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave = std::nullopt);
+        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave = std::nullopt,
+        // Optional **v26** UI row heights from the arrangement view (preset key + every row's
+        // actual height); nullopt = omit both keys (heights then load as preset defaults).
+        std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave = std::nullopt);
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).
@@ -455,6 +561,18 @@ private:
     // Current world picture for the audio thread: always either the shared empty snapshot or a
     // user-built snapshot; swapped only from the message thread, read with acquire from any thread.
     mutable std::atomic<std::shared_ptr<const SessionSnapshot>> sessionSnapshot_;
+
+    // [Message thread] Solo listening layer (see the Solo section above): one temporary set +
+    // four persistent memories of explicitly soloed TrackIds, and which set is current (-1 =
+    // temporary). Kept outside `SessionSnapshot` on purpose; stored Mute flags are never rewritten.
+    std::vector<TrackId> temporarySoloSet_;
+    std::array<std::vector<TrackId>, kSoloMemoryCount> soloMemories_;
+    int activeSoloMemoryIndex_ = -1;
+
+    // [Message thread] Visual track groups (see section above): layout metadata outside
+    // `SessionSnapshot`; ids monotonic per session and reassigned on project load.
+    std::vector<VisualTrackGroup> visualTrackGroups_;
+    int nextVisualTrackGroupId_ = 1;
 
     juce::File currentProjectFile_;
     AudioMixdownProjectSettings audioMixdown_;

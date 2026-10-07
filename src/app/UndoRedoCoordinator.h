@@ -78,6 +78,18 @@ public:
         /// Optional: true while a staged project load owns the session — every recorded edit and
         /// undo / redo is refused (the partially applied model must never become an undo step).
         std::function<bool()> isProjectLoadInProgress;
+
+        /// Solo: invoked after undo/redo applied a narrow solo-memory step (the memory content in
+        /// `Session` changed). The app re-derives and republishes the engine's `SoloMuteView` and
+        /// refreshes the S buttons / memory strip — needed when the restored memory is the
+        /// currently active solo set.
+        std::function<void()> refreshSoloStateAfterUndoRestore;
+
+        /// Visual track groups: invoked after undo/redo applied a narrow group-metadata step
+        /// (the full group list in `Session` was replaced). The app relayouts the arrangement
+        /// (markers, handles, collapsed rows) — no audio-side state is involved.
+        /// NOTE: appended LAST on purpose — callers use positional aggregate init.
+        std::function<void()> refreshVisualTrackGroupsAfterUndoRestore;
     };
 
     UndoRedoCoordinator(Session& session, PluginInsertHost& pluginHost, Callbacks callbacks);
@@ -92,6 +104,27 @@ public:
 
     void executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator);
     void executeUndoableInstrumentEdit(const juce::String& label, std::function<bool()> mutator);
+
+    /// Solo (spec §7): ONE narrow undo step for a content change of Solo memory `memoryIndex`
+    /// (an S click while that memory is active, applied by `mutator`). Captures the memory's
+    /// TrackId set before/after around the mutator and records a step that carries ONLY that
+    /// delta (same timeline snapshot pointer on both sides): undoing it can never revert clips,
+    /// tracks, or a committed recording take. Nothing is recorded when the mutator returns false
+    /// or the set is unchanged. Marks the project dirty when a step was recorded. Temporary-set
+    /// edits and memory selection switches must NOT go through here (not undoable, not dirty).
+    void executeUndoableSoloMemoryEdit(const juce::String& label,
+                                       int memoryIndex,
+                                       std::function<bool()> mutator);
+
+    /// Visual track groups (groups spec §7): ONE narrow undo step for a bounded group-metadata
+    /// edit (Create / Rename / Ungroup, applied by `mutator`). Captures the FULL group list
+    /// before/after around the mutator and records a step that carries ONLY that delta (same
+    /// timeline snapshot pointer on both sides): undoing it can never revert clips, tracks, or a
+    /// committed recording take. Nothing is recorded when the mutator returns false or the list
+    /// is unchanged. Marks the project dirty when a step was recorded. Collapse/expand must NOT
+    /// go through here (display change: dirty only, no undo entry).
+    void executeUndoableVisualTrackGroupsEdit(const juce::String& label,
+                                              std::function<bool()> mutator);
 
     /// Recording commit: ONE undo step that may change both the timeline (an audio take clip)
     /// and instrument musical state (live-MIDI take clips on several rows). Records whichever

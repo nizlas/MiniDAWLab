@@ -36,7 +36,9 @@ void SessionHistory::record(juce::String label,
                             std::shared_ptr<const SessionSnapshot> after,
                             std::optional<PluginUndoStepSides> pluginSides,
                             std::optional<InstrumentUndoStepSides> instrumentSides,
-                            std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete) noexcept
+                            std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete,
+                            std::optional<SoloMemoryUndoSides> soloMemorySides,
+                            std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides) noexcept
 {
     if (before == nullptr || after == nullptr)
     {
@@ -53,7 +55,16 @@ void SessionHistory::record(juce::String label,
     const bool instrumentDelta
         = instrumentSides.has_value()
           && !experimentalInstrumentTracksMusicalUndoEqual(instrumentSides->before, instrumentSides->after);
-    if (!pluginDelta && !instrumentDelta)
+    // Solo-memory steps intentionally reuse the SAME snapshot pointer for before/after (narrow
+    // step: the timeline is untouched), so a non-empty solo delta must bypass the identical-ptr
+    // no-op rule the same way a plugin delta does.
+    const bool soloDelta = soloMemorySides.has_value() && soloMemorySides->memoryIndex >= 0
+                           && soloMemorySides->before != soloMemorySides->after;
+    // Visual-group steps reuse the SAME snapshot pointer for before/after too (narrow metadata
+    // step; the timeline is untouched), so a non-empty group delta also bypasses the rule.
+    const bool visualGroupDelta = visualTrackGroupSides.has_value()
+                                  && visualTrackGroupSides->before != visualTrackGroupSides->after;
+    if (!pluginDelta && !instrumentDelta && !soloDelta && !visualGroupDelta)
     {
         if (before.get() == after.get())
         {
@@ -72,7 +83,9 @@ void SessionHistory::record(juce::String label,
                           std::move(after),
                           std::move(pluginSides),
                           std::move(instrumentSides),
-                          std::move(instrumentTrackDelete) });
+                          std::move(instrumentTrackDelete),
+                          std::move(soloMemorySides),
+                          std::move(visualTrackGroupSides) });
     while (static_cast<int>(undo_.size()) > maxSteps_)
     {
         undo_.pop_front();
@@ -103,6 +116,8 @@ std::optional<SessionHistoryRestoreBundle> SessionHistory::popUndo() noexcept
     bundle.pluginSides = step.pluginSides;
     bundle.instrumentSides = step.instrumentSides;
     bundle.instrumentTrackDelete = step.instrumentTrackDelete;
+    bundle.soloMemorySides = step.soloMemorySides;
+    bundle.visualTrackGroupSides = step.visualTrackGroupSides;
     bundle.isRedo = false;
     if constexpr (undo_diagnostic::kUndoDiag)
     {
@@ -132,6 +147,8 @@ std::optional<SessionHistoryRestoreBundle> SessionHistory::popRedo() noexcept
     bundle.pluginSides = step.pluginSides;
     bundle.instrumentSides = step.instrumentSides;
     bundle.instrumentTrackDelete = step.instrumentTrackDelete;
+    bundle.soloMemorySides = step.soloMemorySides;
+    bundle.visualTrackGroupSides = step.visualTrackGroupSides;
     bundle.isRedo = true;
     if constexpr (undo_diagnostic::kUndoDiag)
     {

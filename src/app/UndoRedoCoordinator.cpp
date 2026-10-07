@@ -177,6 +177,27 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
     {
         applyInstrumentTrackRuntimeSides(*bundle->instrumentTrackDelete, *bundle->timelineSnapshot);
     }
+    if (bundle->soloMemorySides.has_value())
+    {
+        // Narrow solo-memory step: write the recorded side back into exactly that memory
+        // (regardless of which memory is active now), then let the app republish the derived view.
+        session_.setSoloMemoryTrackIds(bundle->soloMemorySides->memoryIndex,
+                                       bundle->soloMemorySides->before);
+        if (callbacks_.refreshSoloStateAfterUndoRestore)
+        {
+            callbacks_.refreshSoloStateAfterUndoRestore();
+        }
+    }
+    if (bundle->visualTrackGroupSides.has_value())
+    {
+        // Narrow visual-group step: restore the full recorded group list, then let the app
+        // relayout the arrangement. No audio-side state is involved.
+        session_.setAllVisualTrackGroups(bundle->visualTrackGroupSides->before);
+        if (callbacks_.refreshVisualTrackGroupsAfterUndoRestore)
+        {
+            callbacks_.refreshVisualTrackGroupsAfterUndoRestore();
+        }
+    }
     refreshAfterSessionSnapshotRestore();
     // Stability C3: verify runtime invariants right after the undo completed.
     (void) stability_invariants::runRegisteredStabilityInvariantsCheck("undo-end");
@@ -293,6 +314,23 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
     if (bundle->instrumentTrackDelete.has_value())
     {
         applyInstrumentTrackRuntimeSides(*bundle->instrumentTrackDelete, *bundle->timelineSnapshot);
+    }
+    if (bundle->soloMemorySides.has_value())
+    {
+        session_.setSoloMemoryTrackIds(bundle->soloMemorySides->memoryIndex,
+                                       bundle->soloMemorySides->after);
+        if (callbacks_.refreshSoloStateAfterUndoRestore)
+        {
+            callbacks_.refreshSoloStateAfterUndoRestore();
+        }
+    }
+    if (bundle->visualTrackGroupSides.has_value())
+    {
+        session_.setAllVisualTrackGroups(bundle->visualTrackGroupSides->after);
+        if (callbacks_.refreshVisualTrackGroupsAfterUndoRestore)
+        {
+            callbacks_.refreshVisualTrackGroupsAfterUndoRestore();
+        }
     }
     refreshAfterSessionSnapshotRestore();
     // Stability C3: verify runtime invariants right after the redo completed.
@@ -665,6 +703,94 @@ void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& labe
         writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableInstrumentEdit recorded label=\"" + label
                                    + "\" undoSize=" + juce::String(sessionHistory_.undoStackSize())
                                    + " redoSize=" + juce::String(sessionHistory_.redoStackSize()));
+    }
+}
+
+void UndoRedoCoordinator::executeUndoableSoloMemoryEdit(const juce::String& label,
+                                                        const int memoryIndex,
+                                                        std::function<bool()> mutator)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
+    if (memoryIndex < 0 || memoryIndex >= Session::kSoloMemoryCount)
+    {
+        return;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    std::vector<TrackId> before = session_.getSoloMemoryTrackIds(memoryIndex);
+    if (!mutator())
+    {
+        return;
+    }
+    std::vector<TrackId> after = session_.getSoloMemoryTrackIds(memoryIndex);
+    if (before == after)
+    {
+        return;
+    }
+    sessionHistory_.record(label,
+                           snap,
+                           snap,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           SoloMemoryUndoSides{ memoryIndex, std::move(before), std::move(after) });
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableSoloMemoryEdit recorded label=\"" + label
+                                   + "\" memory=" + juce::String(memoryIndex) + " undoSize="
+                                   + juce::String(sessionHistory_.undoStackSize()));
+    }
+}
+
+void UndoRedoCoordinator::executeUndoableVisualTrackGroupsEdit(const juce::String& label,
+                                                               std::function<bool()> mutator)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return;
+    }
+    std::vector<VisualTrackGroup> before = session_.getVisualTrackGroups();
+    if (!mutator())
+    {
+        return;
+    }
+    std::vector<VisualTrackGroup> after = session_.getVisualTrackGroups();
+    if (before == after)
+    {
+        return;
+    }
+    sessionHistory_.record(label,
+                           snap,
+                           snap,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           VisualTrackGroupsUndoSides{ std::move(before), std::move(after) });
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+    if constexpr (undo_diagnostic::kUndoDiag)
+    {
+        writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableVisualTrackGroupsEdit recorded label=\""
+                                   + label + "\" undoSize="
+                                   + juce::String(sessionHistory_.undoStackSize()));
     }
 }
 

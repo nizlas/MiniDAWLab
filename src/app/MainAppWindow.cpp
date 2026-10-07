@@ -27,6 +27,7 @@
 #include "app/TrackLanesEditCoordinator.h"
 #include "app/TransportLayoutHelper.h"
 #include "app/TransportPlayPauseStopController.h"
+#include "app/SoloCoordinator.h"
 #include "app/UndoRedoCoordinator.h"
 #include "app/ShortcutDiagnostics.h"
 #include "app/TransportControlsFactory.h"
@@ -88,6 +89,7 @@
 #include "ui/UiLayoutSettingsStore.h"
 #include "ui/mixer/MixerWindow.h"
 #include "ui/EditToolIconStrip.h"
+#include "ui/SoloMemoryStrip.h"
 #include "ui/CollapsibleSideStrip.h"
 #include "ui/InspectorView.h"
 #include "ui/InstrumentAlternativesPopup.h"
@@ -547,6 +549,15 @@ public:
                     }
                 },
                 [this] { return isProjectLoadInProgress(); },
+                [this] {
+                    if (soloCoordinator_ != nullptr)
+                    {
+                        soloCoordinator_->republishDerivedView();
+                    }
+                },
+                // Visual track groups: a narrow group-metadata undo step replaced the full group
+                // list in `Session` — relayout the arrangement (markers, handles, collapsed rows).
+                [this] { trackLanesView.refreshVisualTrackGroupsFromSession(); },
             });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
@@ -793,6 +804,13 @@ public:
                 return liveMidiInputCoordinator_ != nullptr
                        && liveMidiInputCoordinator_->liveRecordingRequestedForDestination(tid);
             };
+            // Solo (spec §5): PARTIAL isolation inside a proxied destination (own clips gated, or
+            // a gated subset of its routed sources) forces the safe Secondary live path — a proxy
+            // mixes the full material and cannot isolate. Whole-destination solo never sets this,
+            // so a valid proxy keeps playing for it. Stored proxy identity/currency is untouched.
+            pbDeps.soloIsolationRequested = [this](const TrackId tid) {
+                return soloCoordinator_ != nullptr && soloCoordinator_->soloIsolationRequested(tid);
+            };
             proxyPlaybackCoordinator_
                 = std::make_unique<proxy_playback::ProxyPlaybackCoordinator>(std::move(pbDeps));
         }
@@ -839,6 +857,46 @@ public:
                     }
                 },
             });
+        // ---- Solo (spec §§1–7): ONE command path for every S button and the memory strip, plus
+        // the derived `SoloMuteView` publish flow. Built after the proxy / undo / live-MIDI
+        // coordinators it consults (all access is null-checked for teardown safety anyway).
+        soloCoordinator_ = std::make_unique<SoloCoordinator>(
+            session,
+            playbackEngine_,
+            SoloCoordinator::Callbacks{
+                [this](const TrackId tid) {
+                    return proxyPlaybackCoordinator_ != nullptr
+                           && proxyPlaybackCoordinator_->isPlayingProxy(tid);
+                },
+                [this](const TrackId tid) {
+                    // Same lazy-ensure the proxy coordinator's SecondaryLive override uses.
+                    return instrumentRuntimeCoordinator_ != nullptr
+                           && instrumentRuntimeCoordinator_->ensureSecondaryInstrumentLoadedForTrack(tid);
+                },
+                [this](const TrackId tid) {
+                    if (proxyPlaybackCoordinator_ != nullptr)
+                    {
+                        proxyPlaybackCoordinator_->refreshDestination(tid);
+                    }
+                },
+                [this] { refreshAllSoloUi(); },
+                [](const juce::String& reason) {
+                    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Solo", reason);
+                },
+                [this](const juce::String& label, const int memoryIndex, std::function<bool()> mutator) {
+                    if (undoRedoCoordinator_ != nullptr)
+                    {
+                        undoRedoCoordinator_->executeUndoableSoloMemoryEdit(label, memoryIndex,
+                                                                            std::move(mutator));
+                    }
+                    else if (mutator != nullptr)
+                    {
+                        juce::ignoreUnused(mutator());
+                    }
+                },
+            });
+        trackLanesView.setSoloUiHooks(makeSoloUiHooks());
+
         recordingCoordinator_->setRecordStartBlockedPredicate([this]() -> juce::String {
             return isProjectLoadInProgress() ? juce::String("A project is still opening. Wait until it has finished loading.")
                                              : juce::String();
@@ -1493,6 +1551,8 @@ public:
                 },
                 [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); },
             });
+        // Solo: Instrument + Midi rows consume the same seam as the audio / group headers.
+        instrumentTimelineRowCoordinator_->setSoloUiHooks(makeSoloUiHooks());
         // Live MIDI: Monitor / Arm cells of Instrument + Midi rows read and toggle the runtime
         // flags owned by the live-MIDI coordinator (independent of row selection and of each other).
         instrumentTimelineRowCoordinator_->setLiveMidiCallbacks(
@@ -1875,6 +1935,48 @@ public:
         editToolIconStrip_.onToolSelected = [this](EditTool t) { applyEditToolSelection(t); };
         addAndMakeVisible(editToolIconStrip_);
 
+        // Solo memory strip (spec §3): four toggle buttons above the track-header column, laid
+        // out by `applyTransportControlsLayout`. All semantics live in `SoloCoordinator`.
+        soloMemoryStrip_.activeMemoryIndexProvider = [this] {
+            return soloCoordinator_ != nullptr ? soloCoordinator_->activeSoloMemoryIndex() : -1;
+        };
+        soloMemoryStrip_.onMemoryButtonClick = [this](const int memoryIndex) {
+            if (soloCoordinator_ != nullptr)
+            {
+                soloCoordinator_->handleSoloMemoryButtonClick(memoryIndex);
+            }
+        };
+        addAndMakeVisible(soloMemoryStrip_);
+
+        // Shared track heights (one-shot commands, not a mode): item ids match the preset enum + 1.
+        // "Custom" is only the no-selection status text — deliberately NOT an item.
+        trackRowHeightPresetCombo_.addItem("Small", kTrackRowHeightComboIdSmall);
+        trackRowHeightPresetCombo_.addItem("Medium", kTrackRowHeightComboIdMedium);
+        trackRowHeightPresetCombo_.addItem("Large", kTrackRowHeightComboIdLarge);
+        trackRowHeightPresetCombo_.setTextWhenNothingSelected("Custom");
+        trackRowHeightPresetCombo_.setTooltip("Set the height of all arrangement tracks");
+        // Never take keyboard focus: a focused combo would consume Space (play/pause) after a click.
+        trackRowHeightPresetCombo_.setWantsKeyboardFocus(false);
+        trackRowHeightPresetCombo_.onChange = [this] {
+            namespace trh = track_row_heights;
+            switch (trackRowHeightPresetCombo_.getSelectedId())
+            {
+            case kTrackRowHeightComboIdSmall:
+                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
+                break;
+            case kTrackRowHeightComboIdMedium:
+                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
+                break;
+            case kTrackRowHeightComboIdLarge:
+                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Large);
+                break;
+            default:
+                break; // deselected programmatically (Custom status) — no command.
+            }
+        };
+        addAndMakeVisible(trackRowHeightPresetCombo_);
+        refreshTrackRowHeightPresetComboFromLanes();
+
         configureArrangementMusicalControls();
         addAndMakeVisible(arrangementBpmLabel_);
         addAndMakeVisible(arrangementBpmEditor_);
@@ -2052,6 +2154,13 @@ public:
                 // P1H onProjectLoaded: capture asset source hints for later Save As rehoming.
                 [this](const juce::File& projectFolder) {
                     captureProxyAssetSourceHints(projectFolder);
+                    // Solo: the session reset its transient solo state and adopted the loaded
+                    // memories — republish so the engine drops any previous project's view and
+                    // the S cells / memory strip repaint (memory buttons all off after load).
+                    if (soloCoordinator_ != nullptr)
+                    {
+                        soloCoordinator_->republishDerivedView();
+                    }
                 },
                 // P1H §18.2 onSuccessfulUserSave: queue proxy work per destination update mode
                 // (On Save queues stale destinations; Auto queues only already-eligible work;
@@ -2068,6 +2177,31 @@ public:
                 },
                 // Staged load: centre the progress window over the main window.
                 [this]() -> juce::Component* { return getTopLevelComponent(); },
+                // v26 row heights for save: preset key + every row's actual effective height.
+                [this]() -> std::optional<ProjectFileTrackRowHeightsV1> {
+                    ProjectFileTrackRowHeightsV1 rh;
+                    rh.presetKey = track_row_heights::persistenceKeyForPreset(
+                        trackLanesView.lastChosenTrackRowHeightPreset());
+                    rh.perTrackRowHeightPx = trackLanesView.allTrackRowHeightsPxForProjectSave();
+                    return rh;
+                },
+                // v26 row heights after load: always applied — pre-v26 files reset to Medium.
+                [this](const ProjectFileV1& loaded) {
+                    std::vector<std::pair<TrackId, int>> perTrack;
+                    perTrack.reserve(loaded.tracks.size());
+                    for (const auto& t : loaded.tracks)
+                    {
+                        perTrack.emplace_back(t.id, t.rowHeightPx);
+                    }
+                    trackLanesView.applyTrackRowHeightsFromLoadedProject(loaded.trackRowHeightPreset,
+                                                                         perTrack);
+                    refreshTrackRowHeightPresetComboFromLanes();
+                    appendProjectLoadDiagnosticLine(
+                        "load: row heights preset="
+                        + track_row_heights::persistenceKeyForPreset(
+                            trackLanesView.lastChosenTrackRowHeightPreset())
+                        + (loaded.trackRowHeightPreset.isEmpty() ? " (default, no key)" : ""));
+                },
             });
 
         // Stability C5: app-level states that must block a periodic autosave tick. Everything
@@ -2175,7 +2309,77 @@ public:
         arrangementVerticalScrollBar_.setAutoHide(true);
         arrangementVerticalScrollBar_.setSingleStepSize(32.0);
         arrangementVerticalScrollBar_.addListener(&arrangementVerticalScrollBarListener_);
-        trackLanesView.setOnVerticalScrollModelChanged([this] { syncArrangementVerticalScrollBarFromLanes(); });
+        trackLanesView.setOnVerticalScrollModelChanged([this] {
+            syncArrangementVerticalScrollBarFromLanes();
+            // Track add / duplicate / delete / undo / project switch can all change whether every
+            // row matches one preset — keep the dropdown status in sync from the same signal.
+            refreshTrackRowHeightPresetComboFromLanes();
+        });
+        // Row-height changes (drag, preset command, load apply): dropdown status + dirty flag.
+        // Only user-origin edits mark the project dirty; the load apply passes false.
+        trackLanesView.setOnTrackRowHeightsChanged([this](const bool byUserEdit) {
+            if (byUserEdit && projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->markProjectDirtyFromEdit();
+            }
+            refreshTrackRowHeightPresetComboFromLanes();
+        });
+        // Visual track groups (purely visual; groups spec §7): Create / Rename / Ungroup run as
+        // narrow group-metadata undo steps (never a timeline snapshot); collapse / expand follows
+        // the display-change policy — project dirty, NO undo entry (like row heights above).
+        {
+            VisualTrackGroupUiHooks groupHooks;
+            groupHooks.createGroup = [this](juce::String name, std::vector<TrackId> members) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableVisualTrackGroupsEdit(
+                    "Create track group",
+                    [this, name = std::move(name), members = std::move(members)]() mutable {
+                        return session.createVisualTrackGroup(std::move(name), std::move(members))
+                            .has_value();
+                    });
+                trackLanesView.refreshVisualTrackGroupsFromSession();
+            };
+            groupHooks.renameGroup = [this](const int groupId, juce::String newName) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableVisualTrackGroupsEdit(
+                    "Rename track group",
+                    [this, groupId, newName = std::move(newName)]() mutable {
+                        session.renameVisualTrackGroup(groupId, std::move(newName));
+                        return true; // no-op suppression: the coordinator skips equal before/after
+                    });
+                trackLanesView.refreshVisualTrackGroupsFromSession();
+            };
+            groupHooks.ungroup = [this](const int groupId) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableVisualTrackGroupsEdit(
+                    "Ungroup tracks",
+                    [this, groupId] {
+                        session.removeVisualTrackGroup(groupId);
+                        return true;
+                    });
+                trackLanesView.refreshVisualTrackGroupsFromSession();
+            };
+            groupHooks.setCollapsed = [this](const int groupId, const bool collapsed) {
+                if (session.setVisualTrackGroupCollapsed(groupId, collapsed))
+                {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                    trackLanesView.refreshVisualTrackGroupsFromSession();
+                }
+            };
+            trackLanesView.setVisualTrackGroupUiHooks(std::move(groupHooks));
+        }
         addAndMakeVisible(arrangementVerticalScrollBar_);
         syncArrangementVerticalScrollBarFromLanes();
         refreshInstrumentUi();
@@ -5625,7 +5829,30 @@ public:
             inspectorCollapsedKnob_,
             lanePlayheadOverlay_.get(),
             &arrangementVerticalScrollBar_,
+            &soloMemoryStrip_,
+            &trackRowHeightPresetCombo_,
         });
+    }
+
+    /// Dropdown status <- lanes heights: Small/Medium/Large when ALL rows exactly match that
+    /// preset, otherwise no selection (the combo then shows its "Custom" status text). Silent
+    /// sync — never re-fires the preset command.
+    void refreshTrackRowHeightPresetComboFromLanes()
+    {
+        namespace trh = track_row_heights;
+        const std::optional<trh::TrackRowHeightPreset> status
+            = trackLanesView.uniformTrackRowHeightPresetStatus();
+        int wantedId = 0;
+        if (status.has_value())
+        {
+            wantedId = (*status == trh::TrackRowHeightPreset::Small)  ? kTrackRowHeightComboIdSmall
+                     : (*status == trh::TrackRowHeightPreset::Large)  ? kTrackRowHeightComboIdLarge
+                                                                      : kTrackRowHeightComboIdMedium;
+        }
+        if (trackRowHeightPresetCombo_.getSelectedId() != wantedId)
+        {
+            trackRowHeightPresetCombo_.setSelectedId(wantedId, juce::dontSendNotification);
+        }
     }
 
     /// Scrollbar <- lanes model, without notification (the bar never drives layout from here).
@@ -6337,6 +6564,56 @@ private:
         refreshRowChromeAfterMixerAction();
     }
 
+    /// ONE solo seam for every consumer (arrangement headers, instrument/MIDI rows, mixer strips):
+    /// display state from the coordinator's published picture, S clicks into its command path.
+    [[nodiscard]] SoloUiHooks makeSoloUiHooks()
+    {
+        SoloUiHooks hooks;
+        hooks.displayState = [this](const TrackId tid) {
+            TrackSoloDisplayState st;
+            if (soloCoordinator_ == nullptr)
+            {
+                return st;
+            }
+            st.soloed = soloCoordinator_->isTrackExplicitlySoloed(tid);
+            st.muteLocked = soloCoordinator_->isMuteChangeLocked();
+            if (st.muteLocked
+                && soloCoordinator_->audioDecisionForTrack(tid) == SoloTrackAudioDecision::ForcedSilent)
+            {
+                // Silenced BY SOLO and not stored-muted ⇒ the distinct dimmed M tint. A
+                // stored-muted row keeps its normal mute colours (plus the lock).
+                bool storedMuted = false;
+                if (const auto snap = session.loadSessionSnapshotForAudioThread())
+                {
+                    const int idx = snap->findTrackIndexById(tid);
+                    storedMuted = idx >= 0 && snap->getTrack(idx).isMuted();
+                }
+                st.soloSilenced = !storedMuted;
+            }
+            return st;
+        };
+        hooks.toggleSolo = [this](const TrackId tid) {
+            if (soloCoordinator_ != nullptr)
+            {
+                juce::ignoreUnused(soloCoordinator_->toggleTrackSolo(tid));
+            }
+        };
+        return hooks;
+    }
+
+    /// Repaint everything that shows solo state. The mixer strips follow on their own 10 Hz
+    /// refresh poll (same discipline as every other mixer state change).
+    void refreshAllSoloUi()
+    {
+        trackLanesView.repaint();
+        if (instrumentTimelineRowCoordinator_ != nullptr)
+        {
+            instrumentTimelineRowCoordinator_->repaintInstrumentTrackRow();
+        }
+        soloMemoryStrip_.repaint();
+        inspectorView_.refreshFromSession();
+    }
+
     void buildMixerStripBindings()
     {
         MixerStripBindings& b = mixerBindings_;
@@ -6392,6 +6669,8 @@ private:
             }
             activateTrackLikeHeaderClickForMixer(tid);
         };
+        // Solo: the same seam the arrangement headers use (S cell + locked-M rendering).
+        b.solo = makeSoloUiHooks();
         b.isPowerInteractable = [this] { return !trackLanesView.isStructuralTimelineEditBlocked(); };
         b.togglePower = [this](const TrackId tid) -> bool {
             if (trackLanesView.isStructuralTimelineEditBlocked())
@@ -7835,6 +8114,9 @@ private:
     std::unique_ptr<RecordingCoordinator> recordingCoordinator_;
     std::unique_ptr<TransportPlayPauseStopController> transportPlayPauseStopController_;
     std::unique_ptr<UndoRedoCoordinator> undoRedoCoordinator_;
+    /// Solo commands + derived-view publish (S buttons, memory strip, mute lock, proxy refusal).
+    /// Declared after the undo/proxy coordinators it talks to (all access is null-checked).
+    std::unique_ptr<SoloCoordinator> soloCoordinator_;
     std::unique_ptr<ClipPasteboardController> clipPasteboardController_;
     std::unique_ptr<AudioClipImportCoordinator> audioClipImportCoordinator_;
     std::unique_ptr<InstrumentMidiImportCoordinator> instrumentMidiImportCoordinator_;
@@ -7859,6 +8141,15 @@ private:
 
     AddTrackCornerGlyphButton addTrackCornerPlusButton_;
     EditToolIconStrip editToolIconStrip_;
+    /// Spec §3: the four Solo-memory buttons above the track-header column (main window only).
+    SoloMemoryStrip soloMemoryStrip_;
+    /// Shared track heights: one-shot Small/Medium/Large commands; shows "Custom" (status only,
+    /// never a selectable item) while row heights are mixed. Placed between the Solo memory strip
+    /// and the edit tool strip by `applyTransportControlsLayout`.
+    static constexpr int kTrackRowHeightComboIdSmall = 1;
+    static constexpr int kTrackRowHeightComboIdMedium = 2;
+    static constexpr int kTrackRowHeightComboIdLarge = 3;
+    juce::ComboBox trackRowHeightPresetCombo_;
     juce::Label arrangementBpmLabel_;
     juce::TextEditor arrangementBpmEditor_;
     juce::ComboBox arrangementTimeSignatureCombo_;

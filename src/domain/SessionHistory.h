@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include "domain/SessionSnapshot.h"
+#include "domain/VisualTrackGroup.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginTrackSlot.h"
 
@@ -49,6 +50,32 @@ struct InstrumentTrackDeleteUndoSides
     ProjectFileExperimentalInstrumentTrackV1 row;
 };
 
+/// Narrow Solo-memory undo payload (Solo spec §7): the content change of ONE persistent Solo
+/// memory. Deliberately decoupled from the timeline — a solo-memory step records the SAME
+/// snapshot pointer for before/after, so undoing a memory edit restores exactly that memory's
+/// TrackId set and can never erase a recording take or any other session change. Undo always
+/// targets `memoryIndex` directly (never "the currently active memory"), so it stays correct
+/// even after the user switched the active memory. Temporary-set edits and memory SELECTION
+/// changes are never recorded (not undoable, not dirty).
+struct SoloMemoryUndoSides
+{
+    int memoryIndex = -1; ///< 0 … `Session::kSoloMemoryCount`-1.
+    std::vector<TrackId> before;
+    std::vector<TrackId> after;
+};
+
+/// Narrow visual-track-group undo payload (groups spec §7): the FULL group list before/after one
+/// bounded metadata edit (Create / Rename / Ungroup). Like `SoloMemoryUndoSides` this is
+/// deliberately decoupled from the timeline — the step records the SAME snapshot pointer for
+/// before/after, so undoing a group edit restores exactly the group metadata and can never erase
+/// a recording take or any other session change. Collapse/expand is a display change and is NEVER
+/// recorded here (dirty only, no undo entry).
+struct VisualTrackGroupsUndoSides
+{
+    std::vector<VisualTrackGroup> before;
+    std::vector<VisualTrackGroup> after;
+};
+
 struct SessionHistoryRestoreBundle
 {
     /// Always non-null when `popUndo` / `popRedo` returns has_value.
@@ -59,6 +86,10 @@ struct SessionHistoryRestoreBundle
     std::optional<InstrumentUndoStepSides> instrumentSides {};
     /// Delete Track: instrument runtime restore (undo) / teardown (redo) payload; apply last.
     std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete {};
+    /// Solo memory content step: apply `before` (undo) / `after` (redo) to that memory only.
+    std::optional<SoloMemoryUndoSides> soloMemorySides {};
+    /// Visual-group metadata step: apply `before` (undo) / `after` (redo) as the full group list.
+    std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -79,6 +110,9 @@ public:
                 std::optional<PluginUndoStepSides> pluginSides = std::nullopt,
                 std::optional<InstrumentUndoStepSides> instrumentSides = std::nullopt,
                 std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete
+                = std::nullopt,
+                std::optional<SoloMemoryUndoSides> soloMemorySides = std::nullopt,
+                std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides
                 = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
@@ -101,6 +135,8 @@ private:
         std::optional<PluginUndoStepSides> pluginSides;
         std::optional<InstrumentUndoStepSides> instrumentSides;
         std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete;
+        std::optional<SoloMemoryUndoSides> soloMemorySides;
+        std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides;
     };
 
     int maxSteps_;

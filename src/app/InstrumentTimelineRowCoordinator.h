@@ -12,6 +12,7 @@
 #include "domain/Track.h"
 #include "instruments/InstrumentTrackController.h"
 
+#include "ui/SoloUiHooks.h"
 #include "ui/TrackHeaderView.h"
 
 class Session;
@@ -65,6 +66,11 @@ public:
         /// value) — the take preview's right edge uses the same position and transform as the
         /// playhead line. Falls back to the transport position when absent.
         std::function<double()> playheadDisplaySamplesForUi;
+
+        /// Solo seam (same `SoloUiHooks` semantics as `TrackLanesView::setSoloUiHooks`): display
+        /// state for the S cell / locked-M chrome, toggle for S clicks. Both optional — unwired
+        /// keeps the pre-solo chrome on Instrument/Midi rows.
+        SoloUiHooks soloUiHooks{};
     };
 
     /// Install the live-MIDI header / lane seam after construction (composition root).
@@ -84,6 +90,9 @@ public:
         callbacks_.liveMidiTakePreviewForTrack = std::move(takePreviewForTrack);
         callbacks_.playheadDisplaySamplesForUi = std::move(playheadDisplaySamplesForUi);
     }
+
+    /// Install the solo seam after construction (composition root, next to the lanes' hooks).
+    void setSoloUiHooks(SoloUiHooks hooks) noexcept { callbacks_.soloUiHooks = std::move(hooks); }
 
     /// [Message thread, once per playhead frame] Invalidate only the strip a running take's
     /// preview grew by since the previous frame on the recording lanes (the playhead overlay

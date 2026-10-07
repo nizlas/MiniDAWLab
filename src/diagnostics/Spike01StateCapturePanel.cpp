@@ -729,7 +729,9 @@ private:
         float peak = 0.0f;
         for (std::int64_t pos = 0; pos < r->lengthInSamples;)
         {
-            const int n = (int)juce::jmin((std::int64_t)8192, r->lengthInSamples - pos);
+            // juce::int64 (not std::int64_t): on Linux std::int64_t is `long` while
+            // lengthInSamples is `long long` — jmin needs one common type.
+            const int n = (int)juce::jmin((juce::int64)8192, r->lengthInSamples - pos);
             if (!r->read(&buf, 0, n, pos, true, true))
             {
                 return -1.0f;

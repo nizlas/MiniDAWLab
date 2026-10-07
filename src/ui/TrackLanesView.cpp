@@ -23,6 +23,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_core/juce_core.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -187,7 +188,239 @@ namespace
         return 48000.0;
     }
 
+    /// Mini-strip clip-interval fill: the grey-blue family of the MIDI note previews / clip
+    /// chrome, dim enough to read as an overview, bright enough against the 0xff252528 lane bg.
+    constexpr unsigned int kCollapsedStripClipFillArgb = 0xff8e98a8u;
+    /// Collapsed run's header-column plate behind the marker (slightly lighter than the lane bg).
+    constexpr unsigned int kCollapsedRunHeaderPlateArgb = 0xff2b2d31u;
+    /// The shared group-marker colour (same as the header's left-edge member marker).
+    constexpr unsigned int kVisualGroupMarkerArgb = 0xff6f8096u;
+    /// Marker x inside the header column: right of the 4 px active stripe, left of all content.
+    constexpr int kVisualGroupMarkerXPx = TrackHeaderView::kHeaderActiveStripeWidthPx + 1;
+    constexpr int kVisualGroupMarkerWidthPx = 2;
+    /// Movement past this cancels a pending handle long-press AND the short-click toggle.
+    constexpr int kVisualGroupHandleDragCancelPx = 4;
+
 } // namespace
+
+/// The group handle tab: the "inverted golf club" head where the vertical member marker turns
+/// into a short tab extending right over the header area at the group's top boundary. Owns the
+/// three handle gestures (short click = toggle collapse, long press = inline rename, right-click
+/// = menu) and swallows its mouse events so the row underneath — the previous track's name strip
+/// or resize band — is never activated through it (spec §3).
+class TrackLanesView::VisualGroupHandleView final : public juce::Component,
+                                                    private juce::Timer,
+                                                    private juce::TextEditor::Listener
+{
+public:
+    VisualGroupHandleView(TrackLanesView& owner, const int groupId) noexcept
+        : owner_(owner), groupId_(groupId)
+    {
+        setWantsKeyboardFocus(false);
+    }
+
+    [[nodiscard]] int getGroupId() const noexcept { return groupId_; }
+
+    void setDisplayState(const juce::String& name, const bool collapsed)
+    {
+        if (name_ == name && collapsed_ == collapsed)
+        {
+            return;
+        }
+        name_ = name;
+        collapsed_ = collapsed;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const auto b = getLocalBounds();
+        if (b.isEmpty())
+        {
+            return;
+        }
+        g.setColour(juce::Colour(0xf0343a46));
+        g.fillRoundedRectangle(b.toFloat(), 3.0f);
+        // The member marker's continuation at the tab's left edge (the club's shaft meets the head).
+        g.setColour(juce::Colour(kVisualGroupMarkerArgb));
+        g.fillRect(0, 0, kVisualGroupMarkerWidthPx, b.getHeight());
+        g.drawRoundedRectangle(b.toFloat().reduced(0.5f), 3.0f, 1.0f);
+        // Collapse glyph: a small triangle — down-pointing expanded, right-pointing collapsed.
+        const float gy = (float) (b.getHeight() - 8) * 0.5f;
+        juce::Path p;
+        if (collapsed_)
+        {
+            p.addTriangle(5.0f, gy, 5.0f, gy + 8.0f, 11.0f, gy + 4.0f);
+        }
+        else
+        {
+            p.addTriangle(4.0f, gy + 1.0f, 12.0f, gy + 1.0f, 8.0f, gy + 7.0f);
+        }
+        g.setColour(juce::Colour(0xffd8dee8));
+        g.fillPath(p);
+        if (renameEditor_ == nullptr || !renameEditor_->isVisible())
+        {
+            g.setFont(juce::Font(juce::FontOptions(11.0f)));
+            g.drawFittedText(name_,
+                             b.withTrimmedLeft(15).withTrimmedRight(3),
+                             juce::Justification::centredLeft,
+                             1);
+        }
+    }
+
+    void resized() override
+    {
+        if (renameEditor_ != nullptr && renameEditor_->isVisible())
+        {
+            renameEditor_->setBounds(renameEditorBounds());
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu())
+        {
+            stopTimer();
+            pressActive_ = false;
+            owner_.showVisualGroupHandleContextMenu(groupId_);
+            return;
+        }
+        if (!e.mods.isLeftButtonDown() || (renameEditor_ != nullptr && renameEditor_->isVisible()))
+        {
+            return;
+        }
+        longPressFired_ = false;
+        pressMoved_ = false;
+        pressActive_ = true;
+        startTimer(kVisualGroupHandleLongPressMs);
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (pressActive_ && !pressMoved_
+            && e.getDistanceFromDragStart() > kVisualGroupHandleDragCancelPx)
+        {
+            // Clear mouse movement cancels BOTH the pending long-press rename and the short-click
+            // toggle: a drag off the handle is neither gesture (spec §3).
+            pressMoved_ = true;
+            stopTimer();
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        stopTimer();
+        const bool plainShortClick = pressActive_ && !longPressFired_ && !pressMoved_;
+        pressActive_ = false;
+        if (plainShortClick)
+        {
+            // Short click toggles exactly once; a long press (rename began) must NOT also toggle
+            // at mouse-up (spec §3).
+            owner_.toggleVisualGroupCollapsedFromHandle(groupId_);
+        }
+    }
+
+    /// Inline rename (long press / context menu / test): Enter commits, Escape cancels. The
+    /// editor takes keyboard focus, so app shortcuts cannot swallow the typed text.
+    bool beginInlineRename()
+    {
+        ensureRenameEditor();
+        renameEditor_->setText(name_, juce::dontSendNotification);
+        renameEditor_->setBounds(renameEditorBounds());
+        renameEditor_->setVisible(true);
+        renameEditor_->toFront(true);
+        renameEditor_->selectAll();
+        renameEditor_->grabKeyboardFocus();
+        repaint();
+        return true;
+    }
+
+    [[nodiscard]] bool isRenameEditorOpen() const noexcept
+    {
+        return renameEditor_ != nullptr && renameEditor_->isVisible();
+    }
+
+    /// [Test] The exact commit path of the inline editor with `newName` as its content.
+    bool commitRenameWithTextForTest(const juce::String& newName)
+    {
+        ensureRenameEditor();
+        renameEditor_->setText(newName, juce::dontSendNotification);
+        renameEditor_->setVisible(true);
+        submitRename();
+        return true;
+    }
+
+private:
+    void timerCallback() override
+    {
+        stopTimer();
+        if (!pressActive_ || pressMoved_)
+        {
+            return;
+        }
+        // Central long-press threshold reached without clear movement: rename, not toggle.
+        longPressFired_ = true;
+        beginInlineRename();
+    }
+
+    [[nodiscard]] juce::Rectangle<int> renameEditorBounds() const noexcept
+    {
+        return getLocalBounds().withTrimmedLeft(14).reduced(1);
+    }
+
+    void ensureRenameEditor()
+    {
+        if (renameEditor_ != nullptr)
+        {
+            return;
+        }
+        renameEditor_ = std::make_unique<juce::TextEditor>();
+        renameEditor_->setFont(juce::Font(juce::FontOptions(11.0f)));
+        renameEditor_->setBorder(juce::BorderSize<int>(1));
+        renameEditor_->setSelectAllWhenFocused(true);
+        renameEditor_->addListener(this);
+        addChildComponent(*renameEditor_);
+    }
+
+    void closeRenameEditor() noexcept
+    {
+        if (renameEditor_ != nullptr)
+        {
+            renameEditor_->setVisible(false);
+        }
+        repaint();
+    }
+
+    void submitRename()
+    {
+        if (renameEditor_ == nullptr)
+        {
+            return;
+        }
+        const juce::String newName = renameEditor_->getText().trim();
+        closeRenameEditor();
+        if (newName.isNotEmpty() && newName != name_
+            && owner_.visualGroupUiHooks_.renameGroup != nullptr)
+        {
+            owner_.visualGroupUiHooks_.renameGroup(groupId_, newName);
+        }
+    }
+
+    void textEditorReturnKeyPressed(juce::TextEditor&) override { submitRename(); }
+    void textEditorEscapeKeyPressed(juce::TextEditor&) override { closeRenameEditor(); }
+    void textEditorFocusLost(juce::TextEditor&) override { closeRenameEditor(); }
+
+    TrackLanesView& owner_;
+    const int groupId_;
+    juce::String name_;
+    bool collapsed_ = false;
+    bool pressActive_ = false;
+    bool pressMoved_ = false;
+    bool longPressFired_ = false;
+    std::unique_ptr<juce::TextEditor> renameEditor_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VisualGroupHandleView)
+};
 
 TrackLanesView::TrackLanesView(
     Session& session,
@@ -441,6 +674,21 @@ bool TrackLanesView::verifyVerticalScrollLayoutForDiagnostics(juce::String& repo
                << " header=" << hb.toString() << (lane != nullptr ? " lane=" + lb.toString() : juce::String()) << "\n";
         if (header != nullptr && header->isVisible())
         {
+            // A member of a COLLAPSED visual group keeps its 4 px display row but deliberately
+            // gets EMPTY header/lane bounds — no hidden buttons, hit areas or tooltips under the
+            // mini strip (groups spec §4). Expected-empty like a scrolled-out row.
+            if (isTrackInCollapsedVisualGroup(e.sessionTrackId))
+            {
+                if (!hb.isEmpty() || !lb.isEmpty())
+                {
+                    failReason = juce::String(kind) + " row of track " + juce::String((juce::int64) e.sessionTrackId)
+                                 + " is in a collapsed group but still has laid-out components (header="
+                                 + hb.toString() + " lane=" + lb.toString() + ")";
+                    return false;
+                }
+                expectedY += rowH;
+                continue;
+            }
             if (visibleRow.isEmpty())
             {
                 if (!hb.isEmpty())
@@ -937,6 +1185,24 @@ void TrackLanesView::setInputMonitoringHooks(std::function<bool(TrackId)> isMoni
     toggleTrackInputMonitorFn_ = std::move(toggleMonitor);
 }
 
+void TrackLanesView::setSoloUiHooks(SoloUiHooks hooks) noexcept
+{
+    soloUiHooks_ = std::move(hooks);
+    for (auto& h : headers_)
+    {
+        h->repaint();
+    }
+    for (auto& h : masterHeaders_)
+    {
+        h->repaint();
+    }
+    for (auto& [tid, h] : groupHeaders_)
+    {
+        juce::ignoreUnused(tid);
+        h->repaint();
+    }
+}
+
 void TrackLanesView::setOnAudioClipMouseDownClearForeignSelections(std::function<void()> fn) noexcept
 {
     onAudioClipMouseDownClearForeignSelections_ = std::move(fn);
@@ -1155,6 +1421,25 @@ void TrackLanesView::rebuildVisibleTrackEntries() noexcept
         visibleTrackEntries_.push_back(
             VisibleTrackEntry{ VisibleTrackKind::Instrument, tid });
     }
+
+    // Visual track groups + header multi-selection ride on the visible entries: refresh the
+    // display cache (membership → 4 px collapsed strips, marker/handle runs) and drop selection
+    // ids of tracks that no longer exist.
+    rebuildVisualGroupDisplayCache();
+    if (!headerMultiSelection_.empty())
+    {
+        headerMultiSelection_.erase(
+            std::remove_if(headerMultiSelection_.begin(),
+                           headerMultiSelection_.end(),
+                           [this](const TrackId tid)
+                           { return visibleRowIndexForTrackForDiagnostics(tid) < 0; }),
+            headerMultiSelection_.end());
+    }
+    if (headerSelectionAnchorTid_ != kInvalidTrackId
+        && visibleRowIndexForTrackForDiagnostics(headerSelectionAnchorTid_) < 0)
+    {
+        headerSelectionAnchorTid_ = kInvalidTrackId;
+    }
 }
 
 bool TrackLanesView::isInstrumentTimelineRowVisible() const noexcept
@@ -1350,6 +1635,16 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                                  && toggleTrackInputMonitorFn_ != nullptr;
             m.monitorEnabled = m.monitorAvailable && isTrackInputMonitoredFn_(tid);
             m.monitorInteractable = true;
+            if (soloUiHooks_.displayState != nullptr)
+            {
+                const TrackSoloDisplayState st = soloUiHooks_.displayState(tid);
+                m.soloAvailable = true;
+                m.soloed = st.soloed;
+                m.soloSilenced = st.soloSilenced;
+                m.muteLockedBySolo = st.muteLocked;
+            }
+            m.headerMultiSelected = isHeaderMultiSelected(tid);
+            m.visualGroupMember = isTrackInDisplayableVisualGroup(tid);
             return m;
         };
 
@@ -1361,6 +1656,9 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                 onAudioHeaderActivated_();
             }
             onActive();
+        };
+        callbacks.onHeaderSelectionClick = [this, tid](const bool shiftRange) {
+            handleHeaderSelectionClick(tid, shiftRange);
         };
         callbacks.onToggleArm = [this, tid, onActive, onArm] {
             if (const auto snap = session_.loadSessionSnapshotForAudioThread())
@@ -1418,6 +1716,19 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             }
             onActive();
         };
+        callbacks.onToggleSolo = [this, tid, onActive, onArm] {
+            if (soloUiHooks_.toggleSolo != nullptr)
+            {
+                soloUiHooks_.toggleSolo(tid);
+            }
+            onArm();
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
         callbacks.onTogglePower = [this, tid, onActive, onArm]() -> bool {
             if (isStructuralTimelineEditBlocked())
             {
@@ -1444,6 +1755,9 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         };
         callbacks.onShowContextMenu = [this, tid, onActive, onDelete, pluginHost = trackHeaderPluginHost_](
             TrackHeaderView& self, const juce::MouseEvent&) {
+            // Right-click selection policy (groups spec §2): inside the multi-selection → keep it
+            // so "Create collapsible group…" can target the range; outside → select clicked row.
+            applyHeaderRightClickSelectionPolicy(tid);
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)
             {
@@ -1454,6 +1768,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             juce::PopupMenu menu;
             constexpr int kDeleteTrackMenuId = 1;
             constexpr int kDuplicateTrackMenuId = 2;
+            constexpr int kCreateCollapsibleGroupMenuId = 3;
             constexpr int kLoadVst3MenuId = 10;
             constexpr int kPluginEditorMenuId = 11;
             constexpr int kPluginParamsMenuId = 12;
@@ -1467,6 +1782,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
             menu.addItem(makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
+            appendCreateCollapsibleGroupMenuItem(menu, kCreateCollapsibleGroupMenuId);
 
             if (onAudioTrackImportClipAtPlayhead_ != nullptr)
             {
@@ -1520,6 +1836,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                  onDelete,
                  kDeleteTrackMenuId,
                  kDuplicateTrackMenuId,
+                 kCreateCollapsibleGroupMenuId,
                  kImportAudioClipMenuId,
                  kLoadVst3MenuId,
                  kPluginEditorMenuId,
@@ -1541,6 +1858,11 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                     if (result == kDuplicateTrackMenuId)
                     {
                         requestDuplicateTrackForHeaderMenu(tid);
+                        return;
+                    }
+                    if (result == kCreateCollapsibleGroupMenuId)
+                    {
+                        requestCreateCollapsibleGroupFromSelection();
                         return;
                     }
                     if (result == kImportAudioClipMenuId)
@@ -1783,6 +2105,17 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
         }
         m.powerInteractable = false;
         m.muteInteractable = true;
+        // Master: never an S cell (`soloAvailable` stays false), but its M still shows the
+        // effective state + lock while solo is active elsewhere (mute edits are globally locked).
+        if (soloUiHooks_.displayState != nullptr)
+        {
+            const TrackSoloDisplayState st = soloUiHooks_.displayState(tid);
+            m.soloSilenced = st.soloSilenced;
+            m.muteLockedBySolo = st.muteLocked;
+        }
+        // Stereo Out can be shift-range selected (clear indication) but never grouped — the
+        // Create item validates against Master membership, and `visualGroupMember` stays false.
+        m.headerMultiSelected = isHeaderMultiSelected(tid);
         return m;
     };
 
@@ -1794,6 +2127,9 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
             onAudioHeaderActivated_();
         }
         onActive();
+    };
+    callbacks.onHeaderSelectionClick = [this, tid](const bool shiftRange) {
+        handleHeaderSelectionClick(tid, shiftRange);
     };
     callbacks.onToggleMute = [this, tid, onActive] {
         bool nowMuted = true;
@@ -1886,6 +2222,16 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                 }
             }
             m.muteInteractable = true;
+            if (soloUiHooks_.displayState != nullptr)
+            {
+                const TrackSoloDisplayState st = soloUiHooks_.displayState(tid);
+                m.soloAvailable = true; // group rows solo (mute-only chrome becomes [M][S])
+                m.soloed = st.soloed;
+                m.soloSilenced = st.soloSilenced;
+                m.muteLockedBySolo = st.muteLocked;
+            }
+            m.headerMultiSelected = isHeaderMultiSelected(tid);
+            m.visualGroupMember = isTrackInDisplayableVisualGroup(tid);
             return m;
         };
 
@@ -1898,6 +2244,9 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             }
             onActive();
         };
+        callbacks.onHeaderSelectionClick = [this, tid](const bool shiftRange) {
+            handleHeaderSelectionClick(tid, shiftRange);
+        };
         callbacks.onToggleMute = [this, tid, onActive] {
             bool nowMuted = true;
             if (const auto snap = session_.loadSessionSnapshotForAudioThread())
@@ -1909,6 +2258,18 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                 }
             }
             session_.setTrackMuted(tid, nowMuted);
+            session_.setActiveTrack(tid);
+            if (onAudioHeaderActivated_ != nullptr)
+            {
+                onAudioHeaderActivated_();
+            }
+            onActive();
+        };
+        callbacks.onToggleSolo = [this, tid, onActive] {
+            if (soloUiHooks_.toggleSolo != nullptr)
+            {
+                soloUiHooks_.toggleSolo(tid);
+            }
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)
             {
@@ -1942,6 +2303,7 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
         };
         callbacks.onShowContextMenu = [this, tid, onActive, onDelete](TrackHeaderView& self,
                                                                       const juce::MouseEvent&) {
+            applyHeaderRightClickSelectionPolicy(tid);
             session_.setActiveTrack(tid);
             if (onAudioHeaderActivated_ != nullptr)
             {
@@ -1952,6 +2314,7 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             juce::PopupMenu menu;
             constexpr int kDeleteTrackMenuId = 1;
             constexpr int kDuplicateTrackMenuId = 2;
+            constexpr int kCreateCollapsibleGroupMenuId = 3;
             const bool editLocked = isStructuralTimelineEditBlocked();
             juce::PopupMenu::Item deleteItem;
             deleteItem.itemID = kDeleteTrackMenuId;
@@ -1959,11 +2322,13 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
             menu.addItem(makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
+            appendCreateCollapsibleGroupMenuItem(menu, kCreateCollapsibleGroupMenuId);
 
             juce::Component::SafePointer<TrackHeaderView> safeThis(&self);
             menu.showMenuAsync(
                 juce::PopupMenu::Options().withTargetComponent(&self),
-                [safeThis, this, onDelete, tid, kDeleteTrackMenuId, kDuplicateTrackMenuId](const int result) {
+                [safeThis, this, onDelete, tid, kDeleteTrackMenuId, kDuplicateTrackMenuId,
+                 kCreateCollapsibleGroupMenuId](const int result) {
                     if (safeThis == nullptr)
                     {
                         return;
@@ -1971,6 +2336,11 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
                     if (result == kDuplicateTrackMenuId)
                     {
                         requestDuplicateTrackForHeaderMenu(tid);
+                        return;
+                    }
+                    if (result == kCreateCollapsibleGroupMenuId)
+                    {
+                        requestCreateCollapsibleGroupFromSelection();
                         return;
                     }
                     if (result != kDeleteTrackMenuId || isStructuralTimelineEditBlocked())
@@ -2105,6 +2475,13 @@ void TrackLanesView::resized()
         juce::Rectangle row(area.getX(), y, w, rowH);
         auto visibleRow = row.getIntersection(scrollViewport);
         const VisibleTrackEntry& e = visibleTrackEntries_[(size_t)vi];
+        if (isTrackInCollapsedVisualGroup(e.sessionTrackId))
+        {
+            // Collapsed group member: the 4 px mini strip is painted by this view directly; the
+            // row's header/lane components get EMPTY bounds (like scrolled-out rows) so none of
+            // their buttons, clips or tooltips can be hit under the strip (groups spec §4).
+            visibleRow = {};
+        }
         if (e.kind == VisibleTrackKind::Instrument)
         {
             auto itA = instrumentTimelineAttachments_.find(e.sessionTrackId);
@@ -2190,6 +2567,7 @@ void TrackLanesView::resized()
     {
         timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
     }
+    layoutVisualGroupHandles();
     publishVerticalScrollModelIfChanged();
 }
 
@@ -2307,12 +2685,21 @@ void TrackLanesView::paint(juce::Graphics& g)
         return;
     }
 
+    // Collapsed visual groups: paint the 4 px/member mini strips (grey clip-interval overview)
+    // before the separators so a group's strips read as one gapless block.
+    paintCollapsedGroupContent(g);
+
     int yLine = ay + gutter - verticalScrollOffsetPx_;
     for (int i = 0; i < vr; ++i)
     {
         yLine += rowHeightForVisibleEntry(i);
         if (yLine <= bounds.getY() || yLine >= bounds.getBottom())
         {
+            continue;
+        }
+        if (suppressSeparatorBelowVisibleIndex(i))
+        {
+            // Zero separator between two mini strips of the same collapsed group (spec §4).
             continue;
         }
 
@@ -2341,14 +2728,16 @@ bool TrackLanesView::trackHeaderModelUsesSubtitle(const TrackId tid) const noexc
 
 int TrackLanesView::minimumRowHeightPxForTrackHeader(const TrackId tid) const noexcept
 {
-    return TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(trackHeaderModelUsesSubtitle(tid));
+    juce::ignoreUnused(tid);
+    // The minimum individual height equals the shared Small preset for EVERY row kind: the
+    // smallest height where title row + full control strip + resize band fit without overlap
+    // (`ui/TrackRowHeightPresets.h`; the old name-only collapse below that is no longer reachable).
+    return track_row_heights::kSmallRowHeightPx;
 }
 
 int TrackLanesView::rowHeightForTrack(const TrackId tid) const noexcept
 {
-    const int lo = (tid == kInvalidTrackId)
-                       ? TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(false)
-                       : minimumRowHeightPxForTrackHeader(tid);
+    const int lo = track_row_heights::kSmallRowHeightPx;
     if (tid == kInvalidTrackId)
     {
         return juce::jlimit(lo, maxRowHeightPx_, defaultRowHeightPx_);
@@ -2364,7 +2753,15 @@ int TrackLanesView::rowHeightForVisibleEntry(const int visibleIndex) const noexc
     {
         return 0;
     }
-    return rowHeightForTrack(visibleTrackEntries_[(size_t)visibleIndex].sessionTrackId);
+    // DISPLAY height: a member of a collapsed visual group shows as a 4 px mini strip. The
+    // STORED normal height (`rowHeightForTrack`, used by save / preset status / duplicate /
+    // resize) is deliberately untouched — collapse never rewrites a row height.
+    const TrackId tid = visibleTrackEntries_[(size_t)visibleIndex].sessionTrackId;
+    if (isTrackInCollapsedVisualGroup(tid))
+    {
+        return kCollapsedGroupMemberRowHeightPx;
+    }
+    return rowHeightForTrack(tid);
 }
 
 int TrackLanesView::visibleRowPixelHeight(const int visibleIndex) const noexcept
@@ -2400,6 +2797,7 @@ void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) 
     {
         return;
     }
+    const int before = rowHeightForTrack(tid);
     const int lo = minimumRowHeightPxForTrackHeader(tid);
     const int nh = juce::jlimit(lo, maxRowHeightPx_, heightPx);
     if (nh == defaultRowHeightPx_)
@@ -2412,6 +2810,139 @@ void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) 
     }
     resized();
     repaint();
+    if (nh != before)
+    {
+        // Every caller of this setter is a user-origin edit (drag / stability click-path); the
+        // project-load apply uses `applyTrackRowHeightsFromLoadedProject` and never lands here.
+        notifyTrackRowHeightsChanged(true);
+    }
+}
+
+void TrackLanesView::notifyTrackRowHeightsChanged(const bool byUserEdit) noexcept
+{
+    if (onTrackRowHeightsChanged_)
+    {
+        onTrackRowHeightsChanged_(byUserEdit);
+    }
+}
+
+TrackId TrackLanesView::topVisibleTrackIdForCurrentOffset() const noexcept
+{
+    int acc = 0;
+    for (int vi = 0; vi < (int) visibleTrackEntries_.size(); ++vi)
+    {
+        const int h = rowHeightForVisibleEntry(vi); // display height (4 px collapsed strips)
+        if (verticalScrollOffsetPx_ < acc + h)
+        {
+            return visibleTrackEntries_[(size_t) vi].sessionTrackId;
+        }
+        acc += h;
+    }
+    return visibleTrackEntries_.empty() ? kInvalidTrackId
+                                        : visibleTrackEntries_.back().sessionTrackId;
+}
+
+void TrackLanesView::applyTrackRowHeightPreset(
+    const track_row_heights::TrackRowHeightPreset preset) noexcept
+{
+    namespace trh = track_row_heights;
+    // Capture the topmost visible track with the OLD heights before anything changes.
+    const TrackId keepTopTid = topVisibleTrackIdForCurrentOffset();
+    lastChosenRowHeightPreset_ = preset;
+    defaultRowHeightPx_ = trh::heightPxForPreset(preset);
+    perTrackRowHeightPx_.clear();
+    // ONE gathered layout pass for every row (incl. scrolled-out ones) — `resized()` lays the
+    // whole stack out from the shared height model; no per-track relayouts.
+    resized();
+    if (keepTopTid != kInvalidTrackId)
+    {
+        // Preserve the previously topmost visible track; the same clamp path as the wheel keeps
+        // the offset valid when the content shrank below the viewport.
+        scrollVerticallyToOffsetPx(rowTopOffsetPxForTrackForDiagnostics(keepTopTid));
+    }
+    repaint();
+    notifyTrackRowHeightsChanged(true);
+}
+
+std::optional<track_row_heights::TrackRowHeightPreset>
+TrackLanesView::uniformTrackRowHeightPresetStatus() const noexcept
+{
+    namespace trh = track_row_heights;
+    if (visibleTrackEntries_.empty())
+    {
+        return trh::presetMatchingHeightPx(juce::jlimit(trh::kSmallRowHeightPx, maxRowHeightPx_,
+                                                        defaultRowHeightPx_));
+    }
+    const int first = rowHeightForTrack(visibleTrackEntries_.front().sessionTrackId);
+    for (const auto& e : visibleTrackEntries_)
+    {
+        if (rowHeightForTrack(e.sessionTrackId) != first)
+        {
+            return std::nullopt;
+        }
+    }
+    return trh::presetMatchingHeightPx(first);
+}
+
+std::vector<std::pair<TrackId, int>> TrackLanesView::allTrackRowHeightsPxForProjectSave() const
+{
+    std::vector<std::pair<TrackId, int>> out;
+    const int n = session_.getNumTracks();
+    out.reserve(static_cast<std::size_t>(juce::jmax(0, n)));
+    for (int i = 0; i < n; ++i)
+    {
+        const TrackId tid = session_.getTrackIdAtIndex(i);
+        if (tid != kInvalidTrackId)
+        {
+            out.emplace_back(tid, rowHeightForTrack(tid));
+        }
+    }
+    return out;
+}
+
+void TrackLanesView::applyTrackRowHeightsFromLoadedProject(
+    const juce::String& presetKey, const std::vector<std::pair<TrackId, int>>& perTrackPx) noexcept
+{
+    namespace trh = track_row_heights;
+    lastChosenRowHeightPreset_ = trh::presetFromPersistenceKey(presetKey);
+    defaultRowHeightPx_ = trh::heightPxForPreset(lastChosenRowHeightPreset_);
+    perTrackRowHeightPx_.clear();
+    for (const auto& [tid, px] : perTrackPx)
+    {
+        if (tid == kInvalidTrackId || px <= 0)
+        {
+            continue; // absent / malformed height: the row keeps the project default.
+        }
+        const int clamped = juce::jlimit(trh::kSmallRowHeightPx, maxRowHeightPx_, px);
+        if (clamped != defaultRowHeightPx_)
+        {
+            perTrackRowHeightPx_[tid] = clamped;
+        }
+    }
+    prunePerTrackRowHeightsNotInSession();
+    resized();
+    repaint();
+    notifyTrackRowHeightsChanged(false);
+}
+
+void TrackLanesView::copyRowHeightForDuplicatedTrack(const TrackId sourceTid,
+                                                     const TrackId newTid) noexcept
+{
+    if (sourceTid == kInvalidTrackId || newTid == kInvalidTrackId || sourceTid == newTid)
+    {
+        return;
+    }
+    const int h = rowHeightForTrack(sourceTid);
+    if (h == defaultRowHeightPx_)
+    {
+        perTrackRowHeightPx_.erase(newTid);
+    }
+    else
+    {
+        perTrackRowHeightPx_[newTid] = h;
+    }
+    // The caller follows with `syncTracksFromSession()` + layout; duplication marks the project
+    // dirty through its own undoable step, so no user-edit notification is needed here.
 }
 
 void TrackLanesView::snapTrackHeaderRowHeightAfterResize(const TrackId tid,
@@ -2609,7 +3140,12 @@ void TrackLanesView::updateHeaderTrackDrag(const TrackId movedId, const juce::Po
     }
 
     const int destVis = bestK <= sv ? bestK : (bestK - 1);
-    const bool noop = (destVis == sv);
+    // Visual track groups (spec §6): a reorder that would split a displayable group's contiguity
+    // (or drop an outside track into its middle) is refused — shown as the red no-op line while
+    // dragging; the drop explains with the group's name (`endHeaderTrackDrag`).
+    const bool violatesGroup
+        = destVis != sv && session_.checkTrackMoveAgainstVisualGroups(movedId, destVis).has_value();
+    const bool noop = (destVis == sv) || violatesGroup;
     headerTrackDragNoop_ = noop;
     if (noop)
     {
@@ -2645,7 +3181,20 @@ void TrackLanesView::endHeaderTrackDrag(const TrackId movedId)
     {
         const int k = headerTrackDragInsertGapK_;
         const int destSessionIndex = (k <= sv) ? k : (k - 1);
-        if (committedHeaderDragTrackReorder_ != nullptr)
+        // Visual track groups (spec §6): refuse clearly instead of splitting a group. The drag
+        // already showed this as a red no-op line; this is the final guard at the drop (the
+        // session-side `moveTrack` veto backs it up for every other call site).
+        if (const std::optional<juce::String> violatedGroupName
+            = session_.checkTrackMoveAgainstVisualGroups(movedId, destSessionIndex);
+            violatedGroupName.has_value())
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "Move track",
+                "This move would split the collapsible group \"" + *violatedGroupName
+                    + "\". Ungroup it first (right-click the group handle) to move the track here.");
+        }
+        else if (committedHeaderDragTrackReorder_ != nullptr)
         {
             committedHeaderDragTrackReorder_(movedId, destSessionIndex);
         }
@@ -2718,6 +3267,10 @@ void TrackLanesView::paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g)
         if (yLine <= bounds.getY() || yLine >= bounds.getBottom())
         {
             continue;
+        }
+        if (suppressSeparatorBelowVisibleIndex(i))
+        {
+            continue; // gapless mini strips of one collapsed group (spec §4)
         }
 
         g.drawHorizontalLine(yLine, (float)bounds.getX(), (float)hx);
@@ -3125,4 +3678,540 @@ void TrackLanesView::selectPlacedClipOnTrack(const TrackId tid, const PlacedClip
             break;
         }
     }
+}
+
+// =============================================================================
+// Visual track groups (collapsible, purely visual) + header multi-selection
+// =============================================================================
+
+void TrackLanesView::setVisualTrackGroupUiHooks(VisualTrackGroupUiHooks hooks) noexcept
+{
+    visualGroupUiHooks_ = std::move(hooks);
+}
+
+void TrackLanesView::refreshVisualTrackGroupsFromSession() noexcept
+{
+    rebuildVisibleTrackEntries(); // also rebuilds the group display cache + handles
+    resized();
+    repaint();
+}
+
+void TrackLanesView::rebuildVisualGroupDisplayCache()
+{
+    visualGroupMembershipByTrackId_.clear();
+    visualGroupDisplayRuns_.clear();
+    for (const VisualTrackGroup& g : session_.getVisualTrackGroups())
+    {
+        if (!session_.isVisualTrackGroupDisplayable(g.id))
+        {
+            continue; // Safe fallback: members render as normal tracks.
+        }
+        const std::vector<TrackId> members = session_.getEffectiveVisualGroupMemberTrackIds(g.id);
+        int firstVi = -1;
+        int lastVi = -1;
+        bool allVisible = true;
+        for (const TrackId tid : members)
+        {
+            const int vi = visibleRowIndexForTrackForDiagnostics(tid);
+            if (vi < 0)
+            {
+                allVisible = false; // e.g. an instrument row without a UI attachment yet
+                break;
+            }
+            firstVi = (firstVi < 0) ? vi : juce::jmin(firstVi, vi);
+            lastVi = juce::jmax(lastVi, vi);
+        }
+        // The run must map to one contiguous block of VISIBLE rows too; otherwise skip it for
+        // this layout pass (no marker/handle/collapse) without touching any data.
+        if (!allVisible || firstVi < 0 || lastVi - firstVi + 1 != (int) members.size())
+        {
+            continue;
+        }
+        VisualGroupDisplayRun run;
+        run.groupId = g.id;
+        run.name = g.name;
+        run.collapsed = g.collapsed;
+        run.firstVisibleIndex = firstVi;
+        run.lastVisibleIndex = lastVi;
+        visualGroupDisplayRuns_.push_back(std::move(run));
+        for (const TrackId tid : members)
+        {
+            visualGroupMembershipByTrackId_[tid] = VisualGroupMembershipCacheEntry{ g.id, g.collapsed };
+        }
+    }
+    rebuildVisualGroupHandles();
+}
+
+void TrackLanesView::rebuildVisualGroupHandles()
+{
+    // Drop handles of groups that are no longer displayable…
+    for (auto it = visualGroupHandles_.begin(); it != visualGroupHandles_.end();)
+    {
+        if (findVisualGroupRun(it->first) == nullptr)
+        {
+            it = visualGroupHandles_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    // …and ensure one per current run, with up-to-date name/collapse display state.
+    for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
+    {
+        auto it = visualGroupHandles_.find(run.groupId);
+        if (it == visualGroupHandles_.end())
+        {
+            auto handle = std::make_unique<VisualGroupHandleView>(*this, run.groupId);
+            addAndMakeVisible(*handle);
+            it = visualGroupHandles_.emplace(run.groupId, std::move(handle)).first;
+        }
+        it->second->setDisplayState(run.name, run.collapsed);
+    }
+}
+
+int TrackLanesView::yTopForVisibleIndex(const int vi) const noexcept
+{
+    int y = getLocalBounds().getY() + kArrangementTimelineHeaderGutterPx - verticalScrollOffsetPx_;
+    for (int i = 0; i < vi && i < (int) visibleTrackEntries_.size(); ++i)
+    {
+        y += rowHeightForVisibleEntry(i);
+    }
+    return y;
+}
+
+void TrackLanesView::layoutVisualGroupHandles() noexcept
+{
+    const int gutterBottom = getLocalBounds().getY() + kArrangementTimelineHeaderGutterPx;
+    for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
+    {
+        const auto it = visualGroupHandles_.find(run.groupId);
+        if (it == visualGroupHandles_.end() || it->second == nullptr)
+        {
+            continue;
+        }
+        VisualGroupHandleView& handle = *it->second;
+        const int topY = yTopForVisibleIndex(run.firstVisibleIndex);
+        const int bottomY = yTopForVisibleIndex(run.lastVisibleIndex)
+                            + rowHeightForVisibleEntry(run.lastVisibleIndex);
+        if (bottomY <= gutterBottom || topY >= getHeight() || getHeight() <= gutterBottom)
+        {
+            handle.setBounds(0, 0, 0, 0); // group fully scrolled out
+            continue;
+        }
+        // Centre the tab on the boundary between the first member and the previous track; when
+        // the group is first or that boundary is above the viewport top, clamp it below the
+        // gutter so the handle stays visible and clickable (sticky while the group intersects).
+        int tabTop = topY - kVisualGroupHandleHeightPx / 2;
+        tabTop = juce::jmax(tabTop, gutterBottom);
+        tabTop = juce::jmin(tabTop, bottomY - kVisualGroupHandleHeightPx);
+        tabTop = juce::jmax(tabTop, gutterBottom); // tiny collapsed run near the top: gutter wins
+        const int x = kVisualGroupMarkerXPx;
+        const int w = juce::jmin(kVisualGroupHandleMaxWidthPx,
+                                 juce::jmax(0, headerColumnWidthPx() - x - 6));
+        handle.setBounds(x, tabTop, w, kVisualGroupHandleHeightPx);
+        handle.toFront(false);
+    }
+}
+
+const TrackLanesView::VisualGroupDisplayRun*
+TrackLanesView::findVisualGroupRun(const int groupId) const noexcept
+{
+    for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
+    {
+        if (run.groupId == groupId)
+        {
+            return &run;
+        }
+    }
+    return nullptr;
+}
+
+bool TrackLanesView::isTrackInDisplayableVisualGroup(const TrackId tid) const noexcept
+{
+    return visualGroupMembershipByTrackId_.find(tid) != visualGroupMembershipByTrackId_.end();
+}
+
+bool TrackLanesView::isTrackInCollapsedVisualGroup(const TrackId tid) const noexcept
+{
+    const auto it = visualGroupMembershipByTrackId_.find(tid);
+    return it != visualGroupMembershipByTrackId_.end() && it->second.collapsed;
+}
+
+bool TrackLanesView::suppressSeparatorBelowVisibleIndex(const int vi) const noexcept
+{
+    if (vi < 0 || vi + 1 >= (int) visibleTrackEntries_.size())
+    {
+        return false;
+    }
+    const auto a = visualGroupMembershipByTrackId_.find(visibleTrackEntries_[(size_t) vi].sessionTrackId);
+    const auto b
+        = visualGroupMembershipByTrackId_.find(visibleTrackEntries_[(size_t) vi + 1].sessionTrackId);
+    return a != visualGroupMembershipByTrackId_.end() && b != visualGroupMembershipByTrackId_.end()
+           && a->second.groupId == b->second.groupId && a->second.collapsed && b->second.collapsed;
+}
+
+void TrackLanesView::paintCollapsedGroupContent(juce::Graphics& g) const
+{
+    const auto bounds = getLocalBounds();
+    constexpr int gutter = kArrangementTimelineHeaderGutterPx;
+    const int headerW = juce::jmin(headerColumnWidthPx(), bounds.getWidth());
+    const int hx = bounds.getX() + headerW;
+    const int tw = juce::jmax(0, bounds.getWidth() - headerW);
+    const double spp = timelineViewport_.getSamplesPerPixel();
+    const std::int64_t visStart = timelineViewport_.getVisibleStartSamples();
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    const juce::Rectangle<int> viewport = bounds.withTrimmedTop(gutter);
+
+    for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
+    {
+        if (!run.collapsed)
+        {
+            continue;
+        }
+        const int runTop = yTopForVisibleIndex(run.firstVisibleIndex);
+        const int runBottom = yTopForVisibleIndex(run.lastVisibleIndex)
+                              + rowHeightForVisibleEntry(run.lastVisibleIndex);
+        const juce::Rectangle<int> runRect(bounds.getX(), runTop, bounds.getWidth(), runBottom - runTop);
+        const juce::Rectangle<int> runVisible = runRect.getIntersection(viewport);
+        if (runVisible.isEmpty())
+        {
+            continue;
+        }
+        juce::Graphics::ScopedSaveState const gs(g);
+        g.reduceClipRegion(runVisible);
+        // Header column: a quiet plate + the group marker — no title row, no buttons; the handle
+        // tab (a separate child component) is the only interactive element of a collapsed group.
+        if (headerW > 0)
+        {
+            g.setColour(juce::Colour(kCollapsedRunHeaderPlateArgb));
+            g.fillRect(bounds.getX(), runTop, headerW, runBottom - runTop);
+            g.setColour(juce::Colour(kVisualGroupMarkerArgb));
+            g.fillRect(bounds.getX() + kVisualGroupMarkerXPx,
+                       runTop,
+                       kVisualGroupMarkerWidthPx,
+                       runBottom - runTop);
+        }
+        // Lane area: one 4 px strip per member, zero gap, grey clip-interval fields that follow
+        // the exact same zoom / scroll / origin mapping as the full lanes. Purely painted — no
+        // components, so there is nothing to hit, hover, drag, or tooltip (spec §4).
+        if (tw <= 0 || spp <= 0.0 || snap == nullptr)
+        {
+            continue;
+        }
+        const float originX = (float) hx;
+        const auto sampleToX = [&](const std::int64_t s) {
+            return TimelineRulerView::sessionSampleToLocalX(s, originX, visStart, spp);
+        };
+        g.setColour(juce::Colour(kCollapsedStripClipFillArgb));
+        int y = runTop;
+        for (int vi = run.firstVisibleIndex; vi <= run.lastVisibleIndex; ++vi)
+        {
+            const int stripH = rowHeightForVisibleEntry(vi);
+            const VisibleTrackEntry& e = visibleTrackEntries_[(size_t) vi];
+            const auto fillInterval = [&](const std::int64_t startS, const std::int64_t lenS) {
+                if (lenS <= 0)
+                {
+                    return;
+                }
+                const float x1 = juce::jmax((float) hx, sampleToX(startS));
+                const float x2 = juce::jmin((float) bounds.getRight(), sampleToX(startS + lenS));
+                if (x2 > x1)
+                {
+                    g.fillRect(x1, (float) y, x2 - x1, (float) stripH);
+                }
+            };
+            if (e.kind == VisibleTrackKind::Audio)
+            {
+                const int ti = snap->findTrackIndexById(e.sessionTrackId);
+                if (ti >= 0)
+                {
+                    for (const PlacedClip& c : snap->getTrack(ti).getPlacedClips())
+                    {
+                        fillInterval(c.getStartSample(), c.getEffectiveLengthSamples());
+                    }
+                }
+            }
+            else if (e.kind == VisibleTrackKind::Instrument)
+            {
+                // Instrument destination AND Midi rows: this row's OWN timeline MIDI clips only.
+                // A clean destination without own clips gets NO fabricated events from routed
+                // MIDI tracks (spec §4).
+                const auto itA = instrumentTimelineAttachments_.find(e.sessionTrackId);
+                if (itA != instrumentTimelineAttachments_.end() && itA->second.controller != nullptr)
+                {
+                    for (const auto& clip : itA->second.controller->getClips())
+                    {
+                        if (clip != nullptr)
+                        {
+                            fillInterval(clip->startSamples, clip->lengthSamples);
+                        }
+                    }
+                }
+            }
+            // Group / Master rows have no timeline clips: their strip stays empty.
+            y += stripH;
+        }
+    }
+}
+
+// --------------------------------------------------------- header multi-selection
+
+void TrackLanesView::handleHeaderSelectionClick(const TrackId tid, const bool shiftRange) noexcept
+{
+    const int vi = visibleRowIndexForTrackForDiagnostics(tid);
+    if (vi < 0)
+    {
+        return;
+    }
+    const int anchorVi = headerSelectionAnchorTid_ != kInvalidTrackId
+                             ? visibleRowIndexForTrackForDiagnostics(headerSelectionAnchorTid_)
+                             : -1;
+    headerMultiSelection_.clear();
+    if (!shiftRange || anchorVi < 0)
+    {
+        headerMultiSelection_.push_back(tid);
+        headerSelectionAnchorTid_ = tid;
+    }
+    else
+    {
+        // Contiguous range from the anchor (anchor itself unchanged, so another shift-click can
+        // re-span from the same anchor).
+        const int lo = juce::jmin(anchorVi, vi);
+        const int hi = juce::jmax(anchorVi, vi);
+        for (int i = lo; i <= hi; ++i)
+        {
+            headerMultiSelection_.push_back(visibleTrackEntries_[(size_t) i].sessionTrackId);
+        }
+    }
+    repaint();
+}
+
+bool TrackLanesView::isHeaderMultiSelected(const TrackId tid) const noexcept
+{
+    return std::find(headerMultiSelection_.begin(), headerMultiSelection_.end(), tid)
+           != headerMultiSelection_.end();
+}
+
+void TrackLanesView::clearHeaderMultiSelection() noexcept
+{
+    if (headerMultiSelection_.empty() && headerSelectionAnchorTid_ == kInvalidTrackId)
+    {
+        return;
+    }
+    headerMultiSelection_.clear();
+    headerSelectionAnchorTid_ = kInvalidTrackId;
+    repaint();
+}
+
+void TrackLanesView::applyHeaderRightClickSelectionPolicy(const TrackId clickedTid) noexcept
+{
+    // Right-click INSIDE the selection keeps it (so "Create collapsible group…" can target the
+    // range); outside it selects the clicked track first — never a stale cross-row menu (spec §2).
+    if (!isHeaderMultiSelected(clickedTid))
+    {
+        handleHeaderSelectionClick(clickedTid, false);
+    }
+}
+
+std::vector<TrackId> TrackLanesView::selectedHeaderTrackIdsInVisibleOrder() const
+{
+    std::vector<std::pair<int, TrackId>> ordered;
+    ordered.reserve(headerMultiSelection_.size());
+    for (const TrackId tid : headerMultiSelection_)
+    {
+        const int vi = visibleRowIndexForTrackForDiagnostics(tid);
+        if (vi >= 0)
+        {
+            ordered.emplace_back(vi, tid);
+        }
+    }
+    std::sort(ordered.begin(), ordered.end());
+    std::vector<TrackId> out;
+    out.reserve(ordered.size());
+    for (const auto& [vi, tid] : ordered)
+    {
+        juce::ignoreUnused(vi);
+        out.push_back(tid);
+    }
+    return out;
+}
+
+bool TrackLanesView::canCreateCollapsibleGroupFromCurrentSelection() const
+{
+    const std::vector<TrackId> sel = selectedHeaderTrackIdsInVisibleOrder();
+    if (sel.size() < 2)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return false;
+    }
+    int prevIdx = -2;
+    for (const TrackId tid : sel)
+    {
+        const int idx = snap->findTrackIndexById(tid);
+        if (idx < 0 || snap->getTrack(idx).getKind() == TrackKind::Master
+            || session_.findVisualTrackGroupIdContainingTrack(tid).has_value())
+        {
+            return false; // No Stereo Out, no overlap with an existing group.
+        }
+        if (prevIdx >= -1 && idx != prevIdx + 1)
+        {
+            return false; // Only adjacent tracks.
+        }
+        prevIdx = idx;
+    }
+    return true;
+}
+
+void TrackLanesView::appendCreateCollapsibleGroupMenuItem(juce::PopupMenu& menu, const int itemId)
+{
+    juce::PopupMenu::Item item(juce::String("Create collapsible group") + juce::String::fromUTF8("\xe2\x80\xa6"));
+    item.itemID = itemId;
+    item.isEnabled = canCreateCollapsibleGroupFromCurrentSelection();
+    menu.addItem(item);
+}
+
+void TrackLanesView::requestCreateCollapsibleGroupFromSelection()
+{
+    if (!canCreateCollapsibleGroupFromCurrentSelection() || visualGroupUiHooks_.createGroup == nullptr)
+    {
+        return;
+    }
+    const std::vector<TrackId> members = selectedHeaderTrackIdsInVisibleOrder();
+    int displayableCount = 0;
+    for (const VisualTrackGroup& g : session_.getVisualTrackGroups())
+    {
+        displayableCount += session_.isVisualTrackGroupDisplayable(g.id) ? 1 : 0;
+    }
+    const juce::String defaultName = "Group " + juce::String(displayableCount + 1);
+    // Async name prompt (Enter = create, Escape = cancel); the group is created expanded with
+    // every member height untouched — `Session::createVisualTrackGroup` via the Create hook.
+    auto* aw = new juce::AlertWindow("Create collapsible group",
+                                     "Group name:",
+                                     juce::MessageBoxIconType::QuestionIcon,
+                                     this);
+    aw->addTextEditor("name", defaultName);
+    aw->addButton("Create", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    aw->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<TrackLanesView> safeThis(this);
+    aw->enterModalState(
+        true,
+        juce::ModalCallbackFunction::create([safeThis, aw, members](const int result) {
+            if (result != 1 || safeThis == nullptr
+                || safeThis->visualGroupUiHooks_.createGroup == nullptr)
+            {
+                return;
+            }
+            juce::String name = aw->getTextEditorContents("name").trim();
+            safeThis->visualGroupUiHooks_.createGroup(std::move(name), members);
+        }),
+        true);
+}
+
+// --------------------------------------------------------- handle actions + tests
+
+void TrackLanesView::toggleVisualGroupCollapsedFromHandle(const int groupId)
+{
+    const VisualTrackGroup* const g = session_.findVisualTrackGroupById(groupId);
+    if (g == nullptr || visualGroupUiHooks_.setCollapsed == nullptr)
+    {
+        return;
+    }
+    visualGroupUiHooks_.setCollapsed(groupId, !g->collapsed);
+}
+
+void TrackLanesView::beginVisualGroupRenameFromHandle(const int groupId)
+{
+    const auto it = visualGroupHandles_.find(groupId);
+    if (it != visualGroupHandles_.end() && it->second != nullptr
+        && !it->second->getBounds().isEmpty())
+    {
+        it->second->beginInlineRename();
+    }
+}
+
+void TrackLanesView::showVisualGroupHandleContextMenu(const int groupId)
+{
+    const VisualTrackGroup* const g = session_.findVisualTrackGroupById(groupId);
+    const auto itHandle = visualGroupHandles_.find(groupId);
+    if (g == nullptr || itHandle == visualGroupHandles_.end() || itHandle->second == nullptr)
+    {
+        return;
+    }
+    enum
+    {
+        kToggleCollapse = 1,
+        kRename = 2,
+        kUngroup = 3,
+    };
+    juce::PopupMenu menu;
+    menu.addItem(kToggleCollapse, g->collapsed ? "Expand group" : "Collapse group");
+    menu.addItem(kRename, juce::String("Rename group") + juce::String::fromUTF8("\xe2\x80\xa6"));
+    // Ungroup removes ONLY the visual grouping — tracks and clips are never deleted (spec §3).
+    menu.addItem(kUngroup, "Ungroup");
+    juce::Component::SafePointer<TrackLanesView> safeThis(this);
+    menu.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(itHandle->second.get()),
+        [safeThis, groupId](const int result) {
+            if (safeThis == nullptr || result == 0)
+            {
+                return;
+            }
+            if (result == kToggleCollapse)
+            {
+                safeThis->toggleVisualGroupCollapsedFromHandle(groupId);
+            }
+            else if (result == kRename)
+            {
+                safeThis->beginVisualGroupRenameFromHandle(groupId);
+            }
+            else if (result == kUngroup && safeThis->visualGroupUiHooks_.ungroup != nullptr)
+            {
+                safeThis->visualGroupUiHooks_.ungroup(groupId);
+            }
+        });
+}
+
+juce::Rectangle<int> TrackLanesView::visualGroupHandleBoundsForTest(const int groupId) const noexcept
+{
+    const auto it = visualGroupHandles_.find(groupId);
+    return it != visualGroupHandles_.end() && it->second != nullptr ? it->second->getBounds()
+                                                                    : juce::Rectangle<int>();
+}
+
+bool TrackLanesView::shortClickVisualGroupHandleLikeMouseForTest(const int groupId)
+{
+    const auto it = visualGroupHandles_.find(groupId);
+    if (it == visualGroupHandles_.end() || it->second == nullptr || it->second->getBounds().isEmpty())
+    {
+        return false;
+    }
+    // The exact short-click action the handle's mouse-up dispatches.
+    toggleVisualGroupCollapsedFromHandle(groupId);
+    return true;
+}
+
+bool TrackLanesView::beginRenameOnVisualGroupHandleLikeLongPressForTest(const int groupId)
+{
+    const auto it = visualGroupHandles_.find(groupId);
+    if (it == visualGroupHandles_.end() || it->second == nullptr || it->second->getBounds().isEmpty())
+    {
+        return false;
+    }
+    return it->second->beginInlineRename();
+}
+
+bool TrackLanesView::commitVisualGroupHandleRenameForTest(const int groupId,
+                                                          const juce::String& newName)
+{
+    const auto it = visualGroupHandles_.find(groupId);
+    if (it == visualGroupHandles_.end() || it->second == nullptr)
+    {
+        return false;
+    }
+    return it->second->commitRenameWithTextForTest(newName);
 }

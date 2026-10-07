@@ -22,6 +22,7 @@
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
 #include "ui/InspectorView.h" // InspectorPluginHost, InspectorAudioInputDeviceSnapshot, InspectorMidiInputSnapshot
+#include "ui/SoloUiHooks.h"
 
 #include <juce_graphics/juce_graphics.h>
 
@@ -56,6 +57,9 @@ struct MixerStripBindings
 
     // --- base buttons (header semantics per kind) -------------------------------------------------
     std::function<void(TrackId)> toggleMute;
+    /// Solo seam shared with the arrangement headers (`SoloUiHooks`): S cell on every strip except
+    /// Stereo Out; display state also drives the locked-M rendering. Unwired ⇒ no S cell.
+    SoloUiHooks solo;
     /// Returns false when refused (structural edit blocked while playing / recording / count-in).
     std::function<bool(TrackId)> togglePower;
     std::function<bool()> isPowerInteractable;
