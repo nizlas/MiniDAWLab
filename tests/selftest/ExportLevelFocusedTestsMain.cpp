@@ -30,6 +30,7 @@
 #include "domain/TrackStereoPan.h"
 #include "engine/LevelMeterAccumulator.h"
 #include "engine/PlaybackEngine.h"
+#include "engine/SoloMuteView.h"
 #include "io/MonoWavFileWriter.h"
 #include "transport/Transport.h"
 #include "ui/ChannelFaderScale.h"
@@ -1137,6 +1138,90 @@ void testRealtimeVsOfflineDeterministic()
     (void)root.deleteRecursively();
 }
 
+/// Solo (spec §6/§8): the offline mixdown and the realtime callback follow the SAME published
+/// SoloMuteView — soloing t1 renders exactly like base-muting t2, a base-muted but soloed t1 is
+/// still heard, the Mute command path is locked while solo is active, and clearing solo restores
+/// the stored-Mute picture. Everything through the production derive + publish + render paths.
+void testSoloFollowsBothRenderPaths()
+{
+    const juce::File root = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-export-solo-tests");
+    (void)root.deleteRecursively();
+    (void)root.createDirectory();
+    const juce::File wavA = writeToneWav(root, "a.wav", 2.0, 0.6f, 440.0);
+    const juce::File wavB = writeToneWav(root, "b.wav", 2.0, 0.7f, 660.0);
+
+    Session session;
+    Transport transport;
+    PlaybackEngine engine(transport, session);
+    const TrackId t1 = session.getActiveTrackId();
+    expect(session.addRecordedTakeAtSample(wavA, kRate, 0, t1, (std::int64_t)(2.0 * kRate)).wasOk(), "solo fixture: take A");
+    session.addTrack();
+    const TrackId t2 = session.getActiveTrackId();
+    expect(session.addRecordedTakeAtSample(wavB, kRate, 0, t2, (std::int64_t)(2.0 * kRate)).wasOk(), "solo fixture: take B");
+    engine.rebuildRoutingPlanFromSession();
+
+    const int len = kBlock * 20;
+    const std::int64_t start = (std::int64_t)(0.25 * kRate);
+
+    const auto republishSolo = [&] {
+        engine.publishSoloMuteView(solo_mute_view::deriveSoloMuteView(
+            *session.loadSessionSnapshotForAudioThread(), session.getCurrentSoloSetTrackIds()));
+    };
+    const auto isMutedNow = [&](const TrackId id) {
+        const auto snap = session.loadSessionSnapshotForAudioThread();
+        const int ix = snap->findTrackIndexById(id);
+        return ix >= 0 && snap->getTrack(ix).isMuted();
+    };
+
+    // Reference picture "t1 only": plain base-mute of t2, no solo anywhere.
+    session.setTrackMuted(t2, true);
+    const RenderedPair onlyT1 = renderBothPaths(session, transport, engine, start, len);
+    session.setTrackMuted(t2, false);
+    const RenderedPair fullMix = renderBothPaths(session, transport, engine, start, len);
+    expect(peakOf(fullMix.offlineL) > peakOf(onlyT1.offlineL) + 0.05, "solo: reference pictures differ audibly");
+
+    // 1. Solo t1 (temporary set) == base-muting t2, in BOTH render paths, sample-identically.
+    expect(session.toggleTrackInCurrentSoloSet(t1), "solo: S on t1");
+    republishSolo();
+    {
+        const RenderedPair p = renderBothPaths(session, transport, engine, start, len);
+        expect(std::max(maxAbsDiff(p.realtimeL, p.offlineL), maxAbsDiff(p.realtimeR, p.offlineR)) < 1.0e-6,
+               "solo: realtime and offline render stay sample-identical while solo is active");
+        expect(maxAbsDiff(p.offlineL, onlyT1.offlineL) < 1.0e-6 && maxAbsDiff(p.offlineR, onlyT1.offlineR) < 1.0e-6,
+               "solo: the offline MIXDOWN follows the audible solo picture (t2 silent)");
+    }
+
+    // 2. The Mute COMMAND path is locked while solo is active; the stored flags stay intact.
+    session.setTrackMuted(t2, true);
+    expect(!isMutedNow(t2) && session.isMuteChangeLockedBySolo(),
+           "solo: setTrackMuted is refused while solo is active (stored flag unchanged)");
+
+    // 3. A base-muted but explicitly soloed track is still heard (stored flag untouched).
+    expect(session.toggleTrackInCurrentSoloSet(t1), "solo: S off for re-mute setup");
+    republishSolo();
+    session.setTrackMuted(t1, true);
+    expect(session.toggleTrackInCurrentSoloSet(t1), "solo: S on the base-MUTED t1");
+    republishSolo();
+    {
+        const RenderedPair p = renderBothPaths(session, transport, engine, start, len);
+        expect(maxAbsDiff(p.offlineL, onlyT1.offlineL) < 1.0e-6
+                   && maxAbsDiff(p.realtimeL, onlyT1.realtimeL) < 1.0e-6,
+               "solo: a base-muted soloed track is heard in both paths (stored Mute not rewritten)");
+        expect(isMutedNow(t1), "solo: t1's STORED mute flag is still set while solo forces it audible");
+    }
+
+    // 4. Clearing solo instantly restores the stored-Mute picture (t1 muted -> t2 only).
+    expect(session.toggleTrackInCurrentSoloSet(t1), "solo: S off");
+    republishSolo();
+    session.setTrackMuted(t1, false);
+    {
+        const RenderedPair p = renderBothPaths(session, transport, engine, start, len);
+        expect(maxAbsDiff(p.offlineL, fullMix.offlineL) < 1.0e-6,
+               "solo: after un-solo + un-mute the full mix is back, bit-exact");
+    }
+    (void)root.deleteRecursively();
+}
+
 void testLevelMeterAccumulator()
 {
     level_meter::Accumulator acc;
@@ -1271,6 +1356,7 @@ int main(int argc, char** argv)
     testFaderScale();
     testFaderRoundTripThroughProjectFile();
     testRealtimeVsOfflineDeterministic();
+    testSoloFollowsBothRenderPaths();
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

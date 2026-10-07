@@ -138,6 +138,15 @@ std::shared_ptr<const SoloMuteView> deriveSoloMuteView(const SessionSnapshot& sn
             // A pure MIDI lane produces no audio of its own; soloing it opens its DESTINATION
             // Instrument strip as a carrier (ForcedAudible, content stays gated) plus that
             // strip's downstream path. Off is always respected — solo never turns on an Off row.
+            if (tr.isTrackOff())
+            {
+                continue;
+            }
+            // The lane itself is marked ForcedAudible: no audio strip consumes this (Midi rows
+            // render no audio), but `trackForcedAudibleBySolo` feeds the instrument scheduler's
+            // stored-mute override — an explicitly soloed but base-muted MIDI lane must still
+            // deliver its events (spec §2) — and the UI must not tint it as solo-silenced.
+            decision[static_cast<std::size_t>(i)] = SoloTrackAudioDecision::ForcedAudible;
             const int destIdx = snap.findTrackIndexById(tr.getMidiDestinationTrackId());
             if (destIdx >= 0 && snap.getTrack(destIdx).getKind() == TrackKind::Instrument
                 && !snap.getTrack(destIdx).isTrackOff())

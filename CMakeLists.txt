@@ -570,8 +570,9 @@ endif()
 # -----------------------------------------------------------------------------
 # TrackHeaderColumnFocusedTests: the shared track-header column width. Drives the PRODUCTION
 # TrackHeaderView geometry + offscreen paint per row-kind model at the old 120 px (negative control:
-# the clipped Arm cell the user reported), the new minimum (132) and default (144), the pure clamp
-# formula every boundary-sharing view uses, and the app-wide UiLayoutSettingsStore round trip.
+# the clipped Arm cell the user reported), the current minimum (154) and default (166, both grew
+# when the Solo cell was added), the pure clamp formula every boundary-sharing view uses (including
+# clamping old narrower saved widths UP), and the app-wide UiLayoutSettingsStore round trip.
 # No audio device, no window, no VST3 hosting.
 # -----------------------------------------------------------------------------
 juce_add_console_app(TrackHeaderColumnFocusedTests PRODUCT_NAME "TrackHeaderColumnFocusedTests")
@@ -685,6 +686,60 @@ target_link_libraries(MixerFocusedTests
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+# -----------------------------------------------------------------------------
+# SoloFocusedTests: the Solo listening layer + four persistent Solo memories — the production
+# Session solo commands (five separate sets, Mute lock in the command path), the pure
+# deriveSoloMuteView routing closure (downstream chain + sends, Group feeder closure passing
+# stored Mute, MIDI carrier/suppression, Off rules, stale ids), v25 soloMemories persistence
+# through the production save/load (incl. pre-v25 and malformed files), the narrow solo-memory
+# undo through the REAL UndoRedoCoordinator, and the S-cell / SoloMemoryStrip geometry offscreen.
+# No audio device, no window, no VST3 hosting (instrument entry points Session.cpp references are
+# satisfied by never-executed link stubs in the test main).
+# -----------------------------------------------------------------------------
+juce_add_console_app(SoloFocusedTests PRODUCT_NAME "SoloFocusedTests")
+target_sources(SoloFocusedTests PRIVATE
+    tests/selftest/SoloFocusedTestsMain.cpp
+    src/app/UndoRedoCoordinator.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/SoloMuteView.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/ForbiddenCursor.cpp)
+target_include_directories(SoloFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(SoloFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(SoloFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(SoloFocusedTests PRIVATE /wd4458)
+endif()
+# UndoRedoCoordinator.h includes the generated JuceHeader.h.
+juce_generate_juce_header(SoloFocusedTests)
 
 # JUCE juce_VST3PluginFormat.cpp + VST3 SDK headers: local `iid` triggers MSVC C4458 (hides base member).
 # Safe to silence; module sources compile as part of this target.
