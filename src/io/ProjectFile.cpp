@@ -1264,6 +1264,31 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
         // passes a key, so this covers only writers without row-height data); absent → Medium.
         root->setProperty("trackRowHeightPreset", data.trackRowHeightPreset);
     }
+    if (data.version >= 27 && !data.visualTrackGroups.empty())
+    {
+        // v27 additive: purely visual collapsible track groups. Omitted when no group exists so a
+        // project without groups serializes like v26 apart from the version number. Only identity
+        // (name), membership (TrackIds), and the collapsed display state are written — member row
+        // heights stay on `tracks[].rowHeight` and are NEVER rewritten by collapse state.
+        juce::Array<juce::var> groupsVar;
+        for (const ProjectFileVisualTrackGroupV1& g : data.visualTrackGroups)
+        {
+            juce::DynamicObject::Ptr gv = new juce::DynamicObject();
+            gv->setProperty("name", g.name);
+            if (g.collapsed)
+            {
+                gv->setProperty("collapsed", true);
+            }
+            juce::Array<juce::var> idsVar;
+            for (const TrackId id : g.memberTrackIds)
+            {
+                idsVar.add(static_cast<juce::int64>(id));
+            }
+            gv->setProperty("memberTrackIds", juce::var(idsVar));
+            groupsVar.add(juce::var(gv.get()));
+        }
+        root->setProperty("visualTrackGroups", juce::var(groupsVar));
+    }
     root->setProperty("bpm", data.bpm);
     root->setProperty("timeSignatureNumerator", data.timeSignatureNumerator);
     root->setProperty("timeSignatureDenominator", data.timeSignatureDenominator);
@@ -1843,6 +1868,59 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
     // v26 optional `trackRowHeightPreset`: stored raw; absent key (every pre-v26 file), an empty
     // string or any unknown value is interpreted as Medium by the UI apply — never a read failure.
     out.trackRowHeightPreset = root.getProperty("trackRowHeightPreset", {}).toString().trim();
+
+    // v27 optional `visualTrackGroups`: array of { name, collapsed, memberTrackIds[] }. Absent key
+    // (every pre-v27 file) or any malformed shape degrades to no groups — never a read failure.
+    // Duplicate/invalid ids are dropped here; existence, contiguity, overlap and the ≥2-member
+    // rule are validated by `Session` on apply (invalid group → normal visible tracks).
+    out.visualTrackGroups.clear();
+    {
+        const juce::var& vgv = root.getProperty("visualTrackGroups", {});
+        if (const juce::Array<juce::var>* groups = vgv.getArray())
+        {
+            for (const juce::var& gVar : *groups)
+            {
+                const juce::DynamicObject* gObj = gVar.getDynamicObject();
+                if (gObj == nullptr)
+                {
+                    continue;
+                }
+                ProjectFileVisualTrackGroupV1 g;
+                g.name = gObj->getProperty("name").toString().trim();
+                const juce::var& cv = gObj->getProperty("collapsed");
+                g.collapsed = cv.isBool() ? static_cast<bool>(cv)
+                                          : ((cv.isInt() || cv.isInt64() || cv.isDouble())
+                                                 && static_cast<double>(cv) != 0.0);
+                const juce::Array<juce::var>* ids = gObj->getProperty("memberTrackIds").getArray();
+                if (ids == nullptr)
+                {
+                    continue;
+                }
+                for (const juce::var& idVar : *ids)
+                {
+                    if (!(idVar.isInt64() || idVar.isInt() || idVar.isDouble()))
+                    {
+                        continue;
+                    }
+                    const std::int64_t raw = static_cast<std::int64_t>(static_cast<double>(idVar));
+                    if (raw <= 0)
+                    {
+                        continue;
+                    }
+                    const TrackId id = static_cast<TrackId>(raw);
+                    if (std::find(g.memberTrackIds.begin(), g.memberTrackIds.end(), id)
+                        == g.memberTrackIds.end())
+                    {
+                        g.memberTrackIds.push_back(id);
+                    }
+                }
+                if (!g.memberTrackIds.empty())
+                {
+                    out.visualTrackGroups.push_back(std::move(g));
+                }
+            }
+        }
+    }
 
     {
         const juce::var& bpmv = root.getProperty("bpm", {});

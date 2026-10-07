@@ -356,7 +356,8 @@ void testProjectPersistenceRoundTrip()
     ProjectFileV1 parsed;
     const juce::Result read = readProjectFile(proj, parsed);
     expect(read.wasOk(), "read: raw readProjectFile succeeds");
-    expect(parsed.version == 26, "read: file version is 26");
+    expect(parsed.version == ProjectFileV1::kCurrentVersion && parsed.version >= 26,
+           "read: file version is current (>= 26)");
     expect(parsed.trackRowHeightPreset == "small", "read: root trackRowHeightPreset == \"small\"");
     int withHeight = 0;
     int draggedPx = 0;
@@ -439,8 +440,10 @@ void testOlderProjectsAndMalformedValues()
         const juce::String text = oldProj.loadFileAsString();
         expect(!text.contains("rowHeight") && !text.contains("trackRowHeightPreset"),
                "pre-v26: a save without row-height data emits NO row-height keys");
-        const juce::String asV25 = text.replace("\"version\": 26", "\"version\": 25")
-                                       .replace("\"version\":26", "\"version\":25");
+        const juce::String currentVersionText = juce::String(ProjectFileV1::kCurrentVersion);
+        const juce::String asV25
+            = text.replace("\"version\": " + currentVersionText, "\"version\": 25")
+                  .replace("\"version\":" + currentVersionText, "\"version\":25");
         expect(asV25 != text && oldProj.replaceWithText(asV25), "pre-v26: version rewritten to 25");
 
         ProjectFileV1 reread;

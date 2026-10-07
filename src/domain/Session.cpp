@@ -487,6 +487,18 @@ std::optional<TrackId> Session::duplicateTrack(const TrackId sourceTrackId, juce
     nextPlacedClipId_ += static_cast<PlacedClipId>(juce::jmax(0, clipIdsUsed));
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
     activeTrackId_ = newId;
+    // Visual track groups: the copy sits directly below its source, so when the source belongs to
+    // a group the copy becomes a member too (inserted right after the source id; spec §6). Layout
+    // metadata only — nothing about the published snapshot changes here.
+    for (VisualTrackGroup& g : visualTrackGroups_)
+    {
+        const auto it = std::find(g.memberTrackIds.begin(), g.memberTrackIds.end(), sourceTrackId);
+        if (it != g.memberTrackIds.end())
+        {
+            g.memberTrackIds.insert(it + 1, newId);
+            break; // Effective memberships never overlap.
+        }
+    }
     return newId;
 }
 
@@ -1159,6 +1171,13 @@ void Session::moveTrack(const TrackId movedTrackId, const int destIndex) noexcep
     {
         return;
     }
+    if (checkTrackMoveAgainstVisualGroups(movedTrackId, destIndex).has_value())
+    {
+        // Defensive: callers (header drag) refuse group-splitting moves with a visible message
+        // BEFORE reaching here; this guarantees the audio-model order can never silently diverge
+        // from a displayable group's contiguity even via other call sites.
+        return;
+    }
     const std::shared_ptr<const SessionSnapshot> next
         = SessionSnapshot::withTrackReordered(*current, movedTrackId, destIndex);
     jassert(next != nullptr);
@@ -1581,6 +1600,270 @@ void Session::resetTransientSoloStateForProjectLoad() noexcept
     activeSoloMemoryIndex_ = -1;
 }
 
+// ------------------------------------------------------- Visual track groups
+// Layout metadata only (see Session.h / VisualTrackGroup.h). None of these methods touch
+// `sessionSnapshot_` — the audio model and every stored track property are unaffected.
+
+void Session::setAllVisualTrackGroups(std::vector<VisualTrackGroup> groups) noexcept
+{
+    visualTrackGroups_.clear();
+    visualTrackGroups_.reserve(groups.size());
+    int maxSeenId = 0;
+    for (VisualTrackGroup& g : groups)
+    {
+        g.memberTrackIds = dedupedSoloIds(std::move(g.memberTrackIds));
+        if (g.memberTrackIds.empty())
+        {
+            continue; // Nothing left to reference; keep state minimal.
+        }
+        if (g.id <= 0)
+        {
+            g.id = nextVisualTrackGroupId_++;
+        }
+        maxSeenId = std::max(maxSeenId, g.id);
+        visualTrackGroups_.push_back(std::move(g));
+    }
+    nextVisualTrackGroupId_ = std::max(nextVisualTrackGroupId_, maxSeenId + 1);
+}
+
+std::optional<int> Session::createVisualTrackGroup(juce::String name,
+                                                   std::vector<TrackId> memberTrackIds) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return std::nullopt;
+    }
+    // Deduplicate, then order + validate against the current snapshot: every member must exist,
+    // none may be the Master row, and the member indices must form one contiguous run.
+    const std::vector<TrackId> wanted = dedupedSoloIds(std::move(memberTrackIds));
+    std::vector<std::pair<int, TrackId>> indexAndId;
+    indexAndId.reserve(wanted.size());
+    for (const TrackId id : wanted)
+    {
+        const int idx = current->findTrackIndexById(id);
+        if (idx < 0 || current->getTrack(idx).getKind() == TrackKind::Master)
+        {
+            return std::nullopt;
+        }
+        if (findVisualTrackGroupIdContainingTrack(id).has_value())
+        {
+            return std::nullopt; // No overlap / nesting with an existing effective membership.
+        }
+        indexAndId.emplace_back(idx, id);
+    }
+    if (indexAndId.size() < 2)
+    {
+        return std::nullopt;
+    }
+    std::sort(indexAndId.begin(), indexAndId.end());
+    for (std::size_t i = 1; i < indexAndId.size(); ++i)
+    {
+        if (indexAndId[i].first != indexAndId[i - 1].first + 1)
+        {
+            return std::nullopt; // Only adjacent tracks may form a group.
+        }
+    }
+    VisualTrackGroup group;
+    group.id = nextVisualTrackGroupId_++;
+    group.name = name.trim().isEmpty() ? juce::String("Grupp ") + juce::String(group.id)
+                                       : name.trim();
+    group.memberTrackIds.reserve(indexAndId.size());
+    for (const auto& [idx, id] : indexAndId)
+    {
+        juce::ignoreUnused(idx);
+        group.memberTrackIds.push_back(id);
+    }
+    group.collapsed = false;
+    visualTrackGroups_.push_back(std::move(group));
+    return visualTrackGroups_.back().id;
+}
+
+void Session::renameVisualTrackGroup(const int groupId, juce::String newName) noexcept
+{
+    const juce::String trimmed = newName.trim();
+    if (trimmed.isEmpty())
+    {
+        return;
+    }
+    for (VisualTrackGroup& g : visualTrackGroups_)
+    {
+        if (g.id == groupId)
+        {
+            g.name = trimmed;
+            return;
+        }
+    }
+}
+
+bool Session::setVisualTrackGroupCollapsed(const int groupId, const bool collapsed) noexcept
+{
+    for (VisualTrackGroup& g : visualTrackGroups_)
+    {
+        if (g.id == groupId)
+        {
+            if (g.collapsed == collapsed)
+            {
+                return false;
+            }
+            g.collapsed = collapsed;
+            return true;
+        }
+    }
+    return false;
+}
+
+void Session::removeVisualTrackGroup(const int groupId) noexcept
+{
+    visualTrackGroups_.erase(std::remove_if(visualTrackGroups_.begin(),
+                                            visualTrackGroups_.end(),
+                                            [groupId](const VisualTrackGroup& g)
+                                            { return g.id == groupId; }),
+                             visualTrackGroups_.end());
+}
+
+const VisualTrackGroup* Session::findVisualTrackGroupById(const int groupId) const noexcept
+{
+    for (const VisualTrackGroup& g : visualTrackGroups_)
+    {
+        if (g.id == groupId)
+        {
+            return &g;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<TrackId> Session::getEffectiveVisualGroupMemberTrackIds(const int groupId) const
+{
+    std::vector<TrackId> out;
+    const VisualTrackGroup* group = findVisualTrackGroupById(groupId);
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (group == nullptr || current == nullptr)
+    {
+        return out;
+    }
+    std::vector<int> indices;
+    indices.reserve(group->memberTrackIds.size());
+    for (const TrackId id : group->memberTrackIds)
+    {
+        const int idx = current->findTrackIndexById(id);
+        if (idx >= 0)
+        {
+            indices.push_back(idx); // Stale ids of deleted tracks are invisible here.
+        }
+    }
+    std::sort(indices.begin(), indices.end());
+    out.reserve(indices.size());
+    for (const int idx : indices)
+    {
+        out.push_back(current->getTrack(idx).getId());
+    }
+    return out;
+}
+
+bool Session::isVisualTrackGroupDisplayable(const int groupId) const
+{
+    const std::vector<TrackId> members = getEffectiveVisualGroupMemberTrackIds(groupId);
+    if (members.size() < 2)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    int prevIdx = current->findTrackIndexById(members.front());
+    for (std::size_t i = 1; i < members.size(); ++i)
+    {
+        const int idx = current->findTrackIndexById(members[i]);
+        if (idx != prevIdx + 1)
+        {
+            return false; // Members drifted apart → render as normal tracks (safe fallback).
+        }
+        prevIdx = idx;
+    }
+    return true;
+}
+
+std::optional<int> Session::findVisualTrackGroupIdContainingTrack(const TrackId trackId) const
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return std::nullopt;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || current->findTrackIndexById(trackId) < 0)
+    {
+        return std::nullopt;
+    }
+    for (const VisualTrackGroup& g : visualTrackGroups_)
+    {
+        if (std::find(g.memberTrackIds.begin(), g.memberTrackIds.end(), trackId)
+            != g.memberTrackIds.end())
+        {
+            return g.id;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<juce::String> Session::checkTrackMoveAgainstVisualGroups(const TrackId movedTrackId,
+                                                                       const int destIndex) const
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return std::nullopt;
+    }
+    const int numTracks = current->getNumTracks();
+    const int fromIndex = current->findTrackIndexById(movedTrackId);
+    if (fromIndex < 0 || destIndex < 0 || destIndex >= numTracks || destIndex == fromIndex)
+    {
+        return std::nullopt; // Not a real move; Session::moveTrack refuses these itself.
+    }
+    // Simulate the resulting order (same splice `SessionSnapshot::withTrackReordered` performs).
+    std::vector<TrackId> order;
+    order.reserve(static_cast<std::size_t>(numTracks));
+    for (int i = 0; i < numTracks; ++i)
+    {
+        order.push_back(current->getTrack(i).getId());
+    }
+    order.erase(order.begin() + fromIndex);
+    order.insert(order.begin() + destIndex, movedTrackId);
+    // Every group displayable BEFORE the move must stay contiguous AFTER it — a safe reorder may
+    // not split a group or drop an outside track into its middle. Reorders WITHIN one group (the
+    // member run is preserved, order inside it may change) pass this check by construction.
+    for (const VisualTrackGroup& g : visualTrackGroups_)
+    {
+        if (!isVisualTrackGroupDisplayable(g.id))
+        {
+            continue;
+        }
+        const std::vector<TrackId> members = getEffectiveVisualGroupMemberTrackIds(g.id);
+        std::vector<int> newIndices;
+        newIndices.reserve(members.size());
+        for (const TrackId id : members)
+        {
+            const auto it = std::find(order.begin(), order.end(), id);
+            jassert(it != order.end());
+            newIndices.push_back(static_cast<int>(std::distance(order.begin(), it)));
+        }
+        std::sort(newIndices.begin(), newIndices.end());
+        // Contiguity catches every violation, including an outside track landing inside the
+        // member run (that insertion splits the run's indices).
+        for (std::size_t i = 1; i < newIndices.size(); ++i)
+        {
+            if (newIndices[i] != newIndices[i - 1] + 1)
+            {
+                return g.name;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 bool Session::setTrackMidiOutputChannel(const TrackId trackId, const int midiOutputChannel) noexcept
 {
     if (trackId == kInvalidTrackId)
@@ -1963,6 +2246,23 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     {
         out.hasMidiEditorWorkspace = true;
         out.midiEditorWorkspace = *midiEditorWorkspaceForSave;
+    }
+    // Visual track groups (v27): persist only groups that are displayable right now (≥2 existing
+    // members, contiguous), with members filtered to the saved snapshot in session order — stale
+    // ids of deleted tracks never reach disk. Collapsed state is saved; member row heights are the
+    // NORMAL heights on `tracks[].rowHeight` (a collapsed group's 4 px display is never written).
+    out.visualTrackGroups.clear();
+    for (const VisualTrackGroup& g : visualTrackGroups_)
+    {
+        if (!isVisualTrackGroupDisplayable(g.id))
+        {
+            continue;
+        }
+        ProjectFileVisualTrackGroupV1 gOut;
+        gOut.name = g.name;
+        gOut.collapsed = g.collapsed;
+        gOut.memberTrackIds = getEffectiveVisualGroupMemberTrackIds(g.id);
+        out.visualTrackGroups.push_back(std::move(gOut));
     }
     // Row heights (v26): UI-owned — the preset key at the root plus each row's actual height,
     // looked up per track id below. Tracks the UI did not report keep `rowHeightPx = 0` (omitted).
@@ -2548,6 +2848,57 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             }
         }
         soloMemories_[static_cast<std::size_t>(m)] = std::move(mem);
+    }
+
+    // Visual track groups (v27): adopt saved groups after validating against the freshly built
+    // track list — unknown member ids are dropped, and a group that ends up with <2 members,
+    // non-contiguous members, or members shared with an earlier group is ignored entirely (its
+    // tracks render as normal rows). Musical data is NEVER changed to repair layout metadata.
+    visualTrackGroups_.clear();
+    nextVisualTrackGroupId_ = 1;
+    {
+        std::vector<TrackId> claimedMemberIds;
+        for (const ProjectFileVisualTrackGroupV1& g : parsed.visualTrackGroups)
+        {
+            std::vector<int> indices;
+            indices.reserve(g.memberTrackIds.size());
+            bool anyClaimed = false;
+            for (const TrackId id : g.memberTrackIds)
+            {
+                const int idx = (id == kInvalidTrackId) ? -1 : next->findTrackIndexById(id);
+                if (idx < 0 || next->getTrack(idx).getKind() == TrackKind::Master)
+                {
+                    continue;
+                }
+                anyClaimed = anyClaimed
+                             || std::find(claimedMemberIds.begin(), claimedMemberIds.end(), id)
+                                    != claimedMemberIds.end();
+                indices.push_back(idx);
+            }
+            std::sort(indices.begin(), indices.end());
+            bool contiguous = indices.size() >= 2 && !anyClaimed;
+            for (std::size_t i = 1; contiguous && i < indices.size(); ++i)
+            {
+                contiguous = indices[i] == indices[i - 1] + 1;
+            }
+            if (!contiguous)
+            {
+                continue; // Safe fallback: these tracks stay normal visible rows.
+            }
+            VisualTrackGroup adopted;
+            adopted.id = nextVisualTrackGroupId_++;
+            adopted.name = g.name.isEmpty() ? juce::String("Grupp ") + juce::String(adopted.id)
+                                            : g.name;
+            adopted.collapsed = g.collapsed;
+            adopted.memberTrackIds.reserve(indices.size());
+            for (const int idx : indices)
+            {
+                const TrackId id = next->getTrack(idx).getId();
+                adopted.memberTrackIds.push_back(id);
+                claimedMemberIds.push_back(id);
+            }
+            visualTrackGroups_.push_back(std::move(adopted));
+        }
     }
 
     currentProjectFile_ = file;

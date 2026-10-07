@@ -38,6 +38,7 @@
 #include "domain/PlacedClip.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
+#include "domain/VisualTrackGroup.h"
 #include "domain/AudioMixdownProjectSettings.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginTrackSlot.h"
@@ -303,6 +304,55 @@ public:
     /// memories are NOT touched here — the load path assigns them from the parsed file.
     void resetTransientSoloStateForProjectLoad() noexcept;
 
+    // --------------------------------------------------- Visual track groups
+    // Purely visual collapsible groups of adjacent arrangement tracks (see `VisualTrackGroup.h`).
+    // Message-thread state OUTSIDE `SessionSnapshot`, exactly like the Solo sets: stored member
+    // lists tolerate stale ids of deleted tracks (undoing a deletion restores membership for
+    // free); display and persistence filter to tracks existing in the current snapshot and only
+    // treat a group as *displayable* when ≥2 effective members are contiguous in snapshot order.
+    // None of these commands publish a snapshot — the audio model is never touched.
+
+    /// All stored groups (raw; may contain stale member ids and currently non-displayable groups).
+    [[nodiscard]] const std::vector<VisualTrackGroup>& getVisualTrackGroups() const noexcept
+    {
+        return visualTrackGroups_;
+    }
+    /// [Message thread] Replace ALL group state (narrow undo restore + project load). No validation
+    /// beyond dropping invalid member ids — callers pass states previously produced by this class.
+    void setAllVisualTrackGroups(std::vector<VisualTrackGroup> groups) noexcept;
+
+    /// [Message thread] Create a group of `memberTrackIds` (any order; stored in snapshot order).
+    /// Refuses (returns nullopt, nothing changed) unless the members are ≥2 EXISTING non-Master
+    /// tracks, contiguous in snapshot order, and none is already an effective member of another
+    /// group. Empty/whitespace name → "Grupp <n>". Created expanded. Returns the new group id.
+    [[nodiscard]] std::optional<int> createVisualTrackGroup(juce::String name,
+                                                            std::vector<TrackId> memberTrackIds) noexcept;
+    /// [Message thread] Rename one group (trimmed; empty after trim or unknown id → no-op).
+    void renameVisualTrackGroup(int groupId, juce::String newName) noexcept;
+    /// [Message thread] Collapse/expand one group (display state only). Unknown id → no-op.
+    /// Returns true when the stored state changed.
+    [[nodiscard]] bool setVisualTrackGroupCollapsed(int groupId, bool collapsed) noexcept;
+    /// [Message thread] Ungroup: remove the group's metadata only. Tracks and clips are untouched.
+    void removeVisualTrackGroup(int groupId) noexcept;
+
+    /// Group by id, or nullptr (pointer invalidated by the next group mutation).
+    [[nodiscard]] const VisualTrackGroup* findVisualTrackGroupById(int groupId) const noexcept;
+    /// Stored members filtered to tracks existing in the current snapshot, in SNAPSHOT order.
+    [[nodiscard]] std::vector<TrackId> getEffectiveVisualGroupMemberTrackIds(int groupId) const;
+    /// True when the group currently qualifies for display: ≥2 effective members, contiguous in
+    /// snapshot order. Non-displayable groups render as normal tracks (safe fallback) and are
+    /// dropped on save.
+    [[nodiscard]] bool isVisualTrackGroupDisplayable(int groupId) const;
+    /// The group whose EFFECTIVE membership contains `trackId` (groups never overlap on effective
+    /// members), or nullopt.
+    [[nodiscard]] std::optional<int> findVisualTrackGroupIdContainingTrack(TrackId trackId) const;
+
+    /// [Message thread] Would `moveTrack(movedTrackId, destIndex)` break any displayable group's
+    /// contiguity (or split a group by landing inside it)? Returns the violated group's name for
+    /// the UI refusal message, or nullopt when the move is safe. Pure check — no state change.
+    [[nodiscard]] std::optional<juce::String> checkTrackMoveAgainstVisualGroups(TrackId movedTrackId,
+                                                                                int destIndex) const;
+
     /// [Message thread] MIDI output channel for this row's own timeline MIDI:
     /// `kTrackMidiOutputChannelAny` preserves each event's stored channel, 1 … 16 remaps every
     /// event to that channel. Unrelated to `setTrackRoutedOutput` (audio bus). Returns false when
@@ -518,6 +568,11 @@ private:
     std::vector<TrackId> temporarySoloSet_;
     std::array<std::vector<TrackId>, kSoloMemoryCount> soloMemories_;
     int activeSoloMemoryIndex_ = -1;
+
+    // [Message thread] Visual track groups (see section above): layout metadata outside
+    // `SessionSnapshot`; ids monotonic per session and reassigned on project load.
+    std::vector<VisualTrackGroup> visualTrackGroups_;
+    int nextVisualTrackGroupId_ = 1;
 
     juce::File currentProjectFile_;
     AudioMixdownProjectSettings audioMixdown_;
