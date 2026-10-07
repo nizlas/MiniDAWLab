@@ -39,6 +39,7 @@
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
 #include "domain/VisualTrackGroup.h"
+#include "domain/TrackColour.h"
 #include "domain/AudioMixdownProjectSettings.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginTrackSlot.h"
@@ -353,6 +354,18 @@ public:
     [[nodiscard]] std::optional<juce::String> checkTrackMoveAgainstVisualGroups(TrackId movedTrackId,
                                                                                 int destIndex) const;
 
+    // --------------------------------------------------- Track colours (v28)
+    // One palette key per track (`domain/TrackColour.h`), UI metadata OUTSIDE `SessionSnapshot`
+    // like the Solo sets and the visual groups: a colour change publishes no snapshot and never
+    // touches the audio model. Absent entry = `DefaultGrey`. Stale entries of deleted tracks are
+    // kept (undoing a deletion restores the colour for free) and filtered on save. Duplicate Track
+    // copies the source colour; events derive their colour from their track at paint time.
+
+    [[nodiscard]] TrackColourKey getTrackColour(TrackId trackId) const noexcept;
+    /// [Message thread] Returns true when the stored key changed (callers record the narrow undo
+    /// step and mark the project dirty). `DefaultGrey` removes the entry.
+    [[nodiscard]] bool setTrackColour(TrackId trackId, TrackColourKey key) noexcept;
+
     /// [Message thread] MIDI output channel for this row's own timeline MIDI:
     /// `kTrackMidiOutputChannelAny` preserves each event's stored channel, 1 … 16 remaps every
     /// event to that channel. Unrelated to `setTrackRoutedOutput` (audio bus). Returns false when
@@ -573,6 +586,10 @@ private:
     // `SessionSnapshot`; ids monotonic per session and reassigned on project load.
     std::vector<VisualTrackGroup> visualTrackGroups_;
     int nextVisualTrackGroupId_ = 1;
+
+    // [Message thread] Track colours (see section above): palette key per track id; absent =
+    // `TrackColourKey::DefaultGrey`. Replaced wholesale on project load.
+    std::unordered_map<TrackId, TrackColourKey> trackColours_;
 
     juce::File currentProjectFile_;
     AudioMixdownProjectSettings audioMixdown_;

@@ -88,8 +88,14 @@ public:
         /// Visual track groups: invoked after undo/redo applied a narrow group-metadata step
         /// (the full group list in `Session` was replaced). The app relayouts the arrangement
         /// (markers, handles, collapsed rows) — no audio-side state is involved.
-        /// NOTE: appended LAST on purpose — callers use positional aggregate init.
+        /// NOTE: callers use positional aggregate init — keep the order.
         std::function<void()> refreshVisualTrackGroupsAfterUndoRestore;
+
+        /// Track colours: invoked after a recorded colour edit and after undo/redo applied a narrow
+        /// colour step (one track's palette key in `Session` changed). The app repaints headers and
+        /// lanes (cached event rasters re-derive their fill) — no audio-side state is involved.
+        /// NOTE: appended LAST on purpose — callers use positional aggregate init.
+        std::function<void()> refreshTrackColoursAfterUndoRestore;
     };
 
     UndoRedoCoordinator(Session& session, PluginInsertHost& pluginHost, Callbacks callbacks);
@@ -125,6 +131,12 @@ public:
     /// go through here (display change: dirty only, no undo entry).
     void executeUndoableVisualTrackGroupsEdit(const juce::String& label,
                                               std::function<bool()> mutator);
+
+    /// Track colour: ONE narrow undo step that changes exactly `trackId`'s palette key (same
+    /// timeline snapshot pointer on both sides — never an instrument, a take or the whole
+    /// Session). Nothing is recorded (and nothing dirtied) when the colour is unchanged or the
+    /// track is unknown. Refused while a staged project load runs.
+    void executeUndoableTrackColourEdit(TrackId trackId, TrackColourKey newColour);
 
     /// Recording commit: ONE undo step that may change both the timeline (an audio take clip)
     /// and instrument musical state (live-MIDI take clips on several rows). Records whichever

@@ -10,6 +10,7 @@
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackHeaderView.h"
+#include "ui/TrackColourPalette.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
@@ -209,6 +210,7 @@ namespace
 /// = menu) and swallows its mouse events so the row underneath — the previous track's name strip
 /// or resize band — is never activated through it (spec §3).
 class TrackLanesView::VisualGroupHandleView final : public juce::Component,
+                                                    public juce::TooltipClient,
                                                     private juce::Timer,
                                                     private juce::TextEditor::Listener
 {
@@ -220,6 +222,9 @@ public:
     }
 
     [[nodiscard]] int getGroupId() const noexcept { return groupId_; }
+
+    /// The full group name — needed when the compact tab (Micro neighbours) truncates it.
+    juce::String getTooltip() override { return name_; }
 
     void setDisplayState(const juce::String& name, const bool collapsed)
     {
@@ -260,11 +265,13 @@ public:
         g.fillPath(p);
         if (renameEditor_ == nullptr || !renameEditor_->isVisible())
         {
-            g.setFont(juce::Font(juce::FontOptions(11.0f)));
-            g.drawFittedText(name_,
-                             b.withTrimmedLeft(15).withTrimmedRight(3),
-                             juce::Justification::centredLeft,
-                             1);
+            // Compact tab (12 px, Micro neighbours): a smaller font; the name ellipsizes and the
+            // full text is the tooltip.
+            g.setFont(juce::Font(juce::FontOptions(b.getHeight() < 14 ? 9.5f : 11.0f)));
+            g.drawText(name_,
+                       b.withTrimmedLeft(15).withTrimmedRight(3),
+                       juce::Justification::centredLeft,
+                       true);
         }
     }
 
@@ -1645,6 +1652,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             }
             m.headerMultiSelected = isHeaderMultiSelected(tid);
             m.visualGroupMember = isTrackInDisplayableVisualGroup(tid);
+            fillCommonHeaderModelFields(m, tid);
             return m;
         };
 
@@ -1659,6 +1667,9 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
         };
         callbacks.onHeaderSelectionClick = [this, tid](const bool shiftRange) {
             handleHeaderSelectionClick(tid, shiftRange);
+        };
+        callbacks.onShowColourMenu = [this, tid](TrackHeaderView&, const juce::Rectangle<int> anchor) {
+            showTrackColourMenuForTrack(tid, anchor);
         };
         callbacks.onToggleArm = [this, tid, onActive, onArm] {
             if (const auto snap = session_.loadSessionSnapshotForAudioThread())
@@ -2116,6 +2127,7 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
         // Stereo Out can be shift-range selected (clear indication) but never grouped — the
         // Create item validates against Master membership, and `visualGroupMember` stays false.
         m.headerMultiSelected = isHeaderMultiSelected(tid);
+        fillCommonHeaderModelFields(m, tid);
         return m;
     };
 
@@ -2130,6 +2142,9 @@ void TrackLanesView::rebuildMasterHeadersIfNeeded()
     };
     callbacks.onHeaderSelectionClick = [this, tid](const bool shiftRange) {
         handleHeaderSelectionClick(tid, shiftRange);
+    };
+    callbacks.onShowColourMenu = [this, tid](TrackHeaderView&, const juce::Rectangle<int> anchor) {
+        showTrackColourMenuForTrack(tid, anchor);
     };
     callbacks.onToggleMute = [this, tid, onActive] {
         bool nowMuted = true;
@@ -2232,6 +2247,7 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
             }
             m.headerMultiSelected = isHeaderMultiSelected(tid);
             m.visualGroupMember = isTrackInDisplayableVisualGroup(tid);
+            fillCommonHeaderModelFields(m, tid);
             return m;
         };
 
@@ -2246,6 +2262,9 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
         };
         callbacks.onHeaderSelectionClick = [this, tid](const bool shiftRange) {
             handleHeaderSelectionClick(tid, shiftRange);
+        };
+        callbacks.onShowColourMenu = [this, tid](TrackHeaderView&, const juce::Rectangle<int> anchor) {
+            showTrackColourMenuForTrack(tid, anchor);
         };
         callbacks.onToggleMute = [this, tid, onActive] {
             bool nowMuted = true;
@@ -2729,22 +2748,22 @@ bool TrackLanesView::trackHeaderModelUsesSubtitle(const TrackId tid) const noexc
 int TrackLanesView::minimumRowHeightPxForTrackHeader(const TrackId tid) const noexcept
 {
     juce::ignoreUnused(tid);
-    // The minimum individual height equals the shared Small preset for EVERY row kind: the
-    // smallest height where title row + full control strip + resize band fit without overlap
-    // (`ui/TrackRowHeightPresets.h`; the old name-only collapse below that is no longer reachable).
-    return track_row_heights::kSmallRowHeightPx;
+    // The minimum individual height equals the shared Micro preset for EVERY row kind: one title
+    // row (type icon, number, Power / Mute / Solo, name) + the resize band
+    // (`ui/TrackRowHeightPresets.h`). Collapsed-group 4 px strips are a separate display mechanism.
+    return track_row_heights::kMinRowHeightPx;
 }
 
 int TrackLanesView::rowHeightForTrack(const TrackId tid) const noexcept
 {
-    const int lo = track_row_heights::kSmallRowHeightPx;
+    namespace trh = track_row_heights;
     if (tid == kInvalidTrackId)
     {
-        return juce::jlimit(lo, maxRowHeightPx_, defaultRowHeightPx_);
+        return trh::clampRowHeightPx(defaultRowHeightPx_);
     }
     auto it = perTrackRowHeightPx_.find(tid);
     const int h = (it != perTrackRowHeightPx_.end()) ? it->second : defaultRowHeightPx_;
-    return juce::jlimit(lo, maxRowHeightPx_, h);
+    return trh::clampRowHeightPx(h);
 }
 
 int TrackLanesView::rowHeightForVisibleEntry(const int visibleIndex) const noexcept
@@ -2788,7 +2807,9 @@ void TrackLanesView::applyTrackRowHeightDelta(const TrackId tid,
     {
         return;
     }
-    setTrackRowHeightPx(tid, startHeightPx + deltaPx);
+    // Snap during the drag from the ORIGINAL height + the total pointer movement: a pure function
+    // of the pointer position, so the row cannot flutter between two grid heights at a boundary.
+    setTrackRowHeightPx(tid, track_row_heights::snapRowHeightPxToGrid(startHeightPx + deltaPx));
 }
 
 void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) noexcept
@@ -2799,7 +2820,7 @@ void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) 
     }
     const int before = rowHeightForTrack(tid);
     const int lo = minimumRowHeightPxForTrackHeader(tid);
-    const int nh = juce::jlimit(lo, maxRowHeightPx_, heightPx);
+    const int nh = juce::jlimit(lo, track_row_heights::kRowHeightSafetyMaxPx, heightPx);
     if (nh == defaultRowHeightPx_)
     {
         perTrackRowHeightPx_.erase(tid);
@@ -2870,8 +2891,7 @@ TrackLanesView::uniformTrackRowHeightPresetStatus() const noexcept
     namespace trh = track_row_heights;
     if (visibleTrackEntries_.empty())
     {
-        return trh::presetMatchingHeightPx(juce::jlimit(trh::kSmallRowHeightPx, maxRowHeightPx_,
-                                                        defaultRowHeightPx_));
+        return trh::presetMatchingHeightPx(trh::clampRowHeightPx(defaultRowHeightPx_));
     }
     const int first = rowHeightForTrack(visibleTrackEntries_.front().sessionTrackId);
     for (const auto& e : visibleTrackEntries_)
@@ -2913,7 +2933,10 @@ void TrackLanesView::applyTrackRowHeightsFromLoadedProject(
         {
             continue; // absent / malformed height: the row keeps the project default.
         }
-        const int clamped = juce::jlimit(trh::kSmallRowHeightPx, maxRowHeightPx_, px);
+        // Clamp to [Micro, safety max] but NEVER re-snap: a valid older off-grid height (e.g. the
+        // pre-grid 64 / 96 / 192) stays as saved and reports "Custom" until the user resizes or
+        // picks a preset.
+        const int clamped = trh::clampRowHeightPx(px);
         if (clamped != defaultRowHeightPx_)
         {
             perTrackRowHeightPx_[tid] = clamped;
@@ -2952,14 +2975,160 @@ void TrackLanesView::snapTrackHeaderRowHeightAfterResize(const TrackId tid,
     {
         return;
     }
+    juce::ignoreUnused(headerHasSubtitle);
     const int h = rowHeightForTrack(tid);
-    const int lo = minimumRowHeightPxForTrackHeader(tid);
-    const int snapped = TrackHeaderView::snapTrackHeaderRowHeightAfterResize(
-        h, headerHasSubtitle, lo, maxRowHeightPx_);
+    const int snapped = track_row_heights::snapRowHeightPxToGrid(h);
     if (snapped != h)
     {
         setTrackRowHeightPx(tid, snapped);
     }
+}
+
+// --------------------------------------------------------- header numbers / icons / colours
+
+int TrackLanesView::trackNumberForTrack(const TrackId tid) const noexcept
+{
+    if (tid == kInvalidTrackId)
+    {
+        return 0;
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr)
+    {
+        return 0;
+    }
+    const int idx = snap->findTrackIndexById(tid);
+    return idx >= 0 ? idx + 1 : 0;
+}
+
+int TrackLanesView::trackNumberDigitCount() const noexcept
+{
+    int digits = 1;
+    for (int n = juce::jmax(1, session_.getNumTracks()); n >= 10; n /= 10)
+    {
+        ++digits;
+    }
+    return juce::jmax(TrackHeaderView::kHeaderMinNumberDigits, digits);
+}
+
+track_strip_glyphs::TrackTypeIcon TrackLanesView::typeIconForTrackKind(const TrackKind kind) noexcept
+{
+    using track_strip_glyphs::TrackTypeIcon;
+    switch (kind)
+    {
+    case TrackKind::Instrument:
+        return TrackTypeIcon::Instrument;
+    case TrackKind::Midi:
+        return TrackTypeIcon::Midi;
+    case TrackKind::Group:
+        return TrackTypeIcon::Group;
+    case TrackKind::Master:
+        return TrackTypeIcon::Master;
+    case TrackKind::Audio:
+    default:
+        return TrackTypeIcon::Audio;
+    }
+}
+
+void TrackLanesView::fillCommonHeaderModelFields(TrackHeaderModel& m, const TrackId tid) const noexcept
+{
+    m.trackNumber = trackNumberForTrack(tid);
+    m.trackNumberDigits = trackNumberDigitCount();
+    m.colourKey = session_.getTrackColour(tid);
+    if (const auto snap = session_.loadSessionSnapshotForAudioThread())
+    {
+        const int idx = snap->findTrackIndexById(tid);
+        if (idx >= 0)
+        {
+            m.typeIcon = typeIconForTrackKind(snap->getTrack(idx).getKind());
+        }
+    }
+}
+
+void TrackLanesView::showTrackColourMenuForTrack(const TrackId tid, const juce::Rectangle<int> segmentScreenBounds)
+{
+    if (tid == kInvalidTrackId || onTrackColourRequested_ == nullptr)
+    {
+        return;
+    }
+    const TrackColourKey current = session_.getTrackColour(tid);
+    juce::PopupMenu menu;
+    for (int i = 0; i < kTrackColourKeyCount; ++i)
+    {
+        const TrackColourKey key = trackColourKeyFromIndex(i);
+        juce::PopupMenu::Item item(track_colour_palette::displayName(key));
+        item.itemID = kTrackColourMenuBaseId + i;
+        item.isTicked = (key == current);
+        // Swatch: a small filled square in the exact segment colour, drawn as the item icon.
+        auto swatch = std::make_unique<juce::DrawableRectangle>();
+        swatch->setRectangle(juce::Parallelogram<float>(juce::Rectangle<float>(0.0f, 0.0f, 14.0f, 14.0f)));
+        swatch->setCornerSize(juce::Point<float>(2.0f, 2.0f));
+        swatch->setFill(juce::FillType(track_colour_palette::menuSwatch(key)));
+        swatch->setStrokeFill(juce::FillType(juce::Colour(0x80000000)));
+        swatch->setStrokeThickness(1.0f);
+        item.image = std::move(swatch);
+        menu.addItem(std::move(item));
+    }
+    juce::Component::SafePointer<TrackLanesView> safeThis(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(segmentScreenBounds),
+                       [safeThis, tid](const int result) {
+                           if (safeThis == nullptr || result < kTrackColourMenuBaseId
+                               || result >= kTrackColourMenuBaseId + kTrackColourKeyCount
+                               || safeThis->onTrackColourRequested_ == nullptr)
+                           {
+                               return;
+                           }
+                           // The command targets the right-clicked track only — never the header
+                           // multi-selection, never the active track.
+                           safeThis->onTrackColourRequested_(tid, trackColourKeyFromIndex(result - kTrackColourMenuBaseId));
+                       });
+}
+
+void TrackLanesView::refreshTrackColoursFromSession() noexcept
+{
+    // Headers and lanes read `Session::getTrackColour` when they paint; a full repaint of this
+    // (buffered) view invalidates every child, and the audio lanes rebuild their wave raster on
+    // the next paint because the raster remembers the colour it was built with.
+    for (auto& h : headers_)
+    {
+        if (h != nullptr)
+        {
+            h->repaint();
+        }
+    }
+    for (auto& l : lanes_)
+    {
+        if (l != nullptr)
+        {
+            l->repaint();
+        }
+    }
+    for (auto& kv : groupHeaders_)
+    {
+        if (kv.second != nullptr)
+        {
+            kv.second->repaint();
+        }
+    }
+    for (auto& mh : masterHeaders_)
+    {
+        if (mh != nullptr)
+        {
+            mh->repaint();
+        }
+    }
+    for (auto& kv : instrumentTimelineAttachments_)
+    {
+        if (kv.second.header != nullptr)
+        {
+            kv.second.header->repaint();
+        }
+        if (kv.second.midiLane != nullptr)
+        {
+            kv.second.midiLane->repaint();
+        }
+    }
+    repaint();
 }
 
 void TrackLanesView::prunePerTrackRowHeightsNotInSession() noexcept
@@ -3780,9 +3949,26 @@ int TrackLanesView::yTopForVisibleIndex(const int vi) const noexcept
     return y;
 }
 
+int TrackLanesView::headerFreeBottomPxForRowHeight(const int rowDisplayHeightPx) noexcept
+{
+    // Chrome below the lowest control row of a header of this DISPLAY height: 0 for a collapsed
+    // 4 px strip and for Micro (title row + band only), 14 for Mini, 3 for Small, 45 for Medium.
+    if (rowDisplayHeightPx < track_row_heights::kMinRowHeightPx)
+    {
+        return 0;
+    }
+    int controlsBottom = TrackHeaderView::kHeaderRowTopPadPx + TrackHeaderView::kStripControlCellWidthPx;
+    if (rowDisplayHeightPx >= TrackHeaderView::kMinimumHeightForSecondRowPx)
+    {
+        controlsBottom += TrackHeaderView::kHeaderRowGapPx + TrackHeaderView::kStripControlCellWidthPx;
+    }
+    return juce::jmax(0, rowDisplayHeightPx - TrackHeaderView::kHeaderResizeBandPx - controlsBottom);
+}
+
 void TrackLanesView::layoutVisualGroupHandles() noexcept
 {
     const int gutterBottom = getLocalBounds().getY() + kArrangementTimelineHeaderGutterPx;
+    const int headerW = headerColumnWidthPx();
     for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
     {
         const auto it = visualGroupHandles_.find(run.groupId);
@@ -3799,17 +3985,46 @@ void TrackLanesView::layoutVisualGroupHandles() noexcept
             handle.setBounds(0, 0, 0, 0); // group fully scrolled out
             continue;
         }
-        // Centre the tab on the boundary between the first member and the previous track; when
-        // the group is first or that boundary is above the viewport top, clamp it below the
-        // gutter so the handle stays visible and clickable (sticky while the group intersects).
-        int tabTop = topY - kVisualGroupHandleHeightPx / 2;
-        tabTop = juce::jmax(tabTop, gutterBottom);
-        tabTop = juce::jmin(tabTop, bottomY - kVisualGroupHandleHeightPx);
-        tabTop = juce::jmax(tabTop, gutterBottom); // tiny collapsed run near the top: gutter wins
-        const int x = kVisualGroupMarkerXPx;
-        const int w = juce::jmin(kVisualGroupHandleMaxWidthPx,
-                                 juce::jmax(0, headerColumnWidthPx() - x - 6));
-        handle.setBounds(x, tabTop, w, kVisualGroupHandleHeightPx);
+        // The tab stays anchored at the group's top boundary but must never cover a name, a
+        // number or a Power / Mute / Solo cell of either adjacent row (spec §6). Three placements:
+        //   (a) boundary at or above the viewport top (first track, or scrolled past): the tab
+        //       sits in the timeline-gutter band right of the add-track corner (sticky);
+        //   (b) the previous row has free chrome under its lowest control row (Mini, Medium,
+        //       Large …): the tab sits fully inside that free band, bottom edge on the boundary;
+        //   (c) compact neighbours (Micro, Small, collapsed strips): a 12 px tab centred on the
+        //       boundary and confined to the group margin + colour-segment zone — left of every
+        //       control cell and of the name; the full name is the tab's tooltip.
+        int tabH = kVisualGroupHandleHeightPx;
+        int tabTop = 0;
+        int x = kVisualGroupMarkerXPx;
+        int w = 0;
+        const int fullW = juce::jmin(kVisualGroupHandleMaxWidthPx, juce::jmax(0, headerW - x - 6));
+        if (topY <= gutterBottom)
+        {
+            x = kVisualGroupHandleGutterLeftPx;
+            w = juce::jmin(kVisualGroupHandleMaxWidthPx, juce::jmax(0, headerW - x - 6));
+            tabTop = gutterBottom - tabH;
+        }
+        else
+        {
+            const int prevVi = run.firstVisibleIndex - 1;
+            const int free = prevVi >= 0 ? headerFreeBottomPxForRowHeight(rowHeightForVisibleEntry(prevVi)) : 0;
+            if (free >= kVisualGroupHandleMinInlineHeightPx)
+            {
+                tabH = juce::jmin(kVisualGroupHandleHeightPx, free);
+                tabTop = topY - tabH;
+                w = fullW;
+            }
+            else
+            {
+                tabH = kVisualGroupHandleCompactHeightPx;
+                tabTop = topY - tabH / 2;
+                const int segRight = TrackHeaderView::kHeaderGroupMarginPx
+                                     + TrackHeaderView::colourSegmentWidthPxForDigits(trackNumberDigitCount());
+                w = juce::jmax(0, juce::jmin(segRight, headerW - 2) - x);
+            }
+        }
+        handle.setBounds(x, tabTop, w, tabH);
         handle.toFront(false);
     }
 }

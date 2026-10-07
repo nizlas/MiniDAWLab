@@ -448,6 +448,40 @@ public:
     }
 
     // -------------------------------------------------------------------------------------------
+    // Header order numbers, type icons and track colours (compact-header slice 2026-10-07).
+    // -------------------------------------------------------------------------------------------
+
+    /// 1-based position of `tid` in the session (arrangement) order, 0 when unknown. Derived live:
+    /// insert / duplicate / delete / reorder renumber; hidden members of a collapsed group count.
+    [[nodiscard]] int trackNumberForTrack(TrackId tid) const noexcept;
+    /// Shared digit-column width for every header: max(3, digits of the track count).
+    [[nodiscard]] int trackNumberDigitCount() const noexcept;
+    /// The segment's type icon for a session row kind (Midi rows get the MIDI connector, not the
+    /// instrument keyboard).
+    [[nodiscard]] static track_strip_glyphs::TrackTypeIcon typeIconForTrackKind(TrackKind kind) noexcept;
+
+    /// [Message thread] Wired once by `Main`: the colour command (the owner records the narrow
+    /// undo step + dirty flag, then calls `refreshTrackColoursFromSession`).
+    void setOnTrackColourRequested(std::function<void(TrackId, TrackColourKey)> fn) noexcept
+    {
+        onTrackColourRequested_ = std::move(fn);
+    }
+    /// [Message thread] Right-click on a header's icon / number segment: the compact palette
+    /// menu anchored at `segmentScreenBounds`. Applies to `tid` whatever row is active; never a
+    /// mass recolour through the header multi-selection.
+    void showTrackColourMenuForTrack(TrackId tid, juce::Rectangle<int> segmentScreenBounds);
+    /// [Message thread] After a colour change (command / undo / redo / load): repaint every
+    /// header and lane. Lanes derive their event fill from `Session::getTrackColour` on paint and
+    /// the audio lanes' cached wave rasters re-derive on the next paint — no zoom / click needed.
+    void refreshTrackColoursFromSession() noexcept;
+    /// [Test] The palette's menu item id for a colour (1-based: `index + 1`).
+    static constexpr int kTrackColourMenuBaseId = 1;
+    /// Fill the shared header-model fields (order number, digit column, type icon, colour key)
+    /// for `tid` — used by every header model provider (audio / group / master here, instrument
+    /// and MIDI rows in `InstrumentTimelineRowCoordinator`) so all headers agree.
+    void fillCommonHeaderModelFields(TrackHeaderModel& m, TrackId tid) const noexcept;
+
+    // -------------------------------------------------------------------------------------------
     // Visual track groups (collapsible, purely visual — `domain/VisualTrackGroup.h`) and the
     // header multi-selection used to create them.
     // -------------------------------------------------------------------------------------------
@@ -460,6 +494,16 @@ public:
     /// into this short tab extending right over the header area at the group's top boundary).
     static constexpr int kVisualGroupHandleHeightPx = 16;
     static constexpr int kVisualGroupHandleMaxWidthPx = 140;
+    /// Placement rules (see `layoutVisualGroupHandles`): the tab uses its full 16 px only inside
+    /// a previous row's free chrome (at least this many px below its lowest control row), the
+    /// compact 12 px variant confined to the margin + colour segment otherwise, and the gutter
+    /// band (right of the add-track corner button) when the boundary is at / above the viewport.
+    static constexpr int kVisualGroupHandleMinInlineHeightPx = 12;
+    static constexpr int kVisualGroupHandleCompactHeightPx = 12;
+    static constexpr int kVisualGroupHandleGutterLeftPx = 30;
+    /// Free header chrome below the lowest control row for a row of this DISPLAY height (0 for
+    /// Micro and for collapsed 4 px strips). Pure; public for the focused tests.
+    [[nodiscard]] static int headerFreeBottomPxForRowHeight(int rowDisplayHeightPx) noexcept;
     /// Long-press threshold on the handle: rename instead of collapse-toggle (spec §3).
     static constexpr int kVisualGroupHandleLongPressMs = 500;
 
@@ -673,12 +717,13 @@ private:
     std::vector<VisibleTrackEntry> visibleTrackEntries_;
 
     /// Default (un-dragged) row height = the last chosen preset's px (Medium on a fresh session).
-    int defaultRowHeightPx_ = track_row_heights::kMediumRowHeightPx;
-    int maxRowHeightPx_ = 480;
+    /// Range: [`track_row_heights::kMinRowHeightPx`, `kRowHeightSafetyMaxPx`] (no 480 px user cap).
+    int defaultRowHeightPx_ = track_row_heights::kMediumPresetPx;
     track_row_heights::TrackRowHeightPreset lastChosenRowHeightPreset_
         = track_row_heights::TrackRowHeightPreset::Medium;
     std::function<void(bool)> onTrackRowHeightsChanged_;
     void notifyTrackRowHeightsChanged(bool byUserEdit) noexcept;
+    std::function<void(TrackId, TrackColourKey)> onTrackColourRequested_;
     [[nodiscard]] TrackId topVisibleTrackIdForCurrentOffset() const noexcept;
     int verticalScrollOffsetPx_ = 0;
     VerticalScrollModel lastPublishedVerticalScrollModel_{};

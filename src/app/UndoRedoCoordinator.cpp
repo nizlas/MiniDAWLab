@@ -198,6 +198,16 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
             callbacks_.refreshVisualTrackGroupsAfterUndoRestore();
         }
     }
+    if (bundle->trackColourSides.has_value())
+    {
+        // Narrow track-colour step: restore that one track's palette key; headers and
+        // lanes re-derive their colour from the Session on repaint.
+        (void) session_.setTrackColour(bundle->trackColourSides->trackId, bundle->trackColourSides->before);
+        if (callbacks_.refreshTrackColoursAfterUndoRestore)
+        {
+            callbacks_.refreshTrackColoursAfterUndoRestore();
+        }
+    }
     refreshAfterSessionSnapshotRestore();
     // Stability C3: verify runtime invariants right after the undo completed.
     (void) stability_invariants::runRegisteredStabilityInvariantsCheck("undo-end");
@@ -330,6 +340,14 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
         if (callbacks_.refreshVisualTrackGroupsAfterUndoRestore)
         {
             callbacks_.refreshVisualTrackGroupsAfterUndoRestore();
+        }
+    }
+    if (bundle->trackColourSides.has_value())
+    {
+        (void) session_.setTrackColour(bundle->trackColourSides->trackId, bundle->trackColourSides->after);
+        if (callbacks_.refreshTrackColoursAfterUndoRestore)
+        {
+            callbacks_.refreshTrackColoursAfterUndoRestore();
         }
     }
     refreshAfterSessionSnapshotRestore();
@@ -791,6 +809,43 @@ void UndoRedoCoordinator::executeUndoableVisualTrackGroupsEdit(const juce::Strin
         writeUndoDiagnosticLogLine("[UndoDiag] executeUndoableVisualTrackGroupsEdit recorded label=\""
                                    + label + "\" undoSize="
                                    + juce::String(sessionHistory_.undoStackSize()));
+    }
+}
+
+void UndoRedoCoordinator::executeUndoableTrackColourEdit(const TrackId trackId, const TrackColourKey newColour)
+{
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
+    const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+    if (snap == nullptr || trackId == kInvalidTrackId || snap->findTrackIndexById(trackId) < 0)
+    {
+        return;
+    }
+    const TrackColourKey before = session_.getTrackColour(trackId);
+    if (!session_.setTrackColour(trackId, newColour))
+    {
+        return; // same colour: no step, no dirty
+    }
+    // Narrow step: identical snapshot pointer on both sides — undo restores exactly this one
+    // colour, never instruments, takes or the rest of the Session.
+    sessionHistory_.record("Track colour",
+                           snap,
+                           snap,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           TrackColourUndoSides{ trackId, before, newColour });
+    if (callbacks_.markProjectDirty)
+    {
+        callbacks_.markProjectDirty();
+    }
+    if (callbacks_.refreshTrackColoursAfterUndoRestore)
+    {
+        callbacks_.refreshTrackColoursAfterUndoRestore();
     }
 }
 

@@ -43,6 +43,7 @@
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
 #include "ui/TrackRowHeightPresets.h"
+#include "ui/TrackColourPalette.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -393,9 +394,9 @@ void testCollapsedLayoutExactFourPx()
 
     const std::map<TrackId, int> h = f.rowHeights();
     expect(h.at(rows[4]) == 4 && h.at(rows[5]) == 4 && h.at(rows[6]) == 4,
-           "collapse: every member row (incl. the bus) displays at EXACTLY 4 px (64 px minimum "
+           "collapse: every member row (incl. the bus) displays at EXACTLY 4 px (the Micro minimum "
            "does not apply)");
-    expect(h.at(rows[0]) == trh::kMediumRowHeightPx && h.at(rows[1]) == trh::kMediumRowHeightPx,
+    expect(h.at(rows[0]) == trh::kMediumPresetPx && h.at(rows[1]) == trh::kMediumPresetPx,
            "collapse: rows outside the group keep their heights");
     expect(f.lanes->verticalScrollModel().contentHeightPx
                == contentExpanded - (64 + 150 + 192) + 3 * 4,
@@ -587,9 +588,9 @@ void testNormalHeightsSeparateFromCollapsedDisplay()
            "heights: status reads Small from the normal heights while the group is collapsed");
     f.setCollapsed(*gid, false);
     const std::map<TrackId, int> hExpanded = f.rowHeights();
-    expect(hExpanded.at(rows[1]) == trh::kSmallRowHeightPx
-               && hExpanded.at(rows[2]) == trh::kSmallRowHeightPx
-               && hExpanded.at(rows[3]) == trh::kSmallRowHeightPx,
+    expect(hExpanded.at(rows[1]) == trh::kSmallPresetPx
+               && hExpanded.at(rows[2]) == trh::kSmallPresetPx
+               && hExpanded.at(rows[3]) == trh::kSmallPresetPx,
            "heights: expansion restores the heights the preset gave the HIDDEN members (64)");
 }
 
@@ -599,39 +600,79 @@ void testNormalHeightsSeparateFromCollapsedDisplay()
 void testHandlePlacementAndGestures()
 {
     GroupFixture f(/*extraAudioTracks*/ 10);
-    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
     constexpr int gutter = TrackLanesView::kArrangementTimelineHeaderGutterPx;
 
-    // A group starting at the very FIRST track: the handle stays visible (clamped at the gutter).
+    // A group starting at the very FIRST track: the handle stays visible — in the gutter band
+    // above the first member (right of the add-track corner), never over the member's title row.
     const std::optional<int> gFirst = f.makeGroup({ 0, 1 }, "First");
     const juce::Rectangle<int> bFirst = f.lanes->visualGroupHandleBoundsForTest(*gFirst);
-    expect(!bFirst.isEmpty() && bFirst.getY() == gutter
+    expect(!bFirst.isEmpty() && bFirst.getBottom() == gutter
                && bFirst.getHeight() == TrackLanesView::kVisualGroupHandleHeightPx
+               && bFirst.getX() == TrackLanesView::kVisualGroupHandleGutterLeftPx
                && bFirst.getWidth() <= TrackLanesView::kVisualGroupHandleMaxWidthPx,
-           "handle: a group at the FIRST track keeps its handle visible at the gutter edge");
+           "handle: a group at the FIRST track keeps its handle visible in the gutter band (covers no title row)");
 
-    // A mid-list group: the handle is centered over the boundary between the previous track and
-    // the first member.
+    // A mid-list group with Medium neighbours: the handle sits fully INSIDE the previous row's
+    // free chrome (below its second control row), its bottom edge on the group's top boundary.
     const std::optional<int> gMid = f.makeGroup({ 3, 4, 5 }, "Mid");
     const juce::Rectangle<int> bMid = f.lanes->visualGroupHandleBoundsForTest(*gMid);
     const int boundaryY = f.widgetYTopForTrack(f.tidAt(3));
-    expect(!bMid.isEmpty()
-               && bMid.getY() == boundaryY - TrackLanesView::kVisualGroupHandleHeightPx / 2,
-           "handle: a mid-list handle is centered over the group's top boundary");
+    expect(!bMid.isEmpty() && bMid.getBottom() == boundaryY
+               && bMid.getHeight() == TrackLanesView::kVisualGroupHandleHeightPx
+               && bMid.getY() >= f.widgetYTopForTrack(f.tidAt(2)) + TrackHeaderView::kHeaderRowTopPadPx
+                                     + 2 * TrackHeaderView::kStripControlCellWidthPx + TrackHeaderView::kHeaderRowGapPx,
+           "handle: a mid-list handle (Medium rows) sits inside the previous row's free band, bottom on the boundary, below its cells");
+    expect(TrackLanesView::headerFreeBottomPxForRowHeight(trh::kMediumPresetPx) == 45
+               && TrackLanesView::headerFreeBottomPxForRowHeight(trh::kMiniPresetPx) == 14
+               && TrackLanesView::headerFreeBottomPxForRowHeight(trh::kSmallPresetPx) == 3
+               && TrackLanesView::headerFreeBottomPxForRowHeight(trh::kMicroPresetPx) == 0
+               && TrackLanesView::headerFreeBottomPxForRowHeight(TrackLanesView::kCollapsedGroupMemberRowHeightPx) == 0,
+           "handle: free chrome under the lowest control row = 45 / 14 / 3 / 0 / 0 px for Medium / Mini / Small / Micro / collapsed strip");
 
     // Scroll until the mid group's top is above the viewport while its rows are still visible:
-    // the handle clamps to the viewport top instead of disappearing.
+    // the handle moves into the gutter band instead of disappearing (sticky).
     f.lanes->scrollVerticallyToOffsetPx(f.lanes->rowTopOffsetPxForTrackForDiagnostics(f.tidAt(4)));
     const juce::Rectangle<int> bClamped = f.lanes->visualGroupHandleBoundsForTest(*gMid);
-    expect(!bClamped.isEmpty() && bClamped.getY() == gutter,
-           "handle: with the group's top scrolled past the viewport top the handle clamps to the "
-           "gutter edge and stays accessible");
+    expect(!bClamped.isEmpty() && bClamped.getBottom() == gutter,
+           "handle: with the group's top scrolled past the viewport top the handle sits in the "
+           "gutter band and stays accessible");
 
     // Scroll far past the group: the handle unmaps (no floating orphan).
     f.lanes->scrollVerticallyToOffsetPx(f.lanes->verticalScrollModel().maxOffsetPx());
     expect(f.lanes->visualGroupHandleBoundsForTest(*gFirst).isEmpty(),
            "handle: a fully scrolled-out group has NO laid-out handle");
     f.lanes->scrollVerticallyToOffsetPx(0);
+
+    // Micro neighbours (no free chrome anywhere): the compact 12 px tab, centred on the boundary
+    // and confined to the group margin + colour segment — left of every Power / Mute / Solo cell
+    // and of the name, overlapping at most the top of the first member's icon / number area.
+    {
+        f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Micro);
+        const juce::Rectangle<int> bMicro = f.lanes->visualGroupHandleBoundsForTest(*gMid);
+        const int boundaryMicro = f.widgetYTopForTrack(f.tidAt(3));
+        const int segRight = TrackHeaderView::kHeaderGroupMarginPx
+                             + TrackHeaderView::colourSegmentWidthPxForDigits(f.lanes->trackNumberDigitCount());
+        const int firstCellX = segRight + TrackHeaderView::kHeaderSegmentToStripGapPx;
+        expect(!bMicro.isEmpty() && bMicro.getHeight() == TrackLanesView::kVisualGroupHandleCompactHeightPx
+                   && bMicro.getCentreY() == boundaryMicro && bMicro.getRight() <= segRight && bMicro.getRight() < firstCellX
+                   && bMicro.getBottom() <= boundaryMicro + TrackHeaderView::kHeaderRowTopPadPx + 4,
+               "handle (Micro): compact 12 px tab centred on the boundary, confined left of every title cell and the name");
+        // Two adjacent groups in Micro: the second group's tab at the shared boundary never
+        // overlaps the first group's tab or any control cell.
+        const std::optional<int> gNext = f.makeGroup({ 6, 7 }, "Next");
+        const juce::Rectangle<int> bNext = f.lanes->visualGroupHandleBoundsForTest(*gNext);
+        expect(gNext.has_value() && !bNext.isEmpty() && !bNext.intersects(bMicro)
+                   && bNext.getCentreY() == f.widgetYTopForTrack(f.tidAt(6)) && bNext.getRight() < firstCellX,
+               "handle (Micro): two directly adjacent groups get two disjoint compact tabs, both left of the control cells");
+        // The hidden hit-test of the previous (Micro) row's cells: nothing of the compact tab lies
+        // over its title cells (they start at x = firstCellX).
+        juce::Component* const atNextTab = f.lanes->getComponentAt(bNext.getCentreX(), bNext.getCentreY());
+        expect(atNextTab != nullptr && atNextTab->getBounds() == bNext,
+               "handle (Micro): the compact tab is the component hit at its centre (it swallows its own clicks)");
+        f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
+        f.lanes->scrollVerticallyToOffsetPx(0);
+    }
 
     // The handle never hit-tests through to the previous track's header or its resize band.
     const juce::Rectangle<int> bMid2 = f.lanes->visualGroupHandleBoundsForTest(*gMid);
@@ -1098,6 +1139,187 @@ void testMalformedGroupMetadataSafeFallback()
     (void)badProj.deleteFile();
 }
 // ---------------------------------------------------------------------------------------------
+// Track colours (compact-header slice): narrow undo through the real coordinator, immediate lane repaint from the
+// cached raster, Duplicate inheritance, v28 persistence, pre-v28 / unknown keys -> Default grey.
+// ---------------------------------------------------------------------------------------------
+[[nodiscard]] int countExactColour(const juce::Image& img,
+                                   const juce::Rectangle<int>& area,
+                                   const juce::Colour colour)
+{
+    int n = 0;
+    const juce::Rectangle<int> r = area.getIntersection(img.getBounds());
+    for (int y = r.getY(); y < r.getBottom(); ++y)
+    {
+        for (int x = r.getX(); x < r.getRight(); ++x)
+        {
+            if (img.getPixelAt(x, y) == colour)
+            {
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
+void testTrackColourNarrowUndoRepaintAndPersistence()
+{
+    const juce::File wav = writeToneWav("colour-take.wav", 1.0);
+    auto f = std::make_unique<GroupFixture>(/*extraAudioTracks*/ 3);
+    Session& s = f->session;
+    f->lanes->setSize(900, 400);
+    const TrackId tA = f->tidAt(0);
+    const TrackId tB = f->tidAt(1);
+    const TrackId tC = f->tidAt(2); // stays uncoloured (Duplicate below inserts right after B)
+    s.setActiveTrack(tA);
+    expect(s.addRecordedTakeAtSample(wav, kRate, 0, tB, (std::int64_t)kRate).wasOk(),
+           "colour fixture: a committed take on the NON-active track B");
+    f->lanes->syncTracksFromSession();
+    f->lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
+
+    PluginInsertHost pluginHost;
+    int dirtyCount = 0;
+    int colourRefreshes = 0;
+    UndoRedoCoordinator::Callbacks cb;
+    cb.markProjectDirty = [&] { ++dirtyCount; };
+    cb.refreshTrackColoursAfterUndoRestore = [&] {
+        ++colourRefreshes;
+        f->lanes->refreshTrackColoursFromSession();
+    };
+    UndoRedoCoordinator undo(s, pluginHost, std::move(cb));
+    const auto timelineBefore = s.loadSessionSnapshotForAudioThread();
+
+    // The lane body of track B's clip, in lanes coordinates: below the waveform band (the tone is
+    // painted at full display gain around the lane centre) so the sampled pixels are pure body fill.
+    const auto clipBodyProbe = [&] {
+        const int top = f->widgetYTopForTrack(tB);
+        const int x0 = f->lanes->headerColumnWidthPx() + 10;
+        return juce::Rectangle<int>(x0, top + trh::kMediumPresetPx - 22, 60, 12);
+    };
+    const juce::Image before = f->lanes->createComponentSnapshot(f->lanes->getLocalBounds(), false, 1.0f);
+    expect(countExactColour(before, clipBodyProbe(), track_colour_palette::eventBodyFill(TrackColourKey::DefaultGrey)) > 300,
+           "colour: before any change the clip body paints in the historic default grey-blue");
+
+    // Command on the right-clicked (non-active) track: narrow step, no snapshot publish.
+    undo.executeUndoableTrackColourEdit(tB, TrackColourKey::Red);
+    expect(s.getTrackColour(tB) == TrackColourKey::Red && s.getTrackColour(tA) == TrackColourKey::DefaultGrey
+               && s.getActiveTrackId() == tA,
+           "colour: the edit colours exactly the requested track B (active track A untouched, still active)");
+    expect(dirtyCount == 1 && colourRefreshes == 1,
+           "colour: one dirty mark + one colour refresh for the edit");
+    expect(s.loadSessionSnapshotForAudioThread() == timelineBefore,
+           "colour: the colour edit left the timeline snapshot pointer IDENTICAL (no musical data touched)");
+    const juce::Image after = f->lanes->createComponentSnapshot(f->lanes->getLocalBounds(), false, 1.0f);
+    expect(countExactColour(after, clipBodyProbe(), track_colour_palette::eventBodyFill(TrackColourKey::Red)) > 300
+               && countExactColour(after, clipBodyProbe(), track_colour_palette::eventBodyFill(TrackColourKey::DefaultGrey)) == 0,
+           "colour: the very next paint shows the red event body (cached raster invalidated immediately)");
+    const int headerSeg = countExactColour(after, f->lanes->getLocalBounds().withWidth(f->lanes->headerColumnWidthPx())
+                                                      .withY(f->widgetYTopForTrack(tB)).withHeight(trh::kMediumPresetPx),
+                                           track_colour_palette::headerSegmentFill(TrackColourKey::Red));
+    expect(headerSeg > 200, "colour: track B's header colour segment paints in the red segment fill");
+
+    // Same colour again: no step; undo -> grey; redo -> red. Only the colour moves.
+    undo.executeUndoableTrackColourEdit(tB, TrackColourKey::Red);
+    expect(dirtyCount == 1, "colour: re-applying the same colour records NO step");
+    undo.invokeUndoFromWindowShortcut();
+    expect(s.getTrackColour(tB) == TrackColourKey::DefaultGrey && colourRefreshes >= 2,
+           "colour undo: Ctrl+Z restores Default grey and refreshes the display");
+    expect(timelinesEqualByContent(*s.loadSessionSnapshotForAudioThread(), *timelineBefore),
+           "colour undo: the take and tracks are untouched (timeline equal by content)");
+    undo.invokeRedoFromWindowShortcut();
+    expect(s.getTrackColour(tB) == TrackColourKey::Red, "colour redo: red is back");
+
+    // Duplicate inherits the source colour.
+    const std::optional<TrackId> dup = s.duplicateTrack(tB);
+    expect(dup.has_value() && s.getTrackColour(*dup) == TrackColourKey::Red,
+           "colour: Duplicate inherits the source track's colour");
+
+    // v28 persistence: only non-default colours are written; reload restores them.
+    // (A clip-less sibling fixture with the same track ids: project saves require clip audio inside
+    // the project's Audio folder, which is not what this colour slice is about.)
+    const juce::File proj = tempDir().getChildFile("track-colours.dalproj");
+    (void)proj.deleteFile();
+    GroupFixture pf(/*extraAudioTracks*/ 3);
+    expect(pf.tidAt(0) == tA && pf.tidAt(1) == tB, "colour save fixture: same track ids as the live fixture");
+    const std::optional<TrackId> pdup = pf.session.duplicateTrack(tB);
+    expect(pdup.has_value() && pf.session.setTrackColour(tA, TrackColourKey::Teal)
+               && pf.session.setTrackColour(tB, TrackColourKey::Red) && pf.session.setTrackColour(*pdup, TrackColourKey::Red),
+           "colour save fixture: A teal, B red, duplicate red");
+    const juce::Result saveRes = pf.session.saveProjectToFile(pf.transport, proj, kRate);
+    expect(saveRes.wasOk(), "colour save: project written (" + saveRes.getErrorMessage() + ")");
+    ProjectFileV1 parsed;
+    expect(readProjectFile(proj, parsed).wasOk() && parsed.version == ProjectFileV1::kCurrentVersion
+               && parsed.version >= 28,
+           "colour save: the file is the current (>= 28) schema");
+    int tealCount = 0, redCount = 0, emptyCount = 0;
+    for (const auto& t : parsed.tracks)
+    {
+        if (t.colourKey == "teal") ++tealCount;
+        else if (t.colourKey == "red") ++redCount;
+        else if (t.colourKey.isEmpty()) ++emptyCount;
+    }
+    expect(tealCount == 1 && redCount == 2 && emptyCount == (int)parsed.tracks.size() - 3,
+           "colour save: teal x1 (A), red x2 (B + duplicate), every other track has NO colour key");
+    {
+        GroupFixture g(/*extraAudioTracks*/ 0);
+        juce::StringArray skipped;
+        juce::String note;
+        expect(g.session.loadProjectFromFile(g.transport, proj, kRate, skipped, note, nullptr).wasOk(),
+               "colour reload: project loads");
+        expect(g.session.getTrackColour(tA) == TrackColourKey::Teal && g.session.getTrackColour(tB) == TrackColourKey::Red
+                   && g.session.getTrackColour(*pdup) == TrackColourKey::Red
+                   && g.session.getTrackColour(tC) == TrackColourKey::DefaultGrey,
+               "colour reload: colours restored per track id; uncoloured tracks stay Default grey");
+    }
+
+    // Pre-v28 file (no colour keys, version text rewritten) -> every track Default grey.
+    {
+        const juce::String text = proj.loadFileAsString();
+        const juce::String cur = juce::String(ProjectFileV1::kCurrentVersion);
+        juce::String asV27 = text.replace("\"version\": " + cur, "\"version\": 27")
+                                 .replace("\"version\":" + cur, "\"version\":27");
+        asV27 = asV27.replace("\"colour\": \"teal\",", "").replace("\"colour\": \"red\",", "")
+                     .replace("\"colour\":\"teal\",", "").replace("\"colour\":\"red\",", "");
+        const juce::File oldProj = tempDir().getChildFile("pre-v28-colours.dalproj");
+        expect(asV27 != text && !asV27.contains("\"colour\"") && oldProj.replaceWithText(asV27),
+               "pre-v28: version rewritten to 27 and colour keys stripped");
+        GroupFixture g(/*extraAudioTracks*/ 0);
+        juce::StringArray skipped;
+        juce::String note;
+        expect(g.session.loadProjectFromFile(g.transport, oldProj, kRate, skipped, note, nullptr).wasOk(),
+               "pre-v28: the v27 file loads");
+        expect(g.session.getTrackColour(tA) == TrackColourKey::DefaultGrey
+                   && g.session.getTrackColour(tB) == TrackColourKey::DefaultGrey,
+               "pre-v28: older projects simply show Default grey everywhere");
+        (void)oldProj.deleteFile();
+    }
+
+    // Unknown / malformed colour values -> Default grey, never a failed read.
+    {
+        const juce::File badProj = tempDir().getChildFile("bad-colours.dalproj");
+        const juce::String json =
+            "{ \"version\": 28, \"nextPlacedClipId\": 50, \"nextTrackId\": 99, \"activeTrackId\": 1,"
+            " \"playheadSamples\": 0, \"deviceSampleRateAtSave\": 48000.0,"
+            " \"tracks\": ["
+            "  { \"id\": 1, \"name\": \"T1\", \"kind\": \"audio\", \"colour\": \"neon-pink\" },"
+            "  { \"id\": 2, \"name\": \"T2\", \"kind\": \"audio\", \"colour\": 7 },"
+            "  { \"id\": 3, \"name\": \"T3\", \"kind\": \"audio\", \"colour\": \"purple\" },"
+            "  { \"id\": 90, \"name\": \"Stereo Out\", \"kind\": \"master\" } ] }";
+        expect(badProj.replaceWithText(json), "bad colours: handcrafted project written");
+        GroupFixture g(/*extraAudioTracks*/ 0);
+        juce::StringArray skipped;
+        juce::String note;
+        expect(g.session.loadProjectFromFile(g.transport, badProj, kRate, skipped, note, nullptr).wasOk(),
+               "bad colours: the load NEVER fails on unknown colour values");
+        expect(g.session.getTrackColour(1) == TrackColourKey::DefaultGrey
+                   && g.session.getTrackColour(2) == TrackColourKey::DefaultGrey
+                   && g.session.getTrackColour(3) == TrackColourKey::Purple,
+               "bad colours: unknown / non-string values fall back to Default grey; valid keys load");
+        (void)badProj.deleteFile();
+    }
+    (void)proj.deleteFile();
+}
+
+// ---------------------------------------------------------------------------------------------
 // --render <dir>: reproducible example images for the feature report / PR — the SAME group
 // rendered expanded and collapsed, in an 8-track and a 16-track arrangement (offscreen snapshots
 // of the production TrackLanesView; the handler-level verification above is what proves behavior,
@@ -1156,9 +1378,102 @@ void renderGroupExample(const juce::File& outDir,
              outDir.getChildFile(baseName + "-collapsed.png"));
 }
 
+/// Compact-header example: several row kinds (audio, MIDI, Group bus, Stereo Out) with
+/// track colours, 3-digit-wide numbers, long names, clips, and a collapsed group — rendered once
+/// per preset (Micro / Mini / Small / Medium) plus one mixed-heights image.
+void renderCompactLayoutExample(const juce::File& outDir)
+{
+    const juce::File wav = writeToneWav("render-tone.wav", 4.0);
+    GroupFixture f(/*extraAudioTracks*/ 7, /*withGroupBus*/ true);
+    (void)f.session.addMidiTrack();
+    (void)f.session.addMidiTrack();
+    f.lanes->syncTracksFromSession();
+    f.lanes->setSize(1000, 760);
+
+    const auto sec = [](const double s) { return (std::int64_t)std::llround(s * kRate); };
+    const TrackColourKey colours[] = { TrackColourKey::Blue,  TrackColourKey::Teal,
+                                       TrackColourKey::Green, TrackColourKey::Ochre,
+                                       TrackColourKey::Orange, TrackColourKey::Red,
+                                       TrackColourKey::Purple, TrackColourKey::DefaultGrey };
+    const int n = f.session.getNumTracks();
+    for (int i = 0; i < n; ++i)
+    {
+        const TrackId tid = f.session.getTrackIdAtIndex(i);
+        const TrackKind kind = f.session.getTrackKindAtIndex(i);
+        if (kind == TrackKind::Audio)
+        {
+            f.session.setTrackName(tid, i % 3 == 0 ? "A very long audio track name that must ellipsize"
+                                                   : "Audio " + juce::String(i + 1));
+            (void)f.session.addRecordedTakeAtSample(wav, kRate, sec(0.3 * (double)(i % 5)), tid,
+                                                    sec(1.2 + 0.4 * (double)(i % 3)));
+            (void)f.session.addRecordedTakeAtSample(wav, kRate, sec(3.2 + 0.2 * (double)(i % 4)), tid,
+                                                    sec(0.9));
+        }
+        else if (kind == TrackKind::Midi)
+        {
+            f.session.setTrackName(tid, "MIDI out " + juce::String(i + 1));
+        }
+        if (kind != TrackKind::Master)
+        {
+            (void)f.session.setTrackColour(tid, colours[i % 8]);
+        }
+    }
+    const std::vector<TrackId> rows = f.rowTrackIds();
+    f.lanes->syncTracksFromSession();
+    f.lanes->refreshTrackColoursFromSession();
+
+    // Group of three audio rows (indices 2..4), collapsed in every image.
+    const std::optional<int> gid = f.makeGroup({ 2, 3, 4 }, "Drum bus group");
+    if (!gid.has_value())
+    {
+        info("render: compact example group creation failed");
+        return;
+    }
+    f.setCollapsed(*gid, true);
+
+    const std::pair<const char*, trh::TrackRowHeightPreset> presets[]
+        = { { "micro", trh::TrackRowHeightPreset::Micro }, { "mini", trh::TrackRowHeightPreset::Mini },
+            { "small", trh::TrackRowHeightPreset::Small }, { "medium", trh::TrackRowHeightPreset::Medium } };
+    // The lane raster cache rebuilds on a deferred timer after a resize (stale rasters are blitted
+    // scaled meanwhile - the zoom-freeze fix); pump the message loop so the images show the final
+    // per-height painting, exactly as the app does a few hundred ms after a height change.
+    // Offscreen components only paint inside createComponentSnapshot: the first snapshot takes
+    // the geometry-stale blit path and arms the deferred rebuild, the pumped loop runs it, and
+    // the second snapshot is the one written out.
+    const auto settle = [&f] {
+        (void)f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(700);
+    };
+    for (const auto& [name, preset] : presets)
+    {
+        f.lanes->applyTrackRowHeightPreset(preset);
+        const int contentH = juce::jmin(760, f.lanes->verticalScrollModel().contentHeightPx
+                                                 + TrackLanesView::kArrangementTimelineHeaderGutterPx + 24);
+        f.lanes->setSize(1000, contentH);
+        settle();
+        writePng(f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f),
+                 outDir.getChildFile("compact-" + juce::String(name) + "-collapsed-group.png"));
+    }
+    // Mixed heights: the first row at Micro, then Mini, Small, Medium, Large, with the group
+    // expanded so the inline / compact handle placement is visible between unequal rows.
+    f.setCollapsed(*gid, false);
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
+    const int mixed[] = { trh::kMicroPresetPx, trh::kMiniPresetPx, trh::kSmallPresetPx, trh::kMediumPresetPx,
+                          trh::kLargePresetPx, trh::kMicroPresetPx, trh::kMicroPresetPx, trh::kSmallPresetPx };
+    for (size_t i = 0; i < rows.size() && i < 8; ++i)
+    {
+        f.lanes->setTrackRowHeightPxForStabilityTest(rows[i], mixed[i]);
+    }
+    f.lanes->setSize(1000, 760);
+    settle();
+    writePng(f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f),
+             outDir.getChildFile("compact-mixed-heights-expanded-group.png"));
+}
+
 int runRenderMode(const juce::File& outDir)
 {
     (void)outDir.createDirectory();
+    renderCompactLayoutExample(outDir);
     // 8 arrangement tracks (7 audio + Stereo Out), Medium heights, 4-member "Drums" group.
     renderGroupExample(outDir, "group-8-tracks", /*extraAudioTracks*/ 6, { 1, 2, 3, 4 }, "Drums",
                        trh::TrackRowHeightPreset::Medium, 820);
@@ -1189,6 +1504,7 @@ int main(int argc, char** argv)
     testNarrowUndoThroughRealCoordinator();
     testPersistenceRoundTripAndOlderProjects();
     testMalformedGroupMetadataSafeFallback();
+    testTrackColourNarrowUndoRepaintAndPersistence();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

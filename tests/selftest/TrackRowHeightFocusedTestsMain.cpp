@@ -6,8 +6,8 @@
 // vertical-scroll model) and the PRODUCTION project save/load path:
 //   - a preset command changes EVERY row (all kinds incl. Group + Stereo Out, incl. rows scrolled
 //     out of the viewport) in one gathered layout pass and preserves the top visible track;
-//   - individual bottom-edge resize still works per row, min = Small (64), max = 480, and flips
-//     the dropdown status to Custom;
+//   - individual bottom-edge resize still works per row, snapping to the Micro + n x 14 grid,
+//     min = Micro (28), only a documented 1120 px safety cap, and flips the dropdown status to Custom;
 //   - new rows get the last chosen preset's height; a duplicated row keeps the SOURCE height;
 //   - v26 persistence: root `trackRowHeightPreset` + per-track `rowHeight` survive save/reload,
 //     pre-v26 files load as Medium, malformed values degrade safely (clamped / defaulted);
@@ -184,20 +184,20 @@ void testPresetChangesEveryRowIncludingOffViewport()
     // Small viewport: most rows are scrolled out — the preset must still change them all.
     f.lanes->setSize(800, 150);
     f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
-    expect(f.allRowsAt(trh::kSmallRowHeightPx),
-           "preset Small: EVERY row (incl. off-viewport, Group, Stereo Out) is exactly 64 px");
-    expect(f.lanes->verticalScrollModel().contentHeightPx == rowCount * trh::kSmallRowHeightPx,
-           "preset Small: content height = rows x 64 (one gathered layout)");
+    expect(f.allRowsAt(trh::kSmallPresetPx),
+           "preset Small: EVERY row (incl. off-viewport, Group, Stereo Out) is exactly 56 px");
+    expect(f.lanes->verticalScrollModel().contentHeightPx == rowCount * trh::kSmallPresetPx,
+           "preset Small: content height = rows x 56 (one gathered layout)");
     expect(f.lanes->uniformTrackRowHeightPresetStatus() == trh::TrackRowHeightPreset::Small,
            "preset Small: dropdown status reports Small");
 
     f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Large);
-    expect(f.allRowsAt(trh::kLargeRowHeightPx), "preset Large: every row is exactly 192 px");
+    expect(f.allRowsAt(trh::kLargePresetPx), "preset Large: every row is exactly 196 px");
     expect(f.lanes->uniformTrackRowHeightPresetStatus() == trh::TrackRowHeightPreset::Large,
            "preset Large: dropdown status reports Large");
 
     f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
-    expect(f.allRowsAt(trh::kMediumRowHeightPx), "preset Medium: every row back at 96 px");
+    expect(f.allRowsAt(trh::kMediumPresetPx), "preset Medium: every row back at 98 px");
     expect(f.verticalLayoutOk("after presets"), "vertical scroll layout verifies after preset changes");
 }
 
@@ -214,7 +214,7 @@ void testIndividualResizeAfterPresetIsCustomAndClamped()
     int othersAtDefault = 0;
     for (const auto& [tid, h] : f.rowHeights())
     {
-        othersAtDefault += (tid != mid && h == trh::kMediumRowHeightPx) ? 1 : 0;
+        othersAtDefault += (tid != mid && h == trh::kMediumPresetPx) ? 1 : 0;
     }
     expect(othersAtDefault == (int)rows.size() - 1, "drag: every other row stays at the preset height");
     expect(!f.lanes->uniformTrackRowHeightPresetStatus().has_value(),
@@ -223,20 +223,94 @@ void testIndividualResizeAfterPresetIsCustomAndClamped()
            "drag after preset: the project default preset is NOT changed by an individual drag");
 
     f.lanes->setTrackRowHeightPxForStabilityTest(mid, 10);
-    expect(f.rowHeights()[mid] == trh::kSmallRowHeightPx,
-           "drag: below-minimum request clamps to the Small preset height (64)");
+    expect(f.rowHeights()[mid] == trh::kMicroPresetPx,
+           "drag: below-minimum request clamps to the Micro preset height (28)");
     f.lanes->setTrackRowHeightPxForStabilityTest(mid, 100000);
-    expect(f.rowHeights()[mid] == 480, "drag: the existing 480 px maximum is kept");
+    expect(f.rowHeights()[mid] == trh::kRowHeightSafetyMaxPx,
+           "drag: the old 480 px cap is gone; only the documented 1120 px safety cap applies");
     expect(f.verticalLayoutOk("after mid-list resize"),
            "vertical scroll layout verifies after a mid-list resize (headers/lanes aligned)");
 
     // A uniform height that is EXACTLY a preset reads as that preset again (status from heights).
     for (const TrackId tid : rows)
     {
-        f.lanes->setTrackRowHeightPxForStabilityTest(tid, trh::kSmallRowHeightPx);
+        f.lanes->setTrackRowHeightPxForStabilityTest(tid, trh::kSmallPresetPx);
     }
     expect(f.lanes->uniformTrackRowHeightPresetStatus() == trh::TrackRowHeightPreset::Small,
-           "status: all rows dragged to exactly 64 px reads as Small (derived from heights)");
+           "status: all rows dragged to exactly 56 px reads as Small (derived from heights)");
+}
+
+// Compact-header slice: the Micro + n x 14 grid — Micro / Mini presets, snapping drags computed from the drag's
+// ORIGINAL height + total movement (no flutter), free steps above Large, and valid older off-grid
+// heights kept as Custom by the load apply.
+void testGridPresetsAndSnappingDrag()
+{
+    LanesFixture f;
+    const int rowCount = (int)f.rowTrackIds().size();
+
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Micro);
+    expect(f.allRowsAt(trh::kMicroPresetPx) && f.lanes->uniformTrackRowHeightPresetStatus() == trh::TrackRowHeightPreset::Micro,
+           "preset Micro: every row is exactly 28 px and the status reads Micro");
+    expect(f.lanes->verticalScrollModel().contentHeightPx == rowCount * trh::kMicroPresetPx,
+           "preset Micro: content height = rows x 28");
+    expect(f.verticalLayoutOk("micro"), "preset Micro: headers and lanes still share one vertical geometry");
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Mini);
+    expect(f.allRowsAt(trh::kMiniPresetPx) && f.lanes->uniformTrackRowHeightPresetStatus() == trh::TrackRowHeightPreset::Mini,
+           "preset Mini: every row is exactly 42 px and the status reads Mini");
+    expect(f.verticalLayoutOk("mini"), "preset Mini: layout verifies");
+
+    // Snapping drag: the same entry the header's bottom-edge drag uses, fed with the ORIGINAL
+    // height and a growing total delta. Every intermediate height is a grid height; equal
+    // pointer positions give equal heights (no flutter), and the drag end re-snap is a no-op.
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
+    const std::vector<TrackId> rows = f.rowTrackIds();
+    const TrackId mid = rows[rows.size() / 2];
+    const int start = f.rowHeights()[mid];
+    bool allOnGrid = true;
+    bool monotone = true;
+    int last = start;
+    for (int delta = 0; delta <= 140; delta += 3)
+    {
+        f.lanes->applyTrackRowHeightDelta(mid, start, delta);
+        const int h = f.rowHeights()[mid];
+        allOnGrid = allOnGrid && trh::isOnRowHeightGrid(h);
+        monotone = monotone && h >= last;
+        last = h;
+    }
+    expect(allOnGrid, "snap drag: every intermediate height during a downward drag is on the grid");
+    expect(monotone && last == trh::snapRowHeightPxToGrid(start + 140),
+           "snap drag: heights only grow with the pointer and end at the snapped start + total movement");
+    f.lanes->applyTrackRowHeightDelta(mid, start, 6);
+    const int hA = f.rowHeights()[mid];
+    f.lanes->applyTrackRowHeightDelta(mid, start, 7);
+    const int hB = f.rowHeights()[mid];
+    f.lanes->applyTrackRowHeightDelta(mid, start, 6);
+    expect(hA == start && hB == start + trh::kRowHeightStepPx && f.rowHeights()[mid] == start,
+           "snap drag: +6 px stays, +7 px (half a step, ties up) is one step taller, +6 again returns — a pure function of the pointer");
+    f.lanes->applyTrackRowHeightDelta(mid, start, 8);
+    expect(f.rowHeights()[mid] == start + trh::kRowHeightStepPx, "snap drag: +8 px is one grid step taller");
+    f.lanes->snapTrackHeaderRowHeightAfterResize(mid, false);
+    expect(f.rowHeights()[mid] == start + trh::kRowHeightStepPx, "snap drag: the drag-end re-snap leaves a grid height unchanged");
+    expect(!f.lanes->uniformTrackRowHeightPresetStatus().has_value(), "snap drag: a single resized row reads as Custom");
+
+    // Steps above Large are ordinary heights (no 480 px user cap).
+    f.lanes->applyTrackRowHeightDelta(mid, start, 600);
+    expect(f.rowHeights()[mid] == trh::snapRowHeightPxToGrid(start + 600) && f.rowHeights()[mid] > trh::kLargePresetPx
+               && f.rowHeights()[mid] > 480 && trh::isOnRowHeightGrid(f.rowHeights()[mid]),
+           "grid: a drag far below Large lands on a grid height above the old 480 px cap");
+    expect(f.verticalLayoutOk("tall row"), "grid: layout verifies with one very tall row");
+
+    // Load apply keeps valid older off-grid heights (pre-grid 64 / 96 / 192) as Custom.
+    f.lanes->applyTrackRowHeightsFromLoadedProject("medium", { { rows[0], 64 }, { rows[1], 192 } });
+    expect(f.rowHeights()[rows[0]] == 64 && f.rowHeights()[rows[1]] == 192,
+           "load: saved pre-grid heights 64 / 192 are kept exactly (clamped only, never re-snapped)");
+    expect(!f.lanes->uniformTrackRowHeightPresetStatus().has_value(), "load: mixed / off-grid heights read as Custom");
+    f.lanes->applyTrackRowHeightDelta(rows[0], 64, 0);
+    expect(f.rowHeights()[rows[0]] == trh::snapRowHeightPxToGrid(64) && trh::isOnRowHeightGrid(f.rowHeights()[rows[0]]),
+           "load: the first user resize of an off-grid row snaps it onto the grid");
+    f.lanes->applyTrackRowHeightsFromLoadedProject("micro", {});
+    expect(f.allRowsAt(trh::kMicroPresetPx) && f.lanes->lastChosenTrackRowHeightPreset() == trh::TrackRowHeightPreset::Micro,
+           "load: the saved \"micro\" preset key restores Micro as default for every row without a saved height");
 }
 
 void testNewTrackGetsLastChosenPresetAndDuplicateKeepsSourceHeight()
@@ -258,8 +332,8 @@ void testNewTrackGetsLastChosenPresetAndDuplicateKeepsSourceHeight()
     {
         newest = juce::jmax(newest, tid);
     }
-    expect(f.rowHeights()[newest] == trh::kLargeRowHeightPx,
-           "new track: created at the LAST CHOSEN preset height (192) even after an individual drag");
+    expect(f.rowHeights()[newest] == trh::kLargePresetPx,
+           "new track: created at the LAST CHOSEN preset height (196) even after an individual drag");
 
     // Duplicate keeps the SOURCE height (the lanes-side primitive the duplicate flow calls).
     const std::optional<TrackId> dup = f.session.duplicateTrack(firstRow);
@@ -400,10 +474,10 @@ void testProjectPersistenceRoundTrip()
             if (tid != draggedTid)
             {
                 ++others;
-                othersAtSmall += (h == trh::kSmallRowHeightPx) ? 1 : 0;
+                othersAtSmall += (h == trh::kSmallPresetPx) ? 1 : 0;
             }
         }
-        expect(others > 0 && othersAtSmall == others, "reload: every other row is back at Small (64)");
+        expect(others > 0 && othersAtSmall == others, "reload: every other row is back at Small (56)");
         expect(!f.lanes->uniformTrackRowHeightPresetStatus().has_value(),
                "reload: mixed heights -> dropdown status Custom");
 
@@ -416,8 +490,8 @@ void testProjectPersistenceRoundTrip()
         {
             newest = juce::jmax(newest, tid);
         }
-        expect(f.rowHeights()[newest] == trh::kSmallRowHeightPx,
-               "reload: a NEW track uses the restored preset default (64)");
+        expect(f.rowHeights()[newest] == trh::kSmallPresetPx,
+               "reload: a NEW track uses the restored preset default (56)");
     }
     (void)proj.deleteFile();
 }
@@ -460,8 +534,8 @@ void testOlderProjectsAndMalformedValues()
         f.lanes->applyTrackRowHeightsFromLoadedProject(reread.trackRowHeightPreset, perTrack);
         expect(f.lanes->lastChosenTrackRowHeightPreset() == trh::TrackRowHeightPreset::Medium,
                "pre-v26: missing preset key -> Medium default");
-        expect(f.allRowsAt(trh::kMediumRowHeightPx),
-               "pre-v26: all rows at the historical Medium default (96) - older projects keep their look");
+        expect(f.allRowsAt(trh::kMediumPresetPx),
+               "pre-v26: all rows at the historical Medium default (98) - older projects keep their look");
         (void)oldProj.deleteFile();
     }
 
@@ -505,9 +579,10 @@ void testOlderProjectsAndMalformedValues()
         const std::vector<TrackId> rows = f.rowTrackIds();
         f.lanes->applyTrackRowHeightsFromLoadedProject(
             "medium", { { rows[0], 10 }, { rows[1], 5000 } });
-        expect(f.rowHeights()[rows[0]] == trh::kSmallRowHeightPx,
-               "malformed: a below-minimum saved height clamps to Small (64) on load");
-        expect(f.rowHeights()[rows[1]] == 480, "malformed: an absurd saved height clamps to the 480 max");
+        expect(f.rowHeights()[rows[0]] == trh::kMicroPresetPx,
+               "malformed: a below-minimum saved height clamps to Micro (28) on load");
+        expect(f.rowHeights()[rows[1]] == trh::kRowHeightSafetyMaxPx,
+               "malformed: an absurd saved height clamps to the 1120 px safety cap");
         (void)badProj.deleteFile();
     }
 }
@@ -589,6 +664,7 @@ int main()
 
     testPresetChangesEveryRowIncludingOffViewport();
     testIndividualResizeAfterPresetIsCustomAndClamped();
+    testGridPresetsAndSnappingDrag();
     testNewTrackGetsLastChosenPresetAndDuplicateKeepsSourceHeight();
     testTopVisibleTrackPreservedAndScrollClamped();
     testUserEditVsLoadNotification();

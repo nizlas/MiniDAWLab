@@ -1,13 +1,20 @@
 // =============================================================================
 // TrackHeaderView.cpp — model/callback-driven header; optional drag host
 // =============================================================================
+// Geometry summary (logical px; see the header and `ui/TrackRowHeightPresets.h`):
+//   x: [0..8) group margin (active stripe 0..4, group marker 5..7) | colour segment (icon +
+//      number, width from the shared digit column) | 3 gap | [Power][Mute][Solo] (22 px cells,
+//      present ones collapsed left) | 4 gap | name … | 8 pad
+//   y: 2 pad | title row 22 (icon, number, cells, name) | 3 gap | second row 22 (Monitor, Arm,
+//      instrument editor, alternatives; only when the height fits) | … | 4 px resize band.
+// =============================================================================
 
 #include "ui/TrackHeaderView.h"
 
 #include "ui/ForbiddenCursor.h"
-#include "ui/TrackRowHeightPresets.h"
-#include "ui/TrackStripButtonGlyphs.h"
+#include "ui/TrackColourPalette.h"
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <juce_core/juce_core.h>
@@ -19,42 +26,23 @@ namespace
     // Face / glyph vocabulary shared with the mixer strips (`ui/TrackStripButtonGlyphs.h`).
     using namespace track_strip_glyphs;
 
-    /// Vertical outer padding (horizontal pad / name trims are public class constants: the header
-    /// column width limits in `TrackHeaderView.h` are derived from them).
-    constexpr int kHeaderOuterPadYPx = 4;
-    /// Vertical gap between name block and control strip.
-    constexpr int kHeaderNameToButtonsGapPx = 3;
-    /// Default title-only block height (~one line at 14pt).
-    constexpr int kHeaderNameBlockTitleOnlyPx = 22;
-    /// Title + subtitle stacked block height.
-    constexpr int kHeaderNameBlockWithSubtitlePx = 30;
+    /// Order number font (fits three 7 px digit advances in the segment's digit column).
+    constexpr float kHeaderNumberFontHeight = 11.0f;
 
-    [[nodiscard]] int headerMinimumRowHeightPxForNameOnly(const bool hasSubtitle) noexcept
-    {
-        const int nameBlock = hasSubtitle ? kHeaderNameBlockWithSubtitlePx : kHeaderNameBlockTitleOnlyPx;
-        return kHeaderOuterPadYPx + nameBlock + TrackHeaderView::kHeaderResizeBandPx;
-    }
-
-    // The shared Small preset is DEFINED as the smallest row height where the title row, the full
-    // control strip and the resize band fit without overlap for every row kind; the binding case
-    // is a row with a subtitle. Computed from the actual control geometry here so the preset can
-    // never drift from the header layout (spec: compute Small from real geometry, do not shrink
-    // buttons or text).
-    static_assert(track_row_heights::kSmallRowHeightPx
-                      == kHeaderOuterPadYPx + kHeaderNameBlockWithSubtitlePx
-                             + kHeaderNameToButtonsGapPx + TrackHeaderView::kStripControlCellWidthPx
+    static_assert(TrackHeaderView::kStripControlCellWidthPx == track_row_heights::kHeaderControlCellPx,
+                  "the title row IS one control cell tall");
+    static_assert(TrackHeaderView::kHeaderGroupMarginPx
+                      >= TrackHeaderView::kHeaderGroupMarkerXPx + TrackHeaderView::kHeaderGroupMarkerWidthPx,
+                  "the group marker must fit inside the group margin");
+    static_assert(TrackHeaderView::kHeaderActiveStripeWidthPx == track_strip_glyphs::kHeaderActiveStripeWidthPx,
+                  "header stripe width is shared with the mixer plate");
+    // Micro = pad + title row + band: the title row fits with nothing to spare and no overlap
+    // between the cells and the resize band.
+    static_assert(track_row_heights::kMicroRowHeightPx
+                      == TrackHeaderView::kHeaderRowTopPadPx + TrackHeaderView::kStripControlCellWidthPx
                              + TrackHeaderView::kHeaderResizeBandPx,
-                  "Small row-height preset must equal the subtitle row's full name+buttons+band height");
-    static_assert(track_row_heights::kSmallRowHeightPx
-                      >= kHeaderOuterPadYPx + kHeaderNameBlockTitleOnlyPx + kHeaderNameToButtonsGapPx
-                             + TrackHeaderView::kStripControlCellWidthPx + TrackHeaderView::kHeaderResizeBandPx,
-                  "Small row-height preset must also fit title-only rows' full chrome");
+                  "Micro row height must equal the title row + pad + resize band");
 } // namespace
-
-int TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(const bool hasSubtitle) noexcept
-{
-    return headerMinimumRowHeightPxForNameOnly(hasSubtitle);
-}
 
 juce::Rectangle<int>
 TrackHeaderView::squareStripButtonBodyFromCell(juce::Rectangle<int> const cell) const noexcept
@@ -115,6 +103,217 @@ TrackHeaderView::stripButtonCellBounds(TrackHeaderButtonKind const kind,
     return {};
 }
 
+// -----------------------------------------------------------------------------------------------
+// Cell presence (model-driven; a cell that is absent has NO bounds, hit area or tooltip)
+// -----------------------------------------------------------------------------------------------
+bool TrackHeaderView::hasPowerCell() const noexcept
+{
+    return modelProvider_().showRecordAndPowerStripCells;
+}
+
+bool TrackHeaderView::hasArmCell() const noexcept
+{
+    return modelProvider_().showRecordAndPowerStripCells;
+}
+
+bool TrackHeaderView::hasInstrumentEditorCell() const noexcept
+{
+    const auto m = modelProvider_();
+    return m.showRecordAndPowerStripCells && callbacks_.onOpenInstrumentEditor != nullptr
+           && m.instrumentEditorAvailable;
+}
+
+bool TrackHeaderView::hasAlternativesCell() const noexcept
+{
+    const auto m = modelProvider_();
+    return m.showRecordAndPowerStripCells && callbacks_.onShowInstrumentAlternatives != nullptr
+           && m.instrumentAlternativesAvailable;
+}
+
+bool TrackHeaderView::hasSoloCell() const noexcept
+{
+    // Model-driven like the other optional cells: every row kind except Master/Stereo Out sets
+    // `soloAvailable`; the cell also needs the wired command (no greyed placeholder while the
+    // owning view has no solo coordinator).
+    const auto m = modelProvider_();
+    return m.soloAvailable && callbacks_.onToggleSolo != nullptr;
+}
+
+bool TrackHeaderView::hasMonitorCell() const noexcept
+{
+    // Model-driven only (kind-checked by each row's provider on every poll): audio rows set
+    // `monitorAvailable` + interactable, Instrument destination rows set available but NOT
+    // interactable (disabled placeholder — no toggle callback exists there), and plain MIDI /
+    // group / master rows leave it false so no cell, hit target, or tooltip appears.
+    const auto m = modelProvider_();
+    return m.showRecordAndPowerStripCells && m.monitorAvailable;
+}
+
+// -----------------------------------------------------------------------------------------------
+// Layout
+// -----------------------------------------------------------------------------------------------
+TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout() const noexcept
+{
+    HeaderContentLayout L{};
+    const TrackHeaderModel m = modelProvider_();
+    auto const b = getLocalBounds();
+    if (b.isEmpty())
+    {
+        return L;
+    }
+    const int chromeBottom = b.getBottom() - kHeaderResizeBandPx;
+    const int chromeH = juce::jmax(0, chromeBottom - b.getY());
+    const int cell = kStripControlCellWidthPx;
+    const int titleY = b.getY() + kHeaderRowTopPadPx;
+
+    // Colour segment: right of the group margin, the full chrome height; icon + number on the
+    // title row inside it.
+    const int segW = colourSegmentWidthPxForDigits(m.trackNumberDigits);
+    const int segX = b.getX() + kHeaderGroupMarginPx;
+    L.colourSegmentBounds = { segX, b.getY(), segW, chromeH };
+    L.typeIconBounds = { segX + kHeaderSegmentPadPx, titleY + (cell - kHeaderTypeIconPx) / 2, kHeaderTypeIconPx,
+                         kHeaderTypeIconPx };
+    const int digitsW = segW - (kHeaderSegmentPadPx + kHeaderTypeIconPx + kHeaderSegmentPadPx + kHeaderSegmentPadPx);
+    L.numberBounds = { segX + kHeaderSegmentPadPx + kHeaderTypeIconPx + kHeaderSegmentPadPx, titleY,
+                       juce::jmax(0, digitsW), cell };
+
+    // Title-row control slots (reserved for three cells on every kind → common name x).
+    const int stripX = segX + segW + kHeaderSegmentToStripGapPx;
+    L.titleStripBounds = { stripX, titleY, kHeaderTitleCellCount * cell, cell };
+
+    const int nameX = stripX + kHeaderTitleCellCount * cell + kHeaderStripToNameGapPx;
+    const int nameRight = b.getRight() - kHeaderOuterPadXPx;
+    L.nameTextBounds = { nameX, titleY, juce::jmax(0, nameRight - nameX), cell };
+
+    // Second row: only when it fits entirely above the resize band (Small and up).
+    if (b.getHeight() >= kMinimumHeightForSecondRowPx)
+    {
+        const int secondY = titleY + cell + kHeaderRowGapPx;
+        const int count = (hasMonitorCell() ? 1 : 0) + (hasArmCell() ? 1 : 0) + (hasInstrumentEditorCell() ? 1 : 0)
+                          + (hasAlternativesCell() ? 1 : 0);
+        L.secondStripBounds = { stripX, secondY, count * cell, cell };
+    }
+    return L;
+}
+
+juce::Rectangle<int> TrackHeaderView::visibleChromeBoundsExcludingResizeBand() const noexcept
+{
+    return getLocalBounds().withTrimmedBottom(kHeaderResizeBandPx);
+}
+
+bool TrackHeaderView::stripCellHitIntersectsVisibleChrome(juce::Rectangle<int> const cell,
+                                                          juce::Point<int> const pos) const noexcept
+{
+    auto const hit = cell.getIntersection(visibleChromeBoundsExcludingResizeBand());
+    return !hit.isEmpty() && hit.contains(pos);
+}
+
+juce::Rectangle<int> TrackHeaderView::titleStripCellAtIndex(int const index) const noexcept
+{
+    auto s = computeHeaderContentLayout().titleStripBounds;
+    if (s.isEmpty() || index < 0 || index >= kHeaderTitleCellCount)
+    {
+        return {};
+    }
+    s.removeFromLeft(kStripControlCellWidthPx * index);
+    return s.removeFromLeft(kStripControlCellWidthPx);
+}
+
+juce::Rectangle<int> TrackHeaderView::secondStripCellAtIndex(int const index) const noexcept
+{
+    auto s = computeHeaderContentLayout().secondStripBounds;
+    if (s.isEmpty() || index < 0 || kStripControlCellWidthPx * (index + 1) > s.getWidth())
+    {
+        return {};
+    }
+    s.removeFromLeft(kStripControlCellWidthPx * index);
+    return s.removeFromLeft(kStripControlCellWidthPx);
+}
+
+// Title row order (present cells collapse left): [Power?][Mute][Solo?]
+juce::Rectangle<int> TrackHeaderView::getPowerButtonBounds() const noexcept
+{
+    return hasPowerCell() ? titleStripCellAtIndex(0) : juce::Rectangle<int>{};
+}
+
+juce::Rectangle<int> TrackHeaderView::getMuteButtonBounds() const noexcept
+{
+    return titleStripCellAtIndex(hasPowerCell() ? 1 : 0);
+}
+
+juce::Rectangle<int> TrackHeaderView::getSoloButtonBounds() const noexcept
+{
+    if (!hasSoloCell())
+    {
+        return {};
+    }
+    return titleStripCellAtIndex((hasPowerCell() ? 1 : 0) + 1);
+}
+
+// Second row order (present cells collapse left): [Monitor?][Arm?][InstrumentEditor?][Alternatives?]
+juce::Rectangle<int> TrackHeaderView::getMonitorButtonBounds() const noexcept
+{
+    return hasMonitorCell() ? secondStripCellAtIndex(0) : juce::Rectangle<int>{};
+}
+
+juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
+{
+    return hasArmCell() ? secondStripCellAtIndex(hasMonitorCell() ? 1 : 0) : juce::Rectangle<int>{};
+}
+
+juce::Rectangle<int> TrackHeaderView::getInstrumentEditorButtonBounds() const noexcept
+{
+    if (!hasInstrumentEditorCell())
+    {
+        return {};
+    }
+    return secondStripCellAtIndex((hasMonitorCell() ? 1 : 0) + (hasArmCell() ? 1 : 0));
+}
+
+juce::Rectangle<int> TrackHeaderView::getAlternativesButtonBounds() const noexcept
+{
+    if (!hasAlternativesCell())
+    {
+        return {};
+    }
+    return secondStripCellAtIndex((hasMonitorCell() ? 1 : 0) + (hasArmCell() ? 1 : 0)
+                                  + (hasInstrumentEditorCell() ? 1 : 0));
+}
+
+juce::Rectangle<int> TrackHeaderView::getColourSegmentBounds() const noexcept
+{
+    return computeHeaderContentLayout().colourSegmentBounds;
+}
+
+juce::Rectangle<int> TrackHeaderView::getTypeIconBounds() const noexcept
+{
+    return computeHeaderContentLayout().typeIconBounds;
+}
+
+juce::Rectangle<int> TrackHeaderView::getTrackNumberBounds() const noexcept
+{
+    return computeHeaderContentLayout().numberBounds;
+}
+
+juce::Rectangle<int> TrackHeaderView::getNameTextBounds() const noexcept
+{
+    return computeHeaderContentLayout().nameTextBounds;
+}
+
+juce::Rectangle<int> TrackHeaderView::getSecondRowStripBounds() const noexcept
+{
+    return computeHeaderContentLayout().secondStripBounds;
+}
+
+bool TrackHeaderView::isPositionInColourSegment(juce::Point<int> const pos) const noexcept
+{
+    const juce::Rectangle<int> seg = computeHeaderContentLayout().colourSegmentBounds;
+    return !seg.isEmpty() && seg.contains(pos) && !isPositionInRowResizeBand(pos);
+}
+
+// -----------------------------------------------------------------------------------------------
+// Strip specs
+// -----------------------------------------------------------------------------------------------
 std::vector<TrackHeaderView::TrackHeaderStripButtonSpec>
 TrackHeaderView::buildStripControlSpecs() const noexcept
 {
@@ -122,7 +321,16 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
     std::vector<TrackHeaderStripButtonSpec> specs;
     specs.reserve(7);
 
-    const auto makeMuteSpec = [&]() {
+    if (hasPowerCell())
+    {
+        TrackHeaderStripButtonSpec p{};
+        p.kind = TrackHeaderButtonKind::Power;
+        p.enabled = callbacks_.onTogglePower != nullptr && m.powerInteractable;
+        p.powerStandby = m.off;
+        p.cellBounds = getPowerButtonBounds();
+        specs.push_back(std::move(p));
+    }
+    {
         TrackHeaderStripButtonSpec mu{};
         mu.kind = TrackHeaderButtonKind::Mute;
         // While solo is active the Mute command path is locked: the cell ignores clicks but still
@@ -132,49 +340,18 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
         mu.muteSoloSilenced = m.soloSilenced;
         mu.muteLocked = m.muteLockedBySolo;
         mu.cellBounds = getMuteButtonBounds();
-        return mu;
-    };
-    const auto appendSoloSpec = [&]() {
-        if (!hasSoloCell())
-        {
-            return;
-        }
+        specs.push_back(std::move(mu));
+    }
+    if (hasSoloCell())
+    {
         TrackHeaderStripButtonSpec so{};
         so.kind = TrackHeaderButtonKind::Solo;
         so.enabled = true; // presence already implies callback + model availability
         so.soloActive = m.soloed;
         so.cellBounds = getSoloButtonBounds();
         specs.push_back(std::move(so));
-    };
-
-    juce::Rectangle<int> inst = getInstrumentEditorButtonBounds();
-    if (!inst.isEmpty())
-    {
-        TrackHeaderStripButtonSpec s{};
-        s.kind = TrackHeaderButtonKind::InstrumentEditor;
-        s.enabled =
-            callbacks_.onOpenInstrumentEditor != nullptr && m.instrumentEditorAvailable;
-        s.cellBounds = inst;
-        specs.push_back(s);
     }
-
-    if (!m.showRecordAndPowerStripCells)
-    {
-        specs.push_back(makeMuteSpec());
-        appendSoloSpec(); // group rows solo; master rows leave soloAvailable false
-        return specs;
-    }
-
-    TrackHeaderStripButtonSpec p{};
-    p.kind = TrackHeaderButtonKind::Power;
-    p.enabled = callbacks_.onTogglePower != nullptr && m.powerInteractable;
-    p.powerStandby = m.off;
-    p.cellBounds = getPowerButtonBounds();
-    specs.push_back(std::move(p));
-
-    specs.push_back(makeMuteSpec());
-    appendSoloSpec();
-
+    // Second row (each getter returns empty bounds when the row is hidden → no hit, no paint).
     if (hasMonitorCell())
     {
         TrackHeaderStripButtonSpec mo{};
@@ -184,25 +361,35 @@ TrackHeaderView::buildStripControlSpecs() const noexcept
         mo.cellBounds = getMonitorButtonBounds();
         specs.push_back(std::move(mo));
     }
-
-    TrackHeaderStripButtonSpec a{};
-    a.kind = TrackHeaderButtonKind::Arm;
-    a.enabled = callbacks_.onToggleArm != nullptr && m.armInteractable;
-    a.armActive = m.armed;
-    a.cellBounds = getArmButtonBounds();
-    specs.push_back(std::move(a));
-
-    juce::Rectangle<int> alt = getAlternativesButtonBounds();
-    if (!alt.isEmpty())
+    if (hasArmCell())
+    {
+        TrackHeaderStripButtonSpec a{};
+        a.kind = TrackHeaderButtonKind::Arm;
+        a.enabled = callbacks_.onToggleArm != nullptr && m.armInteractable;
+        a.armActive = m.armed;
+        a.cellBounds = getArmButtonBounds();
+        specs.push_back(std::move(a));
+    }
+    if (hasInstrumentEditorCell())
+    {
+        TrackHeaderStripButtonSpec s{};
+        s.kind = TrackHeaderButtonKind::InstrumentEditor;
+        s.enabled = callbacks_.onOpenInstrumentEditor != nullptr && m.instrumentEditorAvailable;
+        s.cellBounds = getInstrumentEditorButtonBounds();
+        specs.push_back(s);
+    }
+    if (hasAlternativesCell())
     {
         TrackHeaderStripButtonSpec al{};
         al.kind = TrackHeaderButtonKind::Alternatives;
-        al.enabled = callbacks_.onShowInstrumentAlternatives != nullptr
-                     && m.instrumentAlternativesAvailable;
-        al.cellBounds = alt;
+        al.enabled = callbacks_.onShowInstrumentAlternatives != nullptr && m.instrumentAlternativesAvailable;
+        al.cellBounds = getAlternativesButtonBounds();
         specs.push_back(std::move(al));
     }
-
+    // Drop every spec whose cell is hidden (empty bounds): nothing to paint, hit or tooltip.
+    specs.erase(std::remove_if(specs.begin(), specs.end(),
+                               [](const TrackHeaderStripButtonSpec& s) { return s.cellBounds.isEmpty(); }),
+                specs.end());
     return specs;
 }
 
@@ -307,32 +494,12 @@ void TrackHeaderView::drawStripControlButton(juce::Graphics& g,
                                         spec.armActive ? juce::Colour(0xffd01818) : juce::Colour(0xff5a5858),
                                         ctlEdgeNeutral,
                                         showHoverBrighten);
-            juce::Graphics::ScopedSaveState gs(g);
-            g.reduceClipRegion(bodyPx);
-            const float fontH =
-                juce::jlimit(8.5f,
-                             11.5f,
-                             juce::jmin(static_cast<float>(bodyPx.getWidth()),
-                                        static_cast<float>(bodyPx.getHeight()))
-                                     * 0.52f);
-            g.setFont(juce::Font(juce::FontOptions().withHeight(fontH)));
-            g.setColour(spec.armActive ? juce::Colour(0xfff8f8ff) : juce::Colour(0xffeaeaea));
-            g.drawFittedText("R", bodyPx, juce::Justification::centred, 1);
+            drawStripLetter(g, bodyPx, "R", spec.armActive ? juce::Colour(0xfff8f8ff) : juce::Colour(0xffeaeaea));
         }
         else
         {
             drawStandardStripButtonFace(g, rf, juce::Colour(0xff3e3e3e), edgeInactiveStroke, false);
-            juce::Graphics::ScopedSaveState gs(g);
-            g.reduceClipRegion(bodyPx);
-            const float fontH =
-                juce::jlimit(8.5f,
-                             11.5f,
-                             juce::jmin(static_cast<float>(bodyPx.getWidth()),
-                                        static_cast<float>(bodyPx.getHeight()))
-                                     * 0.52f);
-            g.setFont(juce::Font(juce::FontOptions().withHeight(fontH)));
-            g.setColour(juce::Colour(0xff888888));
-            g.drawFittedText("R", bodyPx, juce::Justification::centred, 1);
+            drawStripLetter(g, bodyPx, "R", juce::Colour(0xff888888));
         }
         break;
 
@@ -364,253 +531,16 @@ void TrackHeaderView::repaintStripHoverCell(std::optional<TrackHeaderButtonKind>
     }
 }
 
-bool TrackHeaderView::hasInstrumentEditorCell() const noexcept
-{
-    const auto m = modelProvider_();
-    return m.showRecordAndPowerStripCells && callbacks_.onOpenInstrumentEditor != nullptr
-           && m.instrumentEditorAvailable;
-}
-
-bool TrackHeaderView::hasAlternativesCell() const noexcept
-{
-    const auto m = modelProvider_();
-    return m.showRecordAndPowerStripCells && callbacks_.onShowInstrumentAlternatives != nullptr
-           && m.instrumentAlternativesAvailable;
-}
-
-bool TrackHeaderView::hasSoloCell() const noexcept
-{
-    // Model-driven like the other optional cells: every row kind except Master/Stereo Out sets
-    // `soloAvailable`; the cell also needs the wired command (no greyed placeholder while the
-    // owning view has no solo coordinator).
-    const auto m = modelProvider_();
-    return m.soloAvailable && callbacks_.onToggleSolo != nullptr;
-}
-
-bool TrackHeaderView::hasMonitorCell() const noexcept
-{
-    // Model-driven only (kind-checked by each row's provider on every poll): audio rows set
-    // `monitorAvailable` + interactable, Instrument destination rows set available but NOT
-    // interactable (disabled placeholder — no toggle callback exists there), and plain MIDI /
-    // group / master rows leave it false so no cell, hit target, or tooltip appears.
-    const auto m = modelProvider_();
-    return m.showRecordAndPowerStripCells && m.monitorAvailable;
-}
-
-int TrackHeaderView::computeRightStripCellCount() const noexcept
-{
-    const auto m = modelProvider_();
-    if (!m.showRecordAndPowerStripCells)
-    {
-        // [Mute][Solo?] — group rows show Solo; master keeps the mute-only chrome.
-        return 1 + (hasSoloCell() ? 1 : 0);
-    }
-    // [Instrument?][Power][Mute][Solo?][Monitor?][Arm] — the P2 Alternatives button is NOT a strip
-    // cell: it is a smaller standalone button anchored at the header's physical bottom-left corner
-    // (getAlternativesButtonBounds). Monitor appears on audio rows only (next to Arm).
-    return 3 + (hasInstrumentEditorCell() ? 1 : 0) + (hasSoloCell() ? 1 : 0) + (hasMonitorCell() ? 1 : 0);
-}
-
-TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout() const noexcept
-{
-    HeaderContentLayout L{};
-    const TrackHeaderModel m = modelProvider_();
-    auto const b = getLocalBounds();
-    if (b.isEmpty())
-    {
-        return L;
-    }
-
-    const bool active = m.active;
-    const int contentLeft =
-        b.getX() + kHeaderOuterPadXPx + (active ? kHeaderNameTrimLeftActivePx : kHeaderNameTrimLeftInactivePx);
-    const int contentTop = b.getY() + kHeaderOuterPadYPx;
-    const int contentRight = b.getRight() - kHeaderOuterPadXPx;
-
-    const int cell = kStripControlCellWidthPx;
-    const int stripW = cell * computeRightStripCellCount();
-
-    const int nameBlockPref =
-        m.subtitle.isEmpty() ? kHeaderNameBlockTitleOnlyPx : kHeaderNameBlockWithSubtitlePx;
-    const int btnY = contentTop + nameBlockPref + kHeaderNameToButtonsGapPx;
-    const int nameW = juce::jmax(0, contentRight - contentLeft);
-
-    L.nameTextBounds = { contentLeft, contentTop, nameW, nameBlockPref };
-    L.controlStripBounds = { contentLeft, btnY, stripW, cell };
-    return L;
-}
-
-int TrackHeaderView::snapTrackHeaderRowHeightAfterResize(const int heightPx,
-                                                         const bool hasSubtitle,
-                                                         const int globalMinRowPx,
-                                                         const int globalMaxRowPx) noexcept
-{
-    const int contentTop = kHeaderOuterPadYPx;
-    const int nameBlock = hasSubtitle ? kHeaderNameBlockWithSubtitlePx : kHeaderNameBlockTitleOnlyPx;
-    const int btnY = contentTop + nameBlock + kHeaderNameToButtonsGapPx;
-    const int cell = kStripControlCellWidthPx;
-    const int band = kHeaderResizeBandPx;
-
-    const int minFullIdeal = btnY + cell + band;
-    // Match `minimumRowHeightPxForNameOnlyLayout` / drag clamp — not `btnY + band`, which keeps the
-    // name-to-buttons gap inside chrome and reads slightly taller than the allowed drag minimum.
-    const int minNameIdeal = minimumRowHeightPxForNameOnlyLayout(hasSubtitle);
-
-    const int hClamped = juce::jlimit(globalMinRowPx, globalMaxRowPx, heightPx);
-
-    if (hClamped >= minFullIdeal)
-    {
-        return hClamped;
-    }
-
-    const int chromeBottom = hClamped - band;
-    const int visiblePx = juce::jmax(0, juce::jmin(btnY + cell, chromeBottom) - btnY);
-    const double frac = (cell > 0) ? static_cast<double>(visiblePx) / static_cast<double>(cell) : 0.0;
-
-    int snappedIdeal = (frac > 0.5) ? minFullIdeal : minNameIdeal;
-    return juce::jlimit(globalMinRowPx, globalMaxRowPx, snappedIdeal);
-}
-
-juce::Rectangle<int> TrackHeaderView::visibleChromeBoundsExcludingResizeBand() const noexcept
-{
-    return getLocalBounds().withTrimmedBottom(kHeaderResizeBandPx);
-}
-
-bool TrackHeaderView::stripCellHitIntersectsVisibleChrome(juce::Rectangle<int> const cell,
-                                                          juce::Point<int> const pos) const noexcept
-{
-    auto const hit = cell.getIntersection(visibleChromeBoundsExcludingResizeBand());
-    return !hit.isEmpty() && hit.contains(pos);
-}
-
-juce::Rectangle<int> TrackHeaderView::getRightControlsStripBounds() const noexcept
-{
-    return computeHeaderContentLayout().controlStripBounds;
-}
-
-// Strip cell order (left to right, optional cells collapse without gaps):
-//   [InstrumentEditor?][Power][Mute][Solo?][Monitor?][Arm]   (showRecordAndPowerStripCells)
-//   [Mute][Solo?]                                            (otherwise)
-// (The P2 Alternatives button is standalone at the header's bottom-left — not a strip cell.)
-juce::Rectangle<int> TrackHeaderView::stripCellBoundsAtIndex(int const index) const noexcept
-{
-    auto s = computeHeaderContentLayout().controlStripBounds;
-    if (s.isEmpty() || index < 0)
-    {
-        return {};
-    }
-    s.removeFromLeft(kStripControlCellWidthPx * index);
-    return s.removeFromLeft(kStripControlCellWidthPx);
-}
-
-juce::Rectangle<int> TrackHeaderView::getSoloButtonBounds() const noexcept
-{
-    if (!hasSoloCell())
-    {
-        return {};
-    }
-    if (!modelProvider_().showRecordAndPowerStripCells)
-    {
-        return stripCellBoundsAtIndex(1); // [Mute][Solo]
-    }
-    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 2);
-}
-
-juce::Rectangle<int> TrackHeaderView::getMonitorButtonBounds() const noexcept
-{
-    if (!hasMonitorCell())
-    {
-        return {};
-    }
-    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + (hasSoloCell() ? 1 : 0) + 2);
-}
-
-juce::Rectangle<int> TrackHeaderView::getArmButtonBounds() const noexcept
-{
-    if (!modelProvider_().showRecordAndPowerStripCells)
-    {
-        return {};
-    }
-    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + (hasSoloCell() ? 1 : 0)
-                                  + (hasMonitorCell() ? 1 : 0) + 2);
-}
-
-juce::Rectangle<int> TrackHeaderView::getMuteButtonBounds() const noexcept
-{
-    if (!modelProvider_().showRecordAndPowerStripCells)
-    {
-        return stripCellBoundsAtIndex(0);
-    }
-    return stripCellBoundsAtIndex((hasInstrumentEditorCell() ? 1 : 0) + 1);
-}
-
-juce::Rectangle<int> TrackHeaderView::getPowerButtonBounds() const noexcept
-{
-    if (!modelProvider_().showRecordAndPowerStripCells)
-    {
-        return {};
-    }
-    return stripCellBoundsAtIndex(hasInstrumentEditorCell() ? 1 : 0);
-}
-
-juce::Rectangle<int> TrackHeaderView::getInstrumentEditorButtonBounds() const noexcept
-{
-    if (!hasInstrumentEditorCell())
-    {
-        return {};
-    }
-    return stripCellBoundsAtIndex(0);
-}
-
-juce::Rectangle<int> TrackHeaderView::getAlternativesButtonBounds() const noexcept
-{
-    if (!hasAlternativesCell())
-    {
-        return {};
-    }
-    // Small discreet hit area (18 px square holding a ~13 px drawn glyph) anchored at the
-    // PHYSICAL bottom-left corner of the whole header: right of the active-selection stripe
-    // with a small clear gap, and a small bottom gap (the cell's lowest 1 px overlaps the
-    // resize band, which keeps hit priority there — mouseDown/mouseMove test the band first).
-    // Deliberately separate from — and visibly smaller than — the 22 px Power/M/R strip cells,
-    // and it stays bottom-left as the row height changes.
-    const juce::Rectangle<int> r(kAlternativesButtonLeftInsetPx,
-                                 getHeight() - kAlternativesButtonBottomGapPx
-                                     - kAlternativesButtonHitPx,
-                                 kAlternativesButtonHitPx,
-                                 kAlternativesButtonHitPx);
-    // Compact heights: rather than colliding with the name block or the control strip, the
-    // button hides entirely (no paint, no hit target, no tooltip) and reappears once the row is
-    // tall enough for the bottom-left anchor to clear them. It never relocates.
-    const HeaderContentLayout layout = computeHeaderContentLayout();
-    if (r.getY() < 0 || r.intersects(layout.nameTextBounds.expanded(1))
-        || r.intersects(layout.controlStripBounds.expanded(1)))
-    {
-        return {};
-    }
-    return r;
-}
-
 void TrackHeaderView::updateStripHoverFromPosition(juce::Point<int> const pos) noexcept
 {
     auto const specs = buildStripControlSpecs();
     std::optional<TrackHeaderButtonKind> next;
 
-    constexpr std::array<TrackHeaderButtonKind, 7> hitPrioritiesRightToLeft{{
-        TrackHeaderButtonKind::Alternatives,
-        TrackHeaderButtonKind::Arm,
-        TrackHeaderButtonKind::Monitor,
-        TrackHeaderButtonKind::Solo,
-        TrackHeaderButtonKind::Mute,
-        TrackHeaderButtonKind::Power,
-        TrackHeaderButtonKind::InstrumentEditor,
-    }};
-    for (auto const pri : hitPrioritiesRightToLeft)
+    for (auto const& s : specs)
     {
-        if (auto const* s = findStripControlSpec(specs, pri);
-            s != nullptr && s->enabled && stripCellHitIntersectsVisibleChrome(s->cellBounds, pos))
+        if (s.enabled && stripCellHitIntersectsVisibleChrome(s.cellBounds, pos))
         {
-            next = pri;
+            next = s.kind;
             break;
         }
     }
@@ -651,16 +581,9 @@ bool TrackHeaderView::isPositionInRowResizeBand(juce::Point<int> const position)
 
     const int bandH = juce::jmin(kHeaderResizeBandPx, h);
     const int bandTop = b.getBottom() - bandH;
-    if (position.y < bandTop)
-    {
-        return false;
-    }
-
-    // Do not exclude using logical `controlStripBounds`: when the row is name-only, those bounds still
-    // overlap the bottom band in Y even though paint/hit-test clip the strip to chrome above the band,
-    // which incorrectly disabled the entire resize zone (buttons are not hit-tested here anyway).
-
-    return true;
+    // The band is the bottom 4 px of the header at EVERY height; the title row ends above it even
+    // in Micro (28 = 2 + 22 + 4), so the band never overlaps a control cell.
+    return position.y >= bandTop;
 }
 
 TrackHeaderView::TrackHeaderView(TrackHeaderModelProvider modelProvider,
@@ -707,7 +630,7 @@ void TrackHeaderView::patchRenameCallbacks(std::function<bool()> canBeginRenameT
 juce::String TrackHeaderView::getTooltip()
 {
     // Strip-cell tooltips (hover state is kept current by mouseMove via
-    // updateStripHoverFromPosition).
+    // updateStripHoverFromPosition). A hidden cell can never be hovered (no bounds).
     if (stripHoveredButton_.has_value()
         && *stripHoveredButton_ == TrackHeaderButtonKind::Alternatives)
     {
@@ -728,7 +651,7 @@ void TrackHeaderView::ensureTrackNameEditor()
     trackNameEditor_->setMultiLine(false);
     trackNameEditor_->setReturnKeyStartsNewLine(false);
     trackNameEditor_->setScrollbarsShown(false);
-    trackNameEditor_->setFont(juce::Font(juce::FontOptions(14.0f)));
+    trackNameEditor_->setFont(juce::Font(juce::FontOptions(kHeaderNameFontHeight)));
     trackNameEditor_->setIndents(4, 2);
     trackNameEditor_->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
     trackNameEditor_->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
@@ -858,6 +781,9 @@ void TrackHeaderView::mouseDoubleClick(juce::MouseEvent const& e)
     beginInlineTrackRenameIfPossible(e.getPosition());
 }
 
+// -----------------------------------------------------------------------------------------------
+// Paint
+// -----------------------------------------------------------------------------------------------
 void TrackHeaderView::paint(juce::Graphics& g)
 {
     TrackHeaderModel const m = modelProvider_();
@@ -868,7 +794,6 @@ void TrackHeaderView::paint(juce::Graphics& g)
 
     auto const b = getLocalBounds();
     // Plate colours / stripe shared with the mixer strip headers (`TrackStripButtonGlyphs.h`).
-    static_assert(kHeaderActiveStripeWidthPx == track_strip_glyphs::kHeaderActiveStripeWidthPx, "header stripe width is shared");
     drawHeaderPlate(g, b, active);
 
     // Header multi-selection (visual-group creation): a subtle blue wash + hairline OVER the
@@ -881,41 +806,56 @@ void TrackHeaderView::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0x7a2e7bd6));
         g.drawRect(b, 1);
     }
-    // Visual group membership: a discreet 2 px vertical marker along the left edge, placed RIGHT
-    // of the active stripe (x 0…4) and LEFT of all content (x ≥ 12) — obscures nothing.
+    // Visual group membership: a discreet 2 px vertical marker in the group margin, RIGHT of the
+    // active stripe (x 0…4) and LEFT of the colour segment (x ≥ 8) — obscures nothing.
     if (m.visualGroupMember)
     {
         g.setColour(juce::Colour(0xff6f8096));
-        g.fillRect(kHeaderActiveStripeWidthPx + 1, 0, 2, b.getHeight());
+        g.fillRect(kHeaderGroupMarkerXPx, 0, kHeaderGroupMarkerWidthPx, b.getHeight());
     }
 
     auto const layout = computeHeaderContentLayout();
+    auto const chrome = visibleChromeBoundsExcludingResizeBand();
+
+    // Colour segment: the track's palette colour as a full-chrome-height band with the type icon
+    // and the order number on the title row. The header plate itself keeps its colour (only the
+    // segment and the track's events carry the track colour); the active stripe stays separate.
+    if (!layout.colourSegmentBounds.isEmpty())
+    {
+        g.setColour(track_colour_palette::headerSegmentFill(m.colourKey));
+        g.fillRect(layout.colourSegmentBounds);
+        const juce::Colour ink = track_colour_palette::segmentInk();
+        drawTrackTypeIcon(g, layout.typeIconBounds.toFloat(), m.typeIcon, ink);
+        if (m.trackNumber > 0 && !layout.numberBounds.isEmpty())
+        {
+            juce::Graphics::ScopedSaveState const gs(g);
+            g.reduceClipRegion(layout.colourSegmentBounds.getIntersection(chrome));
+            g.setColour(ink);
+            g.setFont(juce::Font(juce::FontOptions(kHeaderNumberFontHeight)));
+            g.drawText(juce::String(m.trackNumber), layout.numberBounds, juce::Justification::centredRight, false);
+        }
+    }
+
     auto nameArea = layout.nameTextBounds;
+    // Rows that can show the live-MIDI activity dot keep its slot free at all times so the
+    // ellipsized title never jumps or collides with the dot when MIDI starts arriving.
+    constexpr int kDot = 6;
+    if (m.typeIcon == TrackTypeIcon::Instrument || m.typeIcon == TrackTypeIcon::Midi)
+    {
+        nameArea = nameArea.withTrimmedRight(kDot + 3);
+    }
     if (!nameArea.isEmpty()
         && (trackNameEditor_ == nullptr || !trackNameEditor_->isVisible()))
     {
+        // Same 14 pt as before; a narrow header truncates with an ellipsis instead of shrinking.
         g.setColour(headerNameColour());
         g.setFont(kHeaderNameFontHeight);
-        if (m.subtitle.isEmpty())
-        {
-            g.drawFittedText(m.name, nameArea, juce::Justification::centredLeft, 1);
-        }
-        else
-        {
-            auto r = nameArea;
-            const int titleH = juce::jlimit(12, 17, juce::jmax(12, r.getHeight() / 2));
-            g.drawText(m.name, r.removeFromTop(titleH), juce::Justification::centredLeft, true);
-            g.setColour(juce::Colour(0xffcccccc));
-            g.setFont(11.0f);
-            g.drawFittedText(m.subtitle, r, juce::Justification::topLeft, 2);
-        }
+        g.drawText(m.name, nameArea, juce::Justification::centredLeft, true);
     }
-    // Live-MIDI activity dot: a 6 px disc at the right end of the name row (inside the header,
-    // above the control strip) while MIDI is arriving for this row. Painted only when active so
-    // idle headers are byte-identical to before.
+    // Live-MIDI activity dot: a 6 px disc at the right end of the name row while MIDI is
+    // arriving for this row. Painted only when active so idle headers are byte-identical to before.
     if (m.midiActivity && !layout.nameTextBounds.isEmpty())
     {
-        constexpr int kDot = 6;
         const juce::Rectangle<int> dot(layout.nameTextBounds.getRight() - kDot - 1,
                                        layout.nameTextBounds.getCentreY() - kDot / 2, kDot, kDot);
         g.setColour(juce::Colour(0xff3ddc84));
@@ -924,15 +864,13 @@ void TrackHeaderView::paint(juce::Graphics& g)
 
     juce::Colour const ctlNeutralEdge(kCtlNeutralEdgeArgb);
 
-    auto const chrome = visibleChromeBoundsExcludingResizeBand();
-    if (!layout.controlStripBounds.getIntersection(chrome).isEmpty())
     {
         juce::Graphics::ScopedSaveState const gs(g);
         g.reduceClipRegion(chrome);
 
-        // EVERY strip button kind must appear here: hit testing/hover/tooltips work from
-        // `buildStripControlSpecs`, so a kind missing from this paint list is an invisible-but-
-        // clickable button (the original Monitor-button defect).
+        // EVERY cell kind in `specs` is painted here (hit testing / hover / tooltips work from the
+        // same spec list, so a kind missing from this list would be an invisible-but-clickable
+        // button — the original Monitor-button defect).
         constexpr std::array<TrackHeaderButtonKind, 7> paintOrderBottomToTop{{
             TrackHeaderButtonKind::Mute,
             TrackHeaderButtonKind::Solo,
@@ -957,29 +895,21 @@ void TrackHeaderView::paint(juce::Graphics& g)
     }
 }
 
+// -----------------------------------------------------------------------------------------------
+// Mouse
+// -----------------------------------------------------------------------------------------------
 bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
                                          std::vector<TrackHeaderStripButtonSpec>&& specs) noexcept
 {
-    constexpr std::array<TrackHeaderButtonKind, 7> hitPrioritiesRightToLeft{{
-        TrackHeaderButtonKind::Alternatives,
-        TrackHeaderButtonKind::Arm,
-        TrackHeaderButtonKind::Monitor,
-        TrackHeaderButtonKind::Solo,
-        TrackHeaderButtonKind::Mute,
-        TrackHeaderButtonKind::Power,
-        TrackHeaderButtonKind::InstrumentEditor,
-    }};
-
-    for (auto const pri : hitPrioritiesRightToLeft)
+    for (auto const& spec : specs)
     {
-        TrackHeaderStripButtonSpec const* const spec = findStripControlSpec(specs, pri);
-        if (spec == nullptr || !spec->enabled || spec->cellBounds.isEmpty()
-            || !stripCellHitIntersectsVisibleChrome(spec->cellBounds, position))
+        if (!spec.enabled || spec.cellBounds.isEmpty()
+            || !stripCellHitIntersectsVisibleChrome(spec.cellBounds, position))
         {
             continue;
         }
 
-        switch (spec->kind)
+        switch (spec.kind)
         {
         case TrackHeaderButtonKind::InstrumentEditor:
             if (callbacks_.onOpenInstrumentEditor != nullptr)
@@ -1031,7 +961,7 @@ bool TrackHeaderView::dispatchStripClick(juce::Point<int> const position,
             if (callbacks_.onShowInstrumentAlternatives != nullptr)
             {
                 // Anchor the popup to the clicked cell (screen coordinates).
-                callbacks_.onShowInstrumentAlternatives(localAreaToGlobal(spec->cellBounds));
+                callbacks_.onShowInstrumentAlternatives(localAreaToGlobal(spec.cellBounds));
             }
             return true;
 
@@ -1062,30 +992,55 @@ bool TrackHeaderView::clickMuteCellLikeMouseForStabilityTest() { return clickStr
 bool TrackHeaderView::clickSoloCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Solo); }
 bool TrackHeaderView::clickPowerCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Power); }
 
+namespace
+{
+    [[nodiscard]] juce::MouseEvent makeRightButtonPressAt(juce::Component& target, const juce::Point<float> local)
+    {
+        const juce::Time now = juce::Time::getCurrentTime();
+        return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(),
+                                local,
+                                juce::ModifierKeys(juce::ModifierKeys::rightButtonModifier
+                                                   | juce::ModifierKeys::popupMenuClickModifier),
+                                juce::MouseInputSource::defaultPressure,
+                                juce::MouseInputSource::defaultOrientation,
+                                juce::MouseInputSource::defaultRotation,
+                                juce::MouseInputSource::defaultTiltX,
+                                juce::MouseInputSource::defaultTiltY,
+                                &target,
+                                &target,
+                                now,
+                                local,
+                                now,
+                                1,
+                                false);
+    }
+} // namespace
+
 bool TrackHeaderView::showContextMenuLikeRightClickForStabilityTest()
 {
     if (callbacks_.onShowContextMenu == nullptr)
     {
         return false;
     }
-    const juce::Point<float> local = getLocalBounds().getCentre().toFloat();
-    const juce::Time now = juce::Time::getCurrentTime();
-    const juce::MouseEvent e(juce::Desktop::getInstance().getMainMouseSource(),
-                             local,
-                             juce::ModifierKeys(juce::ModifierKeys::rightButtonModifier | juce::ModifierKeys::popupMenuClickModifier),
-                             juce::MouseInputSource::defaultPressure,
-                             juce::MouseInputSource::defaultOrientation,
-                             juce::MouseInputSource::defaultRotation,
-                             juce::MouseInputSource::defaultTiltX,
-                             juce::MouseInputSource::defaultTiltY,
-                             this,
-                             this,
-                             now,
-                             local,
-                             now,
-                             1,
-                             false);
-    mouseDown(e);
+    // The name area (never the colour segment, whose right-click is the palette).
+    const juce::Rectangle<int> name = computeHeaderContentLayout().nameTextBounds;
+    const juce::Point<float> local = (name.isEmpty() ? getLocalBounds().getCentre() : name.getCentre()).toFloat();
+    mouseDown(makeRightButtonPressAt(*this, local));
+    return true;
+}
+
+bool TrackHeaderView::showColourMenuLikeRightClickForStabilityTest()
+{
+    if (callbacks_.onShowColourMenu == nullptr)
+    {
+        return false;
+    }
+    const juce::Rectangle<int> seg = computeHeaderContentLayout().colourSegmentBounds;
+    if (seg.isEmpty())
+    {
+        return false;
+    }
+    mouseDown(makeRightButtonPressAt(*this, seg.getCentre().toFloat()));
     return true;
 }
 
@@ -1093,10 +1048,17 @@ void TrackHeaderView::mouseDown(juce::MouseEvent const& e)
 {
     if (e.mods.isPopupMenu())
     {
+        dragBlocker_ = DragBlocker::None;
+        headerDragInProgress_ = false;
+        // Right-click on the type-icon / number segment: the track colour palette (for THIS
+        // header's track, whichever row is active). Elsewhere: the generic context menu.
+        if (callbacks_.onShowColourMenu != nullptr && isPositionInColourSegment(e.getPosition()))
+        {
+            callbacks_.onShowColourMenu(*this, localAreaToGlobal(computeHeaderContentLayout().colourSegmentBounds));
+            return;
+        }
         if (callbacks_.onShowContextMenu != nullptr)
         {
-            dragBlocker_ = DragBlocker::None;
-            headerDragInProgress_ = false;
             callbacks_.onShowContextMenu(*this, e);
         }
         return;

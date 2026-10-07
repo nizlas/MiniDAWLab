@@ -608,7 +608,7 @@ void testMonitorButtonRendering(const juce::File& shotDir)
     audioCallbacks.onTogglePower = [] { return true; };
 
     constexpr int kW = 240;
-    constexpr int kH = 64;
+    constexpr int kH = track_row_heights::kMediumPresetPx;
 
     const auto renderHeader = [&](TrackHeaderModel model, TrackHeaderCallbacks cbs,
                                   std::unique_ptr<TrackHeaderView>& outView) {
@@ -652,23 +652,11 @@ void testMonitorButtonRendering(const juce::File& shotDir)
                .contains(cellOff),
            "ui: Monitor cell stays inside header chrome (clear of the resize band)");
 
-    // ---- Compact row height: probe the smallest full-strip height and re-verify ----
-    // The snap helper rounds a drag height to the name-only layout or to the smallest height
-    // that shows the full control strip. Heights below the name-only ideal also snap UP, so the
-    // full-strip minimum is the LARGEST up-snapped result over the probe range.
-    int minFullH = 0;
-    for (int h = 20; h <= kH; ++h)
-    {
-        const int snapped = TrackHeaderView::snapTrackHeaderRowHeightAfterResize(h, false, 10, 400);
-        if (snapped > h)
-        {
-            minFullH = juce::jmax(minFullH, snapped);
-        }
-    }
-    if (minFullH <= 0)
-    {
-        minFullH = kH;
-    }
+    // ---- Compact row height: the smallest grid height that shows the second control row
+    // (Monitor lives there since the compact-header slice) and re-verify ----
+    const int minFullH = track_row_heights::kSmallPresetPx;
+    static_assert(track_row_heights::kSmallPresetPx >= TrackHeaderView::kMinimumHeightForSecondRowPx,
+                  "Small must show the second control row");
     std::unique_ptr<TrackHeaderView> vCompact;
     TrackHeaderModel compactModel = makeAudioHeaderModel(true);
     vCompact = std::make_unique<TrackHeaderView>(

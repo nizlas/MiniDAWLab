@@ -35,6 +35,7 @@
 #include "domain/AudioClip.h"
 #include "engine/RecorderService.h"
 #include "io/AudioWaveformCache.h"
+#include "ui/TrackRowHeightPresets.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -296,6 +297,15 @@ private:
                             std::int64_t visStart,
                             std::int64_t visLen,
                             double spp);
+
+    /// Lane event detail from the lane height (Micro = thin bars, Mini = compact boxes, Small and
+    /// up = waveform + label) — painting only; hit geometry stays the full event rect.
+    [[nodiscard]] track_row_heights::LaneEventDetail currentEventDetail() const noexcept;
+    /// The track colour's event body fill (`Session::getTrackColour(trackId_)` at paint time).
+    [[nodiscard]] juce::Colour currentEventBodyFill() const noexcept;
+    /// Strip fingerprint combined with the current body fill: the raster cache's content key.
+    [[nodiscard]] std::uint64_t rasterContentFingerprint() const noexcept;
+    [[nodiscard]] static juce::Rectangle<float> thinBarRectForEvent(const juce::Rectangle<float>& eventRect) noexcept;
 
     bool ensureWaveRasterForViewState(const juce::Rectangle<float>& bounds,
                                       std::int64_t visStart,

@@ -29,6 +29,9 @@
 
 #include "ui/ClipWaveformView.h"
 
+#include "ui/TrackColourPalette.h"
+#include "ui/TrackRowHeightPresets.h"
+
 #include "ui/TimelineClipEventChrome.h"
 #include "ui/ForbiddenCursor.h"
 #include "ui/TimelineRulerView.h"
@@ -1821,7 +1824,7 @@ bool ClipWaveformView::ensureWaveRasterForViewState(const juce::Rectangle<float>
         return false;
     }
 
-    const std::uint64_t stripFp = lastPeaksFingerprint_;
+    const std::uint64_t stripFp = rasterContentFingerprint();
     bool allPyramidsReady = true;
     const std::uint64_t pyrFp = computePyramidReadyFingerprint(&allPyramidsReady);
 
@@ -1931,6 +1934,10 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
     const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, tc::kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
+    // Detail level from the lane height (Micro = thin bars, Mini = compact boxes, Small and up =
+    // waveform + label) and the track colour's event body: painting only, hit geometry unchanged.
+    const auto detail = currentEventDetail();
+    const juce::Colour bodyFill = currentEventBodyFill();
     for (int row = numRows - 1; row >= 0; --row)
     {
         const TimelineStrip& strip = clipStrips_[(size_t)row];
@@ -1954,10 +1961,16 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
             continue;
         }
 
-        tc::paintEventChromeBody(g, eventRect, tc::unifiedClipEventBodyFill());
+        if (detail == track_row_heights::LaneEventDetail::Bars)
+        {
+            tc::paintEventChromeBody(g, thinBarRectForEvent(eventRect), bodyFill);
+            continue;
+        }
+        tc::paintEventChromeBody(g, eventRect, bodyFill);
 
         juce::Rectangle<float> innerForPeakHeight = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
-        if (eventRect.getWidth() >= 1.0f && innerForPeakHeight.getHeight() >= 1.0f && nsForDraw > 0)
+        if (detail == track_row_heights::LaneEventDetail::Full && eventRect.getWidth() >= 1.0f
+            && innerForPeakHeight.getHeight() >= 1.0f && nsForDraw > 0)
         {
             paintRowWaveformWithPyramid(
                 g,
@@ -1976,7 +1989,7 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
         }
     }
 
-    for (int r = numRows - 1; r >= 0; --r)
+    for (int r = numRows - 1; r >= 0 && detail == track_row_heights::LaneEventDetail::Full; --r)
     {
         const TimelineStrip& stripR = clipStrips_[(size_t)r];
         if (stripR.materialNumSamples <= 0)
@@ -2333,7 +2346,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
     // after each wheel step was the remaining freeze spike). Blit the old raster scaled onto the
     // new mapping, draw chrome, and arm the deferred one-shot rebuild. Content changes
     // (strips/pyramid fingerprints) still rebuild synchronously below — rare and correctness-first.
-    if (!waveRaster_.isNull() && waveRasterStripFp_ == lastPeaksFingerprint_
+    if (!waveRaster_.isNull() && waveRasterStripFp_ == rasterContentFingerprint()
         && waveRasterPyramidFp_ == computePyramidReadyFingerprint())
     {
         const bool geometryExact = waveRasterSpp_ == spp && waveRasterImageH_ == getHeight()
@@ -2350,7 +2363,7 @@ void ClipWaveformView::paint(juce::Graphics& g)
 
     const bool hadRasterBefore = !waveRaster_.isNull();
     const bool likelyHit = hadRasterBefore && visibleFitsWaveRaster(visStart, visLen)
-                           && waveRasterSpp_ == spp && waveRasterStripFp_ == lastPeaksFingerprint_
+                           && waveRasterSpp_ == spp && waveRasterStripFp_ == rasterContentFingerprint()
                            && waveRasterPyramidFp_ == computePyramidReadyFingerprint();
 
     const std::int64_t tRebuildStart
@@ -2462,6 +2475,8 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
     const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, tc::kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
+    const auto detail = currentEventDetail();
+    const juce::Colour bodyFill = currentEventBodyFill();
 
     // --- (1b) Cross-lane **drop ghost** on a target lane (not the overlap underlap hint).
     if (hasDragGhost_ && dragGhostLengthSamples_ > 0)
@@ -2554,7 +2569,17 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
             continue;
         }
 
-        tc::paintEventChromeBody(g, eventRect, tc::unifiedClipEventBodyFill());
+        if (detail == track_row_heights::LaneEventDetail::Bars)
+        {
+            const juce::Rectangle<float> bar = thinBarRectForEvent(eventRect);
+            tc::paintEventChromeBody(g, bar, bodyFill);
+            if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
+            {
+                tc::paintEventChromeSelectionOverlay(g, bar);
+            }
+            continue;
+        }
+        tc::paintEventChromeBody(g, eventRect, bodyFill);
         if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
         {
             tc::paintEventChromeSelectionOverlay(g, eventRect);
@@ -2562,7 +2587,8 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
 
         juce::Rectangle<float> innerForPeakHeight
             = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
-        if (eventRect.getWidth() >= 1.0f && innerForPeakHeight.getHeight() >= 1.0f)
+        if (detail == track_row_heights::LaneEventDetail::Full && eventRect.getWidth() >= 1.0f
+            && innerForPeakHeight.getHeight() >= 1.0f)
         {
             const int ns = nsForDraw;
             if (ns > 0)
@@ -2645,7 +2671,10 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
         {
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
-        tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
+        if (detail == track_row_heights::LaneEventDetail::Full)
+        {
+            tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
+        }
     }
 
     // --- (3) Same shade+hatch *style* for every row the interval function marks. **Order r = n-1…0**:
@@ -2793,6 +2822,32 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
     }
 }
 
+track_row_heights::LaneEventDetail ClipWaveformView::currentEventDetail() const noexcept
+{
+    return track_row_heights::laneEventDetailForHeightPx(getHeight());
+}
+
+juce::Colour ClipWaveformView::currentEventBodyFill() const noexcept
+{
+    return track_colour_palette::eventBodyFill(session_.getTrackColour(trackId_));
+}
+
+std::uint64_t ClipWaveformView::rasterContentFingerprint() const noexcept
+{
+    // The strip fingerprint plus the track colour the raster was painted with: a colour change is
+    // a CONTENT change for the cache (rebuilt synchronously on the next paint, like a snapshot
+    // change), so the new fill shows at once — no zoom, click or reload needed.
+    const std::uint64_t colourBits = static_cast<std::uint64_t>(currentEventBodyFill().getARGB());
+    return lastPeaksFingerprint_ ^ (colourBits * 0x9E3779B97F4A7C15ull);
+}
+
+juce::Rectangle<float> ClipWaveformView::thinBarRectForEvent(const juce::Rectangle<float>& eventRect) noexcept
+{
+    // Micro rows: the event's real time extent as a thin field centred in the lane.
+    const float barH = juce::jmin((float) track_row_heights::kLaneBarFieldHeightPx, eventRect.getHeight());
+    return { eventRect.getX(), eventRect.getCentreY() - barH * 0.5f, eventRect.getWidth(), barH };
+}
+
 void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
                                           const juce::Rectangle<float>& bounds,
                                           const std::int64_t visStart,
@@ -2804,6 +2859,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
     const juce::Rectangle<float> eventTrackY = bounds.reduced(0.0f, tc::kEventVerticalMargin);
     const float midY = eventTrackY.getCentreY();
     const float halfDraw = juce::jmax(1.0f, eventTrackY.getHeight() * 0.5f) * 0.45f;
+    const auto detail = currentEventDetail();
 
     // Dirty-region cull (zoom-freeze fix): chrome for strips fully outside the dirty clip region
     // (playhead-stripe underpaints during playback) is skipped; full repaints cover everything.
@@ -2852,7 +2908,8 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
 
         if (selectedPlacedId_.has_value() && strip.clipId == *selectedPlacedId_)
         {
-            tc::paintEventChromeSelectionOverlay(g, eventRect);
+            tc::paintEventChromeSelectionOverlay(
+                g, detail == track_row_heights::LaneEventDetail::Bars ? thinBarRectForEvent(eventRect) : eventRect);
         }
 
         const bool hideTrimCues
@@ -2878,8 +2935,11 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
         // Live label over the blitted raster: never stale after rename (raster fingerprint does not
-        // include the display name).
-        tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
+        // include the display name). Bars / Compact rows carry no label (no room, spec §4).
+        if (detail == track_row_heights::LaneEventDetail::Full)
+        {
+            tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));
+        }
     }
 
     if (recordingCycleBehindLayersActive_)

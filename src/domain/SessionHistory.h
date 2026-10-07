@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include "domain/SessionSnapshot.h"
+#include "domain/TrackColour.h"
 #include "domain/VisualTrackGroup.h"
 #include "io/ProjectFile.h"
 #include "plugins/PluginTrackSlot.h"
@@ -76,6 +77,16 @@ struct VisualTrackGroupsUndoSides
     std::vector<VisualTrackGroup> after;
 };
 
+/// Narrow track-colour undo payload: ONE track's palette key before/after. Same discipline as the
+/// Solo-memory and group steps — identical snapshot pointer on both sides, so undoing a colour
+/// change restores exactly that colour and never an instrument, a take or the whole Session.
+struct TrackColourUndoSides
+{
+    TrackId trackId = kInvalidTrackId;
+    TrackColourKey before = TrackColourKey::DefaultGrey;
+    TrackColourKey after = TrackColourKey::DefaultGrey;
+};
+
 struct SessionHistoryRestoreBundle
 {
     /// Always non-null when `popUndo` / `popRedo` returns has_value.
@@ -90,6 +101,8 @@ struct SessionHistoryRestoreBundle
     std::optional<SoloMemoryUndoSides> soloMemorySides {};
     /// Visual-group metadata step: apply `before` (undo) / `after` (redo) as the full group list.
     std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides {};
+    /// Track-colour step: apply `before` (undo) / `after` (redo) to that one track's colour.
+    std::optional<TrackColourUndoSides> trackColourSides {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -113,7 +126,8 @@ public:
                 = std::nullopt,
                 std::optional<SoloMemoryUndoSides> soloMemorySides = std::nullopt,
                 std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides
-                = std::nullopt) noexcept;
+                = std::nullopt,
+                std::optional<TrackColourUndoSides> trackColourSides = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
     /// restore (`pluginSides` present — caller applies `before` chain).
@@ -137,6 +151,7 @@ private:
         std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete;
         std::optional<SoloMemoryUndoSides> soloMemorySides;
         std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides;
+        std::optional<TrackColourUndoSides> trackColourSides;
     };
 
     int maxSteps_;

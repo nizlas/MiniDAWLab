@@ -110,9 +110,14 @@ struct ProjectFileTrackV1
     TrackId midiDestinationTrackId = kInvalidTrackId;
     /// v26: the row's ACTUAL arrangement height in logical px (JSON `rowHeight`). `0` = absent
     /// (every pre-v26 file): the row then uses the project's preset default on load. Values are
-    /// clamped to the valid [Small, max] range by the UI apply — a malformed height can never
-    /// break layout. UI-only: never affects clip times, routing, Solo memories or musical data.
+    /// clamped to the valid [Micro, safety max] range by the UI apply — a malformed height can
+    /// never break layout. UI-only: never affects clip times, routing, Solo memories or musical data.
     int rowHeightPx = 0;
+    /// v28: the track's palette colour key (JSON `colour`: "blue" | "teal" | "green" | "ochre" |
+    /// "orange" | "red" | "purple"; see `domain/TrackColour.h`). Empty = absent (every pre-v28
+    /// file and every default-grey track) → `DefaultGrey`; unknown spellings also load as the
+    /// default. Written only when not the default. UI metadata: no effect on audio or clips.
+    juce::String colourKey;
 };
 
 /// v12: editable tick-domain notes (I3f).
@@ -405,7 +410,13 @@ struct ProjectFileV1
     /// Solo memories persisted per project (root `soloMemories`): exactly four slots.
     static constexpr int kSoloMemoryCount = 4;
 
-    /// Current JSON writer version (**27** adds the optional root `visualTrackGroups` — an array
+    /// Current JSON writer version (**28** adds the optional per-track `tracks[].colour` palette
+    /// key — `"blue" | "teal" | "green" | "ochre" | "orange" | "red" | "purple"`, omitted for the
+    /// default grey — and extends the root `trackRowHeightPreset` vocabulary with `"micro"` and
+    /// `"mini"`; row heights now live on the Micro + n x 14 px grid (`ui/TrackRowHeightPresets.h`),
+    /// saved heights are clamped but never re-snapped on load. Absent keys (every pre-v28 file)
+    /// load as default grey / the historical Medium; UI metadata only.)
+    /// (**27** adds the optional root `visualTrackGroups` — an array
     /// of purely visual collapsible track groups, each `{ name, collapsed, memberTrackIds[] }`.
     /// Omitted when no group exists; absent key (every pre-v27 file) loads as no groups. Layout
     /// metadata only: tracks, clips, routing, Solo and row heights are untouched.)
@@ -441,7 +452,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 27;
+    static constexpr int kCurrentVersion = 28;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;

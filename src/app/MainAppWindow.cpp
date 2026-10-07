@@ -558,6 +558,9 @@ public:
                 // Visual track groups: a narrow group-metadata undo step replaced the full group
                 // list in `Session` — relayout the arrangement (markers, handles, collapsed rows).
                 [this] { trackLanesView.refreshVisualTrackGroupsFromSession(); },
+                // Track colours: a colour command / undo / redo changed one track's palette key —
+                // repaint headers + lanes (cached wave rasters re-derive their fill).
+                [this] { trackLanesView.refreshTrackColoursFromSession(); },
             });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
@@ -1950,29 +1953,25 @@ public:
 
         // Shared track heights (one-shot commands, not a mode): item ids match the preset enum + 1.
         // "Custom" is only the no-selection status text — deliberately NOT an item.
-        trackRowHeightPresetCombo_.addItem("Small", kTrackRowHeightComboIdSmall);
-        trackRowHeightPresetCombo_.addItem("Medium", kTrackRowHeightComboIdMedium);
-        trackRowHeightPresetCombo_.addItem("Large", kTrackRowHeightComboIdLarge);
+        for (const auto preset : { track_row_heights::TrackRowHeightPreset::Micro, track_row_heights::TrackRowHeightPreset::Mini,
+                                   track_row_heights::TrackRowHeightPreset::Small, track_row_heights::TrackRowHeightPreset::Medium,
+                                   track_row_heights::TrackRowHeightPreset::Large })
+        {
+            trackRowHeightPresetCombo_.addItem(track_row_heights::displayNameForPreset(preset),
+                                               trackRowHeightComboIdForPreset(preset));
+        }
         trackRowHeightPresetCombo_.setTextWhenNothingSelected("Custom");
         trackRowHeightPresetCombo_.setTooltip("Set the height of all arrangement tracks");
         // Never take keyboard focus: a focused combo would consume Space (play/pause) after a click.
         trackRowHeightPresetCombo_.setWantsKeyboardFocus(false);
         trackRowHeightPresetCombo_.onChange = [this] {
-            namespace trh = track_row_heights;
-            switch (trackRowHeightPresetCombo_.getSelectedId())
+            const int id = trackRowHeightPresetCombo_.getSelectedId();
+            if (id <= 0)
             {
-            case kTrackRowHeightComboIdSmall:
-                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
-                break;
-            case kTrackRowHeightComboIdMedium:
-                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
-                break;
-            case kTrackRowHeightComboIdLarge:
-                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Large);
-                break;
-            default:
-                break; // deselected programmatically (Custom status) — no command.
+                return; // deselected programmatically (Custom status) — no command.
             }
+            // Item id = grid enum value + 1 (Micro 1 … Large 5): one-shot preset command.
+            trackLanesView.applyTrackRowHeightPreset(static_cast<track_row_heights::TrackRowHeightPreset>(id - 1));
         };
         addAndMakeVisible(trackRowHeightPresetCombo_);
         refreshTrackRowHeightPresetComboFromLanes();
@@ -2323,6 +2322,14 @@ public:
                 projectIoCoordinator_->markProjectDirtyFromEdit();
             }
             refreshTrackRowHeightPresetComboFromLanes();
+        });
+        // Track colour (palette from a header's icon / number segment): ONE narrow undo step on
+        // exactly that track's colour + dirty flag; the coordinator's refresh callback repaints.
+        trackLanesView.setOnTrackColourRequested([this](const TrackId tid, const TrackColourKey key) {
+            if (undoRedoCoordinator_ != nullptr)
+            {
+                undoRedoCoordinator_->executeUndoableTrackColourEdit(tid, key);
+            }
         });
         // Visual track groups (purely visual; groups spec §7): Create / Rename / Ungroup run as
         // narrow group-metadata undo steps (never a timeline snapshot); collapse / expand follows
@@ -5842,13 +5849,7 @@ public:
         namespace trh = track_row_heights;
         const std::optional<trh::TrackRowHeightPreset> status
             = trackLanesView.uniformTrackRowHeightPresetStatus();
-        int wantedId = 0;
-        if (status.has_value())
-        {
-            wantedId = (*status == trh::TrackRowHeightPreset::Small)  ? kTrackRowHeightComboIdSmall
-                     : (*status == trh::TrackRowHeightPreset::Large)  ? kTrackRowHeightComboIdLarge
-                                                                      : kTrackRowHeightComboIdMedium;
-        }
+        const int wantedId = status.has_value() ? trackRowHeightComboIdForPreset(*status) : 0;
         if (trackRowHeightPresetCombo_.getSelectedId() != wantedId)
         {
             trackRowHeightPresetCombo_.setSelectedId(wantedId, juce::dontSendNotification);
@@ -8146,9 +8147,11 @@ private:
     /// Shared track heights: one-shot Small/Medium/Large commands; shows "Custom" (status only,
     /// never a selectable item) while row heights are mixed. Placed between the Solo memory strip
     /// and the edit tool strip by `applyTransportControlsLayout`.
-    static constexpr int kTrackRowHeightComboIdSmall = 1;
-    static constexpr int kTrackRowHeightComboIdMedium = 2;
-    static constexpr int kTrackRowHeightComboIdLarge = 3;
+    /// Item id = `TrackRowHeightPreset` value + 1 (Micro 1, Mini 2, Small 3, Medium 4, Large 5).
+    [[nodiscard]] static constexpr int trackRowHeightComboIdForPreset(const track_row_heights::TrackRowHeightPreset p) noexcept
+    {
+        return static_cast<int>(p) + 1;
+    }
     juce::ComboBox trackRowHeightPresetCombo_;
     juce::Label arrangementBpmLabel_;
     juce::TextEditor arrangementBpmEditor_;

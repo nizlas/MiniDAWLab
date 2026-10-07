@@ -20,6 +20,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cmath>
+
 namespace track_strip_glyphs
 {
 
@@ -234,6 +236,108 @@ inline void drawMonitorSpeakerGlyph(juce::Graphics& g, const juce::Rectangle<flo
     arc.addCentredArc(coneRight + w * 0.10f, a.getCentreY(), w * 0.22f, h * 0.34f, 0.0f,
                       juce::degreesToRadians(20.0f), juce::degreesToRadians(160.0f), true);
     g.strokePath(arc, juce::PathStrokeType(stroke));
+}
+
+// --- track type icons (the header's colour segment, compact-header slice 2026-10-07) -----------------------------------
+/// The arrangement row kinds as the header shows them in front of the order number.
+enum class TrackTypeIcon
+{
+    Audio,      ///< waveform
+    Instrument, ///< keyboard
+    Midi,       ///< 5-pin MIDI connector (distinct from the instrument keyboard)
+    Group,      ///< bus: three lines merging into one
+    Master,     ///< Stereo Out: two overlapping circles (L / R)
+};
+
+/// Small vector icon in DAL's flat style, `ink`-coloured on the caller's segment background.
+/// Degrades to nothing below ~8 px.
+inline void drawTrackTypeIcon(juce::Graphics& g,
+                              const juce::Rectangle<float> area,
+                              const TrackTypeIcon icon,
+                              const juce::Colour ink)
+{
+    const float side = juce::jmin(area.getWidth(), area.getHeight());
+    if (side < 8.0f)
+    {
+        return;
+    }
+    const juce::Rectangle<float> a(area.getCentreX() - side * 0.5f, area.getCentreY() - side * 0.5f, side, side);
+    const auto x = [&](const float nx) { return a.getX() + nx * side; };
+    const auto y = [&](const float ny) { return a.getY() + ny * side; };
+    const float stroke = juce::jlimit(1.0f, 1.6f, side * 0.1f);
+    g.setColour(ink);
+    switch (icon)
+    {
+    case TrackTypeIcon::Audio:
+    {
+        // Mirrored waveform: seven bars of varying height around the centre line.
+        constexpr float heights[7] = { 0.30f, 0.62f, 0.90f, 0.50f, 0.78f, 0.40f, 0.22f };
+        const float barW = side / 7.0f * 0.62f;
+        for (int i = 0; i < 7; ++i)
+        {
+            const float cx = x((static_cast<float>(i) + 0.5f) / 7.0f);
+            const float h = side * heights[i];
+            g.fillRoundedRectangle(cx - barW * 0.5f, a.getCentreY() - h * 0.5f, barW, h, barW * 0.4f);
+        }
+        break;
+    }
+    case TrackTypeIcon::Instrument:
+    {
+        // Keyboard: three light keys with two black keys (outline in the ink colour).
+        const juce::Rectangle<float> kb(x(0.06f), y(0.16f), side * 0.88f, side * 0.68f);
+        g.drawRoundedRectangle(kb, 1.2f, stroke);
+        const float kx1 = kb.getX() + kb.getWidth() / 3.0f;
+        const float kx2 = kb.getX() + 2.0f * kb.getWidth() / 3.0f;
+        g.drawLine(kx1, kb.getCentreY(), kx1, kb.getBottom(), stroke);
+        g.drawLine(kx2, kb.getCentreY(), kx2, kb.getBottom(), stroke);
+        const float bkW = juce::jmax(2.0f, kb.getWidth() * 0.2f);
+        const float bkH = kb.getHeight() * 0.52f;
+        g.fillRect(juce::Rectangle<float>(kx1 - bkW * 0.5f, kb.getY(), bkW, bkH));
+        g.fillRect(juce::Rectangle<float>(kx2 - bkW * 0.5f, kb.getY(), bkW, bkH));
+        break;
+    }
+    case TrackTypeIcon::Midi:
+    {
+        // DIN connector: ring + five pins.
+        const juce::Rectangle<float> ring = a.reduced(side * 0.08f);
+        g.drawEllipse(ring, stroke);
+        const float pr = juce::jmax(0.9f, side * 0.09f);
+        const float r = ring.getWidth() * 0.30f;
+        const float cx = ring.getCentreX();
+        const float cy = ring.getCentreY() + side * 0.02f;
+        for (const float deg : { -60.0f, -30.0f, 0.0f, 30.0f, 60.0f })
+        {
+            const float rad = juce::degreesToRadians(deg);
+            const float px = cx + std::sin(rad) * r;
+            const float py = cy - std::cos(rad) * r + side * 0.08f;
+            g.fillEllipse(px - pr, py - pr, pr * 2.0f, pr * 2.0f);
+        }
+        break;
+    }
+    case TrackTypeIcon::Group:
+    {
+        // Bus: three lines from the left merging into one line to the right.
+        juce::Path p;
+        for (const float ny : { 0.22f, 0.5f, 0.78f })
+        {
+            p.startNewSubPath(x(0.08f), y(ny));
+            p.lineTo(x(0.42f), y(ny));
+            p.lineTo(x(0.6f), y(0.5f));
+        }
+        p.startNewSubPath(x(0.6f), y(0.5f));
+        p.lineTo(x(0.94f), y(0.5f));
+        g.strokePath(p, juce::PathStrokeType(stroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        break;
+    }
+    case TrackTypeIcon::Master:
+    {
+        // Stereo out: two overlapping rings (L / R).
+        const float r = side * 0.30f;
+        g.drawEllipse(x(0.34f) - r, a.getCentreY() - r, r * 2.0f, r * 2.0f, stroke);
+        g.drawEllipse(x(0.66f) - r, a.getCentreY() - r, r * 2.0f, r * 2.0f, stroke);
+        break;
+    }
+    }
 }
 
 /// Letter cells ("M", "R"): font height follows the square body like the header strip.

@@ -230,6 +230,11 @@ namespace
             // the project's preset default on load; the UI apply clamps to the valid range.
             to->setProperty("rowHeight", t.rowHeightPx);
         }
+        if (fileVersion >= 28 && t.colourKey.isNotEmpty())
+        {
+            // v28 additive: palette key of the track colour; the default grey is the absent key.
+            to->setProperty("colour", t.colourKey);
+        }
         if (fileVersion >= 14 && !t.kind.equalsIgnoreCase("master") && t.routedOutputTrackId != kInvalidTrackId)
         {
             juce::DynamicObject::Ptr outObj = new juce::DynamicObject();
@@ -2282,6 +2287,15 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 trk.rowHeightPx = (std::isfinite(raw) && raw > 0.0 && raw < 100000.0)
                                       ? static_cast<int>(raw + 0.5)
                                       : 0;
+            }
+        }
+        {
+            // v28 optional `colour` (any version reads it): the raw palette key, validated by
+            // `trackColourKeyFromPersistenceKey` on apply (unknown → default grey, never an error).
+            const juce::var& cv = tv.getProperty("colour", {});
+            if (cv.isString())
+            {
+                trk.colourKey = cv.toString().trim();
             }
         }
         if (trk.kind.equalsIgnoreCase("master"))

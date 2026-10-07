@@ -61,6 +61,8 @@ struct Kind
     {
         Kind k{ "audio", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Audio;
+        k.model.colourKey = TrackColourKey::Blue;
         k.model.active = true; // widest left trim (active accent)
         k.model.monitorAvailable = true;
         k.model.monitorInteractable = true;
@@ -73,6 +75,8 @@ struct Kind
     {
         Kind k{ "instrument", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Instrument;
+        k.model.colourKey = TrackColourKey::Teal;
         k.model.subtitle = "VB3-II";
         k.model.active = true;
         k.model.instrumentEditorAvailable = true;
@@ -89,6 +93,8 @@ struct Kind
     {
         Kind k{ "midi", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Midi;
+        k.model.colourKey = TrackColourKey::Green;
         k.model.active = true;
         kinds.push_back(std::move(k));
     }
@@ -97,6 +103,8 @@ struct Kind
         // activity dot) — the widest strip: [Instrument][Power][Mute][Monitor][Arm] + Alternatives.
         Kind k{ "instrument-live-midi", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Instrument;
+        k.model.colourKey = TrackColourKey::Ochre;
         k.model.subtitle = "VB3-II";
         k.model.active = true;
         k.model.instrumentEditorAvailable = true;
@@ -119,6 +127,8 @@ struct Kind
         // Live-MIDI slice: plain Midi row now carries a Monitor cell: [Power][Mute][Monitor][Arm].
         Kind k{ "midi-live-midi", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Midi;
+        k.model.colourKey = TrackColourKey::Orange;
         k.model.active = true;
         k.model.monitorAvailable = true;
         k.model.monitorInteractable = true;
@@ -133,6 +143,8 @@ struct Kind
     {
         Kind k{ "group", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Group;
+        k.model.colourKey = TrackColourKey::Purple;
         k.model.active = true;
         k.model.showRecordAndPowerStripCells = false;
         kinds.push_back(std::move(k));
@@ -140,6 +152,8 @@ struct Kind
     {
         Kind k{ "master", {}, {} };
         k.model.name = trackName;
+        k.model.typeIcon = track_strip_glyphs::TrackTypeIcon::Master;
+        k.model.colourKey = TrackColourKey::DefaultGrey;
         k.model.active = true;
         k.model.showRecordAndPowerStripCells = false;
         k.model.trackNameRenameEnabled = false;
@@ -215,86 +229,150 @@ void savePng(const juce::Image& img, const juce::File& outDir, const juce::Strin
 // ---------------------------------------------------------------------------------------------
 void testDerivedLimits()
 {
-    info("constants: cell=" + juce::String(TrackHeaderView::kStripControlCellWidthPx) + " px, max cells="
-         + juce::String(TrackHeaderView::kMaxStripControlCellCount) + ", outer pad=" + juce::String(TrackHeaderView::kHeaderOuterPadXPx)
-         + ", active left trim=" + juce::String(TrackHeaderView::kHeaderNameTrimLeftActivePx) + " => min column="
-         + juce::String(TrackHeaderView::kMinimumHeaderColumnWidthPx) + " px, default=" + juce::String(TrackHeaderView::kDefaultHeaderColumnWidthPx)
-         + " px (logical / DPI-independent)");
-    expect(TrackHeaderView::kMinimumHeaderColumnWidthPx == 154, "limits: minimum column width is 8 + 6 + 6*22 + 8 = 154 px (Solo added a 6th cell)");
-    expect(TrackHeaderView::kDefaultHeaderColumnWidthPx == 166, "limits: default column width is minimum + 12 = 166 px");
-    expect(TrackLanesView::kTrackHeaderColumnMinWidthPx == TrackHeaderView::kMinimumHeaderColumnWidthPx
-               && TrackLanesView::kTrackHeaderColumnDefaultWidthPx == TrackHeaderView::kDefaultHeaderColumnWidthPx,
+    using H = TrackHeaderView;
+    info("constants: cell=" + juce::String(H::kStripControlCellWidthPx) + " px, group margin=" + juce::String(H::kHeaderGroupMarginPx)
+         + ", segment(3 digits)=" + juce::String(H::colourSegmentWidthPxForDigits(3)) + ", title cells=" + juce::String(H::kHeaderTitleCellCount)
+         + ", name min=" + juce::String(H::kHeaderNameMinWidthPx) + " => min column=" + juce::String(H::kMinimumHeaderColumnWidthPx)
+         + " px, default=" + juce::String(H::kDefaultHeaderColumnWidthPx) + " px (logical / DPI-independent)");
+    expect(H::colourSegmentWidthPxForDigits(3) == 44 && H::colourSegmentWidthPxForDigits(1) == 44 && H::colourSegmentWidthPxForDigits(4) == 51,
+           "limits: the colour segment is 3 + 14 + 3 + digits*7 + 3 px with a 3-digit floor (44 / 51 px)");
+    expect(H::kMinimumHeaderColumnWidthPx == 181,
+           "limits: minimum column width is 8 + 44 + 3 + 3*22 + 4 + 48 + 8 = 181 px (icon/number segment + three title cells + name room)");
+    expect(H::kDefaultHeaderColumnWidthPx == 200, "limits: default column width is minimum + 19 = 200 px");
+    expect(TrackLanesView::kTrackHeaderColumnMinWidthPx == H::kMinimumHeaderColumnWidthPx
+               && TrackLanesView::kTrackHeaderColumnDefaultWidthPx == H::kDefaultHeaderColumnWidthPx,
            "limits: TrackLanesView shares the header-derived limits (one source of truth)");
+    expect(H::kHeaderResizeBandPx == 4 && H::kHeaderRowTopPadPx == 2 && H::kMinimumHeightForSecondRowPx == 53,
+           "limits: resize band 4 px, title pad 2 px, second control row from 53 px (fits at Small = 56)");
+}
+
+/// Everything a header shows, with its bounds, for overlap / alignment checks.
+struct Chrome
+{
+    juce::Rectangle<int> segment, icon, number, name, secondRow;
+    Cells cells;
+};
+
+[[nodiscard]] Chrome chromeOf(const TrackHeaderView& v)
+{
+    Chrome c;
+    c.segment = v.getColourSegmentBounds();
+    c.icon = v.getTypeIconBounds();
+    c.number = v.getTrackNumberBounds();
+    c.name = v.getNameTextBounds();
+    c.secondRow = v.getSecondRowStripBounds();
+    c.cells = cellsOf(v);
+    const juce::Rectangle<int> solo = v.getSoloButtonBounds();
+    if (!solo.isEmpty())
+    {
+        c.cells.present.emplace_back("solo", solo);
+        c.cells.rightMost = juce::jmax(c.cells.rightMost, solo.getRight());
+    }
+    return c;
+}
+
+[[nodiscard]] bool isTitleRowCell(const char* name)
+{
+    const juce::String n(name);
+    return n == "power" || n == "mute" || n == "solo";
 }
 
 void testGeometryPerKindAndWidth(const juce::File& shotDir)
 {
-    constexpr int kRowH = 96; // default row height in the app
+    namespace trh = track_row_heights;
     const juce::Colour bg(0xff333333);
     for (const int width : { 120, TrackLanesView::kTrackHeaderColumnMinWidthPx, TrackLanesView::kTrackHeaderColumnDefaultWidthPx, 240 })
     {
         const bool legacyWidth = width == 120;
         for (Kind& k : rowKinds("Track"))
         {
+            const bool isMaster = juce::String(k.name) == "master";
+            if (!isMaster)
+            {
+                k.model.soloAvailable = true;
+                k.callbacks.onToggleSolo = [] {};
+            }
+            k.model.trackNumber = 123;
+            k.model.trackNumberDigits = 3;
             auto view = std::make_unique<TrackHeaderView>(
                 [m = k.model] { return m; }, k.callbacks, kInvalidTrackId, std::nullopt);
-            view->setSize(width, kRowH);
-            const Cells cells = cellsOf(*view);
+            view->setSize(width, trh::kMediumPresetPx);
+            const Chrome ch = chromeOf(*view);
             const juce::Rectangle<int> local = view->getLocalBounds();
             const juce::Rectangle<int> chrome = local.withTrimmedBottom(TrackHeaderView::kHeaderResizeBandPx);
             bool allInside = true;
             bool allHittable = true;
+            bool titleRowAligned = true;
+            bool noOverlap = true;
             juce::String desc;
-            for (const auto& [name, r] : cells.present)
+            for (const auto& [name, r] : ch.cells.present)
             {
                 desc << " " << name << "=" << r.toString();
                 allInside = allInside && local.contains(r);
-                // Hittable like the production hit test: the cell centre lies inside the chrome
-                // above the bottom resize band.
                 allHittable = allHittable && chrome.contains(r.getCentre());
+                noOverlap = noOverlap && !r.intersects(ch.segment) && !r.intersects(ch.name);
+                if (isTitleRowCell(name))
+                {
+                    titleRowAligned = titleRowAligned && r.getY() == ch.name.getY() && r.getHeight() == ch.name.getHeight()
+                                      && r.getRight() <= ch.name.getX() && r.getX() >= ch.segment.getRight();
+                }
+                else
+                {
+                    titleRowAligned = titleRowAligned && r.getY() >= ch.name.getBottom();
+                }
             }
             const juce::String who = juce::String(k.name) + " @ " + juce::String(width) + " px";
-            info(who + ": cells=" + juce::String((int)cells.present.size()) + " rightmost edge=" + juce::String(cells.rightMost)
-                 + " margin=" + juce::String(width - cells.rightMost) + desc);
-            if (legacyWidth && (juce::String(k.name) == "instrument" || juce::String(k.name) == "instrument-live-midi"))
+            info(who + ": cells=" + juce::String((int)ch.cells.present.size()) + " segment=" + ch.segment.toString()
+                 + " name=" + ch.name.toString() + desc);
+            if (legacyWidth)
             {
-                // Negative control: documents the reported defect at the old fixed width.
-                expect(!allInside, who + ": (old width) the 5-cell instrument row's Arm cell IS clipped — the reported defect");
+                // Negative control: at the pre-compact-header fixed 120 px width the icon / number segment,
+                // the three title cells and the name cannot all fit (the name area collapses).
+                expect(ch.name.getWidth() < TrackHeaderView::kHeaderNameMinWidthPx,
+                       who + ": (old width) no usable name room next to segment + title cells — why the minimum grew");
+                continue;
             }
-            else
+            expect(allInside && !ch.cells.present.empty(), who + ": every present button is fully inside the header");
+            expect(allHittable, who + ": every present button centre is hittable (above the resize band)");
+            expect(noOverlap, who + ": no button overlaps the colour segment or the name area");
+            expect(titleRowAligned, who + ": Power / Mute / Solo share the title row with the name (between segment and name); other cells sit below");
+            expect(ch.segment.getX() == TrackHeaderView::kHeaderGroupMarginPx && ch.segment.getY() == 0
+                       && ch.segment.getBottom() == chrome.getBottom() && ch.segment.contains(ch.icon) && ch.segment.contains(ch.number)
+                       && ch.icon.getRight() <= ch.number.getX(),
+                   who + ": colour segment right of the 8 px group margin, full chrome height, icon before number inside it");
+            expect(ch.name.getWidth() >= TrackHeaderView::kHeaderNameMinWidthPx && ch.name.getRight() == width - TrackHeaderView::kHeaderOuterPadXPx,
+                   who + ": name keeps at least " + juce::String(TrackHeaderView::kHeaderNameMinWidthPx) + " px and the 8 px right pad");
             {
-                expect(allInside, who + ": every present button is fully inside the header");
+                const bool hasSecondRowCells = !(isMaster || juce::String(k.name) == "group");
+                const int titleStripX = view->getPowerButtonBounds().isEmpty() ? view->getMuteButtonBounds().getX()
+                                                                               : view->getPowerButtonBounds().getX();
+                expect(hasSecondRowCells == !ch.secondRow.isEmpty()
+                           && (!hasSecondRowCells
+                               || (ch.secondRow.getY() == ch.name.getBottom() + TrackHeaderView::kHeaderRowGapPx
+                                   && ch.secondRow.getX() == titleStripX)),
+                       who + ": at Medium the second row exists (for kinds with Monitor / Arm / editor) under the title row, starting at the title strip's x");
             }
-            if (!legacyWidth)
+
+            const juce::Image img = view->createComponentSnapshot(local, false, 1.0f);
+            savePng(img, shotDir, "header-" + juce::String(k.name) + "-" + juce::String(width) + ".png");
+            expect(countNonBackgroundPixels(img, ch.icon, bg) > 8, who + ": the type icon is painted");
+            expect(countNonBackgroundPixels(img, ch.number, bg) > 20, who + ": the three-digit number is painted");
+            if (!ch.cells.present.empty())
             {
-                expect(allHittable, who + ": every present button centre is hittable (above the resize band)");
-                expect(width - cells.rightMost >= TrackHeaderView::kHeaderOuterPadXPx,
-                       who + ": at least the standard 8 px right pad remains after the last button");
-                const juce::Image img = view->createComponentSnapshot(local, false, 1.0f);
-                savePng(img, shotDir, "header-" + juce::String(k.name) + "-" + juce::String(width) + ".png");
-                if (!cells.present.empty())
-                {
-                    // Right-most STRIP cell (the alternatives button sits bottom-left, not in the strip).
-                    size_t lastIdx = cells.present.size() - 1;
-                    if (juce::String(cells.present[lastIdx].first) == "alternatives" && lastIdx > 0)
-                    {
-                        --lastIdx;
-                    }
-                    const auto& last = cells.present[lastIdx];
-                    expect(countNonBackgroundPixels(img, last.second, bg) > 30,
-                           who + ": the right-most strip button (" + juce::String(last.first) + ") is actually painted");
-                }
-                // Live-MIDI rows: Monitor AND Arm cells both exist, are inside and are painted
-                // (the orange monitoring face / red armed face are not the background).
-                if (juce::String(k.name).endsWith("live-midi"))
-                {
-                    const juce::Rectangle<int> mon = view->getMonitorButtonBounds();
-                    const juce::Rectangle<int> arm = view->getArmButtonBounds();
-                    expect(!mon.isEmpty() && !arm.isEmpty() && local.contains(mon) && local.contains(arm),
-                           who + ": Monitor and Arm cells present and inside the header");
-                    expect(countNonBackgroundPixels(img, mon, bg) > 30 && countNonBackgroundPixels(img, arm, bg) > 30,
-                           who + ": Monitor and Arm cells are painted");
-                }
+                const auto& last = ch.cells.present.back();
+                expect(countNonBackgroundPixels(img, last.second, bg) > 30,
+                       who + ": the last present button (" + juce::String(last.first) + ") is actually painted");
+            }
+            // Live-MIDI rows: Monitor AND Arm cells both exist, are inside and are painted
+            // (the orange monitoring face / red armed face are not the background).
+            if (juce::String(k.name).endsWith("live-midi"))
+            {
+                const juce::Rectangle<int> mon = view->getMonitorButtonBounds();
+                const juce::Rectangle<int> arm = view->getArmButtonBounds();
+                expect(!mon.isEmpty() && !arm.isEmpty() && local.contains(mon) && local.contains(arm),
+                       who + ": Monitor and Arm cells present and inside the header (second row)");
+                expect(countNonBackgroundPixels(img, mon, bg) > 30 && countNonBackgroundPixels(img, arm, bg) > 30,
+                       who + ": Monitor and Arm cells are painted");
             }
         }
     }
@@ -313,8 +391,8 @@ void testNamesNeverChangeLayout()
                                                         kInvalidTrackId, std::nullopt);
             auto vl = std::make_unique<TrackHeaderView>([m = longKinds[i].model] { return m; }, longKinds[i].callbacks,
                                                         kInvalidTrackId, std::nullopt);
-            vs->setSize(width, 96);
-            vl->setSize(width, 96);
+            vs->setSize(width, track_row_heights::kMediumPresetPx);
+            vl->setSize(width, track_row_heights::kMediumPresetPx);
             const Cells cs = cellsOf(*vs);
             const Cells cl = cellsOf(*vl);
             bool same = cs.present.size() == cl.present.size();
@@ -322,31 +400,50 @@ void testNamesNeverChangeLayout()
             {
                 same = cs.present[j].second == cl.present[j].second;
             }
-            expect(same, juce::String(shortKinds[i].name) + " @ " + juce::String(width)
-                             + " px: a very long name leaves every button exactly where a short name puts it");
-            // The long name is painted only inside the header (truncated/fitted), never beyond it.
+            expect(same && vs->getColourSegmentBounds() == vl->getColourSegmentBounds() && vs->getNameTextBounds() == vl->getNameTextBounds(),
+                   juce::String(shortKinds[i].name) + " @ " + juce::String(width)
+                       + " px: a very long name leaves every button, the segment and the name area exactly where a short name puts them");
+            // The long name is painted only inside the header (ellipsized), never beyond it.
             const juce::Image img = vl->createComponentSnapshot(vl->getLocalBounds(), false, 1.0f);
             expect(img.getWidth() == width, juce::String(shortKinds[i].name) + " @ " + juce::String(width)
                                                 + " px: header render stays exactly the column width with a long name");
         }
+    }
+    // Digit column: a 4-digit project widens the segment for EVERY header (shared column), the
+    // name shrinks, the cells move right by exactly one digit advance, nothing overlaps.
+    {
+        std::vector<Kind> kinds = rowKinds("Track");
+        Kind& k = kinds.front();
+        k.model.trackNumberDigits = 3;
+        auto v3 = std::make_unique<TrackHeaderView>([m = k.model] { return m; }, k.callbacks, kInvalidTrackId, std::nullopt);
+        k.model.trackNumberDigits = 4;
+        k.model.trackNumber = 1234;
+        auto v4 = std::make_unique<TrackHeaderView>([m = k.model] { return m; }, k.callbacks, kInvalidTrackId, std::nullopt);
+        v3->setSize(TrackLanesView::kTrackHeaderColumnDefaultWidthPx, track_row_heights::kMediumPresetPx);
+        v4->setSize(TrackLanesView::kTrackHeaderColumnDefaultWidthPx, track_row_heights::kMediumPresetPx);
+        expect(v4->getColourSegmentBounds().getWidth() == v3->getColourSegmentBounds().getWidth() + TrackHeaderView::kHeaderDigitAdvancePx
+                   && v4->getMuteButtonBounds().getX() == v3->getMuteButtonBounds().getX() + TrackHeaderView::kHeaderDigitAdvancePx
+                   && v4->getNameTextBounds().getWidth() == v3->getNameTextBounds().getWidth() - TrackHeaderView::kHeaderDigitAdvancePx
+                   && !v4->getMuteButtonBounds().intersects(v4->getColourSegmentBounds()),
+               "digits: a 4-digit column widens the segment by one digit advance and shifts the cells; no overlap");
     }
 }
 
 void testClampFormula()
 {
     using V = TrackLanesView;
-    expect(V::clampHeaderColumnWidthForTotalWidth(166, 1200) == 166, "clamp: default fits on a wide view");
-    expect(V::clampHeaderColumnWidthForTotalWidth(100, 1200) == 154, "clamp: below minimum -> minimum (154)");
-    expect(V::clampHeaderColumnWidthForTotalWidth(132, 1200) == 154,
-           "clamp: a saved pre-Solo minimum width (132) is raised to the new minimum (154)");
-    expect(V::clampHeaderColumnWidthForTotalWidth(144, 1200) == 154,
-           "clamp: a saved pre-Solo default width (144) is raised to the new minimum (154)");
-    expect(V::clampHeaderColumnWidthForTotalWidth(240, 1200) == 240, "clamp: wide preference honoured when it fits");
-    expect(V::clampHeaderColumnWidthForTotalWidth(240, 340) == 180,
-           "clamp: narrow view keeps 160 px of lane area (340 - 160 = 180) before honouring the preference");
-    expect(V::clampHeaderColumnWidthForTotalWidth(240, 300) == 154,
-           "clamp: when the 160 px lane reservation would push below the minimum, the minimum wins (300 - 160 = 140 < 154)");
-    expect(V::clampHeaderColumnWidthForTotalWidth(240, 250) == 154,
+    constexpr int kMin = V::kTrackHeaderColumnMinWidthPx;     // 181
+    constexpr int kDef = V::kTrackHeaderColumnDefaultWidthPx; // 200
+    expect(V::clampHeaderColumnWidthForTotalWidth(kDef, 1200) == kDef, "clamp: default fits on a wide view");
+    expect(V::clampHeaderColumnWidthForTotalWidth(100, 1200) == kMin, "clamp: below minimum -> minimum (181)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(154, 1200) == kMin && V::clampHeaderColumnWidthForTotalWidth(166, 1200) == kMin,
+           "clamp: saved pre-compact-header widths (154 minimum / 166 default) are raised to the new minimum (181)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 1200) == 240, "clamp: a wider saved preference is preserved when it fits");
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 370) == 210,
+           "clamp: narrow view keeps 160 px of lane area (370 - 160 = 210) before honouring the preference");
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 330) == kMin,
+           "clamp: when the 160 px lane reservation would push below the minimum, the minimum wins (330 - 160 = 170 < 181)");
+    expect(V::clampHeaderColumnWidthForTotalWidth(240, 250) == kMin,
            "clamp: very narrow view never goes below the minimum while the view is at least that wide");
     expect(V::clampHeaderColumnWidthForTotalWidth(240, 100) == 100, "clamp: a view narrower than the minimum gets the whole view");
     expect(V::clampHeaderColumnWidthForTotalWidth(240, 0) == 0, "clamp: zero-width view -> 0");
@@ -355,121 +452,130 @@ void testClampFormula()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Shared track heights: the central Small/Medium/Large definitions, the proof that Small fits the
-// full header chrome (title + every main strip button incl. Solo + resize band) for every row
-// kind, and the alternatives-button hide rule at compact heights. The alternatives button is NOT
-// a strip cell: when `getAlternativesButtonBounds()` is empty, `buildStripControlSpecs()` adds no
-// Alternatives spec, so the paint loop, the hover/click hit scan and the tooltip (which requires
-// a hovered spec) are all off through the same single gate — bounds-empty IS the structural
-// "no paint, no hit target, no tooltip" guarantee the spec demands.
-void testRowHeightPresetsAndSmallChromeFit(const juce::File& shotDir)
+// The row-height grid (Micro + n x 14) and the compact title row: at every preset the title row
+// (icon, number, Power / Mute / Solo, name) is fully present and hittable; the second row
+// (Monitor / Arm / editor / alternatives) exists from Small on and is structurally absent below
+// (empty bounds = no paint spec, no hit scan entry, no tooltip — one gate).
+void testRowHeightGridAndCompactChrome(const juce::File& shotDir)
 {
     namespace trh = track_row_heights;
 
-    expect(trh::kSmallRowHeightPx == 64 && trh::kMediumRowHeightPx == 96 && trh::kLargeRowHeightPx == 192,
-           "presets: Small=64, Medium=96 (the historical default), Large=192 (2 x Medium) logical px");
-    expect(trh::heightPxForPreset(trh::TrackRowHeightPreset::Small) == 64
-               && trh::heightPxForPreset(trh::TrackRowHeightPreset::Medium) == 96
-               && trh::heightPxForPreset(trh::TrackRowHeightPreset::Large) == 192,
-           "presets: heightPxForPreset maps every preset to its px");
-    expect(trh::presetMatchingHeightPx(64) == trh::TrackRowHeightPreset::Small
-               && trh::presetMatchingHeightPx(96) == trh::TrackRowHeightPreset::Medium
-               && trh::presetMatchingHeightPx(192) == trh::TrackRowHeightPreset::Large
-               && !trh::presetMatchingHeightPx(97).has_value() && !trh::presetMatchingHeightPx(0).has_value(),
-           "presets: presetMatchingHeightPx is exact (any other height = Custom)");
-    expect(trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(trh::TrackRowHeightPreset::Small))
-                   == trh::TrackRowHeightPreset::Small
-               && trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(trh::TrackRowHeightPreset::Medium))
-                      == trh::TrackRowHeightPreset::Medium
-               && trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(trh::TrackRowHeightPreset::Large))
-                      == trh::TrackRowHeightPreset::Large,
-           "presets: persistence keys round trip (small/medium/large)");
+    expect(trh::kMicroRowHeightPx == 28 && trh::kRowHeightStepPx == 14,
+           "grid: Micro = 2 + 22 + 4 = 28 px, step = Micro / 2 = 14 px");
+    expect(trh::kMicroPresetPx == 28 && trh::kMiniPresetPx == 42 && trh::kSmallPresetPx == 56 && trh::kMediumPresetPx == 98
+               && trh::kLargePresetPx == 196,
+           "grid: Micro 28 (n=0), Mini 42 (n=1), Small 56 (n=2), Medium 98 (n=5), Large 196 (n=12)");
+    expect(trh::gridStepsForPreset(trh::TrackRowHeightPreset::Medium) >= trh::gridStepsForPreset(trh::TrackRowHeightPreset::Small) + 2
+               && trh::gridStepsForPreset(trh::TrackRowHeightPreset::Large) >= trh::gridStepsForPreset(trh::TrackRowHeightPreset::Medium) + 2,
+           "grid: Medium >= Small + 2 steps, Large >= Medium + 2 steps");
+    expect(trh::presetMatchingHeightPx(28) == trh::TrackRowHeightPreset::Micro && trh::presetMatchingHeightPx(42) == trh::TrackRowHeightPreset::Mini
+               && trh::presetMatchingHeightPx(56) == trh::TrackRowHeightPreset::Small && trh::presetMatchingHeightPx(98) == trh::TrackRowHeightPreset::Medium
+               && trh::presetMatchingHeightPx(196) == trh::TrackRowHeightPreset::Large && !trh::presetMatchingHeightPx(70).has_value()
+               && !trh::presetMatchingHeightPx(64).has_value() && !trh::presetMatchingHeightPx(96).has_value(),
+           "grid: presetMatchingHeightPx is exact; grid heights that are no preset (70) and the old 64 / 96 are Custom");
+    expect(trh::snapRowHeightPxToGrid(28) == 28 && trh::snapRowHeightPxToGrid(34) == 28 && trh::snapRowHeightPxToGrid(35) == 42
+               && trh::snapRowHeightPxToGrid(49) == 56 && trh::snapRowHeightPxToGrid(96) == 98 && trh::snapRowHeightPxToGrid(10) == 28
+               && trh::snapRowHeightPxToGrid(250) == 252 && trh::snapRowHeightPxToGrid(100000) == trh::kRowHeightSafetyMaxPx,
+           "grid: snapping rounds to the nearest step (ties up), floors at Micro, allows steps above Large, caps at the safety max");
+    expect(trh::clampRowHeightPx(64) == 64 && trh::clampRowHeightPx(10) == 28 && trh::clampRowHeightPx(5000) == trh::kRowHeightSafetyMaxPx
+               && trh::kRowHeightSafetyMaxPx == 1120 && trh::isOnRowHeightGrid(trh::kRowHeightSafetyMaxPx),
+           "grid: clamping (used by project load) keeps valid off-grid heights like the old 64; the 1120 px safety cap is grid-aligned");
+    for (const auto p : { trh::TrackRowHeightPreset::Micro, trh::TrackRowHeightPreset::Mini, trh::TrackRowHeightPreset::Small,
+                          trh::TrackRowHeightPreset::Medium, trh::TrackRowHeightPreset::Large })
+    {
+        expect(trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(p)) == p,
+               "grid: persistence key round trip for " + trh::displayNameForPreset(p) + " (\"" + trh::persistenceKeyForPreset(p) + "\")");
+    }
     expect(trh::presetFromPersistenceKey("") == trh::TrackRowHeightPreset::Medium
                && trh::presetFromPersistenceKey("huge") == trh::TrackRowHeightPreset::Medium,
-           "presets: absent/unknown persistence key repairs to Medium (older projects keep their look)");
-
-    // Snap-rule proof that Small is EXACTLY the smallest full-chrome height for subtitle rows and
-    // at least it for title-only rows: with a permissive minimum the 50% rule would move any
-    // height below the full name+buttons+band ideal, so passing through unchanged proves >= ideal.
-    using H = TrackHeaderView;
-    expect(H::snapTrackHeaderRowHeightAfterResize(trh::kSmallRowHeightPx, true, 1, 480) == trh::kSmallRowHeightPx,
-           "snap: Small passes through for subtitle rows -> Small >= their full chrome ideal");
-    expect(H::snapTrackHeaderRowHeightAfterResize(trh::kSmallRowHeightPx - 1, true, 1, 480)
-               != trh::kSmallRowHeightPx - 1,
-           "snap: Small-1 is moved for subtitle rows -> Small is the MINIMAL full-chrome height");
-    expect(H::snapTrackHeaderRowHeightAfterResize(trh::kSmallRowHeightPx, false, 1, 480) == trh::kSmallRowHeightPx,
-           "snap: Small passes through for title-only rows too");
-    expect(H::snapTrackHeaderRowHeightAfterResize(10, true, trh::kSmallRowHeightPx, 480) == trh::kSmallRowHeightPx
-               && H::snapTrackHeaderRowHeightAfterResize(10, false, trh::kSmallRowHeightPx, 480)
-                      == trh::kSmallRowHeightPx,
-           "snap: with the app's global minimum = Small, any drag below it lands at Small (every kind)");
-    expect(H::snapTrackHeaderRowHeightAfterResize(100000, true, trh::kSmallRowHeightPx, 480) == 480,
-           "snap: the existing 480 px maximum is kept");
+           "grid: absent/unknown persistence key repairs to Medium (older projects keep their look)");
+    expect(trh::laneEventDetailForHeightPx(28) == trh::LaneEventDetail::Bars && trh::laneEventDetailForHeightPx(42) == trh::LaneEventDetail::Compact
+               && trh::laneEventDetailForHeightPx(56) == trh::LaneEventDetail::Full && trh::laneEventDetailForHeightPx(31) == trh::LaneEventDetail::Bars
+               && trh::laneEventDetailForHeightPx(47) == trh::LaneEventDetail::Compact,
+           "detail: Micro = Bars, Mini = Compact, Small and up = Full (thresholds 32 / 48 px)");
 
     const juce::Colour bg(0xff333333);
     for (const int width : { TrackLanesView::kTrackHeaderColumnMinWidthPx, TrackLanesView::kTrackHeaderColumnDefaultWidthPx })
     {
-        for (Kind& k : rowKinds("Track"))
+        for (Kind& k : rowKinds("A long enough track name"))
         {
-            // Solo cells exactly as the app wires them: every row kind except master.
             const bool isMaster = juce::String(k.name) == "master";
             if (!isMaster)
             {
                 k.model.soloAvailable = true;
                 k.callbacks.onToggleSolo = [] {};
             }
+            k.model.trackNumber = 100;
+            k.model.trackNumberDigits = 3;
             const bool altAvailable = k.model.instrumentAlternativesAvailable;
             auto view = std::make_unique<TrackHeaderView>(
                 [m = k.model] { return m; }, k.callbacks, kInvalidTrackId, std::nullopt);
-            view->setSize(width, trh::kSmallRowHeightPx);
 
-            const juce::Rectangle<int> local = view->getLocalBounds();
-            const juce::Rectangle<int> chrome = local.withTrimmedBottom(TrackHeaderView::kHeaderResizeBandPx);
-            const juce::String who = juce::String(k.name) + " @ " + juce::String(width) + " px, Small height";
+            for (const auto preset : { trh::TrackRowHeightPreset::Micro, trh::TrackRowHeightPreset::Mini, trh::TrackRowHeightPreset::Small,
+                                       trh::TrackRowHeightPreset::Medium })
+            {
+                const int h = trh::heightPxForPreset(preset);
+                view->setSize(width, h);
+                const Chrome ch = chromeOf(*view);
+                const juce::Rectangle<int> local = view->getLocalBounds();
+                const juce::Rectangle<int> chrome = local.withTrimmedBottom(TrackHeaderView::kHeaderResizeBandPx);
+                const juce::String who = juce::String(k.name) + " @ " + juce::String(width) + " px, " + trh::displayNameForPreset(preset);
+                const bool secondRowFits = h >= TrackHeaderView::kMinimumHeightForSecondRowPx;
 
-            Cells cells = cellsOf(*view);
-            const juce::Rectangle<int> solo = view->getSoloButtonBounds();
-            if (!solo.isEmpty())
-            {
-                cells.present.emplace_back("solo", solo);
-            }
-            expect(!isMaster == !solo.isEmpty(), who + ": Solo cell present on every kind except master");
-            bool allInside = true;
-            bool allHittable = true;
-            for (const auto& [name, r] : cells.present)
-            {
-                juce::ignoreUnused(name);
-                allInside = allInside && local.contains(r);
-                allHittable = allHittable && chrome.contains(r.getCentre());
-            }
-            expect(allInside && !cells.present.empty(),
-                   who + ": every main button (incl. S / instrument editor) fully inside the header");
-            expect(allHittable, who + ": every main button centre is hittable above the resize band");
+                // Title row: icon, number, Power/Mute/Solo (as the kind has them) and the name are inside
+                // and hittable at EVERY preset, including Micro.
+                bool titleInside = chrome.contains(ch.icon) && chrome.contains(ch.number) && chrome.contains(ch.name);
+                bool titleCellsPresent = !view->getMuteButtonBounds().isEmpty()
+                                         && (isMaster || juce::String(k.name) == "group" || !view->getPowerButtonBounds().isEmpty())
+                                         && (isMaster || !view->getSoloButtonBounds().isEmpty());
+                bool secondRowCellsAbsent = view->getMonitorButtonBounds().isEmpty() && view->getArmButtonBounds().isEmpty()
+                                            && view->getInstrumentEditorButtonBounds().isEmpty() && view->getAlternativesButtonBounds().isEmpty();
+                for (const auto& [name, r] : ch.cells.present)
+                {
+                    titleInside = titleInside && chrome.contains(r) && chrome.contains(r.getCentre());
+                    if (!isTitleRowCell(name))
+                    {
+                        secondRowCellsAbsent = false;
+                    }
+                }
+                expect(titleInside && titleCellsPresent, who + ": title row (icon, number, Power/Mute/Solo, name) fully inside the chrome and hittable");
+                expect(ch.name.getY() == TrackHeaderView::kHeaderRowTopPadPx && ch.name.getHeight() == TrackHeaderView::kStripControlCellWidthPx,
+                       who + ": the title row is top-aligned at the 2 px pad with the 22 px cell height (it never jumps between heights)");
+                if (secondRowFits)
+                {
+                    const bool hasAnySecond = (juce::String(k.name) != "group" && !isMaster);
+                    expect(hasAnySecond == !ch.secondRow.isEmpty(), who + ": second control row present exactly for kinds that have Monitor / Arm / editor");
+                    if (hasAnySecond)
+                    {
+                        expect(chrome.contains(ch.secondRow) && ch.secondRow.getY() == ch.name.getBottom() + TrackHeaderView::kHeaderRowGapPx,
+                               who + ": second row sits under the title row inside the chrome");
+                    }
+                    if (altAvailable)
+                    {
+                        expect(!view->getAlternativesButtonBounds().isEmpty() && chrome.contains(view->getAlternativesButtonBounds()),
+                               who + ": alternatives cell present on the second row");
+                    }
+                }
+                else
+                {
+                    expect(ch.secondRow.isEmpty() && secondRowCellsAbsent,
+                           who + ": NO second-row cell (Monitor / Arm / editor / alternatives) below Small — empty bounds, nothing hittable");
+                }
+                // Resize band: the bottom 4 px, below every cell (even in Micro the band never
+                // overlaps a title cell).
+                bool bandClear = true;
+                for (const auto& [name, r] : ch.cells.present)
+                {
+                    juce::ignoreUnused(name);
+                    bandClear = bandClear && r.getBottom() <= chrome.getBottom();
+                }
+                expect(bandClear, who + ": the 4 px resize band lies below every control cell");
 
-            // Alternatives: hidden at Small (empty bounds = no paint spec, no hit scan entry, no
-            // tooltip — one structural gate), back at Medium/Large, hidden again when shrunk.
-            expect(view->getAlternativesButtonBounds().isEmpty(),
-                   who + ": the standalone alternatives button is fully OFF at Small");
-            if (altAvailable)
-            {
-                view->setSize(width, trh::kMediumRowHeightPx);
-                const juce::Rectangle<int> altMedium = view->getAlternativesButtonBounds();
-                expect(!altMedium.isEmpty() && view->getLocalBounds().contains(altMedium),
-                       who + ": alternatives button RETURNS at Medium, inside the header");
-                view->setSize(width, trh::kLargeRowHeightPx);
-                expect(!view->getAlternativesButtonBounds().isEmpty(),
-                       who + ": alternatives button present at Large");
-                view->setSize(width, trh::kSmallRowHeightPx);
-                expect(view->getAlternativesButtonBounds().isEmpty(),
-                       who + ": alternatives button hides again when shrunk back to Small");
-            }
-
-            // Paint evidence: the Solo cell (the newest strip button) is actually painted at Small.
-            const juce::Image img = view->createComponentSnapshot(local, false, 1.0f);
-            savePng(img, shotDir, "header-small-" + juce::String(k.name) + "-" + juce::String(width) + ".png");
-            if (!solo.isEmpty())
-            {
-                expect(countNonBackgroundPixels(img, solo, bg) > 30, who + ": the S cell is painted at Small");
+                const juce::Image img = view->createComponentSnapshot(local, false, 1.0f);
+                savePng(img, shotDir, "header-" + trh::displayNameForPreset(preset).toLowerCase() + "-" + juce::String(k.name) + "-" + juce::String(width) + ".png");
+                expect(countNonBackgroundPixels(img, ch.number, bg) > 20 && countNonBackgroundPixels(img, ch.icon, bg) > 8,
+                       who + ": number and type icon are painted");
+                expect(countNonBackgroundPixels(img, view->getMuteButtonBounds(), bg) > 30, who + ": the M cell is painted");
             }
         }
     }
@@ -534,7 +640,7 @@ int main(int argc, char** argv)
     testGeometryPerKindAndWidth(shotDir);
     testNamesNeverChangeLayout();
     testClampFormula();
-    testRowHeightPresetsAndSmallChromeFit(shotDir);
+    testRowHeightGridAndCompactChrome(shotDir);
     testUiLayoutStore();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);

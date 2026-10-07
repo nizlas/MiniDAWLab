@@ -14,7 +14,9 @@
 #include "ui/TimelineClipEventChrome.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
+#include "ui/TrackColourPalette.h"
 #include "ui/TrackLanesView.h"
+#include "ui/TrackRowHeightPresets.h"
 
 #include <cmath>
 #include <limits>
@@ -175,16 +177,32 @@ void paintMidiClipNotePreview(juce::Graphics& g,
 
 /// MIDI runtime clip: same outer chrome sequence as placed audio clips (`ClipWaveformView`); label only inside.
 /// Paint order: body fill -> note preview -> selection overlay -> label (border/text stay readable).
+/// `detail` (from the lane height, `track_row_heights::laneEventDetailForHeightPx`) is painting
+/// only: Bars = a thin field over the clip's real time extent, Compact = the box without notes or
+/// label, Full = everything. `bodyFill` is the track colour's event body.
 void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
                                     juce::Rectangle<float> eb,
                                     bool selected,
                                     const juce::String& clipName,
                                     const InstrumentMidiClip* clipForNotePreview,
-                                    const MidiClipNotePreviewContext& notePreviewCtx)
+                                    const MidiClipNotePreviewContext& notePreviewCtx,
+                                    const track_row_heights::LaneEventDetail detail,
+                                    const juce::Colour bodyFill)
 {
     using namespace mini_daw::timeline_clip_chrome;
-    paintEventChromeBody(g, eb, midiLaneEventBodyFill());
-    if (clipForNotePreview != nullptr)
+    if (detail == track_row_heights::LaneEventDetail::Bars)
+    {
+        const float barH = juce::jmin((float) track_row_heights::kLaneBarFieldHeightPx, eb.getHeight());
+        const juce::Rectangle<float> bar(eb.getX(), eb.getCentreY() - barH * 0.5f, eb.getWidth(), barH);
+        paintEventChromeBody(g, bar, bodyFill);
+        if (selected)
+        {
+            paintEventChromeSelectionOverlay(g, bar);
+        }
+        return;
+    }
+    paintEventChromeBody(g, eb, bodyFill);
+    if (detail == track_row_heights::LaneEventDetail::Full && clipForNotePreview != nullptr)
     {
         paintMidiClipNotePreview(g, eb, *clipForNotePreview, notePreviewCtx);
     }
@@ -192,8 +210,11 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
     {
         paintEventChromeSelectionOverlay(g, eb);
     }
-    const juce::String label = clipName.trim().isNotEmpty() ? clipName.trim() : juce::String("MIDI");
-    paintEventTopLeftNameLabel(g, eb, label);
+    if (detail == track_row_heights::LaneEventDetail::Full)
+    {
+        const juce::String label = clipName.trim().isNotEmpty() ? clipName.trim() : juce::String("MIDI");
+        paintEventTopLeftNameLabel(g, eb, label);
+    }
 }
 } // namespace
 
@@ -355,6 +376,11 @@ private:
         noteCtx.samplesPerPixel = owner_.timelineViewport_.getSamplesPerPixel();
         noteCtx.originX = (float)laneContent.getX();
         noteCtx.sampleRate = ac->getTimelineSampleRate();
+        // Detail level from the lane height (Micro = bars, Mini = compact boxes, Small+ = full)
+        // and the track colour's event body — both painting-only; hit geometry is unchanged.
+        const auto detail = track_row_heights::laneEventDetailForHeightPx(getHeight());
+        const juce::Colour bodyFill
+            = track_colour_palette::eventBodyFill(owner_.session_.getTrackColour(laneTimelineTrackId_));
 
         for (const auto& up : ac->getClips())
         {
@@ -395,7 +421,7 @@ private:
             const auto pitchRange = cachedNotePitchRangeForClip(*c);
             noteCtx.cachedMinPitch = pitchRange.first;
             noteCtx.cachedMaxPitch = pitchRange.second;
-            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name, c, noteCtx);
+            paintRuntimeMidiClipEventBlock(g, eb.toFloat(), sel, c->name, c, noteCtx, detail, bodyFill);
 
             const bool hideTrimCues = trimLaneGestureActive_ && trimLaneClipId_ == c->id;
             const bool onEventBodyTrimCue = hoverEventTrimCueId_ == c->id
@@ -1964,6 +1990,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         }
         m.headerMultiSelected = trackLanes_.isHeaderMultiSelected(laneTid);
         m.visualGroupMember = trackLanes_.isTrackInDisplayableVisualGroup(laneTid);
+        trackLanes_.fillCommonHeaderModelFields(m, laneTid);
         return m;
     };
 
@@ -2039,6 +2066,9 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         {
             callbacks_.showInstrumentAlternativesForTrack(laneTid, screenAnchor);
         }
+    };
+    callbacks.onShowColourMenu = [this, laneTid](TrackHeaderView&, const juce::Rectangle<int> anchor) {
+        trackLanes_.showTrackColourMenuForTrack(laneTid, anchor);
     };
     callbacks.onShowContextMenu = [this, laneTid, repaintExtras](TrackHeaderView& self, const juce::MouseEvent&) {
         // Groups spec §2: right-click inside the header multi-selection keeps it; outside it

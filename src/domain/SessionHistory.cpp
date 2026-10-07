@@ -38,7 +38,8 @@ void SessionHistory::record(juce::String label,
                             std::optional<InstrumentUndoStepSides> instrumentSides,
                             std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete,
                             std::optional<SoloMemoryUndoSides> soloMemorySides,
-                            std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides) noexcept
+                            std::optional<VisualTrackGroupsUndoSides> visualTrackGroupSides,
+                            std::optional<TrackColourUndoSides> trackColourSides) noexcept
 {
     if (before == nullptr || after == nullptr)
     {
@@ -64,7 +65,10 @@ void SessionHistory::record(juce::String label,
     // step; the timeline is untouched), so a non-empty group delta also bypasses the rule.
     const bool visualGroupDelta = visualTrackGroupSides.has_value()
                                   && visualTrackGroupSides->before != visualTrackGroupSides->after;
-    if (!pluginDelta && !instrumentDelta && !soloDelta && !visualGroupDelta)
+    // Track-colour steps: same narrow-step rule (one track's palette key before/after).
+    const bool colourDelta = trackColourSides.has_value() && trackColourSides->trackId != kInvalidTrackId
+                             && trackColourSides->before != trackColourSides->after;
+    if (!pluginDelta && !instrumentDelta && !soloDelta && !visualGroupDelta && !colourDelta)
     {
         if (before.get() == after.get())
         {
@@ -85,7 +89,8 @@ void SessionHistory::record(juce::String label,
                           std::move(instrumentSides),
                           std::move(instrumentTrackDelete),
                           std::move(soloMemorySides),
-                          std::move(visualTrackGroupSides) });
+                          std::move(visualTrackGroupSides),
+                          std::move(trackColourSides) });
     while (static_cast<int>(undo_.size()) > maxSteps_)
     {
         undo_.pop_front();
@@ -118,6 +123,7 @@ std::optional<SessionHistoryRestoreBundle> SessionHistory::popUndo() noexcept
     bundle.instrumentTrackDelete = step.instrumentTrackDelete;
     bundle.soloMemorySides = step.soloMemorySides;
     bundle.visualTrackGroupSides = step.visualTrackGroupSides;
+    bundle.trackColourSides = step.trackColourSides;
     bundle.isRedo = false;
     if constexpr (undo_diagnostic::kUndoDiag)
     {
@@ -149,6 +155,7 @@ std::optional<SessionHistoryRestoreBundle> SessionHistory::popRedo() noexcept
     bundle.instrumentTrackDelete = step.instrumentTrackDelete;
     bundle.soloMemorySides = step.soloMemorySides;
     bundle.visualTrackGroupSides = step.visualTrackGroupSides;
+    bundle.trackColourSides = step.trackColourSides;
     bundle.isRedo = true;
     if constexpr (undo_diagnostic::kUndoDiag)
     {

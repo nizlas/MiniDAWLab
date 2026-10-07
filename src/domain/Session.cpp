@@ -499,7 +499,35 @@ std::optional<TrackId> Session::duplicateTrack(const TrackId sourceTrackId, juce
             break; // Effective memberships never overlap.
         }
     }
+    // Track colour: the copy inherits the source's palette key (UI metadata, no snapshot change).
+    if (const auto ct = trackColours_.find(sourceTrackId); ct != trackColours_.end())
+    {
+        trackColours_[newId] = ct->second;
+    }
     return newId;
+}
+
+TrackColourKey Session::getTrackColour(const TrackId trackId) const noexcept
+{
+    const auto it = trackColours_.find(trackId);
+    return it != trackColours_.end() ? it->second : TrackColourKey::DefaultGrey;
+}
+
+bool Session::setTrackColour(const TrackId trackId, const TrackColourKey key) noexcept
+{
+    if (trackId == kInvalidTrackId || getTrackColour(trackId) == key)
+    {
+        return false;
+    }
+    if (key == TrackColourKey::DefaultGrey)
+    {
+        trackColours_.erase(trackId); // the default is the absence of an entry (and of a file key)
+    }
+    else
+    {
+        trackColours_[trackId] = key;
+    }
+    return true;
 }
 
 void Session::addGroupTrack() noexcept
@@ -2299,6 +2327,11 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         {
             tr.rowHeightPx = rhIt->second;
         }
+        // Track colour (v28): the stored palette key; the default is never written (absent key).
+        if (const TrackColourKey ck = getTrackColour(t.getId()); ck != TrackColourKey::DefaultGrey)
+        {
+            tr.colourKey = trackColourPersistenceKey(ck);
+        }
         switch (t.getKind())
         {
         case TrackKind::Instrument:
@@ -2898,6 +2931,18 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                 claimedMemberIds.push_back(id);
             }
             visualTrackGroups_.push_back(std::move(adopted));
+        }
+    }
+
+    // Track colours (v28): per-track palette keys; absent / unknown spelling (every pre-v28
+    // project) = the default grey. UI metadata only — never changes clips, routing or heights.
+    trackColours_.clear();
+    for (const ProjectFileTrackV1& t : parsed.tracks)
+    {
+        const TrackColourKey key = trackColourKeyFromPersistenceKey(t.colourKey);
+        if (t.id != kInvalidTrackId && key != TrackColourKey::DefaultGrey && next->findTrackIndexById(t.id) >= 0)
+        {
+            trackColours_[t.id] = key;
         }
     }
 
