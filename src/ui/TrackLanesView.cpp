@@ -2408,14 +2408,16 @@ bool TrackLanesView::trackHeaderModelUsesSubtitle(const TrackId tid) const noexc
 
 int TrackLanesView::minimumRowHeightPxForTrackHeader(const TrackId tid) const noexcept
 {
-    return TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(trackHeaderModelUsesSubtitle(tid));
+    juce::ignoreUnused(tid);
+    // The minimum individual height equals the shared Small preset for EVERY row kind: the
+    // smallest height where title row + full control strip + resize band fit without overlap
+    // (`ui/TrackRowHeightPresets.h`; the old name-only collapse below that is no longer reachable).
+    return track_row_heights::kSmallRowHeightPx;
 }
 
 int TrackLanesView::rowHeightForTrack(const TrackId tid) const noexcept
 {
-    const int lo = (tid == kInvalidTrackId)
-                       ? TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(false)
-                       : minimumRowHeightPxForTrackHeader(tid);
+    const int lo = track_row_heights::kSmallRowHeightPx;
     if (tid == kInvalidTrackId)
     {
         return juce::jlimit(lo, maxRowHeightPx_, defaultRowHeightPx_);
@@ -2467,6 +2469,7 @@ void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) 
     {
         return;
     }
+    const int before = rowHeightForTrack(tid);
     const int lo = minimumRowHeightPxForTrackHeader(tid);
     const int nh = juce::jlimit(lo, maxRowHeightPx_, heightPx);
     if (nh == defaultRowHeightPx_)
@@ -2479,6 +2482,139 @@ void TrackLanesView::setTrackRowHeightPx(const TrackId tid, const int heightPx) 
     }
     resized();
     repaint();
+    if (nh != before)
+    {
+        // Every caller of this setter is a user-origin edit (drag / stability click-path); the
+        // project-load apply uses `applyTrackRowHeightsFromLoadedProject` and never lands here.
+        notifyTrackRowHeightsChanged(true);
+    }
+}
+
+void TrackLanesView::notifyTrackRowHeightsChanged(const bool byUserEdit) noexcept
+{
+    if (onTrackRowHeightsChanged_)
+    {
+        onTrackRowHeightsChanged_(byUserEdit);
+    }
+}
+
+TrackId TrackLanesView::topVisibleTrackIdForCurrentOffset() const noexcept
+{
+    int acc = 0;
+    for (const auto& e : visibleTrackEntries_)
+    {
+        const int h = rowHeightForTrack(e.sessionTrackId);
+        if (verticalScrollOffsetPx_ < acc + h)
+        {
+            return e.sessionTrackId;
+        }
+        acc += h;
+    }
+    return visibleTrackEntries_.empty() ? kInvalidTrackId
+                                        : visibleTrackEntries_.back().sessionTrackId;
+}
+
+void TrackLanesView::applyTrackRowHeightPreset(
+    const track_row_heights::TrackRowHeightPreset preset) noexcept
+{
+    namespace trh = track_row_heights;
+    // Capture the topmost visible track with the OLD heights before anything changes.
+    const TrackId keepTopTid = topVisibleTrackIdForCurrentOffset();
+    lastChosenRowHeightPreset_ = preset;
+    defaultRowHeightPx_ = trh::heightPxForPreset(preset);
+    perTrackRowHeightPx_.clear();
+    // ONE gathered layout pass for every row (incl. scrolled-out ones) — `resized()` lays the
+    // whole stack out from the shared height model; no per-track relayouts.
+    resized();
+    if (keepTopTid != kInvalidTrackId)
+    {
+        // Preserve the previously topmost visible track; the same clamp path as the wheel keeps
+        // the offset valid when the content shrank below the viewport.
+        scrollVerticallyToOffsetPx(rowTopOffsetPxForTrackForDiagnostics(keepTopTid));
+    }
+    repaint();
+    notifyTrackRowHeightsChanged(true);
+}
+
+std::optional<track_row_heights::TrackRowHeightPreset>
+TrackLanesView::uniformTrackRowHeightPresetStatus() const noexcept
+{
+    namespace trh = track_row_heights;
+    if (visibleTrackEntries_.empty())
+    {
+        return trh::presetMatchingHeightPx(juce::jlimit(trh::kSmallRowHeightPx, maxRowHeightPx_,
+                                                        defaultRowHeightPx_));
+    }
+    const int first = rowHeightForTrack(visibleTrackEntries_.front().sessionTrackId);
+    for (const auto& e : visibleTrackEntries_)
+    {
+        if (rowHeightForTrack(e.sessionTrackId) != first)
+        {
+            return std::nullopt;
+        }
+    }
+    return trh::presetMatchingHeightPx(first);
+}
+
+std::vector<std::pair<TrackId, int>> TrackLanesView::allTrackRowHeightsPxForProjectSave() const
+{
+    std::vector<std::pair<TrackId, int>> out;
+    const int n = session_.getNumTracks();
+    out.reserve(static_cast<std::size_t>(juce::jmax(0, n)));
+    for (int i = 0; i < n; ++i)
+    {
+        const TrackId tid = session_.getTrackIdAtIndex(i);
+        if (tid != kInvalidTrackId)
+        {
+            out.emplace_back(tid, rowHeightForTrack(tid));
+        }
+    }
+    return out;
+}
+
+void TrackLanesView::applyTrackRowHeightsFromLoadedProject(
+    const juce::String& presetKey, const std::vector<std::pair<TrackId, int>>& perTrackPx) noexcept
+{
+    namespace trh = track_row_heights;
+    lastChosenRowHeightPreset_ = trh::presetFromPersistenceKey(presetKey);
+    defaultRowHeightPx_ = trh::heightPxForPreset(lastChosenRowHeightPreset_);
+    perTrackRowHeightPx_.clear();
+    for (const auto& [tid, px] : perTrackPx)
+    {
+        if (tid == kInvalidTrackId || px <= 0)
+        {
+            continue; // absent / malformed height: the row keeps the project default.
+        }
+        const int clamped = juce::jlimit(trh::kSmallRowHeightPx, maxRowHeightPx_, px);
+        if (clamped != defaultRowHeightPx_)
+        {
+            perTrackRowHeightPx_[tid] = clamped;
+        }
+    }
+    prunePerTrackRowHeightsNotInSession();
+    resized();
+    repaint();
+    notifyTrackRowHeightsChanged(false);
+}
+
+void TrackLanesView::copyRowHeightForDuplicatedTrack(const TrackId sourceTid,
+                                                     const TrackId newTid) noexcept
+{
+    if (sourceTid == kInvalidTrackId || newTid == kInvalidTrackId || sourceTid == newTid)
+    {
+        return;
+    }
+    const int h = rowHeightForTrack(sourceTid);
+    if (h == defaultRowHeightPx_)
+    {
+        perTrackRowHeightPx_.erase(newTid);
+    }
+    else
+    {
+        perTrackRowHeightPx_[newTid] = h;
+    }
+    // The caller follows with `syncTracksFromSession()` + layout; duplication marks the project
+    // dirty through its own undoable step, so no user-edit notification is needed here.
 }
 
 void TrackLanesView::snapTrackHeaderRowHeightAfterResize(const TrackId tid,

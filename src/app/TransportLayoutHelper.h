@@ -64,6 +64,12 @@ struct TransportLayoutRefs
     /// column, same height as the Pointer/Split tool row, following the header-column width. May
     /// be null (not constructed); the tool strip's left clamp then falls back to the row edge.
     SoloMemoryStrip* soloMemoryStrip = nullptr;
+
+    /// Shared track-height preset dropdown (Small / Medium / Large, "Custom" as status text):
+    /// placed between the Solo memory strip and the Pointer/Split tool strip, same height. The
+    /// tool strip's left clamp extends past it, so the two never overlap at narrow widths (the
+    /// same tight-toolbar strategy the Solo strip already uses). May be null (not constructed).
+    juce::ComboBox* trackRowHeightPresetCombo = nullptr;
 };
 
 /// Width of the vertical scrollbar column reserved right of the arrangement when it is shown.

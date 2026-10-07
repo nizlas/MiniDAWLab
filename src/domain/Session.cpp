@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 #include <new>
 #include <optional>
@@ -1897,7 +1898,8 @@ juce::Result Session::saveProjectToFile(Transport& transport,
                                        const juce::String arrangementSnapResolutionKey,
                                        std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave,
                                        std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave,
-                                       std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave)
+                                       std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave,
+                                       std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave)
 {
     const std::shared_ptr<const SessionSnapshot> s = loadSessionSnapshotForAudioThread();
     if (s == nullptr)
@@ -1962,6 +1964,20 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         out.hasMidiEditorWorkspace = true;
         out.midiEditorWorkspace = *midiEditorWorkspaceForSave;
     }
+    // Row heights (v26): UI-owned — the preset key at the root plus each row's actual height,
+    // looked up per track id below. Tracks the UI did not report keep `rowHeightPx = 0` (omitted).
+    std::unordered_map<TrackId, int> rowHeightPxByTrackId;
+    if (trackRowHeightsForSave.has_value())
+    {
+        out.trackRowHeightPreset = trackRowHeightsForSave->presetKey;
+        for (const auto& [tid, px] : trackRowHeightsForSave->perTrackRowHeightPx)
+        {
+            if (tid != kInvalidTrackId && px > 0)
+            {
+                rowHeightPxByTrackId[tid] = px;
+            }
+        }
+    }
 
     for (int i = 0; i < s->getNumTracks(); ++i)
     {
@@ -1979,6 +1995,10 @@ juce::Result Session::saveProjectToFile(Transport& transport,
         tr.midiOutputChannel = t.getMidiOutputChannel();
         tr.midiDestinationTrackId
             = (t.getKind() == TrackKind::Midi) ? t.getMidiDestinationTrackId() : kInvalidTrackId;
+        if (const auto rhIt = rowHeightPxByTrackId.find(t.getId()); rhIt != rowHeightPxByTrackId.end())
+        {
+            tr.rowHeightPx = rhIt->second;
+        }
         switch (t.getKind())
         {
         case TrackKind::Instrument:

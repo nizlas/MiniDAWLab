@@ -5,6 +5,7 @@
 #include "ui/TrackHeaderView.h"
 
 #include "ui/ForbiddenCursor.h"
+#include "ui/TrackRowHeightPresets.h"
 #include "ui/TrackStripButtonGlyphs.h"
 
 #include <array>
@@ -33,6 +34,21 @@ namespace
         const int nameBlock = hasSubtitle ? kHeaderNameBlockWithSubtitlePx : kHeaderNameBlockTitleOnlyPx;
         return kHeaderOuterPadYPx + nameBlock + TrackHeaderView::kHeaderResizeBandPx;
     }
+
+    // The shared Small preset is DEFINED as the smallest row height where the title row, the full
+    // control strip and the resize band fit without overlap for every row kind; the binding case
+    // is a row with a subtitle. Computed from the actual control geometry here so the preset can
+    // never drift from the header layout (spec: compute Small from real geometry, do not shrink
+    // buttons or text).
+    static_assert(track_row_heights::kSmallRowHeightPx
+                      == kHeaderOuterPadYPx + kHeaderNameBlockWithSubtitlePx
+                             + kHeaderNameToButtonsGapPx + TrackHeaderView::kStripControlCellWidthPx
+                             + TrackHeaderView::kHeaderResizeBandPx,
+                  "Small row-height preset must equal the subtitle row's full name+buttons+band height");
+    static_assert(track_row_heights::kSmallRowHeightPx
+                      >= kHeaderOuterPadYPx + kHeaderNameBlockTitleOnlyPx + kHeaderNameToButtonsGapPx
+                             + TrackHeaderView::kStripControlCellWidthPx + TrackHeaderView::kHeaderResizeBandPx,
+                  "Small row-height preset must also fit title-only rows' full chrome");
 } // namespace
 
 int TrackHeaderView::minimumRowHeightPxForNameOnlyLayout(const bool hasSubtitle) noexcept

@@ -168,7 +168,11 @@ public:
 
     /// After a row-height drag ends: snap to name-only or full name+buttons using the 50% visibility rule.
     /// `hasSubtitle` selects the taller name block (instrument subtitle). Must match header paint geometry.
-    /// `globalMinRowPx` must be <= the name-only ideal (`minimumRowHeightPxForNameOnlyLayout`) so the collapsed snap can stick.
+    /// NOTE: since the shared Small preset became the global drag minimum (`globalMinRowPx` =
+    /// `track_row_heights::kSmallRowHeightPx` >= the full name+buttons ideal of every row kind),
+    /// the name-only collapse branch below the full ideal is unreachable from the app's drag path
+    /// — heights pass through clamped unchanged. The branch is kept for the pure-function contract
+    /// (and callers passing a smaller explicit minimum, e.g. tests).
     [[nodiscard]] static int snapTrackHeaderRowHeightAfterResize(int heightPx,
                                                                  bool hasSubtitle,
                                                                  int globalMinRowPx,

@@ -17,6 +17,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 struct ProjectFileClipV1
@@ -107,6 +108,11 @@ struct ProjectFileTrackV1
     /// Absent key = None (disconnected). Only meaningful when `kind == "midi"`; identity-based
     /// (a missing/non-instrument id is repaired to None on load, never retargeted).
     TrackId midiDestinationTrackId = kInvalidTrackId;
+    /// v26: the row's ACTUAL arrangement height in logical px (JSON `rowHeight`). `0` = absent
+    /// (every pre-v26 file): the row then uses the project's preset default on load. Values are
+    /// clamped to the valid [Small, max] range by the UI apply — a malformed height can never
+    /// break layout. UI-only: never affects clip times, routing, Solo memories or musical data.
+    int rowHeightPx = 0;
 };
 
 /// v12: editable tick-domain notes (I3f).
@@ -320,6 +326,18 @@ struct ProjectFileExperimentalInstrumentTrackV1
     int secondaryForcedMidiChannel = 0;
 };
 
+/// v26 save-path handoff from the arrangement UI (the owner of row heights) into
+/// `Session::saveProjectToFile`: the last chosen preset key plus every row's actual height in px.
+/// Not a JSON shape of its own — the writer stores the preset at the root (`trackRowHeightPreset`)
+/// and each height on its track (`tracks[].rowHeight`), the single storage model for row heights.
+struct ProjectFileTrackRowHeightsV1
+{
+    /// "small" | "medium" | "large" (`track_row_heights::persistenceKeyForPreset`).
+    juce::String presetKey;
+    /// Session-ordered `{TrackId, effective height px}` for EVERY row.
+    std::vector<std::pair<TrackId, int>> perTrackRowHeightPx;
+};
+
 /// Optional main application window placement (root `mainWindow` object); omitted in older projects.
 /// Values are **screen** coordinates in pixels (same as `DocumentWindow::getScreenBounds()`).
 struct ProjectFileMainWindowBoundsV1
@@ -374,7 +392,13 @@ struct ProjectFileV1
     /// Solo memories persisted per project (root `soloMemories`): exactly four slots.
     static constexpr int kSoloMemoryCount = 4;
 
-    /// Current JSON writer version (**25** adds the optional root `soloMemories` — an array of
+    /// Current JSON writer version (**26** adds the optional root `trackRowHeightPreset` — the
+    /// last explicitly chosen shared track-height preset, `"small" | "medium" | "large"` — and the
+    /// optional per-track `tracks[].rowHeight` actual arrangement row height in logical px. Both
+    /// additive with absent-key defaults: pre-v26 files load with preset = Medium and every row at
+    /// the preset default, exactly their historical look. UI-only fields: clip times, routing,
+    /// Solo memories and musical data are untouched.)
+    /// (**25** adds the optional root `soloMemories` — an array of
     /// exactly four arrays of explicit soloed `TrackId`s (Solo memory 1 … 4). Omitted when all four
     /// memories are empty; absent key (every pre-v25 file) loads as four empty memories. Only the
     /// stored memory **content** is persisted — the temporary solo set, the active memory
@@ -400,7 +424,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 25;
+    static constexpr int kCurrentVersion = 26;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -448,6 +472,11 @@ struct ProjectFileV1
     /// are deduplicated and validated against `tracks` on load by `Session` (unknown ids dropped
     /// silently — never a crash, never a false-active solo).
     std::array<std::vector<TrackId>, kSoloMemoryCount> soloMemories;
+    /// v26: last explicitly chosen shared track-height preset (root `trackRowHeightPreset`,
+    /// `"small" | "medium" | "large"`). Empty = absent (every pre-v26 file) → Medium on load; any
+    /// unknown value also repairs to Medium. Default height for new tracks; the dropdown's status
+    /// is derived from the actual heights, not from this key.
+    juce::String trackRowHeightPreset;
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;

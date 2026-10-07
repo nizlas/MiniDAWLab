@@ -417,7 +417,10 @@ public:
         juce::String arrangementSnapResolutionKey = "1_4",
         std::optional<ProjectFileMainWindowBoundsV1> mainWindowBoundsForSave = std::nullopt,
         std::optional<ProjectFileMainWindowBoundsV1> midiEditorWindowBoundsForSave = std::nullopt,
-        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave = std::nullopt);
+        std::optional<ProjectFileMidiEditorWorkspaceV1> midiEditorWorkspaceForSave = std::nullopt,
+        // Optional **v26** UI row heights from the arrangement view (preset key + every row's
+        // actual height); nullopt = omit both keys (heights then load as preset defaults).
+        std::optional<ProjectFileTrackRowHeightsV1> trackRowHeightsForSave = std::nullopt);
 
     // Optional `pluginHost`: clears all plugin instances first, then after a successful timeline load
     // restores inserts from **v8** track fields (missing files append `[plugin]` lines to `outSkippedClipDetails`).

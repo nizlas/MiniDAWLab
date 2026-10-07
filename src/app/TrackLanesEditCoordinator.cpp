@@ -1182,6 +1182,9 @@ std::optional<TrackId> TrackLanesEditCoordinator::duplicateTrack(const TrackId s
             }
 
             // ---- 5. UI: the copy is the active track; Monitor / Arm are runtime-only and start off.
+            // The copy keeps the SOURCE row's height (shared track-height spec §4); the project's
+            // default preset is never touched by duplication.
+            trackLanesView_.copyRowHeightForDuplicatedTrack(sourceTid, *newTid);
             session_.setActiveTrack(*newTid);
             callbacks_.syncViewportFromSession();
             trackLanesView_.syncTracksFromSession();

@@ -224,6 +224,12 @@ namespace
             // Absent key = None; identity-based (never a list index or name).
             to->setProperty("midiTo", static_cast<juce::int64>(t.midiDestinationTrackId));
         }
+        if (fileVersion >= 26 && t.rowHeightPx > 0)
+        {
+            // v26 additive: the row's actual arrangement height in px. Absent key (and 0) = use
+            // the project's preset default on load; the UI apply clamps to the valid range.
+            to->setProperty("rowHeight", t.rowHeightPx);
+        }
         if (fileVersion >= 14 && !t.kind.equalsIgnoreCase("master") && t.routedOutputTrackId != kInvalidTrackId)
         {
             juce::DynamicObject::Ptr outObj = new juce::DynamicObject();
@@ -1252,6 +1258,12 @@ juce::Result writeProjectFile(const juce::File& file, const ProjectFileV1& data)
             root->setProperty("soloMemories", juce::var(memoriesVar));
         }
     }
+    if (data.version >= 26 && data.trackRowHeightPreset.isNotEmpty())
+    {
+        // v26 additive: last chosen shared track-height preset. Omitted when unset (the UI always
+        // passes a key, so this covers only writers without row-height data); absent → Medium.
+        root->setProperty("trackRowHeightPreset", data.trackRowHeightPreset);
+    }
     root->setProperty("bpm", data.bpm);
     root->setProperty("timeSignatureNumerator", data.timeSignatureNumerator);
     root->setProperty("timeSignatureDenominator", data.timeSignatureDenominator);
@@ -1828,6 +1840,10 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
         }
     }
 
+    // v26 optional `trackRowHeightPreset`: stored raw; absent key (every pre-v26 file), an empty
+    // string or any unknown value is interpreted as Medium by the UI apply — never a read failure.
+    out.trackRowHeightPreset = root.getProperty("trackRowHeightPreset", {}).toString().trim();
+
     {
         const juce::var& bpmv = root.getProperty("bpm", {});
         if (bpmv.isDouble() || bpmv.isInt() || bpmv.isInt64())
@@ -2177,6 +2193,18 @@ juce::Result readProjectFile(const juce::File& file, ProjectFileV1& out)
                 trk.muted = (bool)mv;
             else if (mv.isInt() || mv.isInt64() || mv.isDouble())
                 trk.muted = static_cast<int>(static_cast<double>(mv) + 0.5) != 0;
+        }
+        {
+            // v26 optional `rowHeight` (any version reads it): numeric and positive, else 0 =
+            // absent → preset default. Range clamping to [Small, max] happens in the UI apply.
+            const juce::var& rhv = tv.getProperty("rowHeight", {});
+            if (rhv.isInt() || rhv.isInt64() || rhv.isDouble())
+            {
+                const double raw = static_cast<double>(rhv);
+                trk.rowHeightPx = (std::isfinite(raw) && raw > 0.0 && raw < 100000.0)
+                                      ? static_cast<int>(raw + 0.5)
+                                      : 0;
+            }
         }
         if (trk.kind.equalsIgnoreCase("master"))
         {

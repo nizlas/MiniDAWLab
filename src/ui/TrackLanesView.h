@@ -35,6 +35,7 @@
 #include "ui/ClipWaveformView.h"
 #include "ui/SoloUiHooks.h"
 #include "ui/TrackHeaderView.h"
+#include "ui/TrackRowHeightPresets.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -385,13 +386,62 @@ public:
     /// `setInstrumentMidiClipMoveBlockedPredicate`). Defaults to `RecorderService::isRecording()` when unset.
     [[nodiscard]] bool isInstrumentMidiClipMoveBlocked() const noexcept;
 
-    /// [Message thread] Runtime-only row height drag (no undo, no persistence).
+    /// [Message thread] Row height drag (bottom-edge resize of ONE row; min = the shared Small
+    /// preset, max unchanged). No undo step (existing row-height policy); heights are persisted
+    /// per project (v26) via `allTrackRowHeightsPxForProjectSave` / `applyTrackRowHeightsFromLoadedProject`.
     void applyTrackRowHeightDelta(TrackId tid, int startHeightPx, int deltaPx) noexcept;
+
+    // -------------------------------------------------------------------------------------------
+    // Shared track heights Small / Medium / Large (`ui/TrackRowHeightPresets.h`).
+    // -------------------------------------------------------------------------------------------
+
+    /// [Message thread] One-shot preset command: sets EVERY arrangement row (all kinds, including
+    /// Group and Stereo Out, including scrolled-out rows) to the preset height in ONE gathered
+    /// layout pass, clears all individual overrides, records the preset as the default height for
+    /// new tracks, and preserves the previously topmost visible track as far as clamping allows.
+    void applyTrackRowHeightPreset(track_row_heights::TrackRowHeightPreset preset) noexcept;
+
+    /// [Message thread] Dropdown status: the preset ALL rows' effective heights exactly match, or
+    /// nullopt = "Custom" (mixed heights or a uniform non-preset height). Status only — derived
+    /// from the actual heights, independent of `lastChosenTrackRowHeightPreset()`.
+    [[nodiscard]] std::optional<track_row_heights::TrackRowHeightPreset>
+    uniformTrackRowHeightPresetStatus() const noexcept;
+
+    /// [Message thread] The last explicitly chosen preset (project default for NEW tracks even
+    /// after individual drags). Loaded projects restore it; missing/unknown key = Medium.
+    [[nodiscard]] track_row_heights::TrackRowHeightPreset lastChosenTrackRowHeightPreset() const noexcept
+    {
+        return lastChosenRowHeightPreset_;
+    }
+
+    /// [Message thread] Project save: every session row's ACTUAL effective height in px (clamped),
+    /// in session order. Written per track (v26 `rowHeight`) together with the preset key.
+    [[nodiscard]] std::vector<std::pair<TrackId, int>> allTrackRowHeightsPxForProjectSave() const;
+
+    /// [Message thread] Project load: adopt the saved preset (absent/unknown → Medium) as default +
+    /// new-track height, then the saved per-track heights clamped to [Small, max]. Rows without a
+    /// saved height (older projects) use the default. Never marks the project dirty.
+    void applyTrackRowHeightsFromLoadedProject(
+        const juce::String& presetKey,
+        const std::vector<std::pair<TrackId, int>>& perTrackPx) noexcept;
+
+    /// [Message thread] Duplicate Track keeps the SOURCE row's height for the copy; the project
+    /// default preset is never touched. Call before the post-duplicate `syncTracksFromSession`.
+    void copyRowHeightForDuplicatedTrack(TrackId sourceTid, TrackId newTid) noexcept;
+
+    /// [Message thread] Fired after any row-height change. `byUserEdit` = true for drags / preset
+    /// commands (callers mark the project dirty), false for the project-load apply.
+    void setOnTrackRowHeightsChanged(std::function<void(bool byUserEdit)> fn) noexcept
+    {
+        onTrackRowHeightsChanged_ = std::move(fn);
+    }
 
     /// Optional arrangement timeline snapping (Slice D): used by clip lanes when committing/editing.
     void setArrangementTimelineSnapFunction(std::function<std::int64_t(std::int64_t)> fn) noexcept;
 
-    /// [Message thread] After header bottom-edge resize: snap to clean name-only or full name+buttons height.
+    /// [Message thread] After header bottom-edge resize: clamp/snap via the shared static rule.
+    /// With the global minimum = the Small preset (>= every row kind's full name+buttons ideal)
+    /// this passes heights through clamped; the old name-only collapse is no longer reachable.
     void snapTrackHeaderRowHeightAfterResize(TrackId tid, bool headerHasSubtitle) noexcept;
 
     /// [Message thread] Stability C3 introspection: trackIds of all instrument timeline
@@ -508,8 +558,14 @@ private:
     /// Flattened snapshot order (`Audio`: `lanes_`/`headers_` indices; `Instrument`: bridged attachments).
     std::vector<VisibleTrackEntry> visibleTrackEntries_;
 
-    int defaultRowHeightPx_ = 96;
+    /// Default (un-dragged) row height = the last chosen preset's px (Medium on a fresh session).
+    int defaultRowHeightPx_ = track_row_heights::kMediumRowHeightPx;
     int maxRowHeightPx_ = 480;
+    track_row_heights::TrackRowHeightPreset lastChosenRowHeightPreset_
+        = track_row_heights::TrackRowHeightPreset::Medium;
+    std::function<void(bool)> onTrackRowHeightsChanged_;
+    void notifyTrackRowHeightsChanged(bool byUserEdit) noexcept;
+    [[nodiscard]] TrackId topVisibleTrackIdForCurrentOffset() const noexcept;
     int verticalScrollOffsetPx_ = 0;
     VerticalScrollModel lastPublishedVerticalScrollModel_{};
     std::function<void()> onVerticalScrollModelChanged_;

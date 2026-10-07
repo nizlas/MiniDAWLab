@@ -81,8 +81,23 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
                                    pw,
                                    useH);
         // Never under the solo-memory strip: clamp the tool strip's left edge past it.
-        const int minX = soloMemStripBounds.isEmpty() ? fullToolbarRow.getX()
-                                                      : (soloMemStripBounds.getRight() + 8);
+        int minX = soloMemStripBounds.isEmpty() ? fullToolbarRow.getX()
+                                                : (soloMemStripBounds.getRight() + 8);
+        // Track-height preset dropdown: directly after the Solo memory strip (before the tool
+        // strip), same height; the tool strip's left clamp then starts past it so the two groups
+        // can never overlap, including narrow windows / wide header columns.
+        if (r.trackRowHeightPresetCombo != nullptr)
+        {
+            constexpr int kRowHeightComboWidthPx = 92;
+            constexpr int kRowHeightComboGapPx = 8;
+            const juce::Rectangle<int> comboBounds(minX,
+                                                   fullToolbarRow.getCentreY() - useH / 2,
+                                                   kRowHeightComboWidthPx,
+                                                   useH);
+            r.trackRowHeightPresetCombo->setBounds(comboBounds);
+            r.trackRowHeightPresetCombo->setVisible(true);
+            minX = comboBounds.getRight() + kRowHeightComboGapPx;
+        }
         const int maxX = fullToolbarRow.getRight() - reservedRight - pw;
         if (maxX >= minX)
         {

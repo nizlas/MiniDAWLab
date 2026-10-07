@@ -1945,6 +1945,35 @@ public:
         };
         addAndMakeVisible(soloMemoryStrip_);
 
+        // Shared track heights (one-shot commands, not a mode): item ids match the preset enum + 1.
+        // "Custom" is only the no-selection status text — deliberately NOT an item.
+        trackRowHeightPresetCombo_.addItem("Small", kTrackRowHeightComboIdSmall);
+        trackRowHeightPresetCombo_.addItem("Medium", kTrackRowHeightComboIdMedium);
+        trackRowHeightPresetCombo_.addItem("Large", kTrackRowHeightComboIdLarge);
+        trackRowHeightPresetCombo_.setTextWhenNothingSelected("Custom");
+        trackRowHeightPresetCombo_.setTooltip("Set the height of all arrangement tracks");
+        // Never take keyboard focus: a focused combo would consume Space (play/pause) after a click.
+        trackRowHeightPresetCombo_.setWantsKeyboardFocus(false);
+        trackRowHeightPresetCombo_.onChange = [this] {
+            namespace trh = track_row_heights;
+            switch (trackRowHeightPresetCombo_.getSelectedId())
+            {
+            case kTrackRowHeightComboIdSmall:
+                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
+                break;
+            case kTrackRowHeightComboIdMedium:
+                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
+                break;
+            case kTrackRowHeightComboIdLarge:
+                trackLanesView.applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Large);
+                break;
+            default:
+                break; // deselected programmatically (Custom status) — no command.
+            }
+        };
+        addAndMakeVisible(trackRowHeightPresetCombo_);
+        refreshTrackRowHeightPresetComboFromLanes();
+
         configureArrangementMusicalControls();
         addAndMakeVisible(arrangementBpmLabel_);
         addAndMakeVisible(arrangementBpmEditor_);
@@ -2145,6 +2174,31 @@ public:
                 },
                 // Staged load: centre the progress window over the main window.
                 [this]() -> juce::Component* { return getTopLevelComponent(); },
+                // v26 row heights for save: preset key + every row's actual effective height.
+                [this]() -> std::optional<ProjectFileTrackRowHeightsV1> {
+                    ProjectFileTrackRowHeightsV1 rh;
+                    rh.presetKey = track_row_heights::persistenceKeyForPreset(
+                        trackLanesView.lastChosenTrackRowHeightPreset());
+                    rh.perTrackRowHeightPx = trackLanesView.allTrackRowHeightsPxForProjectSave();
+                    return rh;
+                },
+                // v26 row heights after load: always applied — pre-v26 files reset to Medium.
+                [this](const ProjectFileV1& loaded) {
+                    std::vector<std::pair<TrackId, int>> perTrack;
+                    perTrack.reserve(loaded.tracks.size());
+                    for (const auto& t : loaded.tracks)
+                    {
+                        perTrack.emplace_back(t.id, t.rowHeightPx);
+                    }
+                    trackLanesView.applyTrackRowHeightsFromLoadedProject(loaded.trackRowHeightPreset,
+                                                                         perTrack);
+                    refreshTrackRowHeightPresetComboFromLanes();
+                    appendProjectLoadDiagnosticLine(
+                        "load: row heights preset="
+                        + track_row_heights::persistenceKeyForPreset(
+                            trackLanesView.lastChosenTrackRowHeightPreset())
+                        + (loaded.trackRowHeightPreset.isEmpty() ? " (default, no key)" : ""));
+                },
             });
 
         // Stability C5: app-level states that must block a periodic autosave tick. Everything
@@ -2252,7 +2306,21 @@ public:
         arrangementVerticalScrollBar_.setAutoHide(true);
         arrangementVerticalScrollBar_.setSingleStepSize(32.0);
         arrangementVerticalScrollBar_.addListener(&arrangementVerticalScrollBarListener_);
-        trackLanesView.setOnVerticalScrollModelChanged([this] { syncArrangementVerticalScrollBarFromLanes(); });
+        trackLanesView.setOnVerticalScrollModelChanged([this] {
+            syncArrangementVerticalScrollBarFromLanes();
+            // Track add / duplicate / delete / undo / project switch can all change whether every
+            // row matches one preset — keep the dropdown status in sync from the same signal.
+            refreshTrackRowHeightPresetComboFromLanes();
+        });
+        // Row-height changes (drag, preset command, load apply): dropdown status + dirty flag.
+        // Only user-origin edits mark the project dirty; the load apply passes false.
+        trackLanesView.setOnTrackRowHeightsChanged([this](const bool byUserEdit) {
+            if (byUserEdit && projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->markProjectDirtyFromEdit();
+            }
+            refreshTrackRowHeightPresetComboFromLanes();
+        });
         addAndMakeVisible(arrangementVerticalScrollBar_);
         syncArrangementVerticalScrollBarFromLanes();
         refreshInstrumentUi();
@@ -5703,7 +5771,29 @@ public:
             lanePlayheadOverlay_.get(),
             &arrangementVerticalScrollBar_,
             &soloMemoryStrip_,
+            &trackRowHeightPresetCombo_,
         });
+    }
+
+    /// Dropdown status <- lanes heights: Small/Medium/Large when ALL rows exactly match that
+    /// preset, otherwise no selection (the combo then shows its "Custom" status text). Silent
+    /// sync — never re-fires the preset command.
+    void refreshTrackRowHeightPresetComboFromLanes()
+    {
+        namespace trh = track_row_heights;
+        const std::optional<trh::TrackRowHeightPreset> status
+            = trackLanesView.uniformTrackRowHeightPresetStatus();
+        int wantedId = 0;
+        if (status.has_value())
+        {
+            wantedId = (*status == trh::TrackRowHeightPreset::Small)  ? kTrackRowHeightComboIdSmall
+                     : (*status == trh::TrackRowHeightPreset::Large)  ? kTrackRowHeightComboIdLarge
+                                                                      : kTrackRowHeightComboIdMedium;
+        }
+        if (trackRowHeightPresetCombo_.getSelectedId() != wantedId)
+        {
+            trackRowHeightPresetCombo_.setSelectedId(wantedId, juce::dontSendNotification);
+        }
     }
 
     /// Scrollbar <- lanes model, without notification (the bar never drives layout from here).
@@ -7994,6 +8084,13 @@ private:
     EditToolIconStrip editToolIconStrip_;
     /// Spec §3: the four Solo-memory buttons above the track-header column (main window only).
     SoloMemoryStrip soloMemoryStrip_;
+    /// Shared track heights: one-shot Small/Medium/Large commands; shows "Custom" (status only,
+    /// never a selectable item) while row heights are mixed. Placed between the Solo memory strip
+    /// and the edit tool strip by `applyTransportControlsLayout`.
+    static constexpr int kTrackRowHeightComboIdSmall = 1;
+    static constexpr int kTrackRowHeightComboIdMedium = 2;
+    static constexpr int kTrackRowHeightComboIdLarge = 3;
+    juce::ComboBox trackRowHeightPresetCombo_;
     juce::Label arrangementBpmLabel_;
     juce::TextEditor arrangementBpmEditor_;
     juce::ComboBox arrangementTimeSignatureCombo_;

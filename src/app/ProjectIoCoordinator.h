@@ -70,6 +70,13 @@ public:
         std::function<void(const juce::File& projectFolder)> rehomeProxyAssetsAfterSaveAs;
         /// Optional (staged load): the component the progress window is centred over (main window).
         std::function<juce::Component*()> getProgressWindowAnchor;
+
+        /// Optional (v26): arrangement row heights (preset key + every row's actual px) for save
+        /// — explicit saves, Save As and autosave all pass the same snapshot to the writer.
+        std::function<std::optional<ProjectFileTrackRowHeightsV1>()> getTrackRowHeightsForProjectSave;
+        /// Optional (v26): after load end, apply saved row heights + preset default. Always invoked
+        /// (even for pre-v26 files) so an older project resets to its historical Medium look.
+        std::function<void(const ProjectFileV1&)> applyTrackRowHeightsFromLoadedProject;
     };
 
     ProjectIoCoordinator(Transport& transport,
