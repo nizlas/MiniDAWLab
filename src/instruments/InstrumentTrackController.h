@@ -132,6 +132,11 @@ struct InstrumentTrackRenderSnapshot
 {
     std::uint32_t revision = 0;
     bool playbackEnabled = false;
+    /// `playbackEnabled` without the stored-mute term (`trackActive_ && powerOn_`). Consumed only
+    /// when solo FORCES this lane audible (`solo_mute_view::trackForcedAudibleBySolo`): an
+    /// explicitly soloed but base-muted lane must schedule its MIDI (spec §2) while the stored
+    /// mute flag stays untouched. Off/power still wins in both variants.
+    bool playbackEnabledIgnoringMute = false;
     /// Resolved copy of the owning row's `Track::getMidiOutputChannel()`, for diagnostics only:
     /// the remap it describes is already applied to every `InstrumentNoteRenderEvent::midiChannel`
     /// below, so the audio thread never has to consult it.
@@ -680,6 +685,9 @@ public:
     /// sounding notes are released immediately — then CC/pitch-bend/note scheduling is skipped,
     /// exactly like the recording suppression gate. Never a global All Notes Off: other sources
     /// sustaining notes in the same destination host are untouched.
+    /// `soloForceAudibleOverridesMute` (also per block from `SoloMuteView`): gate on
+    /// `playbackEnabledIgnoringMute` instead of `playbackEnabled` — an explicitly soloed but
+    /// base-muted lane delivers its events; transitions are discontinuities like the suppress gate.
     void audioThread_scheduleTransportMidiForSegment(ExperimentalInstrumentHost& host,
                                                      std::int64_t timelineSegStart,
                                                      int segNumSamples,
@@ -687,7 +695,8 @@ public:
                                                      bool forceDiscontinuity,
                                                      int deviceBlockNumSamples,
                                                      int* outMidiEventsEmitted = nullptr,
-                                                     bool soloSuppressNewEvents = false) noexcept;
+                                                     bool soloSuppressNewEvents = false,
+                                                     bool soloForceAudibleOverridesMute = false) noexcept;
 
     /// [Audio thread] Stop/flush: pending transport offs + allNotesOff(1).
     void audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
@@ -889,6 +898,8 @@ private:
     /// flushed immediately, CC memory re-chased on resume) so toggling Solo during playback never
     /// leaves hanging notes and never requires a global All Notes Off.
     bool rtLastSoloSuppressNewEvents_ = false;
+    /// [Audio thread only] Last `soloForceAudibleOverridesMute` seen — same transition rule.
+    bool rtLastSoloForceAudible_ = false;
 
 public:
     /// [Message thread] The playback registry swapped this track's transport host (steering §17

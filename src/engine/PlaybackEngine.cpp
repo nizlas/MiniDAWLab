@@ -2123,6 +2123,10 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                      // Solo: an open CARRIER strip must not leak the
                                                                                      // destination's own clips (see SoloMuteView).
                                                                                      solo_mute_view::transportClipsSuppressedBySolo(
+                                                                                         soloView, itr.getId()),
+                                                                                     // Solo: explicitly soloed but base-muted lane
+                                                                                     // still delivers its events.
+                                                                                     solo_mute_view::trackForcedAudibleBySolo(
                                                                                          soloView, itr.getId()));
 
                 // P1G: note the audible timeline segment for proxy substitution — consumed by
@@ -2205,6 +2209,8 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                                                                                 // Solo: non-soloed MIDI source into an OPEN
                                                                                 // destination strip must stay silent.
                                                                                 solo_mute_view::routedMidiSourceSuppressedBySolo(
+                                                                                    soloView, src.trackId),
+                                                                                solo_mute_view::trackForcedAudibleBySolo(
                                                                                     soloView, src.trackId));
                 src.midiController->audioThread_setLastRoutedDestTrackId(destEntry->trackId);
             }
@@ -2687,6 +2693,8 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                    numSamples,
                                                                                    nullptr,
                                                                                    solo_mute_view::transportClipsSuppressedBySolo(
+                                                                                       soloView, itr.getId()),
+                                                                                   solo_mute_view::trackForcedAudibleBySolo(
                                                                                        soloView, itr.getId()));
 
                 // P1G: offline mixdown uses the same authoritative source selection — the host
@@ -2735,6 +2743,8 @@ void PlaybackEngine::renderOfflineMixdownBlock(const SessionSnapshot& sessionSna
                                                                                 numSamples,
                                                                                 nullptr,
                                                                                 solo_mute_view::routedMidiSourceSuppressedBySolo(
+                                                                                    soloView, src.trackId),
+                                                                                solo_mute_view::trackForcedAudibleBySolo(
                                                                                     soloView, src.trackId));
             }
         }

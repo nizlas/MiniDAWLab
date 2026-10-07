@@ -109,6 +109,17 @@ public:
         /// temporary Secondary selection applies — independently of Monitor (Monitor off still
         /// records without live delivery). Arming alone never sets this. Optional.
         std::function<bool(TrackId)> liveRecordingRequested;
+        /// Solo: true while the CURRENT solo set requires PARTIAL isolation inside this
+        /// destination — its own clips gated, or only a subset of its routed MIDI sources
+        /// audible. A proxy WAV is the baked full mix of the destination and cannot isolate one
+        /// voice, so while this holds the same temporary Secondary live selection applies
+        /// (identical override pattern as monitoring/recording: stored proxy identity, currency
+        /// and plugin state untouched; the override ends with the need). WHOLE-destination solo
+        /// never sets this — a valid proxy may then keep playing. When this holds and no live
+        /// source is usable, the SOLO COMMAND is refused up front by the app (atomic refusal:
+        /// previous set and sound state intact) — the engine never plays the whole proxy while
+        /// the UI claims a single voice is soloed. Optional; absent = never requested.
+        std::function<bool(TrackId)> soloIsolationRequested;
     };
 
     explicit ProxyPlaybackCoordinator(Dependencies deps) : deps_(std::move(deps)) {}
@@ -423,7 +434,11 @@ private:
             = deps_.liveMonitorRequested && deps_.liveMonitorRequested(destination);
         const bool recordingNeedsLive
             = deps_.liveRecordingRequested && deps_.liveRecordingRequested(destination);
-        if (ev.decision.useProxy && (monitorNeedsLive || recordingNeedsLive)
+        // Solo partial isolation (gated own clips / gated subset of routed sources) is the same
+        // "a proxy cannot do this" condition — same temporary Secondary selection, same limits.
+        const bool soloNeedsLive
+            = deps_.soloIsolationRequested && deps_.soloIsolationRequested(destination);
+        if (ev.decision.useProxy && (monitorNeedsLive || recordingNeedsLive || soloNeedsLive)
             && deps_.secondaryUsable && deps_.secondaryUsable(destination))
         {
             ev.decision = { ProxyPlaybackSourceState::SecondaryLive, false };

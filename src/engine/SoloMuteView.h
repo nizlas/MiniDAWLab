@@ -162,4 +162,34 @@ namespace solo_mute_view
            && sortedIdListContains(view->suppressRoutedMidiSources, sourceTrackId);
 }
 
+/// [Audio thread] True when solo FORCES `trackId` audible (explicit solo / needed carrier). The
+/// instrument MIDI scheduler uses this to override the stored-mute part of its own gate: a
+/// base-muted but explicitly soloed Instrument/Midi lane must deliver its events (spec §2) even
+/// though `InstrumentTrackController` bakes `muted_` into `playbackEnabled`. Stored mute flags
+/// stay untouched; clearing solo restores the baked gate on the next block.
+[[nodiscard]] inline bool trackForcedAudibleBySolo(const SoloMuteView* view, const TrackId trackId) noexcept
+{
+    if (view == nullptr || !view->soloActive)
+    {
+        return false;
+    }
+    const auto& v = view->audioDecisions;
+    std::size_t lo = 0;
+    std::size_t hi = v.size();
+    while (lo < hi)
+    {
+        const std::size_t mid = lo + ((hi - lo) >> 1);
+        if (v[mid].first < trackId)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    return lo < v.size() && v[lo].first == trackId
+           && v[lo].second == SoloTrackAudioDecision::ForcedAudible;
+}
+
 } // namespace solo_mute_view

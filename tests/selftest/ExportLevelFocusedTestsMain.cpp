@@ -1286,7 +1286,7 @@ ProjectFileExperimentalInstrumentTrackV1 InstrumentTrackController::buildExperim
     return {};
 }
 void InstrumentTrackController::audioThread_scheduleTransportMidiForSegment(ExperimentalInstrumentHost&, std::int64_t, int,
-                                                                           int, bool, int, int*, bool) noexcept {}
+                                                                           int, bool, int, int*, bool, bool) noexcept {}
 void InstrumentTrackController::audioThread_flushTransportMidi(ExperimentalInstrumentHost&, int, int) noexcept {}
 void InstrumentTrackController::audioThread_flushPendingTransportOffsInto(ExperimentalInstrumentHost&, int, int) noexcept {}
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(float* const*, int, int, float, float) noexcept {}
