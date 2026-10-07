@@ -1097,11 +1097,85 @@ void testMalformedGroupMetadataSafeFallback()
            "malformed: every track renders (invalid groups fall back to normal visible rows)");
     (void)badProj.deleteFile();
 }
+// ---------------------------------------------------------------------------------------------
+// --render <dir>: reproducible example images for the feature report / PR — the SAME group
+// rendered expanded and collapsed, in an 8-track and a 16-track arrangement (offscreen snapshots
+// of the production TrackLanesView; the handler-level verification above is what proves behavior,
+// these images just show the result).
+// ---------------------------------------------------------------------------------------------
+void writePng(const juce::Image& img, const juce::File& file)
+{
+    (void)file.deleteFile();
+    juce::FileOutputStream os(file);
+    if (os.openedOk())
+    {
+        juce::PNGImageFormat().writeImageToStream(img, os);
+        info("wrote " + file.getFullPathName());
+    }
+}
+
+void renderGroupExample(const juce::File& outDir,
+                        const juce::String& baseName,
+                        const int extraAudioTracks,
+                        const std::vector<int>& groupIndices,
+                        const juce::String& groupName,
+                        const trh::TrackRowHeightPreset preset,
+                        const int viewHeightPx)
+{
+    const juce::File wav = writeToneWav("render-tone.wav", 4.0);
+    GroupFixture f(extraAudioTracks);
+    f.lanes->setSize(1100, viewHeightPx);
+    f.lanes->applyTrackRowHeightPreset(preset);
+
+    // Scatter clips so the collapsed strips show distinct interval patterns per member.
+    const auto sec = [](const double s) { return (std::int64_t)std::llround(s * kRate); };
+    const std::vector<TrackId> rows = f.rowTrackIds();
+    for (size_t i = 0; i + 1 < rows.size(); ++i) // skip Stereo Out
+    {
+        const double start = 0.35 * (double)(i % 7);
+        const double len = 1.0 + 0.5 * (double)(i % 4);
+        if (i % 5 != 4) // every fifth row stays empty
+        {
+            (void)f.session.addRecordedTakeAtSample(wav, kRate, sec(start), rows[i], sec(len));
+            (void)f.session.addRecordedTakeAtSample(wav, kRate, sec(start + len + 0.8), rows[i],
+                                                    sec(juce::jmax(0.5, 2.2 - len)));
+        }
+    }
+    f.lanes->syncTracksFromSession();
+
+    const std::optional<int> gid = f.makeGroup(groupIndices, groupName);
+    if (!gid.has_value())
+    {
+        info("render: group creation failed for " + baseName);
+        return;
+    }
+    writePng(f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f),
+             outDir.getChildFile(baseName + "-expanded.png"));
+    f.setCollapsed(*gid, true);
+    writePng(f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f),
+             outDir.getChildFile(baseName + "-collapsed.png"));
+}
+
+int runRenderMode(const juce::File& outDir)
+{
+    (void)outDir.createDirectory();
+    // 8 arrangement tracks (7 audio + Stereo Out), Medium heights, 4-member "Drums" group.
+    renderGroupExample(outDir, "group-8-tracks", /*extraAudioTracks*/ 6, { 1, 2, 3, 4 }, "Drums",
+                       trh::TrackRowHeightPreset::Medium, 820);
+    // 16 arrangement tracks (15 audio + Stereo Out), Small heights, 8-member "Percussion" group.
+    renderGroupExample(outDir, "group-16-tracks", /*extraAudioTracks*/ 14, { 2, 3, 4, 5, 6, 7, 8, 9 },
+                       "Percussion", trh::TrackRowHeightPreset::Small, 1080);
+    return 0;
+}
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceGui;
+    if (argc >= 3 && juce::String(argv[1]) == "--render")
+    {
+        return runRenderMode(juce::File(juce::String(argv[2])));
+    }
     info("CollapsibleTrackGroupFocusedTests - purely visual collapsible track groups (spec slice)");
 
     testHeaderSelectionAndCreateValidation();
