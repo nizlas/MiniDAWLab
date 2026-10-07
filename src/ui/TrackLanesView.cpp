@@ -2673,7 +2673,43 @@ void TrackLanesView::resized()
         timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
     }
     layoutVisualGroupHandles();
+    invalidateCollapsedBlockRegionsAfterLayout();
     publishVerticalScrollModelIfChanged();
+}
+
+void TrackLanesView::invalidateCollapsedBlockRegionsAfterLayout() noexcept
+{
+    // The collapsed blocks (header plate + strips) are painted by THIS view, and their member
+    // rows have EMPTY child bounds. A relayout that moves the rows (wheel / scrollbar scroll,
+    // a row-height change above the block, add / delete) only dirties the moved CHILDREN in the
+    // buffered image, so a block would stay painted at its previous position and nothing would
+    // paint it at the new one (ghost strips). Dirty the previous and the new block rectangles —
+    // a few small repaints per layout, no full-view repaint and no timer.
+    std::vector<juce::Rectangle<int>> now;
+    const juce::Rectangle<int> viewport = getLocalBounds().withTrimmedTop(kArrangementTimelineHeaderGutterPx);
+    for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
+    {
+        if (!run.collapsed)
+        {
+            continue;
+        }
+        const int top = yTopForVisibleIndex(run.firstVisibleIndex);
+        const int bottom = yTopForVisibleIndex(run.lastVisibleIndex) + rowHeightForVisibleEntry(run.lastVisibleIndex);
+        const juce::Rectangle<int> block = juce::Rectangle<int>(0, top, getWidth(), bottom - top).getIntersection(viewport);
+        if (!block.isEmpty())
+        {
+            now.push_back(block);
+        }
+    }
+    for (const juce::Rectangle<int>& r : paintedCollapsedBlockRects_)
+    {
+        repaint(r);
+    }
+    for (const juce::Rectangle<int>& r : now)
+    {
+        repaint(r);
+    }
+    paintedCollapsedBlockRects_ = std::move(now);
 }
 
 TrackLanesView::VerticalScrollModel TrackLanesView::verticalScrollModel() const noexcept

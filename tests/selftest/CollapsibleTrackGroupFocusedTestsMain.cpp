@@ -1569,6 +1569,187 @@ void testMiniLaneShowsWaveformAndSharedEventMargin()
 }
 
 // ---------------------------------------------------------------------------------------------
+// Bug report: after creating and ungrouping groups, some contiguous track intervals could not be
+// grouped again. The exact user path: header click / shift-click -> selected ids -> the menu
+// item's eligibility -> Create / Ungroup, for the same interval, a partially overlapping one, and
+// with a second, still existing group that must be left alone.
+// ---------------------------------------------------------------------------------------------
+void testRegroupAfterUngroupAndAfterMemberDeletion()
+{
+    GroupFixture f(/*extraAudioTracks*/ 8);
+    const auto selectRange = [&](const int firstIdx, const int lastIdx) {
+        f.lanes->handleHeaderSelectionClick(f.tidAt(firstIdx), false);
+        f.lanes->handleHeaderSelectionClick(f.tidAt(lastIdx), true);
+        return f.lanes->canCreateCollapsibleGroupFromCurrentSelection();
+    };
+    const auto createFromSelection = [&](const char* name) -> std::optional<int> {
+        return f.session.createVisualTrackGroup(name, f.lanes->selectedHeaderTrackIdsInVisibleOrder());
+    };
+
+    // A second group that must survive everything below untouched.
+    const std::optional<int> keep = f.makeGroup({ 6, 7 }, "Keep");
+    expect(keep.has_value(), "fixture: a second group {6,7} exists");
+
+    // Create {1,2,3} through the user path, ungroup it, create the SAME interval again.
+    expect(selectRange(1, 3), "regroup: the fresh interval {1,2,3} is eligible");
+    const std::optional<int> g1 = createFromSelection("First");
+    expect(g1.has_value(), "regroup: {1,2,3} created");
+    f.lanes->refreshVisualTrackGroupsFromSession();
+    f.session.removeVisualTrackGroup(*g1); // the Ungroup hook's mutation
+    f.lanes->refreshVisualTrackGroupsFromSession();
+    expect(selectRange(1, 3), "regroup: after Ungroup the SAME interval {1,2,3} is eligible again");
+    const std::optional<int> g2 = createFromSelection("Second");
+    expect(g2.has_value(), "regroup: {1,2,3} created again after Ungroup");
+    f.lanes->refreshVisualTrackGroupsFromSession();
+    f.session.removeVisualTrackGroup(*g2);
+    f.lanes->refreshVisualTrackGroupsFromSession();
+
+    // A partially overlapping interval that includes former members: {2,3,4}.
+    expect(selectRange(2, 4), "regroup: a partially overlapping interval {2,3,4} with former members is eligible");
+    const std::optional<int> g3 = createFromSelection("Third");
+    expect(g3.has_value(), "regroup: {2,3,4} created");
+    f.lanes->refreshVisualTrackGroupsFromSession();
+    expect(f.session.isVisualTrackGroupDisplayable(*keep)
+               && f.session.getEffectiveVisualGroupMemberTrackIds(*keep) == f.tidsAt({ 6, 7 }),
+           "regroup: the other, still existing group {6,7} is unaffected");
+    f.session.removeVisualTrackGroup(*g3);
+    f.lanes->refreshVisualTrackGroupsFromSession();
+
+    // Collapse before Ungroup, then regroup.
+    const std::optional<int> g4 = f.makeGroup({ 1, 2 }, "Fourth");
+    f.setCollapsed(*g4, true);
+    f.session.removeVisualTrackGroup(*g4);
+    f.lanes->refreshVisualTrackGroupsFromSession();
+    expect(selectRange(1, 2), "regroup: ungrouping a COLLAPSED group leaves {1,2} eligible");
+
+    // A member deletion dissolves a 2-track group visually (<2 effective members). The remaining
+    // track must still be groupable with its new neighbours: the invisible leftover must not
+    // block Create (it was the leftover metadata of a group that no longer displays).
+    const std::optional<int> g5 = f.makeGroup({ 3, 4 }, "Fifth");
+    expect(g5.has_value(), "fixture: group {3,4}");
+    const TrackId t3 = f.tidAt(3);
+    const TrackId t4 = f.tidAt(4);
+    f.session.removeTrack(t4);
+    f.lanes->syncTracksFromSession();
+    f.lanes->refreshVisualTrackGroupsFromSession();
+    expect(!f.session.isVisualTrackGroupDisplayable(*g5), "dissolve: {3,4} minus 4 no longer displays");
+    // Now session index 3 is t3 and index 4 is the former index-5 track.
+    expect(selectRange(3, 4),
+           "regroup after dissolve: the remaining member + its new neighbour are eligible");
+    const std::optional<int> g6 = createFromSelection("Sixth");
+    expect(g6.has_value() && f.session.isVisualTrackGroupDisplayable(*g6)
+               && f.session.getEffectiveVisualGroupMemberTrackIds(*g6) == std::vector<TrackId>({ t3, f.tidAt(4) }),
+           "regroup after dissolve: the new group is created and displayable");
+    expect(f.session.isVisualTrackGroupDisplayable(*keep)
+               && f.session.getEffectiveVisualGroupMemberTrackIds(*keep) == f.tidsAt({ 5, 6 }),
+           "regroup after dissolve: the other group {Keep} still displays with its two members");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bug report: a collapsed group did not follow vertical scrolling — the block stayed painted at
+// its previous position (ghost strips) while the rows around it moved. The lanes view is
+// buffered to an image and the collapsed block is painted by the view itself (its member rows
+// have EMPTY child bounds), so the block's old / new regions must be invalidated explicitly.
+// Pixel-sampled through the same cached-image path the app uses.
+// ---------------------------------------------------------------------------------------------
+void testCollapsedBlockFollowsVerticalScroll()
+{
+    const juce::File wav = writeToneWav("scroll-tone.wav");
+    GroupFixture f(/*extraAudioTracks*/ 12);
+    // Paint THROUGH a parent so the lanes view goes via its cached (buffered-to-image) path with
+    // incremental invalidation — the app's situation. Offscreen, child moves do not dirty the
+    // parent (no peer), so ONLY explicit invalidation can move the block; that is exactly what
+    // the fix must provide.
+    juce::Component wrapper;
+    wrapper.setVisible(true);
+    wrapper.addAndMakeVisible(*f.lanes);
+    f.lanes->setSize(800, 300);
+    wrapper.setSize(800, 300);
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Mini);
+    const auto sec = [](const double s) { return (std::int64_t)std::llround(s * kRate); };
+    const TrackId m0 = f.tidAt(4);
+    const TrackId m1 = f.tidAt(5);
+    expect(f.session.addRecordedTakeAtSample(wav, kRate, sec(0.5), m0, sec(2.0)).wasOk()
+               && f.session.addRecordedTakeAtSample(wav, kRate, sec(1.0), m1, sec(2.0)).wasOk(),
+           "scroll fixture: clips on the two members");
+    f.lanes->syncTracksFromSession();
+    const std::optional<int> gid = f.makeGroup({ 4, 5 }, "Scrolled");
+    expect(gid.has_value(), "scroll fixture: group {4,5}");
+    f.setCollapsed(*gid, true);
+
+    const int x = widgetXForSample(f, sec(1.3)); // inside both members' clips
+    const int headerW = f.lanes->headerColumnWidthPx();
+    const auto stripRows = [&](const juce::Image& img) {
+        // Rows (lanes-view y) where the strip fill is painted at x.
+        std::vector<int> rows;
+        for (int y = TrackLanesView::kArrangementTimelineHeaderGutterPx; y < img.getHeight(); ++y)
+        {
+            if (img.getPixelAt(x, y) == juce::Colour(kStripFillArgb))
+            {
+                rows.push_back(y);
+            }
+        }
+        return rows;
+    };
+    const auto plateRows = [&](const juce::Image& img) {
+        std::vector<int> rows;
+        for (int y = TrackLanesView::kArrangementTimelineHeaderGutterPx; y < img.getHeight(); ++y)
+        {
+            if (img.getPixelAt(headerW / 2, y) == juce::Colour(0xff2b2d31)) // collapsed header plate
+            {
+                rows.push_back(y);
+            }
+        }
+        return rows;
+    };
+    // `paintEntireComponent` on a buffered-to-image component paints through its cached image —
+    // the same incremental invalidation the app's window uses.
+    const auto snapshot = [&] {
+        juce::Image img(juce::Image::ARGB, wrapper.getWidth(), wrapper.getHeight(), true);
+        juce::Graphics g(img);
+        wrapper.paintEntireComponent(g, false);
+        return img;
+    };
+
+    const juce::Image before = snapshot();
+    const int blockTop0 = f.widgetYTopForTrack(m0);
+    const std::vector<int> strips0 = stripRows(before);
+    expect(strips0.size() == 8 && strips0.front() == blockTop0 + TrackLanesView::collapsedGroupStripsTopPadPx(2),
+           "scroll: before scrolling the two 4 px strips sit in the block at its top position");
+
+    // Wheel / scrollbar path: the ONE scroll entry point. Scroll by 30 px.
+    f.lanes->scrollVerticallyToOffsetPx(30);
+    const juce::Image after = snapshot();
+    const int blockTop1 = f.widgetYTopForTrack(m0);
+    expect(blockTop1 == blockTop0 - 30, "scroll: the block's layout position moved up by 30 px");
+    const std::vector<int> strips1 = stripRows(after);
+    expect(strips1.size() == 8 && strips1.front() == blockTop1 + TrackLanesView::collapsedGroupStripsTopPadPx(2),
+           "scroll: the strips are painted at the NEW position only (no ghost strips at the old one)");
+    const std::vector<int> plate1 = plateRows(after);
+    // (The block's first pixel row is the row separator painted over the plate.)
+    expect(!plate1.empty() && plate1.front() == blockTop1 + 1 && plate1.back() == blockTop1 + TrackLanesView::collapsedGroupBlockHeightPx(2) - 1,
+           "scroll: the collapsed header plate covers exactly the block at its new position");
+    expect(f.lanes->visualGroupHandleBoundsForTest(*gid).getY() == blockTop1 + TrackLanesView::kVisualGroupCollapsedTopPadPx,
+           "scroll: the chevron button moved with the block (hit area = paint position)");
+
+    // Scroll back, then past the top edge (block partially above the gutter), then expand.
+    f.lanes->scrollVerticallyToOffsetPx(0);
+    const std::vector<int> stripsBack = stripRows(snapshot());
+    expect(stripsBack == strips0, "scroll back: the strips are exactly where they started, nothing left behind");
+    f.lanes->scrollVerticallyToOffsetPx(f.lanes->rowTopOffsetPxForTrackForDiagnostics(m0) + 10);
+    const juce::Image clipped = snapshot();
+    const std::vector<int> stripsClipped = stripRows(clipped);
+    expect(!stripsClipped.empty() && stripsClipped.front() >= TrackLanesView::kArrangementTimelineHeaderGutterPx
+               && stripsClipped.size() < 8,
+           "scroll past the top: the block is clipped at the gutter (no strips painted into the gutter)");
+    f.setCollapsed(*gid, false);
+    f.lanes->scrollVerticallyToOffsetPx(0);
+    expect(stripRows(snapshot()).empty() && f.verticalLayoutOk("expanded after scroll"),
+           "expand after scrolling: no strip pixels remain and the layout verifies");
+    wrapper.removeChildComponent(f.lanes.get());
+}
+
+// ---------------------------------------------------------------------------------------------
 // --render <dir>: reproducible example images for the feature report / PR — the SAME group
 // rendered expanded and collapsed, in an 8-track and a 16-track arrangement (offscreen snapshots
 // of the production TrackLanesView; the handler-level verification above is what proves behavior,
@@ -1759,6 +1940,8 @@ int main(int argc, char** argv)
     testCollapsedBlockHeightsForGroupSizes();
     testScrollAnchoringAndClamp();
     testMembershipOnTrackChanges();
+    testRegroupAfterUngroupAndAfterMemberDeletion();
+    testCollapsedBlockFollowsVerticalScroll();
     testNarrowUndoThroughRealCoordinator();
     testPersistenceRoundTripAndOlderProjects();
     testMalformedGroupMetadataSafeFallback();

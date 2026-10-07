@@ -730,6 +730,11 @@ private:
     void rebuildVisualGroupHandles();
     /// Position every group control for the current layout (called at the end of `resized()`).
     void layoutVisualGroupHandles() noexcept;
+    /// Dirty the previous + current rectangles of every collapsed block (painted by this view,
+    /// no child covers them) so a scroll / relayout never leaves ghost strips in the buffered
+    /// image. Called at the end of `resized()`.
+    void invalidateCollapsedBlockRegionsAfterLayout() noexcept;
+    std::vector<juce::Rectangle<int>> paintedCollapsedBlockRects_;
     /// Collapsed mini strips + collapsed-run header chrome (called from `paint()`).
     void paintCollapsedGroupContent(juce::Graphics& g) const;
     /// Group marker continuity + nothing painted over the controls: called from

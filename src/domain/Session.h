@@ -324,8 +324,11 @@ public:
 
     /// [Message thread] Create a group of `memberTrackIds` (any order; stored in snapshot order).
     /// Refuses (returns nullopt, nothing changed) unless the members are ≥2 EXISTING non-Master
-    /// tracks, contiguous in snapshot order, and none is already an effective member of another
-    /// group. Empty/whitespace name → "Group <n>". Created expanded. Returns the new group id.
+    /// tracks, contiguous in snapshot order, and none is an effective member of another
+    /// DISPLAYABLE group. A leftover membership in a dissolved (non-displayable) group never
+    /// blocks: the new group takes the track over and the leftover entry is pruned (a leftover
+    /// group with no stored members left is dropped). Empty/whitespace name → "Group <n>".
+    /// Created expanded. Returns the new group id.
     [[nodiscard]] std::optional<int> createVisualTrackGroup(juce::String name,
                                                             std::vector<TrackId> memberTrackIds) noexcept;
     /// [Message thread] Rename one group (trimmed; empty after trim or unknown id → no-op).
@@ -344,8 +347,9 @@ public:
     /// snapshot order. Non-displayable groups render as normal tracks (safe fallback) and are
     /// dropped on save.
     [[nodiscard]] bool isVisualTrackGroupDisplayable(int groupId) const;
-    /// The group whose EFFECTIVE membership contains `trackId` (groups never overlap on effective
-    /// members), or nullopt.
+    /// The DISPLAYABLE group whose membership contains `trackId` (displayable groups never
+    /// overlap), or nullopt — a dissolved group's leftover id does not count, so its track can be
+    /// grouped again.
     [[nodiscard]] std::optional<int> findVisualTrackGroupIdContainingTrack(TrackId trackId) const;
 
     /// [Message thread] Would `moveTrack(movedTrackId, destIndex)` break any displayable group's

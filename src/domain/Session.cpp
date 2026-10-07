@@ -1703,6 +1703,27 @@ std::optional<int> Session::createVisualTrackGroup(juce::String name,
         group.memberTrackIds.push_back(id);
     }
     group.collapsed = false;
+    // The new group takes over any leftover membership in a dissolved (non-displayable) group,
+    // so the stored metadata never lists a track in two groups; a leftover group with no stored
+    // members left is dropped. (Displayable groups were rejected above, so only dissolved
+    // groups can still mention these ids.)
+    for (VisualTrackGroup& g : visualTrackGroups_)
+    {
+        g.memberTrackIds.erase(std::remove_if(g.memberTrackIds.begin(),
+                                              g.memberTrackIds.end(),
+                                              [&group](const TrackId id)
+                                              {
+                                                  return std::find(group.memberTrackIds.begin(),
+                                                                   group.memberTrackIds.end(),
+                                                                   id)
+                                                         != group.memberTrackIds.end();
+                                              }),
+                               g.memberTrackIds.end());
+    }
+    visualTrackGroups_.erase(std::remove_if(visualTrackGroups_.begin(),
+                                            visualTrackGroups_.end(),
+                                            [](const VisualTrackGroup& g) { return g.memberTrackIds.empty(); }),
+                             visualTrackGroups_.end());
     visualTrackGroups_.push_back(std::move(group));
     return visualTrackGroups_.back().id;
 }
@@ -1828,8 +1849,12 @@ std::optional<int> Session::findVisualTrackGroupIdContainingTrack(const TrackId 
     }
     for (const VisualTrackGroup& g : visualTrackGroups_)
     {
+        // Only a DISPLAYABLE group holds a track: a group that has dissolved (its other members
+        // deleted, or drifted apart) keeps its stored ids for a later snapshot restore, but it
+        // is invisible to the user and must never block grouping its leftover track again.
         if (std::find(g.memberTrackIds.begin(), g.memberTrackIds.end(), trackId)
-            != g.memberTrackIds.end())
+                != g.memberTrackIds.end()
+            && isVisualTrackGroupDisplayable(g.id))
         {
             return g.id;
         }
