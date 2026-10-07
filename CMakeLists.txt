@@ -798,6 +798,69 @@ endif()
 # UndoRedoCoordinator.h includes the generated JuceHeader.h.
 juce_generate_juce_header(SoloFocusedTests)
 
+# -----------------------------------------------------------------------------
+# CollapsibleTrackGroupFocusedTests: purely visual collapsible track groups — the production
+# TrackLanesView offscreen (header multi-selection, create validation, 4 px collapsed mini-view
+# with pixel-sampled grey clip intervals under zoom/scroll, group handle placement + short-click/
+# long-press actions, the shared scroll model with anchoring/clamping), Session membership rules
+# (Duplicate, delete + snapshot restore, visual dissolve, reorder veto), the narrow group-metadata
+# undo through the REAL UndoRedoCoordinator, and v27 persistence (round trip, pre-v27, malformed
+# metadata safe fallback). No audio device, no window, no instrument runtime (instrument entry
+# points referenced by the linked sources are satisfied by never-executed link stubs).
+# -----------------------------------------------------------------------------
+juce_add_console_app(CollapsibleTrackGroupFocusedTests PRODUCT_NAME "CollapsibleTrackGroupFocusedTests")
+target_sources(CollapsibleTrackGroupFocusedTests PRIVATE
+    tests/selftest/CollapsibleTrackGroupFocusedTestsMain.cpp
+    src/app/UndoRedoCoordinator.cpp
+    src/audio/LatencySettingsStore.cpp
+    src/diagnostics/StabilityDiagnosticLog.cpp
+    src/diagnostics/ProjectLoadDiagnosticLog.cpp
+    src/diagnostics/UndoDiagnosticFileLog.cpp
+    src/domain/Session.cpp
+    src/domain/SessionHistory.cpp
+    src/domain/SessionSnapshot.cpp
+    src/domain/SessionRouting.cpp
+    src/domain/Track.cpp
+    src/domain/PlacedClip.cpp
+    src/domain/AudioClip.cpp
+    src/domain/AudioMixdownProjectSettings.cpp
+    src/engine/RecorderService.cpp
+    src/io/AudioFileLoader.cpp
+    src/io/AudioWaveformCache.cpp
+    src/io/MonoWavFileWriter.cpp
+    src/io/ProjectFile.cpp
+    src/plugins/PluginInsertHost.cpp
+    src/plugins/PluginEditorWindows.cpp
+    src/transport/Transport.cpp
+    src/ui/ClipWaveformView.cpp
+    src/ui/TimelineViewportModel.cpp
+    src/ui/TimelineRulerView.cpp
+    src/ui/TimelineLocatorPainter.cpp
+    src/ui/TrackHeaderView.cpp
+    src/ui/TrackLanesView.cpp
+    src/ui/UiPlayheadClock.cpp
+    src/ui/ForbiddenCursor.cpp)
+target_include_directories(CollapsibleTrackGroupFocusedTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(CollapsibleTrackGroupFocusedTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(CollapsibleTrackGroupFocusedTests
+    PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_formats
+        juce::juce_audio_devices
+        juce::juce_audio_processors
+        juce::juce_gui_basics
+        juce::juce_gui_extra
+        juce::juce_events
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+)
+if (MSVC)
+    target_compile_options(CollapsibleTrackGroupFocusedTests PRIVATE /wd4458)
+endif()
+# UndoRedoCoordinator.h includes the generated JuceHeader.h.
+juce_generate_juce_header(CollapsibleTrackGroupFocusedTests)
+
 # JUCE juce_VST3PluginFormat.cpp + VST3 SDK headers: local `iid` triggers MSVC C4458 (hides base member).
 # Safe to silence; module sources compile as part of this target.
 if (MSVC)

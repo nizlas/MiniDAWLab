@@ -3855,7 +3855,6 @@ void TrackLanesView::paintCollapsedGroupContent(juce::Graphics& g) const
 {
     const auto bounds = getLocalBounds();
     constexpr int gutter = kArrangementTimelineHeaderGutterPx;
-    const int gutterBottom = bounds.getY() + gutter;
     const int headerW = juce::jmin(headerColumnWidthPx(), bounds.getWidth());
     const int hx = bounds.getX() + headerW;
     const int tw = juce::jmax(0, bounds.getWidth() - headerW);
