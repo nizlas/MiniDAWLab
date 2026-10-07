@@ -379,6 +379,158 @@ const TrackHeaderView* TrackLanesView::findInstrumentRowHeaderForDiagnostics(con
     return it != instrumentTimelineAttachments_.end() ? it->second.header : nullptr;
 }
 
+bool TrackLanesView::verifyVerticalScrollLayoutForDiagnostics(juce::String& report, juce::String& failReason) const
+{
+    const VerticalScrollModel m = verticalScrollModel();
+    constexpr int gutter = kArrangementTimelineHeaderGutterPx;
+    const juce::Rectangle<int> viewport = getLocalBounds().withTrimmedTop(gutter);
+    report << "vertical scroll: content=" << m.contentHeightPx << " viewport=" << m.viewportHeightPx
+           << " offset=" << m.offsetPx << " max=" << m.maxOffsetPx() << " rows=" << (int) visibleTrackEntries_.size()
+           << " fits=" << (m.everythingFits() ? 1 : 0) << "\n";
+    if (m.offsetPx < 0 || m.offsetPx > m.maxOffsetPx())
+    {
+        failReason = "offset " + juce::String(m.offsetPx) + " outside 0.." + juce::String(m.maxOffsetPx());
+        return false;
+    }
+    // Every row sits at `gutter - offset + sum(previous heights)`; header and lane of the SAME row
+    // share y and height (clipped to the viewport the same way), and rows are contiguous.
+    int expectedY = viewport.getY() - m.offsetPx;
+    for (int vi = 0; vi < (int) visibleTrackEntries_.size(); ++vi)
+    {
+        const VisibleTrackEntry& e = visibleTrackEntries_[(size_t) vi];
+        const int rowH = juce::jmax(1, rowHeightForVisibleEntry(vi));
+        const juce::Rectangle<int> row(getLocalBounds().getX(), expectedY, getWidth(), rowH);
+        const juce::Rectangle<int> visibleRow = row.getIntersection(viewport);
+        const juce::Component* header = nullptr;
+        const juce::Component* lane = nullptr;
+        const char* kind = "audio";
+        if (e.kind == VisibleTrackKind::Instrument)
+        {
+            kind = "instrument";
+            const auto it = instrumentTimelineAttachments_.find(e.sessionTrackId);
+            if (it != instrumentTimelineAttachments_.end())
+            {
+                header = it->second.header;
+                lane = it->second.midiLane;
+            }
+        }
+        else if (e.kind == VisibleTrackKind::Master)
+        {
+            kind = "master";
+            header = masterHeaders_.empty() ? nullptr : masterHeaders_[0].get();
+        }
+        else if (e.kind == VisibleTrackKind::Group)
+        {
+            kind = "group";
+            const auto it = groupHeaders_.find(e.sessionTrackId);
+            header = it != groupHeaders_.end() ? it->second.get() : nullptr;
+        }
+        else
+        {
+            const int si = audioLaneIndexFromTrackId(e.sessionTrackId);
+            if (si >= 0 && si < (int) headers_.size() && si < (int) lanes_.size())
+            {
+                header = headers_[(size_t) si].get();
+                lane = lanes_[(size_t) si].get();
+            }
+        }
+        const juce::Rectangle<int> hb = header != nullptr ? header->getBounds() : juce::Rectangle<int>();
+        const juce::Rectangle<int> lb = lane != nullptr ? lane->getBounds() : juce::Rectangle<int>();
+        report << "  row " << vi << " " << kind << " track " << juce::String((juce::int64) e.sessionTrackId)
+               << " h=" << rowH << " expectedY=" << expectedY << " visible=" << visibleRow.toString()
+               << " header=" << hb.toString() << (lane != nullptr ? " lane=" + lb.toString() : juce::String()) << "\n";
+        if (header != nullptr && header->isVisible())
+        {
+            if (visibleRow.isEmpty())
+            {
+                if (!hb.isEmpty())
+                {
+                    failReason = juce::String(kind) + " header of track " + juce::String((juce::int64) e.sessionTrackId)
+                                 + " is laid out (" + hb.toString() + ") although its row is scrolled out of view";
+                    return false;
+                }
+            }
+            else if (hb.getY() != visibleRow.getY() || hb.getHeight() != visibleRow.getHeight())
+            {
+                failReason = juce::String(kind) + " header of track " + juce::String((juce::int64) e.sessionTrackId)
+                             + " spans y=" + juce::String(hb.getY()) + " h=" + juce::String(hb.getHeight())
+                             + " but the row is y=" + juce::String(visibleRow.getY()) + " h=" + juce::String(visibleRow.getHeight());
+                return false;
+            }
+            if (lane != nullptr && lane->isVisible() && !visibleRow.isEmpty()
+                && (lb.getY() != hb.getY() || lb.getHeight() != hb.getHeight()))
+            {
+                failReason = juce::String(kind) + " lane of track " + juce::String((juce::int64) e.sessionTrackId)
+                             + " (" + lb.toString() + ") is not aligned with its header (" + hb.toString() + ")";
+                return false;
+            }
+        }
+        expectedY += rowH;
+    }
+    if (expectedY - (viewport.getY() - m.offsetPx) != m.contentHeightPx)
+    {
+        failReason = "row heights sum to " + juce::String(expectedY - (viewport.getY() - m.offsetPx))
+                     + " but the model says content=" + juce::String(m.contentHeightPx);
+        return false;
+    }
+    return true;
+}
+
+int TrackLanesView::visibleRowIndexForTrackForDiagnostics(const TrackId tid) const noexcept
+{
+    for (int i = 0; i < (int) visibleTrackEntries_.size(); ++i)
+    {
+        if (visibleTrackEntries_[(size_t) i].sessionTrackId == tid)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int TrackLanesView::rowTopOffsetPxForTrackForDiagnostics(const TrackId tid) const noexcept
+{
+    int y = 0;
+    for (int i = 0; i < (int) visibleTrackEntries_.size(); ++i)
+    {
+        if (visibleTrackEntries_[(size_t) i].sessionTrackId == tid)
+        {
+            return y;
+        }
+        y += rowHeightForVisibleEntry(i);
+    }
+    return -1;
+}
+
+bool TrackLanesView::openHeaderContextMenuForStabilityTest(const TrackId tid)
+{
+    TrackHeaderView* header = nullptr;
+    if (const auto it = instrumentTimelineAttachments_.find(tid); it != instrumentTimelineAttachments_.end())
+    {
+        header = it->second.header;
+    }
+    if (header == nullptr)
+    {
+        if (const auto it = groupHeaders_.find(tid); it != groupHeaders_.end())
+        {
+            header = it->second.get();
+        }
+    }
+    if (header == nullptr)
+    {
+        const int si = audioLaneIndexFromTrackId(tid);
+        if (si >= 0 && si < (int) headers_.size())
+        {
+            header = headers_[(size_t) si].get();
+        }
+    }
+    if (header == nullptr || !header->isVisible() || header->getBounds().isEmpty())
+    {
+        return false;
+    }
+    return header->showContextMenuLikeRightClickForStabilityTest();
+}
+
 TrackLanesView::HeaderColumnResizeHandle::HeaderColumnResizeHandle(TrackLanesView& owner) noexcept
     : owner_(owner)
 {
@@ -681,6 +833,34 @@ void TrackLanesView::requestDeleteTrackForHeaderMenu(const TrackId tid) noexcept
     {
         onDeleteTrackRequested_(tid);
     }
+}
+
+void TrackLanesView::setOnDuplicateTrackRequested(
+    std::function<void(TrackId)> onDuplicateTrackRequested) noexcept
+{
+    onDuplicateTrackRequested_ = std::move(onDuplicateTrackRequested);
+}
+
+void TrackLanesView::requestDuplicateTrackForHeaderMenu(const TrackId tid) noexcept
+{
+    if (tid == kInvalidTrackId || isStructuralTimelineEditBlocked())
+    {
+        return;
+    }
+    if (onDuplicateTrackRequested_ != nullptr)
+    {
+        onDuplicateTrackRequested_(tid);
+    }
+}
+
+juce::PopupMenu::Item TrackLanesView::makeDuplicateTrackMenuItem(const int itemId, const bool editLocked)
+{
+    juce::PopupMenu::Item item;
+    item.itemID = itemId;
+    item.text = editLocked ? juce::String("Duplicate Track (stop playback first)")
+                           : juce::String("Duplicate Track");
+    item.isEnabled = !editLocked;
+    return item;
 }
 
 void TrackLanesView::setOnUndoableClipMoveRequested(
@@ -1273,6 +1453,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
 
             juce::PopupMenu menu;
             constexpr int kDeleteTrackMenuId = 1;
+            constexpr int kDuplicateTrackMenuId = 2;
             constexpr int kLoadVst3MenuId = 10;
             constexpr int kPluginEditorMenuId = 11;
             constexpr int kPluginParamsMenuId = 12;
@@ -1285,6 +1466,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             deleteItem.text = "Delete Track";
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
+            menu.addItem(makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
 
             if (onAudioTrackImportClipAtPlayhead_ != nullptr)
             {
@@ -1299,7 +1481,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             {
                 juce::PopupMenu::Item loadItem;
                 loadItem.itemID = kLoadVst3MenuId;
-                loadItem.text = "Load VST3…";
+                loadItem.text = juce::String(juce::CharPointer_UTF8("Load VST3\xe2\x80\xa6"));
                 loadItem.isEnabled = !editLocked;
                 menu.addItem(loadItem);
             }
@@ -1307,7 +1489,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             {
                 juce::PopupMenu::Item edItem;
                 edItem.itemID = kPluginEditorMenuId;
-                edItem.text = "Plugin editor…";
+                edItem.text = juce::String(juce::CharPointer_UTF8("Plugin editor\xe2\x80\xa6"));
                 edItem.isEnabled = !editLocked;
                 menu.addItem(edItem);
             }
@@ -1315,7 +1497,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
             {
                 juce::PopupMenu::Item parItem;
                 parItem.itemID = kPluginParamsMenuId;
-                parItem.text = "Plugin parameters…";
+                parItem.text = juce::String(juce::CharPointer_UTF8("Plugin parameters\xe2\x80\xa6"));
                 parItem.isEnabled = !editLocked;
                 menu.addItem(parItem);
             }
@@ -1337,6 +1519,7 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                  tid,
                  onDelete,
                  kDeleteTrackMenuId,
+                 kDuplicateTrackMenuId,
                  kImportAudioClipMenuId,
                  kLoadVst3MenuId,
                  kPluginEditorMenuId,
@@ -1353,6 +1536,11 @@ void TrackLanesView::rebuildChildLanesIfNeeded()
                             return;
                         }
                         onDelete(tid);
+                        return;
+                    }
+                    if (result == kDuplicateTrackMenuId)
+                    {
+                        requestDuplicateTrackForHeaderMenu(tid);
                         return;
                     }
                     if (result == kImportAudioClipMenuId)
@@ -1763,22 +1951,29 @@ void TrackLanesView::rebuildGroupHeadersIfNeeded()
 
             juce::PopupMenu menu;
             constexpr int kDeleteTrackMenuId = 1;
+            constexpr int kDuplicateTrackMenuId = 2;
             const bool editLocked = isStructuralTimelineEditBlocked();
             juce::PopupMenu::Item deleteItem;
             deleteItem.itemID = kDeleteTrackMenuId;
             deleteItem.text = "Delete Track";
             deleteItem.isEnabled = !editLocked;
             menu.addItem(deleteItem);
+            menu.addItem(makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
 
             juce::Component::SafePointer<TrackHeaderView> safeThis(&self);
             menu.showMenuAsync(
                 juce::PopupMenu::Options().withTargetComponent(&self),
-                [safeThis, this, onDelete, tid, kDeleteTrackMenuId](const int result) {
-                    if (safeThis == nullptr || result != kDeleteTrackMenuId)
+                [safeThis, this, onDelete, tid, kDeleteTrackMenuId, kDuplicateTrackMenuId](const int result) {
+                    if (safeThis == nullptr)
                     {
                         return;
                     }
-                    if (isStructuralTimelineEditBlocked())
+                    if (result == kDuplicateTrackMenuId)
+                    {
+                        requestDuplicateTrackForHeaderMenu(tid);
+                        return;
+                    }
+                    if (result != kDeleteTrackMenuId || isStructuralTimelineEditBlocked())
                     {
                         return;
                     }
@@ -1879,12 +2074,14 @@ void TrackLanesView::resized()
         {
             verticalScrollOffsetPx_ = 0;
         }
+        publishVerticalScrollModelIfChanged();
         return;
     }
 
     constexpr int gutter = kArrangementTimelineHeaderGutterPx;
     if (area.getHeight() <= gutter)
     {
+        publishVerticalScrollModelIfChanged();
         return;
     }
 
@@ -1992,6 +2189,49 @@ void TrackLanesView::resized()
     if (tw > 0)
     {
         timelineViewport_.clampToExtent((double)tw, session_.getArrangementExtentSamples());
+    }
+    publishVerticalScrollModelIfChanged();
+}
+
+TrackLanesView::VerticalScrollModel TrackLanesView::verticalScrollModel() const noexcept
+{
+    VerticalScrollModel m;
+    m.contentHeightPx = visibleTrackEntries_.empty() ? 0 : totalContentHeightPx();
+    m.viewportHeightPx = juce::jmax(0, getHeight() - kArrangementTimelineHeaderGutterPx);
+    m.offsetPx = juce::jlimit(0, m.maxOffsetPx(), verticalScrollOffsetPx_);
+    return m;
+}
+
+void TrackLanesView::scrollVerticallyToOffsetPx(const int offsetPx) noexcept
+{
+    if (visibleTrackEntries_.empty())
+    {
+        return;
+    }
+    const int clamped = juce::jlimit(0, maxVerticalScrollOffsetPx(), offsetPx);
+    if (clamped == verticalScrollOffsetPx_)
+    {
+        return;
+    }
+    setVerticalScrollOffsetPx(clamped);
+}
+
+void TrackLanesView::setOnVerticalScrollModelChanged(std::function<void()> fn) noexcept
+{
+    onVerticalScrollModelChanged_ = std::move(fn);
+}
+
+void TrackLanesView::publishVerticalScrollModelIfChanged() noexcept
+{
+    const VerticalScrollModel now = verticalScrollModel();
+    if (now == lastPublishedVerticalScrollModel_)
+    {
+        return;
+    }
+    lastPublishedVerticalScrollModel_ = now;
+    if (onVerticalScrollModelChanged_ != nullptr)
+    {
+        onVerticalScrollModelChanged_();
     }
 }
 

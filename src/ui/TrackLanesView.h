@@ -159,6 +159,19 @@ public:
     /// Appends one line per header to `report`; returns false with `failReason` on the first violation.
     [[nodiscard]] bool verifyHeaderColumnLayoutForDiagnostics(juce::String& report, juce::String& failReason) const;
 
+    /// [Stability] Vertical layout check: offset within range, every row at its model position,
+    /// header + lane of one row sharing y / height, scrolled-out rows collapsed, heights summing
+    /// to the model's content height. Appends a per-row report.
+    [[nodiscard]] bool verifyVerticalScrollLayoutForDiagnostics(juce::String& report, juce::String& failReason) const;
+    /// [Stability] Visible-row index of a track (-1 when absent) and its top offset in content px.
+    [[nodiscard]] int visibleRowIndexForTrackForDiagnostics(TrackId tid) const noexcept;
+    [[nodiscard]] int rowTopOffsetPxForTrackForDiagnostics(TrackId tid) const noexcept;
+    /// [Stability] Open the header context menu of a row like a right click (audio / group /
+    /// instrument / MIDI-content headers). False when the row has no laid-out header.
+    bool openHeaderContextMenuForStabilityTest(TrackId tid);
+    /// [Stability] Same setter the row-height drag ends in (clamped to the row's minimum / max).
+    void setTrackRowHeightPxForStabilityTest(const TrackId tid, const int heightPx) noexcept { setTrackRowHeightPx(tid, heightPx); }
+
     /// Height of the timeline row band shared with `TimelineRulerView` / transport layout (px).
     /// Track rows scroll only below this; the header-column gutter above the first row matches this.
     static constexpr int kArrangementTimelineHeaderGutterPx = 28;
@@ -183,6 +196,40 @@ public:
     void paintOverChildren(juce::Graphics& g) override;
     void mouseWheelMove(
         const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+
+    // -------------------------------------------------------------------------------------------
+    // Vertical scroll model (the ONE model behind the wheel, the arrangement scrollbar and the
+    // header + lane layout). Offsets are px of the row stack below the timeline gutter.
+    // -------------------------------------------------------------------------------------------
+    struct VerticalScrollModel
+    {
+        int contentHeightPx = 0;  ///< sum of the visible rows' heights (varying row heights included)
+        int viewportHeightPx = 0; ///< view height minus `kArrangementTimelineHeaderGutterPx`
+        int offsetPx = 0;         ///< current clamped offset (0 .. max(0, content - viewport))
+
+        [[nodiscard]] int maxOffsetPx() const noexcept { return juce::jmax(0, contentHeightPx - viewportHeightPx); }
+        [[nodiscard]] bool everythingFits() const noexcept { return contentHeightPx <= viewportHeightPx; }
+        [[nodiscard]] bool operator==(const VerticalScrollModel& o) const noexcept
+        {
+            return contentHeightPx == o.contentHeightPx && viewportHeightPx == o.viewportHeightPx
+                && offsetPx == o.offsetPx;
+        }
+    };
+
+    /// Current model as laid out by the last `resized()` (clamped).
+    [[nodiscard]] VerticalScrollModel verticalScrollModel() const noexcept;
+
+    /// Default (un-dragged) row height in px — the wheel scrolls by half of it per notch.
+    [[nodiscard]] int defaultRowHeightPx() const noexcept { return defaultRowHeightPx_; }
+
+    /// [Message thread] Scrollbar / external drive: same clamp and layout path as the wheel.
+    void scrollVerticallyToOffsetPx(int offsetPx) noexcept;
+
+    /// [Message thread] Fired (after layout) whenever content height, viewport height or offset
+    /// changed — resize, wheel, row-height drag, track add / duplicate / delete / undo / project
+    /// switch. Handlers must not call back into layout synchronously (sync a scrollbar with
+    /// `dontSendNotification`).
+    void setOnVerticalScrollModelChanged(std::function<void()> fn) noexcept;
 
     // [Message thread] `Main` can call this after `Session::addTrack` so a new `ClipWaveformView`
     // is created before layout without waiting for a user resize.
@@ -231,6 +278,18 @@ public:
 
     /// Same handler as wired by `setOnDeleteTrackRequested` (`Main` invokes from instrument-shell headers).
     void requestDeleteTrackForHeaderMenu(TrackId tid) noexcept;
+
+    // [Message thread] Wired once by `Main`: header context menu "Duplicate Track" invokes this with
+    // the clicked track id (explicit source, independent of the active track).
+    void setOnDuplicateTrackRequested(std::function<void(TrackId)> onDuplicateTrackRequested) noexcept;
+
+    /// Same handler as wired by `setOnDuplicateTrackRequested`; refused while structural edits are
+    /// blocked (recording / count-in / playing / project load). Used by every header menu.
+    void requestDuplicateTrackForHeaderMenu(TrackId tid) noexcept;
+
+    /// The "Duplicate Track" item every header menu shows right after "Delete Track" (the item text
+    /// states why it is unavailable while playing / recording / loading).
+    [[nodiscard]] static juce::PopupMenu::Item makeDuplicateTrackMenuItem(int itemId, bool editLocked);
 
     // [Message thread] Wired once by `Main`: header context menu VST3 / editor / remove (optional).
     void setTrackHeaderPluginHost(TrackHeaderPluginHost host) noexcept;
@@ -443,6 +502,9 @@ private:
     int defaultRowHeightPx_ = 96;
     int maxRowHeightPx_ = 480;
     int verticalScrollOffsetPx_ = 0;
+    VerticalScrollModel lastPublishedVerticalScrollModel_{};
+    std::function<void()> onVerticalScrollModelChanged_;
+    void publishVerticalScrollModelIfChanged() noexcept;
 
     int trackHeaderColumnWidthPx_ = kTrackHeaderColumnDefaultWidthPx;
     HeaderColumnResizeHandle headerColumnResizeHandle_{ *this };
@@ -487,6 +549,7 @@ private:
 
     TrackHeaderPluginHost trackHeaderPluginHost_{};
     std::function<void(TrackId)> onDeleteTrackRequested_;
+    std::function<void(TrackId)> onDuplicateTrackRequested_;
     std::function<bool(TrackId)> isTrackInputMonitoredFn_;
     std::function<void(TrackId)> toggleTrackInputMonitorFn_;
     std::function<bool(PlacedClipId, std::int64_t, std::optional<TrackId>)> onUndoableClipMoveRequested_;

@@ -388,7 +388,10 @@ void testSerialVsParallelIdentical()
     std::printf("\n-- serial vs parallel: identical output, one processBlock per host per block --\n");
     instrument_render::setConfiguredWorkerCountOverride(4);
     constexpr int kBlocks = 48;
-    constexpr int kBusy = 20000; // ≈ tens of µs per instance → summed work above the pool threshold
+    // ≈ 100+ µs per instance on a fast core (dependent FP chain, ~4 cycles / iteration), so the
+    // seven live rows sum to several times `kMinParallelWorkMicros` (300 µs) regardless of the
+    // CPU's clock state — 20000 iterations sat right at the threshold and made this check flaky.
+    constexpr int kBusy = 120000;
 
     Harness a;
     a.buildStandardSession(kBusy);

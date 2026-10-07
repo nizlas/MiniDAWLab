@@ -2028,12 +2028,14 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         constexpr int kDeleteTrackMenuId = 1;
         constexpr int kImportMidiFileMenuId = 3;
         constexpr int kRescanDescriptionsMenuId = 2;
+        constexpr int kDuplicateTrackMenuId = 4;
         const bool editLocked = trackLanes_.isStructuralTimelineEditBlocked();
         juce::PopupMenu::Item deleteItem;
         deleteItem.itemID = kDeleteTrackMenuId;
         deleteItem.text = "Delete Track";
         deleteItem.isEnabled = !editLocked;
         menu.addItem(deleteItem);
+        menu.addItem(TrackLanesView::makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
         juce::PopupMenu::Item importMidiItem;
         importMidiItem.itemID = kImportMidiFileMenuId;
         importMidiItem.text = "Import MIDI file...";
@@ -2054,6 +2056,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             [safeLanes,
              laneTid,
              kDeleteTrackMenuId,
+             kDuplicateTrackMenuId,
              kImportMidiFileMenuId,
              kRescanDescriptionsMenuId,
              rescan,
@@ -2065,6 +2068,11 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
                 if (result == kDeleteTrackMenuId)
                 {
                     safeLanes->requestDeleteTrackForHeaderMenu(laneTid);
+                    return;
+                }
+                if (result == kDuplicateTrackMenuId)
+                {
+                    safeLanes->requestDuplicateTrackForHeaderMenu(laneTid);
                     return;
                 }
                 if (result == kImportMidiFileMenuId)

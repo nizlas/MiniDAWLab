@@ -711,6 +711,83 @@ std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackAdded(
             previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
 }
 
+std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackDuplicated(
+    const SessionSnapshot& previous,
+    const TrackId sourceTrackId,
+    const TrackId newTrackId,
+    juce::String newTrackName,
+    const PlacedClipId firstNewClipId,
+    int& outClipIdsUsed) noexcept
+{
+    outClipIdsUsed = 0;
+    if (sourceTrackId == kInvalidTrackId || newTrackId == kInvalidTrackId || sourceTrackId == newTrackId
+        || firstNewClipId == kInvalidPlacedClipId)
+    {
+        return nullptr;
+    }
+    const int srcIx = previous.findTrackIndexById(sourceTrackId);
+    if (srcIx < 0 || previous.findTrackIndexById(newTrackId) >= 0)
+    {
+        return nullptr;
+    }
+    const Track& src = previous.getTrack(srcIx);
+    if (src.getKind() == TrackKind::Master)
+    {
+        return nullptr;
+    }
+
+    // Clips: same immutable material, same placement / trims / window / name, new ids.
+    std::vector<PlacedClip> clips;
+    clips.reserve(src.getPlacedClips().size());
+    PlacedClipId nextId = firstNewClipId;
+    for (const PlacedClip& c : src.getPlacedClips())
+    {
+        clips.push_back(c.withId(nextId++));
+        ++outClipIdsUsed;
+    }
+
+    // Row: the fresh-row constructor lists every constructor field explicitly; the fields the
+    // constructor does not take (pre-gain, input assignments) travel through the same COW helpers
+    // project load uses, so a new persistent field cannot be dropped silently here either.
+    Track copy(newTrackId,
+               std::move(newTrackName),
+               std::move(clips),
+               src.getChannelFaderGain(),
+               src.isTrackOff(),
+               src.isMuted(),
+               src.getKind(),
+               src.getStereoPan(),
+               src.getRoutedOutputTrackId(),
+               src.getSends(),
+               src.getMidiOutputChannel(),
+               src.getMidiDestinationTrackId());
+    copy = copy.withPreGainDb(src.getPreGainDb());
+    copy = copy.withInputAssignment(src.getInputAssignment());
+    copy = copy.withMidiInputAssignment(src.getMidiInputAssignment());
+
+    std::vector<Track> out;
+    out.reserve((size_t)previous.getNumTracks() + 1U);
+    for (int i = 0; i < previous.getNumTracks(); ++i)
+    {
+        out.push_back(duplicateTrackSameClips(previous.getTrack(i)));
+        if (i == srcIx)
+        {
+            out.push_back(copy); // directly below the source
+        }
+    }
+    ensureMasterTrackInvariant(out, kInvalidTrackId, nullptr);
+    const TrackId masterId = findLastMasterTrackId(out);
+    if (masterId != kInvalidTrackId)
+    {
+        session_routing::repairRoutingInPlace(out, masterId);
+        session_routing::repairSendsInPlace(out, masterId);
+    }
+    session_routing::repairMidiDestinationsInPlace(out);
+    return std::shared_ptr<const SessionSnapshot>(new SessionSnapshot{
+        std::move(out), previous.arrangementExtentSamples_,
+            previous.getLeftLocatorSamples(), previous.getRightLocatorSamples(), previous.getProjectMusicalTime()});
+}
+
 std::shared_ptr<const SessionSnapshot> SessionSnapshot::withTrackRemoved(
     const SessionSnapshot& previous,
     const TrackId removedTrackId) noexcept

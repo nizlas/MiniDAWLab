@@ -989,6 +989,33 @@ bool TrackHeaderView::clickArmCellLikeMouseForStabilityTest() { return clickStri
 bool TrackHeaderView::clickMuteCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Mute); }
 bool TrackHeaderView::clickPowerCellLikeMouseForStabilityTest() { return clickStripCellLikeMouse(TrackHeaderButtonKind::Power); }
 
+bool TrackHeaderView::showContextMenuLikeRightClickForStabilityTest()
+{
+    if (callbacks_.onShowContextMenu == nullptr)
+    {
+        return false;
+    }
+    const juce::Point<float> local = getLocalBounds().getCentre().toFloat();
+    const juce::Time now = juce::Time::getCurrentTime();
+    const juce::MouseEvent e(juce::Desktop::getInstance().getMainMouseSource(),
+                             local,
+                             juce::ModifierKeys(juce::ModifierKeys::rightButtonModifier | juce::ModifierKeys::popupMenuClickModifier),
+                             juce::MouseInputSource::defaultPressure,
+                             juce::MouseInputSource::defaultOrientation,
+                             juce::MouseInputSource::defaultRotation,
+                             juce::MouseInputSource::defaultTiltX,
+                             juce::MouseInputSource::defaultTiltY,
+                             this,
+                             this,
+                             now,
+                             local,
+                             now,
+                             1,
+                             false);
+    mouseDown(e);
+    return true;
+}
+
 void TrackHeaderView::mouseDown(juce::MouseEvent const& e)
 {
     if (e.mods.isPopupMenu())

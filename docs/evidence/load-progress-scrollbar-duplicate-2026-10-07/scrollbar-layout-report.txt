@@ -1,0 +1,64 @@
+vertical scroll: content=1416 viewport=1012 offset=404 max=404 rows=14 fits=0
+  row 0 audio track 1 h=96 expectedY=-376 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 1 instrument track 3 h=96 expectedY=-280 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 2 audio track 4 h=170 expectedY=-184 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 3 audio track 10 h=60 expectedY=-14 visible=0 28 1113 18 header=0 28 149 18 lane=149 28 964 18
+  row 4 instrument track 5 h=130 expectedY=46 visible=0 46 1113 130 header=0 46 149 130 lane=149 46 964 130
+  row 5 instrument track 11 h=96 expectedY=176 visible=0 176 1113 96 header=0 176 149 96 lane=149 176 964 96
+  row 6 instrument track 7 h=96 expectedY=272 visible=0 272 1113 96 header=0 272 149 96 lane=149 272 964 96
+  row 7 instrument track 8 h=96 expectedY=368 visible=0 368 1113 96 header=0 368 149 96 lane=149 368 964 96
+  row 8 group track 9 h=96 expectedY=464 visible=0 464 1113 96 header=0 464 149 96
+  row 9 group track 15 h=96 expectedY=560 visible=0 560 1113 96 header=0 560 149 96
+  row 10 group track 14 h=96 expectedY=656 visible=0 656 1113 96 header=0 656 149 96
+  row 11 instrument track 12 h=96 expectedY=752 visible=0 752 1113 96 header=0 752 149 96 lane=149 752 964 96
+  row 12 instrument track 13 h=96 expectedY=848 visible=0 848 1113 96 header=0 848 149 96 lane=149 848 964 96
+  row 13 master track 2 h=96 expectedY=944 visible=0 944 1113 96 header=0 944 149 96
+scrollbar visible=1 bounds=1281 86 14 1012 rangeStart=404 rangeSize=1012 limit=1416 | lanes content=1416 viewport=1012 offset=404 max=404 lanesBounds=168 58 1113 1040
+vertical scroll: content=1416 viewport=1012 offset=10 max=404 rows=14 fits=0
+  row 0 audio track 1 h=96 expectedY=18 visible=0 28 1113 86 header=0 28 149 86 lane=149 28 964 86
+  row 1 instrument track 3 h=96 expectedY=114 visible=0 114 1113 96 header=0 114 149 96 lane=149 114 964 96
+  row 2 audio track 4 h=170 expectedY=210 visible=0 210 1113 170 header=0 210 149 170 lane=149 210 964 170
+  row 3 audio track 10 h=60 expectedY=380 visible=0 380 1113 60 header=0 380 149 60 lane=149 380 964 60
+  row 4 instrument track 5 h=130 expectedY=440 visible=0 440 1113 130 header=0 440 149 130 lane=149 440 964 130
+  row 5 instrument track 11 h=96 expectedY=570 visible=0 570 1113 96 header=0 570 149 96 lane=149 570 964 96
+  row 6 instrument track 7 h=96 expectedY=666 visible=0 666 1113 96 header=0 666 149 96 lane=149 666 964 96
+  row 7 instrument track 8 h=96 expectedY=762 visible=0 762 1113 96 header=0 762 149 96 lane=149 762 964 96
+  row 8 group track 9 h=96 expectedY=858 visible=0 858 1113 96 header=0 858 149 96
+  row 9 group track 15 h=96 expectedY=954 visible=0 954 1113 86 header=0 954 149 86
+  row 10 group track 14 h=96 expectedY=1050 visible=0 0 0 0 header=0 0 0 0
+  row 11 instrument track 12 h=96 expectedY=1146 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 12 instrument track 13 h=96 expectedY=1242 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 13 master track 2 h=96 expectedY=1338 visible=0 0 0 0 header=0 0 0 0
+scrollbar visible=1 bounds=1281 86 14 1012 rangeStart=10 rangeSize=1012 limit=1416 | lanes content=1416 viewport=1012 offset=10 max=404 lanesBounds=168 58 1113 1040
+vertical scroll: content=1416 viewport=1012 offset=0 max=404 rows=14 fits=0
+  row 0 audio track 1 h=96 expectedY=28 visible=0 28 1113 96 header=0 28 149 96 lane=149 28 964 96
+  row 1 instrument track 3 h=96 expectedY=124 visible=0 124 1113 96 header=0 124 149 96 lane=149 124 964 96
+  row 2 audio track 4 h=170 expectedY=220 visible=0 220 1113 170 header=0 220 149 170 lane=149 220 964 170
+  row 3 audio track 10 h=60 expectedY=390 visible=0 390 1113 60 header=0 390 149 60 lane=149 390 964 60
+  row 4 instrument track 5 h=130 expectedY=450 visible=0 450 1113 130 header=0 450 149 130 lane=149 450 964 130
+  row 5 instrument track 11 h=96 expectedY=580 visible=0 580 1113 96 header=0 580 149 96 lane=149 580 964 96
+  row 6 instrument track 7 h=96 expectedY=676 visible=0 676 1113 96 header=0 676 149 96 lane=149 676 964 96
+  row 7 instrument track 8 h=96 expectedY=772 visible=0 772 1113 96 header=0 772 149 96 lane=149 772 964 96
+  row 8 group track 9 h=96 expectedY=868 visible=0 868 1113 96 header=0 868 149 96
+  row 9 group track 15 h=96 expectedY=964 visible=0 964 1113 76 header=0 964 149 76
+  row 10 group track 14 h=96 expectedY=1060 visible=0 0 0 0 header=0 0 0 0
+  row 11 instrument track 12 h=96 expectedY=1156 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 12 instrument track 13 h=96 expectedY=1252 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 13 master track 2 h=96 expectedY=1348 visible=0 0 0 0 header=0 0 0 0
+scrollbar visible=1 bounds=1281 86 14 1012 rangeStart=0 rangeSize=1012 limit=1416 | lanes content=1416 viewport=1012 offset=0 max=404 lanesBounds=168 58 1113 1040
+vertical scroll: content=1416 viewport=1012 offset=362 max=404 rows=14 fits=0
+  row 0 audio track 1 h=96 expectedY=-334 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 1 instrument track 3 h=96 expectedY=-238 visible=0 0 0 0 header=0 0 0 0 lane=0 0 0 0
+  row 2 audio track 4 h=170 expectedY=-142 visible=0 28 1113 0 header=0 0 0 0 lane=0 0 0 0
+  row 3 audio track 10 h=60 expectedY=28 visible=0 28 1113 60 header=0 28 149 60 lane=149 28 964 60
+  row 4 instrument track 5 h=130 expectedY=88 visible=0 88 1113 130 header=0 88 149 130 lane=149 88 964 130
+  row 5 instrument track 11 h=96 expectedY=218 visible=0 218 1113 96 header=0 218 149 96 lane=149 218 964 96
+  row 6 instrument track 7 h=96 expectedY=314 visible=0 314 1113 96 header=0 314 149 96 lane=149 314 964 96
+  row 7 instrument track 8 h=96 expectedY=410 visible=0 410 1113 96 header=0 410 149 96 lane=149 410 964 96
+  row 8 group track 9 h=96 expectedY=506 visible=0 506 1113 96 header=0 506 149 96
+  row 9 group track 15 h=96 expectedY=602 visible=0 602 1113 96 header=0 602 149 96
+  row 10 group track 14 h=96 expectedY=698 visible=0 698 1113 96 header=0 698 149 96
+  row 11 instrument track 12 h=96 expectedY=794 visible=0 794 1113 96 header=0 794 149 96 lane=149 794 964 96
+  row 12 instrument track 13 h=96 expectedY=890 visible=0 890 1113 96 header=0 890 149 96 lane=149 890 964 96
+  row 13 master track 2 h=96 expectedY=986 visible=0 986 1113 54 header=0 986 149 54
+scrollbar visible=1 bounds=1281 86 14 1012 rangeStart=362 rangeSize=1012 limit=1416 | lanes content=1416 viewport=1012 offset=362 max=404 lanesBounds=168 58 1113 1040

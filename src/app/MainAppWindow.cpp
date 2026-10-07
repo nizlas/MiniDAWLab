@@ -437,6 +437,7 @@ public:
                     recordingCoordinator_->stopRecordingAndCommitFromUi(sourceContext);
                 },
                 [this]() { recordingCoordinator_->cancelCountIn(); },
+                [this]() { return isProjectLoadInProgress(); },
             });
 
         undoRedoCoordinator_ = std::make_unique<UndoRedoCoordinator>(
@@ -545,6 +546,7 @@ public:
                         trackLanesEditCoordinator_->redoTeardownDeletedInstrumentTrack(tid);
                     }
                 },
+                [this] { return isProjectLoadInProgress(); },
             });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
@@ -837,6 +839,10 @@ public:
                     }
                 },
             });
+        recordingCoordinator_->setRecordStartBlockedPredicate([this]() -> juce::String {
+            return isProjectLoadInProgress() ? juce::String("A project is still opening. Wait until it has finished loading.")
+                                             : juce::String();
+        });
         recordingCoordinator_->setLiveMidiTakeCallbacks(
             [this] { return liveMidiInputCoordinator_->armedTracksReadyToRecord(); },
             [this]() -> juce::StringArray {
@@ -1689,16 +1695,19 @@ public:
                    && instrumentRuntimeCoordinator_->isSecondaryTransportActive(tid);
         });
         trackLanesView.setStructuralTimelineEditBlockedPredicate([this]() {
-            // Power / delete / inserts are not realtime-safe paths: blocked while Playing (not mute).
+            // Power / delete / duplicate / inserts are not realtime-safe paths: blocked while
+            // Playing (not mute) and while a staged project load owns the session.
             return anyRecordingInProgress()
                    || (recordingCoordinator_ != nullptr
                        && recordingCoordinator_->isCountInActive())
-                   || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing;
+                   || transport.readPlaybackIntentForUi() == PlaybackIntent::Playing
+                   || isProjectLoadInProgress();
         });
         trackLanesView.setInstrumentMidiClipMoveBlockedPredicate([this]() {
             return anyRecordingInProgress()
                    || (recordingCoordinator_ != nullptr
-                       && recordingCoordinator_->isCountInActive());
+                       && recordingCoordinator_->isCountInActive())
+                   || isProjectLoadInProgress();
         });
         trackLanesView.setArrangementTimelineSnapFunction(
             [this](std::int64_t s) noexcept { return snapArrangementTimelineSample(s); });
@@ -1728,6 +1737,10 @@ public:
             }
         });
         addTrackCornerPlusButton_.onClick = [this] {
+            if (isProjectLoadInProgress())
+            {
+                return; // the staged load owns the session until finalize
+            }
             juce::PopupMenu menu;
             menu.addItem(1, "Add Audio Track");
             menu.addItem(3, "Add Group Track");
@@ -1759,7 +1772,7 @@ public:
             menu.showMenuAsync(
                 juce::PopupMenu::Options().withTargetComponent(&addTrackCornerPlusButton_),
                 [safeThis](int result) {
-                    if (safeThis == nullptr || result == 0)
+                    if (safeThis == nullptr || result == 0 || safeThis->isProjectLoadInProgress())
                     {
                         return;
                     }
@@ -2053,6 +2066,8 @@ public:
                 [this](const juce::File& projectFolder) {
                     rehomeProxyAssetsIntoFolder(projectFolder);
                 },
+                // Staged load: centre the progress window over the main window.
+                [this]() -> juce::Component* { return getTopLevelComponent(); },
             });
 
         // Stability C5: app-level states that must block a periodic autosave tick. Everything
@@ -2151,6 +2166,18 @@ public:
                 }
             });
         addAndMakeVisible(*lanePlayheadOverlay_);
+        // Vertical arrangement scrollbar: a plain view onto the lanes view's ONE vertical scroll
+        // model (the wheel, header + lane layout and this bar share `verticalScrollOffsetPx_`).
+        // Range = real content height from the laid-out rows (varying heights included); the bar
+        // auto-hides when everything fits. Thumb drags / trough clicks / arrow steps feed back
+        // through the same clamp path the wheel uses; model changes (resize, track add /
+        // duplicate / delete / undo, project switch, row-height drags) re-sync the bar silently.
+        arrangementVerticalScrollBar_.setAutoHide(true);
+        arrangementVerticalScrollBar_.setSingleStepSize(32.0);
+        arrangementVerticalScrollBar_.addListener(&arrangementVerticalScrollBarListener_);
+        trackLanesView.setOnVerticalScrollModelChanged([this] { syncArrangementVerticalScrollBarFromLanes(); });
+        addAndMakeVisible(arrangementVerticalScrollBar_);
+        syncArrangementVerticalScrollBarFromLanes();
         refreshInstrumentUi();
         addAndMakeVisible(inspectorCollapsedKnob_);
         inspectorCollapsedKnob_.setVisible(false);
@@ -2323,6 +2350,8 @@ public:
 
     ~TransportControlsContent() override
     {
+        arrangementVerticalScrollBar_.removeListener(&arrangementVerticalScrollBarListener_);
+        trackLanesView.setOnVerticalScrollModelChanged(nullptr);
         // P1J shutdown: bounded cancel + worker join + staging cleanup BEFORE the render
         // scheduler/engine teardown (the preparation may own in-flight render requests).
         portablePreparationWindow_.reset();
@@ -2434,9 +2463,17 @@ public:
     void invokeCopySelectedClipFromWindowShortcut() override;
     void invokePasteClipFromWindowShortcut() override;
 
+    /// [Message thread] True while the staged project load owns the session (see
+    /// `ProjectIoCoordinator::isLoadInProgress`): structural edits, undo / redo, save, transport
+    /// start and track creation are refused until finalize released the gates.
+    [[nodiscard]] bool isProjectLoadInProgress() const noexcept
+    {
+        return projectIoCoordinator_ != nullptr && projectIoCoordinator_->isLoadInProgress();
+    }
+
     void invokeUndoFromWindowShortcut() override
     {
-        if (undoRedoCoordinator_ != nullptr)
+        if (undoRedoCoordinator_ != nullptr && !isProjectLoadInProgress())
         {
             undoRedoCoordinator_->invokeUndoFromWindowShortcut();
         }
@@ -2444,7 +2481,7 @@ public:
 
     void invokeRedoFromWindowShortcut() override
     {
-        if (undoRedoCoordinator_ != nullptr)
+        if (undoRedoCoordinator_ != nullptr && !isProjectLoadInProgress())
         {
             undoRedoCoordinator_->invokeRedoFromWindowShortcut();
         }
@@ -2454,7 +2491,7 @@ public:
     {
         if (projectIoCoordinator_ != nullptr)
         {
-            projectIoCoordinator_->saveProject();
+            projectIoCoordinator_->saveProject(); // refuses by itself while a load is in progress
         }
     }
 
@@ -4022,6 +4059,7 @@ public:
 
         installMixerStabilityHooks(hooks);
         installPerfProfileStabilityHooks(hooks);
+        installLoadProgressAndDuplicateTrackStabilityHooks(hooks);
 
         hooks.captureArrangementPng = [this](const juce::File& png) -> bool {
             const juce::Image img = createComponentSnapshot(getLocalBounds(), true, 1.0f);
@@ -5586,7 +5624,36 @@ public:
             inspectorResizeSplitter_,
             inspectorCollapsedKnob_,
             lanePlayheadOverlay_.get(),
+            &arrangementVerticalScrollBar_,
         });
+    }
+
+    /// Scrollbar <- lanes model, without notification (the bar never drives layout from here).
+    void syncArrangementVerticalScrollBarFromLanes()
+    {
+        const TrackLanesView::VerticalScrollModel m = trackLanesView.verticalScrollModel();
+        arrangementVerticalScrollBar_.setRangeLimits(0.0, (double) juce::jmax(m.contentHeightPx, m.viewportHeightPx),
+                                                     juce::dontSendNotification);
+        arrangementVerticalScrollBar_.setCurrentRange((double) m.offsetPx, (double) m.viewportHeightPx,
+                                                      juce::dontSendNotification);
+        // Page-wise trough clicks move by most of a viewport (one row of overlap for orientation).
+        arrangementVerticalScrollBar_.setSingleStepSize((double) juce::jmax(16, trackLanesView.defaultRowHeightPx() / 2));
+    }
+
+    /// Diagnostics / scenario hook: the bar's current geometry vs the lanes' model.
+    [[nodiscard]] juce::String arrangementVerticalScrollBarDiagnostics() const
+    {
+        const TrackLanesView::VerticalScrollModel m = trackLanesView.verticalScrollModel();
+        juce::String s;
+        s << "scrollbar visible=" << (arrangementVerticalScrollBar_.isVisible() ? 1 : 0)
+          << " bounds=" << arrangementVerticalScrollBar_.getBounds().toString()
+          << " rangeStart=" << (int) std::lround(arrangementVerticalScrollBar_.getCurrentRangeStart())
+          << " rangeSize=" << (int) std::lround(arrangementVerticalScrollBar_.getCurrentRangeSize())
+          << " limit=" << (int) std::lround(arrangementVerticalScrollBar_.getMaximumRangeLimit())
+          << " | lanes content=" << m.contentHeightPx << " viewport=" << m.viewportHeightPx
+          << " offset=" << m.offsetPx << " max=" << m.maxOffsetPx()
+          << " lanesBounds=" << trackLanesView.getBounds().toString();
+        return s;
     }
 
 private:
@@ -5933,6 +6000,10 @@ private:
     /// runs the same post-add UI sync as every other add-track entry.
     std::optional<TrackId> addMidiTrackFromUi()
     {
+        if (isProjectLoadInProgress())
+        {
+            return std::nullopt; // the staged load owns the session until finalize
+        }
         const std::optional<TrackId> newMidiId = session.addMidiTrack();
         if (newMidiId.has_value() && instrumentRuntimeCoordinator_ != nullptr)
         {
@@ -6460,6 +6531,395 @@ private:
     }
 
     /// [Message thread] `--stability-mixer` hooks: every one drives the REAL window / strips.
+    /// [Message thread] `--stability-load-progress` + `--stability-duplicate-track` hooks. Every
+    /// hook drives the production path the user's control ends in (staged loader, header-menu
+    /// duplicate command, the Session setters, the real ScrollBar) or reads existing diagnostics.
+    void installLoadProgressAndDuplicateTrackStabilityHooks(StabilityRunnerHooks& hooks)
+    {
+        auto& L = hooks.load;
+        L.beginInteractiveLoad = [this](const juce::File& f) {
+            if (projectIoCoordinator_ != nullptr)
+            {
+                projectIoCoordinator_->loadProjectFromFile(f, ProjectIoCoordinator::LoadDrive::Interactive);
+            }
+        };
+        L.isLoadInProgress = [this] { return isProjectLoadInProgress(); };
+        L.progressText = [this]() -> juce::String {
+            return projectIoCoordinator_ != nullptr ? projectIoCoordinator_->loadProgressTextForDiagnostics() : juce::String();
+        };
+        L.captureProgressWindowPng = [this](const juce::File& png) -> bool {
+            return projectIoCoordinator_ != nullptr && projectIoCoordinator_->captureLoadProgressWindowPng(png);
+        };
+        L.togglePlayLikeButton = [this] {
+            if (transportPlayPauseStopController_ != nullptr)
+            {
+                transportPlayPauseStopController_->togglePlayPauseFromUi();
+            }
+        };
+        L.isTransportPlaying = [this] { return transport.readPlaybackIntentForUi() == PlaybackIntent::Playing; };
+        L.addAudioTrackLikeUi = [this]() -> std::optional<TrackId> {
+            // Same guard + calls as the "+" corner menu's "Add Audio Track".
+            if (isProjectLoadInProgress())
+            {
+                return std::nullopt;
+            }
+            session.addTrack();
+            syncViewportFromSession();
+            trackLanesView.syncTracksFromSession();
+            inspectorView_.refreshFromSession();
+            return session.getActiveTrackId();
+        };
+        L.isStructuralEditBlocked = [this] { return trackLanesView.isStructuralTimelineEditBlocked(); };
+        L.tailProjectLoadDiagnosticLog = [](const int maxLines) -> juce::StringArray {
+            const juce::File log = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                       .getChildFile("MiniDAWLab")
+                                       .getChildFile("project-load-diag.log");
+            juce::StringArray all;
+            if (log.existsAsFile())
+            {
+                all.addLines(log.loadFileAsString());
+            }
+            juce::StringArray tail;
+            for (int i = juce::jmax(0, all.size() - maxLines); i < all.size(); ++i)
+            {
+                tail.add(all[i]);
+            }
+            return tail;
+        };
+
+        auto& D = hooks.dup;
+        D.duplicateTrackLikeMenu = [this](const TrackId tid) -> TrackId {
+            if (trackLanesEditCoordinator_ == nullptr)
+            {
+                return kInvalidTrackId;
+            }
+            const std::optional<TrackId> id = trackLanesEditCoordinator_->duplicateTrack(tid);
+            return id.has_value() ? *id : kInvalidTrackId;
+        };
+        const auto describeRow = [this](const TrackId tid, const bool withIdentity) -> juce::String {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            const int idx = snap != nullptr ? snap->findTrackIndexById(tid) : -1;
+            if (idx < 0)
+            {
+                return "track " + juce::String((juce::int64) tid) + ": not in snapshot";
+            }
+            const Track& tr = snap->getTrack(idx);
+            juce::String kind;
+            switch (tr.getKind())
+            {
+                case TrackKind::Audio: kind = "audio"; break;
+                case TrackKind::Instrument: kind = "instrument"; break;
+                case TrackKind::Group: kind = "group"; break;
+                case TrackKind::Master: kind = "master"; break;
+                case TrackKind::Midi: kind = "midi"; break;
+            }
+            juce::String s;
+            if (withIdentity)
+            {
+                s << "id=" << juce::String((juce::int64) tid) << " index=" << idx << " name=\"" << tr.getName() << "\" ";
+            }
+            s << "kind=" << kind << " fader=" << juce::String(tr.getChannelFaderGain(), 4)
+              << " preGainDb=" << juce::String(tr.getPreGainDb(), 2) << " pan=" << juce::String(tr.getStereoPan(), 3)
+              << " muted=" << (tr.isMuted() ? 1 : 0) << " off=" << (tr.isTrackOff() ? 1 : 0)
+              << " output=" << juce::String((juce::int64) tr.getRoutedOutputTrackId())
+              << " midiTo=" << juce::String((juce::int64) tr.getMidiDestinationTrackId())
+              << " midiOutCh=" << tr.getMidiOutputChannel();
+            s << " sends=[";
+            for (const TrackSend& snd : tr.getSends())
+            {
+                s << "(slot" << snd.uiSlotIndex << " dest=" << juce::String((juce::int64) snd.destTrackId)
+                  << " amt=" << juce::String(snd.amountLinear, 4) << " on=" << (snd.enabled ? 1 : 0) << ")";
+            }
+            s << "]";
+            const TrackInputAssignment& in = tr.getInputAssignment();
+            s << " input=(kind=" << (int) in.kind << " chA=" << in.physicalChannelA << " chB=" << in.physicalChannelB << ")";
+            const TrackMidiInputAssignment& min = tr.getMidiInputAssignment();
+            s << " midiInput=(mode=" << (int) min.mode << " ch=" << min.channelFilter << " dev=\"" << min.deviceName << "\")";
+            s << " clips=[";
+            for (const PlacedClip& c : tr.getPlacedClips())
+            {
+                s << "(";
+                if (withIdentity)
+                {
+                    s << "id=" << juce::String((juce::int64) c.getId()) << " ";
+                }
+                s << "start=" << juce::String((juce::int64) c.getStartSample())
+                  << " len=" << juce::String((juce::int64) c.getEffectiveLengthSamples())
+                  << " leftTrim=" << juce::String((juce::int64) c.getLeftTrimSamples())
+                  << " window=" << juce::String((juce::int64) c.getMaterialWindowStartSamples()) << ".."
+                  << juce::String((juce::int64) c.getMaterialWindowEndExclusiveSamples())
+                  << " material=0x" << (c.getMaterial() != nullptr ? juce::String::toHexString((juce::int64) (std::intptr_t) c.getMaterial().get()) : juce::String("0"))
+                  << ")";
+            }
+            s << "]";
+            return s;
+        };
+        D.describeSessionRow = [describeRow](const TrackId tid) { return describeRow(tid, true); };
+        D.describeSessionRowWithoutIdentity = [describeRow](const TrackId tid) { return describeRow(tid, false); };
+        D.insertChainDigest = [this](const TrackId tid) -> juce::String {
+            if (!pluginHost_.hasAnyInsertOnTrack(tid))
+            {
+                return {};
+            }
+            // "identity=<sha> state=<sha> sizes=<n,n,..> slots=N": identity covers stage / order /
+            // path / identifier (must match on a copy); the state digest is byte-exact (retained
+            // placeholder bytes must match; a LIVE plug-in may legitimately re-serialize its state
+            // after a restore, so the runner compares that part only for placeholders).
+            const PluginTrackChain chain = pluginHost_.exportChain(tid);
+            juce::MemoryOutputStream identityInput;
+            juce::MemoryOutputStream stateInput;
+            juce::String sizes;
+            int i = 0;
+            for (const PluginInsertDescriptor& slot : chain.slots)
+            {
+                identityInput << i << "|" << (slot.stage == InsertStage::Pre ? "pre" : "post") << "|"
+                              << (slot.occupied ? 1 : 0) << "|" << slot.vst3AbsolutePath << "|" << slot.pluginIdentifier << "\n";
+                stateInput << i << "|" << (int) slot.opaqueState.getSize() << "|";
+                stateInput.write(slot.opaqueState.getData(), slot.opaqueState.getSize());
+                stateInput << "\n";
+                sizes << (i > 0 ? "," : "") << (int) slot.opaqueState.getSize();
+                ++i;
+            }
+            const juce::MemoryBlock idBytes = identityInput.getMemoryBlock();
+            const juce::MemoryBlock stBytes = stateInput.getMemoryBlock();
+            return "identity=" + juce::SHA256(idBytes.getData(), idBytes.getSize()).toHexString().substring(0, 16)
+                   + " state=" + juce::SHA256(stBytes.getData(), stBytes.getSize()).toHexString().substring(0, 16)
+                   + " sizes=" + sizes + " slots=" + juce::String((int) chain.slots.size());
+        };
+        D.insertInstancePointers = [this](const TrackId tid) -> juce::String {
+            juce::String s;
+            for (const auto& [chainTid, ptrs] : pluginHost_.exportChainInstancePointersForDiagnostics())
+            {
+                if (chainTid != tid)
+                {
+                    continue;
+                }
+                for (const void* p : ptrs)
+                {
+                    s << (s.isEmpty() ? "" : " ") << "0x" << juce::String::toHexString((juce::int64) (std::intptr_t) p);
+                }
+            }
+            return s;
+        };
+        D.setInsertParam0 = [this](const TrackId tid, const int i, const float v) -> bool {
+            juce::AudioPluginInstance* const inst = pluginHost_.liveInstanceAtChainIndexForDiagnostics(tid, i);
+            if (inst == nullptr || inst->getParameters().isEmpty())
+            {
+                return false;
+            }
+            inst->getParameters()[0]->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, v));
+            return true;
+        };
+        D.getInsertParam0 = [this](const TrackId tid, const int i) -> float {
+            juce::AudioPluginInstance* const inst = pluginHost_.liveInstanceAtChainIndexForDiagnostics(tid, i);
+            if (inst == nullptr || inst->getParameters().isEmpty())
+            {
+                return std::numeric_limits<float>::quiet_NaN();
+            }
+            return inst->getParameters()[0]->getValue();
+        };
+        D.addUnavailablePlaceholderInsert = [this](const TrackId tid, juce::String& failReason) -> bool {
+            PluginTrackChain chain = pluginHost_.hasAnyInsertOnTrack(tid) ? pluginHost_.exportChain(tid) : PluginTrackChain{};
+            PluginInsertDescriptor slot;
+            slot.stage = InsertStage::Post;
+            slot.occupied = true;
+            slot.vst3AbsolutePath = "C:\\Program Files\\Common Files\\VST3\\DAL-NotInstalled-Test.vst3";
+            slot.pluginIdentifier = "VST3-NotInstalled Test FX-0badc0de-4242"; // "<format>-<name>-<hash>-<uid>"
+            const char payload[] = "dal-placeholder-state-bytes-1234567890";
+            slot.opaqueState.replaceAll(payload, sizeof(payload));
+            chain.slots.push_back(slot);
+            pluginHost_.importChain(tid, chain);
+            inspectorView_.refreshFromSession();
+            for (const InsertRowView& row : pluginHost_.getInsertRowsForTrack(tid))
+            {
+                if (row.unavailable && row.displayName.contains("NotInstalled"))
+                {
+                    return true;
+                }
+            }
+            failReason = "placeholder row not present after importChain";
+            return false;
+        };
+        D.instrumentRuntimeIdentity = [this](const TrackId tid) -> juce::String {
+            if (instrumentRuntimeCoordinator_ == nullptr)
+            {
+                return "none";
+            }
+            InstrumentTrackController* const ctl = instrumentRuntimeCoordinator_->getMidiClipControllerForTrack(tid);
+            if (ctl == nullptr || !ctl->hasInstrumentTrack())
+            {
+                return "none";
+            }
+            const ExperimentalInstrumentHost* const host = instrumentRuntimeCoordinator_->getInstrumentHostForTrack(tid);
+            const ProjectFileExperimentalInstrumentTrackV1 row = ctl->buildExperimentalInstrumentProjectBlock();
+            int notes = 0;
+            for (const auto& c : row.clips)
+            {
+                notes += (int) c.timelineNotes.size();
+            }
+            juce::String s;
+            s << "host=0x" << juce::String::toHexString((juce::int64) (std::intptr_t) host) << " kind=" << row.instrumentKind
+              << " name=\"" << row.name << "\" loaded=" << (row.pluginWasLoadedOnSave ? 1 : 0)
+              << " descriptor=" << (row.hasGenericVst3Descriptor ? row.genericVst3Descriptor.fileOrIdentifier : juce::String("-"))
+              << " clips=" << (int) row.clips.size() << " notes=" << notes
+              << " stateLen=" << row.pluginStateBase64.length()
+              << " stateSha=" << (row.pluginStateBase64.isNotEmpty()
+                                      ? juce::SHA256(row.pluginStateBase64.toRawUTF8(), (size_t) row.pluginStateBase64.getNumBytesAsUTF8()).toHexString().substring(0, 16)
+                                      : juce::String("-"))
+              << " secondary=" << (row.hasSecondary ? 1 : 0) << " proxy=" << (row.hasProxy ? 1 : 0)
+              << " proxyGen=\"" << (row.hasProxy ? row.proxy.generationId : juce::String()) << "\""
+              << " updateMode=" << row.proxyUpdateMode;
+            return s;
+        };
+        D.setRoutedOutput = [this](const TrackId tid, const TrackId dest) -> bool {
+            const bool ok = session.setTrackRoutedOutput(tid, dest);
+            inspectorView_.refreshFromSession();
+            return ok;
+        };
+        D.insertSend = [this](const TrackId tid, const int slot, const TrackId dest, const float amount) -> bool {
+            const bool ok = session.insertTrackSend(tid, slot, dest, amount);
+            inspectorView_.refreshFromSession();
+            return ok;
+        };
+        D.isTrackArmed = [this](const TrackId tid) -> bool {
+            return recorder_.getArmedTrackId() == tid
+                   || (liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isRecordArmed(tid));
+        };
+        D.isTrackMonitored = [this](const TrackId tid) -> bool {
+            return playbackEngine_.isTrackInputMonitoringEnabled(tid)
+                   || (liveMidiInputCoordinator_ != nullptr && liveMidiInputCoordinator_->isMonitorEnabled(tid));
+        };
+        D.openHeaderMenuCaptureAndDismiss = [this](const TrackId tid, const juce::File& png, juce::String& detail) -> bool {
+            juce::PopupMenu::dismissAllActiveMenus();
+            if (!trackLanesView.openHeaderContextMenuForStabilityTest(tid))
+            {
+                detail = "header of track " + juce::String((juce::int64) tid) + " not laid out / no menu";
+                return false;
+            }
+            // The popup is a JUCE desktop window of its own; snapshot every desktop component that
+            // is not one of DAL's own top-level windows.
+            juce::Component* menuWindow = nullptr;
+            juce::Desktop& desktop = juce::Desktop::getInstance();
+            for (int i = desktop.getNumComponents() - 1; i >= 0; --i)
+            {
+                juce::Component* const c = desktop.getComponent(i);
+                if (c == nullptr || !c->isVisible() || c == getTopLevelComponent()
+                    || dynamic_cast<juce::ResizableWindow*>(c) != nullptr)
+                {
+                    continue;
+                }
+                menuWindow = c;
+                break;
+            }
+            if (menuWindow == nullptr)
+            {
+                detail = "no popup window found on the desktop";
+                juce::PopupMenu::dismissAllActiveMenus();
+                return false;
+            }
+            detail = "popup=" + menuWindow->getScreenBounds().toString();
+            const juce::Image img = menuWindow->createComponentSnapshot(menuWindow->getLocalBounds(), true, 1.0f);
+            bool ok = false;
+            if (img.isValid())
+            {
+                png.getParentDirectory().createDirectory();
+                juce::FileOutputStream out(png);
+                if (out.openedOk())
+                {
+                    juce::PNGImageFormat fmt;
+                    ok = fmt.writeImageToStream(img, out);
+                }
+            }
+            juce::PopupMenu::dismissAllActiveMenus();
+            return ok;
+        };
+        D.scrollBarDiagnostics = [this] { return arrangementVerticalScrollBarDiagnostics(); };
+        D.verifyVerticalLayout = [this](juce::String& report, juce::String& failReason) -> bool {
+            if (!trackLanesView.verifyVerticalScrollLayoutForDiagnostics(report, failReason))
+            {
+                return false;
+            }
+            const TrackLanesView::VerticalScrollModel m = trackLanesView.verticalScrollModel();
+            const bool barShown = arrangementVerticalScrollBar_.isVisible();
+            report << arrangementVerticalScrollBarDiagnostics() << "\n";
+            if (barShown == m.everythingFits())
+            {
+                failReason = juce::String("scrollbar ") + (barShown ? "shown" : "hidden") + " although content "
+                             + (m.everythingFits() ? "fits" : "exceeds") + " the viewport";
+                return false;
+            }
+            if (!barShown)
+            {
+                return true;
+            }
+            if ((int) std::lround(arrangementVerticalScrollBar_.getMaximumRangeLimit()) != m.contentHeightPx
+                || (int) std::lround(arrangementVerticalScrollBar_.getCurrentRangeSize()) != m.viewportHeightPx
+                || (int) std::lround(arrangementVerticalScrollBar_.getCurrentRangeStart()) != m.offsetPx)
+            {
+                failReason = "scrollbar range does not mirror the lanes model";
+                return false;
+            }
+            const juce::Rectangle<int> bar = arrangementVerticalScrollBar_.getBounds();
+            const juce::Rectangle<int> lanes = trackLanesView.getBounds();
+            if (bar.getX() < lanes.getRight() || bar.getY() != lanes.getY() + TrackLanesView::kArrangementTimelineHeaderGutterPx
+                || bar.getBottom() != lanes.getBottom())
+            {
+                failReason = "scrollbar column " + bar.toString() + " does not sit right of the rows " + lanes.toString();
+                return false;
+            }
+            if (rulerView.getRight() != lanes.getRight())
+            {
+                failReason = "ruler right edge " + juce::String(rulerView.getRight()) + " differs from lanes right edge "
+                             + juce::String(lanes.getRight());
+                return false;
+            }
+            return true;
+        };
+        D.scrollBarDragTo = [this](const int offsetPx) {
+            arrangementVerticalScrollBar_.setCurrentRangeStart((double) offsetPx, juce::sendNotificationSync);
+        };
+        D.scrollBarPageClick = [this](const int pages) {
+            arrangementVerticalScrollBar_.moveScrollbarInPages(pages, juce::sendNotificationSync);
+        };
+        D.wheelLanes = [this](const int notches) {
+            juce::MouseWheelDetails wheel;
+            wheel.deltaX = 0.0f;
+            wheel.deltaY = -0.1f * (float) notches; // JUCE wheel notch ≈ 0.1; negative = scroll down
+            wheel.isReversed = false;
+            wheel.isSmooth = false;
+            wheel.isInertial = false;
+            const juce::Point<float> pos = trackLanesView.getLocalBounds().getCentre().toFloat();
+            const juce::Time now = juce::Time::getCurrentTime();
+            const juce::MouseEvent e(juce::Desktop::getInstance().getMainMouseSource(), pos, juce::ModifierKeys(),
+                                     juce::MouseInputSource::defaultPressure, juce::MouseInputSource::defaultOrientation,
+                                     juce::MouseInputSource::defaultRotation, juce::MouseInputSource::defaultTiltX,
+                                     juce::MouseInputSource::defaultTiltY, &trackLanesView, &trackLanesView, now, pos, now, 0, false);
+            trackLanesView.mouseWheelMove(e, wheel);
+        };
+        D.lanesScrollModel = [this]() -> juce::String {
+            const TrackLanesView::VerticalScrollModel m = trackLanesView.verticalScrollModel();
+            return "content=" + juce::String(m.contentHeightPx) + " viewport=" + juce::String(m.viewportHeightPx)
+                   + " offset=" + juce::String(m.offsetPx) + " max=" + juce::String(m.maxOffsetPx());
+        };
+        D.visibleRowIndexForTrack = [this](const TrackId tid) { return trackLanesView.visibleRowIndexForTrackForDiagnostics(tid); };
+        D.rowTopOffsetPxForTrack = [this](const TrackId tid) { return trackLanesView.rowTopOffsetPxForTrackForDiagnostics(tid); };
+        D.setRowHeightPx = [this](const TrackId tid, const int px) { trackLanesView.setTrackRowHeightPxForStabilityTest(tid, px); };
+        D.sessionTrackOrder = [this]() -> juce::String {
+            const auto snap = session.loadSessionSnapshotForAudioThread();
+            juce::String s;
+            if (snap == nullptr)
+            {
+                return s;
+            }
+            for (int i = 0; i < snap->getNumTracks(); ++i)
+            {
+                const Track& tr = snap->getTrack(i);
+                s << (i > 0 ? "|" : "") << juce::String((juce::int64) tr.getId()) << ":" << tr.getName();
+            }
+            return s;
+        };
+    }
+
     /// [Message thread] `--stability-perf-profile` hooks: runtime description, device buffer
     /// request, loaded-vs-processed inventory, the opt-in audio profiler and the engine's load
     /// window. Diagnostics only — every reader here is the engine's / hosts' existing relaxed
@@ -7436,6 +7896,18 @@ private:
         }
     } };
     std::unique_ptr<PlayheadOverlay> lanePlayheadOverlay_;
+    /// Vertical arrangement scrollbar (see the ctor comment); bound to the lanes' scroll model.
+    juce::ScrollBar arrangementVerticalScrollBar_{ true };
+    struct ArrangementVerticalScrollBarListener final : juce::ScrollBar::Listener
+    {
+        explicit ArrangementVerticalScrollBarListener(TransportControlsContent& o) noexcept : owner(o) {}
+        void scrollBarMoved(juce::ScrollBar*, const double newRangeStart) override
+        {
+            // Thumb drag / trough page click / arrow step: ONE clamp + layout path, same as the wheel.
+            owner.trackLanesView.scrollVerticallyToOffsetPx((int) std::lround(newRangeStart));
+        }
+        TransportControlsContent& owner;
+    } arrangementVerticalScrollBarListener_{ *this };
     /// The overlay's most recent per-frame display position (session samples; NaN before the
     /// first frame). The MIDI lanes' running-take preview reads it so its right edge and the
     /// playhead line come from one value — the overlay stays the only clock sampler.

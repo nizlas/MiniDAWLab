@@ -17,6 +17,9 @@ public:
         std::function<bool()> isCountInActive;
         std::function<void(const char* sourceContext)> stopRecordingAndCommitFromUi;
         std::function<void()> cancelCountIn;
+        /// Optional: true while a staged project load runs — transport start is refused (the
+        /// session is only partially applied); Stop / seek stay allowed.
+        std::function<bool()> isProjectLoadInProgress;
     };
 
     /// Optional: when non-null, `updatePlayPauseButtonFromTransport` syncs button text (Play/Pause).

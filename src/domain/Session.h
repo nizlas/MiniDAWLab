@@ -40,6 +40,7 @@
 #include "domain/Track.h"
 #include "domain/AudioMixdownProjectSettings.h"
 #include "io/ProjectFile.h"
+#include "plugins/PluginTrackSlot.h"
 #include "ui/SnapSettings.h"
 
 #include <juce_core/juce_core.h>
@@ -49,7 +50,9 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 class AudioClip;
 class Transport;
@@ -117,6 +120,16 @@ public:
 
     /// [Message thread] Append an empty `TrackKind::Group` bus row (routes to Master by default).
     void addGroupTrack() noexcept;
+
+    /// [Message thread] Duplicate Track (single-row command, see `SessionSnapshot::withTrackDuplicated`):
+    /// the copy is inserted directly below `sourceTrackId`, gets the next track id and fresh ids for
+    /// every copied clip (material shared), inherits every persisted row property incl. the SAME
+    /// audio output / sends / MIDI To destinations, and becomes the active track. Empty name →
+    /// `uniqueDuplicateTrackName(source name)`. Returns the new id, or nullopt (unknown source,
+    /// Master, or a snapshot build failure — nothing changed, no ids consumed).
+    [[nodiscard]] std::optional<TrackId> duplicateTrack(TrackId sourceTrackId, juce::String newTrackName = {}) noexcept;
+    /// "<name> — kopia", then "<name> — kopia 2", … — first name not used by any current row.
+    [[nodiscard]] juce::String uniqueDuplicateTrackName(const juce::String& sourceName) const;
 
     /// [Message thread] Append an empty `TrackKind::Midi` lane (MIDI destination = None, no audio
     /// routing). Returns the new stable `TrackId` when published, else `nullopt`.
@@ -386,8 +399,28 @@ public:
     /// [Message thread] Called after the display mode changes (e.g. repaint main + MIDI rulers).
     void setOnTimelineRulerTimeDisplayChanged(std::function<void()> callback) noexcept;
 
+    /// One row's insert chain the loader restores AFTER the timeline (same payload the deferred
+    /// `callAsync` path imports; see `applyLoadedProjectModel`).
+    struct PendingPluginInsertRestore
+    {
+        TrackId trackId = kInvalidTrackId;
+        PluginTrackChain chain;
+    };
+    /// Pre-decoded clip material keyed by the ABSOLUTE source file path (`resolveProjectAudioFile`).
+    /// Built off the message thread by the staged loader so `applyLoadedProjectModel` decodes nothing
+    /// for files found here (a file is decoded once even when many clips share it).
+    using PreDecodedMaterialByPath = std::unordered_map<juce::String, std::shared_ptr<const AudioClip>>;
+    /// [Any thread] The on-disk file a project `sourcePath` refers to (empty File when the stored path
+    /// is not a legal `Audio/...` relative path). Pure.
+    [[nodiscard]] static juce::File resolveProjectAudioFile(const juce::String& storedSourcePath,
+                                                            const juce::File& projectFolder) noexcept;
+
     /// [Message thread] Same effects as loading `file`, but uses an already-parsed model (caller read
     /// `file` beforehand). Caller restores `experimentalInstrumentTracks` rows after timeline + inserts.
+    /// `preDecodedMaterial` (optional): clips whose resolved file is in the map reuse that material
+    /// instead of decoding. `outDeferredInsertRestores` (optional): when non-null the insert chains are
+    /// handed back here for the caller to import step by step (progress, UI responsiveness) and the
+    /// internal deferred `callAsync` import is NOT scheduled; null keeps the previous behaviour.
     [[nodiscard]] juce::Result applyLoadedProjectModel(
         Transport& transport,
         const juce::File& loadedFromDisk,
@@ -396,7 +429,9 @@ public:
         juce::StringArray& outSkippedClipDetails,
         juce::String& outInfoNote,
         PluginInsertHost* pluginHost = nullptr,
-        std::uint64_t loadGenerationForDeferredRestore = 0);
+        std::uint64_t loadGenerationForDeferredRestore = 0,
+        const PreDecodedMaterialByPath* preDecodedMaterial = nullptr,
+        std::vector<PendingPluginInsertRestore>* outDeferredInsertRestores = nullptr);
 
     /// [Message thread] Increments and returns the current project-load generation (used to stale-guard
     /// deferred restore callbacks when a newer load begins).

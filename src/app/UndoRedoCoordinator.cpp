@@ -66,6 +66,10 @@ void UndoRedoCoordinator::onPluginUndoRecord(const juce::String& label, const Pl
 
 void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
 {
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine(
@@ -169,11 +173,9 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
             callbacks_.rebindMidiEditorAfterInstrumentMusicalUndo();
         }
     }
-    if (bundle->instrumentTrackDelete.has_value() && callbacks_.restoreDeletedInstrumentTrackRuntime)
+    if (bundle->instrumentTrackDelete.has_value())
     {
-        // Undo of Delete Track: the timeline snapshot restored the session row; now recreate the
-        // instrument runtime from the captured project row (same restore path as project load).
-        callbacks_.restoreDeletedInstrumentTrackRuntime(*bundle->instrumentTrackDelete);
+        applyInstrumentTrackRuntimeSides(*bundle->instrumentTrackDelete, *bundle->timelineSnapshot);
     }
     refreshAfterSessionSnapshotRestore();
     // Stability C3: verify runtime invariants right after the undo completed.
@@ -190,6 +192,10 @@ void UndoRedoCoordinator::invokeUndoFromWindowShortcut()
 
 void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
 {
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
     if constexpr (undo_diagnostic::kUndoDiag)
     {
         writeUndoDiagnosticLogLine(
@@ -284,12 +290,9 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
             callbacks_.rebindMidiEditorAfterInstrumentMusicalUndo();
         }
     }
-    if (bundle->instrumentTrackDelete.has_value()
-        && callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo)
+    if (bundle->instrumentTrackDelete.has_value())
     {
-        // Redo of Delete Track: the timeline snapshot removed the row again (and pluginSides->after
-        // evicted inserts); retire the recreated instrument runtime with the hardened teardown.
-        callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo(bundle->instrumentTrackDelete->trackId);
+        applyInstrumentTrackRuntimeSides(*bundle->instrumentTrackDelete, *bundle->timelineSnapshot);
     }
     refreshAfterSessionSnapshotRestore();
     // Stability C3: verify runtime invariants right after the redo completed.
@@ -301,6 +304,28 @@ void UndoRedoCoordinator::invokeRedoFromWindowShortcut()
             "[UndoDiag] invokeRedo complete liveNow=" + undoDiagSnapPtr(liveNow.get()) + " undoSize="
             + juce::String(sessionHistory_.undoStackSize()) + " redoSize="
             + juce::String(sessionHistory_.redoStackSize()));
+    }
+}
+
+void UndoRedoCoordinator::applyInstrumentTrackRuntimeSides(const InstrumentTrackDeleteUndoSides& sides,
+                                                           const SessionSnapshot& restoredTimeline)
+{
+    // One rule for Delete Track AND Duplicate Track steps: the restored timeline decides. When the
+    // row exists in it, the instrument runtime is recreated from the captured project row (undo of
+    // a delete, redo of a duplicate); when it does not, the recreated runtime is retired with the
+    // hardened teardown (redo of a delete, undo of a duplicate). The insert chain was already
+    // imported / evicted by `pluginSides` before this call.
+    const bool rowPresent = restoredTimeline.findTrackIndexById(sides.trackId) >= 0;
+    if (rowPresent)
+    {
+        if (callbacks_.restoreDeletedInstrumentTrackRuntime)
+        {
+            callbacks_.restoreDeletedInstrumentTrackRuntime(sides);
+        }
+    }
+    else if (callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo)
+    {
+        callbacks_.teardownDeletedInstrumentTrackRuntimeForRedo(sides.trackId);
     }
 }
 
@@ -364,6 +389,10 @@ void UndoRedoCoordinator::refreshAfterSessionSnapshotRestore()
 
 void UndoRedoCoordinator::executeUndoableSessionEdit(const juce::String& label, std::function<bool()> mutator)
 {
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
     std::shared_ptr<const SessionSnapshot> before = session_.loadSessionSnapshotForAudioThread();
     if (before == nullptr)
     {
@@ -416,6 +445,10 @@ void UndoRedoCoordinator::executeUndoableTrackDelete(
     std::function<bool(std::optional<PluginUndoStepSides>& outPluginSides,
                        std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentDelete)> mutator)
 {
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
     std::shared_ptr<const SessionSnapshot> before = session_.loadSessionSnapshotForAudioThread();
     if (before == nullptr)
     {
@@ -538,6 +571,10 @@ void UndoRedoCoordinator::executeUndoableRecordingCommit(const juce::String& lab
 void UndoRedoCoordinator::executeUndoableInstrumentEdit(const juce::String& label,
                                                        std::function<bool()> mutator)
 {
+    if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+    {
+        return; // a staged project load owns the session until it finalizes
+    }
     std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
     if (snap == nullptr)
     {

@@ -115,6 +115,16 @@ public:
     /// row was already removed by the redo timeline snapshot.
     void redoTeardownDeletedInstrumentTrack(TrackId tid);
 
+    /// [Message thread] Duplicate Track: copies the session row (clips with new ids, fader,
+    /// pre-gain, pan, Mute/Off, routing, sends, input assignments, MIDI To) directly below the
+    /// source, gives the copy its own insert instances (captured chain, placeholders preserved)
+    /// and — for instrument / MIDI-content rows — its own instrument runtime restored from the
+    /// source's captured project row (live Primary state when capturable, retained state
+    /// otherwise). Monitor and Record Arm start off. Recorded as ONE undo step with the Delete
+    /// Track step shape; refused during recording / count-in (and by the menu while playing).
+    /// Returns the new TrackId when the copy was created.
+    std::optional<TrackId> duplicateTrack(TrackId sourceTid);
+
 private:
     Session& session_;
     PlaybackEngine& playbackEngine_;

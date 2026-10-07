@@ -6,21 +6,33 @@
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
 #include "diagnostics/StabilityScenarioRunner.h"
+#include "domain/AudioClip.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
 #include "domain/Track.h"
 #include "engine/PlaybackEngine.h"
 #include "instruments/InstrumentTrackController.h"
+#include "io/AudioFileLoader.h"
 #include "io/ProjectFile.h"
 #include "io/ProxyMetadataCheckpoint.h"
 #include "plugins/ExperimentalInstrumentHost.h"
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
 
+#include <atomic>
+#include <functional>
+#include <thread>
 #include <unordered_set>
 
 namespace
 {
+    /// "<text>…" with a real U+2026 (juce::String treats `const char*` as ASCII, so the UTF-8 bytes
+    /// go through CharPointer_UTF8 explicitly - same convention as the rest of the UI).
+    [[nodiscard]] juce::String withEllipsisUtf8(const char* asciiText)
+    {
+        return juce::String(asciiText) + juce::String(juce::CharPointer_UTF8("\xe2\x80\xa6"));
+    }
+
     class ScopedInstrumentProcessingLoadGate final
     {
     public:
@@ -494,6 +506,12 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
             onDone(saved);
         }
     };
+    if (loadJob_ != nullptr)
+    {
+        appendProjectSaveDiagnosticLine("save refused: project load in progress");
+        reportDone(false);
+        return;
+    }
     juce::AudioIODevice* const device = deviceManager_.getCurrentAudioDevice();
     if (device == nullptr)
     {
@@ -718,6 +736,11 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
 
 void ProjectIoCoordinator::loadProject()
 {
+    if (loadJob_ != nullptr)
+    {
+        appendProjectLoadDiagnosticLine("load: chooser refused (a load is already in progress)");
+        return;
+    }
     confirmUnsavedChangesThen(UnsavedGuardKind::LoadProject,
                               [this, guard = asyncLifetime_.guard()] {
                                   if (!guard.isAlive())
@@ -755,8 +778,177 @@ void ProjectIoCoordinator::launchLoadProjectChooser()
     });
 }
 
+// =============================================================================
+// Staged project load - units, progress window, drives (see the header's public section)
+// =============================================================================
+
+/// Modal progress window: phase + detail labels and a `juce::ProgressBar` (indeterminate when the
+/// fraction is negative). No Cancel (nothing here could honour it); the close button is inert.
+class ProjectIoCoordinator::LoadProgressWindow final : public juce::DialogWindow
+{
+public:
+    LoadProgressWindow()
+        : juce::DialogWindow("Opening project", juce::Colour(0xff2b2d31), /*escapeKeyTriggersCloseButton*/ false,
+                             /*addToDesktop*/ true)
+    {
+        auto content = std::make_unique<Content>(progressValue_);
+        content_ = content.get();
+        setContentOwned(content.release(), true);
+        setUsingNativeTitleBar(false);
+        setTitleBarButtonsRequired(0, false);
+        setResizable(false, false);
+        setAlwaysOnTop(true);
+    }
+
+    void closeButtonPressed() override {} // no cancel path exists; the load always finishes or fails
+
+    void setProgress(const juce::String& phase, const juce::String& detail, const double fraction)
+    {
+        progressValue_ = fraction < 0.0 ? -1.0 : juce::jlimit(0.0, 1.0, fraction);
+        if (content_ != nullptr)
+        {
+            content_->phase.setText(phase, juce::dontSendNotification);
+            content_->detail.setText(detail, juce::dontSendNotification);
+            content_->repaint();
+        }
+        repaint();
+        // Paint NOW (no nested message loop): the next unit may block for a plug-in's whole
+        // instantiation, and the window must already show what is being loaded.
+        if (juce::ComponentPeer* peer = getPeer())
+        {
+            peer->performAnyPendingRepaintsNow();
+        }
+    }
+
+    [[nodiscard]] juce::String phaseText() const { return content_ != nullptr ? content_->phase.getText() : juce::String(); }
+    [[nodiscard]] juce::String detailText() const { return content_ != nullptr ? content_->detail.getText() : juce::String(); }
+    [[nodiscard]] double fraction() const noexcept { return progressValue_; }
+
+private:
+    struct Content final : juce::Component
+    {
+        explicit Content(double& value) : bar(value)
+        {
+            phase.setFont(juce::FontOptions(16.0f, juce::Font::bold));
+            phase.setJustificationType(juce::Justification::centredLeft);
+            detail.setFont(juce::FontOptions(13.0f));
+            detail.setJustificationType(juce::Justification::centredLeft);
+            detail.setColour(juce::Label::textColourId, juce::Colours::whitesmoke.withAlpha(0.85f));
+            bar.setPercentageDisplay(false);
+            addAndMakeVisible(phase);
+            addAndMakeVisible(detail);
+            addAndMakeVisible(bar);
+            setSize(460, 118);
+        }
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced(16, 14);
+            phase.setBounds(r.removeFromTop(24));
+            r.removeFromTop(4);
+            detail.setBounds(r.removeFromTop(20));
+            r.removeFromTop(12);
+            bar.setBounds(r.removeFromTop(18));
+        }
+        juce::Label phase;
+        juce::Label detail;
+        juce::ProgressBar bar;
+    };
+
+    double progressValue_ = -1.0;
+    Content* content_ = nullptr;
+};
+
+struct ProjectIoCoordinator::LoadJob
+{
+    enum class Unit
+    {
+        ParseAndDecode,       ///< background thread (Interactive) or inline (Synchronous)
+        ClosePrevious,        ///< stop, gate, retire the previous project's instrument runtimes
+        ApplyModel,           ///< session model replace + inventory
+        RestoreInstrument,    ///< one `experimentalInstrumentTracks` row per unit
+        OrphansAndUi,         ///< orphan lanes, MIDI content controllers, editor sync, UI refresh
+        RestoreInsertChain,   ///< one row's insert chain per unit
+        Finalize,
+        Done,
+    };
+
+    juce::File file;
+    LoadDrive drive = LoadDrive::Interactive;
+    double sampleRate = 0.0;
+    std::uint64_t generation = 0; ///< `Session::beginProjectLoadGeneration` (stale-guards every async unit)
+    std::uint64_t serial = 0;     ///< monotonically increasing per load (stale-guards worker posts)
+    std::function<void(bool ok)> completion; ///< per-load continuation (recovery prompt), fired from finish
+    Unit unit = Unit::ParseAndDecode;
+
+    // Background stage results (written by the worker, read on the message thread after its post).
+    std::thread worker;
+    std::atomic<bool> workerDone{ false };
+    juce::Result parseResult = juce::Result::ok();
+    ProjectFileV1 parsed;
+    Session::PreDecodedMaterialByPath material;
+    int audioFilesTotal = 0;
+    std::atomic<int> audioFilesDecoded{ 0 };
+
+    // Message-thread stage state.
+    std::unique_ptr<ScopedInstrumentProcessingLoadGate> gate;
+    juce::StringArray skipped;
+    juce::String infoNote;
+    juce::String instrumentAutoloadNoteAcc;
+    std::vector<const ProjectFileExperimentalInstrumentTrackV1*> instrumentRows; ///< enabled rows, file order
+    int instrumentIndex = 0;
+    std::vector<Session::PendingPluginInsertRestore> insertRows;
+    int insertIndex = 0;
+    bool announced = false; ///< Interactive: a unit is first announced (painted), then executed
+    double startMs = 0.0;
+    juce::String lastPhase;
+    juce::String lastDetail;
+    double lastFraction = -1.0;
+
+    ~LoadJob()
+    {
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+};
+
+ProjectIoCoordinator::~ProjectIoCoordinator()
+{
+    stopTimer();
+    // A load still in flight at shutdown: the gate is released by the job's destructor order
+    // (gate before worker join); async units check the lifetime guard and never run after this.
+    loadJob_.reset();
+    loadProgressWindow_.reset();
+}
+
+juce::String ProjectIoCoordinator::loadProgressTextForDiagnostics() const
+{
+    if (loadJob_ == nullptr)
+    {
+        return {};
+    }
+    return loadJob_->lastPhase + " | " + loadJob_->lastDetail + " | "
+           + (loadJob_->lastFraction < 0.0 ? juce::String("indeterminate")
+                                           : juce::String(loadJob_->lastFraction * 100.0, 1) + "%")
+           + " | elapsedMs=" + juce::String((int) (juce::Time::getMillisecondCounterHiRes() - loadJob_->startMs))
+           + " | window=" + (loadProgressWindow_ != nullptr && loadProgressWindow_->isShowing() ? "showing" : "none");
+}
+
 void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
 {
+    loadProjectFromFile(projectFile,
+                        isStabilityTestModeActive() ? LoadDrive::Synchronous : LoadDrive::Interactive);
+}
+
+void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile, const LoadDrive drive)
+{
+    if (loadJob_ != nullptr)
+    {
+        appendProjectLoadDiagnosticLine("load: refused (a load is already in progress) file=\""
+                                        + projectFile.getFullPathName() + "\"");
+        return;
+    }
     if (!projectFile.existsAsFile())
     {
         juce::AlertWindow::showMessageBoxAsync(
@@ -774,351 +966,727 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
             "No active audio device; cannot match sample rate to decode project clips.");
         return;
     }
-    const double sampleRate = device->getCurrentSampleRate();
-    const juce::File f = projectFile;
+    loadJob_start(projectFile, drive, {});
+}
+
+void ProjectIoCoordinator::loadProjectFromFileThen(const juce::File& projectFile,
+                                                   std::function<void(bool ok)> completion)
+{
+    if (loadJob_ != nullptr || !projectFile.existsAsFile() || deviceManager_.getCurrentAudioDevice() == nullptr)
     {
-        writeLastOperationBreadcrumb("project load start: " + f.getFullPathName());
-        ProjectFileV1 parsedLoad;
-        const juce::Result parsedRes = readProjectFile(f, parsedLoad);
-        if (!parsedRes.wasOk())
+        loadProjectFromFile(projectFile); // reports the refusal / alert exactly like the plain entry
+        if (completion)
         {
-            writeLastOperationBreadcrumb("project load failed (parse)");
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon, "Load project", parsedRes.getErrorMessage());
+            completion(false);
+        }
+        return;
+    }
+    loadJob_start(projectFile,
+                  isStabilityTestModeActive() ? LoadDrive::Synchronous : LoadDrive::Interactive,
+                  std::move(completion));
+}
+
+void ProjectIoCoordinator::loadJob_setProgress(const juce::String& phase, const juce::String& detail,
+                                               const double fraction)
+{
+    if (loadJob_ == nullptr)
+    {
+        return;
+    }
+    loadJob_->lastPhase = phase;
+    loadJob_->lastDetail = detail;
+    loadJob_->lastFraction = fraction;
+    if (loadProgressWindow_ != nullptr)
+    {
+        loadProgressWindow_->setProgress(phase, detail, fraction);
+    }
+}
+
+void ProjectIoCoordinator::loadJob_start(const juce::File& projectFile, const LoadDrive drive,
+                                         std::function<void(bool ok)> completion)
+{
+    auto job = std::make_unique<LoadJob>();
+    job->file = projectFile;
+    job->drive = drive;
+    job->sampleRate = deviceManager_.getCurrentAudioDevice()->getCurrentSampleRate();
+    job->startMs = juce::Time::getMillisecondCounterHiRes();
+    job->serial = ++loadJobSerialCounter_;
+    job->completion = std::move(completion);
+    loadJob_ = std::move(job);
+    writeLastOperationBreadcrumb("project load start: " + projectFile.getFullPathName());
+    appendProjectLoadDiagnosticLine(juce::String("load: staged load begin drive=")
+                                    + (drive == LoadDrive::Interactive ? "interactive" : "synchronous")
+                                    + " file=\"" + projectFile.getFullPathName() + "\"");
+
+    if (drive == LoadDrive::Interactive)
+    {
+        loadProgressWindow_ = std::make_unique<LoadProgressWindow>();
+        juce::Component* anchor = callbacks_.getProgressWindowAnchor ? callbacks_.getProgressWindowAnchor() : nullptr;
+        if (anchor != nullptr)
+        {
+            loadProgressWindow_->centreAroundComponent(anchor, loadProgressWindow_->getWidth(),
+                                                       loadProgressWindow_->getHeight());
+        }
+        else
+        {
+            loadProgressWindow_->centreWithSize(loadProgressWindow_->getWidth(), loadProgressWindow_->getHeight());
+        }
+        loadProgressWindow_->setVisible(true);
+        // Modal: mouse input to every other window is refused while the load runs; no nested
+        // message loop is ever run (the units are scheduled on the normal loop).
+        loadProgressWindow_->enterModalState(true, nullptr, false);
+        loadProgressWindow_->toFront(true);
+    }
+    loadJob_setProgress(withEllipsisUtf8("Reading project"), projectFile.getFileName(), -1.0);
+
+    // Unit 1 - parse + decode. The decode set is the UNIQUE audio files of the project (a file
+    // shared by many clips is decoded once); results are handed to `applyLoadedProjectModel`.
+    const auto parseAndDecode = [](LoadJob& j, const std::function<void(int done, int total, const juce::String& name)>& progress) {
+        j.parseResult = readProjectFile(j.file, j.parsed);
+        if (!j.parseResult.wasOk())
+        {
             return;
         }
-        appendProjectLoadDiagnosticLine("load: parsed file=\"" + f.getFullPathName() + "\" experimentalInstrumentTracks="
-                                        + juce::String((int)parsedLoad.experimentalInstrumentTracks.size()));
-        transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
-        appendProjectLoadDiagnosticLine("load: transport stopped");
-
-        // Monitor is a runtime-only control and defaults OFF on project opening/restoration —
-        // never carry live input monitoring across a project replacement.
-        playbackEngine_.clearAllInputMonitoring();
-
-        // P1H project replacement (§13.3): obsolete/cancel every proxy job of the OLD project
-        // and drop the runtime-only policy timers BEFORE the runtimes they reference are
-        // cleared. Queued work is re-derivable from fingerprints on reopen; nothing waits.
-        if (callbacks_.onProjectAboutToBeReplaced != nullptr)
+        std::vector<juce::File> files;
+        const juce::File folder = j.file.getParentDirectory();
+        for (const auto& tr : j.parsed.tracks)
         {
-            callbacks_.onProjectAboutToBeReplaced();
-        }
-
-        const ScopedInstrumentProcessingLoadGate instrumentLoadGate(playbackEngine_, session_);
-        const std::uint64_t loadGeneration = instrumentLoadGate.loadGeneration();
-
-        appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes begin");
-        callbacks_.clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
-        appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes end");
-
-        appendProjectLoadDiagnosticLine("load: before applyLoadedProjectModel (session model replace)");
-        juce::StringArray skipped;
-        juce::String infoNote;
-        appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel begin");
-        const juce::Result r = session_.applyLoadedProjectModel(
-            transport_,
-            f,
-            parsedLoad,
-            sampleRate,
-            skipped,
-            infoNote,
-            &pluginHost_,
-            loadGeneration);
-        if (!r.wasOk())
-        {
-            writeLastOperationBreadcrumb("project load failed (apply model)");
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon, "Load project", r.getErrorMessage());
-            return;
-        }
-        appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel end");
-        appendProjectLoadDiagnosticLine("load: after applyLoadedProjectModel (session model replaced)");
-        callbacks_.restoreSnapProjectRootFieldsToUi(
-            { parsedLoad.snapEnabled, parsedLoad.snapResolution });
-        juce::String instrumentAutoloadNoteAcc;
-        if (!parsedLoad.experimentalInstrumentTracks.empty())
-        {
-            std::unordered_set<TrackId> seenExperimentalTrackIds;
-            seenExperimentalTrackIds.reserve(parsedLoad.experimentalInstrumentTracks.size());
-            for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
+            if (!tr.kind.equalsIgnoreCase("audio"))
             {
-                const TrackId rowTid = etRow.trackId;
-                const juce::String rowName = etRow.name.isNotEmpty() ? etRow.name : juce::String("(empty)");
-                appendProjectLoadDiagnosticLine(
-                    "load: experimentalInstrumentTrack row trackId=" + juce::String((juce::int64)rowTid)
-                    + " instrumentKind=" + etRow.instrumentKind + " name=\"" + rowName + "\" clips="
-                    + juce::String((int)etRow.clips.size()) + " enabled="
-                    + juce::String(etRow.enabled ? "true" : "false"));
-                if (rowTid != kInvalidTrackId)
-                {
-                    if (!seenExperimentalTrackIds.insert(rowTid).second)
-                    {
-                        appendProjectLoadDiagnosticLine(
-                            "load: duplicate experimentalInstrumentTrack trackId="
-                            + juce::String((juce::int64)rowTid));
-                    }
-                }
-                bool tracksRowMatch = false;
-                juce::String tracksRowKind;
-                for (const auto& tr : parsedLoad.tracks)
-                {
-                    if (tr.id == rowTid)
-                    {
-                        tracksRowMatch = true;
-                        tracksRowKind = tr.kind;
-                        break;
-                    }
-                }
-                appendProjectLoadDiagnosticLine(
-                    "load: experimental row trackId=" + juce::String((juce::int64)rowTid)
-                    + " tracks[] match=" + juce::String(tracksRowMatch ? "yes" : "NO")
-                    + (tracksRowMatch ? (" kind=" + tracksRowKind) : juce::String{}));
+                continue;
             }
-            for (const auto& tr : parsedLoad.tracks)
+            for (const auto& c : tr.clips)
             {
-                if (!tr.kind.equalsIgnoreCase("instrument"))
+                const juce::File f = Session::resolveProjectAudioFile(c.sourcePath, folder);
+                if (f == juce::File() || !f.existsAsFile())
                 {
-                    continue;
+                    continue; // the model apply reports the skip with the real reason
                 }
-                bool hasExperimentalRow = false;
-                for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
+                bool seen = false;
+                for (const auto& k : files)
                 {
-                    if (etRow.trackId == tr.id)
-                    {
-                        hasExperimentalRow = true;
-                        break;
-                    }
+                    if (k == f) { seen = true; break; }
                 }
-                if (!hasExperimentalRow)
+                if (!seen)
                 {
+                    files.push_back(f);
+                }
+            }
+        }
+        j.audioFilesTotal = (int)files.size();
+        int done = 0;
+        for (const juce::File& f : files)
+        {
+            progress(done, (int)files.size(), f.getFileName());
+            std::unique_ptr<AudioClip> clip;
+            if (AudioFileLoader::loadFromFile(f, j.sampleRate, clip).wasOk() && clip != nullptr)
+            {
+                j.material.emplace(f.getFullPathName(), std::shared_ptr<const AudioClip>(std::move(clip)));
+            }
+            ++done;
+            j.audioFilesDecoded.store(done, std::memory_order_relaxed);
+        }
+    };
+
+    if (drive == LoadDrive::Synchronous)
+    {
+        parseAndDecode(*loadJob_, [](int, int, const juce::String&) {});
+        loadJob_->workerDone.store(true, std::memory_order_release);
+        loadJob_->unit = LoadJob::Unit::ClosePrevious;
+        // Run every remaining unit to completion before returning (scenario contract).
+        while (loadJob_ != nullptr)
+        {
+            loadJob_runNextUnit();
+        }
+        return;
+    }
+
+    LoadJob* const jobPtr = loadJob_.get();
+    const std::uint64_t jobStamp = jobPtr->serial;
+    auto guard = asyncLifetime_.guard();
+    loadJob_->worker = std::thread([this, jobPtr, jobStamp, guard, parseAndDecode] {
+        const auto post = [this, jobPtr, jobStamp, guard](std::function<void()> fn) {
+            juce::MessageManager::callAsync([this, jobPtr, jobStamp, guard, fn = std::move(fn)] {
+                if (!guard.isAlive() || loadJob_.get() != jobPtr
+                    || loadJob_->serial != jobStamp)
+                {
+                    return; // coordinator gone or a different load - nothing to update
+                }
+                fn();
+            });
+        };
+        parseAndDecode(*jobPtr, [this, &post](const int done, const int total, const juce::String& name) {
+            post([this, done, total, name] {
+                loadJob_setProgress(withEllipsisUtf8("Loading audio material"),
+                                    juce::String(done + 1) + " of " + juce::String(total) + ": " + name,
+                                    total > 0 ? (double)done / (double)total : -1.0);
+            });
+        });
+        jobPtr->workerDone.store(true, std::memory_order_release);
+        post([this] {
+            if (loadJob_ == nullptr || !loadJob_->workerDone.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            loadJob_->unit = LoadJob::Unit::ClosePrevious;
+            loadJob_runNextUnit();
+        });
+    });
+}
+
+void ProjectIoCoordinator::loadJob_scheduleNextUnit()
+{
+    if (loadJob_ == nullptr || loadJob_->drive != LoadDrive::Interactive)
+    {
+        return; // Synchronous: the start loop drives
+    }
+    // A short timer (not callAsync) so the queue drains between units: WM_PAINT and the UI
+    // timers get their turn, which is what keeps the main window painting and responsive.
+    LoadJob* const jobPtr = loadJob_.get();
+    const std::uint64_t jobStamp = loadJob_->serial;
+    juce::Timer::callAfterDelay(4, [this, jobPtr, jobStamp, guard = asyncLifetime_.guard()] {
+        // Pointer AND serial: a later job could be allocated at the same address.
+        if (!guard.isAlive() || loadJob_.get() != jobPtr || loadJob_->serial != jobStamp)
+        {
+            return;
+        }
+        loadJob_runNextUnit();
+    });
+}
+
+void ProjectIoCoordinator::loadJob_runNextUnit()
+{
+    if (loadJob_ == nullptr)
+    {
+        return;
+    }
+    LoadJob& j = *loadJob_;
+    const double sampleRate = j.sampleRate;
+    const juce::File f = j.file;
+    const bool interactive = j.drive == LoadDrive::Interactive;
+
+    // Interactive: every unit is announced in its own turn (the window paints the text), then
+    // executed in the next turn. The Synchronous drive skips the extra turn.
+    const auto announce = [&](const juce::String& phase, const juce::String& detail, const double fraction) -> bool {
+        if (!interactive)
+        {
+            loadJob_setProgress(phase, detail, fraction);
+            return true; // execute now
+        }
+        if (j.announced)
+        {
+            j.announced = false;
+            return true; // announced last turn: execute now
+        }
+        loadJob_setProgress(phase, detail, fraction);
+        j.announced = true;
+        loadJob_scheduleNextUnit();
+        return false; // paint first
+    };
+
+    switch (j.unit)
+    {
+        case LoadJob::Unit::ParseAndDecode:
+            return; // the worker posts ApplyModel when done
+
+        case LoadJob::Unit::ClosePrevious:
+        {
+            if (!j.parseResult.wasOk())
+            {
+                writeLastOperationBreadcrumb("project load failed (parse)");
+                loadJob_finish(false, j.parseResult.getErrorMessage());
+                return;
+            }
+            // Retiring a large previous project (64 instrument hosts, 18 AmpliTube inserts) is
+            // seconds of synchronous plug-in teardown; it gets its own announced phase so the
+            // window says what is happening instead of "Preparing project".
+            if (!announce(withEllipsisUtf8("Closing previous project"), juce::String(), -1.0))
+            {
+                return;
+            }
+            appendProjectLoadDiagnosticLine("load: parsed file=\"" + f.getFullPathName() + "\" experimentalInstrumentTracks="
+                                            + juce::String((int)j.parsed.experimentalInstrumentTracks.size())
+                                            + " predecodedAudioFiles=" + juce::String((int)j.material.size()) + "/"
+                                            + juce::String(j.audioFilesTotal));
+            transport_.requestPlaybackIntent(PlaybackIntent::Stopped);
+            appendProjectLoadDiagnosticLine("load: transport stopped");
+
+            // Monitor is a runtime-only control and defaults OFF on project opening/restoration -
+            // never carry live input monitoring across a project replacement.
+            playbackEngine_.clearAllInputMonitoring();
+
+            // P1H project replacement (--13.3): obsolete/cancel every proxy job of the OLD project
+            // and drop the runtime-only policy timers BEFORE the runtimes they reference are
+            // cleared. Queued work is re-derivable from fingerprints on reopen; nothing waits.
+            if (callbacks_.onProjectAboutToBeReplaced != nullptr)
+            {
+                callbacks_.onProjectAboutToBeReplaced();
+            }
+
+            // The gate (instrument processing suspended + idle ack) is held for the WHOLE staged
+            // load: plug-in instantiation / state restore never overlaps the realtime instrument
+            // section or its render workers (jobs run inside the callback, which skips the section).
+            j.gate = std::make_unique<ScopedInstrumentProcessingLoadGate>(playbackEngine_, session_);
+            j.generation = j.gate->loadGeneration();
+
+            appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes begin");
+            callbacks_.clearExperimentalInstrumentRuntimesPreserveBridgeOnly();
+            appendProjectLoadDiagnosticLine("load: clearExperimentalInstrumentRuntimes end");
+            j.unit = LoadJob::Unit::ApplyModel;
+            loadJob_scheduleNextUnit(); // Synchronous drive: no-op, the start loop runs it
+            return;
+        }
+
+        case LoadJob::Unit::ApplyModel:
+        {
+            if (!announce(withEllipsisUtf8("Preparing project"), f.getFileName(), -1.0))
+            {
+                return;
+            }
+            appendProjectLoadDiagnosticLine("load: before applyLoadedProjectModel (session model replace)");
+            appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel begin");
+            const juce::Result r = session_.applyLoadedProjectModel(
+                transport_, f, j.parsed, sampleRate, j.skipped, j.infoNote, &pluginHost_, j.generation,
+                &j.material, &j.insertRows);
+            if (!r.wasOk())
+            {
+                writeLastOperationBreadcrumb("project load failed (apply model)");
+                loadJob_finish(false, r.getErrorMessage());
+                return;
+            }
+            j.material.clear(); // the session owns the material now
+            appendProjectLoadDiagnosticLine("load: applyLoadedProjectModel end");
+            appendProjectLoadDiagnosticLine("load: after applyLoadedProjectModel (session model replaced)");
+            // The routing plan is published separately from the snapshot; rebuild it NOW so the
+            // audio callback never runs the restore phases (seconds, not one block) with a plan
+            // built from the previous project against the new snapshot's rows.
+            playbackEngine_.rebuildRoutingPlanFromSession();
+            callbacks_.restoreSnapProjectRootFieldsToUi({ j.parsed.snapEnabled, j.parsed.snapResolution });
+
+            // Inventory log (unchanged diagnostics) + the ordered restore list.
+            j.instrumentRows.clear();
+            if (!j.parsed.experimentalInstrumentTracks.empty())
+            {
+                std::unordered_set<TrackId> seenExperimentalTrackIds;
+                seenExperimentalTrackIds.reserve(j.parsed.experimentalInstrumentTracks.size());
+                for (const auto& etRow : j.parsed.experimentalInstrumentTracks)
+                {
+                    const TrackId rowTid = etRow.trackId;
+                    const juce::String rowName = etRow.name.isNotEmpty() ? etRow.name : juce::String("(empty)");
                     appendProjectLoadDiagnosticLine(
-                        "load: tracks[] instrument without experimentalInstrumentTrack trackId="
-                        + juce::String((juce::int64)tr.id) + " name=\"" + tr.name + "\"");
+                        "load: experimentalInstrumentTrack row trackId=" + juce::String((juce::int64)rowTid)
+                        + " instrumentKind=" + etRow.instrumentKind + " name=\"" + rowName + "\" clips="
+                        + juce::String((int)etRow.clips.size()) + " enabled="
+                        + juce::String(etRow.enabled ? "true" : "false"));
+                    if (rowTid != kInvalidTrackId && !seenExperimentalTrackIds.insert(rowTid).second)
+                    {
+                        appendProjectLoadDiagnosticLine("load: duplicate experimentalInstrumentTrack trackId="
+                                                        + juce::String((juce::int64)rowTid));
+                    }
+                    bool tracksRowMatch = false;
+                    juce::String tracksRowKind;
+                    for (const auto& tr : j.parsed.tracks)
+                    {
+                        if (tr.id == rowTid)
+                        {
+                            tracksRowMatch = true;
+                            tracksRowKind = tr.kind;
+                            break;
+                        }
+                    }
+                    appendProjectLoadDiagnosticLine(
+                        "load: experimental row trackId=" + juce::String((juce::int64)rowTid)
+                        + " tracks[] match=" + juce::String(tracksRowMatch ? "yes" : "NO")
+                        + (tracksRowMatch ? (" kind=" + tracksRowKind) : juce::String{}));
+                    if (etRow.enabled)
+                    {
+                        j.instrumentRows.push_back(&etRow);
+                    }
+                }
+                for (const auto& tr : j.parsed.tracks)
+                {
+                    if (!tr.kind.equalsIgnoreCase("instrument"))
+                    {
+                        continue;
+                    }
+                    bool hasExperimentalRow = false;
+                    for (const auto& etRow : j.parsed.experimentalInstrumentTracks)
+                    {
+                        if (etRow.trackId == tr.id) { hasExperimentalRow = true; break; }
+                    }
+                    if (!hasExperimentalRow)
+                    {
+                        appendProjectLoadDiagnosticLine(
+                            "load: tracks[] instrument without experimentalInstrumentTrack trackId="
+                            + juce::String((juce::int64)tr.id) + " name=\"" + tr.name + "\"");
+                    }
                 }
             }
-            for (const auto& etRow : parsedLoad.experimentalInstrumentTracks)
+            j.instrumentIndex = 0;
+            j.unit = j.instrumentRows.empty() ? LoadJob::Unit::OrphansAndUi : LoadJob::Unit::RestoreInstrument;
+            loadJob_scheduleNextUnit();
+            return;
+        }
+
+        case LoadJob::Unit::RestoreInstrument:
+        {
+            if (j.instrumentIndex >= (int)j.instrumentRows.size())
             {
-                if (!etRow.enabled)
+                j.unit = LoadJob::Unit::OrphansAndUi;
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            const ProjectFileExperimentalInstrumentTrackV1& etRow = *j.instrumentRows[(size_t)j.instrumentIndex];
+            const int total = (int)j.instrumentRows.size();
+            const juce::String shown = etRow.instrumentKind == "MidiContent"
+                                           ? juce::String("MIDI track")
+                                           : (etRow.name.isNotEmpty() ? etRow.name : etRow.instrumentKind);
+            if (!announce(withEllipsisUtf8("Loading instruments"),
+                          juce::String(j.instrumentIndex + 1) + " of " + juce::String(total) + ": " + shown,
+                          (double)j.instrumentIndex / (double)juce::jmax(1, total)))
+            {
+                return;
+            }
+            ++j.instrumentIndex;
+
+            const bool isGroove = etRow.instrumentKind == "GrooveAgentSE";
+            const bool isHalion = etRow.instrumentKind == "HALionSonic";
+            const bool isGeneric = etRow.instrumentKind == "GenericVst3";
+            const bool isMidiContent = etRow.instrumentKind == "MidiContent";
+            if (isMidiContent)
+            {
+                // Phase B: plugin-less MIDI content row - restore clips onto a MIDI content
+                // controller bound to the TrackKind::Midi session row. No plugin autoload.
+                const TrackId midiTid = etRow.trackId;
+                const std::shared_ptr<const SessionSnapshot> midiSnap = session_.loadSessionSnapshotForAudioThread();
+                const int midiTix = (midiSnap != nullptr && midiTid != kInvalidTrackId) ? midiSnap->findTrackIndexById(midiTid) : -1;
+                if (midiTix < 0 || midiSnap->getTrack(midiTix).getKind() != TrackKind::Midi
+                    || callbacks_.getOrCreateMidiContentControllerForTrack == nullptr)
                 {
-                    continue;
-                }
-                const bool isGroove = etRow.instrumentKind == "GrooveAgentSE";
-                const bool isHalion = etRow.instrumentKind == "HALionSonic";
-                const bool isGeneric = etRow.instrumentKind == "GenericVst3";
-                const bool isMidiContent = etRow.instrumentKind == "MidiContent";
-                if (isMidiContent)
-                {
-                    // Phase B: plugin-less MIDI content row — restore clips onto a MIDI content
-                    // controller bound to the TrackKind::Midi session row. No plugin autoload.
-                    const TrackId midiTid = etRow.trackId;
-                    const std::shared_ptr<const SessionSnapshot> midiSnap
-                        = session_.loadSessionSnapshotForAudioThread();
-                    const int midiTix = (midiSnap != nullptr && midiTid != kInvalidTrackId)
-                                            ? midiSnap->findTrackIndexById(midiTid)
-                                            : -1;
-                    if (midiTix < 0 || midiSnap->getTrack(midiTix).getKind() != TrackKind::Midi
-                        || callbacks_.getOrCreateMidiContentControllerForTrack == nullptr)
-                    {
-                        appendProjectLoadDiagnosticLine(
-                            "load: skip MidiContent restore (row missing or not Midi) trackId="
-                            + juce::String((juce::int64)midiTid));
-                        continue;
-                    }
-                    InstrumentTrackController* const midiCtl
-                        = callbacks_.getOrCreateMidiContentControllerForTrack(midiTid);
-                    if (midiCtl == nullptr)
-                    {
-                        appendProjectLoadDiagnosticLine(
-                            "load: skip MidiContent restore (controller create failed) trackId="
-                            + juce::String((juce::int64)midiTid));
-                        continue;
-                    }
-                    midiCtl->setTimelineSampleRate(sampleRate);
-                    midiCtl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
-                    appendProjectLoadDiagnosticLine("load: after MidiContent restore trackId="
+                    appendProjectLoadDiagnosticLine("load: skip MidiContent restore (row missing or not Midi) trackId="
                                                     + juce::String((juce::int64)midiTid));
-                    continue;
                 }
-                if (!isGroove && !isHalion && !isGeneric)
+                else if (InstrumentTrackController* const midiCtl = callbacks_.getOrCreateMidiContentControllerForTrack(midiTid))
                 {
-                    appendProjectLoadDiagnosticLine(
-                        "load: skip unknown experimental instrumentKind=\"" + etRow.instrumentKind
-                        + "\" trackId=" + juce::String((juce::int64)etRow.trackId));
-                    continue;
-                }
-                const TrackId bindTid = InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
-                    &session_,
-                    etRow.trackId,
-                    &parsedLoad.tracks);
-                const std::shared_ptr<const SessionSnapshot> postSnap
-                    = session_.loadSessionSnapshotForAudioThread();
-                if (bindTid == kInvalidTrackId || postSnap == nullptr)
-                {
-                    appendProjectLoadDiagnosticLine(
-                        "load: skip experimental restore unresolved trackId="
-                        + juce::String((juce::int64)etRow.trackId));
-                    continue;
-                }
-                const int tix = postSnap->findTrackIndexById(bindTid);
-                if (tix < 0 || postSnap->getTrack(tix).getKind() != TrackKind::Instrument)
-                {
-                    appendProjectLoadDiagnosticLine(
-                        "load: skip experimental restore non-instrument lane trackId="
-                        + juce::String((juce::int64)bindTid));
-                    continue;
-                }
-                if (isGeneric)
-                {
-                    appendProjectLoadDiagnosticLine("load: before GenericVst3 restore trackId="
-                                                    + juce::String((juce::int64)bindTid));
-                    restoreGenericVst3InstrumentTrack(
-                        session_,
-                        callbacks_,
-                        bindTid,
-                        sampleRate,
-                        &etRow,
-                        &parsedLoad.tracks,
-                        instrumentAutoloadNoteAcc);
-                    appendProjectLoadDiagnosticLine("load: after GenericVst3 restore trackId="
-                                                    + juce::String((juce::int64)bindTid));
-                    continue;
-                }
-                appendProjectLoadDiagnosticLine(
-                    "load: before GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
-                    + " kind=" + etRow.instrumentKind);
-                const auto runtime = callbacks_.getOrCreateInstrumentRuntimeForTrack(bindTid);
-                InstrumentTrackController* ctl = runtime.second;
-                ExperimentalInstrumentHost* mh = runtime.first;
-                if (ctl == nullptr || mh == nullptr)
-                {
-                    appendProjectLoadDiagnosticLine(
-                        "load: skip GrooveAgent/HALion restore missing runtime trackId="
-                        + juce::String((juce::int64)bindTid));
-                    continue;
-                }
-                ctl->setTimelineSampleRate(sampleRate);
-                ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &parsedLoad.tracks);
-                juce::String noteOne;
-                if (isGroove)
-                {
-                    ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
+                    midiCtl->setTimelineSampleRate(sampleRate);
+                    midiCtl->restoreExperimentalInstrumentSingleProjectRow(etRow, &j.parsed.tracks);
+                    appendProjectLoadDiagnosticLine("load: after MidiContent restore trackId=" + juce::String((juce::int64)midiTid));
                 }
                 else
                 {
-                    ctl->runPendingHalionSonicProjectAutoload(*mh, noteOne);
+                    appendProjectLoadDiagnosticLine("load: skip MidiContent restore (controller create failed) trackId="
+                                                    + juce::String((juce::int64)midiTid));
                 }
-                appendProjectLoadDiagnosticLine(
-                    "load: after GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
-                    + " kind=" + etRow.instrumentKind);
-                if (noteOne.isNotEmpty())
-                {
-                    if (instrumentAutoloadNoteAcc.isNotEmpty())
-                    {
-                        instrumentAutoloadNoteAcc << "\n\n";
-                    }
-                    instrumentAutoloadNoteAcc << noteOne;
-                }
+                loadJob_scheduleNextUnit();
+                return;
             }
-        }
-        appendProjectLoadDiagnosticLine("load: before orphan instrument lane restore");
-        restoreOrphanInstrumentLanesWithoutRuntime(
-            session_, parsedLoad, callbacks_, sampleRate, instrumentAutoloadNoteAcc);
-        appendProjectLoadDiagnosticLine("load: after orphan instrument lane restore");
-        // Phase B: every TrackKind::Midi row needs its plugin-less controller, including rows
-        // whose project block was missing (e.g. hand-edited files) — otherwise the lane would
-        // have no MIDI clip owner until restart.
-        if (callbacks_.getOrCreateMidiContentControllerForTrack != nullptr)
-        {
-            if (const auto midiRowsSnap = session_.loadSessionSnapshotForAudioThread())
+            if (!isGroove && !isHalion && !isGeneric)
             {
-                for (int ti = 0; ti < midiRowsSnap->getNumTracks(); ++ti)
+                appendProjectLoadDiagnosticLine("load: skip unknown experimental instrumentKind=\"" + etRow.instrumentKind
+                                                + "\" trackId=" + juce::String((juce::int64)etRow.trackId));
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            const TrackId bindTid = InstrumentTrackController::resolveExperimentalInstrumentLaneIdFromProjectFields(
+                &session_, etRow.trackId, &j.parsed.tracks);
+            const std::shared_ptr<const SessionSnapshot> postSnap = session_.loadSessionSnapshotForAudioThread();
+            if (bindTid == kInvalidTrackId || postSnap == nullptr)
+            {
+                appendProjectLoadDiagnosticLine("load: skip experimental restore unresolved trackId="
+                                                + juce::String((juce::int64)etRow.trackId));
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            const int tix = postSnap->findTrackIndexById(bindTid);
+            if (tix < 0 || postSnap->getTrack(tix).getKind() != TrackKind::Instrument)
+            {
+                appendProjectLoadDiagnosticLine("load: skip experimental restore non-instrument lane trackId="
+                                                + juce::String((juce::int64)bindTid));
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            if (isGeneric)
+            {
+                appendProjectLoadDiagnosticLine("load: before GenericVst3 restore trackId=" + juce::String((juce::int64)bindTid));
+                restoreGenericVst3InstrumentTrack(session_, callbacks_, bindTid, sampleRate, &etRow, &j.parsed.tracks,
+                                                  j.instrumentAutoloadNoteAcc);
+                appendProjectLoadDiagnosticLine("load: after GenericVst3 restore trackId=" + juce::String((juce::int64)bindTid));
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            appendProjectLoadDiagnosticLine("load: before GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
+                                            + " kind=" + etRow.instrumentKind);
+            const auto runtime = callbacks_.getOrCreateInstrumentRuntimeForTrack(bindTid);
+            InstrumentTrackController* const ctl = runtime.second;
+            ExperimentalInstrumentHost* const mh = runtime.first;
+            if (ctl == nullptr || mh == nullptr)
+            {
+                appendProjectLoadDiagnosticLine("load: skip GrooveAgent/HALion restore missing runtime trackId="
+                                                + juce::String((juce::int64)bindTid));
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            ctl->setTimelineSampleRate(sampleRate);
+            ctl->restoreExperimentalInstrumentSingleProjectRow(etRow, &j.parsed.tracks);
+            juce::String noteOne;
+            if (isGroove)
+            {
+                ctl->runPendingGrooveAgentProjectAutoload(*mh, noteOne);
+            }
+            else
+            {
+                ctl->runPendingHalionSonicProjectAutoload(*mh, noteOne);
+            }
+            appendProjectLoadDiagnosticLine("load: after GrooveAgent/HALion restore trackId=" + juce::String((juce::int64)bindTid)
+                                            + " kind=" + etRow.instrumentKind);
+            if (noteOne.isNotEmpty())
+            {
+                if (j.instrumentAutoloadNoteAcc.isNotEmpty())
                 {
-                    const Track& tr = midiRowsSnap->getTrack(ti);
-                    if (tr.getKind() != TrackKind::Midi)
+                    j.instrumentAutoloadNoteAcc << "\n\n";
+                }
+                j.instrumentAutoloadNoteAcc << noteOne;
+            }
+            loadJob_scheduleNextUnit();
+            return;
+        }
+
+        case LoadJob::Unit::OrphansAndUi:
+        {
+            if (!announce(withEllipsisUtf8("Preparing tracks"), juce::String(), -1.0))
+            {
+                return;
+            }
+            appendProjectLoadDiagnosticLine("load: before orphan instrument lane restore");
+            restoreOrphanInstrumentLanesWithoutRuntime(session_, j.parsed, callbacks_, sampleRate, j.instrumentAutoloadNoteAcc);
+            appendProjectLoadDiagnosticLine("load: after orphan instrument lane restore");
+            // Phase B: every TrackKind::Midi row needs its plugin-less controller, including rows
+            // whose project block was missing (e.g. hand-edited files) - otherwise the lane would
+            // have no MIDI clip owner until restart.
+            if (callbacks_.getOrCreateMidiContentControllerForTrack != nullptr)
+            {
+                if (const auto midiRowsSnap = session_.loadSessionSnapshotForAudioThread())
+                {
+                    for (int ti = 0; ti < midiRowsSnap->getNumTracks(); ++ti)
                     {
-                        continue;
-                    }
-                    if (callbacks_.getOrCreateMidiContentControllerForTrack(tr.getId()) == nullptr)
-                    {
-                        appendProjectLoadDiagnosticLine(
-                            "load: midi content controller create FAILED trackId="
-                            + juce::String((juce::int64)tr.getId()));
+                        const Track& tr = midiRowsSnap->getTrack(ti);
+                        if (tr.getKind() != TrackKind::Midi)
+                        {
+                            continue;
+                        }
+                        if (callbacks_.getOrCreateMidiContentControllerForTrack(tr.getId()) == nullptr)
+                        {
+                            appendProjectLoadDiagnosticLine("load: midi content controller create FAILED trackId="
+                                                            + juce::String((juce::int64)tr.getId()));
+                        }
                     }
                 }
             }
+            appendProjectLoadDiagnosticLine("load: instrument restore complete");
+            appendProjectLoadDiagnosticLine("load: before syncMidiEditorInstrumentStateFromHost");
+            callbacks_.syncMidiEditorInstrumentStateFromHost();
+            appendProjectLoadDiagnosticLine("load: after syncMidiEditorInstrumentStateFromHost");
+            // Missing/unavailable Primary instruments are an EXPECTED portable-project state (proxy
+            // playback and the per-track status already communicate availability), so the per-track
+            // "could not be loaded / placeholder" notes are no longer surfaced as a blocking
+            // informational dialog after an otherwise successful load. They stay in the project-load
+            // diagnostic log; real load errors (sample-rate note in `infoNote`, skipped audio files)
+            // still show in finalize.
+            if (j.instrumentAutoloadNoteAcc.isNotEmpty())
+            {
+                appendProjectLoadDiagnosticLine("load: instrument availability notes (not shown as dialog): "
+                                                + j.instrumentAutoloadNoteAcc.replace("\n", " | "));
+            }
+            callbacks_.clearSessionHistory();
+            appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject begin");
+            callbacks_.refreshAllUiAfterLoadedProject();
+            appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject end");
+            j.insertIndex = 0;
+            if (!j.insertRows.empty())
+            {
+                appendProjectLoadDiagnosticLine("load: deferred plugin insert restore begin count="
+                                                + juce::String((int)j.insertRows.size()));
+            }
+            j.unit = j.insertRows.empty() ? LoadJob::Unit::Finalize : LoadJob::Unit::RestoreInsertChain;
+            loadJob_scheduleNextUnit();
+            return;
         }
-        appendProjectLoadDiagnosticLine("load: instrument restore complete");
-        appendProjectLoadDiagnosticLine("load: before syncMidiEditorInstrumentStateFromHost");
-        callbacks_.syncMidiEditorInstrumentStateFromHost();
-        appendProjectLoadDiagnosticLine("load: after syncMidiEditorInstrumentStateFromHost");
-        // Missing/unavailable Primary instruments are an EXPECTED portable-project state (proxy
-        // playback and the per-track status already communicate availability), so the per-track
-        // "could not be loaded / placeholder" notes are no longer surfaced as a blocking
-        // informational dialog after an otherwise successful load. They stay in the project-load
-        // diagnostic log; real load errors (sample-rate note in `infoNote`, skipped audio files)
-        // still show below.
-        if (instrumentAutoloadNoteAcc.isNotEmpty())
+
+        case LoadJob::Unit::RestoreInsertChain:
         {
-            appendProjectLoadDiagnosticLine(
-                "load: instrument availability notes (not shown as dialog): "
-                + instrumentAutoloadNoteAcc.replace("\n", " | "));
+            if (j.insertIndex >= (int)j.insertRows.size())
+            {
+                appendProjectLoadDiagnosticLine("load: deferred plugin insert restore complete");
+                j.unit = LoadJob::Unit::Finalize;
+                loadJob_scheduleNextUnit();
+                return;
+            }
+            const Session::PendingPluginInsertRestore& row = j.insertRows[(size_t)j.insertIndex];
+            const int total = (int)j.insertRows.size();
+            juce::String names;
+            for (const auto& s : row.chain.slots)
+            {
+                if (!s.occupied)
+                {
+                    continue;
+                }
+                const juce::String n = juce::File(s.vst3AbsolutePath).getFileNameWithoutExtension();
+                names << (names.isEmpty() ? "" : ", ") << (n.isNotEmpty() ? n : s.pluginIdentifier);
+            }
+            if (!announce(withEllipsisUtf8("Restoring effects"),
+                          juce::String(j.insertIndex + 1) + " of " + juce::String(total) + ": " + names,
+                          (double)j.insertIndex / (double)juce::jmax(1, total)))
+            {
+                return;
+            }
+            ++j.insertIndex;
+            appendProjectLoadDiagnosticLine("load: deferred before importChain trackId=" + juce::String((juce::int64)row.trackId)
+                                            + " slots=" + juce::String((int)row.chain.slots.size()));
+            pluginHost_.importChain(row.trackId, row.chain);
+            appendProjectLoadDiagnosticLine("load: deferred after importChain trackId=" + juce::String((juce::int64)row.trackId));
+            loadJob_scheduleNextUnit();
+            return;
         }
-        callbacks_.clearSessionHistory();
-        appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject begin");
-        callbacks_.refreshAllUiAfterLoadedProject();
-        appendProjectLoadDiagnosticLine("load: refreshAllUiAfterLoadedProject end");
-        // P1H: capture proxy asset source hints while the on-disk location is known (the
-        // autosave recovery flow clears the save path AFTER this, so a later first-time
-        // Save As can still copy the referenced generations from here).
-        if (callbacks_.onProjectLoaded != nullptr)
+
+        case LoadJob::Unit::Finalize:
         {
-            callbacks_.onProjectLoaded(f.getParentDirectory());
-        }
-        appendProjectLoadDiagnosticLine("load: complete");
-        markProjectCleanNow();
-        // P1 acceptance correction: a freshly loaded project counts as "saved" for the
-        // automatic proxy-metadata checkpoint guard; record the loaded file's identity.
-        refreshKnownProjectDiskIdentity();
-        writeLastOperationBreadcrumb("project load end ok: " + f.getFullPathName());
-        // Stability C3: verify runtime invariants right after the load completed.
-        (void) stability_invariants::runRegisteredStabilityInvariantsCheck("project-load-end");
-        // Always invoked (even without saved bounds) so the MIDI editor bounds memo is seeded or
-        // cleared per project; the callee no-ops per window when the project has no bounds.
-        if (callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
-        {
-            callbacks_.applyMainWindowBoundsFromLoadedProject(parsedLoad);
-        }
-        // Conny 1B: reopen the MIDI editor when the project saved it as open (after the session,
-        // instrument runtimes, clips and main window are all restored). Skips safely when the
-        // saved track/clip no longer exists; never opens plugin editor windows.
-        if (callbacks_.restoreMidiEditorWorkspaceFromLoadedProject != nullptr)
-        {
-            callbacks_.restoreMidiEditorWorkspaceFromLoadedProject(parsedLoad);
-        }
-        if (infoNote.isNotEmpty() || skipped.size() > 0)
-        {
+            if (!announce(withEllipsisUtf8("Finalizing project"), juce::String(), -1.0))
+            {
+                return;
+            }
+            // P1H: capture proxy asset source hints while the on-disk location is known (the
+            // autosave recovery flow clears the save path AFTER this, so a later first-time
+            // Save As can still copy the referenced generations from here).
+            if (callbacks_.onProjectLoaded != nullptr)
+            {
+                callbacks_.onProjectLoaded(f.getParentDirectory());
+            }
+            // The insert chains are in: refresh the views that show them once more.
+            if (!j.insertRows.empty())
+            {
+                callbacks_.refreshAllUiAfterLoadedProject();
+            }
+            appendProjectLoadDiagnosticLine("load: complete elapsedMs="
+                                            + juce::String((int)(juce::Time::getMillisecondCounterHiRes() - j.startMs)));
+            markProjectCleanNow();
+            // P1 acceptance correction: a freshly loaded project counts as "saved" for the
+            // automatic proxy-metadata checkpoint guard; record the loaded file's identity.
+            refreshKnownProjectDiskIdentity();
+            writeLastOperationBreadcrumb("project load end ok: " + f.getFullPathName());
+            // Stability C3: verify runtime invariants right after the load completed.
+            (void) stability_invariants::runRegisteredStabilityInvariantsCheck("project-load-end");
+            // Always invoked (even without saved bounds) so the MIDI editor bounds memo is seeded or
+            // cleared per project; the callee no-ops per window when the project has no bounds.
+            if (callbacks_.applyMainWindowBoundsFromLoadedProject != nullptr)
+            {
+                callbacks_.applyMainWindowBoundsFromLoadedProject(j.parsed);
+            }
+            // Conny 1B: reopen the MIDI editor when the project saved it as open (after the session,
+            // instrument runtimes, clips and main window are all restored). Skips safely when the
+            // saved track/clip no longer exists; never opens plugin editor windows.
+            if (callbacks_.restoreMidiEditorWorkspaceFromLoadedProject != nullptr)
+            {
+                callbacks_.restoreMidiEditorWorkspaceFromLoadedProject(j.parsed);
+            }
             juce::String body;
-            if (infoNote.isNotEmpty())
+            if (j.infoNote.isNotEmpty() || j.skipped.size() > 0)
             {
-                body = infoNote;
+                if (j.infoNote.isNotEmpty())
+                {
+                    body = j.infoNote;
+                }
+                if (j.skipped.size() > 0)
+                {
+                    if (body.isNotEmpty())
+                    {
+                        body << "\n\n";
+                    }
+                    body << "Could not load " + juce::String(j.skipped.size())
+                         + (j.skipped.size() == 1 ? " file:" : " files:") + "\n\n";
+                    for (int i = 0; i < j.skipped.size(); ++i)
+                    {
+                        body << j.skipped[i] << (i < j.skipped.size() - 1 ? "\n" : "");
+                    }
+                }
             }
-            if (skipped.size() > 0)
+            loadJob_finish(true, {});
+            if (body.isNotEmpty())
             {
-                if (body.isNotEmpty())
-                {
-                    body << "\n\n";
-                }
-                body << "Could not load " + juce::String(skipped.size())
-                     + (skipped.size() == 1 ? " file:" : " files:") + "\n\n";
-                for (int i = 0; i < skipped.size(); ++i)
-                {
-                    body << skipped[i] << (i < skipped.size() - 1 ? "\n" : "");
-                }
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
             }
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::InfoIcon, "Load project (partial or note)", body);
+            return;
+        }
+
+        case LoadJob::Unit::Done:
+            return;
+    }
+}
+
+void ProjectIoCoordinator::loadJob_finish(const bool ok, const juce::String& errorBodyRef)
+{
+    if (loadJob_ == nullptr)
+    {
+        return;
+    }
+    // `errorBodyRef` may refer INTO the job (e.g. `parseResult.getErrorMessage()`), which is
+    // destroyed below - take an owning copy first.
+    const juce::String errorBody = errorBodyRef;
+    // Release order: the progress window first (modal state ends), then the gate (instrument
+    // processing resumes) with the job. The worker thread (if any) has already posted its result.
+    if (loadProgressWindow_ != nullptr)
+    {
+        loadProgressWindow_->exitModalState(0);
+        loadProgressWindow_->setVisible(false);
+        loadProgressWindow_.reset();
+    }
+    const juce::File f = loadJob_->file;
+    appendProjectLoadDiagnosticLine(juce::String("load: staged load ") + (ok ? "finished ok" : "FAILED")
+                                    + " file=\"" + f.getFullPathName() + "\""
+                                    + (ok ? juce::String() : " error=\"" + errorBody.replace("\n", " ") + "\""));
+    std::function<void(bool)> completion = std::move(loadJob_->completion);
+    loadJob_.reset();
+    if (completion)
+    {
+        completion(ok);
+    }
+    if (!ok)
+    {
+        if (isStabilityTestModeActive())
+        {
+            // Scenario runs must not leave a modal box behind; the diagnostic log has the error.
+            juce::Logger::writeToLog("[Load] failed (stability mode, alert suppressed): " + errorBody.replace("\n", " "));
+        }
+        else
+        {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load project", errorBody);
         }
     }
+    if (onProjectLoadFinished_)
+    {
+        onProjectLoadFinished_(ok);
+    }
+}
+
+bool ProjectIoCoordinator::captureLoadProgressWindowPng(const juce::File& png) const
+{
+    if (loadProgressWindow_ == nullptr || !loadProgressWindow_->isShowing())
+    {
+        return false;
+    }
+    const juce::Image img = loadProgressWindow_->createComponentSnapshot(loadProgressWindow_->getLocalBounds(), true, 1.0f);
+    if (!img.isValid())
+    {
+        return false;
+    }
+    png.getParentDirectory().createDirectory();
+    juce::FileOutputStream out(png);
+    if (!out.openedOk())
+    {
+        return false;
+    }
+    juce::PNGImageFormat fmt;
+    return fmt.writeImageToStream(img, out);
 }
 
 // =============================================================================
@@ -1127,6 +1695,12 @@ void ProjectIoCoordinator::loadProjectFromFile(const juce::File& projectFile)
 
 bool ProjectIoCoordinator::isProjectDirty() const noexcept
 {
+    if (loadJob_ != nullptr)
+    {
+        // A load in progress holds a partially applied model; the on-disk file is authoritative
+        // and nothing user-made exists yet - never prompt to save (or autosave) this state.
+        return false;
+    }
     if (instrumentOrPluginEditsSinceClean_)
     {
         return true;
@@ -1522,7 +2096,13 @@ juce::String ProjectIoCoordinator::periodicAutosaveBlockReason() const
     {
         return "stability-test-mode";
     }
-    // Covers the recovery prompt, unsaved-changes prompts, alerts, and modal pickers. Load/save/
+    // A staged project load spans many message-loop turns: the model is only partially applied
+    // until finalize, so an autosave written now would capture a half-built project.
+    if (loadJob_ != nullptr)
+    {
+        return "project load in progress";
+    }
+    // Covers the recovery prompt, unsaved-changes prompts, alerts, and modal pickers. Save/
     // export/mixdown/undo/redo/track-delete all run synchronously on the message thread, so this
     // timer cannot fire in the middle of them.
     if (juce::ModalComponentManager::getInstance()->getNumModalComponents() > 0)
@@ -1755,31 +2335,38 @@ void ProjectIoCoordinator::offerAutosaveRecoveryOnStartup(const bool commandLine
                     // Invariant 8 tolerates the transient "save path is the autosave" state
                     // only while this flag is set (cleared right after the path is detached).
                     stability_invariants::setAutosaveRecoveryInProgress(true);
-                    loadProjectFromFile(autosaveFile);
-                    if (session_.getCurrentProjectFile() == autosaveFile)
-                    {
-                        // Loaded OK. Detach the autosave path so plain Save goes through Save As
-                        // (the original project is never overwritten silently), and flag the
-                        // recovered state as unsaved so quit/load prompts protect it.
-                        session_.setCurrentProjectFile(juce::File());
-                        stability_invariants::setAutosaveRecoveryInProgress(false);
-                        markProjectDirtyFromEdit();
-                        appendProjectSaveDiagnosticLine(
-                            "recovery: autosave loaded; save path cleared (use Save As)");
-                        appendAutosaveDiagnosticLine(
-                            "recovery (prompt): loaded " + autosaveFile.getFullPathName()
-                            + "; save path cleared (Save goes through Save As)");
-                        // Stability C3: verify invariants after autosave recovery completed.
-                        (void) stability_invariants::runRegisteredStabilityInvariantsCheck(
-                            "autosave-recovery-end");
-                    }
-                    else
-                    {
-                        stability_invariants::setAutosaveRecoveryInProgress(false);
-                        appendProjectSaveDiagnosticLine("recovery: autosave load failed");
-                        appendAutosaveDiagnosticLine("recovery (prompt): autosave load FAILED: "
-                                                     + autosaveFile.getFullPathName());
-                    }
+                    // The staged load finishes asynchronously (progress window); the detach /
+                    // dirty steps run from its completion, never before the project is in.
+                    loadProjectFromFileThen(autosaveFile, [this, autosaveFile, guard](const bool ok) {
+                        if (!guard.isAlive())
+                        {
+                            return;
+                        }
+                        if (ok && session_.getCurrentProjectFile() == autosaveFile)
+                        {
+                            // Loaded OK. Detach the autosave path so plain Save goes through Save As
+                            // (the original project is never overwritten silently), and flag the
+                            // recovered state as unsaved so quit/load prompts protect it.
+                            session_.setCurrentProjectFile(juce::File());
+                            stability_invariants::setAutosaveRecoveryInProgress(false);
+                            markProjectDirtyFromEdit();
+                            appendProjectSaveDiagnosticLine(
+                                "recovery: autosave loaded; save path cleared (use Save As)");
+                            appendAutosaveDiagnosticLine(
+                                "recovery (prompt): loaded " + autosaveFile.getFullPathName()
+                                + "; save path cleared (Save goes through Save As)");
+                            // Stability C3: verify invariants after autosave recovery completed.
+                            (void) stability_invariants::runRegisteredStabilityInvariantsCheck(
+                                "autosave-recovery-end");
+                        }
+                        else
+                        {
+                            stability_invariants::setAutosaveRecoveryInProgress(false);
+                            appendProjectSaveDiagnosticLine("recovery: autosave load failed");
+                            appendAutosaveDiagnosticLine("recovery (prompt): autosave load FAILED: "
+                                                         + autosaveFile.getFullPathName());
+                        }
+                    });
                 }
                 else if (result == 2) // Ignore
                 {

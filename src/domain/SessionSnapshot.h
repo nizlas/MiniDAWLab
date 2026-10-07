@@ -113,6 +113,23 @@ public:
         juce::String newTrackName,
         TrackKind kind) noexcept;
 
+    /// [Message thread] Duplicate Track (single-row command): a copy of `sourceTrackId` inserted
+    /// DIRECTLY BELOW the source with id `newTrackId` and name `newTrackName`. Every persisted row
+    /// property is copied (kind, fader, pre-gain, pan, mute, Off, audio output, sends, MIDI output
+    /// channel, MIDI To, audio input and live-MIDI input assignments); every placed clip is copied
+    /// with a NEW id drawn from `firstNewClipId` upwards (`outClipIdsUsed` tells how many), sharing
+    /// the immutable material (no PCM copy). Routing is left exactly as the source's: the copy
+    /// feeds the same destinations, nothing points at the copy, so no cycle can arise; the normal
+    /// repair pass still runs. Master rows are never duplicated (returns nullptr); unknown source or
+    /// an id already present also returns nullptr.
+    [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackDuplicated(
+        const SessionSnapshot& previous,
+        TrackId sourceTrackId,
+        TrackId newTrackId,
+        juce::String newTrackName,
+        PlacedClipId firstNewClipId,
+        int& outClipIdsUsed) noexcept;
+
     // [Message thread] Drops the `TrackId` row and all its `PlacedClip`s. Unknown id: same snapshot
     // pointer shape (tracks copied verbatim). Removing the last lane yields `createEmpty()`.
     [[nodiscard]] static std::shared_ptr<const SessionSnapshot> withTrackRemoved(

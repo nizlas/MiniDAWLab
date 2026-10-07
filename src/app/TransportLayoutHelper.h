@@ -54,7 +54,14 @@ struct TransportLayoutRefs
 
     /// May be null until constructed in the owner ctor.
     PlayheadOverlay* lanePlayheadOverlay;
+
+    /// Vertical arrangement scrollbar (right of the track rows, below the timeline gutter). May be
+    /// null; when its range says everything fits it is hidden and the column is not reserved.
+    juce::ScrollBar* arrangementVerticalScrollBar;
 };
+
+/// Width of the vertical scrollbar column reserved right of the arrangement when it is shown.
+inline constexpr int kArrangementVerticalScrollBarWidthPx = 14;
 
 void applyTransportControlsLayout(const TransportLayoutRefs& refs);
 

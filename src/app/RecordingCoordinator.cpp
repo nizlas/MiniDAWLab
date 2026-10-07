@@ -752,6 +752,20 @@ void RecordingCoordinator::numpadRecordToggled()
     // Live MIDI rows (Instrument / Midi kind) record through their own capture path; several may
     // be armed at once and they may combine with the (single) armed audio track in one take.
     lastRecordStartRefusal_.clear();
+    if (recordStartBlocked_)
+    {
+        const juce::String blocked = recordStartBlocked_();
+        if (blocked.isNotEmpty())
+        {
+            lastRecordStartRefusal_ = blocked;
+            juce::Logger::writeToLog("[Rec] start blocked: " + blocked);
+            if (!isStabilityTestModeActive())
+            {
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "Recording", blocked);
+            }
+            return;
+        }
+    }
     const std::vector<TrackId> midiTracks = callbacks_.armedMidiTracksReadyToRecord
                                                 ? callbacks_.armedMidiTracksReadyToRecord()
                                                 : std::vector<TrackId>{};

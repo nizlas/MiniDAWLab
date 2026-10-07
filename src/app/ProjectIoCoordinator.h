@@ -68,6 +68,8 @@ public:
         /// folder — copies/validates referenced proxy generation assets into the new layout
         /// (honest nonfatal degradation on failure; the original project is never touched).
         std::function<void(const juce::File& projectFolder)> rehomeProxyAssetsAfterSaveAs;
+        /// Optional (staged load): the component the progress window is centred over (main window).
+        std::function<juce::Component*()> getProgressWindowAnchor;
     };
 
     ProjectIoCoordinator(Transport& transport,
@@ -77,13 +79,50 @@ public:
                            PlaybackEngine& playbackEngine,
                            Callbacks callbacks);
 
+    ~ProjectIoCoordinator() override;
+
     void saveProject();
     void loadProject();
 
+    // ---------------------------------------------------------------------
+    // Staged project load (progress + responsiveness)
+    // ---------------------------------------------------------------------
+    // One load is a fixed sequence of UNITS: parse + decode the audio material (background
+    // thread), replace the session model, restore one instrument runtime per unit, orphan lanes /
+    // MIDI content controllers + UI refresh, import one insert chain per unit, finalize. The
+    // Interactive drive runs one unit per message-loop turn behind a modal progress window (the
+    // window and the main window paint between units; plug-in instantiation itself still blocks
+    // for its own duration); the Synchronous drive runs the same units in one call (stability
+    // scenarios keep their "load returns loaded" contract). Session edits, transport start, save,
+    // autosave and a second load are refused while `isLoadInProgress()`; the dirty flag reads
+    // false (the on-disk file is authoritative); window close is safe (pending units check the
+    // lifetime guard and the load generation).
+    enum class LoadDrive
+    {
+        Interactive, ///< async units + progress window (the user's Open / command line / recovery)
+        Synchronous, ///< same units, run to completion before returning (stability test mode)
+    };
+
     /// [Message thread] Load `projectFile` directly (no chooser) — same pipeline as `loadProject`,
     /// so project-relative paths resolve identically. Used by the command-line ".dalproj" open path.
-    /// Shows a non-fatal alert when the file is missing or unreadable.
+    /// Shows a non-fatal alert when the file is missing or unreadable. Drive: Synchronous while a
+    /// `--stability-*` scenario runs, Interactive otherwise.
     void loadProjectFromFile(const juce::File& projectFile);
+    void loadProjectFromFile(const juce::File& projectFile, LoadDrive drive);
+    /// [Message thread] Like `loadProjectFromFile` (default drive) with a per-load continuation
+    /// fired once the load finished or failed (after the gates are released). A refused start
+    /// (load in progress, missing file, no device) fires `completion(false)` immediately.
+    void loadProjectFromFileThen(const juce::File& projectFile, std::function<void(bool ok)> completion);
+
+    /// [Message thread] True from the first unit until finalize / failure released the UI gates.
+    [[nodiscard]] bool isLoadInProgress() const noexcept { return loadJob_ != nullptr; }
+    /// [Message thread] "phase | detail | fraction" of the running load (empty when idle). Diagnostics.
+    [[nodiscard]] juce::String loadProgressTextForDiagnostics() const;
+    /// [Message thread] PNG of the progress dialog as rendered (false when it is not showing).
+    [[nodiscard]] bool captureLoadProgressWindowPng(const juce::File& png) const;
+    /// [Message thread] Optional observer fired once per finished load (ok or failed), after the
+    /// gates are released. Stability scenarios wait on it.
+    void setOnProjectLoadFinished(std::function<void(bool ok)> fn) { onProjectLoadFinished_ = std::move(fn); }
 
     // ---------------------------------------------------------------------
     // Stability Slice 5: unsaved-work protection (dirty flag, prompts, autosave, recovery).
@@ -173,6 +212,23 @@ public:
 
 private:
     void timerCallback() override;
+
+    // Staged load (see the public section). `LoadJob` and the progress window live in the .cpp.
+    struct LoadJob;
+    class LoadProgressWindow;
+    void loadJob_start(const juce::File& projectFile, LoadDrive drive, std::function<void(bool ok)> completion);
+    /// Runs the next unit; Interactive: schedules the following unit on a short timer so the message
+    /// loop paints in between; Synchronous: the caller loops.
+    void loadJob_runNextUnit();
+    void loadJob_scheduleNextUnit();
+    void loadJob_setProgress(const juce::String& phase, const juce::String& detail, double fraction);
+    /// Final common exit: releases the gate + progress window, logs, optional error alert, observer.
+    void loadJob_finish(bool ok, const juce::String& errorBody);
+    std::unique_ptr<LoadJob> loadJob_;
+    std::unique_ptr<LoadProgressWindow> loadProgressWindow_;
+    std::function<void(bool ok)> onProjectLoadFinished_;
+    std::uint64_t loadJobSerialCounter_ = 0;
+
     /// Returns non-empty skip/block reason when the periodic tick must not autosave right now.
     [[nodiscard]] juce::String periodicAutosaveBlockReason() const;
     /// Shared autosave writer; returns ok/failure and logs everything to autosave-diag.log.

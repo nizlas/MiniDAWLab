@@ -160,6 +160,14 @@ PlacedClip PlacedClip::withDisplayName(juce::String newDisplayName) const noexce
     return out;
 }
 
+PlacedClip PlacedClip::withId(const PlacedClipId newId) const noexcept
+{
+    jassert(newId != kInvalidPlacedClipId);
+    PlacedClip out = *this; // same material, placement, trims, window and display name
+    out.id_ = newId;
+    return out;
+}
+
 PlacedClip PlacedClip::withStartSampleOnTimeline(const std::int64_t newStartSampleOnTimeline) const noexcept
 {
     return replicatedWith(newStartSampleOnTimeline, leftTrimSamples_, visibleLengthSamples_);

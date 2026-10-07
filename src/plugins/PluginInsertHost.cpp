@@ -1663,6 +1663,17 @@ std::vector<std::pair<TrackId, std::vector<const void*>>>
     return out;
 }
 
+juce::AudioPluginInstance* PluginInsertHost::liveInstanceAtChainIndexForDiagnostics(const TrackId trackId,
+                                                                                  const int chainIndex) const noexcept
+{
+    const auto it = chains_.find(trackId);
+    if (it == chains_.end() || chainIndex < 0 || chainIndex >= (int) it->second.size())
+    {
+        return nullptr;
+    }
+    return it->second[(size_t) chainIndex].instance.get();
+}
+
 std::vector<std::pair<TrackId, std::vector<const void*>>>
     PluginInsertHost::exportPublishedMapPointersForDiagnostics() const
 {

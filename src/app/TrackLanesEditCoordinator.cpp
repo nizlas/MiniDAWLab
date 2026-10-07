@@ -296,6 +296,8 @@ void TrackLanesEditCoordinator::install()
             });
     });
 
+    trackLanesView_.setOnDuplicateTrackRequested([this](const TrackId tid) { duplicateTrack(tid); });
+
     trackLanesView_.setCommittedHeaderDragTrackReorder([this](const TrackId movedId,
                                                               const int destSessionIndex) {
         if (movedId == kInvalidTrackId || destSessionIndex < 0)
@@ -1061,4 +1063,140 @@ void TrackLanesEditCoordinator::redoTeardownDeletedInstrumentTrack(const TrackId
     }
     appendTrackDeleteDiagnosticLine("redo delete end trackId=" + juce::String((juce::int64)tid));
     writeLastOperationBreadcrumb("track delete redo end id=" + juce::String((juce::int64)tid));
+}
+
+// =============================================================================
+// Duplicate Track (single-row command; header context menu, explicit source TrackId)
+// =============================================================================
+std::optional<TrackId> TrackLanesEditCoordinator::duplicateTrack(const TrackId sourceTid)
+{
+    if (callbacks_.isRecording() || callbacks_.isCountInActive())
+    {
+        appendTrackDeleteDiagnosticLine("duplicate refused (recording/count-in) trackId="
+                                        + juce::String((juce::int64)sourceTid));
+        return std::nullopt;
+    }
+    if (sourceTid == kInvalidTrackId || !callbacks_.executeUndoableTrackDelete)
+    {
+        return std::nullopt;
+    }
+    std::optional<TrackId> created;
+    // One undo step (the Delete Track step shape, inverted): `before` lacks the copy, `after` has
+    // it; `pluginSides` carries the copied chain under the NEW id (before = empty); the instrument
+    // payload carries the captured project row under the NEW id. Undo = snapshot without the row +
+    // chain evicted + runtime retired; redo = snapshot with the row + chain re-imported + runtime
+    // recreated — the same application rule the Delete Track step uses, decided by row presence.
+    callbacks_.executeUndoableTrackDelete(
+        "Duplicate track",
+        [this, sourceTid, &created](std::optional<PluginUndoStepSides>& outPluginSides,
+                                    std::optional<InstrumentTrackDeleteUndoSides>& outInstrumentRow) -> bool {
+            const std::shared_ptr<const SessionSnapshot> snap = session_.loadSessionSnapshotForAudioThread();
+            const int ix = snap != nullptr ? snap->findTrackIndexById(sourceTid) : -1;
+            if (ix < 0)
+            {
+                appendTrackDeleteDiagnosticLine("duplicate abort (track not found) trackId="
+                                                + juce::String((juce::int64)sourceTid));
+                return false;
+            }
+            const Track& src = snap->getTrack(ix);
+            if (src.getKind() == TrackKind::Master)
+            {
+                appendTrackDeleteDiagnosticLine("duplicate abort (master track) trackId="
+                                                + juce::String((juce::int64)sourceTid));
+                return false;
+            }
+            appendTrackDeleteDiagnosticLine("duplicate begin trackId=" + juce::String((juce::int64)sourceTid)
+                                            + " kind=" + trackKindDiagnosticName(src.getKind())
+                                            + " name=\"" + src.getName() + "\"");
+            writeLastOperationBreadcrumb("track duplicate start id=" + juce::String((juce::int64)sourceTid));
+
+            // ---- 1. Capture under the realtime gate: insert chain + instrument row with the CURRENT
+            // live state. The gate silences and drains the callback (and with it the render
+            // workers), so no state capture overlaps processing of the same instance.
+            PluginTrackChain chain;
+            std::optional<ProjectFileExperimentalInstrumentTrackV1> row;
+            {
+                const ScopedTrackDeleteRealtimeGate captureGate(playbackEngine_);
+                if (pluginHost_.hasAnyInsertOnTrack(sourceTid))
+                {
+                    chain = pluginHost_.exportChain(sourceTid);
+                }
+                if ((src.getKind() == TrackKind::Instrument || src.getKind() == TrackKind::Midi)
+                    && callbacks_.getInstrumentControllerForTrack)
+                {
+                    if (InstrumentTrackController* const ctl = callbacks_.getInstrumentControllerForTrack(sourceTid);
+                        ctl != nullptr && ctl->hasInstrumentTrack())
+                    {
+                        ProjectFileExperimentalInstrumentTrackV1 captured = ctl->buildExperimentalInstrumentProjectBlock();
+                        if (captured.enabled)
+                        {
+                            row = std::move(captured);
+                        }
+                    }
+                }
+            }
+            appendTrackDeleteDiagnosticLine(
+                "duplicate capture: insertSlots=" + juce::String((int)chain.slots.size())
+                + " instrumentRow=" + (row.has_value() ? ("yes kind=" + row->instrumentKind
+                                                          + " clips=" + juce::String((int)row->clips.size())
+                                                          + " stateBase64Len=" + juce::String(row->pluginStateBase64.length()))
+                                                       : juce::String("no")));
+
+            // ---- 2. Session: the copy directly below the source (new track + clip ids, same
+            // destinations). Nothing points at the copy, so routing stays acyclic.
+            const std::optional<TrackId> newTid = session_.duplicateTrack(sourceTid);
+            if (!newTid.has_value())
+            {
+                appendTrackDeleteDiagnosticLine("duplicate abort (session refused) trackId="
+                                                + juce::String((juce::int64)sourceTid));
+                return false;
+            }
+            created = newTid;
+            appendTrackDeleteDiagnosticLine("duplicate: session row added newTrackId=" + juce::String((juce::int64)*newTid));
+
+            // ---- 3. Inserts: own instances with the captured state (unavailable plug-ins stay
+            // placeholders with identity + retained state, exactly like a project load).
+            if (!chain.slots.empty())
+            {
+                // Fresh track id: no instances exist yet, so this instantiates the whole chain
+                // (no undo recording happens in the host; the step below carries the sides).
+                pluginHost_.importChain(*newTid, chain);
+                PluginUndoStepSides sides;
+                sides.trackId = *newTid;
+                sides.before = PluginTrackChain{};
+                sides.after = chain;
+                outPluginSides = std::move(sides);
+            }
+
+            // ---- 4. Instrument / MIDI-content runtime: the captured row under the new id, through
+            // the same restore path project load and Delete-Track undo use (own plug-in instance,
+            // state restored; placeholder shell when the plug-in cannot be loaded).
+            if (row.has_value())
+            {
+                InstrumentTrackDeleteUndoSides sides;
+                sides.trackId = *newTid;
+                sides.row = *row;
+                sides.row.trackId = *newTid;
+                restoreDeletedInstrumentTrackForUndo(sides);
+                outInstrumentRow = std::move(sides);
+            }
+
+            // ---- 5. UI: the copy is the active track; Monitor / Arm are runtime-only and start off.
+            session_.setActiveTrack(*newTid);
+            callbacks_.syncViewportFromSession();
+            trackLanesView_.syncTracksFromSession();
+            if (callbacks_.refreshInstrumentUi)
+            {
+                callbacks_.refreshInstrumentUi();
+            }
+            rulerView_.repaint();
+            trackLanesView_.repaint();
+            inspectorView_.refreshFromSession();
+            appendTrackDeleteDiagnosticLine("duplicate end ok sourceTrackId=" + juce::String((juce::int64)sourceTid)
+                                            + " newTrackId=" + juce::String((juce::int64)*newTid));
+            writeLastOperationBreadcrumb("track duplicate end ok id=" + juce::String((juce::int64)*newTid));
+            (void) stability_invariants::runRegisteredStabilityInvariantsCheck("track-duplicate-end");
+            return true;
+        });
+    return created;
 }

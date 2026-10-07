@@ -126,6 +126,15 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         r.inspectorResizeSplitter.setBounds(0, 0, 0, 0);
         r.inspectorResizeSplitter.setVisible(false);
     }
+    // Vertical scrollbar column: reserved right of ruler + lanes (same right edge for both, so the
+    // ruler / lane / playhead x mapping is untouched); the bar itself sits below the gutter and
+    // auto-hides when everything fits. Reserving the column permanently keeps lane widths stable
+    // when a project crosses the "needs scrolling" threshold.
+    juce::Rectangle<int> scrollBarColumn;
+    if (r.arrangementVerticalScrollBar != nullptr)
+    {
+        scrollBarColumn = area.removeFromRight(juce::jmin(kArrangementVerticalScrollBarWidthPx, area.getWidth()));
+    }
     const int timelineBandTop = area.getY();
     auto timelineRow = area.removeFromTop(gutter);
     // ONE shared boundary: the lanes view computes its effective header-column width from the very
@@ -147,6 +156,13 @@ void mini_daw_app_transport::applyTransportControlsLayout(const TransportLayoutR
         timelineBandTop,
         area.getWidth(),
         juce::jmax(0, area.getBottom() - timelineBandTop));
+    if (r.arrangementVerticalScrollBar != nullptr)
+    {
+        // Same vertical span as the scrollable row stack (below the timeline gutter).
+        r.arrangementVerticalScrollBar->setBounds(scrollBarColumn.withTop(timelineBandTop + gutter)
+                                                      .withBottom(r.trackLanesView.getBottom()));
+        r.arrangementVerticalScrollBar->toFront(false);
+    }
     if (r.lanePlayheadOverlay != nullptr)
     {
         const int tw = r.trackLanesView.getWidth();

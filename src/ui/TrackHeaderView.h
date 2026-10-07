@@ -217,6 +217,10 @@ public:
     bool clickArmCellLikeMouseForStabilityTest();
     bool clickMuteCellLikeMouseForStabilityTest();
     bool clickPowerCellLikeMouseForStabilityTest();
+    /// [Stability] Open the header context menu exactly like a right-button press at the header
+    /// centre (`mouseDown` with popup modifiers → the owner's `onShowContextMenu`). False when no
+    /// menu callback is wired.
+    bool showContextMenuLikeRightClickForStabilityTest();
 
 private:
     enum class DragBlocker : std::uint8_t

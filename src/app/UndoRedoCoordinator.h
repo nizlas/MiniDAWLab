@@ -75,6 +75,9 @@ public:
         /// Delete-Track redo: re-run the hardened instrument runtime teardown (editors, timeline UI,
         /// publish-before-destroy retire) after the timeline snapshot removed the row again.
         std::function<void(TrackId)> teardownDeletedInstrumentTrackRuntimeForRedo;
+        /// Optional: true while a staged project load owns the session — every recorded edit and
+        /// undo / redo is refused (the partially applied model must never become an undo step).
+        std::function<bool()> isProjectLoadInProgress;
     };
 
     UndoRedoCoordinator(Session& session, PluginInsertHost& pluginHost, Callbacks callbacks);
@@ -110,6 +113,10 @@ public:
 
 private:
     void refreshAfterSessionSnapshotRestore();
+    /// Instrument-runtime side of a structural step (Delete / Duplicate Track): recreate when the
+    /// restored timeline contains the row, retire when it does not.
+    void applyInstrumentTrackRuntimeSides(const InstrumentTrackDeleteUndoSides& sides,
+                                          const SessionSnapshot& restoredTimeline);
     void onPluginUndoRecord(const juce::String& label, const PluginUndoStepSides& sides);
 
     /// C callback for `PluginInsertHost::setUndoRecorder` (must be a plain function pointer).

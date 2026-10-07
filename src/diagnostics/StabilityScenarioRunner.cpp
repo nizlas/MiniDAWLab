@@ -362,6 +362,34 @@ StabilityScenarioRequest parseStabilityScenarioFromCommandLine(const juce::Strin
         {
             req.perfProfilerOff = true;
         }
+        else if (a == "--stability-load-progress")
+        {
+            if (!setKind(StabilityScenarioKind::LoadProgress)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-load-progress requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--stability-duplicate-track")
+        {
+            if (!setKind(StabilityScenarioKind::DuplicateTrack)) { return {}; }
+            if (!nextProjectArg(i, req.projectA))
+            {
+                errorOut = "--stability-duplicate-track requires a project path";
+                return {};
+            }
+        }
+        else if (a == "--evidence")
+        {
+            if (i + 1 >= args.size())
+            {
+                errorOut = "--evidence requires a directory";
+                return {};
+            }
+            ++i;
+            req.evidenceDir = fileFromArg(args[i]);
+        }
         else if (a == "--repeat")
         {
             if (i + 1 >= args.size())
@@ -506,6 +534,8 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
         case StabilityScenarioKind::ProxyPlaybackEdges: scenarioName_ = "proxy-playback-edges"; break;
         case StabilityScenarioKind::Mixer: scenarioName_ = "mixer"; break;
         case StabilityScenarioKind::PerfProfile: scenarioName_ = "perf-profile"; break;
+        case StabilityScenarioKind::LoadProgress: scenarioName_ = "load-progress"; break;
+        case StabilityScenarioKind::DuplicateTrack: scenarioName_ = "duplicate-track"; break;
         case StabilityScenarioKind::None: scenarioName_ = "none"; break;
     }
 
@@ -609,6 +639,12 @@ void StabilityScenarioRunner::start(const StabilityScenarioRequest& request)
             break;
         case StabilityScenarioKind::PerfProfile:
             appendPerfProfileSteps(request);
+            break;
+        case StabilityScenarioKind::LoadProgress:
+            appendLoadProgressSteps(request);
+            break;
+        case StabilityScenarioKind::DuplicateTrack:
+            appendDuplicateTrackSteps(request);
             break;
         case StabilityScenarioKind::None:
             finish(false, "no scenario requested");

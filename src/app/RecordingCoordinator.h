@@ -135,6 +135,12 @@ public:
     /// [Diagnostics / stability] Boundaries of the last finished run (as used by the commits).
     [[nodiscard]] RecordRunBoundaries getLastRunBoundariesForDiagnostics() const noexcept { return lastRunBoundaries_; }
 
+    /// Optional: when it returns a non-empty text, a Record START is refused with that text (shown
+    /// like the other refusals, kept in `getLastRecordStartRefusalForDiagnostics`). Stopping a
+    /// running take / cancelling a count-in is never blocked. Used while a staged project load
+    /// owns the session.
+    void setRecordStartBlockedPredicate(std::function<juce::String()> fn) { recordStartBlocked_ = std::move(fn); }
+
 private:
     struct CountInTimer;
     struct CycleRecordingWrapTimer;
@@ -172,6 +178,7 @@ private:
     bool midiTakeActive_ = false;
     bool pendingMidiTake_ = false; ///< set during count-in when MIDI rows will record
     juce::String lastRecordStartRefusal_;
+    std::function<juce::String()> recordStartBlocked_;
     TrackId cycleSessionTrackId_ = kInvalidTrackId;
     std::int64_t cycleSessionLocL_ = 0;
     std::int64_t cycleSessionLocR_ = 0;

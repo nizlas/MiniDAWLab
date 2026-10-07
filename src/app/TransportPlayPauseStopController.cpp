@@ -29,6 +29,10 @@ void TransportPlayPauseStopController::togglePlayPauseTransportOnly()
     }
     else
     {
+        if (callbacks_.isProjectLoadInProgress && callbacks_.isProjectLoadInProgress())
+        {
+            return; // a staged project load owns the session until it finalizes
+        }
         transport_.requestPlaybackIntent(PlaybackIntent::Playing);
     }
     updatePlayPauseButtonFromTransport();

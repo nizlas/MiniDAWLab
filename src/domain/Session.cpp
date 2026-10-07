@@ -425,6 +425,69 @@ void Session::addTrack() noexcept
     activeTrackId_ = newId;
 }
 
+juce::String Session::uniqueDuplicateTrackName(const juce::String& sourceName) const
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    const auto nameTaken = [&current](const juce::String& candidate) {
+        for (int i = 0; current != nullptr && i < current->getNumTracks(); ++i)
+        {
+            if (current->getTrack(i).getName() == candidate)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    const juce::String base = sourceName.trim().isEmpty() ? juce::String("Track") : sourceName.trim();
+    const juce::String first = base + juce::String(juce::CharPointer_UTF8(" \xe2\x80\x94 kopia"));
+    if (!nameTaken(first))
+    {
+        return first;
+    }
+    for (int n = 2; n < 10000; ++n)
+    {
+        const juce::String candidate = first + " " + juce::String(n);
+        if (!nameTaken(candidate))
+        {
+            return candidate;
+        }
+    }
+    return first;
+}
+
+std::optional<TrackId> Session::duplicateTrack(const TrackId sourceTrackId, juce::String newTrackName) noexcept
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr || sourceTrackId == kInvalidTrackId)
+    {
+        return std::nullopt;
+    }
+    const int srcIx = current->findTrackIndexById(sourceTrackId);
+    if (srcIx < 0 || current->getTrack(srcIx).getKind() == TrackKind::Master)
+    {
+        return std::nullopt;
+    }
+    if (newTrackName.isEmpty())
+    {
+        newTrackName = uniqueDuplicateTrackName(current->getTrack(srcIx).getName());
+    }
+    const TrackId newId = nextTrackId_;
+    jassert(newId != kInvalidTrackId);
+    int clipIdsUsed = 0;
+    const std::shared_ptr<const SessionSnapshot> next = SessionSnapshot::withTrackDuplicated(
+        *current, sourceTrackId, newId, std::move(newTrackName), nextPlacedClipId_, clipIdsUsed);
+    if (next == nullptr)
+    {
+        return std::nullopt;
+    }
+    // Monotonic ids are consumed only on success (same discipline as addTrack / the clip paths).
+    nextTrackId_ = newId + 1;
+    nextPlacedClipId_ += static_cast<PlacedClipId>(juce::jmax(0, clipIdsUsed));
+    std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+    activeTrackId_ = newId;
+    return newId;
+}
+
 void Session::addGroupTrack() noexcept
 {
     const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
@@ -1970,6 +2033,12 @@ std::uint64_t Session::getProjectLoadGeneration() const noexcept
     return loadGeneration_.load(std::memory_order_acquire);
 }
 
+juce::File Session::resolveProjectAudioFile(const juce::String& storedSourcePath,
+                                            const juce::File& projectFolder) noexcept
+{
+    return resolveProjectAudioStoredPath(storedSourcePath, projectFolder);
+}
+
 juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                               const juce::File& file,
                                               const ProjectFileV1& parsed,
@@ -1977,7 +2046,9 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                               juce::StringArray& outSkippedClipDetails,
                                               juce::String& outInfoNote,
                                               PluginInsertHost* pluginHost,
-                                              const std::uint64_t loadGenerationForDeferredRestore)
+                                              const std::uint64_t loadGenerationForDeferredRestore,
+                                              const PreDecodedMaterialByPath* preDecodedMaterial,
+                                              std::vector<PendingPluginInsertRestore>* outDeferredInsertRestores)
 {
     outSkippedClipDetails.clear();
     outInfoNote.clear();
@@ -2082,15 +2153,29 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                 }
 
                 const juce::File f = resolveProjectAudioStoredPath(stored, file.getParentDirectory());
-                std::unique_ptr<AudioClip> loaded;
-                const juce::Result lr = AudioFileLoader::loadFromFile(f, deviceSampleRate, loaded);
-                if (!lr.wasOk())
+                std::shared_ptr<const AudioClip> material;
+                if (preDecodedMaterial != nullptr)
                 {
-                    outSkippedClipDetails.add(
-                        cDto.sourcePath + " - " + lr.getErrorMessage());
-                    continue;
+                    // Staged loader: decoded once per file off the message thread (shared by every
+                    // clip that references the file); a miss falls back to the synchronous decode.
+                    const auto hit = preDecodedMaterial->find(f.getFullPathName());
+                    if (hit != preDecodedMaterial->end() && hit->second != nullptr)
+                    {
+                        material = hit->second;
+                    }
                 }
-                const std::shared_ptr<const AudioClip> material(std::move(loaded));
+                if (material == nullptr)
+                {
+                    std::unique_ptr<AudioClip> loaded;
+                    const juce::Result lr = AudioFileLoader::loadFromFile(f, deviceSampleRate, loaded);
+                    if (!lr.wasOk())
+                    {
+                        outSkippedClipDetails.add(
+                            cDto.sourcePath + " - " + lr.getErrorMessage());
+                        continue;
+                    }
+                    material = std::shared_ptr<const AudioClip>(std::move(loaded));
+                }
                 const int matN = material->getNumSamples();
                 const std::int64_t lRaw = cDto.leftTrimSamples;
                 const std::int64_t l
@@ -2351,6 +2436,20 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
         if (pendingRestores->empty())
         {
             appendProjectLoadDiagnosticLine("apply: after plugin insert restore (none)");
+        }
+        else if (outDeferredInsertRestores != nullptr)
+        {
+            // Staged loader: the caller imports these one chain per message-loop turn (progress +
+            // a paintable window between plug-in instantiations) and finalizes afterwards.
+            outDeferredInsertRestores->clear();
+            outDeferredInsertRestores->reserve(pendingRestores->size());
+            for (PendingPluginInsertRestore& row : *pendingRestores)
+            {
+                outDeferredInsertRestores->push_back(
+                    Session::PendingPluginInsertRestore{ row.trackId, std::move(row.chain) });
+            }
+            appendProjectLoadDiagnosticLine("apply: plugin insert restore handed to the staged loader count="
+                                            + juce::String((int)outDeferredInsertRestores->size()));
         }
         else
         {

@@ -1,0 +1,5 @@
+project=C:\Users\nicla\AppData\Local\Temp\dal-perf-100tracks\TSE_pt2_100tracks-loadprogress.dalproj
+elapsedMs=46911
+tracks=101
+probe: ticks=119 maxGapMs=2683.87 gaps>500ms=22 gaps>2000ms=1 gaps>5000ms=0 phaseBeforeMaxGap="Preparing tracks… |  | indeterminate | elapsedMs=22084 | window=showing"
+phases: Reading project… -> Preparing project… -> Loading instruments… -> Restoring effects…

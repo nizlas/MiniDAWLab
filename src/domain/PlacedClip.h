@@ -121,6 +121,10 @@ public:
     [[nodiscard]] const juce::String& getDisplayName() const noexcept { return displayName_; }
     [[nodiscard]] PlacedClip withDisplayName(juce::String newDisplayName) const noexcept;
 
+    /// Same material (shared, never copied), placement, trims, window and display name under a
+    /// NEW placement id — the copy of a clip on a duplicated track (`Session::duplicateTrack`).
+    [[nodiscard]] PlacedClip withId(PlacedClipId newId) const noexcept;
+
 private:
     [[nodiscard]] PlacedClip replicatedWith(std::int64_t startSampleOnTimeline,
                                             std::int64_t leftTrimSamples,

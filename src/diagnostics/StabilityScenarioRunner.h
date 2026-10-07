@@ -154,6 +154,27 @@ enum class StabilityScenarioKind
     /// output peak / overs, and the process' CPU / memory / page faults. Nothing is saved; use a
     /// temp project copy (a device-setup request can dirty the session).
     PerfProfile,
+    /// `--stability-load-progress <project> [--evidence <dir>]`: the staged, message-loop-driven
+    /// project load as the user sees it — the progress dialog must appear early and update through
+    /// every phase (PNG evidence of the real dialog while instruments / effects restore), the
+    /// message loop must keep running (max stall measured with a 25 ms probe), the session edit /
+    /// transport / save / undo / record gates must refuse while loading, the dirty flag must stay
+    /// clear, and the load must finish with the project's rows. Then the failure path: a corrupt
+    /// file must fail cleanly (gates released, no half model) and the SAME good project must open
+    /// again afterwards. Sibling copy only.
+    LoadProgress,
+    /// `--stability-duplicate-track <project> [--evidence <dir>]`: Duplicate Track through the
+    /// header-menu path by explicit TrackId: an audio row with inserts (+ a Post insert added by
+    /// the picker path + a send to a Group), an instrument row with its own MIDI clips and saved
+    /// state, a pure MIDI row routed to an instrument, a Group, and a row carrying an unavailable
+    /// plug-in placeholder. Verifies the copy's position / name / clips (new ids, same windows) /
+    /// strip settings / routing / sends / insert chain digest / own plug-in instances / own
+    /// instrument runtime, Monitor + Arm off, parameter independence (edit the copy, read the
+    /// original), ONE undo step (undo removes, redo restores with content), dirty flag, save /
+    /// reload, duplication of a NON-active row, and the vertical scrollbar's range + alignment
+    /// across duplicate / delete / undo with a wheel + thumb-drive check. PNG evidence of the
+    /// arrangement, the header menu and the scrollbar. Sibling copy only.
+    DuplicateTrack,
 };
 
 /// Live MIDI scenario: one row's MIDI clips as the runner asserts them.
@@ -244,6 +265,9 @@ struct StabilityScenarioRequest
     /// B = parallel) for a like-for-like comparison.
     enum class PerfGeneration : int { AsConfigured = 0, Serial, AB };
     PerfGeneration perfGeneration = PerfGeneration::AsConfigured;
+    /// LoadProgress / DuplicateTrack: where PNG evidence + reports are written (`--evidence <dir>`;
+    /// default `%TEMP%\dal-<scenario>-evidence`).
+    juce::File evidenceDir;
 
     [[nodiscard]] bool isActive() const noexcept { return kind != StabilityScenarioKind::None; }
 };
@@ -761,6 +785,88 @@ struct StabilityRunnerHooks
         std::function<void(bool)> setGenerationSerial;
     };
     PerfHooks perf;
+
+    // --- Staged project load (`--stability-load-progress`) -----------------------------------------
+    struct LoadProgressHooks
+    {
+        /// Start the message-loop-driven (Interactive) staged load exactly like File > Open does
+        /// for a user; returns at once (the runner polls `isLoadInProgress`).
+        std::function<void(const juce::File&)> beginInteractiveLoad;
+        std::function<bool()> isLoadInProgress;
+        /// "phase | detail | fraction | elapsedMs | window=showing/none" (empty when idle).
+        std::function<juce::String()> progressText;
+        /// PNG of the real progress dialog (false when it is not showing).
+        std::function<bool(const juce::File& png)> captureProgressWindowPng;
+        /// Play / pause through the transport controller (button / Space path).
+        std::function<void()> togglePlayLikeButton;
+        std::function<bool()> isTransportPlaying;
+        /// The transport "add track" entry for an audio row (same path as the "+" corner menu).
+        std::function<std::optional<TrackId>()> addAudioTrackLikeUi;
+        /// `TrackLanesView::isStructuralTimelineEditBlocked` (the predicate every structural header
+        /// menu item and clip edit consults).
+        std::function<bool()> isStructuralEditBlocked;
+        /// Last diagnostic lines of `project-load-diag.log` that start with "load:" / "apply:" /
+        /// "instrument:" — the runner echoes the per-phase timings into the stability log.
+        std::function<juce::StringArray(int maxLines)> tailProjectLoadDiagnosticLog;
+    };
+    LoadProgressHooks load;
+
+    // --- Duplicate Track + vertical scrollbar (`--stability-duplicate-track`) -------------------------
+    struct DuplicateTrackHooks
+    {
+        /// Same path as the header menu "Duplicate Track" with an explicit source id; the new id
+        /// or `kInvalidTrackId` when refused.
+        std::function<TrackId(TrackId)> duplicateTrackLikeMenu;
+        /// One line with the session row as stored: index, kind, name, fader, pre-gain, pan, mute,
+        /// off, output, sends, input assignment, MIDI input, MIDI To + channel, clip ids + windows.
+        std::function<juce::String(TrackId)> describeSessionRow;
+        /// The same line with the identity-bearing fields (track id, clip ids, name) removed, so two
+        /// rows can be compared for "same settings and placements".
+        std::function<juce::String(TrackId)> describeSessionRowWithoutIdentity;
+        /// Insert chain digest independent of slot ids (stage, order, identity, enabled/bypass,
+        /// state bytes) — equal for a faithful copy; "" when the row has no chain.
+        std::function<juce::String(TrackId)> insertChainDigest;
+        /// Live plug-in instance pointers of the row's chain ("0x.. 0x..") — must be disjoint
+        /// between original and copy.
+        std::function<juce::String(TrackId)> insertInstancePointers;
+        /// Parameter 0 of the live instance at chain index `i`: set / get (false / NaN when none).
+        std::function<bool(TrackId, int i, float v)> setInsertParam0;
+        std::function<float(TrackId, int i)> getInsertParam0;
+        /// Add an unavailable placeholder insert (non-existent plug-in path + opaque state) to the
+        /// row through the production `importChain` path (temp copy only).
+        std::function<bool(TrackId, juce::String& failReason)> addUnavailablePlaceholderInsert;
+        /// Instrument runtime identity of a row: "host=0x.. kind=.. primary=.. loaded=0/1 clips=N
+        /// stateLen=N proxyGen=.." ("none" when the row has no runtime).
+        std::function<juce::String(TrackId)> instrumentRuntimeIdentity;
+        /// Session routing setters (the Inspector's paths).
+        std::function<bool(TrackId, TrackId dest)> setRoutedOutput;
+        std::function<bool(TrackId, int uiSlot, TrackId dest, float amountLinear)> insertSend;
+        /// Audio record-arm state of a row / live Monitor state (the copy must have both off).
+        std::function<bool(TrackId)> isTrackArmed;
+        std::function<bool(TrackId)> isTrackMonitored;
+        /// Open the header context menu of a row like a right click, then snapshot the popup
+        /// window into `png` and dismiss it. `detail` lists the menu item texts found.
+        std::function<bool(TrackId, const juce::File& png, juce::String& detail)> openHeaderMenuCaptureAndDismiss;
+        /// Vertical scrollbar + lanes model diagnostics line / verification / drives.
+        std::function<juce::String()> scrollBarDiagnostics;
+        std::function<bool(juce::String& report, juce::String& failReason)> verifyVerticalLayout;
+        /// Drive the bar like a thumb drag to `offsetPx` (ScrollBar::setCurrentRangeStart with
+        /// notification) / like a page click in the trough (`moveScrollbarInPages`).
+        std::function<void(int offsetPx)> scrollBarDragTo;
+        std::function<void(int pages)> scrollBarPageClick;
+        /// The lanes' wheel path for `notches` (positive = down).
+        std::function<void(int notches)> wheelLanes;
+        /// The lanes' model: content / viewport / offset / max as "content=.. viewport=.. offset=.. max=..".
+        std::function<juce::String()> lanesScrollModel;
+        /// Visible-row index and content-top offset (px) of a track in the arrangement (-1 = absent).
+        std::function<int(TrackId)> visibleRowIndexForTrack;
+        std::function<int(TrackId)> rowTopOffsetPxForTrack;
+        /// Set a row's height through the drag path (`setTrackRowHeightPx`), for varying heights.
+        std::function<void(TrackId, int px)> setRowHeightPx;
+        /// The arrangement's visible track order (session index order) as "id:name|id:name…".
+        std::function<juce::String()> sessionTrackOrder;
+    };
+    DuplicateTrackHooks dup;
 };
 
 class StabilityScenarioRunner final : private juce::Timer
@@ -824,6 +930,10 @@ private:
     void appendProxyPlaybackEdgesSteps(const StabilityScenarioRequest& request);
     /// Audio-thread cost profile of one playback window (see `StabilityScenarioKind::PerfProfile`).
     void appendPerfProfileSteps(const StabilityScenarioRequest& request);
+    /// Staged load progress / responsiveness / gates / failure path (see `LoadProgress`).
+    void appendLoadProgressSteps(const StabilityScenarioRequest& request);
+    /// Duplicate Track + vertical scrollbar (see `DuplicateTrack`).
+    void appendDuplicateTrackSteps(const StabilityScenarioRequest& request);
 
     void appendLoadAndVerifySteps(const juce::File& project, const juce::String& label);
     /// Inserts the delete/undo/redo/undo cycle steps for one track at `insertAt`.

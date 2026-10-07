@@ -228,6 +228,12 @@ public:
     [[nodiscard]] std::vector<std::pair<TrackId, std::vector<const void*>>>
         exportPublishedMapPointersForDiagnostics() const;
 
+    /// [Message thread] Stability / diagnostics: the live instance at chain position `chainIndex`
+    /// of a track (nullptr for an unavailable placeholder or out of range). Parameter reads /
+    /// writes on it follow the generic-editor rules (message thread, host-owned instance).
+    [[nodiscard]] juce::AudioPluginInstance* liveInstanceAtChainIndexForDiagnostics(TrackId trackId,
+                                                                                    int chainIndex) const noexcept;
+
     /// [Message thread] Optional hook run after publishing a realtime map that dropped live plugin
     /// instances, *before* those instances are released/destroyed (Stability Slice 3, publish-before-
     /// destroy). Wired to `PlaybackEngine::waitForAudioCallbackExit` so an in-flight audio callback
