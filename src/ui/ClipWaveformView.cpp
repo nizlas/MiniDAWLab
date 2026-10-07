@@ -1969,7 +1969,7 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
         tc::paintEventChromeBody(g, eventRect, bodyFill);
 
         juce::Rectangle<float> innerForPeakHeight = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
-        if (detail == track_row_heights::LaneEventDetail::Full && eventRect.getWidth() >= 1.0f
+        if (detail != track_row_heights::LaneEventDetail::Bars && eventRect.getWidth() >= 1.0f
             && innerForPeakHeight.getHeight() >= 1.0f && nsForDraw > 0)
         {
             paintRowWaveformWithPyramid(
@@ -1989,7 +1989,7 @@ void ClipWaveformView::paintStableCommittedLayer(juce::Graphics& g,
         }
     }
 
-    for (int r = numRows - 1; r >= 0 && detail == track_row_heights::LaneEventDetail::Full; --r)
+    for (int r = numRows - 1; r >= 0 && detail != track_row_heights::LaneEventDetail::Bars; --r)
     {
         const TimelineStrip& stripR = clipStrips_[(size_t)r];
         if (stripR.materialNumSamples <= 0)
@@ -2587,7 +2587,7 @@ void ClipWaveformView::paintUncachedFull(juce::Graphics& g,
 
         juce::Rectangle<float> innerForPeakHeight
             = eventRect.reduced(0.0f, 1.0f + kWaveInset * 0.5f);
-        if (detail == track_row_heights::LaneEventDetail::Full && eventRect.getWidth() >= 1.0f
+        if (detail != track_row_heights::LaneEventDetail::Bars && eventRect.getWidth() >= 1.0f
             && innerForPeakHeight.getHeight() >= 1.0f)
         {
             const int ns = nsForDraw;
@@ -2935,7 +2935,7 @@ void ClipWaveformView::paintDynamicChrome(juce::Graphics& g,
             tc::paintEventChromeTrimHandle(g, eventRect, false);
         }
         // Live label over the blitted raster: never stale after rename (raster fingerprint does not
-        // include the display name). Bars / Compact rows carry no label (no room, spec §4).
+        // include the display name). Bars / Content rows carry no label (the content has priority).
         if (detail == track_row_heights::LaneEventDetail::Full)
         {
             tc::paintEventTopLeftNameLabel(g, eventRect, clipDisplayLabelForStrip(strip));

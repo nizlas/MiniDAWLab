@@ -204,15 +204,22 @@ namespace
 
 } // namespace
 
-/// The group handle tab: the "inverted golf club" head where the vertical member marker turns
-/// into a short tab extending right over the header area at the group's top boundary. Owns the
-/// three handle gestures (short click = toggle collapse, long press = inline rename, right-click
-/// = menu) and swallows its mouse events so the row underneath — the previous track's name strip
-/// or resize band — is never activated through it (spec §3).
+/// Shared look of the two group controls: a flat fill in the group tone (no frames, glow or
+/// gradients) with light ink. The fill is opaque so no row separator shows through a control.
+namespace
+{
+    constexpr unsigned int kVisualGroupControlFillArgb = 0xff3a4150u;
+    constexpr unsigned int kVisualGroupControlInkArgb = 0xffd8dee8u;
+    constexpr float kVisualGroupLabelFontPx = 11.0f;
+} // namespace
+
+/// The group's collapse / expand BUTTON: a small chevron box (no text) on the member marker's
+/// shaft at the group's top boundary (expanded) or at the top of the collapsed block. A short
+/// click toggles exactly once (mouse-up inside the button without a drag); right-click opens the
+/// group menu; the tooltip is the full group name (the only place it is readable when the label
+/// has no room). Swallows its mouse events so the rows underneath are never activated through it.
 class TrackLanesView::VisualGroupHandleView final : public juce::Component,
-                                                    public juce::TooltipClient,
-                                                    private juce::Timer,
-                                                    private juce::TextEditor::Listener
+                                                    public juce::TooltipClient
 {
 public:
     VisualGroupHandleView(TrackLanesView& owner, const int groupId) noexcept
@@ -223,7 +230,6 @@ public:
 
     [[nodiscard]] int getGroupId() const noexcept { return groupId_; }
 
-    /// The full group name — needed when the compact tab (Micro neighbours) truncates it.
     juce::String getTooltip() override { return name_; }
 
     void setDisplayState(const juce::String& name, const bool collapsed)
@@ -237,6 +243,117 @@ public:
         repaint();
     }
 
+    /// The painted box: right of the active stripe, over the marker column.
+    [[nodiscard]] juce::Rectangle<int> boxBounds() const noexcept
+    {
+        return getLocalBounds().withTrimmedLeft(kVisualGroupButtonBoxXPx);
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const auto box = boxBounds();
+        if (box.isEmpty())
+        {
+            return;
+        }
+        g.setColour(juce::Colour(kVisualGroupControlFillArgb));
+        g.fillRoundedRectangle(box.toFloat(), 2.0f);
+        // Chevron: right-pointing while collapsed, down-pointing while expanded; 7 px wide,
+        // centred in the box.
+        const float cx = (float) box.getCentreX();
+        const float cy = (float) box.getCentreY();
+        juce::Path p;
+        if (collapsed_)
+        {
+            p.addTriangle(cx - 2.5f, cy - 3.5f, cx - 2.5f, cy + 3.5f, cx + 3.0f, cy);
+        }
+        else
+        {
+            p.addTriangle(cx - 3.5f, cy - 2.5f, cx + 3.5f, cy - 2.5f, cx, cy + 3.0f);
+        }
+        g.setColour(juce::Colour(kVisualGroupControlInkArgb));
+        g.fillPath(p);
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        pressActive_ = false;
+        if (e.mods.isPopupMenu())
+        {
+            owner_.showVisualGroupHandleContextMenu(groupId_);
+            return;
+        }
+        pressActive_ = e.mods.isLeftButtonDown();
+        pressMoved_ = false;
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (pressActive_ && !pressMoved_ && e.getDistanceFromDragStart() > kVisualGroupHandleDragCancelPx)
+        {
+            pressMoved_ = true; // a drag off the button is not a click
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        const bool click = pressActive_ && !pressMoved_ && getLocalBounds().contains(e.getPosition());
+        pressActive_ = false;
+        if (click)
+        {
+            owner_.toggleVisualGroupCollapsedFromHandle(groupId_);
+        }
+    }
+
+private:
+    TrackLanesView& owner_;
+    const int groupId_;
+    juce::String name_;
+    bool collapsed_ = false;
+    bool pressActive_ = false;
+    bool pressMoved_ = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VisualGroupHandleView)
+};
+
+/// The group's NAME LABEL: the name in the group tone, ellipsized to the available header
+/// width (tooltip = the full name when truncated). Long press (500 ms, cancelled by movement)
+/// opens the inline rename editor — Enter commits, Escape cancels — WITHOUT toggling the group;
+/// a plain short click does nothing; right-click opens the group menu. Hidden (empty bounds) at
+/// boundaries without room, see `layoutVisualGroupHandles`.
+class TrackLanesView::VisualGroupNameLabelView final : public juce::Component,
+                                                       public juce::TooltipClient,
+                                                       private juce::Timer,
+                                                       private juce::TextEditor::Listener
+{
+public:
+    VisualGroupNameLabelView(TrackLanesView& owner, const int groupId) noexcept
+        : owner_(owner), groupId_(groupId)
+    {
+        setWantsKeyboardFocus(false);
+    }
+
+    [[nodiscard]] int getGroupId() const noexcept { return groupId_; }
+
+    /// Full name only when the painted text is truncated (no tooltip noise otherwise).
+    juce::String getTooltip() override { return isTextTruncated() ? name_ : juce::String(); }
+
+    void setDisplayName(const juce::String& name)
+    {
+        if (name_ == name)
+        {
+            return;
+        }
+        name_ = name;
+        repaint();
+    }
+
+    [[nodiscard]] bool isTextTruncated() const noexcept
+    {
+        const juce::Font font{ juce::FontOptions{ kVisualGroupLabelFontPx } };
+        return juce::GlyphArrangement::getStringWidth(font, name_) > (float) textBounds().getWidth();
+    }
+
     void paint(juce::Graphics& g) override
     {
         const auto b = getLocalBounds();
@@ -244,34 +361,13 @@ public:
         {
             return;
         }
-        g.setColour(juce::Colour(0xf0343a46));
-        g.fillRoundedRectangle(b.toFloat(), 3.0f);
-        // The member marker's continuation at the tab's left edge (the club's shaft meets the head).
-        g.setColour(juce::Colour(kVisualGroupMarkerArgb));
-        g.fillRect(0, 0, kVisualGroupMarkerWidthPx, b.getHeight());
-        g.drawRoundedRectangle(b.toFloat().reduced(0.5f), 3.0f, 1.0f);
-        // Collapse glyph: a small triangle — down-pointing expanded, right-pointing collapsed.
-        const float gy = (float) (b.getHeight() - 8) * 0.5f;
-        juce::Path p;
-        if (collapsed_)
-        {
-            p.addTriangle(5.0f, gy, 5.0f, gy + 8.0f, 11.0f, gy + 4.0f);
-        }
-        else
-        {
-            p.addTriangle(4.0f, gy + 1.0f, 12.0f, gy + 1.0f, 8.0f, gy + 7.0f);
-        }
-        g.setColour(juce::Colour(0xffd8dee8));
-        g.fillPath(p);
+        g.setColour(juce::Colour(kVisualGroupControlFillArgb));
+        g.fillRect(b);
         if (renameEditor_ == nullptr || !renameEditor_->isVisible())
         {
-            // Compact tab (12 px, Micro neighbours): a smaller font; the name ellipsizes and the
-            // full text is the tooltip.
-            g.setFont(juce::Font(juce::FontOptions(b.getHeight() < 14 ? 9.5f : 11.0f)));
-            g.drawText(name_,
-                       b.withTrimmedLeft(15).withTrimmedRight(3),
-                       juce::Justification::centredLeft,
-                       true);
+            g.setColour(juce::Colour(kVisualGroupControlInkArgb));
+            g.setFont(juce::Font(juce::FontOptions(kVisualGroupLabelFontPx)));
+            g.drawText(name_, textBounds(), juce::Justification::centredLeft, true);
         }
     }
 
@@ -279,7 +375,7 @@ public:
     {
         if (renameEditor_ != nullptr && renameEditor_->isVisible())
         {
-            renameEditor_->setBounds(renameEditorBounds());
+            renameEditor_->setBounds(getLocalBounds());
         }
     }
 
@@ -292,39 +388,28 @@ public:
             owner_.showVisualGroupHandleContextMenu(groupId_);
             return;
         }
-        if (!e.mods.isLeftButtonDown() || (renameEditor_ != nullptr && renameEditor_->isVisible()))
+        if (!e.mods.isLeftButtonDown() || isRenameEditorOpen())
         {
             return;
         }
-        longPressFired_ = false;
-        pressMoved_ = false;
         pressActive_ = true;
+        pressMoved_ = false;
         startTimer(kVisualGroupHandleLongPressMs);
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
-        if (pressActive_ && !pressMoved_
-            && e.getDistanceFromDragStart() > kVisualGroupHandleDragCancelPx)
+        if (pressActive_ && !pressMoved_ && e.getDistanceFromDragStart() > kVisualGroupHandleDragCancelPx)
         {
-            // Clear mouse movement cancels BOTH the pending long-press rename and the short-click
-            // toggle: a drag off the handle is neither gesture (spec §3).
             pressMoved_ = true;
-            stopTimer();
+            stopTimer(); // clear movement cancels the pending long-press rename
         }
     }
 
     void mouseUp(const juce::MouseEvent&) override
     {
         stopTimer();
-        const bool plainShortClick = pressActive_ && !longPressFired_ && !pressMoved_;
-        pressActive_ = false;
-        if (plainShortClick)
-        {
-            // Short click toggles exactly once; a long press (rename began) must NOT also toggle
-            // at mouse-up (spec §3).
-            owner_.toggleVisualGroupCollapsedFromHandle(groupId_);
-        }
+        pressActive_ = false; // a short click on the name is deliberately NOT a toggle
     }
 
     /// Inline rename (long press / context menu / test): Enter commits, Escape cancels. The
@@ -333,7 +418,7 @@ public:
     {
         ensureRenameEditor();
         renameEditor_->setText(name_, juce::dontSendNotification);
-        renameEditor_->setBounds(renameEditorBounds());
+        renameEditor_->setBounds(getLocalBounds());
         renameEditor_->setVisible(true);
         renameEditor_->toFront(true);
         renameEditor_->selectAll();
@@ -358,6 +443,11 @@ public:
     }
 
 private:
+    [[nodiscard]] juce::Rectangle<int> textBounds() const noexcept
+    {
+        return getLocalBounds().withTrimmedLeft(3).withTrimmedRight(3);
+    }
+
     void timerCallback() override
     {
         stopTimer();
@@ -365,14 +455,9 @@ private:
         {
             return;
         }
-        // Central long-press threshold reached without clear movement: rename, not toggle.
-        longPressFired_ = true;
+        // Central long-press threshold reached without clear movement: rename, never toggle.
+        pressActive_ = false;
         beginInlineRename();
-    }
-
-    [[nodiscard]] juce::Rectangle<int> renameEditorBounds() const noexcept
-    {
-        return getLocalBounds().withTrimmedLeft(14).reduced(1);
     }
 
     void ensureRenameEditor()
@@ -382,8 +467,11 @@ private:
             return;
         }
         renameEditor_ = std::make_unique<juce::TextEditor>();
-        renameEditor_->setFont(juce::Font(juce::FontOptions(11.0f)));
-        renameEditor_->setBorder(juce::BorderSize<int>(1));
+        renameEditor_->setFont(juce::Font(juce::FontOptions(kVisualGroupLabelFontPx)));
+        // The editor fills the 12 px label: no border and no top indent, or the text line
+        // (default indent 4) is pushed below the label's bottom edge and clipped.
+        renameEditor_->setBorder(juce::BorderSize<int>(0));
+        renameEditor_->setIndents(3, 0);
         renameEditor_->setSelectAllWhenFocused(true);
         renameEditor_->addListener(this);
         addChildComponent(*renameEditor_);
@@ -396,6 +484,7 @@ private:
             renameEditor_->setVisible(false);
         }
         repaint();
+        owner_.visualGroupRenameEditorClosed(groupId_);
     }
 
     void submitRename()
@@ -406,8 +495,7 @@ private:
         }
         const juce::String newName = renameEditor_->getText().trim();
         closeRenameEditor();
-        if (newName.isNotEmpty() && newName != name_
-            && owner_.visualGroupUiHooks_.renameGroup != nullptr)
+        if (newName.isNotEmpty() && newName != name_ && owner_.visualGroupUiHooks_.renameGroup != nullptr)
         {
             owner_.visualGroupUiHooks_.renameGroup(groupId_, newName);
         }
@@ -420,13 +508,11 @@ private:
     TrackLanesView& owner_;
     const int groupId_;
     juce::String name_;
-    bool collapsed_ = false;
     bool pressActive_ = false;
     bool pressMoved_ = false;
-    bool longPressFired_ = false;
     std::unique_ptr<juce::TextEditor> renameEditor_;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VisualGroupHandleView)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VisualGroupNameLabelView)
 };
 
 TrackLanesView::TrackLanesView(
@@ -2776,11 +2862,40 @@ int TrackLanesView::rowHeightForVisibleEntry(const int visibleIndex) const noexc
     // STORED normal height (`rowHeightForTrack`, used by save / preset status / duplicate /
     // resize) is deliberately untouched — collapse never rewrites a row height.
     const TrackId tid = visibleTrackEntries_[(size_t)visibleIndex].sessionTrackId;
-    if (isTrackInCollapsedVisualGroup(tid))
+    const auto member = visualGroupMembershipByTrackId_.find(tid);
+    if (member != visualGroupMembershipByTrackId_.end() && member->second.collapsed)
     {
+        if (const VisualGroupDisplayRun* const run = findVisualGroupRun(member->second.groupId); run != nullptr)
+        {
+            return collapsedMemberDisplayHeightPx(*run, visibleIndex);
+        }
         return kCollapsedGroupMemberRowHeightPx;
     }
     return rowHeightForTrack(tid);
+}
+
+int TrackLanesView::collapsedMemberDisplayHeightPx(const VisualGroupDisplayRun& run, const int vi) const noexcept
+{
+    const int n = run.lastVisibleIndex - run.firstVisibleIndex + 1;
+    const int content = collapsedGroupStripsContentHeightPx(n);
+    const int block = collapsedGroupBlockHeightPx(n);
+    const int topPad = (block - content) / 2;
+    const int bottomPad = block - content - topPad;
+    const int i = vi - run.firstVisibleIndex;
+    int h = kCollapsedGroupMemberRowHeightPx;
+    if (i == 0)
+    {
+        h += topPad;
+    }
+    if (i == n - 1)
+    {
+        h += bottomPad;
+    }
+    else
+    {
+        h += kCollapsedGroupStripGapPx;
+    }
+    return h;
 }
 
 int TrackLanesView::visibleRowPixelHeight(const int visibleIndex) const noexcept
@@ -3417,6 +3532,12 @@ void TrackLanesView::paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g)
     constexpr int gutter = kArrangementTimelineHeaderGutterPx;
     const int gutterBottom = ay + gutter;
 
+    // The group controls (chevron button / name label) are children, but these separators are
+    // painted OVER the children; keep every control's rectangle out of the clip so no separator
+    // cuts through a control (the controls' opaque fill then stands alone — no double lines).
+    juce::Graphics::ScopedSaveState const gs(g);
+    excludeVisualGroupControlsFromClip(g);
+
     g.setColour(juce::Colour(kArrangementHeaderRowSeparatorArgb));
     if (gutterBottom > ay && gutterBottom < bounds.getBottom())
     {
@@ -3488,6 +3609,7 @@ void TrackLanesView::paintOverChildren(juce::Graphics& g)
         }
 
         paintHeaderColumnHorizontalRowSeparators(g);
+        paintVisualGroupMarkersOverSeparators(g);
     }
 
     if (!headerTrackDragActive_ || headerTrackDragInvalidArea_)
@@ -3913,7 +4035,7 @@ void TrackLanesView::rebuildVisualGroupDisplayCache()
 
 void TrackLanesView::rebuildVisualGroupHandles()
 {
-    // Drop handles of groups that are no longer displayable…
+    // Drop the controls of groups that are no longer displayable…
     for (auto it = visualGroupHandles_.begin(); it != visualGroupHandles_.end();)
     {
         if (findVisualGroupRun(it->first) == nullptr)
@@ -3925,17 +4047,21 @@ void TrackLanesView::rebuildVisualGroupHandles()
             ++it;
         }
     }
-    // …and ensure one per current run, with up-to-date name/collapse display state.
+    // …and ensure one button + label pair per current run, with up-to-date name / collapse state.
     for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
     {
         auto it = visualGroupHandles_.find(run.groupId);
         if (it == visualGroupHandles_.end())
         {
-            auto handle = std::make_unique<VisualGroupHandleView>(*this, run.groupId);
-            addAndMakeVisible(*handle);
-            it = visualGroupHandles_.emplace(run.groupId, std::move(handle)).first;
+            VisualGroupControls controls;
+            controls.button = std::make_unique<VisualGroupHandleView>(*this, run.groupId);
+            controls.label = std::make_unique<VisualGroupNameLabelView>(*this, run.groupId);
+            addAndMakeVisible(*controls.button);
+            addAndMakeVisible(*controls.label);
+            it = visualGroupHandles_.emplace(run.groupId, std::move(controls)).first;
         }
-        it->second->setDisplayState(run.name, run.collapsed);
+        it->second.button->setDisplayState(run.name, run.collapsed);
+        it->second.label->setDisplayName(run.name);
     }
 }
 
@@ -3969,63 +4095,95 @@ void TrackLanesView::layoutVisualGroupHandles() noexcept
 {
     const int gutterBottom = getLocalBounds().getY() + kArrangementTimelineHeaderGutterPx;
     const int headerW = headerColumnWidthPx();
+    const int labelX = kVisualGroupButtonWidthPx + kVisualGroupButtonToLabelGapPx;
+    const int labelW = juce::jmax(0, headerW - kVisualGroupLabelRightPadPx - labelX);
     for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
     {
         const auto it = visualGroupHandles_.find(run.groupId);
-        if (it == visualGroupHandles_.end() || it->second == nullptr)
+        if (it == visualGroupHandles_.end() || it->second.button == nullptr || it->second.label == nullptr)
         {
             continue;
         }
-        VisualGroupHandleView& handle = *it->second;
+        VisualGroupHandleView& button = *it->second.button;
+        VisualGroupNameLabelView& label = *it->second.label;
         const int topY = yTopForVisibleIndex(run.firstVisibleIndex);
         const int bottomY = yTopForVisibleIndex(run.lastVisibleIndex)
                             + rowHeightForVisibleEntry(run.lastVisibleIndex);
         if (bottomY <= gutterBottom || topY >= getHeight() || getHeight() <= gutterBottom)
         {
-            handle.setBounds(0, 0, 0, 0); // group fully scrolled out
+            button.setBounds(0, 0, 0, 0); // group fully scrolled out
+            label.setBounds(0, 0, 0, 0);
             continue;
         }
-        // The tab stays anchored at the group's top boundary but must never cover a name, a
-        // number or a Power / Mute / Solo cell of either adjacent row (spec §6). Three placements:
-        //   (a) boundary at or above the viewport top (first track, or scrolled past): the tab
-        //       sits in the timeline-gutter band right of the add-track corner (sticky);
-        //   (b) the previous row has free chrome under its lowest control row (Mini, Medium,
-        //       Large …): the tab sits fully inside that free band, bottom edge on the boundary;
-        //   (c) compact neighbours (Micro, Small, collapsed strips): a 12 px tab centred on the
-        //       boundary and confined to the group margin + colour-segment zone — left of every
-        //       control cell and of the name; the full name is the tab's tooltip.
-        int tabH = kVisualGroupHandleHeightPx;
-        int tabTop = 0;
-        int x = kVisualGroupMarkerXPx;
-        int w = 0;
-        const int fullW = juce::jmin(kVisualGroupHandleMaxWidthPx, juce::jmax(0, headerW - x - 6));
-        if (topY <= gutterBottom)
+        int buttonX = 0;
+        int buttonY = 0;
+        int labelY = 0;
+        bool labelFits = true;
+        if (run.collapsed && topY >= gutterBottom)
         {
-            x = kVisualGroupHandleGutterLeftPx;
-            w = juce::jmin(kVisualGroupHandleMaxWidthPx, juce::jmax(0, headerW - x - 6));
-            tabTop = gutterBottom - tabH;
+            // Collapsed block: both controls at the block's top pad (the block is at least
+            // `kCollapsedGroupHeaderMinHeightPx` tall, so they always fit).
+            buttonY = topY + kVisualGroupCollapsedTopPadPx;
+            labelY = buttonY;
+        }
+        else if (topY <= gutterBottom)
+        {
+            // Group top at / above the viewport top (first track, or scrolled past): the controls
+            // sit in the timeline-gutter band right of the add-track corner button (sticky).
+            buttonX = kVisualGroupHandleGutterLeftPx;
+            buttonY = gutterBottom - kVisualGroupGutterBottomGapPx - kVisualGroupButtonHeightPx;
+            labelY = buttonY;
         }
         else
         {
+            // Expanded, boundary inside the viewport: button and label share one vertical span
+            // across the boundary — 10 px above it (the previous row's resize band + glyph-free
+            // chrome under its title row) and 2 px below it (the first member's top pad, above
+            // its title row and icon). The button is always shown (it stays left of every control
+            // cell); the label only when the previous row leaves those 10 px free of controls.
+            buttonY = topY - kVisualGroupButtonReachAbovePx;
+            labelY = topY + kVisualGroupLabelReachBelowPx - kVisualGroupLabelHeightPx;
             const int prevVi = run.firstVisibleIndex - 1;
-            const int free = prevVi >= 0 ? headerFreeBottomPxForRowHeight(rowHeightForVisibleEntry(prevVi)) : 0;
-            if (free >= kVisualGroupHandleMinInlineHeightPx)
+            int freeAbove = 0;
+            if (prevVi >= 0)
             {
-                tabH = juce::jmin(kVisualGroupHandleHeightPx, free);
-                tabTop = topY - tabH;
-                w = fullW;
+                const TrackId prevTid = visibleTrackEntries_[(size_t) prevVi].sessionTrackId;
+                if (isTrackInCollapsedVisualGroup(prevTid))
+                {
+                    // A collapsed block above: free below its control row.
+                    const auto prevMember = visualGroupMembershipByTrackId_.find(prevTid);
+                    const VisualGroupDisplayRun* const prevRun
+                        = prevMember != visualGroupMembershipByTrackId_.end()
+                              ? findVisualGroupRun(prevMember->second.groupId)
+                              : nullptr;
+                    if (prevRun != nullptr)
+                    {
+                        const int n = prevRun->lastVisibleIndex - prevRun->firstVisibleIndex + 1;
+                        freeAbove = collapsedGroupBlockHeightPx(n) - kVisualGroupCollapsedTopPadPx
+                                    - kVisualGroupButtonHeightPx;
+                    }
+                }
+                else
+                {
+                    freeAbove = TrackHeaderView::kHeaderResizeBandPx
+                                + headerFreeBottomPxForRowHeight(rowHeightForVisibleEntry(prevVi));
+                }
             }
-            else
-            {
-                tabH = kVisualGroupHandleCompactHeightPx;
-                tabTop = topY - tabH / 2;
-                const int segRight = TrackHeaderView::kHeaderGroupMarginPx
-                                     + TrackHeaderView::colourSegmentWidthPxForDigits(trackNumberDigitCount());
-                w = juce::jmax(0, juce::jmin(segRight, headerW - 2) - x);
-            }
+            labelFits = freeAbove >= kVisualGroupLabelHeightPx - kVisualGroupLabelReachBelowPx;
         }
-        handle.setBounds(x, tabTop, w, tabH);
-        handle.toFront(false);
+        button.setBounds(buttonX, buttonY, kVisualGroupButtonWidthPx, kVisualGroupButtonHeightPx);
+        const bool forceForRename = visualGroupRenameForcingLabelGroupId_ == run.groupId;
+        if (labelFits || forceForRename)
+        {
+            label.setBounds(buttonX + labelX, labelY, juce::jmax(0, headerW - kVisualGroupLabelRightPadPx - (buttonX + labelX)), kVisualGroupLabelHeightPx);
+        }
+        else
+        {
+            label.setBounds(0, 0, 0, 0); // no room: the button's tooltip carries the name
+        }
+        juce::ignoreUnused(labelW);
+        button.toFront(false);
+        label.toFront(false);
     }
 }
 
@@ -4095,8 +4253,9 @@ void TrackLanesView::paintCollapsedGroupContent(juce::Graphics& g) const
         }
         juce::Graphics::ScopedSaveState const gs(g);
         g.reduceClipRegion(runVisible);
-        // Header column: a quiet plate + the group marker — no title row, no buttons; the handle
-        // tab (a separate child component) is the only interactive element of a collapsed group.
+        // Header column: a quiet plate + the group marker — no title row, no track buttons; the
+        // chevron button and the name label (separate child components at the block's top pad)
+        // are the only interactive elements of a collapsed group.
         if (headerW > 0)
         {
             g.setColour(juce::Colour(kCollapsedRunHeaderPlateArgb));
@@ -4107,9 +4266,11 @@ void TrackLanesView::paintCollapsedGroupContent(juce::Graphics& g) const
                        kVisualGroupMarkerWidthPx,
                        runBottom - runTop);
         }
-        // Lane area: one 4 px strip per member, zero gap, grey clip-interval fields that follow
-        // the exact same zoom / scroll / origin mapping as the full lanes. Purely painted — no
-        // components, so there is nothing to hit, hover, drag, or tooltip (spec §4).
+        // Lane area: one 4 px strip per member with a 1 px empty gap between strips, the whole
+        // strips block centred vertically in the block (the readable header minimum may make the
+        // block taller than the strips; strips are never stretched). Grey clip-interval fields
+        // follow the exact same zoom / scroll / origin mapping as the full lanes. Purely painted
+        // — no components, so there is nothing to hit, hover, drag, or tooltip (spec §4).
         if (tw <= 0 || spp <= 0.0 || snap == nullptr)
         {
             continue;
@@ -4119,10 +4280,11 @@ void TrackLanesView::paintCollapsedGroupContent(juce::Graphics& g) const
             return TimelineRulerView::sessionSampleToLocalX(s, originX, visStart, spp);
         };
         g.setColour(juce::Colour(kCollapsedStripClipFillArgb));
-        int y = runTop;
+        const int memberCount = run.lastVisibleIndex - run.firstVisibleIndex + 1;
+        int y = runTop + collapsedGroupStripsTopPadPx(memberCount);
         for (int vi = run.firstVisibleIndex; vi <= run.lastVisibleIndex; ++vi)
         {
-            const int stripH = rowHeightForVisibleEntry(vi);
+            const int stripH = kCollapsedGroupMemberRowHeightPx;
             const VisibleTrackEntry& e = visibleTrackEntries_[(size_t) vi];
             const auto fillInterval = [&](const std::int64_t startS, const std::int64_t lenS) {
                 if (lenS <= 0)
@@ -4165,7 +4327,50 @@ void TrackLanesView::paintCollapsedGroupContent(juce::Graphics& g) const
                 }
             }
             // Group / Master rows have no timeline clips: their strip stays empty.
-            y += stripH;
+            y += stripH + kCollapsedGroupStripGapPx;
+        }
+    }
+}
+
+void TrackLanesView::excludeVisualGroupControlsFromClip(juce::Graphics& g) const
+{
+    for (const auto& [gid, controls] : visualGroupHandles_)
+    {
+        juce::ignoreUnused(gid);
+        if (controls.button != nullptr && !controls.button->getBounds().isEmpty())
+        {
+            g.excludeClipRegion(controls.button->getBounds());
+        }
+        if (controls.label != nullptr && !controls.label->getBounds().isEmpty())
+        {
+            g.excludeClipRegion(controls.label->getBounds());
+        }
+    }
+}
+
+void TrackLanesView::paintVisualGroupMarkersOverSeparators(juce::Graphics& g) const
+{
+    // An expanded group's member marker runs as ONE unbroken line from the group's top boundary
+    // to its last member's bottom — painted after the header-column row separators, so the
+    // separators between members (and the one at the group's top) never cut the marker.
+    const auto bounds = getLocalBounds();
+    const int gutterBottom = bounds.getY() + kArrangementTimelineHeaderGutterPx;
+    if (headerColumnWidthPx() <= kVisualGroupMarkerXPx + kVisualGroupMarkerWidthPx || bounds.getBottom() <= gutterBottom)
+    {
+        return;
+    }
+    juce::Graphics::ScopedSaveState const gs(g);
+    excludeVisualGroupControlsFromClip(g); // the button sits ON the marker; never paint over it
+    g.setColour(juce::Colour(kVisualGroupMarkerArgb));
+    for (const VisualGroupDisplayRun& run : visualGroupDisplayRuns_)
+    {
+        const int topY = juce::jmax(gutterBottom, yTopForVisibleIndex(run.firstVisibleIndex));
+        const int bottomY = juce::jmin(bounds.getBottom(),
+                                       yTopForVisibleIndex(run.lastVisibleIndex)
+                                           + rowHeightForVisibleEntry(run.lastVisibleIndex));
+        if (bottomY > topY)
+        {
+            g.fillRect(bounds.getX() + kVisualGroupMarkerXPx, topY, kVisualGroupMarkerWidthPx, bottomY - topY);
         }
     }
 }
@@ -4342,10 +4547,26 @@ void TrackLanesView::toggleVisualGroupCollapsedFromHandle(const int groupId)
 void TrackLanesView::beginVisualGroupRenameFromHandle(const int groupId)
 {
     const auto it = visualGroupHandles_.find(groupId);
-    if (it != visualGroupHandles_.end() && it->second != nullptr
-        && !it->second->getBounds().isEmpty())
+    if (it == visualGroupHandles_.end() || it->second.label == nullptr || it->second.button == nullptr
+        || it->second.button->getBounds().isEmpty())
     {
-        it->second->beginInlineRename();
+        return;
+    }
+    if (it->second.label->getBounds().isEmpty())
+    {
+        // Label hidden at this boundary (Micro / Small neighbours): lay it out for the edit only.
+        visualGroupRenameForcingLabelGroupId_ = groupId;
+        layoutVisualGroupHandles();
+    }
+    it->second.label->beginInlineRename();
+}
+
+void TrackLanesView::visualGroupRenameEditorClosed(const int groupId) noexcept
+{
+    if (visualGroupRenameForcingLabelGroupId_ == groupId)
+    {
+        visualGroupRenameForcingLabelGroupId_ = 0;
+        layoutVisualGroupHandles();
     }
 }
 
@@ -4353,7 +4574,7 @@ void TrackLanesView::showVisualGroupHandleContextMenu(const int groupId)
 {
     const VisualTrackGroup* const g = session_.findVisualTrackGroupById(groupId);
     const auto itHandle = visualGroupHandles_.find(groupId);
-    if (g == nullptr || itHandle == visualGroupHandles_.end() || itHandle->second == nullptr)
+    if (g == nullptr || itHandle == visualGroupHandles_.end() || itHandle->second.button == nullptr)
     {
         return;
     }
@@ -4370,7 +4591,7 @@ void TrackLanesView::showVisualGroupHandleContextMenu(const int groupId)
     menu.addItem(kUngroup, "Ungroup");
     juce::Component::SafePointer<TrackLanesView> safeThis(this);
     menu.showMenuAsync(
-        juce::PopupMenu::Options().withTargetComponent(itHandle->second.get()),
+        juce::PopupMenu::Options().withTargetComponent(itHandle->second.button.get()),
         [safeThis, groupId](const int result) {
             if (safeThis == nullptr || result == 0)
             {
@@ -4394,18 +4615,25 @@ void TrackLanesView::showVisualGroupHandleContextMenu(const int groupId)
 juce::Rectangle<int> TrackLanesView::visualGroupHandleBoundsForTest(const int groupId) const noexcept
 {
     const auto it = visualGroupHandles_.find(groupId);
-    return it != visualGroupHandles_.end() && it->second != nullptr ? it->second->getBounds()
-                                                                    : juce::Rectangle<int>();
+    return it != visualGroupHandles_.end() && it->second.button != nullptr ? it->second.button->getBounds()
+                                                                           : juce::Rectangle<int>();
+}
+
+juce::Rectangle<int> TrackLanesView::visualGroupNameLabelBoundsForTest(const int groupId) const noexcept
+{
+    const auto it = visualGroupHandles_.find(groupId);
+    return it != visualGroupHandles_.end() && it->second.label != nullptr ? it->second.label->getBounds()
+                                                                          : juce::Rectangle<int>();
 }
 
 bool TrackLanesView::shortClickVisualGroupHandleLikeMouseForTest(const int groupId)
 {
     const auto it = visualGroupHandles_.find(groupId);
-    if (it == visualGroupHandles_.end() || it->second == nullptr || it->second->getBounds().isEmpty())
+    if (it == visualGroupHandles_.end() || it->second.button == nullptr || it->second.button->getBounds().isEmpty())
     {
         return false;
     }
-    // The exact short-click action the handle's mouse-up dispatches.
+    // The exact short-click action the button's mouse-up dispatches.
     toggleVisualGroupCollapsedFromHandle(groupId);
     return true;
 }
@@ -4413,20 +4641,20 @@ bool TrackLanesView::shortClickVisualGroupHandleLikeMouseForTest(const int group
 bool TrackLanesView::beginRenameOnVisualGroupHandleLikeLongPressForTest(const int groupId)
 {
     const auto it = visualGroupHandles_.find(groupId);
-    if (it == visualGroupHandles_.end() || it->second == nullptr || it->second->getBounds().isEmpty())
+    if (it == visualGroupHandles_.end() || it->second.label == nullptr || it->second.label->getBounds().isEmpty())
     {
-        return false;
+        return false; // a long press needs a visible name label
     }
-    return it->second->beginInlineRename();
+    return it->second.label->beginInlineRename();
 }
 
 bool TrackLanesView::commitVisualGroupHandleRenameForTest(const int groupId,
                                                           const juce::String& newName)
 {
     const auto it = visualGroupHandles_.find(groupId);
-    if (it == visualGroupHandles_.end() || it->second == nullptr)
+    if (it == visualGroupHandles_.end() || it->second.label == nullptr)
     {
         return false;
     }
-    return it->second->commitRenameWithTextForTest(newName);
+    return it->second.label->commitRenameWithTextForTest(newName);
 }

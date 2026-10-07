@@ -178,8 +178,9 @@ void paintMidiClipNotePreview(juce::Graphics& g,
 /// MIDI runtime clip: same outer chrome sequence as placed audio clips (`ClipWaveformView`); label only inside.
 /// Paint order: body fill -> note preview -> selection overlay -> label (border/text stay readable).
 /// `detail` (from the lane height, `track_row_heights::laneEventDetailForHeightPx`) is painting
-/// only: Bars = a thin field over the clip's real time extent, Compact = the box without notes or
-/// label, Full = everything. `bodyFill` is the track colour's event body.
+/// only: Bars = a thin field over the clip's real time extent, Content = the box with the note
+/// preview but without the name label, Full = everything. `bodyFill` is the track colour's
+/// event body.
 void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
                                     juce::Rectangle<float> eb,
                                     bool selected,
@@ -202,7 +203,7 @@ void paintRuntimeMidiClipEventBlock(juce::Graphics& g,
         return;
     }
     paintEventChromeBody(g, eb, bodyFill);
-    if (detail == track_row_heights::LaneEventDetail::Full && clipForNotePreview != nullptr)
+    if (clipForNotePreview != nullptr) // Content and Full: the notes, scaled + clipped to the box
     {
         paintMidiClipNotePreview(g, eb, *clipForNotePreview, notePreviewCtx);
     }
@@ -376,8 +377,8 @@ private:
         noteCtx.samplesPerPixel = owner_.timelineViewport_.getSamplesPerPixel();
         noteCtx.originX = (float)laneContent.getX();
         noteCtx.sampleRate = ac->getTimelineSampleRate();
-        // Detail level from the lane height (Micro = bars, Mini = compact boxes, Small+ = full)
-        // and the track colour's event body — both painting-only; hit geometry is unchanged.
+        // Detail level from the lane height (Micro = bars, Mini = notes without label, Small+ =
+        // full) and the track colour's event body — both painting-only; hit geometry is unchanged.
         const auto detail = track_row_heights::laneEventDetailForHeightPx(getHeight());
         const juce::Colour bodyFill
             = track_colour_palette::eventBodyFill(owner_.session_.getTrackColour(laneTimelineTrackId_));
@@ -1372,9 +1373,13 @@ private:
         return minStart;
     }
 
+    /// The lane's content area. No extra vertical inset here: the ONLY vertical event margin is
+    /// the shared `timeline_clip_chrome::kEventVerticalMargin` applied by the event-bounds
+    /// helpers below, so for the same row height a MIDI event's outer top / bottom edges line up
+    /// exactly with an audio clip's (`ClipWaveformView` uses the same margin on its local bounds).
     [[nodiscard]] juce::Rectangle<int> getLaneContentBounds() const
     {
-        return getLocalBounds().reduced(0, 6);
+        return getLocalBounds();
     }
 
     [[nodiscard]] juce::Rectangle<int> getEventBoundsForSessionSpan(std::int64_t startSamples,

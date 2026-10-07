@@ -487,24 +487,70 @@ public:
     // -------------------------------------------------------------------------------------------
 
     /// Collapsed mini-view: each effective member of a collapsed displayable group shows as a
-    /// strip of EXACTLY this many logical px (the Small 64 px minimum deliberately does not apply
-    /// to the collapsed display; the stored normal height is untouched).
+    /// strip of EXACTLY this many logical px, with `kCollapsedGroupStripGapPx` of empty lane
+    /// background between consecutive strips (none before the first / after the last). The
+    /// row-height grid and the Micro minimum deliberately do not apply to the collapsed display;
+    /// the stored normal heights are untouched.
     static constexpr int kCollapsedGroupMemberRowHeightPx = 4;
-    /// Group handle tab geometry (the "inverted golf club": the vertical member marker continues
-    /// into this short tab extending right over the header area at the group's top boundary).
-    static constexpr int kVisualGroupHandleHeightPx = 16;
-    static constexpr int kVisualGroupHandleMaxWidthPx = 140;
-    /// Placement rules (see `layoutVisualGroupHandles`): the tab uses its full 16 px only inside
-    /// a previous row's free chrome (at least this many px below its lowest control row), the
-    /// compact 12 px variant confined to the margin + colour segment otherwise, and the gutter
-    /// band (right of the add-track corner button) when the boundary is at / above the viewport.
-    static constexpr int kVisualGroupHandleMinInlineHeightPx = 12;
-    static constexpr int kVisualGroupHandleCompactHeightPx = 12;
+    static constexpr int kCollapsedGroupStripGapPx = 1;
+
+    /// Group controls = a small chevron BUTTON (collapse / expand, no text) and a separate NAME
+    /// LABEL (long press = rename, tooltip = full name when truncated). One geometry for layout,
+    /// painting and hit-testing (`layoutVisualGroupHandles`):
+    ///   - button component `kVisualGroupButtonWidthPx` x `kVisualGroupButtonHeightPx` at x 0
+    ///     (its painted box starts at `kVisualGroupButtonBoxXPx`, right of the active stripe, over
+    ///     the member marker — the "club head" on the marker's shaft);
+    ///   - label right of the button (`kVisualGroupButtonToLabelGapPx`), to the header column's
+    ///     right edge minus `kVisualGroupLabelRightPadPx`, `kVisualGroupLabelHeightPx` tall.
+    /// Expanded: both straddle the group's top boundary with ONE vertical span — bottom edge
+    /// `kVisualGroupLabelReachBelowPx` below the boundary (the first member's top pad, above its
+    /// title row and icon), top edge `kVisualGroupButtonReachAbovePx` above it (the previous
+    /// row's resize band + glyph-free chrome; the button stays left of every control cell and the
+    /// label never covers a Power / Mute / Solo cell of either row); the label is
+    /// shown only when the previous row (or the gutter band) leaves it `kVisualGroupLabelHeightPx -
+    /// kVisualGroupLabelReachBelowPx` free px, otherwise the button alone carries the name as
+    /// its tooltip. Collapsed: both sit at `kVisualGroupCollapsedTopPadPx` inside the block.
+    static constexpr int kVisualGroupButtonWidthPx = 16;
+    static constexpr int kVisualGroupButtonBoxXPx = 4;
+    static constexpr int kVisualGroupButtonHeightPx = 12;
+    static constexpr int kVisualGroupLabelHeightPx = 12;
+    static constexpr int kVisualGroupButtonToLabelGapPx = 4;
+    static constexpr int kVisualGroupLabelRightPadPx = 6;
+    static constexpr int kVisualGroupButtonReachAbovePx = 10;
+    static constexpr int kVisualGroupLabelReachBelowPx = 2;
+    static constexpr int kVisualGroupCollapsedTopPadPx = 3;
+    /// Gutter-band placement (group top at / above the viewport top): x right of the add-track
+    /// corner button, bottom edge this many px above the gutter line.
     static constexpr int kVisualGroupHandleGutterLeftPx = 30;
+    static constexpr int kVisualGroupGutterBottomGapPx = 2;
+    /// Smallest readable collapsed block: the control row at its top pad plus the reach of a
+    /// directly following group's button (two adjacent groups never overlap controls). Derived
+    /// from the control geometry above, not from the row-height grid.
+    static constexpr int kCollapsedGroupHeaderMinHeightPx
+        = kVisualGroupCollapsedTopPadPx + kVisualGroupButtonHeightPx + kVisualGroupButtonReachAbovePx;
+    /// Strips content height for `memberCount` members: 4 x members + 1 px gaps between them.
+    [[nodiscard]] static constexpr int collapsedGroupStripsContentHeightPx(const int memberCount) noexcept
+    {
+        return memberCount * kCollapsedGroupMemberRowHeightPx
+               + (memberCount > 1 ? (memberCount - 1) * kCollapsedGroupStripGapPx : 0);
+    }
+    /// The collapsed block's total height: `max(readable header minimum, strips content)` —
+    /// small groups get the header minimum, larger ones grow linearly. Derived UI geometry only
+    /// (never a stored row height); header column and timeline share this one value.
+    [[nodiscard]] static constexpr int collapsedGroupBlockHeightPx(const int memberCount) noexcept
+    {
+        const int content = collapsedGroupStripsContentHeightPx(memberCount);
+        return content > kCollapsedGroupHeaderMinHeightPx ? content : kCollapsedGroupHeaderMinHeightPx;
+    }
+    /// Top offset of the (vertically centred) strips block inside the collapsed block.
+    [[nodiscard]] static constexpr int collapsedGroupStripsTopPadPx(const int memberCount) noexcept
+    {
+        return (collapsedGroupBlockHeightPx(memberCount) - collapsedGroupStripsContentHeightPx(memberCount)) / 2;
+    }
     /// Free header chrome below the lowest control row for a row of this DISPLAY height (0 for
     /// Micro and for collapsed 4 px strips). Pure; public for the focused tests.
     [[nodiscard]] static int headerFreeBottomPxForRowHeight(int rowDisplayHeightPx) noexcept;
-    /// Long-press threshold on the handle: rename instead of collapse-toggle (spec §3).
+    /// Long-press threshold on the name label: rename instead of anything else (spec §1).
     static constexpr int kVisualGroupHandleLongPressMs = 500;
 
     /// [Message thread] Wired once by `Main` (see `VisualTrackGroupUiHooks`).
@@ -538,9 +584,11 @@ public:
     [[nodiscard]] bool isTrackInDisplayableVisualGroup(TrackId tid) const noexcept;
     [[nodiscard]] bool isTrackInCollapsedVisualGroup(TrackId tid) const noexcept;
 
-    /// [Test] Handle introspection + the exact mouse-equivalent actions (short click toggles,
-    /// long press begins inline rename). False / empty when the group has no laid-out handle.
+    /// [Test] Group-control introspection + the exact mouse-equivalent actions: the chevron
+    /// BUTTON bounds (short click toggles) and the NAME LABEL bounds (empty when hidden; long
+    /// press begins the inline rename). False / empty when the group has no laid-out control.
     [[nodiscard]] juce::Rectangle<int> visualGroupHandleBoundsForTest(int groupId) const noexcept;
+    [[nodiscard]] juce::Rectangle<int> visualGroupNameLabelBoundsForTest(int groupId) const noexcept;
     bool shortClickVisualGroupHandleLikeMouseForTest(int groupId);
     bool beginRenameOnVisualGroupHandleLikeLongPressForTest(int groupId);
     bool commitVisualGroupHandleRenameForTest(int groupId, const juce::String& newName);
@@ -653,10 +701,18 @@ private:
     void setTrackRowHeightPx(TrackId tid, int heightPx) noexcept;
 
     // ------------------------------------------------------ Visual track groups (private side)
-    /// Group handle child component: the short tab at the group's top boundary. Owns the short-
-    /// click (toggle), long-press (inline rename) and right-click (menu) gestures; swallows its
-    /// mouse events so the row underneath (previous track / resize band) is never activated.
+    /// Group control child components. `VisualGroupHandleView` is the small chevron BUTTON
+    /// (short click = toggle collapse, right-click = menu, tooltip = the name); `VisualGroupNameLabelView`
+    /// is the separate NAME LABEL (long press = inline rename, right-click = menu, tooltip when
+    /// truncated). Both swallow their mouse events so the rows underneath are never activated.
     class VisualGroupHandleView;
+    class VisualGroupNameLabelView;
+    /// One group's two controls.
+    struct VisualGroupControls
+    {
+        std::unique_ptr<VisualGroupHandleView> button;
+        std::unique_ptr<VisualGroupNameLabelView> label;
+    };
 
     /// One displayable group's current visible-row run (display cache; rebuilt with the entries).
     struct VisualGroupDisplayRun
@@ -670,13 +726,22 @@ private:
 
     /// Rebuild `visualGroupDisplayRuns_` + membership map from `Session` (displayable groups only).
     void rebuildVisualGroupDisplayCache();
-    /// Ensure one handle component per displayable run (created/removed as groups change).
+    /// Ensure one button + label pair per displayable run (created/removed as groups change).
     void rebuildVisualGroupHandles();
-    /// Position every handle for the current layout (called at the end of `resized()`).
+    /// Position every group control for the current layout (called at the end of `resized()`).
     void layoutVisualGroupHandles() noexcept;
     /// Collapsed mini strips + collapsed-run header chrome (called from `paint()`).
     void paintCollapsedGroupContent(juce::Graphics& g) const;
+    /// Group marker continuity + nothing painted over the controls: called from
+    /// `paintOverChildren` AFTER the header-column row separators.
+    void paintVisualGroupMarkersOverSeparators(juce::Graphics& g) const;
+    /// Exclude every laid-out group control from `g`'s clip so separators never cross them.
+    void excludeVisualGroupControlsFromClip(juce::Graphics& g) const;
     [[nodiscard]] const VisualGroupDisplayRun* findVisualGroupRun(int groupId) const noexcept;
+    /// Display height of collapsed member `vi` of `run`: its 4 px strip plus the 1 px gap below it
+    /// (except the last) plus the block's centring pad for the first / last member, so the
+    /// members' display heights sum to `collapsedGroupBlockHeightPx`.
+    [[nodiscard]] int collapsedMemberDisplayHeightPx(const VisualGroupDisplayRun& run, int vi) const noexcept;
     /// Top y (view coords) of visible row `vi` under the current scroll offset.
     [[nodiscard]] int yTopForVisibleIndex(int vi) const noexcept;
     /// True when the horizontal separator UNDER visible row `vi` must be skipped (both `vi` and
@@ -685,6 +750,8 @@ private:
     void showVisualGroupHandleContextMenu(int groupId);
     void toggleVisualGroupCollapsedFromHandle(int groupId);
     void beginVisualGroupRenameFromHandle(int groupId);
+    /// The label closed its rename editor: relayout so a label forced visible for the edit hides again.
+    void visualGroupRenameEditorClosed(int groupId) noexcept;
 
     struct VisualGroupMembershipCacheEntry
     {
@@ -693,7 +760,10 @@ private:
     };
     std::unordered_map<TrackId, VisualGroupMembershipCacheEntry> visualGroupMembershipByTrackId_;
     std::vector<VisualGroupDisplayRun> visualGroupDisplayRuns_;
-    std::unordered_map<int, std::unique_ptr<VisualGroupHandleView>> visualGroupHandles_;
+    std::unordered_map<int, VisualGroupControls> visualGroupHandles_;
+    /// Group whose hidden label is temporarily laid out for an inline rename (context-menu
+    /// Rename on a Micro / Small boundary), or 0.
+    int visualGroupRenameForcingLabelGroupId_ = 0;
     VisualTrackGroupUiHooks visualGroupUiHooks_{};
 
     /// Header multi-selection (visual-group creation): selected ids + the shift anchor. UI-only —

@@ -161,16 +161,15 @@ TrackHeaderView::HeaderContentLayout TrackHeaderView::computeHeaderContentLayout
     {
         return L;
     }
-    const int chromeBottom = b.getBottom() - kHeaderResizeBandPx;
-    const int chromeH = juce::jmax(0, chromeBottom - b.getY());
     const int cell = kStripControlCellWidthPx;
     const int titleY = b.getY() + kHeaderRowTopPadPx;
 
-    // Colour segment: right of the group margin, the full chrome height; icon + number on the
-    // title row inside it.
+    // Colour segment: right of the group margin, the FULL row height — from the row's top edge
+    // down to the separator below (the resize band is a hit area only, never its own visible
+    // strip, so the segment does not stop above it). Icon + number sit on the title row inside it.
     const int segW = colourSegmentWidthPxForDigits(m.trackNumberDigits);
     const int segX = b.getX() + kHeaderGroupMarginPx;
-    L.colourSegmentBounds = { segX, b.getY(), segW, chromeH };
+    L.colourSegmentBounds = { segX, b.getY(), segW, b.getHeight() };
     L.typeIconBounds = { segX + kHeaderSegmentPadPx, titleY + (cell - kHeaderTypeIconPx) / 2, kHeaderTypeIconPx,
                          kHeaderTypeIconPx };
     const int digitsW = segW - (kHeaderSegmentPadPx + kHeaderTypeIconPx + kHeaderSegmentPadPx + kHeaderSegmentPadPx);
@@ -796,15 +795,15 @@ void TrackHeaderView::paint(juce::Graphics& g)
     // Plate colours / stripe shared with the mixer strip headers (`TrackStripButtonGlyphs.h`).
     drawHeaderPlate(g, b, active);
 
-    // Header multi-selection (visual-group creation): a subtle blue wash + hairline OVER the
-    // plate but UNDER the name/strip content. Deliberately distinct from (and additive to) the
-    // 4 px active-track stripe: the active row keeps its own look inside a multi-selection.
+    // Header multi-selection (visual-group creation): ONE flat blue wash over the whole plate,
+    // under the name/strip content — no hairline or outline (a 1 px frame read as a second,
+    // blue separator above the black row separator). Deliberately distinct from (and additive
+    // to) the 4 px active-track stripe: the active row keeps its own look inside a multi-selection.
     if (m.headerMultiSelected)
     {
         g.setColour(juce::Colour(0x2d2e7bd6));
-        g.fillRect(b);
-        g.setColour(juce::Colour(0x7a2e7bd6));
-        g.drawRect(b, 1);
+        // The active row's 4 px stripe stays pure (the clear left marker of the active track).
+        g.fillRect(active ? b.withTrimmedLeft(kHeaderActiveStripeWidthPx) : b);
     }
     // Visual group membership: a discreet 2 px vertical marker in the group margin, RIGHT of the
     // active stripe (x 0…4) and LEFT of the colour segment (x ≥ 8) — obscures nothing.

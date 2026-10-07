@@ -219,23 +219,26 @@ enum class LaneEventDetail
 {
     /// Events as thin fields showing their real time extent only (no waveform / notes / text).
     Bars,
-    /// The full event box (body + border + selection) without waveform, notes or labels.
-    Compact,
+    /// The event box WITH its content illustration (audio waveform / MIDI note preview, scaled
+    /// and clipped to the box's inner area) but WITHOUT the name label — the content has
+    /// priority when the height does not allow both.
+    Content,
     /// The existing full rendering (waveform / note preview + name label).
     Full,
 };
 
-/// Compact needs the event box itself to be readable: 2 x the 4 px event margin + a 24 px body
-/// = 32 px (Mini 42 qualifies, Micro 28 does not).
-inline constexpr int kLaneDetailCompactMinPx = 32;
-/// Full needs the 14 px top-left name strip plus at least 24 px of waveform / note area inside
-/// the box margins: 8 + 14 + 2 + 24 = 48 px (Small 56 qualifies, Mini 42 does not).
+/// Content needs the event box itself to be readable: 2 x the 4 px event margin + a 24 px body
+/// = 32 px (Mini 42 qualifies, Micro 28 does not). Decided from the lane's ACTUAL height, so an
+/// older saved Custom height between the presets behaves sensibly as well.
+inline constexpr int kLaneDetailContentMinPx = 32;
+/// The name label additionally needs its 14 px top-left strip above at least 24 px of waveform /
+/// note area inside the box margins: 8 + 14 + 2 + 24 = 48 px (Small 56 qualifies, Mini 42 does not).
 inline constexpr int kLaneDetailFullMinPx = 48;
 /// Height of the thin event field in `Bars` mode, centred in the lane.
 inline constexpr int kLaneBarFieldHeightPx = 8;
-static_assert(kMicroPresetPx < kLaneDetailCompactMinPx && kMiniPresetPx >= kLaneDetailCompactMinPx
+static_assert(kMicroPresetPx < kLaneDetailContentMinPx && kMiniPresetPx >= kLaneDetailContentMinPx
                   && kMiniPresetPx < kLaneDetailFullMinPx && kSmallPresetPx >= kLaneDetailFullMinPx,
-              "detail thresholds: Micro = Bars, Mini = Compact, Small and above = Full");
+              "detail thresholds: Micro = Bars, Mini = Content (no label), Small and above = Full");
 
 [[nodiscard]] constexpr LaneEventDetail laneEventDetailForHeightPx(const int laneHeightPx) noexcept
 {
@@ -243,9 +246,9 @@ static_assert(kMicroPresetPx < kLaneDetailCompactMinPx && kMiniPresetPx >= kLane
     {
         return LaneEventDetail::Full;
     }
-    if (laneHeightPx >= kLaneDetailCompactMinPx)
+    if (laneHeightPx >= kLaneDetailContentMinPx)
     {
-        return LaneEventDetail::Compact;
+        return LaneEventDetail::Content;
     }
     return LaneEventDetail::Bars;
 }

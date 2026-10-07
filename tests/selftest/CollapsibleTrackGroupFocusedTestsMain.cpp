@@ -39,6 +39,7 @@
 #include "io/ProjectFile.h"
 #include "plugins/PluginInsertHost.h"
 #include "transport/Transport.h"
+#include "ui/TimelineClipEventChrome.h"
 #include "ui/TimelineRulerView.h"
 #include "ui/TimelineViewportModel.h"
 #include "ui/TrackLanesView.h"
@@ -371,8 +372,9 @@ void testHeaderSelectionAndCreateValidation()
 }
 
 // ---------------------------------------------------------------------------------------------
-// §4 + §5: collapsed layout = exactly 4 px per member, zero gaps, shared scroll model, no hidden
-// hit targets
+// §4 + §5: collapsed layout = one block of `collapsedGroupBlockHeightPx(n)` (4 px strips with
+// 1 px gaps, centred; at least the readable header minimum), shared scroll model, no hidden hit
+// targets
 // ---------------------------------------------------------------------------------------------
 void testCollapsedLayoutExactFourPx()
 {
@@ -392,40 +394,54 @@ void testCollapsedLayoutExactFourPx()
     const int contentExpanded = f.lanes->verticalScrollModel().contentHeightPx;
     f.setCollapsed(*gid, true);
 
+    // Three members: strips content 3 x 4 + 2 x 1 = 14 px, block = the readable header minimum
+    // (25 px), strips block centred (pad 5 above / 6 below): member display heights 10 / 5 / 10.
+    constexpr int kBlock = TrackLanesView::collapsedGroupBlockHeightPx(3);
+    constexpr int kPad = TrackLanesView::collapsedGroupStripsTopPadPx(3);
+    static_assert(TrackLanesView::collapsedGroupStripsContentHeightPx(3) == 14 && kBlock == 25 && kPad == 5,
+                  "3-member collapsed block: 14 px of strips inside the 25 px readable minimum");
     const std::map<TrackId, int> h = f.rowHeights();
-    expect(h.at(rows[4]) == 4 && h.at(rows[5]) == 4 && h.at(rows[6]) == 4,
-           "collapse: every member row (incl. the bus) displays at EXACTLY 4 px (the Micro minimum "
-           "does not apply)");
+    expect(h.at(rows[4]) + h.at(rows[5]) + h.at(rows[6]) == kBlock && h.at(rows[4]) == kPad + 4 + 1
+               && h.at(rows[5]) == 4 + 1 && h.at(rows[6]) == 4 + (kBlock - 14 - kPad),
+           "collapse: the members' display heights sum to the block height (25) — 4 px strips, 1 px "
+           "gaps, centring pads on the first / last member (the Micro minimum does not apply)");
     expect(h.at(rows[0]) == trh::kMediumPresetPx && h.at(rows[1]) == trh::kMediumPresetPx,
            "collapse: rows outside the group keep their heights");
-    expect(f.lanes->verticalScrollModel().contentHeightPx
-               == contentExpanded - (64 + 150 + 192) + 3 * 4,
-           "collapse: scrollbar content height shrinks by exactly the members' height delta");
+    expect(f.lanes->verticalScrollModel().contentHeightPx == contentExpanded - (64 + 150 + 192) + kBlock,
+           "collapse: scrollbar content height shrinks by exactly the members' heights minus the block");
     expect(f.lanes->rowTopOffsetPxForTrackForDiagnostics(rows[5])
                    - f.lanes->rowTopOffsetPxForTrackForDiagnostics(rows[4])
-               == 4
+               == kPad + 4 + 1
                && f.lanes->rowTopOffsetPxForTrackForDiagnostics(rows[6])
                           - f.lanes->rowTopOffsetPxForTrackForDiagnostics(rows[5])
-                      == 4,
-           "collapse: strips stack with ZERO gap (consecutive tops exactly 4 px apart)");
+                      == 4 + 1,
+           "collapse: consecutive strips are exactly 5 px apart (4 px strip + 1 px gap)");
     expect(f.verticalLayoutOk("collapsed"), "collapse: the shared vertical layout model verifies");
     expect(f.session.getActiveTrackId() != kInvalidTrackId,
            "collapse: a valid active track remains (never cleared by collapsing)");
 
-    // No hidden hit targets: points inside the collapsed strips hit the lanes view itself (which
-    // paints the strips), never a member header, lane, clip or button. The handle at the group's
-    // top boundary is the only interactive element.
+    // No hidden hit targets: points inside the collapsed block hit the lanes view itself (which
+    // paints the strips), never a member header, lane, clip or button. The chevron button and the
+    // name label at the block's top are the only interactive elements — and they are laid out
+    // INSIDE the block (readable header), never over the row above.
     const int headerW = f.lanes->headerColumnWidthPx();
-    const int stripsTop = f.widgetYTopForTrack(rows[4]);
-    const juce::Rectangle<int> handle = f.lanes->visualGroupHandleBoundsForTest(*gid);
-    expect(!handle.isEmpty(), "collapse: the group handle stays laid out as an overlay");
+    const int blockTop = f.widgetYTopForTrack(rows[4]);
+    const juce::Rectangle<int> button = f.lanes->visualGroupHandleBoundsForTest(*gid);
+    const juce::Rectangle<int> label = f.lanes->visualGroupNameLabelBoundsForTest(*gid);
+    expect(button == juce::Rectangle<int>(0, blockTop + TrackLanesView::kVisualGroupCollapsedTopPadPx,
+                                          TrackLanesView::kVisualGroupButtonWidthPx, TrackLanesView::kVisualGroupButtonHeightPx)
+               && label.getX() == TrackLanesView::kVisualGroupButtonWidthPx + TrackLanesView::kVisualGroupButtonToLabelGapPx
+               && label.getY() == button.getY() && label.getHeight() == TrackLanesView::kVisualGroupLabelHeightPx
+               && label.getRight() == headerW - TrackLanesView::kVisualGroupLabelRightPadPx
+               && label.getBottom() <= blockTop + kBlock,
+           "collapse: button + name label sit at the top pad INSIDE the collapsed block, the label using the header width");
     bool noHiddenHits = true;
-    for (const int y : { stripsTop + 2, stripsTop + 6, stripsTop + 10 })
+    for (const int y : { blockTop + 1, blockTop + kPad + 2, blockTop + kPad + 7, blockTop + kBlock - 2 })
     {
         for (const int x : { 40, headerW - 30, headerW + 60, headerW + 300 })
         {
             const juce::Point<int> p(x, y);
-            if (handle.contains(p))
+            if (button.contains(p) || label.contains(p))
             {
                 continue;
             }
@@ -434,8 +450,11 @@ void testCollapsedLayoutExactFourPx()
         }
     }
     expect(noHiddenHits,
-           "collapse: NO hidden child component under the 12 px strip block (headers, lanes, "
+           "collapse: NO hidden child component under the collapsed block (headers, lanes, "
            "buttons and clips are all unreachable)");
+    juce::Component* const atLabel = f.lanes->getComponentAt(label.getCentreX(), label.getCentreY());
+    expect(atLabel != nullptr && atLabel->getBounds() == label,
+           "collapse: the name label is hit at its centre (its own component, nothing beneath)");
 
     // Expand: each member returns to its stored normal height.
     f.setCollapsed(*gid, false);
@@ -472,7 +491,14 @@ void testCollapsedMiniViewClipIntervals()
     expect(gid.has_value(), "fixture: group over the three clip rows");
     f.setCollapsed(*gid, true);
 
-    const auto stripMidY = [&](const TrackId tid) { return f.widgetYTopForTrack(tid) + 2; };
+    // Strip i (member order) occupies 4 rows at blockTop + pad + 5 i; the row between two strips
+    // is the 1 px gap (lane background).
+    const int blockTop = f.widgetYTopForTrack(rows[1]);
+    constexpr int kPad3 = TrackLanesView::collapsedGroupStripsTopPadPx(3);
+    const auto stripTopY = [&](const int i) { return blockTop + kPad3 + 5 * i; };
+    const auto stripMidY = [&](const TrackId tid) {
+        return stripTopY(tid == tA ? 0 : (tid == tB ? 1 : 2)) + 2;
+    };
     const auto isFill = [&](const juce::Image& img, const int x, const int y) {
         return img.getPixelAt(x, y) == juce::Colour(kStripFillArgb);
     };
@@ -496,6 +522,16 @@ void testCollapsedMiniViewClipIntervals()
                "strips: track C's overlapping clips paint one continuous union field (0.5-2.0 s)");
         expect(!isFill(img, widgetXForSample(f, sec(2.3)), stripMidY(tC)),
                "strips: track C's union field ends where the material ends");
+        // 4 px strips with 1 px empty separation: all four rows of A's strip are filled, the pad
+        // row above it and the gap row below it are not.
+        const int xA = widgetXForSample(f, sec(1.3));
+        expect(isFill(img, xA, stripTopY(0)) && isFill(img, xA, stripTopY(0) + 3)
+                   && !isFill(img, xA, stripTopY(0) - 1) && !isFill(img, xA, stripTopY(0) + 4),
+               "strips: a strip is exactly 4 rows tall, with the centring pad above and the 1 px gap below unfilled");
+        const int xC = widgetXForSample(f, sec(1.2));
+        expect(isFill(img, xC, stripTopY(2)) && isFill(img, xC, stripTopY(2) + 3) && !isFill(img, xC, stripTopY(2) - 1)
+                   && !isFill(img, xC, stripTopY(2) + 4),
+               "strips: the last strip is 4 rows tall too, gap above, centring pad below");
     }
 
     // Zoom in (the production zoom path), then scroll right: the strips must follow the exact
@@ -537,14 +573,16 @@ void testClipLessMemberStripsStayEmpty()
     const juce::Image img = f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f);
     const int headerW = f.lanes->headerColumnWidthPx();
     bool anyFill = false;
-    for (const TrackId tid : { audioTid, busTid })
+    const int blockTop = f.widgetYTopForTrack(audioTid);
+    for (int i = 0; i < 2; ++i)
     {
-        const int y = f.widgetYTopForTrack(tid) + 2;
+        const int y = blockTop + TrackLanesView::collapsedGroupStripsTopPadPx(2) + 5 * i + 2;
         for (int x = headerW + 3; x < f.lanes->getWidth() - 2; x += 7)
         {
             anyFill = anyFill || (img.getPixelAt(x, y) == juce::Colour(kStripFillArgb));
         }
     }
+    juce::ignoreUnused(busTid);
     expect(!anyFill,
            "strips: clip-less members (audio without clips, Group bus) get NO fabricated interval "
            "fields (their strips stay empty end to end)");
@@ -582,8 +620,11 @@ void testNormalHeightsSeparateFromCollapsedDisplay()
     // display stays 4 px until expansion restores the new preset height.
     f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
     const std::map<TrackId, int> hCollapsed = f.rowHeights();
-    expect(hCollapsed.at(rows[1]) == 4 && hCollapsed.at(rows[2]) == 4 && hCollapsed.at(rows[3]) == 4,
-           "heights: the preset does NOT change the collapsed 4 px display");
+    expect(hCollapsed.at(rows[1]) + hCollapsed.at(rows[2]) + hCollapsed.at(rows[3])
+                   == TrackLanesView::collapsedGroupBlockHeightPx(3)
+               && hCollapsed.at(rows[1]) < trh::kMinRowHeightPx && hCollapsed.at(rows[2]) < trh::kMinRowHeightPx
+               && hCollapsed.at(rows[3]) < trh::kMinRowHeightPx,
+           "heights: the preset does NOT change the collapsed display (still the 25 px block)");
     expect(f.lanes->uniformTrackRowHeightPresetStatus() == trh::TrackRowHeightPreset::Small,
            "heights: status reads Small from the normal heights while the group is collapsed");
     f.setCollapsed(*gid, false);
@@ -591,120 +632,222 @@ void testNormalHeightsSeparateFromCollapsedDisplay()
     expect(hExpanded.at(rows[1]) == trh::kSmallPresetPx
                && hExpanded.at(rows[2]) == trh::kSmallPresetPx
                && hExpanded.at(rows[3]) == trh::kSmallPresetPx,
-           "heights: expansion restores the heights the preset gave the HIDDEN members (64)");
+           "heights: expansion restores the heights the preset gave the HIDDEN members (Small)");
 }
 
 // ---------------------------------------------------------------------------------------------
-// §3: handle placement (first track, viewport top, scrolled out) + short click vs long press
+// §1 + §2: group controls (chevron button + separate name label) — placement at the first
+// track, in the viewport, scrolled past the top, scrolled out, Micro neighbours, two adjacent
+// groups; nothing underneath is reachable; short click toggles, long press on the name renames
 // ---------------------------------------------------------------------------------------------
 void testHandlePlacementAndGestures()
 {
+    using TLV = TrackLanesView;
     GroupFixture f(/*extraAudioTracks*/ 10);
     f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
-    constexpr int gutter = TrackLanesView::kArrangementTimelineHeaderGutterPx;
+    constexpr int gutter = TLV::kArrangementTimelineHeaderGutterPx;
+    const int headerW = f.lanes->headerColumnWidthPx();
+    const int segRight = TrackHeaderView::kHeaderGroupMarginPx
+                         + TrackHeaderView::colourSegmentWidthPxForDigits(f.lanes->trackNumberDigitCount());
+    const int firstCellX = segRight + TrackHeaderView::kHeaderSegmentToStripGapPx;
+    constexpr int labelX = TLV::kVisualGroupButtonWidthPx + TLV::kVisualGroupButtonToLabelGapPx;
 
-    // A group starting at the very FIRST track: the handle stays visible — in the gutter band
-    // above the first member (right of the add-track corner), never over the member's title row.
+    // A group starting at the very FIRST track: button + label sit in the gutter band above the
+    // first member (right of the add-track corner), never over the member's title row.
     const std::optional<int> gFirst = f.makeGroup({ 0, 1 }, "First");
     const juce::Rectangle<int> bFirst = f.lanes->visualGroupHandleBoundsForTest(*gFirst);
-    expect(!bFirst.isEmpty() && bFirst.getBottom() == gutter
-               && bFirst.getHeight() == TrackLanesView::kVisualGroupHandleHeightPx
-               && bFirst.getX() == TrackLanesView::kVisualGroupHandleGutterLeftPx
-               && bFirst.getWidth() <= TrackLanesView::kVisualGroupHandleMaxWidthPx,
-           "handle: a group at the FIRST track keeps its handle visible in the gutter band (covers no title row)");
+    const juce::Rectangle<int> lFirst = f.lanes->visualGroupNameLabelBoundsForTest(*gFirst);
+    expect(bFirst == juce::Rectangle<int>(TLV::kVisualGroupHandleGutterLeftPx,
+                                          gutter - TLV::kVisualGroupGutterBottomGapPx - TLV::kVisualGroupButtonHeightPx,
+                                          TLV::kVisualGroupButtonWidthPx, TLV::kVisualGroupButtonHeightPx)
+               && lFirst.getX() == bFirst.getX() + labelX && lFirst.getY() == bFirst.getY()
+               && lFirst.getHeight() == TLV::kVisualGroupLabelHeightPx
+               && lFirst.getRight() == headerW - TLV::kVisualGroupLabelRightPadPx && lFirst.getBottom() < gutter,
+           "controls: a group at the FIRST track keeps button + label visible in the gutter band (covers no title row)");
 
-    // A mid-list group with Medium neighbours: the handle sits fully INSIDE the previous row's
-    // free chrome (below its second control row), its bottom edge on the group's top boundary.
+    // A mid-list group with Medium neighbours: the button straddles the boundary on the marker's
+    // shaft (7 above / 5 below), the label hangs above the boundary with its bottom edge 2 px
+    // below it — inside the previous row's free chrome + resize band, never over a control cell
+    // of either row, and using the header width.
     const std::optional<int> gMid = f.makeGroup({ 3, 4, 5 }, "Mid");
     const juce::Rectangle<int> bMid = f.lanes->visualGroupHandleBoundsForTest(*gMid);
+    const juce::Rectangle<int> lMid = f.lanes->visualGroupNameLabelBoundsForTest(*gMid);
     const int boundaryY = f.widgetYTopForTrack(f.tidAt(3));
-    expect(!bMid.isEmpty() && bMid.getBottom() == boundaryY
-               && bMid.getHeight() == TrackLanesView::kVisualGroupHandleHeightPx
-               && bMid.getY() >= f.widgetYTopForTrack(f.tidAt(2)) + TrackHeaderView::kHeaderRowTopPadPx
+    expect(bMid == juce::Rectangle<int>(0, boundaryY - TLV::kVisualGroupButtonReachAbovePx, TLV::kVisualGroupButtonWidthPx,
+                                        TLV::kVisualGroupButtonHeightPx)
+               && bMid.getRight() < firstCellX,
+           "controls: the mid-list button straddles the group's top boundary on the marker column, left of every cell");
+    expect(lMid.getX() == labelX && lMid.getBottom() == boundaryY + TLV::kVisualGroupLabelReachBelowPx
+               && lMid.getHeight() == TLV::kVisualGroupLabelHeightPx && lMid.getRight() == headerW - TLV::kVisualGroupLabelRightPadPx
+               && lMid.getBottom() <= boundaryY + TrackHeaderView::kHeaderRowTopPadPx
+               && lMid.getY() >= f.widgetYTopForTrack(f.tidAt(2)) + TrackHeaderView::kHeaderRowTopPadPx
                                      + 2 * TrackHeaderView::kStripControlCellWidthPx + TrackHeaderView::kHeaderRowGapPx,
-           "handle: a mid-list handle (Medium rows) sits inside the previous row's free band, bottom on the boundary, below its cells");
-    expect(TrackLanesView::headerFreeBottomPxForRowHeight(trh::kMediumPresetPx) == 45
-               && TrackLanesView::headerFreeBottomPxForRowHeight(trh::kMiniPresetPx) == 14
-               && TrackLanesView::headerFreeBottomPxForRowHeight(trh::kSmallPresetPx) == 3
-               && TrackLanesView::headerFreeBottomPxForRowHeight(trh::kMicroPresetPx) == 0
-               && TrackLanesView::headerFreeBottomPxForRowHeight(TrackLanesView::kCollapsedGroupMemberRowHeightPx) == 0,
-           "handle: free chrome under the lowest control row = 45 / 14 / 3 / 0 / 0 px for Medium / Mini / Small / Micro / collapsed strip");
+           "controls: the name label hangs above the boundary, ending at the first member's top pad, below the previous row's cells");
+    expect(TLV::headerFreeBottomPxForRowHeight(trh::kMediumPresetPx) == 45
+               && TLV::headerFreeBottomPxForRowHeight(trh::kMiniPresetPx) == 14
+               && TLV::headerFreeBottomPxForRowHeight(trh::kSmallPresetPx) == 3
+               && TLV::headerFreeBottomPxForRowHeight(trh::kMicroPresetPx) == 0
+               && TLV::headerFreeBottomPxForRowHeight(TLV::kCollapsedGroupMemberRowHeightPx) == 0,
+           "controls: free chrome under the lowest control row = 45 / 14 / 3 / 0 / 0 px for Medium / Mini / Small / Micro / strip");
 
     // Scroll until the mid group's top is above the viewport while its rows are still visible:
-    // the handle moves into the gutter band instead of disappearing (sticky).
+    // the controls move into the gutter band instead of disappearing (sticky).
     f.lanes->scrollVerticallyToOffsetPx(f.lanes->rowTopOffsetPxForTrackForDiagnostics(f.tidAt(4)));
     const juce::Rectangle<int> bClamped = f.lanes->visualGroupHandleBoundsForTest(*gMid);
-    expect(!bClamped.isEmpty() && bClamped.getBottom() == gutter,
-           "handle: with the group's top scrolled past the viewport top the handle sits in the "
-           "gutter band and stays accessible");
+    expect(!bClamped.isEmpty() && bClamped.getBottom() == gutter - TLV::kVisualGroupGutterBottomGapPx
+               && bClamped.getX() == TLV::kVisualGroupHandleGutterLeftPx
+               && !f.lanes->visualGroupNameLabelBoundsForTest(*gMid).isEmpty(),
+           "controls: with the group's top scrolled past the viewport top both controls sit in the gutter band");
 
-    // Scroll far past the group: the handle unmaps (no floating orphan).
+    // Scroll far past the group: the controls unmap (no floating orphans).
     f.lanes->scrollVerticallyToOffsetPx(f.lanes->verticalScrollModel().maxOffsetPx());
-    expect(f.lanes->visualGroupHandleBoundsForTest(*gFirst).isEmpty(),
-           "handle: a fully scrolled-out group has NO laid-out handle");
+    expect(f.lanes->visualGroupHandleBoundsForTest(*gFirst).isEmpty()
+               && f.lanes->visualGroupNameLabelBoundsForTest(*gFirst).isEmpty(),
+           "controls: a fully scrolled-out group has NO laid-out button or label");
     f.lanes->scrollVerticallyToOffsetPx(0);
 
-    // Micro neighbours (no free chrome anywhere): the compact 12 px tab, centred on the boundary
-    // and confined to the group margin + colour segment — left of every Power / Mute / Solo cell
-    // and of the name, overlapping at most the top of the first member's icon / number area.
+    // Micro neighbours (no free chrome): the button alone, straddling the boundary left of every
+    // control cell; the label is hidden (the button's tooltip carries the name).
     {
         f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Micro);
         const juce::Rectangle<int> bMicro = f.lanes->visualGroupHandleBoundsForTest(*gMid);
         const int boundaryMicro = f.widgetYTopForTrack(f.tidAt(3));
-        const int segRight = TrackHeaderView::kHeaderGroupMarginPx
-                             + TrackHeaderView::colourSegmentWidthPxForDigits(f.lanes->trackNumberDigitCount());
-        const int firstCellX = segRight + TrackHeaderView::kHeaderSegmentToStripGapPx;
-        expect(!bMicro.isEmpty() && bMicro.getHeight() == TrackLanesView::kVisualGroupHandleCompactHeightPx
-                   && bMicro.getCentreY() == boundaryMicro && bMicro.getRight() <= segRight && bMicro.getRight() < firstCellX
-                   && bMicro.getBottom() <= boundaryMicro + TrackHeaderView::kHeaderRowTopPadPx + 4,
-               "handle (Micro): compact 12 px tab centred on the boundary, confined left of every title cell and the name");
-        // Two adjacent groups in Micro: the second group's tab at the shared boundary never
-        // overlaps the first group's tab or any control cell.
+        expect(bMicro == juce::Rectangle<int>(0, boundaryMicro - TLV::kVisualGroupButtonReachAbovePx,
+                                              TLV::kVisualGroupButtonWidthPx, TLV::kVisualGroupButtonHeightPx)
+                   && bMicro.getRight() <= segRight && bMicro.getRight() < firstCellX
+                   && bMicro.getBottom() <= boundaryMicro + TrackHeaderView::kHeaderRowTopPadPx + 3,
+               "controls (Micro): the button straddles the boundary over the margin + segment zone only (icon rows untouched)");
+        expect(f.lanes->visualGroupNameLabelBoundsForTest(*gMid).isEmpty(),
+               "controls (Micro): no room for the label between two Micro rows -> hidden (tooltip on the button)");
+        // Two adjacent groups in Micro: disjoint buttons at their own boundaries.
         const std::optional<int> gNext = f.makeGroup({ 6, 7 }, "Next");
         const juce::Rectangle<int> bNext = f.lanes->visualGroupHandleBoundsForTest(*gNext);
         expect(gNext.has_value() && !bNext.isEmpty() && !bNext.intersects(bMicro)
-                   && bNext.getCentreY() == f.widgetYTopForTrack(f.tidAt(6)) && bNext.getRight() < firstCellX,
-               "handle (Micro): two directly adjacent groups get two disjoint compact tabs, both left of the control cells");
-        // The hidden hit-test of the previous (Micro) row's cells: nothing of the compact tab lies
-        // over its title cells (they start at x = firstCellX).
-        juce::Component* const atNextTab = f.lanes->getComponentAt(bNext.getCentreX(), bNext.getCentreY());
-        expect(atNextTab != nullptr && atNextTab->getBounds() == bNext,
-               "handle (Micro): the compact tab is the component hit at its centre (it swallows its own clicks)");
+                   && bNext.getY() == f.widgetYTopForTrack(f.tidAt(6)) - TLV::kVisualGroupButtonReachAbovePx
+                   && bNext.getRight() < firstCellX,
+               "controls (Micro): two directly adjacent groups get two disjoint buttons, both left of the control cells");
+        juce::Component* const atNext
+            = f.lanes->getComponentAt(TLV::kVisualGroupButtonBoxXPx + 4, bNext.getCentreY());
+        expect(atNext != nullptr && atNext->getBounds() == bNext,
+               "controls (Micro): the button is the component hit inside its box (it swallows its own clicks)");
+        // The first member's Power / Mute cells are NOT covered by the controls.
+        const juce::Rectangle<int> firstRowCells(firstCellX, boundaryMicro + TrackHeaderView::kHeaderRowTopPadPx,
+                                                 3 * TrackHeaderView::kStripControlCellWidthPx, TrackHeaderView::kStripControlCellWidthPx);
+        expect(!firstRowCells.intersects(bMicro) && !firstRowCells.intersects(bNext),
+               "controls (Micro): neither button overlaps the title cells of the row below");
+        // A collapsed group directly ABOVE another group: the next group's button stays inside the
+        // collapsed block's free bottom (the readable minimum reserves it), never over its label.
+        f.setCollapsed(*gMid, true);
+        const juce::Rectangle<int> lMidCollapsed = f.lanes->visualGroupNameLabelBoundsForTest(*gMid);
+        const juce::Rectangle<int> bNext2 = f.lanes->visualGroupHandleBoundsForTest(*gNext);
+        expect(!lMidCollapsed.isEmpty() && !bNext2.isEmpty() && !bNext2.intersects(lMidCollapsed)
+                   && !bNext2.intersects(f.lanes->visualGroupHandleBoundsForTest(*gMid)),
+               "controls: a group right below a collapsed group never overlaps the collapsed block's button or label");
+        f.setCollapsed(*gMid, false);
         f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Medium);
         f.lanes->scrollVerticallyToOffsetPx(0);
     }
 
-    // The handle never hit-tests through to the previous track's header or its resize band.
+    // The controls never hit-test through to the previous track's header or its resize band.
     const juce::Rectangle<int> bMid2 = f.lanes->visualGroupHandleBoundsForTest(*gMid);
-    juce::Component* const atHandle
-        = f.lanes->getComponentAt(bMid2.getCentreX(), bMid2.getCentreY());
-    expect(atHandle != nullptr && atHandle != f.lanes.get()
-               && atHandle->getBounds() == bMid2,
-           "handle: hit-testing the handle area reaches ONLY the handle component (never the "
+    const juce::Rectangle<int> lMid2 = f.lanes->visualGroupNameLabelBoundsForTest(*gMid);
+    juce::Component* const atButton = f.lanes->getComponentAt(TLV::kVisualGroupButtonBoxXPx + 4, bMid2.getCentreY());
+    juce::Component* const atLabel = f.lanes->getComponentAt(lMid2.getCentreX(), lMid2.getCentreY());
+    expect(atButton != nullptr && atButton->getBounds() == bMid2 && atLabel != nullptr && atLabel->getBounds() == lMid2,
+           "controls: hit-testing the button / label areas reaches ONLY those components (never the "
            "previous track or its resize band)");
 
-    // Short click toggles exactly once per click (the exact action the mouse-up dispatches).
+    // Short click on the button toggles exactly once per click (the exact mouse-up action).
     const TrackId activeBefore = f.session.getActiveTrackId();
     expect(f.lanes->shortClickVisualGroupHandleLikeMouseForTest(*gMid)
                && f.session.findVisualTrackGroupById(*gMid)->collapsed,
-           "handle: one short click collapses the group");
+           "button: one short click collapses the group");
     expect(f.lanes->shortClickVisualGroupHandleLikeMouseForTest(*gMid)
                && !f.session.findVisualTrackGroupById(*gMid)->collapsed,
-           "handle: the next short click expands it again (exactly one toggle per click)");
+           "button: the next short click expands it again (exactly one toggle per click)");
     expect(f.session.getActiveTrackId() == activeBefore,
-           "handle: collapsing/expanding never changes the active track");
+           "button: collapsing/expanding never changes the active track");
 
-    // Long press begins the inline rename WITHOUT toggling; committing renames the group.
+    // Long press on the NAME begins the inline rename WITHOUT toggling; committing renames.
     const bool collapsedBefore = f.session.findVisualTrackGroupById(*gMid)->collapsed;
     expect(f.lanes->beginRenameOnVisualGroupHandleLikeLongPressForTest(*gMid),
-           "handle: a long press opens the inline rename editor");
+           "label: a long press on the name opens the inline rename editor");
     expect(f.session.findVisualTrackGroupById(*gMid)->collapsed == collapsedBefore,
-           "handle: the long press did NOT also toggle the collapse state");
+           "label: the long press did NOT also toggle the collapse state");
     expect(f.lanes->commitVisualGroupHandleRenameForTest(*gMid, "Drums")
                && f.session.findVisualTrackGroupById(*gMid)->name == "Drums",
-           "handle: committing the rename editor renames the group to \"Drums\"");
+           "label: committing the rename editor renames the group to \"Drums\"");
     expect(f.session.findVisualTrackGroupById(*gMid)->collapsed == collapsedBefore,
-           "handle: the committed rename still never toggled the group");
+           "label: the committed rename still never toggled the group");
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3: collapsed blocks for 2 / 8 / 16 members — strips content vs readable minimum, same height
+// in header + timeline (one layout model), label readable, restored on expand, through scroll
+// ---------------------------------------------------------------------------------------------
+void testCollapsedBlockHeightsForGroupSizes()
+{
+    using TLV = TrackLanesView;
+    static_assert(TLV::collapsedGroupStripsContentHeightPx(2) == 9 && TLV::collapsedGroupBlockHeightPx(2) == TLV::kCollapsedGroupHeaderMinHeightPx
+                      && TLV::collapsedGroupStripsContentHeightPx(8) == 39 && TLV::collapsedGroupBlockHeightPx(8) == 39
+                      && TLV::collapsedGroupStripsContentHeightPx(16) == 79 && TLV::collapsedGroupBlockHeightPx(16) == 79
+                      && TLV::kCollapsedGroupHeaderMinHeightPx == 25,
+                  "block heights: 2 members -> the 25 px readable minimum; 8 -> 39; 16 -> 79 (4 n + (n - 1))");
+    GroupFixture f(/*extraAudioTracks*/ 30);
+    f.lanes->setSize(900, 1500); // every block starts inside the viewport before the scroll leg
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Mini);
+    const std::vector<TrackId> rows = f.rowTrackIds();
+    expect(rows.size() >= 31, "fixture: 30 audio rows + Stereo Out");
+
+    struct Case { int first; int count; const char* name; };
+    for (const Case c : { Case{ 1, 2, "Two" }, Case{ 5, 8, "Eight" }, Case{ 14, 16, "Sixteen" } })
+    {
+        std::vector<int> idx;
+        for (int k = 0; k < c.count; ++k)
+        {
+            idx.push_back(c.first + k);
+        }
+        const std::optional<int> gid = f.makeGroup(idx, c.name);
+        expect(gid.has_value(), juce::String("fixture: group \"") + c.name + "\" created");
+        const int contentBefore = f.lanes->verticalScrollModel().contentHeightPx;
+        f.setCollapsed(*gid, true);
+        const int block = TLV::collapsedGroupBlockHeightPx(c.count);
+        int sum = 0;
+        const std::map<TrackId, int> h = f.rowHeights();
+        for (const int k : idx)
+        {
+            sum += h.at(f.tidAt(k));
+        }
+        expect(sum == block && f.lanes->verticalScrollModel().contentHeightPx == contentBefore - c.count * trh::kMiniPresetPx + block,
+               juce::String(c.name) + ": members' display heights sum to the block height and the content height follows");
+        const int blockTop = f.widgetYTopForTrack(f.tidAt(c.first));
+        const juce::Rectangle<int> label = f.lanes->visualGroupNameLabelBoundsForTest(*gid);
+        const juce::Rectangle<int> button = f.lanes->visualGroupHandleBoundsForTest(*gid);
+        expect(button.getY() == blockTop + TLV::kVisualGroupCollapsedTopPadPx && label.getY() == button.getY()
+                   && label.getBottom() <= blockTop + block && !label.isEmpty(),
+               juce::String(c.name) + ": the name label is laid out readable inside the collapsed block");
+        expect(f.verticalLayoutOk(c.name), juce::String(c.name) + ": the shared vertical layout verifies while collapsed");
+        // Scroll the block to the viewport top and back: the block keeps its height (header and
+        // timeline share the one model).
+        f.lanes->scrollVerticallyToOffsetPx(f.lanes->rowTopOffsetPxForTrackForDiagnostics(f.tidAt(c.first)));
+        int sumScrolled = 0;
+        const std::map<TrackId, int> hs = f.rowHeights();
+        for (const int k : idx)
+        {
+            sumScrolled += hs.at(f.tidAt(k));
+        }
+        expect(sumScrolled == block && f.verticalLayoutOk("scrolled"), juce::String(c.name) + ": block height unchanged under scroll");
+        f.lanes->scrollVerticallyToOffsetPx(0);
+        f.setCollapsed(*gid, false);
+        bool restored = true;
+        const std::map<TrackId, int> he = f.rowHeights();
+        for (const int k : idx)
+        {
+            restored = restored && he.at(f.tidAt(k)) == trh::kMiniPresetPx;
+        }
+        expect(restored && f.lanes->verticalScrollModel().contentHeightPx == contentBefore,
+               juce::String(c.name) + ": expanding restores every member's normal height and the content height");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1038,8 +1181,10 @@ void testPersistenceRoundTripAndOlderProjects()
                    && f.session.isVisualTrackGroupDisplayable(groups[0].id),
                "reload: the group is adopted displayable with name, members and collapsed state");
         const std::map<TrackId, int> h = f.rowHeights();
-        expect(h.at(g1Members[0]) == 4 && h.at(g1Members[1]) == 4 && h.at(g1Members[2]) == 4,
-               "reload: the collapsed group displays its members at 4 px immediately");
+        expect(h.at(g1Members[0]) + h.at(g1Members[1]) + h.at(g1Members[2]) == TrackLanesView::collapsedGroupBlockHeightPx(3)
+                   && h.at(g1Members[0]) < trh::kMinRowHeightPx && h.at(g1Members[1]) < trh::kMinRowHeightPx
+                   && h.at(g1Members[2]) < trh::kMinRowHeightPx,
+               "reload: the collapsed group displays as the collapsed block (25 px for 3 members) immediately");
         f.setCollapsed(groups[0].id, false);
         expect(f.rowHeights().at(g1Members[1]) == 150,
                "reload + expand: the member's 150 px NORMAL height survived the round trip");
@@ -1320,6 +1465,110 @@ void testTrackColourNarrowUndoRepaintAndPersistence()
 }
 
 // ---------------------------------------------------------------------------------------------
+// §4 + §5 (audio side): Mini lanes show the real waveform (no label), Micro lanes a thin bar;
+// the content returns after a resize through the deferred raster rebuild without any click or
+// zoom; the event's outer top / bottom edges sit at the shared 4 px vertical margin.
+// ---------------------------------------------------------------------------------------------
+void testMiniLaneShowsWaveformAndSharedEventMargin()
+{
+    const juce::File wav = writeToneWav("mini-tone.wav", 2.0);
+    GroupFixture f(/*extraAudioTracks*/ 2);
+    f.lanes->setSize(900, 400);
+    const TrackId tid = f.tidAt(0);
+    expect(f.session.addRecordedTakeAtSample(wav, kRate, 0, tid, (std::int64_t)kRate).wasOk(),
+           "mini fixture: a 1 s tone clip at 0 s");
+    f.lanes->syncTracksFromSession();
+
+    // Offscreen components paint only inside createComponentSnapshot: the first snapshot after a
+    // height change takes the stale-blit path and arms the deferred rebuild (exactly what the app
+    // does); pumping the message loop runs it, the next snapshot shows the final painting.
+    const auto settle = [&f] {
+        (void) f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(700);
+        return f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f);
+    };
+    const juce::Colour body = track_colour_palette::eventBodyFill(TrackColourKey::DefaultGrey);
+    const juce::Colour laneBg(0xff252528);
+    const auto countWaveformPixels = [&](const juce::Image& img, const juce::Rectangle<int>& r) {
+        // Waveform peaks are painted light (lightblue family) — neither the body fill, the border
+        // nor the lane background. Count clearly light pixels.
+        int n = 0;
+        for (int y = r.getY(); y < r.getBottom(); ++y)
+        {
+            for (int x = r.getX(); x < r.getRight(); ++x)
+            {
+                const juce::Colour c = img.getPixelAt(x, y);
+                if (c.getBrightness() > 0.75f) // border 0xff7a8aa0 is ~0.63, waveform peaks ~0.86
+                {
+                    ++n;
+                }
+            }
+        }
+        return n;
+    };
+    const int x0 = f.lanes->headerColumnWidthPx() + 10;
+    const int clipW = 70;
+
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Mini);
+    {
+        const juce::Image img = settle();
+        const int top = f.widgetYTopForTrack(tid);
+        const juce::Rectangle<int> clip(x0, top, clipW, trh::kMiniPresetPx);
+        expect(countWaveformPixels(img, clip) > 200,
+               "Mini: the audio lane paints the real waveform inside the event (content before label)");
+        // Shared vertical margin: the event body starts 4 px below the lane top and ends 4 px
+        // above its bottom (`kEventVerticalMargin`), the same rule the MIDI lanes use.
+        constexpr int m = (int) mini_daw::timeline_clip_chrome::kEventVerticalMargin;
+        // (2 px outside the body: the 1 px border stroke straddles the edge and blends the first row.)
+        const juce::Colour atTopMargin = img.getPixelAt(x0 + 20, top + m - 2);
+        const juce::Colour atBodyTop = img.getPixelAt(x0 + 20, top + m + 1);
+        const juce::Colour atBodyBottom = img.getPixelAt(x0 + 20, top + trh::kMiniPresetPx - m - 2);
+        const juce::Colour atBottomMargin = img.getPixelAt(x0 + 20, top + trh::kMiniPresetPx - m + 1);
+        expect(atTopMargin == laneBg && atBottomMargin == laneBg && atBodyTop != laneBg && atBodyBottom != laneBg,
+               "Mini: the event's outer edges sit exactly at the shared 4 px vertical margin (lane background outside, event inside)");
+        // No name label at Mini: the top-left label strip area shows body / waveform only (no
+        // white text pixels in the first rows of the body right of the corner).
+        int whiteText = 0;
+        for (int y = top + m + 2; y < top + m + 10; ++y)
+        {
+            for (int x = x0 + 6; x < x0 + 60; ++x)
+            {
+                const juce::Colour c = img.getPixelAt(x, y);
+                if (c.getRed() > 220 && c.getGreen() > 220 && c.getBlue() > 220)
+                {
+                    ++whiteText;
+                }
+            }
+        }
+        expect(whiteText == 0, "Mini: the event name label is hidden (content has priority)");
+    }
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Micro);
+    {
+        const juce::Image img = settle();
+        const int top = f.widgetYTopForTrack(tid);
+        const juce::Rectangle<int> clip(x0, top, clipW, trh::kMicroPresetPx);
+        expect(countWaveformPixels(img, clip) == 0, "Micro: no waveform — a thin bar shows the time extent only");
+        int bodyRows = 0;
+        for (int y = top; y < top + trh::kMicroPresetPx; ++y)
+        {
+            if (img.getPixelAt(x0 + 20, y) == body)
+            {
+                ++bodyRows;
+            }
+        }
+        expect(bodyRows >= trh::kLaneBarFieldHeightPx - 2 && bodyRows <= trh::kLaneBarFieldHeightPx,
+               "Micro: the bar is the 8 px thin field (body fill rows)");
+    }
+    f.lanes->applyTrackRowHeightPreset(trh::TrackRowHeightPreset::Small);
+    {
+        const juce::Image img = settle();
+        const int top = f.widgetYTopForTrack(tid);
+        const juce::Rectangle<int> clip(x0, top, clipW, trh::kSmallPresetPx);
+        expect(countWaveformPixels(img, clip) > 200, "Small: waveform content is back after the resize (deferred rebuild, no click / zoom)");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // --render <dir>: reproducible example images for the feature report / PR — the SAME group
 // rendered expanded and collapsed, in an 8-track and a 16-track arrangement (offscreen snapshots
 // of the production TrackLanesView; the handler-level verification above is what proves behavior,
@@ -1371,9 +1620,17 @@ void renderGroupExample(const juce::File& outDir,
         info("render: group creation failed for " + baseName);
         return;
     }
+    // Let the waveform pyramids finish and the deferred raster rebuild run (see the compact
+    // example) so the images show the final lane painting.
+    const auto settle = [&f] {
+        (void) f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(700);
+    };
+    settle();
     writePng(f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f),
              outDir.getChildFile(baseName + "-expanded.png"));
     f.setCollapsed(*gid, true);
+    settle();
     writePng(f.lanes->createComponentSnapshot(f.lanes->getLocalBounds(), false, 1.0f),
              outDir.getChildFile(baseName + "-collapsed.png"));
 }
@@ -1499,12 +1756,14 @@ int main(int argc, char** argv)
     testClipLessMemberStripsStayEmpty();
     testNormalHeightsSeparateFromCollapsedDisplay();
     testHandlePlacementAndGestures();
+    testCollapsedBlockHeightsForGroupSizes();
     testScrollAnchoringAndClamp();
     testMembershipOnTrackChanges();
     testNarrowUndoThroughRealCoordinator();
     testPersistenceRoundTripAndOlderProjects();
     testMalformedGroupMetadataSafeFallback();
     testTrackColourNarrowUndoRepaintAndPersistence();
+    testMiniLaneShowsWaveformAndSharedEventMargin();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

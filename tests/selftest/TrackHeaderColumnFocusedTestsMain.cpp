@@ -17,6 +17,7 @@
 
 #include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
+#include "ui/TrackColourPalette.h"
 #include "ui/TrackRowHeightPresets.h"
 #include "ui/UiLayoutSettingsStore.h"
 
@@ -337,9 +338,21 @@ void testGeometryPerKindAndWidth(const juce::File& shotDir)
             expect(noOverlap, who + ": no button overlaps the colour segment or the name area");
             expect(titleRowAligned, who + ": Power / Mute / Solo share the title row with the name (between segment and name); other cells sit below");
             expect(ch.segment.getX() == TrackHeaderView::kHeaderGroupMarginPx && ch.segment.getY() == 0
-                       && ch.segment.getBottom() == chrome.getBottom() && ch.segment.contains(ch.icon) && ch.segment.contains(ch.number)
+                       && ch.segment.getBottom() == local.getBottom() && ch.segment.contains(ch.icon) && ch.segment.contains(ch.number)
                        && ch.icon.getRight() <= ch.number.getX(),
-                   who + ": colour segment right of the 8 px group margin, full chrome height, icon before number inside it");
+                   who + ": colour segment right of the 8 px group margin, the FULL row height down to the separator (no band gap), icon before number inside it");
+            {
+                // The segment fill really reaches the bottom row of pixels (the resize band is a hit
+                // area only, never a visible strip) and the plate shows no outline hairline.
+                const juce::Image probe = view->createComponentSnapshot(local, false, 1.0f);
+                const juce::Colour segFill = track_colour_palette::headerSegmentFill(k.model.colourKey);
+                bool bottomRowIsSegment = true;
+                for (int x = ch.segment.getX() + 1; x < ch.segment.getRight() - 1; ++x)
+                {
+                    bottomRowIsSegment = bottomRowIsSegment && probe.getPixelAt(x, local.getBottom() - 1) == segFill;
+                }
+                expect(bottomRowIsSegment, who + ": the segment colour fills the row's bottom pixel row (no gap above the separator)");
+            }
             expect(ch.name.getWidth() >= TrackHeaderView::kHeaderNameMinWidthPx && ch.name.getRight() == width - TrackHeaderView::kHeaderOuterPadXPx,
                    who + ": name keeps at least " + juce::String(TrackHeaderView::kHeaderNameMinWidthPx) + " px and the 8 px right pad");
             {
@@ -429,6 +442,42 @@ void testNamesNeverChangeLayout()
     }
 }
 
+/// Selected (multi-selected) headers: one flat wash, no outline hairline — the bottom / top pixel
+/// rows of the plate equal the interior, the active stripe stays, the segment colour stays.
+void testSelectedHeadersHaveNoOutline()
+{
+    for (const bool active : { false, true })
+    {
+        Kind k = rowKinds("Selected row")[0]; // audio
+        k.model.active = active;
+        k.model.headerMultiSelected = true;
+        k.model.trackNumber = 7;
+        k.model.trackNumberDigits = 3;
+        const int w = TrackLanesView::kTrackHeaderColumnDefaultWidthPx;
+        const int h = track_row_heights::kMediumPresetPx;
+        const TrackHeaderModel model = k.model;
+        auto view = std::make_unique<TrackHeaderView>([model] { return model; }, std::move(k.callbacks), kInvalidTrackId, std::nullopt);
+        view->setSize(w, h);
+        const juce::Image img = view->createComponentSnapshot(view->getLocalBounds(), false, 1.0f);
+        const juce::Rectangle<int> name = view->getNameTextBounds();
+        const int x = name.getX() + 4; // plate area right of the cells, no text at the plate's edges
+        const juce::Colour interior = img.getPixelAt(x, h / 2 + 20);
+        expect(img.getPixelAt(x, h - 1) == interior && img.getPixelAt(x, h - 2) == interior && img.getPixelAt(x, 0) == interior
+                   && img.getPixelAt(w - 1, h / 2 + 20) == interior,
+               juce::String(active ? "active+" : "") + "selected: the wash is one flat colour to the plate's bottom, top and right edges (no hairline)");
+        expect(img.getPixelAt(x, h - 1) != juce::Colour(0xff000000) && interior != track_strip_glyphs::headerFillColour(active),
+               juce::String(active ? "active+" : "") + "selected: the selection wash is visible (differs from the plain plate) and is not a black line");
+        const juce::Colour segFill = track_colour_palette::headerSegmentFill(k.model.colourKey);
+        expect(img.getPixelAt(view->getColourSegmentBounds().getX() + 2, h - 2) == segFill,
+               juce::String(active ? "active+" : "") + "selected: the colour segment keeps its exact track colour (painted over the wash)");
+        if (active)
+        {
+            expect(img.getPixelAt(1, h / 2) == track_strip_glyphs::headerActiveStripeColour(),
+                   "active+selected: the 4 px active-track stripe is still the clear left marker");
+        }
+    }
+}
+
 void testClampFormula()
 {
     using V = TrackLanesView;
@@ -489,9 +538,9 @@ void testRowHeightGridAndCompactChrome(const juce::File& shotDir)
     expect(trh::presetFromPersistenceKey("") == trh::TrackRowHeightPreset::Medium
                && trh::presetFromPersistenceKey("huge") == trh::TrackRowHeightPreset::Medium,
            "grid: absent/unknown persistence key repairs to Medium (older projects keep their look)");
-    expect(trh::laneEventDetailForHeightPx(28) == trh::LaneEventDetail::Bars && trh::laneEventDetailForHeightPx(42) == trh::LaneEventDetail::Compact
+    expect(trh::laneEventDetailForHeightPx(28) == trh::LaneEventDetail::Bars && trh::laneEventDetailForHeightPx(42) == trh::LaneEventDetail::Content
                && trh::laneEventDetailForHeightPx(56) == trh::LaneEventDetail::Full && trh::laneEventDetailForHeightPx(31) == trh::LaneEventDetail::Bars
-               && trh::laneEventDetailForHeightPx(47) == trh::LaneEventDetail::Compact,
+               && trh::laneEventDetailForHeightPx(47) == trh::LaneEventDetail::Content,
            "detail: Micro = Bars, Mini = Compact, Small and up = Full (thresholds 32 / 48 px)");
 
     const juce::Colour bg(0xff333333);
@@ -640,6 +689,7 @@ int main(int argc, char** argv)
     testGeometryPerKindAndWidth(shotDir);
     testNamesNeverChangeLayout();
     testClampFormula();
+    testSelectedHeadersHaveNoOutline();
     testRowHeightGridAndCompactChrome(shotDir);
     testUiLayoutStore();
 
