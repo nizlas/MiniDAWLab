@@ -1734,6 +1734,10 @@ void InstrumentTrackController::runPendingGrooveAgentProjectAutoload(Experimenta
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload: failed, project remains editable");
         juce::Logger::writeToLog("[project-autoload] Groove Agent load failed: " + loadResult.getErrorMessage());
     }
+    else if (statePtr != nullptr && stateRestoreHostWarning.isEmpty())
+    {
+        adoptSavedStatePairingAfterLoadRestore(host); // the saved blob is the live state now
+    }
 
     if (stateRestoreHostWarning.isNotEmpty())
     {
@@ -1930,6 +1934,10 @@ void InstrumentTrackController::runPendingHalionSonicProjectAutoload(Experimenta
         mini_daw::writeVst3OopScanDiagnosticLogLine("project-autoload-halion: failed, project remains editable");
         juce::Logger::writeToLog("[project-autoload-halion] HALion Sonic load failed: " + loadResult.getErrorMessage());
     }
+    else if (statePtr != nullptr && stateRestoreHostWarning.isEmpty())
+    {
+        adoptSavedStatePairingAfterLoadRestore(host); // the saved blob is the live state now
+    }
 
     if (stateRestoreHostWarning.isNotEmpty())
     {
@@ -2092,13 +2100,7 @@ void InstrumentTrackController::runPendingGenericVst3ProjectAutoload(Experimenta
         appendProjectLoadDiagnosticLine(
             "load: GenericVst3 state restore ok trackId="
             + juce::String((juce::int64)experimentalDomainTrackId_));
-        // P1 first-generation pairing (§12.3/§18.4): the blob just restored IS the blob in the
-        // loaded main project file, so the post-restore revision is its in-session
-        // association. A concurrent notification bump after this read only makes the record
-        // stale (later equality proof fails safely); it can never forge pairing.
-        savedPrimaryBlob_.revision = host.getPrimarySemanticRevision();
-        savedPrimaryBlob_.known = true;
-        savedPrimaryBlob_.candidateValid = false;
+        adoptSavedStatePairingAfterLoadRestore(host);
     }
 
     appendProjectLoadDiagnosticLine(
@@ -2114,6 +2116,39 @@ void InstrumentTrackController::runPendingGenericVst3ProjectAutoload(Experimenta
     }
 
     syncShellWithHostState();
+}
+
+void InstrumentTrackController::adoptSavedStatePairingAfterLoadRestore(ExperimentalInstrumentHost& host) noexcept
+{
+    // The blob just restored IS the blob in the loaded main project file. Its revision in the
+    // session that saved it is `primaryStateRevisionAtSave` (stamped by that Save from the live
+    // counter it read together with the blob). The counter of this freshly created host
+    // restarted at 0 and sits at 1 after assignment + restore, so without this step the live
+    // fingerprint carries revision 1 while a generation published at (say) revision 3 — and
+    // saved with the matching stamp 3 — can never match again: a proxy that was Current when
+    // saved reopened as Stale although nothing changed. Raising the counter to the stamp makes
+    // the live identity read as the saved state's identity; every later bump stays above it.
+    // A Save made AFTER a sound edit stamps the higher revision, so a generation rendered before
+    // that edit still (correctly) reads Stale. No stamp (0) ⇒ no assumption, old behaviour.
+    const std::uint64_t before = host.getPrimarySemanticRevision();
+    const std::int64_t stamp = hasProxyMetadata_ ? proxyMetadata_.primaryStateRevisionAtSave : 0;
+    std::uint64_t after = before;
+    if (stamp > 0)
+    {
+        after = host.raisePrimarySemanticRevisionToAtLeast((std::uint64_t)stamp);
+    }
+    appendProjectLoadDiagnosticLine(
+        "load: saved-state pairing adopted trackId=" + juce::String((juce::int64)experimentalDomainTrackId_)
+        + " revisionAfterRestore=" + juce::String((juce::int64)before) + " stampAtSave=" + juce::String((juce::int64)stamp)
+        + " stampAtPublish="
+        + juce::String((juce::int64)(hasProxyMetadata_ ? proxyMetadata_.primaryStateRevisionAtPublish : 0))
+        + " liveRevision=" + juce::String((juce::int64)after));
+    // P1 first-generation pairing (§12.3/§18.4): the post-restore (now seeded) revision is the
+    // loaded blob's in-session association. A concurrent notification bump after this read only
+    // makes the record stale (a later equality proof fails safely); it can never forge pairing.
+    savedPrimaryBlob_.revision = after;
+    savedPrimaryBlob_.known = true;
+    savedPrimaryBlob_.candidateValid = false;
 }
 
 void InstrumentTrackController::setTimelineSampleRate(const double sampleRate) noexcept

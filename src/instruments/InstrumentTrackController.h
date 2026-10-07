@@ -391,6 +391,16 @@ public:
     /// Generic catalog VST3 project restore (descriptor + catalog repair; no plugin binary state).
     void runPendingGenericVst3ProjectAutoload(ExperimentalInstrumentHost& host, juce::String& outWarning);
 
+    /// [Message thread, project load] Shared tail of every autoload path above once the project's
+    /// saved plug-in state blob was restored into `host`'s Primary (§9.4.2 "persisted pairing
+    /// restores load-time validity by construction"): the live semantic revision is raised to the
+    /// revision the last Save stamped next to that blob (`proxyMetadata_.primaryStateRevisionAtSave`),
+    /// so a generation rendered at that revision reads Current again after a reopen — and only
+    /// then (a Save after a later sound edit stamps a higher revision ⇒ the generation stays
+    /// Stale; no stamp ⇒ nothing is assumed). Also records the in-session revision of the loaded
+    /// blob for the first-generation pairing proof (`savedPrimaryBlob_`).
+    void adoptSavedStatePairingAfterLoadRestore(ExperimentalInstrumentHost& host) noexcept;
+
     /// Timeline interpretation rate for **musical** length derivation and tick→sample baking
     /// (message thread). Does not rescale clips. TLD-1: when the session holds a persisted
     /// timeline reference rate, that reference is authoritative and the passed (device) rate is

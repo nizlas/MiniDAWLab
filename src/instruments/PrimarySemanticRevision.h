@@ -51,6 +51,25 @@ public:
         return revision_.load(std::memory_order_relaxed);
     }
 
+    /// Message thread (project load). Raise the counter to at least `minimum` — never lower it.
+    /// The §9.4.2 "persisted pairing restores load-time validity by construction" step: the
+    /// counter restarts at 0 with every host, while the saved project carries the revision the
+    /// last Save stamped next to the plug-in state blob it wrote (`primaryStateRevisionAtSave`).
+    /// Right after that very blob has been restored into the instance, the live state IS that
+    /// saved state, so the live revision must read as the saved one again; otherwise a
+    /// generation rendered at that revision could never match the live fingerprint after a
+    /// reopen. Later bumps continue above the seeded value, so no revision is ever reused.
+    /// Returns the resulting revision.
+    std::uint64_t raiseToAtLeast(const std::uint64_t minimum) noexcept
+    {
+        std::uint64_t cur = revision_.load(std::memory_order_relaxed);
+        while (cur < minimum
+               && !revision_.compare_exchange_weak(cur, minimum, std::memory_order_relaxed, std::memory_order_relaxed))
+        {
+        }
+        return cur < minimum ? minimum : cur;
+    }
+
 private:
     std::atomic<std::uint64_t> revision_{ 0 };
 };

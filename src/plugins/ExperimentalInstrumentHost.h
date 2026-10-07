@@ -426,6 +426,15 @@ public:
         (void)primarySemanticRevision_.bump();
     }
 
+    /// [Message thread, project load] After the project's saved plug-in state blob has been
+    /// restored into this host's Primary: make the live revision read as the revision the Save
+    /// stamped next to that blob (`primaryStateRevisionAtSave`), never lowering it. See
+    /// `PrimarySemanticRevision::raiseToAtLeast`. Returns the resulting live revision.
+    std::uint64_t raisePrimarySemanticRevisionToAtLeast(const std::uint64_t minimum) noexcept
+    {
+        return primarySemanticRevision_.raiseToAtLeast(minimum);
+    }
+
     /// [Message thread] Capture the live Primary's exact opaque state bytes for a proxy render
     /// request (§9.4.1 authoritative render state; same `getStateInformation` boundary as Save).
     /// Returns false when no processable instrument is loaded or called off the message thread.
