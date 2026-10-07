@@ -555,6 +555,9 @@ public:
                         soloCoordinator_->republishDerivedView();
                     }
                 },
+                // Visual track groups: a narrow group-metadata undo step replaced the full group
+                // list in `Session` — relayout the arrangement (markers, handles, collapsed rows).
+                [this] { trackLanesView.refreshVisualTrackGroupsFromSession(); },
             });
 
         audioClipImportCoordinator_ = std::make_unique<AudioClipImportCoordinator>(
@@ -2321,6 +2324,62 @@ public:
             }
             refreshTrackRowHeightPresetComboFromLanes();
         });
+        // Visual track groups (purely visual; groups spec §7): Create / Rename / Ungroup run as
+        // narrow group-metadata undo steps (never a timeline snapshot); collapse / expand follows
+        // the display-change policy — project dirty, NO undo entry (like row heights above).
+        {
+            VisualTrackGroupUiHooks groupHooks;
+            groupHooks.createGroup = [this](juce::String name, std::vector<TrackId> members) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableVisualTrackGroupsEdit(
+                    "Create track group",
+                    [this, name = std::move(name), members = std::move(members)]() mutable {
+                        return session.createVisualTrackGroup(std::move(name), std::move(members))
+                            .has_value();
+                    });
+                trackLanesView.refreshVisualTrackGroupsFromSession();
+            };
+            groupHooks.renameGroup = [this](const int groupId, juce::String newName) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableVisualTrackGroupsEdit(
+                    "Rename track group",
+                    [this, groupId, newName = std::move(newName)]() mutable {
+                        session.renameVisualTrackGroup(groupId, std::move(newName));
+                        return true; // no-op suppression: the coordinator skips equal before/after
+                    });
+                trackLanesView.refreshVisualTrackGroupsFromSession();
+            };
+            groupHooks.ungroup = [this](const int groupId) {
+                if (undoRedoCoordinator_ == nullptr)
+                {
+                    return;
+                }
+                undoRedoCoordinator_->executeUndoableVisualTrackGroupsEdit(
+                    "Ungroup tracks",
+                    [this, groupId] {
+                        session.removeVisualTrackGroup(groupId);
+                        return true;
+                    });
+                trackLanesView.refreshVisualTrackGroupsFromSession();
+            };
+            groupHooks.setCollapsed = [this](const int groupId, const bool collapsed) {
+                if (session.setVisualTrackGroupCollapsed(groupId, collapsed))
+                {
+                    if (projectIoCoordinator_ != nullptr)
+                    {
+                        projectIoCoordinator_->markProjectDirtyFromEdit();
+                    }
+                    trackLanesView.refreshVisualTrackGroupsFromSession();
+                }
+            };
+            trackLanesView.setVisualTrackGroupUiHooks(std::move(groupHooks));
+        }
         addAndMakeVisible(arrangementVerticalScrollBar_);
         syncArrangementVerticalScrollBarFromLanes();
         refreshInstrumentUi();

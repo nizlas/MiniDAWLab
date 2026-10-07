@@ -324,7 +324,7 @@ public:
     /// [Message thread] Create a group of `memberTrackIds` (any order; stored in snapshot order).
     /// Refuses (returns nullopt, nothing changed) unless the members are ≥2 EXISTING non-Master
     /// tracks, contiguous in snapshot order, and none is already an effective member of another
-    /// group. Empty/whitespace name → "Grupp <n>". Created expanded. Returns the new group id.
+    /// group. Empty/whitespace name → "Group <n>". Created expanded. Returns the new group id.
     [[nodiscard]] std::optional<int> createVisualTrackGroup(juce::String name,
                                                             std::vector<TrackId> memberTrackIds) noexcept;
     /// [Message thread] Rename one group (trimmed; empty after trim or unknown id → no-op).

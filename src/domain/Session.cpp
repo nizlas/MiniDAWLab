@@ -1666,7 +1666,7 @@ std::optional<int> Session::createVisualTrackGroup(juce::String name,
     }
     VisualTrackGroup group;
     group.id = nextVisualTrackGroupId_++;
-    group.name = name.trim().isEmpty() ? juce::String("Grupp ") + juce::String(group.id)
+    group.name = name.trim().isEmpty() ? juce::String("Group ") + juce::String(group.id)
                                        : name.trim();
     group.memberTrackIds.reserve(indexAndId.size());
     for (const auto& [idx, id] : indexAndId)
@@ -2887,7 +2887,7 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
             }
             VisualTrackGroup adopted;
             adopted.id = nextVisualTrackGroupId_++;
-            adopted.name = g.name.isEmpty() ? juce::String("Grupp ") + juce::String(adopted.id)
+            adopted.name = g.name.isEmpty() ? juce::String("Group ") + juce::String(adopted.id)
                                             : g.name;
             adopted.collapsed = g.collapsed;
             adopted.memberTrackIds.reserve(indices.size());

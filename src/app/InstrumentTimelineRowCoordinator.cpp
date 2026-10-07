@@ -1962,6 +1962,8 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
             m.soloSilenced = st.soloSilenced;
             m.muteLockedBySolo = st.muteLocked;
         }
+        m.headerMultiSelected = trackLanes_.isHeaderMultiSelected(laneTid);
+        m.visualGroupMember = trackLanes_.isTrackInDisplayableVisualGroup(laneTid);
         return m;
     };
 
@@ -1977,6 +1979,9 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         session_.setActiveTrack(laneTid);
         ctl->setActive(true);
         repaintExtras();
+    };
+    callbacks.onHeaderSelectionClick = [this, laneTid](const bool shiftRange) {
+        trackLanes_.handleHeaderSelectionClick(laneTid, shiftRange);
     };
     callbacks.onToggleMute = [ctl, laneTid, this, repaintExtras] {
         ctl->setMuted(!ctl->isMuted());
@@ -2036,6 +2041,9 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         }
     };
     callbacks.onShowContextMenu = [this, laneTid, repaintExtras](TrackHeaderView& self, const juce::MouseEvent&) {
+        // Groups spec §2: right-click inside the header multi-selection keeps it; outside it
+        // selects the clicked row first.
+        trackLanes_.applyHeaderRightClickSelectionPolicy(laneTid);
         session_.setActiveTrack(laneTid);
         instrumentRuntime_.setKeyedInstrumentControllersActiveExclusive(laneTid);
         repaintExtras();
@@ -2045,6 +2053,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         constexpr int kImportMidiFileMenuId = 3;
         constexpr int kRescanDescriptionsMenuId = 2;
         constexpr int kDuplicateTrackMenuId = 4;
+        constexpr int kCreateCollapsibleGroupMenuId = 5;
         const bool editLocked = trackLanes_.isStructuralTimelineEditBlocked();
         juce::PopupMenu::Item deleteItem;
         deleteItem.itemID = kDeleteTrackMenuId;
@@ -2052,6 +2061,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
         deleteItem.isEnabled = !editLocked;
         menu.addItem(deleteItem);
         menu.addItem(TrackLanesView::makeDuplicateTrackMenuItem(kDuplicateTrackMenuId, editLocked));
+        trackLanes_.appendCreateCollapsibleGroupMenuItem(menu, kCreateCollapsibleGroupMenuId);
         juce::PopupMenu::Item importMidiItem;
         importMidiItem.itemID = kImportMidiFileMenuId;
         importMidiItem.text = "Import MIDI file...";
@@ -2073,6 +2083,7 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
              laneTid,
              kDeleteTrackMenuId,
              kDuplicateTrackMenuId,
+             kCreateCollapsibleGroupMenuId,
              kImportMidiFileMenuId,
              kRescanDescriptionsMenuId,
              rescan,
@@ -2089,6 +2100,11 @@ void InstrumentTimelineRowCoordinator::ensureInstrumentTimelineHeaderAndLaneForT
                 if (result == kDuplicateTrackMenuId)
                 {
                     safeLanes->requestDuplicateTrackForHeaderMenu(laneTid);
+                    return;
+                }
+                if (result == kCreateCollapsibleGroupMenuId)
+                {
+                    safeLanes->requestCreateCollapsibleGroupFromSelection();
                     return;
                 }
                 if (result == kImportMidiFileMenuId)

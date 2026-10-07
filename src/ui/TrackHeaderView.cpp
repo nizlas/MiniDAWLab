@@ -871,6 +871,24 @@ void TrackHeaderView::paint(juce::Graphics& g)
     static_assert(kHeaderActiveStripeWidthPx == track_strip_glyphs::kHeaderActiveStripeWidthPx, "header stripe width is shared");
     drawHeaderPlate(g, b, active);
 
+    // Header multi-selection (visual-group creation): a subtle blue wash + hairline OVER the
+    // plate but UNDER the name/strip content. Deliberately distinct from (and additive to) the
+    // 4 px active-track stripe: the active row keeps its own look inside a multi-selection.
+    if (m.headerMultiSelected)
+    {
+        g.setColour(juce::Colour(0x2d2e7bd6));
+        g.fillRect(b);
+        g.setColour(juce::Colour(0x7a2e7bd6));
+        g.drawRect(b, 1);
+    }
+    // Visual group membership: a discreet 2 px vertical marker along the left edge, placed RIGHT
+    // of the active stripe (x 0…4) and LEFT of all content (x ≥ 12) — obscures nothing.
+    if (m.visualGroupMember)
+    {
+        g.setColour(juce::Colour(0xff6f8096));
+        g.fillRect(kHeaderActiveStripeWidthPx + 1, 0, 2, b.getHeight());
+    }
+
     auto const layout = computeHeaderContentLayout();
     auto nameArea = layout.nameTextBounds;
     if (!nameArea.isEmpty()
@@ -1100,9 +1118,19 @@ void TrackHeaderView::mouseDown(juce::MouseEvent const& e)
 
     dragBlocker_ = DragBlocker::None;
     headerDragInProgress_ = false;
-    if (callbacks_.onActivateName != nullptr)
+    // Header multi-selection rides on the same press that activates the row. Plain click:
+    // activate this row (Inspector target) AND select exactly this header (anchor moves here).
+    // Shift-click: extend the contiguous selection from the anchor WITHOUT moving the active
+    // track — the Inspector keeps editing the single active track while a range is built.
+    const bool shiftRange
+        = e.mods.isShiftDown() && callbacks_.onHeaderSelectionClick != nullptr;
+    if (!shiftRange && callbacks_.onActivateName != nullptr)
     {
         callbacks_.onActivateName();
+    }
+    if (callbacks_.onHeaderSelectionClick != nullptr)
+    {
+        callbacks_.onHeaderSelectionClick(shiftRange);
     }
 }
 

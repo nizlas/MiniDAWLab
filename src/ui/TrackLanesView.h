@@ -58,6 +58,17 @@ class TimelineViewportModel;
 class LatencySettingsStore;
 class AudioWaveformCache;
 
+/// [Message thread] Visual-track-group commands the owner (`Main`) wires: Create / Rename /
+/// Ungroup run inside the narrow group-metadata undo; `setCollapsed` is a display change (dirty
+/// only, no undo entry). All are layout metadata — never a snapshot publish.
+struct VisualTrackGroupUiHooks
+{
+    std::function<void(juce::String name, std::vector<TrackId> memberTrackIds)> createGroup;
+    std::function<void(int groupId, juce::String newName)> renameGroup;
+    std::function<void(int groupId)> ungroup;
+    std::function<void(int groupId, bool collapsed)> setCollapsed;
+};
+
 enum class VisibleTrackKind
 {
     Audio,
@@ -436,6 +447,60 @@ public:
         onTrackRowHeightsChanged_ = std::move(fn);
     }
 
+    // -------------------------------------------------------------------------------------------
+    // Visual track groups (collapsible, purely visual — `domain/VisualTrackGroup.h`) and the
+    // header multi-selection used to create them.
+    // -------------------------------------------------------------------------------------------
+
+    /// Collapsed mini-view: each effective member of a collapsed displayable group shows as a
+    /// strip of EXACTLY this many logical px (the Small 64 px minimum deliberately does not apply
+    /// to the collapsed display; the stored normal height is untouched).
+    static constexpr int kCollapsedGroupMemberRowHeightPx = 4;
+    /// Group handle tab geometry (the "inverted golf club": the vertical member marker continues
+    /// into this short tab extending right over the header area at the group's top boundary).
+    static constexpr int kVisualGroupHandleHeightPx = 16;
+    static constexpr int kVisualGroupHandleMaxWidthPx = 140;
+    /// Long-press threshold on the handle: rename instead of collapse-toggle (spec §3).
+    static constexpr int kVisualGroupHandleLongPressMs = 500;
+
+    /// [Message thread] Wired once by `Main` (see `VisualTrackGroupUiHooks`).
+    void setVisualTrackGroupUiHooks(VisualTrackGroupUiHooks hooks) noexcept;
+
+    /// [Message thread] Re-read group state from `Session` (after create/rename/ungroup/collapse,
+    /// undo/redo, or project load): rebuild the display cache + handle components, relayout, repaint.
+    void refreshVisualTrackGroupsFromSession() noexcept;
+
+    /// [Message thread] Header multi-selection click (plain = exactly this header + anchor here;
+    /// `shiftRange` = contiguous visible range anchor … `tid`). Never changes the active track by
+    /// itself and never touches clip selection.
+    void handleHeaderSelectionClick(TrackId tid, bool shiftRange) noexcept;
+    [[nodiscard]] bool isHeaderMultiSelected(TrackId tid) const noexcept;
+    void clearHeaderMultiSelection() noexcept;
+    /// Right-click policy (spec §2): inside the selection → keep it; outside → select clicked row.
+    void applyHeaderRightClickSelectionPolicy(TrackId clickedTid) noexcept;
+    /// Current multi-selection in VISIBLE row order (diagnostics + group creation).
+    [[nodiscard]] std::vector<TrackId> selectedHeaderTrackIdsInVisibleOrder() const;
+
+    /// True when the current multi-selection qualifies for "Create collapsible group…": ≥2
+    /// existing tracks, adjacent in session order, none Stereo Out, none already grouped.
+    [[nodiscard]] bool canCreateCollapsibleGroupFromCurrentSelection() const;
+    /// Appends the "Skapa hopfällbar grupp…" item (disabled when the selection does not qualify).
+    void appendCreateCollapsibleGroupMenuItem(juce::PopupMenu& menu, int itemId);
+    /// Menu action: name prompt (sensible default; OK → `hooks.createGroup`). No-op when invalid.
+    void requestCreateCollapsibleGroupFromSelection();
+
+    /// True when `tid` is an effective member of a displayable group (expanded or collapsed) —
+    /// feeds the header's left-edge group marker. / collapsed variant for layout and hit policy.
+    [[nodiscard]] bool isTrackInDisplayableVisualGroup(TrackId tid) const noexcept;
+    [[nodiscard]] bool isTrackInCollapsedVisualGroup(TrackId tid) const noexcept;
+
+    /// [Test] Handle introspection + the exact mouse-equivalent actions (short click toggles,
+    /// long press begins inline rename). False / empty when the group has no laid-out handle.
+    [[nodiscard]] juce::Rectangle<int> visualGroupHandleBoundsForTest(int groupId) const noexcept;
+    bool shortClickVisualGroupHandleLikeMouseForTest(int groupId);
+    bool beginRenameOnVisualGroupHandleLikeLongPressForTest(int groupId);
+    bool commitVisualGroupHandleRenameForTest(int groupId, const juce::String& newName);
+
     /// Optional arrangement timeline snapping (Slice D): used by clip lanes when committing/editing.
     void setArrangementTimelineSnapFunction(std::function<std::int64_t(std::int64_t)> fn) noexcept;
 
@@ -542,6 +607,55 @@ private:
     void prunePerTrackRowHeightsNotInSession() noexcept;
     void paintHeaderColumnHorizontalRowSeparators(juce::Graphics& g) const noexcept;
     void setTrackRowHeightPx(TrackId tid, int heightPx) noexcept;
+
+    // ------------------------------------------------------ Visual track groups (private side)
+    /// Group handle child component: the short tab at the group's top boundary. Owns the short-
+    /// click (toggle), long-press (inline rename) and right-click (menu) gestures; swallows its
+    /// mouse events so the row underneath (previous track / resize band) is never activated.
+    class VisualGroupHandleView;
+
+    /// One displayable group's current visible-row run (display cache; rebuilt with the entries).
+    struct VisualGroupDisplayRun
+    {
+        int groupId = 0;
+        juce::String name;
+        bool collapsed = false;
+        int firstVisibleIndex = -1;
+        int lastVisibleIndex = -1;
+    };
+
+    /// Rebuild `visualGroupDisplayRuns_` + membership map from `Session` (displayable groups only).
+    void rebuildVisualGroupDisplayCache();
+    /// Ensure one handle component per displayable run (created/removed as groups change).
+    void rebuildVisualGroupHandles();
+    /// Position every handle for the current layout (called at the end of `resized()`).
+    void layoutVisualGroupHandles() noexcept;
+    /// Collapsed mini strips + collapsed-run header chrome (called from `paint()`).
+    void paintCollapsedGroupContent(juce::Graphics& g) const;
+    [[nodiscard]] const VisualGroupDisplayRun* findVisualGroupRun(int groupId) const noexcept;
+    /// Top y (view coords) of visible row `vi` under the current scroll offset.
+    [[nodiscard]] int yTopForVisibleIndex(int vi) const noexcept;
+    /// True when the horizontal separator UNDER visible row `vi` must be skipped (both `vi` and
+    /// `vi`+1 are strips of the SAME collapsed group — zero separator between member strips).
+    [[nodiscard]] bool suppressSeparatorBelowVisibleIndex(int vi) const noexcept;
+    void showVisualGroupHandleContextMenu(int groupId);
+    void toggleVisualGroupCollapsedFromHandle(int groupId);
+    void beginVisualGroupRenameFromHandle(int groupId);
+
+    struct VisualGroupMembershipCacheEntry
+    {
+        int groupId = 0;
+        bool collapsed = false;
+    };
+    std::unordered_map<TrackId, VisualGroupMembershipCacheEntry> visualGroupMembershipByTrackId_;
+    std::vector<VisualGroupDisplayRun> visualGroupDisplayRuns_;
+    std::unordered_map<int, std::unique_ptr<VisualGroupHandleView>> visualGroupHandles_;
+    VisualTrackGroupUiHooks visualGroupUiHooks_{};
+
+    /// Header multi-selection (visual-group creation): selected ids + the shift anchor. UI-only —
+    /// never session state, never clip selection, never the active track.
+    std::vector<TrackId> headerMultiSelection_;
+    TrackId headerSelectionAnchorTid_ = kInvalidTrackId;
 
     Session& session_;
     Transport& transport_;

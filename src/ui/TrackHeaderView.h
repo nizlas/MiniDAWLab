@@ -83,6 +83,13 @@ struct TrackHeaderModel
     /// Live MIDI arrived for this row within the last ~150 ms: a small green dot is painted at
     /// the right end of the name row (discreet activity indicator, never a dialog).
     bool midiActivity = false;
+    /// Header MULTI-selection membership (visual-group creation): a subtle blue wash + hairline
+    /// over the header plate. Independent of `active` — the active-track stripe keeps its own
+    /// look and the Inspector keeps following the single active track.
+    bool headerMultiSelected = false;
+    /// Visual track group membership: a discreet vertical marker along the header's left edge,
+    /// drawn right of the 4 px active stripe so neither it nor any button is obscured.
+    bool visualGroupMember = false;
 };
 
 using TrackHeaderModelProvider = std::function<TrackHeaderModel()>;
@@ -91,6 +98,11 @@ struct TrackHeaderCallbacks
 {
     /// Left-click on name row / drag surface (not on **[Instrument][Power][Mute][R]** strip). Null = no-op.
     std::function<void()> onActivateName;
+    /// Header multi-selection click, dispatched with `onActivateName` from the same press:
+    /// `shiftRange` = shift held (select the contiguous range from the selection anchor);
+    /// otherwise the click selects exactly this header and moves the anchor. Null = no multi-
+    /// selection (clip selection, height drag, and reorder behave exactly as before).
+    std::function<void(bool shiftRange)> onHeaderSelectionClick;
     /// Return true if the click was handled (blocks promoting to header-drag); false = ignored.
     std::function<bool()> onTogglePower;
     std::function<void()> onToggleMute;
