@@ -105,6 +105,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/CountInClickOutput.cpp
     src/playback/ExperimentalInstrumentPlaybackBridge.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/InstrumentRenderPool.cpp
@@ -236,6 +237,7 @@ target_sources(InputRoutingFocusedTests PRIVATE
     src/domain/SessionSnapshot.cpp
     src/domain/SessionRouting.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RecorderService.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
@@ -331,6 +333,7 @@ target_sources(MixdownPreGainFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/io/AudioFileLoader.cpp
     src/io/MonoWavFileWriter.cpp
     src/io/ProjectFile.cpp
@@ -428,6 +431,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/engine/PlaybackEngine.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/RecorderService.cpp
     src/engine/CountInClickOutput.cpp
@@ -486,6 +490,7 @@ target_sources(InstrumentParallelFocusedTests PRIVATE
     src/engine/PlaybackEngine.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
+    src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/RecorderService.cpp
     src/engine/CountInClickOutput.cpp

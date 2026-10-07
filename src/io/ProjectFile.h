@@ -14,6 +14,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -370,7 +371,15 @@ struct ProjectFileAudioMixdownV1
 // Minimal project snapshot: multi-track, placed clips, monotonic id seeds, transport hints.
 struct ProjectFileV1
 {
-    /// Current JSON writer version (**24** adds the optional `tracks[].midiInput` /
+    /// Solo memories persisted per project (root `soloMemories`): exactly four slots.
+    static constexpr int kSoloMemoryCount = 4;
+
+    /// Current JSON writer version (**25** adds the optional root `soloMemories` — an array of
+    /// exactly four arrays of explicit soloed `TrackId`s (Solo memory 1 … 4). Omitted when all four
+    /// memories are empty; absent key (every pre-v25 file) loads as four empty memories. Only the
+    /// stored memory **content** is persisted — the temporary solo set, the active memory
+    /// selection, and every derived solo/mute state are deliberately NOT part of the file.)
+    /// (**24** adds the optional `tracks[].midiInput` /
     /// `midiInputDeviceId` / `midiInputDeviceName` / `midiInputChannel` — per Instrument/Midi-row
     /// live MIDI input for monitoring and recording; absent = None — and the optional
     /// `experimentalInstrumentTracks[].clips[].pitchBend` sparse 14-bit pitch-bend points; both
@@ -391,7 +400,7 @@ struct ProjectFileV1
     /// — sparse MIDI CC automation. **18** adds `tracks[].kind == "midi"` rows with `midiTo`.
     /// **17** adds `tracks[].midiChannel`. **16** adds `experimentalInstrumentTracks[].genericVst3Descriptor`.
     /// **15** adds `tracks[].sends[]`.
-    static constexpr int kCurrentVersion = 24;
+    static constexpr int kCurrentVersion = 25;
 
     int version = kCurrentVersion;
     PlacedClipId nextPlacedClipId = 1;
@@ -435,6 +444,10 @@ struct ProjectFileV1
     /// Optional root `midiEditorWorkspace` object; absent in older files → no auto-reopen.
     bool hasMidiEditorWorkspace = false;
     ProjectFileMidiEditorWorkspaceV1 midiEditorWorkspace;
+    /// v25: four persisted Solo memories (explicit `TrackId` sets). Index 0 = memory "1". Entries
+    /// are deduplicated and validated against `tracks` on load by `Session` (unknown ids dropped
+    /// silently — never a crash, never a false-active solo).
+    std::array<std::vector<TrackId>, kSoloMemoryCount> soloMemories;
     std::vector<ProjectFileTrackV1> tracks;
     // v11+: optional; omitted in older files — empty after read.
     std::vector<ProjectFileExperimentalInstrumentTrackV1> experimentalInstrumentTracks;

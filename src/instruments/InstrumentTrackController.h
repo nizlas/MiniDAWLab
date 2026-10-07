@@ -675,13 +675,19 @@ public:
 
     /// [Audio thread] Sample-accurate Groove Agent MIDI for one render segment (half-open times).
     /// When `outMidiEventsEmitted` is non-null, increments once per successful `audioThread_addMidiEventForCurrentBlock`.
+    /// `soloSuppressNewEvents` (derived per block from `SoloMuteView`): pending note-offs are
+    /// still delivered/flushed first — a suppression TRANSITION is treated as a discontinuity so
+    /// sounding notes are released immediately — then CC/pitch-bend/note scheduling is skipped,
+    /// exactly like the recording suppression gate. Never a global All Notes Off: other sources
+    /// sustaining notes in the same destination host are untouched.
     void audioThread_scheduleTransportMidiForSegment(ExperimentalInstrumentHost& host,
                                                      std::int64_t timelineSegStart,
                                                      int segNumSamples,
                                                      int bufferOffsetInDevice,
                                                      bool forceDiscontinuity,
                                                      int deviceBlockNumSamples,
-                                                     int* outMidiEventsEmitted = nullptr) noexcept;
+                                                     int* outMidiEventsEmitted = nullptr,
+                                                     bool soloSuppressNewEvents = false) noexcept;
 
     /// [Audio thread] Stop/flush: pending transport offs + allNotesOff(1).
     void audioThread_flushTransportMidi(ExperimentalInstrumentHost& host,
@@ -877,6 +883,12 @@ private:
 
     /// Live-MIDI take on this source row (see `setTransportClipsSuppressedForRecording`).
     std::atomic<bool> rtSuppressTransportClipsForRecording_{ false };
+
+    /// [Audio thread only] Last `soloSuppressNewEvents` seen by the transport scheduler: a
+    /// transition in either direction is treated as a segment discontinuity (pending note-offs
+    /// flushed immediately, CC memory re-chased on resume) so toggling Solo during playback never
+    /// leaves hanging notes and never requires a global All Notes Off.
+    bool rtLastSoloSuppressNewEvents_ = false;
 
 public:
     /// [Message thread] The playback registry swapped this track's transport host (steering §17

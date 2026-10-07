@@ -49,6 +49,20 @@ struct InstrumentTrackDeleteUndoSides
     ProjectFileExperimentalInstrumentTrackV1 row;
 };
 
+/// Narrow Solo-memory undo payload (Solo spec §7): the content change of ONE persistent Solo
+/// memory. Deliberately decoupled from the timeline — a solo-memory step records the SAME
+/// snapshot pointer for before/after, so undoing a memory edit restores exactly that memory's
+/// TrackId set and can never erase a recording take or any other session change. Undo always
+/// targets `memoryIndex` directly (never "the currently active memory"), so it stays correct
+/// even after the user switched the active memory. Temporary-set edits and memory SELECTION
+/// changes are never recorded (not undoable, not dirty).
+struct SoloMemoryUndoSides
+{
+    int memoryIndex = -1; ///< 0 … `Session::kSoloMemoryCount`-1.
+    std::vector<TrackId> before;
+    std::vector<TrackId> after;
+};
+
 struct SessionHistoryRestoreBundle
 {
     /// Always non-null when `popUndo` / `popRedo` returns has_value.
@@ -59,6 +73,8 @@ struct SessionHistoryRestoreBundle
     std::optional<InstrumentUndoStepSides> instrumentSides {};
     /// Delete Track: instrument runtime restore (undo) / teardown (redo) payload; apply last.
     std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete {};
+    /// Solo memory content step: apply `before` (undo) / `after` (redo) to that memory only.
+    std::optional<SoloMemoryUndoSides> soloMemorySides {};
     /// True: popped from redo stack (apply `pluginSides->after`), false: undo (apply `before`).
     bool isRedo = false;
 };
@@ -79,7 +95,8 @@ public:
                 std::optional<PluginUndoStepSides> pluginSides = std::nullopt,
                 std::optional<InstrumentUndoStepSides> instrumentSides = std::nullopt,
                 std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete
-                = std::nullopt) noexcept;
+                = std::nullopt,
+                std::optional<SoloMemoryUndoSides> soloMemorySides = std::nullopt) noexcept;
 
     /// [Message thread] Pops one undo step onto redo; returns bundle with timeline + optional plugin
     /// restore (`pluginSides` present — caller applies `before` chain).
@@ -101,6 +118,7 @@ private:
         std::optional<PluginUndoStepSides> pluginSides;
         std::optional<InstrumentUndoStepSides> instrumentSides;
         std::optional<InstrumentTrackDeleteUndoSides> instrumentTrackDelete;
+        std::optional<SoloMemoryUndoSides> soloMemorySides;
     };
 
     int maxSteps_;

@@ -30,6 +30,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -1412,6 +1413,13 @@ void Session::setTrackOff(const TrackId trackId, const bool trackOff) noexcept
 
 void Session::setTrackMuted(const TrackId trackId, const bool muted) noexcept
 {
+    // Solo lock (spec §2): while the current solo set is non-empty, normal Mute changes are
+    // refused in THE COMMON COMMAND PATH — every UI entry (arrangement header, mixer strip) goes
+    // through here. Load/undo restore mute via snapshot replacement and are unaffected.
+    if (isSoloActive())
+    {
+        return;
+    }
     if (trackId == kInvalidTrackId)
     {
         return;
@@ -1425,6 +1433,151 @@ void Session::setTrackMuted(const TrackId trackId, const bool muted) noexcept
         = SessionSnapshot::withTrackMuted(*current, trackId, muted);
     jassert(next != nullptr);
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
+}
+
+// --------------------------------------------------------------------------- Solo
+// Five separate explicit sets (one temporary + four memories); see Session.h Solo section.
+// None of these methods touch `sessionSnapshot_` — stored Mute/Off flags are never rewritten and
+// the audio thread is unaffected until the app publishes a new derived SoloMuteView.
+
+namespace
+{
+    [[nodiscard]] std::vector<TrackId> dedupedSoloIds(std::vector<TrackId> ids) noexcept
+    {
+        std::vector<TrackId> out;
+        out.reserve(ids.size());
+        for (const TrackId id : ids)
+        {
+            if (id == kInvalidTrackId)
+            {
+                continue;
+            }
+            if (std::find(out.begin(), out.end(), id) == out.end())
+            {
+                out.push_back(id);
+            }
+        }
+        return out;
+    }
+} // namespace
+
+void Session::setActiveSoloMemoryIndex(const int indexOrMinusOne) noexcept
+{
+    if (indexOrMinusOne < -1 || indexOrMinusOne >= kSoloMemoryCount)
+    {
+        return;
+    }
+    activeSoloMemoryIndex_ = indexOrMinusOne;
+}
+
+std::vector<TrackId> Session::getCurrentSoloSetTrackIds() const
+{
+    if (activeSoloMemoryIndex_ >= 0 && activeSoloMemoryIndex_ < kSoloMemoryCount)
+    {
+        return soloMemories_[static_cast<std::size_t>(activeSoloMemoryIndex_)];
+    }
+    return temporarySoloSet_;
+}
+
+std::vector<TrackId> Session::getSoloMemoryTrackIds(const int memoryIndex) const
+{
+    if (memoryIndex < 0 || memoryIndex >= kSoloMemoryCount)
+    {
+        return {};
+    }
+    return soloMemories_[static_cast<std::size_t>(memoryIndex)];
+}
+
+void Session::setSoloMemoryTrackIds(const int memoryIndex, std::vector<TrackId> ids) noexcept
+{
+    if (memoryIndex < 0 || memoryIndex >= kSoloMemoryCount)
+    {
+        return;
+    }
+    soloMemories_[static_cast<std::size_t>(memoryIndex)] = dedupedSoloIds(std::move(ids));
+}
+
+bool Session::isTrackInCurrentSoloSet(const TrackId trackId) const noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::vector<TrackId>& cur = (activeSoloMemoryIndex_ >= 0)
+        ? soloMemories_[static_cast<std::size_t>(activeSoloMemoryIndex_)]
+        : temporarySoloSet_;
+    return std::find(cur.begin(), cur.end(), trackId) != cur.end();
+}
+
+bool Session::toggleTrackInCurrentSoloSet(const TrackId trackId) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return false;
+    }
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    if (current == nullptr)
+    {
+        return false;
+    }
+    const int idx = current->findTrackIndexById(trackId);
+    if (idx < 0)
+    {
+        return false;
+    }
+    if (current->getTrack(idx).getKind() == TrackKind::Master)
+    {
+        // No S on Stereo Out (spec §4).
+        return false;
+    }
+    std::vector<TrackId>& cur = (activeSoloMemoryIndex_ >= 0)
+        ? soloMemories_[static_cast<std::size_t>(activeSoloMemoryIndex_)]
+        : temporarySoloSet_;
+    const auto it = std::find(cur.begin(), cur.end(), trackId);
+    if (it != cur.end())
+    {
+        cur.erase(it);
+    }
+    else
+    {
+        cur.push_back(trackId);
+    }
+    return true;
+}
+
+std::vector<TrackId> Session::getEffectiveSoloedTrackIds() const
+{
+    const std::shared_ptr<const SessionSnapshot> current = loadSessionSnapshotForAudioThread();
+    std::vector<TrackId> out;
+    if (current == nullptr)
+    {
+        return out;
+    }
+    const std::vector<TrackId> cur = getCurrentSoloSetTrackIds();
+    out.reserve(cur.size());
+    for (const TrackId id : cur)
+    {
+        if (id == kInvalidTrackId || current->findTrackIndexById(id) < 0)
+        {
+            continue; // Stale id of a deleted track: never a ghost solo.
+        }
+        if (std::find(out.begin(), out.end(), id) == out.end())
+        {
+            out.push_back(id);
+        }
+    }
+    return out;
+}
+
+bool Session::isSoloActive() const noexcept
+{
+    return !getEffectiveSoloedTrackIds().empty();
+}
+
+void Session::resetTransientSoloStateForProjectLoad() noexcept
+{
+    temporarySoloSet_.clear();
+    activeSoloMemoryIndex_ = -1;
 }
 
 bool Session::setTrackMidiOutputChannel(const TrackId trackId, const int midiOutputChannel) noexcept
@@ -1769,6 +1922,22 @@ juce::Result Session::saveProjectToFile(Transport& transport,
     out.leftLocatorSamples = s->getLeftLocatorSamples();
     out.rightLocatorSamples = s->getRightLocatorSamples();
     out.cycleEnabled = transport.readCycleEnabledForUi();
+    // Solo (v25): persist ONLY the four memories' explicit TrackId sets, filtered to rows that
+    // exist in the saved snapshot (stale ids of deleted tracks never reach disk). The temporary
+    // set, the active memory selection, and all derived solo/mute states are deliberately omitted.
+    for (int m = 0; m < kSoloMemoryCount; ++m)
+    {
+        std::vector<TrackId>& memOut = out.soloMemories[static_cast<std::size_t>(m)];
+        memOut.clear();
+        for (const TrackId id : soloMemories_[static_cast<std::size_t>(m)])
+        {
+            if (id != kInvalidTrackId && s->findTrackIndexById(id) >= 0
+                && std::find(memOut.begin(), memOut.end(), id) == memOut.end())
+            {
+                memOut.push_back(id);
+            }
+        }
+    }
     {
         const ProjectMusicalTime mt = s->getProjectMusicalTime();
         out.bpm = mt.bpm;
@@ -2342,6 +2511,24 @@ juce::Result Session::applyLoadedProjectModel(Transport& transport,
                                     + juce::String((juce::int64)activeTrackId_));
     std::atomic_store_explicit(&sessionSnapshot_, next, std::memory_order_release);
     appendProjectLoadDiagnosticLine("apply: after session snapshot publish");
+
+    // Solo (v25): a project always opens WITHOUT active solo — temporary set empty, no memory
+    // selected — while the four saved memories are adopted intact (deduplicated, unknown ids
+    // dropped against the freshly built track list; pre-v25 files simply yield four empty sets).
+    resetTransientSoloStateForProjectLoad();
+    for (int m = 0; m < kSoloMemoryCount; ++m)
+    {
+        std::vector<TrackId> mem;
+        for (const TrackId id : parsed.soloMemories[static_cast<std::size_t>(m)])
+        {
+            if (id != kInvalidTrackId && next->findTrackIndexById(id) >= 0
+                && std::find(mem.begin(), mem.end(), id) == mem.end())
+            {
+                mem.push_back(id);
+            }
+        }
+        soloMemories_[static_cast<std::size_t>(m)] = std::move(mem);
+    }
 
     currentProjectFile_ = file;
 

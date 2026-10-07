@@ -2,6 +2,7 @@
 
 #include "domain/Track.h"
 #include "engine/RoutingPlan.h"
+#include "engine/SoloMuteView.h"
 
 #include <array>
 #include <bit>
@@ -158,7 +159,8 @@ void renderAudioTracksClipSummingForSegment(const SessionSnapshot& sessionSnap,
                                             std::int64_t timelineEnd,
                                             int onlyTrackIndex = -1,
                                             PreGainRampState* preGainRamp = nullptr,
-                                            const LiveInputMonitorSnapshot* monitored = nullptr) noexcept;
+                                            const LiveInputMonitorSnapshot* monitored = nullptr,
+                                            const SoloMuteView* soloView = nullptr) noexcept;
 
 /// [Audio thread] Apply one bus row's channel strip (Pre → fader/mute/off → Post → pan) from stereo
 /// `busScratchStereo` (`[0]`/ `[1]` = L/R) into `outputChannelData` at `destOutFrame0` for `numSamples`.
@@ -168,7 +170,8 @@ void processBusChannelStripToOutputs(const Track& busTrack,
                                      int numSamples,
                                      int numOutputChannels,
                                      float* const* outputChannelData,
-                                     PluginInsertHost* pluginHost) noexcept;
+                                     PluginInsertHost* pluginHost,
+                                     const SoloMuteView* soloView = nullptr) noexcept;
 
 void clearStereoScratch(float* scratchL, float* scratchR, int numSamples) noexcept;
 
@@ -193,7 +196,8 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               TrackId omitClipPlaybackForTrack,
                                               std::int64_t timelineEnd,
                                               int trackIndex,
-                                              PreGainRampState* preGainRamp = nullptr) noexcept;
+                                              PreGainRampState* preGainRamp = nullptr,
+                                              const SoloMuteView* soloView = nullptr) noexcept;
 
 /// One MONITORED audio lane: selected live device input → pre-gain → Pre → fader/mute/off →
 /// Post → pan → `stageL`/`stageR` (accumulated) — the identical strip order as
@@ -212,7 +216,8 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& track,
                                                   float* stageL,
                                                   float* stageR,
                                                   PluginInsertHost* pluginHost,
-                                                  PreGainRampState* preGainRamp) noexcept;
+                                                  PreGainRampState* preGainRamp,
+                                                  const SoloMuteView* soloView = nullptr) noexcept;
 
 /// Instrument synth → Pre → fader/mute/off → Post → pan into `stageL`/`stageR` (replaces stage segment).
 /// P2: `auditionHost` (nullable) is the track's Secondary AUDITION instance — mixed into the SAME
@@ -226,7 +231,8 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               int destOutFrame0,
                                               int numSamples,
                                               PluginInsertHost* pluginHost,
-                                              ExperimentalInstrumentHost* auditionHost = nullptr) noexcept;
+                                              ExperimentalInstrumentHost* auditionHost = nullptr,
+                                              const SoloMuteView* soloView = nullptr) noexcept;
 
 /// Group bus input scratch → post-channel-strip in `stageL`/`stageR` (replaces stage for segment).
 void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
@@ -235,7 +241,8 @@ void applyBusPostChannelStripFromInputToStage(const Track& busTrack,
                                               float* stageR,
                                               int destOutFrame0,
                                               int numSamples,
-                                              PluginInsertHost* pluginHost) noexcept;
+                                              PluginInsertHost* pluginHost,
+                                              const SoloMuteView* soloView = nullptr) noexcept;
 
 /// Dry bus += stage; each send bus += stage * amount (post-channel-strip fan-out).
 void fanPostStripStageToDryAndSends(float* stageL,

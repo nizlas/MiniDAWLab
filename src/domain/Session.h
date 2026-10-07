@@ -45,6 +45,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -248,7 +249,59 @@ public:
     // [Message thread] Lane off: skipped entirely by `PlaybackEngine` (distinct from mute).
     void setTrackOff(TrackId trackId, bool trackOff) noexcept;
     // [Message thread] Mute: engine effective gain zero; stored fader untouched.
+    // SOLO LOCK: while Solo is active (`isSoloActive()`), this command REFUSES every change —
+    // the common command path is locked, not just the buttons (spec §2). Project load and undo
+    // restore stored mute flags through snapshot replacement (`applyLoadedProjectModel` /
+    // `restoreSessionSnapshotForUndo`), which never pass through here and are never blocked.
     void setTrackMuted(TrackId trackId, bool muted) noexcept;
+
+    // ------------------------------------------------------------------ Solo
+    // Solo is a temporary LISTENING layer on top of the stored Mute flags: five separate sets of
+    // explicitly soloed TrackIds — ONE temporary set plus FOUR persistent memories (1 … 4).
+    // Exactly one set is "current" at a time: no memory selected (index -1) → the temporary set;
+    // memory 0 … 3 selected → that memory. S buttons always show and edit the current set.
+    // All of this state is message-thread-owned and NOT part of `SessionSnapshot` (like
+    // `activeTrackId_`): the engine consumes a separately published derived view, stored Mute
+    // flags are never rewritten, and whole-session undo snapshots never carry solo state.
+    // Persistence: ONLY the four memories are saved (project v25); the temporary set, the active
+    // selection, and all derived states are reset on load (`resetTransientSoloStateForProjectLoad`).
+    static constexpr int kSoloMemoryCount = 4;
+
+    /// Active memory index 0 … 3, or -1 when the temporary set is current.
+    [[nodiscard]] int getActiveSoloMemoryIndex() const noexcept { return activeSoloMemoryIndex_; }
+    /// [Message thread] Select a memory (0 … 3) or -1 for the temporary set. Switching NEVER
+    /// copies content between sets and never touches the stored sets. Out-of-range → no-op.
+    void setActiveSoloMemoryIndex(int indexOrMinusOne) noexcept;
+
+    /// Raw stored content of the current set (may contain ids of deleted tracks; see
+    /// `getEffectiveSoloedTrackIds` for the validity-filtered view).
+    [[nodiscard]] std::vector<TrackId> getCurrentSoloSetTrackIds() const;
+    [[nodiscard]] std::vector<TrackId> getSoloMemoryTrackIds(int memoryIndex) const;
+    /// [Message thread] Replace one memory's content (narrow undo + project load). Deduplicates;
+    /// invalid ids (0) dropped. Out-of-range index → no-op. Does NOT change the active selection.
+    void setSoloMemoryTrackIds(int memoryIndex, std::vector<TrackId> ids) noexcept;
+
+    /// True when `trackId` is explicitly in the CURRENT set (raw membership; red S face).
+    [[nodiscard]] bool isTrackInCurrentSoloSet(TrackId trackId) const noexcept;
+    /// [Message thread] Toggle explicit membership of `trackId` in the current set. Refuses ids
+    /// not in the current snapshot and the Master row (no S on Stereo Out). Returns true when the
+    /// set changed. When a memory is current this edits the MEMORY directly (callers wrap it in
+    /// the narrow solo-memory undo command); edits of the temporary set are not undoable.
+    [[nodiscard]] bool toggleTrackInCurrentSoloSet(TrackId trackId) noexcept;
+
+    /// Current set filtered to tracks that exist in the current snapshot (deduplicated). Stale
+    /// ids of deleted tracks are invisible here — no ghost solo — but stay stored so undoing a
+    /// track deletion restores membership without any extra bookkeeping.
+    [[nodiscard]] std::vector<TrackId> getEffectiveSoloedTrackIds() const;
+    /// Solo is ACTIVE only when the current set contains ≥1 existing track. A selected but empty
+    /// (or fully stale) memory does not restrict playback and does not lock Mute.
+    [[nodiscard]] bool isSoloActive() const noexcept;
+    /// Normal Mute changes are locked exactly while Solo is active (spec §2).
+    [[nodiscard]] bool isMuteChangeLockedBySolo() const noexcept { return isSoloActive(); }
+
+    /// [Message thread] Project load/new: temporary set cleared, no memory selected. The four
+    /// memories are NOT touched here — the load path assigns them from the parsed file.
+    void resetTransientSoloStateForProjectLoad() noexcept;
 
     /// [Message thread] MIDI output channel for this row's own timeline MIDI:
     /// `kTrackMidiOutputChannelAny` preserves each event's stored channel, 1 … 16 remaps every
@@ -455,6 +508,13 @@ private:
     // Current world picture for the audio thread: always either the shared empty snapshot or a
     // user-built snapshot; swapped only from the message thread, read with acquire from any thread.
     mutable std::atomic<std::shared_ptr<const SessionSnapshot>> sessionSnapshot_;
+
+    // [Message thread] Solo listening layer (see the Solo section above): one temporary set +
+    // four persistent memories of explicitly soloed TrackIds, and which set is current (-1 =
+    // temporary). Kept outside `SessionSnapshot` on purpose; stored Mute flags are never rewritten.
+    std::vector<TrackId> temporarySoloSet_;
+    std::array<std::vector<TrackId>, kSoloMemoryCount> soloMemories_;
+    int activeSoloMemoryIndex_ = -1;
 
     juce::File currentProjectFile_;
     AudioMixdownProjectSettings audioMixdown_;

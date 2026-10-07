@@ -56,6 +56,7 @@
 #include "engine/LiveMidiInputBus.h"
 #include "engine/PlaybackMixHelpers.h"
 #include "engine/RoutingPlan.h"
+#include "engine/SoloMuteView.h"
 #include "transport/Transport.h"
 
 class CountInClickOutput;
@@ -378,6 +379,18 @@ public:
     [[nodiscard]] bool isTrackInputMonitoringEnabled(TrackId trackId) const noexcept;
 
     // -----------------------------------------------------------------------
+    // Solo — derived listening view (see `SoloMuteView`), runtime-only, never persisted
+    // -----------------------------------------------------------------------
+    /// [Message thread] Publish the derived Solo decision computed OFF the audio thread
+    /// (`solo_mute_view::deriveSoloMuteView`). Null or `soloActive == false` restores plain
+    /// stored-Mute behavior everywhere. Same atomic shared_ptr discipline as the monitor
+    /// snapshot; the realtime callback and the offline mixdown gate acquire ONE view per block,
+    /// so every strip in a block sees the same consistent picture (block-boundary publication).
+    void publishSoloMuteView(std::shared_ptr<const SoloMuteView> view) noexcept;
+    /// [Message thread] Currently published view (UI/diagnostics; may be null).
+    [[nodiscard]] std::shared_ptr<const SoloMuteView> currentSoloMuteView() const noexcept;
+
+    // -----------------------------------------------------------------------
     // Live MIDI input (keyboard → instrument hosts → take capture) — runtime-only
     // -----------------------------------------------------------------------
     /// [Message thread, before the device starts or with the callback drained] Install the live
@@ -602,6 +615,10 @@ private:
     /// loaded once per audio callback. Null = nothing monitored.
     std::atomic<std::shared_ptr<const playback_mix_helpers::LiveInputMonitorSnapshot>>
         liveInputMonitorSnapshot_;
+
+    /// Derived Solo listening view (see `SoloMuteView`): published by the message thread,
+    /// acquire-loaded once per audio callback / offline block. Null = solo inactive.
+    std::atomic<std::shared_ptr<const SoloMuteView>> soloMuteView_;
 
     /// Live MIDI bus (non-owning; installed from Main). Relaxed pointer: installed before the
     /// device starts / with the callback drained, so the callback never races the store.
