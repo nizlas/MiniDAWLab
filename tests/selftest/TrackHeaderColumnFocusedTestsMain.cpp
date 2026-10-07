@@ -17,6 +17,7 @@
 
 #include "ui/TrackHeaderView.h"
 #include "ui/TrackLanesView.h"
+#include "ui/TrackRowHeightPresets.h"
 #include "ui/UiLayoutSettingsStore.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -353,6 +354,127 @@ void testClampFormula()
            "clamp: pure function (same inputs, same output) — the ruler/overlay layout can call it independently");
 }
 
+// ---------------------------------------------------------------------------------------------
+// Shared track heights: the central Small/Medium/Large definitions, the proof that Small fits the
+// full header chrome (title + every main strip button incl. Solo + resize band) for every row
+// kind, and the alternatives-button hide rule at compact heights. The alternatives button is NOT
+// a strip cell: when `getAlternativesButtonBounds()` is empty, `buildStripControlSpecs()` adds no
+// Alternatives spec, so the paint loop, the hover/click hit scan and the tooltip (which requires
+// a hovered spec) are all off through the same single gate — bounds-empty IS the structural
+// "no paint, no hit target, no tooltip" guarantee the spec demands.
+void testRowHeightPresetsAndSmallChromeFit(const juce::File& shotDir)
+{
+    namespace trh = track_row_heights;
+
+    expect(trh::kSmallRowHeightPx == 64 && trh::kMediumRowHeightPx == 96 && trh::kLargeRowHeightPx == 192,
+           "presets: Small=64, Medium=96 (the historical default), Large=192 (2 x Medium) logical px");
+    expect(trh::heightPxForPreset(trh::TrackRowHeightPreset::Small) == 64
+               && trh::heightPxForPreset(trh::TrackRowHeightPreset::Medium) == 96
+               && trh::heightPxForPreset(trh::TrackRowHeightPreset::Large) == 192,
+           "presets: heightPxForPreset maps every preset to its px");
+    expect(trh::presetMatchingHeightPx(64) == trh::TrackRowHeightPreset::Small
+               && trh::presetMatchingHeightPx(96) == trh::TrackRowHeightPreset::Medium
+               && trh::presetMatchingHeightPx(192) == trh::TrackRowHeightPreset::Large
+               && !trh::presetMatchingHeightPx(97).has_value() && !trh::presetMatchingHeightPx(0).has_value(),
+           "presets: presetMatchingHeightPx is exact (any other height = Custom)");
+    expect(trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(trh::TrackRowHeightPreset::Small))
+                   == trh::TrackRowHeightPreset::Small
+               && trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(trh::TrackRowHeightPreset::Medium))
+                      == trh::TrackRowHeightPreset::Medium
+               && trh::presetFromPersistenceKey(trh::persistenceKeyForPreset(trh::TrackRowHeightPreset::Large))
+                      == trh::TrackRowHeightPreset::Large,
+           "presets: persistence keys round trip (small/medium/large)");
+    expect(trh::presetFromPersistenceKey("") == trh::TrackRowHeightPreset::Medium
+               && trh::presetFromPersistenceKey("huge") == trh::TrackRowHeightPreset::Medium,
+           "presets: absent/unknown persistence key repairs to Medium (older projects keep their look)");
+
+    // Snap-rule proof that Small is EXACTLY the smallest full-chrome height for subtitle rows and
+    // at least it for title-only rows: with a permissive minimum the 50% rule would move any
+    // height below the full name+buttons+band ideal, so passing through unchanged proves >= ideal.
+    using H = TrackHeaderView;
+    expect(H::snapTrackHeaderRowHeightAfterResize(trh::kSmallRowHeightPx, true, 1, 480) == trh::kSmallRowHeightPx,
+           "snap: Small passes through for subtitle rows -> Small >= their full chrome ideal");
+    expect(H::snapTrackHeaderRowHeightAfterResize(trh::kSmallRowHeightPx - 1, true, 1, 480)
+               != trh::kSmallRowHeightPx - 1,
+           "snap: Small-1 is moved for subtitle rows -> Small is the MINIMAL full-chrome height");
+    expect(H::snapTrackHeaderRowHeightAfterResize(trh::kSmallRowHeightPx, false, 1, 480) == trh::kSmallRowHeightPx,
+           "snap: Small passes through for title-only rows too");
+    expect(H::snapTrackHeaderRowHeightAfterResize(10, true, trh::kSmallRowHeightPx, 480) == trh::kSmallRowHeightPx
+               && H::snapTrackHeaderRowHeightAfterResize(10, false, trh::kSmallRowHeightPx, 480)
+                      == trh::kSmallRowHeightPx,
+           "snap: with the app's global minimum = Small, any drag below it lands at Small (every kind)");
+    expect(H::snapTrackHeaderRowHeightAfterResize(100000, true, trh::kSmallRowHeightPx, 480) == 480,
+           "snap: the existing 480 px maximum is kept");
+
+    const juce::Colour bg(0xff333333);
+    for (const int width : { TrackLanesView::kTrackHeaderColumnMinWidthPx, TrackLanesView::kTrackHeaderColumnDefaultWidthPx })
+    {
+        for (Kind& k : rowKinds("Track"))
+        {
+            // Solo cells exactly as the app wires them: every row kind except master.
+            const bool isMaster = juce::String(k.name) == "master";
+            if (!isMaster)
+            {
+                k.model.soloAvailable = true;
+                k.callbacks.onToggleSolo = [] {};
+            }
+            const bool altAvailable = k.model.instrumentAlternativesAvailable;
+            auto view = std::make_unique<TrackHeaderView>(
+                [m = k.model] { return m; }, k.callbacks, kInvalidTrackId, std::nullopt);
+            view->setSize(width, trh::kSmallRowHeightPx);
+
+            const juce::Rectangle<int> local = view->getLocalBounds();
+            const juce::Rectangle<int> chrome = local.withTrimmedBottom(TrackHeaderView::kHeaderResizeBandPx);
+            const juce::String who = juce::String(k.name) + " @ " + juce::String(width) + " px, Small height";
+
+            Cells cells = cellsOf(*view);
+            const juce::Rectangle<int> solo = view->getSoloButtonBounds();
+            if (!solo.isEmpty())
+            {
+                cells.present.emplace_back("solo", solo);
+            }
+            expect(!isMaster == !solo.isEmpty(), who + ": Solo cell present on every kind except master");
+            bool allInside = true;
+            bool allHittable = true;
+            for (const auto& [name, r] : cells.present)
+            {
+                juce::ignoreUnused(name);
+                allInside = allInside && local.contains(r);
+                allHittable = allHittable && chrome.contains(r.getCentre());
+            }
+            expect(allInside && !cells.present.empty(),
+                   who + ": every main button (incl. S / instrument editor) fully inside the header");
+            expect(allHittable, who + ": every main button centre is hittable above the resize band");
+
+            // Alternatives: hidden at Small (empty bounds = no paint spec, no hit scan entry, no
+            // tooltip — one structural gate), back at Medium/Large, hidden again when shrunk.
+            expect(view->getAlternativesButtonBounds().isEmpty(),
+                   who + ": the standalone alternatives button is fully OFF at Small");
+            if (altAvailable)
+            {
+                view->setSize(width, trh::kMediumRowHeightPx);
+                const juce::Rectangle<int> altMedium = view->getAlternativesButtonBounds();
+                expect(!altMedium.isEmpty() && view->getLocalBounds().contains(altMedium),
+                       who + ": alternatives button RETURNS at Medium, inside the header");
+                view->setSize(width, trh::kLargeRowHeightPx);
+                expect(!view->getAlternativesButtonBounds().isEmpty(),
+                       who + ": alternatives button present at Large");
+                view->setSize(width, trh::kSmallRowHeightPx);
+                expect(view->getAlternativesButtonBounds().isEmpty(),
+                       who + ": alternatives button hides again when shrunk back to Small");
+            }
+
+            // Paint evidence: the Solo cell (the newest strip button) is actually painted at Small.
+            const juce::Image img = view->createComponentSnapshot(local, false, 1.0f);
+            savePng(img, shotDir, "header-small-" + juce::String(k.name) + "-" + juce::String(width) + ".png");
+            if (!solo.isEmpty())
+            {
+                expect(countNonBackgroundPixels(img, solo, bg) > 30, who + ": the S cell is painted at Small");
+            }
+        }
+    }
+}
+
 void testUiLayoutStore()
 {
     const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("dal-header-column-tests");
@@ -412,6 +534,7 @@ int main(int argc, char** argv)
     testGeometryPerKindAndWidth(shotDir);
     testNamesNeverChangeLayout();
     testClampFormula();
+    testRowHeightPresetsAndSmallChromeFit(shotDir);
     testUiLayoutStore();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);

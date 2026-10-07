@@ -424,11 +424,13 @@ void testPersistence()
         expect(s.saveProjectToFile(transport, proj, 48000.0).wasOk(), "persist: project saved (v25)");
     }
 
-    // Raw file: v25 with the four memories; the temporary set / selection is NOT in the model.
+    // Raw file: the four memories are in the model (soloMemories landed in v25; the writer always
+    // stamps the CURRENT version — v26 added the unrelated row-height fields on top).
     {
         ProjectFileV1 data;
         expect(readProjectFile(proj, data).wasOk(), "persist: file reads back");
-        expect(data.version == 25, "persist: writer version is 25");
+        expect(data.version == ProjectFileV1::kCurrentVersion && data.version >= 25,
+               "persist: writer stamps the current version (>= 25, soloMemories supported)");
         bool memoriesMatch = true;
         for (int m = 0; m < 4; ++m)
         {
