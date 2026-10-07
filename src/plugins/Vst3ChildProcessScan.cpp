@@ -844,6 +844,13 @@ juce::File getGrooveAgentSeVst3BundlePathForOopScanFallback() noexcept
                   + "\" score=" + juce::String(viable.front().second));
     return viable.front().first;
 }
+#else
+// Non-Windows: the Windows bundle-layout probe (Contents\x86_64-win) does not apply; callers use
+// the bundle root unchanged (same fallback the Windows version returns when the layout is absent).
+[[nodiscard]] static juce::File halionSonicPreferredInnerModuleFile(const juce::File& bundleDir)
+{
+    return bundleDir;
+}
 #endif
 
 juce::File getHalionSonicVst3BundlePathForOopScanFallback() noexcept
