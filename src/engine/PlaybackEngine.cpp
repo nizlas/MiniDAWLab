@@ -409,6 +409,118 @@ void PlaybackEngine::ensurePostStripStageScratchCapacity(const int numSamples) n
     postStripStageCapacity_ = numSamples;
 }
 
+void PlaybackEngine::ensureAudioStripJobBuffersCapacity(const int numSamples) noexcept
+{
+    // [Message thread, device stopped] Stage A1 job buffers. All realtime access is gated on the
+    // recorded capacities, so a block larger than prepared simply renders on the serial fallback.
+    if (numSamples <= 0)
+    {
+        return;
+    }
+    using instrument_render::InstrumentRenderPool;
+    // The lane model only works when "render-pool lane" and "insert-host processing lane" are the
+    // same coordinate system (worker i = lane i, callback = last lane) and when every collected
+    // audio payload fits the pool's job table even with zero instrument jobs.
+    static_assert(InstrumentRenderPool::kNumLanes == PluginInsertHost::kMaxProcessingLanes,
+                  "render-pool lanes and insert-host processing lanes must be the same set");
+    static_assert(InstrumentRenderPool::kCallbackLane == PluginInsertHost::kCallbackProcessingLane,
+                  "the callback must map to the same lane index in both subsystems");
+    static_assert(kMaxAudioStripJobs <= InstrumentRenderPool::kMaxJobs,
+                  "every collected audio strip payload must fit the pool's job table");
+    if (audioStripStageCapacity_ < numSamples)
+    {
+        audioStripStageBuffer_.setSize(2 * kMaxAudioStripJobs, numSamples, false, false, true);
+        audioStripStageCapacity_ = numSamples;
+    }
+    if (insertLaneScratchCapacity_ < numSamples)
+    {
+        insertLaneScratch_.setSize(2 * InstrumentRenderPool::kNumLanes, numSamples, false, false, true);
+        for (int lane = 0; lane < InstrumentRenderPool::kNumLanes; ++lane)
+        {
+            insertLaneScratchPtrs_[lane][0] = insertLaneScratch_.getWritePointer(2 * lane);
+            insertLaneScratchPtrs_[lane][1] = insertLaneScratch_.getWritePointer(2 * lane + 1);
+        }
+        insertLaneScratchCapacity_ = numSamples;
+    }
+    for (auto& midi : insertLaneMidi_)
+    {
+        // Same discipline as the host's shared `midiScratch_`: pre-sized here, `clear` (which
+        // never shrinks or grows) after every processBlock on the job path.
+        midi.ensureSize(1024);
+    }
+}
+
+void PlaybackEngine::runAudioStripRenderJob(instrument_render::RenderJob& job, const int laneIndex) noexcept
+{
+    auto* const payload = static_cast<AudioStripJobPayload*>(job.p.context);
+    if (payload != nullptr && payload->engine != nullptr)
+    {
+        payload->engine->audioThread_runAudioStripPayload(*payload, laneIndex);
+    }
+}
+
+void PlaybackEngine::audioThread_runAudioStripPayload(AudioStripJobPayload& payload,
+                                                      const int laneIndex) noexcept
+{
+    using instrument_render::InstrumentRenderPool;
+    if (payload.sessionSnap == nullptr || payload.stageL == nullptr || payload.stageR == nullptr
+        || payload.numSegments <= 0)
+    {
+        return;
+    }
+    const std::int64_t tStart = juce::Time::getHighResolutionTicks();
+    const int lane = juce::jlimit(0, InstrumentRenderPool::kNumLanes - 1, laneIndex);
+
+    // The job writes ONLY the stage regions its segments own (the fan reads exactly these), its
+    // own lane's chain scratch / MIDI scratch, its own row's pre-gain ramp entry, and its own
+    // row's duration slot — nothing shared with a concurrently running job (plan §3.2).
+    playback_mix_helpers::AudioStripInsertAccess access;
+    if (payload.chainEntry != nullptr && pluginHost_ != nullptr)
+    {
+        access.host = pluginHost_;
+        access.entry = payload.chainEntry;
+        access.chainScratch = insertLaneScratchPtrs_[lane];
+        access.chainScratchCapacity = insertLaneScratchCapacity_;
+        access.chainMidiScratch = &insertLaneMidi_[(size_t)lane];
+        access.laneIndex = lane;
+    }
+    for (int s = 0; s < payload.numSegments; ++s)
+    {
+        const AudioStripSegmentDesc& seg = payload.segments[(size_t)s];
+        if (seg.audibleRun <= 0)
+        {
+            continue;
+        }
+        playback_mix_helpers::clearStereoScratch(payload.stageL + seg.destFrame,
+                                                 payload.stageR + seg.destFrame, seg.audibleRun);
+        if (access.entry != nullptr)
+        {
+            // Per-segment transport context on this chain's OWN playhead — the same PositionInfo
+            // sequence the serial path presents, regardless of which lane runs the job.
+            PluginInsertHost::audioThread_setEntryTransportContext(*access.entry, seg.insertContext);
+        }
+        playback_mix_helpers::renderAudioTrackPostStripToStereoScratchWithChainAccess(
+            *payload.sessionSnap,
+            seg.timelineStartAudible,
+            seg.audibleRun,
+            seg.destFrame,
+            payload.stageL,
+            payload.stageR,
+            access,
+            seg.omitClipPlaybackForTrack,
+            payload.timelineEnd,
+            payload.trackIndex,
+            &preGainRampState_,
+            payload.soloView);
+    }
+    if (payload.trackIndex >= 0
+        && payload.trackIndex < (int)audioStripLastRenderTicks_.size())
+    {
+        audioStripLastRenderTicks_[(size_t)payload.trackIndex]
+            = juce::Time::getHighResolutionTicks() - tStart;
+    }
+}
+
 void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     if (device != nullptr)
@@ -433,6 +545,7 @@ void PlaybackEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
             activeInputPhysicalMask_.store(mask, std::memory_order_release);
         }
         ensureMasterScratchCapacity(juce::jmax(bs, kOfflineMixdownBlockCapSamples));
+        ensureAudioStripJobBuffersCapacity(bs);
         // Pre-gain ramps start unprimed: the first block after prepare applies each track's
         // saved pre-gain directly (no unintended fade-in at playback start).
         preGainRampState_.reset();
@@ -1073,25 +1186,33 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     // Every insert chain reads the same host-owned playhead during its synchronous processBlock.
     // Keep that context at the exact timeline segment for clip rendering, and at this callback's
     // transport position for full-block monitoring, instrument and bus processing.
-    const auto setInsertProcessContext = [&](const std::int64_t segmentStartSample) noexcept {
-        if (pluginHost_ == nullptr || sessionSnap == nullptr)
-        {
-            return;
-        }
-
-        const ProjectMusicalTime musicalTime = sessionSnap->getProjectMusicalTime();
+    // Value builder: the serial paths publish it to every chain's playhead via the setter below;
+    // the Stage A1 segment collection stores a COPY in each segment descriptor so a render-pool
+    // job can set its own chain's playhead without touching shared mutable transport state.
+    const auto makeInsertProcessContext = [&](const std::int64_t segmentStartSample) noexcept {
         PluginProcessTransportContext insertContext;
         insertContext.timelineSample = segmentStartSample;
         insertContext.sampleRate = deviceSampleRateForDiagnostics_.load(std::memory_order_relaxed);
-        insertContext.bpm = musicalTime.bpm;
-        insertContext.timeSignatureNumerator = musicalTime.numerator;
-        insertContext.timeSignatureDenominator = musicalTime.denominator;
+        if (sessionSnap != nullptr)
+        {
+            const ProjectMusicalTime musicalTime = sessionSnap->getProjectMusicalTime();
+            insertContext.bpm = musicalTime.bpm;
+            insertContext.timeSignatureNumerator = musicalTime.numerator;
+            insertContext.timeSignatureDenominator = musicalTime.denominator;
+        }
         insertContext.isPlaying = playbackIntent == PlaybackIntent::Playing;
         insertContext.isRecording = recorder_ != nullptr && recorder_->isRecording();
         insertContext.isLooping = validCycle;
         insertContext.loopStartSample = locL;
         insertContext.loopEndSample = locR;
-        pluginHost_->audioThread_setProcessTransportContext(insertContext);
+        return insertContext;
+    };
+    const auto setInsertProcessContext = [&](const std::int64_t segmentStartSample) noexcept {
+        if (pluginHost_ == nullptr || sessionSnap == nullptr)
+        {
+            return;
+        }
+        pluginHost_->audioThread_setProcessTransportContext(makeInsertProcessContext(segmentStartSample));
     };
 
     struct StoreIntentAtScopeExit
@@ -1300,6 +1421,50 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     float* const* mixSumTarget
         = (mixBusL != nullptr && mixBusR != nullptr) ? mixBusPtrs : outputChannelData;
 
+    // ---- Stage A1: decide whether THIS block collects audio-row strip jobs ----
+    // ONE acquire-load of the insert map per block. The shared_ptr lives on this stack frame for
+    // the remainder of the callback, so every entry pointer a job payload carries stays valid
+    // until well after the jobs have joined (publish-before-destroy, plan §3.2).
+    const std::shared_ptr<const PluginAudioThreadMap> insertMapForBlock
+        = pluginHost_ != nullptr ? pluginHost_->audioThread_acquireMapForBlock() : nullptr;
+    audioStripPayloadCount_ = 0;
+    audioStripCollectActive_ = false;
+    if (rp != nullptr && sessionSnap != nullptr && !rp->sourceSteps.empty()
+        && playbackIntent == PlaybackIntent::Playing && instrumentRenderPool_ != nullptr
+        && numSamples > 0 && audioStripStageCapacity_ >= numSamples
+        && insertLaneScratchCapacity_ >= numSamples)
+    {
+        // Pre-count with EXACTLY the per-step gates the collection in `renderRun` applies. All of
+        // them are block-constant (plan fields, snapshot row kind, monitor view), so the count
+        // decides capacity for every segment of this block.
+        int eligible = 0;
+        for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+        {
+            if (step.destBusIndex < 0
+                || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+            {
+                continue;
+            }
+            if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+            {
+                continue;
+            }
+            const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
+            if (srcTr.getKind() != TrackKind::Audio)
+            {
+                continue;
+            }
+            if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+            {
+                continue;
+            }
+            ++eligible;
+        }
+        // Over job capacity: the WHOLE block renders on the serial strip path in `renderRun`
+        // (same strip core on the callback lane) — rows are never dropped or split across modes.
+        audioStripCollectActive_ = eligible > 0 && eligible <= kMaxAudioStripJobs;
+    }
+
     if (countIn_ != nullptr)
     {
         setCallbackPhase(AudioCallbackPhase::CountIn);
@@ -1456,6 +1621,66 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     };
 
+    // GENERATION-JOB COLLECTION (shared): fill `instrumentRenderJobs_` from index 0 with one job
+    // per live instrument host this block will mix — the rows the MIX ORDER loop below processes
+    // (Off rows skipped, muted rows still process — same gate as the strip), plus the audition
+    // host while stopped. Proxy-backed hosts stay on the callback thread. Used by BOTH dispatch
+    // sites: the Stage A1 combined batch (audio strip jobs appended after these) and the legacy
+    // dispatch inside `mixKeyedInstrumentLanesIntoOutputsIfAny` (collect-inactive blocks).
+    const auto collectInstrumentGenerationJobs = [&]() noexcept -> int {
+        using instrument_render::InstrumentRenderPool;
+        if (instrumentRenderPool_ == nullptr || numSamples <= 0 || sessionSnap == nullptr
+            || instrumentSnap == nullptr || instrumentSnap->entries.empty())
+        {
+            return 0;
+        }
+        const bool stripHasScratch = postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
+                                     && postStripStageCapacity_ >= numSamples;
+        const bool auditionActive = stripHasScratch && playbackIntent != PlaybackIntent::Playing;
+        int jobCount = 0;
+        const auto addJob = [&](ExperimentalInstrumentHost* const h) noexcept {
+            if (h == nullptr || jobCount >= InstrumentRenderPool::kMaxJobs || h->audioThread_isProxySelectedNow())
+            {
+                return;
+            }
+            for (int k = 0; k < jobCount; ++k)
+            {
+                if (instrumentRenderJobs_[(size_t)k].p.host == h)
+                {
+                    return; // never two jobs for one instance
+                }
+            }
+            auto& j = instrumentRenderJobs_[(size_t)jobCount++];
+            j.p = instrument_render::RenderJob::Payload{};
+            j.p.host = h;
+            j.p.numSamples = numSamples;
+            j.p.lastRenderTicks = h->audioThread_lastRenderTicksRelaxed();
+        };
+        for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
+        {
+            const Track& tr = sessionSnap->getTrack(ti);
+            if (tr.getKind() != TrackKind::Instrument || tr.isTrackOff())
+            {
+                continue;
+            }
+            const ExperimentalInstrumentPlaybackEntry* const entry
+                = playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
+            if (entry == nullptr || entry->host == nullptr)
+            {
+                continue;
+            }
+            addJob(entry->host);
+            if (auditionActive && entry->auditionHost != nullptr && entry->auditionHost != entry->host)
+            {
+                addJob(entry->auditionHost);
+            }
+        }
+        return jobCount;
+    };
+    // Set once the combined Stage A1 batch has run this block's generation jobs — the legacy
+    // dispatch inside `mixKeyedInstrumentLanesIntoOutputsIfAny` must not run them a second time.
+    bool generationStageAlreadyRan = false;
+
     /// [Audio thread] Sum each keyed instrument whose `trackId` matches a `TrackKind::Instrument`
     /// row in `sessionSnap`, in timeline row order (see MIX ORDER below). When `sessionSnap` is missing
     /// (tear / edge), mix every snapshot entry once so staged-only playback still audible.
@@ -1478,52 +1703,11 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             // instrument's `processBlock` is now independent. One job per host renders into the
             // host's own scratch across the render pool; the callback thread joins before the row
             // loop below, which then applies inserts / fader / pan / meters / routing and sums in
-            // the unchanged row order. Exactly the rows the loop will process are dispatched (an
-            // Off row is skipped, a muted row still processes — same gate as the strip); proxy-
-            // backed hosts stay on this thread (their mix is a copy, their Primary must not run).
-            if (instrumentRenderPool_ != nullptr && numSamples > 0)
+            // the unchanged row order. On Stage A1 collect blocks these jobs already ran in the
+            // combined batch (`dispatchRowJobsAndSumAudioStages`) — never a second processBlock.
+            if (!generationStageAlreadyRan && instrumentRenderPool_ != nullptr && numSamples > 0)
             {
-                using instrument_render::InstrumentRenderPool;
-                const bool stripHasScratch = postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
-                                             && postStripStageCapacity_ >= numSamples;
-                const bool auditionActive = stripHasScratch && playbackIntent != PlaybackIntent::Playing;
-                int jobCount = 0;
-                const auto addJob = [&](ExperimentalInstrumentHost* const h) noexcept {
-                    if (h == nullptr || jobCount >= InstrumentRenderPool::kMaxJobs || h->audioThread_isProxySelectedNow())
-                    {
-                        return;
-                    }
-                    for (int k = 0; k < jobCount; ++k)
-                    {
-                        if (instrumentRenderJobs_[(size_t)k].host == h)
-                        {
-                            return; // never two jobs for one instance
-                        }
-                    }
-                    auto& j = instrumentRenderJobs_[(size_t)jobCount++];
-                    j.host = h;
-                    j.numSamples = numSamples;
-                    j.lastRenderTicks = h->audioThread_lastRenderTicksRelaxed();
-                };
-                for (int ti = 0; ti < sessionSnap->getNumTracks(); ++ti)
-                {
-                    const Track& tr = sessionSnap->getTrack(ti);
-                    if (tr.getKind() != TrackKind::Instrument || tr.isTrackOff())
-                    {
-                        continue;
-                    }
-                    const ExperimentalInstrumentPlaybackEntry* const entry
-                        = playback_mix_helpers::findExperimentalInstrumentPlaybackEntry(*instrumentSnap, tr.getId());
-                    if (entry == nullptr || entry->host == nullptr)
-                    {
-                        continue;
-                    }
-                    addJob(entry->host);
-                    if (auditionActive && entry->auditionHost != nullptr && entry->auditionHost != entry->host)
-                    {
-                        addJob(entry->auditionHost);
-                    }
-                }
+                const int jobCount = collectInstrumentGenerationJobs();
                 if (jobCount > 0)
                 {
                     instrumentRenderPool_->audioThread_runJobs(instrumentRenderJobs_.data(), jobCount,
@@ -1851,10 +2035,113 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         }
     };
 
+    // ---- Stage A1: ONE batch, ONE barrier per block ----
+    // Runs FIRST inside `mixInstrumentsAndFinalizeMaster`, i.e. after every `renderRun` segment
+    // of the block has scheduled transport MIDI and collected strip segments, and BEFORE the
+    // monitoring pass / instrument row strips / bus finalize — so the bus accumulation order
+    // stays: audio-row fans → monitored fans → instrument fans → bus forwarding (plan §3.1).
+    // Jobs write only their own stage buffers / host scratch (never shared buses); the callback
+    // sums after the join on this thread. Every object a payload references (session snapshot,
+    // solo view, routing plan, insert map) is retained on this stack frame past the join.
+    const auto dispatchRowJobsAndSumAudioStages = [&]() noexcept
+    {
+        if (!audioStripCollectActive_)
+        {
+            return;
+        }
+        using instrument_render::InstrumentRenderPool;
+        setCallbackPhase(AudioCallbackPhase::ClipRender);
+        // Instrument generation jobs join the SAME batch: identical job payloads to the legacy
+        // dispatch, scheduled after all of this block's transport MIDI (renderRun ran already).
+        int jobCount = collectInstrumentGenerationJobs();
+        generationStageAlreadyRan = true;
+        int inlineFrom = audioStripPayloadCount_;
+        for (int k = 0; k < audioStripPayloadCount_; ++k)
+        {
+            if (jobCount >= InstrumentRenderPool::kMaxJobs)
+            {
+                inlineFrom = k;
+                break;
+            }
+            AudioStripJobPayload& p = audioStripPayloads_[(size_t)k];
+            auto& j = instrumentRenderJobs_[(size_t)jobCount++];
+            j.p = instrument_render::RenderJob::Payload{};
+            j.p.run = &PlaybackEngine::runAudioStripRenderJob;
+            j.p.context = &p;
+            j.p.numSamples = numSamples;
+            j.p.lastRenderTicks = (p.trackIndex >= 0
+                                   && p.trackIndex < (int)audioStripLastRenderTicks_.size())
+                                      ? audioStripLastRenderTicks_[(size_t)p.trackIndex]
+                                      : 0;
+        }
+        // Combined-batch overflow (more instrument hosts + audio rows than job slots): the
+        // overflowing audio payloads run NOW on the callback lane through the SAME job code —
+        // rows are never dropped (plan §3.3 capacity rule).
+        for (int k = inlineFrom; k < audioStripPayloadCount_; ++k)
+        {
+            audioThread_runAudioStripPayload(audioStripPayloads_[(size_t)k],
+                                             InstrumentRenderPool::kCallbackLane);
+        }
+        if (jobCount > 0)
+        {
+            instrumentRenderPool_->audioThread_runJobs(instrumentRenderJobs_.data(), jobCount,
+                                                       instrumentRenderSerialHint_.load(std::memory_order_relaxed));
+            if (prof)
+            {
+                profiler.audioThread_noteGenerationSection(instrumentRenderPool_->lastRunWallMs(),
+                                                           instrumentRenderPool_->lastRunJoinWaitMs(),
+                                                           jobCount,
+                                                           instrumentRenderPool_->lastRunWasParallel());
+            }
+        }
+        // SUM (callback thread only, after the join): fan each payload's stage to its dry bus +
+        // sends in `sourceSteps` order; each segment occupies its own disjoint frame range, so
+        // this step-major loop accumulates bit-identically to the serial segment-major order
+        // (plan §3.1). Meters fold exactly the regions the fan reads.
+        if (rp == nullptr || sessionSnap == nullptr)
+        {
+            return; // unreachable: collect activation required both — defensive only
+        }
+        for (int k = 0; k < audioStripPayloadCount_; ++k)
+        {
+            const AudioStripJobPayload& p = audioStripPayloads_[(size_t)k];
+            if (p.step == nullptr || p.trackIndex < 0 || p.trackIndex >= sessionSnap->getNumTracks())
+            {
+                continue;
+            }
+            const TrackId tid = sessionSnap->getTrack(p.trackIndex).getId();
+            for (int s = 0; s < p.numSegments; ++s)
+            {
+                const AudioStripSegmentDesc& seg = p.segments[(size_t)s];
+                if (seg.audibleRun <= 0)
+                {
+                    continue;
+                }
+                audioThread_foldTrackMeterIfMetered(tid,
+                                                    p.stageL + seg.destFrame,
+                                                    p.stageR + seg.destFrame,
+                                                    seg.audibleRun);
+                playback_mix_helpers::fanPostStripStageToDryAndSends(p.stageL,
+                                                                     p.stageR,
+                                                                     seg.destFrame,
+                                                                     seg.audibleRun,
+                                                                     p.step->destBusIndex,
+                                                                     p.step->sends,
+                                                                     *rp);
+            }
+        }
+    };
+
     const auto mixInstrumentsAndFinalizeMaster = [&]() noexcept
     {
         using audio_profiler::Phase;
         std::int64_t tPhase = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
+        dispatchRowJobsAndSumAudioStages();
+        if (prof)
+        {
+            profiler.audioThread_addPhase(Phase::ClipRender, tPhase);
+            tPhase = audio_profiler::AudioThreadProfiler::ticks();
+        }
         renderLiveInputMonitoringPass();
         if (prof)
         {
@@ -1977,9 +2264,81 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             omitClipPlaybackForTrack = recorder_->getRecordingTrackId();
         }
 
-        if (rp != nullptr && !rp->sourceSteps.empty() && postStripStagePtrs_[0] != nullptr
+        if (audioStripCollectActive_ && rp != nullptr && sessionSnap != nullptr)
+        {
+            // COLLECT (Stage A1): describe this segment on each eligible row's payload instead of
+            // rendering here; `dispatchRowJobsAndSumAudioStages` renders (render-pool jobs) and
+            // sums (callback thread, sourceSteps order) after the block's last segment. The
+            // per-step gates are block-constant and IDENTICAL to the activation pre-count, so a
+            // cycle wrap's second call walks the same payloads in the same order.
+            const int destFrame = outFrame0 + silencePrefix;
+            const PluginProcessTransportContext segContext
+                = makeInsertProcessContext(timelineStartAudible);
+            int eligIdx = 0;
+            for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
+            {
+                if (step.destBusIndex < 0
+                    || step.destBusIndex >= static_cast<int>(rp->busScratchL.size()))
+                {
+                    continue;
+                }
+                // C2B: stale-plan guard (see finalize staged bus loop).
+                if (step.trackIndex < 0 || step.trackIndex >= sessionSnap->getNumTracks())
+                {
+                    continue;
+                }
+                const Track& srcTr = sessionSnap->getTrack(step.trackIndex);
+                if (srcTr.getKind() != TrackKind::Audio)
+                {
+                    continue;
+                }
+                // Monitor ON: this track's clip playback (and its insert pass here) is replaced by
+                // the live-input monitoring pass in `mixInstrumentsAndFinalizeMaster`.
+                if (monitorPtr != nullptr && monitorPtr->contains(srcTr.getId()))
+                {
+                    continue;
+                }
+                if (eligIdx >= kMaxAudioStripJobs)
+                {
+                    break; // unreachable: the activation pre-count bounded the eligible set
+                }
+                AudioStripJobPayload& p = audioStripPayloads_[(size_t)eligIdx];
+                if (eligIdx >= audioStripPayloadCount_)
+                {
+                    p = AudioStripJobPayload{};
+                    p.engine = this;
+                    p.sessionSnap = sessionSnap.get();
+                    p.soloView = soloView;
+                    p.chainEntry = insertMapForBlock != nullptr
+                                       ? PluginInsertHost::audioThread_findEntry(*insertMapForBlock,
+                                                                                 srcTr.getId())
+                                       : nullptr;
+                    p.step = &step;
+                    p.stageL = audioStripStageBuffer_.getWritePointer(2 * eligIdx);
+                    p.stageR = audioStripStageBuffer_.getWritePointer(2 * eligIdx + 1);
+                    p.trackIndex = step.trackIndex;
+                    p.timelineEnd = timelineEnd;
+                    audioStripPayloadCount_ = eligIdx + 1;
+                }
+                if (p.numSegments < AudioStripJobPayload::kMaxSegments)
+                {
+                    AudioStripSegmentDesc& seg = p.segments[(size_t)p.numSegments++];
+                    seg.timelineStartAudible = timelineStartAudible;
+                    seg.audibleRun = audibleRun;
+                    seg.destFrame = destFrame;
+                    // Recorder state CAN change between a block's renderRun calls — per segment.
+                    seg.omitClipPlaybackForTrack = omitClipPlaybackForTrack;
+                    seg.insertContext = segContext;
+                }
+                ++eligIdx;
+            }
+        }
+        else if (rp != nullptr && !rp->sourceSteps.empty() && postStripStagePtrs_[0] != nullptr
             && postStripStagePtrs_[1] != nullptr && postStripStageCapacity_ >= audibleRun)
         {
+            // SERIAL strip path (collect inactive: not playing, no pool, capacity exceeded, or
+            // job buffers unprepared). Same strip core as the jobs, on the callback lane with the
+            // host's shared scratch (via the serial wrapper).
             const int destFrame = outFrame0 + silencePrefix;
             for (const RoutingPlan::SourceStep& step : rp->sourceSteps)
             {
@@ -2004,8 +2363,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 {
                     continue;
                 }
-                playback_mix_helpers::clearStereoScratch(
-                    postStripStagePtrs_[0], postStripStagePtrs_[1], audibleRun);
+                // Clear the stage region the strip WRITES ([destFrame, destFrame+audibleRun)):
+                // clearing at 0 while rendering/metering/fanning at destFrame fanned a stale
+                // stage region on every cycle-wrap second segment (pre-existing defect, see the
+                // final A1 report; the per-job stages fix it structurally on the parallel path).
+                playback_mix_helpers::clearStereoScratch(postStripStagePtrs_[0] + destFrame,
+                                                         postStripStagePtrs_[1] + destFrame,
+                                                         audibleRun);
                 playback_mix_helpers::renderAudioTrackPostStripToStereoScratch(
                     *sessionSnap,
                     timelineStartAudible,

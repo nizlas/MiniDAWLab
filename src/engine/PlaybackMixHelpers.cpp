@@ -726,6 +726,29 @@ namespace
             juce::FloatVectorOperations::add(destR + outFrame0, srcR + outFrame0, run);
         }
     }
+
+    /// Add processed CHAIN scratch (data at [0, run)) into the stage at `destFrame0`. The offset
+    /// applies to the DESTINATION only: the insert chain always processes its scratch from sample
+    /// 0, so reading the source at the destination offset (what `addStereoScratchToStereoScratch`
+    /// does) would add stale scratch content whenever `destFrame0 > 0` — a real defect on the
+    /// cycle-wrap second segment of an insert-active audio row, fixed with this helper (the
+    /// legacy device-output path `addStereoScratchToDeviceOutputs` always read from 0 correctly).
+    void addChainScratchToStageAtDest(float* destL,
+                                      float* destR,
+                                      const float* srcL,
+                                      const float* srcR,
+                                      const int destFrame0,
+                                      const int run) noexcept
+    {
+        if (destL != nullptr && srcL != nullptr)
+        {
+            juce::FloatVectorOperations::add(destL + destFrame0, srcL, run);
+        }
+        if (destR != nullptr && srcR != nullptr)
+        {
+            juce::FloatVectorOperations::add(destR + destFrame0, srcR, run);
+        }
+    }
 } // namespace
 
 void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,
@@ -740,6 +763,43 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               const int trackIndex,
                                               PreGainRampState* const preGainRamp,
                                               const SoloMuteView* const soloView) noexcept
+{
+    // Serial wrapper: resolve the chain entry and the host's shared buffers, then run the same
+    // strip core the render-pool jobs run (one DSP implementation, Stage A1).
+    AudioStripInsertAccess access;
+    std::shared_ptr<const PluginAudioThreadMap> map; // keeps the entry alive for this call
+    if (pluginHost != nullptr && trackIndex >= 0 && trackIndex < sessionSnap.getNumTracks())
+    {
+        map = pluginHost->audioThread_acquireMapForBlock();
+        if (map != nullptr)
+        {
+            access.host = pluginHost;
+            access.entry = PluginInsertHost::audioThread_findEntry(*map, sessionSnap.getTrack(trackIndex).getId());
+            access.chainScratch = pluginHost->audioThread_getScratchWritePointers();
+            access.chainScratchCapacity = pluginHost->audioThread_sharedChainScratchCapacity();
+            access.chainMidiScratch = &pluginHost->audioThread_sharedChainMidiScratch();
+            access.laneIndex = PluginInsertHost::kCallbackProcessingLane;
+        }
+    }
+    renderAudioTrackPostStripToStereoScratchWithChainAccess(sessionSnap, timelineStartAudible,
+                                                            audibleRun, destOutFrame0, stageL,
+                                                            stageR, access, omitClipPlaybackForTrack,
+                                                            timelineEnd, trackIndex, preGainRamp,
+                                                            soloView);
+}
+
+void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapshot& sessionSnap,
+                                                             const std::int64_t timelineStartAudible,
+                                                             const int audibleRun,
+                                                             const int destOutFrame0,
+                                                             float* stageL,
+                                                             float* stageR,
+                                                             const AudioStripInsertAccess& access,
+                                                             const TrackId omitClipPlaybackForTrack,
+                                                             const std::int64_t timelineEnd,
+                                                             const int trackIndex,
+                                                             PreGainRampState* const preGainRamp,
+                                                             const SoloMuteView* const soloView) noexcept
 {
     if (audibleRun <= 0 || stageL == nullptr || stageR == nullptr || trackIndex < 0
         || trackIndex >= sessionSnap.getNumTracks())
@@ -775,8 +835,9 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
     const bool preGainRamping = std::fabs(preGainStart - preGainTarget) > 1.0e-6f;
 
     const std::vector<PlacedClip>& lane = tr.getPlacedClips();
-    const bool useInsert
-        = pluginHost != nullptr && pluginHost->audioThread_hasActivePluginForTrack(tr.getId());
+    // Same gate as `audioThread_hasActivePluginForTrack`, resolved on the caller's entry.
+    const bool useInsert = access.host != nullptr && access.entry != nullptr
+                           && PluginInsertHost::audioThread_entryHasActiveSlot(*access.entry);
     std::int64_t t = timelineStartAudible;
     int out0 = 0;
     while (out0 < audibleRun)
@@ -812,9 +873,10 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
 
             if (useInsert && effectiveGain > 0.0f)
             {
-                pluginHost->audioThread_clearScratch(PluginInsertHost::kInsertChannels, run);
-                if (float* const* scratch = pluginHost->audioThread_getScratchWritePointers())
+                if (access.buffersUsable())
                 {
+                    float* const* scratch = access.chainScratch;
+                    clearStereoScratch(scratch[0], scratch[1], juce::jmin(run, access.chainScratchCapacity));
                     copyClipRunToStereoScratch(c, off, run, scratch[0], scratch[1]);
                     if (preGainRamping)
                     {
@@ -824,14 +886,20 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                     {
                         scaleStereoScratch(scratch, run, preGainTarget);
                     }
-                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Pre, run);
+                    access.host->audioThread_processEntryChain(*access.entry, InsertStage::Pre, run,
+                                                               scratch, access.chainScratchCapacity,
+                                                               *access.chainMidiScratch, access.laneIndex);
                     scaleStereoScratch(scratch, run, effectiveGain);
-                    pluginHost->audioThread_processChainForTrack(tr.getId(), InsertStage::Post, run);
+                    access.host->audioThread_processEntryChain(*access.entry, InsertStage::Post, run,
+                                                               scratch, access.chainScratchCapacity,
+                                                               *access.chainMidiScratch, access.laneIndex);
                     multiplyStereoScratchLR(scratch,
                                             run,
                                             trackPanLawGainLeft(tr.getStereoPan()),
                                             trackPanLawGainRight(tr.getStereoPan()));
-                    addStereoScratchToStereoScratch(
+                    // Chain data lives at scratch[0, run): add it at the stage's destination
+                    // offset (dest-offset-only — see `addChainScratchToStageAtDest`).
+                    addChainScratchToStageAtDest(
                         stageL, stageR, scratch[0], scratch[1], destFrame, run);
                 }
             }

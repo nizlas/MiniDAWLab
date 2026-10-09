@@ -481,6 +481,88 @@ private:
     void invokeExperimentalInstrumentBeginBlocks(const ExperimentalInstrumentPlaybackSnapshot* instrumentSnap,
                                                  int numSamples) noexcept;
 
+    // -----------------------------------------------------------------------
+    // Stage A1 — parallel audio-row strips (docs/PARALLEL_AUDIO_AND_READAHEAD_PLAN.md §3)
+    // -----------------------------------------------------------------------
+    // One render-pool job per eligible `RoutingPlan::SourceStep` Audio row renders the row's
+    // complete strip — clip segments (both cycle-wrap segments), pre-gain, Pre inserts,
+    // fader/mute, Post inserts, pan — into the row's OWN preallocated stage buffer. Jobs never
+    // touch shared bus scratch; after the join the callback fans the stages to dry bus + sends
+    // in `sourceSteps` order and the segments' disjoint frame ranges, reproducing today's
+    // verified accumulation order bit-for-bit (plan §3.1). Audio strip jobs and instrument
+    // generation jobs are dispatched as ONE batch (one barrier per block). Buses, monitoring,
+    // instrument strips, proxies, offline export stay serial. The pool's serial path runs the
+    // SAME job code on the callback lane (`--instrument-workers 0` = identical-DSP serial mode).
+
+    /// One timeline segment of an audio strip job (≤ 2 per device block: cycle wrap).
+    struct AudioStripSegmentDesc
+    {
+        std::int64_t timelineStartAudible = 0;
+        int audibleRun = 0;
+        /// Offset of this segment in the job's stage buffer AND in the destination bus buffers
+        /// (`outFrame0 + silencePrefix`) — the segments' frame ranges are disjoint.
+        int destFrame = 0;
+        TrackId omitClipPlaybackForTrack = kInvalidTrackId;
+        /// Value copy of this segment's transport context: the job writes it into its OWN
+        /// chain playhead only (plan §3.2 #10 — no shared mutable transport context).
+        PluginProcessTransportContext insertContext;
+    };
+
+    /// One audio row's strip job. Written by the callback during segment collection, read by
+    /// exactly one claimant (worker lane or the callback lane), summed after the join. All
+    /// referenced objects (snapshot, solo view, plan step, insert map entry) are retained by
+    /// the callback for the whole block, which the jobs never outlive.
+    struct AudioStripJobPayload
+    {
+        static constexpr int kMaxSegments = 4; ///< 2 occur today (cycle wrap); margin is defensive
+
+        PlaybackEngine* engine = nullptr;
+        const SessionSnapshot* sessionSnap = nullptr;
+        const SoloMuteView* soloView = nullptr;
+        /// Resolved insert chain (null = row has none). Points into the block's acquired
+        /// `PluginAudioThreadMap`, which the callback retains until every job has joined.
+        const PluginAudioThreadMap::Entry* chainEntry = nullptr;
+        const RoutingPlan::SourceStep* step = nullptr; ///< kept alive by the callback's plan retain
+        float* stageL = nullptr; ///< this job's OWN stage buffer (block capacity)
+        float* stageR = nullptr;
+        int trackIndex = -1;
+        std::int64_t timelineEnd = 0;
+        int numSegments = 0;
+        std::array<AudioStripSegmentDesc, kMaxSegments> segments{};
+    };
+
+    /// Preallocated payload slots (grow-never, audio thread writes between dispatch and join
+    /// only). More eligible rows than this = the whole block renders on the serial inline path
+    /// (same job code on the callback lane) — rows are NEVER dropped or split across modes.
+    static constexpr int kMaxAudioStripJobs = 192;
+
+    /// [Render-pool job entry] Runs `audioThread_runAudioStripPayload` on the claiming lane.
+    static void runAudioStripRenderJob(instrument_render::RenderJob& job, int laneIndex) noexcept;
+    /// [One job thread per payload, or the callback lane serially] Render the payload's clip
+    /// segments + strip into its own stage buffer using the lane's exclusive chain scratch /
+    /// MIDI scratch. No allocation, no locks, no shared-bus writes.
+    void audioThread_runAudioStripPayload(AudioStripJobPayload& payload, int laneIndex) noexcept;
+    /// [Message thread, device stopped] Pre-size the per-job stage buffers, per-lane insert
+    /// scratch and per-lane MIDI scratch for the device block size.
+    void ensureAudioStripJobBuffersCapacity(int numSamples) noexcept;
+
+    std::array<AudioStripJobPayload, kMaxAudioStripJobs> audioStripPayloads_{};
+    int audioStripPayloadCount_ = 0;       ///< [audio thread] valid for the current block only
+    bool audioStripCollectActive_ = false; ///< [audio thread] this block collects strip jobs
+    /// Per-job stage buffers: channels 2k / 2k+1 belong to payload k.
+    juce::AudioBuffer<float> audioStripStageBuffer_;
+    int audioStripStageCapacity_ = 0;
+    /// Per-LANE insert chain scratch + MIDI scratch (lane = render-pool worker index, last lane =
+    /// callback). A job runs entirely on one lane, so these are exclusive while it runs.
+    juce::AudioBuffer<float> insertLaneScratch_;
+    float* insertLaneScratchPtrs_[instrument_render::InstrumentRenderPool::kNumLanes][2] = {};
+    int insertLaneScratchCapacity_ = 0;
+    std::array<juce::MidiBuffer, instrument_render::InstrumentRenderPool::kNumLanes> insertLaneMidi_;
+    /// Last strip-job duration per track index (longest-first ordering key, same role as the
+    /// instrument hosts' `audioThread_lastRenderTicksRelaxed`). Written by the job that owns the
+    /// row, read by the callback before the next dispatch (ordered by the pool's join).
+    std::array<std::int64_t, 1024> audioStripLastRenderTicks_{};
+
     /// [Audio thread] Fold one finished callback into the diagnostic load window (relaxed atomics).
     void audioThread_accumulateCallbackLoad(int numSamples, std::int64_t startTicks) noexcept;
 
