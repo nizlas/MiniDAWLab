@@ -30,6 +30,12 @@
 //     before-destroy + bounded worker pause; chain edits late-apply like other controls);
 //   * Save capture window: adoption hold + gapless drain, state captured with zero lead at the
 //     capture point, playback resumes gaplessly — the whole save is audibly a no-op;
+//   * FAILURE contract (pause ack / save window): a holdable probe parks the worker INSIDE
+//     processBlock; a pause timeout confers NO exclusivity (false return), the blocked worker is
+//     never overlapped (Abandoning waits) or destroyed/prepared over, chain retire and device
+//     stop WAIT for the real ack, a stalled drain FAILS the save window cleanly (error Result,
+//     previous file byte-identical, dirty kept, deferred retry works), and Playing->Paused
+//     during the drain wait resolves to the paused-capture semantics;
 //   * no instance is ever processed concurrently or destroyed/prepared while processing.
 // Accounting honesty (model doc §10): "consumed + missed == total" alone proves nothing about
 // audio correctness — the proof here is bit-identity plus the probes' recorded call sequences;
@@ -48,6 +54,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/PluginStateCaptureWindow.h"
 #include "domain/AudioClip.h"
 #include "domain/Session.h"
 #include "domain/SessionSnapshot.h"
@@ -142,6 +149,21 @@ public:
         {
             gOverlaps.fetch_add(1, std::memory_order_relaxed);
         }
+        // Controlled synchronization for the pause-contract tests: when the gate is armed, PARK
+        // inside this call (the worker is now provably mid-plugin-call) until the test releases
+        // the gate. The 10 s hard cap guarantees the test process terminates even when an
+        // assertion failed before the releasing line ran.
+        if (holdGate_.load(std::memory_order_acquire) != 0)
+        {
+            holding_.store(1, std::memory_order_release);
+            const auto holdCap = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (holdGate_.load(std::memory_order_acquire) != 0
+                   && std::chrono::steady_clock::now() < holdCap)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            holding_.store(0, std::memory_order_release);
+        }
         Call c;
         c.numSamples = buffer.getNumSamples();
         if (juce::AudioPlayHead* const ph = getPlayHead())
@@ -208,8 +230,20 @@ public:
         return samplesProcessed_.load(std::memory_order_acquire);
     }
 
+    /// Arm/release the in-processBlock park (see processBlock). Callable from any thread.
+    void setHoldInProcessBlock(const bool hold) noexcept
+    {
+        holdGate_.store(hold ? 1 : 0, std::memory_order_release);
+    }
+    [[nodiscard]] bool isHeldInProcessBlock() const noexcept
+    {
+        return holding_.load(std::memory_order_acquire) != 0;
+    }
+
 private:
     const float gain_;
+    std::atomic<int> holdGate_{ 0 };
+    std::atomic<int> holding_{ 0 };
     std::atomic<int> inProcess_{ 0 };
     std::atomic<int> callCount_{ 0 };
     std::atomic<std::uint64_t> samplesProcessed_{ 0 };
@@ -242,7 +276,10 @@ public:
     int getInputLatencyInSamples() override { return 0; }
 };
 
-[[nodiscard]] std::shared_ptr<const AudioClip> makeNoiseClip(const std::uint32_t seed, const int numSamples)
+/// `sourceDescription` override: the save path requires clip sources to be EXISTING files under
+/// the project's Audio/ folder — the guarded-save test passes real temp-file paths here.
+[[nodiscard]] std::shared_ptr<const AudioClip> makeNoiseClip(const std::uint32_t seed, const int numSamples,
+                                                             const juce::String& sourceDescription = {})
 {
     juce::AudioBuffer<float> buf(2, numSamples);
     std::uint32_t s = seed * 2654435761u + 12345u;
@@ -256,7 +293,9 @@ public:
         }
     }
     return std::make_shared<const AudioClip>(std::move(buf), kRate,
-                                             juce::String("ra-noise-") + juce::String((int)seed));
+                                             sourceDescription.isNotEmpty()
+                                                 ? sourceDescription
+                                                 : juce::String("ra-noise-") + juce::String((int)seed));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -369,6 +408,32 @@ struct Harness
     {
         return runPlayingBlocks(blocks, startSample, [this](int) { pumpUntilIdle(); });
     }
+
+    /// Run `blocks` raw production callbacks against the CURRENT transport state — no seek, no
+    /// intent change, no trailing stop edge (unlike runPlayingBlocks). Returns the output peak.
+    /// `sleepMicrosBetween` gives a real worker thread breathing room between callbacks.
+    [[nodiscard]] double runCallbackBlocks(const int blocks, const int sleepMicrosBetween = 0)
+    {
+        juce::AudioBuffer<float> blk(2, kBlock);
+        float* ptrs[2] = { blk.getWritePointer(0), blk.getWritePointer(1) };
+        juce::AudioIODeviceCallbackContext ctx;
+        double peak = 0.0;
+        for (int b = 0; b < blocks; ++b)
+        {
+            blk.clear();
+            engine.audioDeviceIOCallbackWithContext(nullptr, 0, ptrs, 2, kBlock, ctx);
+            for (int i = 0; i < kBlock; ++i)
+            {
+                peak = std::max(peak, std::fabs((double)ptrs[0][i]));
+                peak = std::max(peak, std::fabs((double)ptrs[1][i]));
+            }
+            if (sleepMicrosBetween > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(sleepMicrosBetween));
+            }
+        }
+        return peak;
+    }
 };
 
 /// Standard fixture: default empty audio row + 3 clip rows; row B carries the stateful probe
@@ -380,13 +445,24 @@ struct Fixture
     StatefulProbeInsert* pre = nullptr;
     StatefulProbeInsert* post = nullptr;
 
-    explicit Fixture(const int readAheadDepth) : h(readAheadDepth)
+    /// `clipSourceAudioDir`: when set, clip source descriptions become absolute paths of (dummy)
+    /// files inside that directory — required by the project save path (sources must be existing
+    /// files under the project's Audio/ folder).
+    explicit Fixture(const int readAheadDepth, const juce::File* clipSourceAudioDir = nullptr)
+        : h(readAheadDepth)
     {
         constexpr int kClipLen = kBlock * 400;
+        const auto sourceFor = [clipSourceAudioDir](const int seed) -> juce::String {
+            return clipSourceAudioDir == nullptr
+                       ? juce::String()
+                       : clipSourceAudioDir
+                             ->getChildFile("ra-noise-" + juce::String(seed) + ".wav")
+                             .getFullPathName();
+        };
         h.session.addGroupTrack();
-        h.addAudioTrackWithClip(makeNoiseClip(7, kClipLen));
-        h.addAudioTrackWithClip(makeNoiseClip(13, kClipLen));
-        h.addAudioTrackWithClip(makeNoiseClip(29, kClipLen));
+        h.addAudioTrackWithClip(makeNoiseClip(7, kClipLen, sourceFor(7)));
+        h.addAudioTrackWithClip(makeNoiseClip(13, kClipLen, sourceFor(13)));
+        h.addAudioTrackWithClip(makeNoiseClip(29, kClipLen, sourceFor(29)));
         {
             const auto snap = h.session.loadSessionSnapshotForAudioThread();
             for (int i = 0; snap != nullptr && i < snap->getNumTracks(); ++i)
@@ -1002,9 +1078,11 @@ void testSaveCaptureWindow()
             drainedAtCapture = !ra->audioThread_anyOwned();
             // Zero state lead: the chain processed EXACTLY the audibly consumed stream — blocks
             // 0..12 inclusive, nothing ahead. getStateInformation here is the production-path
-            // concurrency class (worker paused, callback-only processing).
-            ra->pauseWorkerAndWait();
-            stateLeadZeroAtCapture = on.pre->callCount() == kCaptureAtBlock + 1
+            // concurrency class (worker paused, callback-only processing). Pump mode acquires
+            // the pause trivially (the pump and this call share the thread).
+            const bool pausedForCapture = ra->pauseWorkerAndWait();
+            stateLeadZeroAtCapture = pausedForCapture
+                                     && on.pre->callCount() == kCaptureAtBlock + 1
                                      && on.pre->samplesProcessed()
                                             == (std::uint64_t)(kCaptureAtBlock + 1) * kBlock;
             on.pre->getStateInformation(capturedState);
@@ -1032,12 +1110,184 @@ void testSaveCaptureWindow()
     // Engine-level wrapper smoke: with a non-playing transport the capture window must return
     // promptly (no drain wait — nothing consumes while stopped; model doc §9).
     const auto tStart = std::chrono::steady_clock::now();
-    on.h.engine.beginPluginStateCaptureWindow();
-    on.h.engine.endPluginStateCaptureWindow();
+    const bool windowOk = on.h.engine.beginPluginStateCaptureWindow();
+    if (windowOk)
+    {
+        on.h.engine.endPluginStateCaptureWindow();
+    }
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now() - tStart)
                                .count();
+    expect(windowOk, "non-playing engine-level capture window succeeds");
     expect(elapsedMs < 400, "non-playing engine-level capture window returns promptly (no 500ms wait)");
+}
+
+// =============================================================================================
+void testSaveWindowDrainFailureAndPausedTransition()
+{
+    std::printf("\n-- save window FAILURE contract: stalled drain fails cleanly; Playing->Paused resolves --\n");
+
+    Fixture on(kDepth);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+
+    // Drive playback manually: the intent STAYS Playing across the save attempts (runPlayingBlocks
+    // would end the run with a stop edge).
+    on.h.transport.requestSeek(0);
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    for (int b = 0; b < 8; ++b)
+    {
+        (void)on.h.runCallbackBlocks(1);
+        on.h.pumpUntilIdle();
+    }
+    expect(ra->audioThread_anyOwned(), "rows owned before the save attempts");
+
+    // (a) The device stalls: intent claims Playing but NO callbacks run during the wait (the
+    //     single-threaded pump test IS that scenario), so the gapless drain can never complete.
+    //     The window must FAIL in bounded time and unwind its hold — never capture as if it
+    //     had succeeded.
+    on.h.engine.setStateCaptureDrainTimeoutMsForTests(60);
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool stalledWindow = on.h.engine.beginPluginStateCaptureWindow();
+    const auto msStalled = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+    if (stalledWindow)
+    {
+        on.h.engine.endPluginStateCaptureWindow(); // never leak the window on a FAILED expectation
+    }
+    expect(!stalledWindow, "drain that cannot complete FAILS the window (no false success)");
+    expect(msStalled < 3000, "the failure is bounded (message-thread wait, injectable timeout)");
+
+    // The failed window left no gate behind: playback continues hit-for-hit, ownership intact.
+    const auto cBefore = ra->countersSnapshot();
+    for (int b = 0; b < 6; ++b)
+    {
+        (void)on.h.runCallbackBlocks(1);
+        on.h.pumpUntilIdle();
+    }
+    const auto cMid = ra->countersSnapshot();
+    expect(ra->audioThread_anyOwned(), "ownership survived the failed window");
+    expect(cMid.missedSegments == cBefore.missedSegments && cMid.discardResets == cBefore.discardResets
+               && cMid.drainReleases == cBefore.drainReleases,
+           "no miss, no reset, no drain release after the failed window (all gates unwound)");
+
+    // (b) Playing -> Paused DURING the drain wait: the window must resolve to the paused-capture
+    //     semantics (rows stay owned, documented <= depth state lead) instead of riding into the
+    //     timeout — the intent is re-read every wait iteration.
+    on.h.engine.setStateCaptureDrainTimeoutMsForTests(5000);
+    std::thread flipper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        on.h.transport.requestPlaybackIntent(PlaybackIntent::Paused);
+    });
+    const auto t1 = std::chrono::steady_clock::now();
+    const bool pausedWindow = on.h.engine.beginPluginStateCaptureWindow();
+    const auto msPaused = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t1)
+                              .count();
+    flipper.join();
+    expect(pausedWindow, "window succeeds once the transport leaves Playing mid-wait");
+    expect(msPaused < 4000, "the Playing->Paused transition resolved the wait (not the full timeout)");
+    expect(ra->audioThread_anyOwned(), "paused-capture semantics: rows stay owned (<= depth lead)");
+    if (pausedWindow)
+    {
+        on.h.engine.endPluginStateCaptureWindow();
+    }
+    on.h.engine.setStateCaptureDrainTimeoutMsForTests(500);
+
+    // Resume: the queue continues (pause/resume continuation), the stream stayed clean end to end.
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    for (int b = 0; b < 8; ++b)
+    {
+        (void)on.h.runCallbackBlocks(1);
+        on.h.pumpUntilIdle();
+    }
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+    const auto c = ra->countersSnapshot();
+    printCounters(c, "drain-failure counters");
+    expect(c.missedSegments == 0 && c.discardResets == 0 && c.staleDiscarded == 0,
+           "whole scenario: no miss, no reset, nothing stale");
+    expect(countStreamBreaks(on.pre) == 0,
+           "chain stream contiguous through the failed window AND the paused window");
+    expect(gOverlaps.load() == 0, "no concurrent processing");
+}
+
+// =============================================================================================
+void testGuardedSaveFailurePreservesFileAndRetry()
+{
+    std::printf("\n-- guarded save: failed window => error + previous file + dirty kept; retry succeeds --\n");
+
+    // Real project folder layout: the save path requires clip sources to be existing files under
+    // <projectDir>/Audio/, so dummy source files are created and the fixture's clips point at them.
+    const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                               .getChildFile("ra-save-window-tests");
+    (void)dir.deleteRecursively();
+    const juce::File audioDir = dir.getChildFile("Audio");
+    expect(audioDir.createDirectory().wasOk(), "temp project Audio dir created");
+    for (const int seed : { 7, 13, 29 })
+    {
+        const juce::Result made
+            = audioDir.getChildFile("ra-noise-" + juce::String(seed) + ".wav").create();
+        expect(made.wasOk(), "dummy clip source file created");
+    }
+    Fixture on(kDepth, &audioDir);
+    const juce::File projectFile = dir.getChildFile("guarded-save.mdlproj");
+
+    // The production decision shape (ProjectIoCoordinator around every saveProjectToFile call):
+    // open the capture window; only a SUCCEEDED window may write; only a wasOk() result may mark
+    // the project clean. `dirty` models the coordinator's dirty flag with that exact rule.
+    bool dirty = true;
+    const auto guardedSave = [&]() -> juce::Result {
+        ScopedPluginStateCaptureWindow window(on.h.engine);
+        const juce::Result r = window.succeeded()
+                                   ? on.h.session.saveProjectToFile(on.h.transport, projectFile,
+                                                                    kRate, &on.h.pluginHost)
+                                   : juce::Result::fail("read-ahead capture window failed");
+        if (r.wasOk())
+        {
+            dirty = false; // markProjectCleanNow analogue: ONLY on a completed save
+        }
+        return r;
+    };
+
+    const juce::Result r1 = guardedSave();
+    expect(r1.wasOk(), "baseline save succeeds (stopped transport, window trivial)");
+    expect(!dirty, "baseline save marked the project clean");
+    juce::MemoryBlock baseline;
+    expect(projectFile.loadFileAsData(baseline) && baseline.getSize() > 0, "baseline file written");
+
+    // Dirty edit, then playback with a stalled drain (no callbacks run during the wait).
+    on.h.session.setTrackChannelFaderGain(on.h.audioTids[2], 0.33f);
+    dirty = true;
+    on.h.transport.requestSeek(0);
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    for (int b = 0; b < 6; ++b)
+    {
+        (void)on.h.runCallbackBlocks(1);
+        on.h.pumpUntilIdle();
+    }
+    on.h.engine.setStateCaptureDrainTimeoutMsForTests(50);
+
+    const juce::Result r2 = guardedSave();
+    expect(!r2.wasOk(), "save with a stalled drain FAILS (an error Result, never silent success)");
+    expect(dirty, "the failed save did NOT mark the project clean");
+    juce::MemoryBlock afterFail;
+    expect(projectFile.loadFileAsData(afterFail) && afterFail == baseline,
+           "existing project file byte-identical after the failed save (not corrupted or replaced)");
+
+    // Deferred retry (user retry / the autosave timer tick): once the window can complete, the
+    // SAME guarded flow succeeds and the pending edit lands.
+    on.h.engine.setStateCaptureDrainTimeoutMsForTests(500);
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+    const juce::Result r3 = guardedSave();
+    expect(r3.wasOk(), "deferred retry succeeds once the window can complete");
+    expect(!dirty, "the successful retry marked the project clean");
+    juce::MemoryBlock afterRetry;
+    expect(projectFile.loadFileAsData(afterRetry) && !(afterRetry == baseline),
+           "the retry wrote the NEW content (the pending fader edit persisted)");
+
+    (void)dir.deleteRecursively();
 }
 
 // =============================================================================================
@@ -1073,6 +1323,171 @@ void testWorkerThreadSmoke()
            "no concurrent processing / lifetime violations under the real thread");
 }
 
+/// Thread-mode fixture whose worker is parked INSIDE the probe row's Pre processBlock. Returns
+/// once the park is confirmed (bounded); the probe's 10 s hard cap guarantees termination even
+/// when a test assertion fails before the release line runs.
+[[nodiscard]] bool parkWorkerInsideProbe(Fixture& on)
+{
+    on.pre->setHoldInProcessBlock(true);
+    on.h.transport.requestSeek(0);
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    (void)on.h.runCallbackBlocks(2, 2000); // adopt the rows; the worker produces on its own
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!on.pre->isHeldInProcessBlock() && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return on.pre->isHeldInProcessBlock();
+}
+
+// =============================================================================================
+void testWorkerPauseAckTimeoutContract()
+{
+    std::printf("\n-- pause-ack timeout contract: no false exclusivity, no overlap, late-ack recovery --\n");
+
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Fixture on(0); // thread-mode renderer via the CLI-flag path
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+    expect(ra != nullptr, "thread-mode renderer constructed");
+    expect(parkWorkerInsideProbe(on), "worker parked inside the probe's processBlock");
+
+    // (1) The production decision logic with an injectable bound: a pause that is NOT really
+    //     acknowledged returns false — it confers no exclusivity and withdraws its request.
+    ra->setPauseAckTimeoutMsForTests(50);
+    expect(!ra->pauseWorkerAndWait(), "pause times out mid-plugin-call: returns false (no exclusivity)");
+
+    // (2) The save window on top of that failed pause: FAILS, no state capture happens. (Paused
+    //     intent: the window skips the drain wait and goes straight to the pause attempt.)
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Paused);
+    const bool blockedWindow = on.h.engine.beginPluginStateCaptureWindow();
+    if (blockedWindow)
+    {
+        on.h.engine.endPluginStateCaptureWindow(); // never leak the window on a FAILED expectation
+    }
+    expect(!blockedWindow, "capture window FAILS while the pause cannot be acknowledged");
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+
+    // (3) The audio callback was never blocked: it keeps running, the starved rows go
+    //     miss -> abandon, and the Abandoning row WAITS for the worker — the in-flight
+    //     processBlock is never overlapped by the live path and never loses its resources.
+    (void)on.h.runCallbackBlocks(8, 2000);
+    expect(on.pre->isHeldInProcessBlock(), "worker STILL inside the original processBlock call");
+    expect(gOverlaps.load() == 0, "abandon under a blocked worker never overlapped the chain");
+
+    // (4) Late acknowledgment: release the plugin call from a helper thread; a pause with a
+    //     generous bound must succeed, and ONLY after the real release (no permanent lock, no
+    //     premature resume of anything).
+    std::atomic<bool> releasedFirst{ false };
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        releasedFirst.store(true, std::memory_order_release);
+        on.pre->setHoldInProcessBlock(false);
+    });
+    ra->setPauseAckTimeoutMsForTests(5000);
+    const bool ackAfterRelease = ra->pauseWorkerAndWait();
+    const bool releaseCameFirst = releasedFirst.load(std::memory_order_acquire);
+    releaser.join();
+    expect(ackAfterRelease, "pause acknowledged after the plugin call returned (late-ack recovery)");
+    expect(releaseCameFirst, "the ack arrived ONLY after the real release — never before");
+    ra->resumeWorker();
+
+    // (5) Full recovery: a normal capture window works again.
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+    const bool recoveredWindow = on.h.engine.beginPluginStateCaptureWindow();
+    if (recoveredWindow)
+    {
+        on.h.engine.endPluginStateCaptureWindow();
+    }
+    expect(recoveredWindow, "capture window succeeds after the worker recovered");
+
+    ra->setPauseAckTimeoutMsForTests(2000);
+    expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0
+               && gPreparedWhileProcessing.load() == 0,
+           "lifetime guards clean through timeout, late ack and recovery");
+}
+
+// =============================================================================================
+void testChainRemovalWaitsForBlockedWorker()
+{
+    std::printf("\n-- chain removal under a BLOCKED worker: retire waits for the REAL ack before destroy --\n");
+
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Fixture on(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+    expect(parkWorkerInsideProbe(on), "worker parked inside the probe's processBlock before the edit");
+
+    // Short per-attempt bound: the retire path must RETRY until the real ack instead of falling
+    // through — the instances may only be destroyed after the in-flight plugin call returned.
+    ra->setPauseAckTimeoutMsForTests(50);
+    std::atomic<bool> releasedFirst{ false };
+    StatefulProbeInsert* const heldPre = on.pre;
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        releasedFirst.store(true, std::memory_order_release);
+        heldPre->setHoldInProcessBlock(false); // the store is the releaser's LAST touch
+    });
+    on.h.pluginHost.removePlugin(on.h.audioTids[1]); // publish -> drain hook -> destroy
+    const bool releaseCameFirst = releasedFirst.load(std::memory_order_acquire);
+    on.pre = nullptr;
+    on.post = nullptr;
+    releaser.join();
+
+    expect(releaseCameFirst,
+           "removePlugin returned only AFTER the worker released (retire stalled, never fell through)");
+    expect(gDestroyedWhileProcessing.load() == 0,
+           "retired instances never destroyed while the worker was inside them");
+    expect(gOverlaps.load() == 0 && gPreparedWhileProcessing.load() == 0, "concurrency guards clean");
+
+    ra->setPauseAckTimeoutMsForTests(2000);
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+}
+
+// =============================================================================================
+void testDeviceStopWaitsForBlockedWorker()
+{
+    std::printf("\n-- device stop under a BLOCKED worker: row teardown waits before releaseResources --\n");
+
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Fixture on(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+    expect(parkWorkerInsideProbe(on), "worker parked inside the probe's processBlock before the stop");
+
+    // Short per-attempt bound again: releaseForDevice must BLOCK (retrying) until the real ack —
+    // the engine calls the host's releaseResources right after it, mirroring JUCE's guarantee
+    // that no callback runs during teardown.
+    ra->setPauseAckTimeoutMsForTests(50);
+    std::atomic<bool> releasedFirst{ false };
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        releasedFirst.store(true, std::memory_order_release);
+        on.pre->setHoldInProcessBlock(false);
+    });
+    on.h.engine.audioDeviceStopped(); // production device-stop path
+    const bool releaseCameFirst = releasedFirst.load(std::memory_order_acquire);
+    releaser.join();
+
+    expect(releaseCameFirst, "audioDeviceStopped returned only AFTER the worker really released");
+    expect(gPreparedWhileProcessing.load() == 0,
+           "releaseResources never overlapped the worker's in-flight processBlock");
+    expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0, "guards clean");
+
+    // Device restart: the renderer leaves its between-devices park and plays normally again.
+    ra->setPauseAckTimeoutMsForTests(2000);
+    on.h.engine.audioDeviceAboutToStart(&on.h.device);
+    const double peak = on.h.runCallbackBlocks(16, 2000);
+    expect(peak > 0.01, "audible playback after the device restart");
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Stopped);
+    (void)on.h.runCallbackBlocks(1);
+    expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0
+               && gPreparedWhileProcessing.load() == 0,
+           "lifetime guards clean through stop, blocked teardown and restart");
+}
+
 } // namespace
 
 int main()
@@ -1094,7 +1509,12 @@ int main()
     testMonitorImmediateHandover();
     testChainRemovalWhileOwned();
     testSaveCaptureWindow();
+    testSaveWindowDrainFailureAndPausedTransition();
+    testGuardedSaveFailurePreservesFileAndRetry();
     testWorkerThreadSmoke();
+    testWorkerPauseAckTimeoutContract();
+    testChainRemovalWaitsForBlockedWorker();
+    testDeviceStopWaitsForBlockedWorker();
 
     std::printf("\n%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
