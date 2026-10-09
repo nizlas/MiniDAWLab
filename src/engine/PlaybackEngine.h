@@ -272,10 +272,19 @@ public:
     /// focused tests (no worker thread; the test drives it via `experimentalReadAhead()`).
     void enableExperimentalReadAheadForTests(int depthBlocks);
     [[nodiscard]] readahead::ReadAheadRenderer* experimentalReadAhead() noexcept { return readAhead_.get(); }
-    /// [Message thread] Pause the read-ahead worker, request a full ownership reset and resume —
-    /// bracket for windows needing exclusive chain access off the callback (plugin retire
-    /// destroy; wired next to `waitForAudioCallbackExit` in the publish-before-destroy hook).
-    void quiesceReadAheadForExclusiveChainAccess() noexcept;
+    /// [Message thread] Bounded pause+resume of the read-ahead worker — the publish-before-
+    /// destroy hook calls this AFTER the new insert map is published and the callback was waited
+    /// out: an acknowledged pause proves the worker is outside every chain render that could
+    /// still reference retired instances; after the resume it only ever acquires the new map.
+    /// Ownership and queues survive (model doc §8) — chain edits late-apply like other controls.
+    void pauseReadAheadWorkerAfterChainPublish() noexcept;
+    /// [Message thread] Plugin-state capture window for Save / Save As / autosave (model doc
+    /// §9): gates adoption off, gaplessly drains owned rows while playback consumption runs
+    /// (bounded wait; skipped when the transport is not playing because nothing consumes), then
+    /// pauses the worker. `getStateInformation` inside the window reads instances processed by
+    /// the audio callback only — the A1/A2 save concurrency class. Never blocks the callback.
+    void beginPluginStateCaptureWindow() noexcept;
+    void endPluginStateCaptureWindow() noexcept;
 
     [[nodiscard]] instrument_render::InstrumentRenderPool::Stats instrumentRenderPoolStats() const noexcept
     {
@@ -631,13 +640,15 @@ private:
     /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md); null unless explicitly enabled.
     std::unique_ptr<readahead::ReadAheadRenderer> readAhead_;
     /// [Audio thread, block-stable after the read-ahead block begin] Owned rows excluded from the
-    /// global transport-context refresh, and this block's single linear consume key (owned rows
-    /// are adopted only in the one-segment, zero-offset regime; anything else is a counted miss).
+    /// global transport-context refresh, and this block's consume keys — one per `renderRun`
+    /// segment (a cycle-wrap block has two: up to the right locator, then from the left locator
+    /// at its destination frame). Row-independent; recorded once per segment in the collect walk.
     std::array<TrackId, readahead::ReadAheadRenderer::kMaxRows> readAheadExcludedIds_{};
     int readAheadExcludedCount_ = 0;
-    std::int64_t readAheadSegStart_ = 0;
-    int readAheadSegRun_ = 0;
-    int readAheadSegDestFrame_ = 0;
+    static constexpr int kReadAheadMaxSegmentsPerBlock = 2;
+    std::int64_t readAheadSegStart_[kReadAheadMaxSegmentsPerBlock] = { 0, 0 };
+    int readAheadSegRun_[kReadAheadMaxSegmentsPerBlock] = { 0, 0 };
+    int readAheadSegDestFrame_[kReadAheadMaxSegmentsPerBlock] = { 0, 0 };
     int readAheadSegCount_ = 0;
 
     /// [Audio thread] Fold one finished callback into the diagnostic load window (relaxed atomics).

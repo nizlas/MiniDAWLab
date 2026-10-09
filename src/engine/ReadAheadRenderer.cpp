@@ -92,9 +92,14 @@ void ReadAheadRenderer::prepareForDevice(const double sampleRate, const int bloc
         row.state.store((int)RowState::Live, std::memory_order_release);
         row.trackId = kInvalidTrackId;
     }
+    for (auto& cd : cooldowns_)
+    {
+        cd = Cooldown{};
+    }
     anyNonLive_.store(false, std::memory_order_release);
-    haveExpectedT0_ = false;
-    liveProgress_.store(std::numeric_limits<std::int64_t>::min(), std::memory_order_release);
+    haveExpectedNextT0_ = false;
+    blockSerial_ = 0;
+    joinedSerial_.store(std::numeric_limits<std::int64_t>::min(), std::memory_order_release);
     prepared_.store(true, std::memory_order_release);
     resumeWorker();
 }
@@ -113,7 +118,7 @@ void ReadAheadRenderer::releaseForDevice() noexcept
         row.trackId = kInvalidTrackId;
     }
     anyNonLive_.store(false, std::memory_order_release);
-    haveExpectedT0_ = false;
+    haveExpectedNextT0_ = false;
     // Stays paused until the next prepareForDevice.
 }
 
@@ -124,8 +129,8 @@ void ReadAheadRenderer::pauseWorkerAndWait() noexcept
     {
         return; // pump mode: the pump and this caller share the message thread
     }
-    // Bounded wait: the ack is set between row renders (never while a row is claimed), so an
-    // acked worker holds no chain, no map and no snapshot. One block render bounds the latency.
+    // Bounded wait: the ack is set between segment renders (never while a row is claimed), so
+    // an acked worker holds no chain, no map and no snapshot. One segment render bounds latency.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (!pauseAcked_.load(std::memory_order_acquire))
     {
@@ -148,42 +153,170 @@ void ReadAheadRenderer::requestFullReset() noexcept
     fullResetRequested_.store(true, std::memory_order_release);
 }
 
+void ReadAheadRenderer::beginStateCaptureHold() noexcept
+{
+    captureHold_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ReadAheadRenderer::endStateCaptureHold() noexcept
+{
+    captureHold_.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic segmentation (replicates PlaybackEngine's run arithmetic exactly)
+// ---------------------------------------------------------------------------
+
+ReadAheadRenderer::SegStep ReadAheadRenderer::stepSegment(const std::int64_t pos, const int fill,
+                                                          const int blockFrames, const bool cycle,
+                                                          const std::int64_t locL, const std::int64_t locR,
+                                                          const std::int64_t end) noexcept
+{
+    SegStep s;
+    s.nextPos = pos;
+    s.nextFill = 0;
+    const std::int64_t avail = end - pos;
+    const std::int64_t rem = (std::int64_t)blockFrames - (std::int64_t)fill;
+    if (avail <= 0 || rem <= 0)
+    {
+        return s; // freeze (arrangement end / degenerate) — the engine early-returns here too
+    }
+    if (fill > 0)
+    {
+        // Wrap continuation: the engine wraps AT MOST once per block; the second segment fills
+        // the rest of the block bounded by the loop span, then the block ends
+        // (`secondRun = min(remainingInBlock, loopSpan, end - locL)`; short second runs land
+        // the playhead at locL + secondRun — possibly exactly locR, where playback goes linear).
+        const std::int64_t toR = cycle ? (locR - pos) : avail;
+        const std::int64_t run = juce::jmin(rem, avail, juce::jmax((std::int64_t)0, toR));
+        if (run <= 0)
+        {
+            return s;
+        }
+        s.freeze = false;
+        s.start = pos;
+        s.run = (int)run;
+        s.destFrame = fill;
+        s.nextPos = pos + run;
+        s.nextFill = 0;
+        return s;
+    }
+    if (!cycle || pos >= locR)
+    {
+        // Linear (cycle off, or playhead at/past the right locator — the engine stays linear).
+        const std::int64_t run = juce::jmin(rem, avail);
+        s.freeze = false;
+        s.start = pos;
+        s.run = (int)run;
+        s.destFrame = 0;
+        s.nextPos = pos + run;
+        s.nextFill = 0;
+        return s;
+    }
+    const std::int64_t toR = locR - pos;
+    const std::int64_t run = juce::jmin(rem, avail, toR);
+    if (run <= 0)
+    {
+        return s;
+    }
+    s.freeze = false;
+    s.start = pos;
+    s.run = (int)run;
+    s.destFrame = 0;
+    if (run == toR)
+    {
+        // Reached the right locator: wrap. The rest of the block (if any) renders from locL.
+        const int fill2 = (int)run;
+        s.nextPos = locL;
+        s.nextFill = fill2 >= blockFrames ? 0 : fill2;
+        return s;
+    }
+    s.nextPos = pos + run;
+    s.nextFill = 0;
+    return s;
+}
+
+std::int64_t ReadAheadRenderer::predictNextBlockStart(const std::int64_t t0, const int blockFrames,
+                                                      const bool cycle, const std::int64_t locL,
+                                                      const std::int64_t locR,
+                                                      const std::int64_t end) noexcept
+{
+    std::int64_t pos = t0;
+    int fill = 0;
+    for (int i = 0; i < 2; ++i) // a block is at most two segments
+    {
+        const SegStep s = stepSegment(pos, fill, blockFrames, cycle, locL, locR, end);
+        if (s.freeze)
+        {
+            return pos; // playhead frozen (the engine advances by 0)
+        }
+        pos = s.nextPos;
+        fill = s.nextFill;
+        if (fill == 0)
+        {
+            return pos;
+        }
+    }
+    return pos;
+}
+
 // ---------------------------------------------------------------------------
 // Audio-callback API
 // ---------------------------------------------------------------------------
 
 void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexcept
 {
+    ++blockSerial_;
     blockT0_ = info.t0;
     blockNumSamples_ = info.numSamples;
     blockArrangementEnd_ = info.arrangementEnd;
     blockPlaybackShift_ = info.playbackShift;
+    blockArmedTrackId_ = info.armedTrackId;
+    blockRecordingTrackId_ = info.recordingTrackId;
     adoptionAllowedThisBlock_ = false;
     if (!prepared_.load(std::memory_order_acquire))
     {
         return;
     }
 
+    for (auto& cd : cooldowns_)
+    {
+        if (cd.blocksLeft > 0 && --cd.blocksLeft == 0)
+        {
+            cd.trackId = kInvalidTrackId;
+        }
+    }
+
+    const bool anyOwned = anyNonLive_.load(std::memory_order_relaxed);
     const bool force = fullResetRequested_.exchange(false, std::memory_order_acq_rel);
-    bool discontinuity = force || !info.playing || !info.planUsable;
+    const bool holdActive = captureHold_.load(std::memory_order_acquire) > 0;
+
+    // Geometry/offset edits while owned are deliberate discontinuities (model doc §3/§4): the
+    // queue was predicted under the old basis. Pause is NOT one — position continuity is only
+    // checked while playing, against the prediction from the last playing block (which a pause
+    // leaves untouched, so resume-at-the-same-position continues the queue).
+    const bool geometryChanged = anyOwned
+                                 && (info.cycleActive != lastCycleActive_
+                                     || (info.cycleActive
+                                         && (info.locLeft != lastLocL_ || info.locRight != lastLocR_)));
+    const bool shiftChanged = anyOwned && info.playbackShift != lastPlaybackShift_;
+    bool discontinuity = force || geometryChanged || shiftChanged || (info.playing && !info.planUsable);
     if (info.playing)
     {
-        if (haveExpectedT0_ && info.t0 != expectedT0_)
+        if (haveExpectedNextT0_ && info.t0 != expectedNextT0_)
         {
-            discontinuity = true; // seek, wrap, frozen playhead (arrangement end), stop+replay
+            discontinuity = true; // seek, stop-button jump, frozen playhead, prediction divergence
         }
-        if (anyNonLive_.load(std::memory_order_relaxed) && info.playbackShift != lastPlaybackShift_)
-        {
-            discontinuity = true; // audible position remapped under the queued blocks
-        }
-        expectedT0_ = info.t0 + info.numSamples;
-        haveExpectedT0_ = true;
+        expectedNextT0_ = predictNextBlockStart(info.t0, juce::jmax(1, info.numSamples),
+                                                info.cycleActive, info.locLeft, info.locRight,
+                                                info.arrangementEnd);
+        haveExpectedNextT0_ = true;
     }
-    else
-    {
-        haveExpectedT0_ = false;
-    }
+    // (not playing: keep the continuation basis — a pause must resume against it)
     lastPlaybackShift_ = info.playbackShift;
+    lastCycleActive_ = info.cycleActive;
+    lastLocL_ = info.locLeft;
+    lastLocR_ = info.locRight;
 
     for (auto& row : rows_)
     {
@@ -197,20 +330,53 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
             audioThread_discardResetRow(row);
             continue;
         }
+        // The mode does not hold for this row: leave it (model doc §7) and sit out the cooldown.
+        if ((state == RowState::Ahead || state == RowState::Draining)
+            && row.consecutiveMisses >= kConsecutiveMissAbandonThreshold)
+        {
+            audioThread_addCooldown(row.trackId);
+            cMissAbandons_.fetch_add(1, std::memory_order_relaxed);
+            audioThread_discardResetRow(row);
+            continue;
+        }
+        // Consume absence: the row was owned through a playing, planned block but the engine
+        // never offered it a consume — it left the routing plan / rendered path. Release it.
+        if ((state == RowState::Ahead || state == RowState::Draining)
+            && row.consumeCheckArmed && !row.consumeTouched)
+        {
+            audioThread_discardResetRow(row);
+            continue;
+        }
         if (state == RowState::Scheduled)
         {
-            // The scheduled block is over (its join published the live progress); from here on
+            // The scheduled block is over (its join published the block serial); from here on
             // the worker owns the chain and the callback consumes.
             row.state.store((int)RowState::Ahead, std::memory_order_release);
         }
         const auto current = (RowState)row.state.load(std::memory_order_relaxed);
+        if (current == RowState::Ahead || current == RowState::Draining)
+        {
+            // Immediate handover (discard): the direct path switches these semantics the same
+            // block (monitor suppresses clip playback; recording omits the row's clips), so a
+            // gapless drain would over-play queued clip audio. Model doc §5.
+            const bool handover = (info.monitorView != nullptr && info.monitorView->contains(row.trackId))
+                                  || (blockRecordingTrackId_ != kInvalidTrackId
+                                      && row.trackId == blockRecordingTrackId_);
+            if (handover)
+            {
+                audioThread_discardResetRow(row);
+                continue;
+            }
+        }
         if (current == RowState::Ahead)
         {
             const bool nearEnd = info.arrangementEnd - info.t0
                                  < (std::int64_t)(depth_ + 2) * (std::int64_t)juce::jmax(1, info.numSamples);
-            const bool wantDrain = info.cycleActive || info.recording || nearEnd
-                                   || row.workerSelfStopped.load(std::memory_order_acquire)
-                                   || (info.monitorView != nullptr && info.monitorView->contains(row.trackId));
+            const bool armed = blockArmedTrackId_ != kInvalidTrackId && row.trackId == blockArmedTrackId_;
+            // Gapless drains: the queued audio is still correct; stop producing and play it out.
+            // (While paused nothing consumes, so the drain simply completes after resume.)
+            const bool wantDrain = (!info.cycleActive && nearEnd) || holdActive || armed
+                                   || row.workerSelfStopped.load(std::memory_order_acquire);
             if (wantDrain)
             {
                 row.stopProduce.store(true, std::memory_order_seq_cst);
@@ -239,9 +405,14 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
                 row.state.store((int)RowState::Live, std::memory_order_release);
             }
         }
+        // Arm the consume-absence check for the coming block; clear this block's touch flag.
+        const auto endState = (RowState)row.state.load(std::memory_order_relaxed);
+        row.consumeTouched = false;
+        row.consumeCheckArmed = (endState == RowState::Ahead || endState == RowState::Draining)
+                                && info.playing && info.planUsable;
     }
 
-    adoptionAllowedThisBlock_ = info.playing && !info.cycleActive && !info.recording && !discontinuity
+    adoptionAllowedThisBlock_ = info.playing && !discontinuity && !holdActive && info.planUsable
                                 && info.numSamples > 0 && info.numSamples <= blockSizeSamples_;
     audioThread_refreshOwnedFlags();
 }
@@ -252,13 +423,25 @@ void ReadAheadRenderer::audioThread_offerAdoption(const TrackId trackId, const i
     {
         return;
     }
-    // Activation conditions (model doc §2): enough arrangement headroom that the worker never
-    // renders the partial end block, and a non-negative audible position (no silence prefix).
+    // Activation conditions (model doc §2): enough arrangement headroom, non-negative audible
+    // positions (including the loop start under cycle), no armed/recording row, no cooldown.
     if (blockArrangementEnd_ - blockT0_ < (std::int64_t)(depth_ + 2) * (std::int64_t)blockNumSamples_)
     {
         return;
     }
     if (blockT0_ + blockPlaybackShift_ < 0)
+    {
+        return;
+    }
+    if (lastCycleActive_ && lastLocL_ + blockPlaybackShift_ < 0)
+    {
+        return;
+    }
+    if (trackId == blockArmedTrackId_ || trackId == blockRecordingTrackId_)
+    {
+        return;
+    }
+    if (audioThread_isCoolingDown(trackId))
     {
         return;
     }
@@ -277,9 +460,19 @@ void ReadAheadRenderer::audioThread_offerAdoption(const TrackId trackId, const i
         row.trackId = trackId;
         row.trackIndex = trackIndex;
         ++row.generation;
-        row.boundary = blockT0_ + blockNumSamples_;
-        row.nextProduceT0 = row.boundary;
+        row.playbackShift = blockPlaybackShift_;
+        row.startAfterSerial = blockSerial_;
+        // The worker's first segment is the start of the NEXT block (transport domain),
+        // derived with the same segmentation the engine will use — gapless by construction.
+        row.nextProducePos = predictNextBlockStart(blockT0_, blockNumSamples_, lastCycleActive_,
+                                                   lastLocL_, lastLocR_, blockArrangementEnd_);
+        row.produceFill = 0;
         row.workerStarted = false;
+        row.produceSeq = 0;
+        row.consumeSeq = 0;
+        row.consecutiveMisses = 0;
+        row.consumeTouched = false;
+        row.consumeCheckArmed = false;
         row.head.store(0, std::memory_order_release);
         row.tail.store(0, std::memory_order_release);
         row.workerAckedStop.store(false, std::memory_order_release);
@@ -328,48 +521,56 @@ int ReadAheadRenderer::audioThread_exportExcludedTrackIds(TrackId* const out) co
 }
 
 bool ReadAheadRenderer::audioThread_tryConsume(const TrackId trackId, const std::int64_t timelineStartAudible,
-                                               const int run, ConsumeView& out) noexcept
+                                               const int run, const int destFrame, ConsumeView& out) noexcept
 {
     Row* const row = findRowByTrackId(trackId);
     if (row == nullptr)
     {
+        cMissed_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    row->consumeTouched = true;
     const auto state = (RowState)row->state.load(std::memory_order_relaxed);
     if (state != RowState::Ahead && state != RowState::Draining)
     {
         cMissed_.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return false; // Abandoning: silent until the worker lets go (counted)
     }
+    const auto miss = [&]() noexcept {
+        // The audible stream advanced past this segment: the expected sequence moves on, so a
+        // late worker result becomes stale (discarded by seq, never played from a wrong time).
+        ++row->consumeSeq;
+        ++row->consecutiveMisses;
+        cMissed_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    };
     for (;;)
     {
         const std::uint32_t h = row->head.load(std::memory_order_relaxed);
         if (h == row->tail.load(std::memory_order_acquire))
         {
-            cMissed_.fetch_add(1, std::memory_order_relaxed);
-            return false; // not ready — silence this block, ownership retained (model doc §7)
+            return miss(); // not ready — silence this segment, ownership retained (model doc §7)
         }
         Slot& s = row->slots[(size_t)(h % (std::uint32_t)depth_)];
-        if (s.generation != row->generation || s.start < timelineStartAudible)
+        if (s.generation != row->generation || s.seq < row->consumeSeq)
         {
-            // Stale (produced for a block that was already missed or invalidated): discard,
-            // never play. The worker's input stream stayed contiguous, so dropping OUTPUT
-            // keeps the plugin state aligned with the timeline.
+            // Stale (produced for a segment the audible stream already passed, or a previous
+            // adoption): discard, never play. Sequence comparison is loop-pass-safe — position
+            // ordering is meaningless across a cycle wrap.
             row->head.store(h + 1, std::memory_order_release);
             cStale_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
-        if (s.start == timelineStartAudible && s.run == run)
+        if (s.seq == row->consumeSeq && s.start == timelineStartAudible && s.run == run
+            && s.destFrame == destFrame)
         {
             out.stageL = s.dataL;
             out.stageR = s.dataR;
-            cConsumed_.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
-        // Head is a FUTURE block (or a run-length mismatch, e.g. diverging arrangement ends):
-        // do not pop — the discontinuity reset at the next block begin cleans up.
-        cMissed_.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        // Key mismatch at the expected sequence (segmentation divergence — defensive) or a
+        // future sequence: miss without popping; the slot becomes stale on the next attempt.
+        return miss();
     }
 }
 
@@ -384,18 +585,27 @@ void ReadAheadRenderer::audioThread_releaseConsumed(const TrackId trackId) noexc
     if (h != row->tail.load(std::memory_order_acquire))
     {
         row->head.store(h + 1, std::memory_order_release);
+        ++row->consumeSeq;
+        row->consecutiveMisses = 0;
+        cConsumed_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
 void ReadAheadRenderer::audioThread_noteMiss(const TrackId trackId) noexcept
 {
-    juce::ignoreUnused(trackId);
+    Row* const row = findRowByTrackId(trackId);
+    if (row != nullptr)
+    {
+        row->consumeTouched = true;
+        ++row->consumeSeq;
+        ++row->consecutiveMisses;
+    }
     cMissed_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void ReadAheadRenderer::audioThread_publishLiveProgress(const std::int64_t liveStreamEnd) noexcept
+void ReadAheadRenderer::audioThread_publishJoinedBlock() noexcept
 {
-    liveProgress_.store(liveStreamEnd, std::memory_order_release);
+    joinedSerial_.store(blockSerial_, std::memory_order_release);
 }
 
 void ReadAheadRenderer::audioThread_publishContextTemplate(const PluginProcessTransportContext& context) noexcept
@@ -422,7 +632,7 @@ void ReadAheadRenderer::audioThread_discardResetRow(Row& row) noexcept
         row.state.store((int)RowState::Live, std::memory_order_release);
         return;
     }
-    // The worker is inside this row's render: it finishes its block, observes the stop and
+    // The worker is inside this row's render: it finishes its segment, observes the stop and
     // acks; the next block begin purges and frees the row. The row is silent meanwhile
     // (consume misses) — never rendered live concurrently.
     row.state.store((int)RowState::Abandoning, std::memory_order_release);
@@ -451,7 +661,41 @@ void ReadAheadRenderer::audioThread_refreshOwnedFlags() noexcept
             break;
         }
     }
-    anyNonLive_.store(any, std::memory_order_relaxed);
+    anyNonLive_.store(any, std::memory_order_release);
+}
+
+void ReadAheadRenderer::audioThread_addCooldown(const TrackId trackId) noexcept
+{
+    Cooldown* slot = nullptr;
+    for (auto& cd : cooldowns_)
+    {
+        if (cd.trackId == trackId)
+        {
+            slot = &cd;
+            break;
+        }
+        if (slot == nullptr && cd.blocksLeft == 0)
+        {
+            slot = &cd;
+        }
+    }
+    if (slot != nullptr)
+    {
+        slot->trackId = trackId;
+        slot->blocksLeft = kMissReAdoptionCooldownBlocks;
+    }
+}
+
+bool ReadAheadRenderer::audioThread_isCoolingDown(const TrackId trackId) const noexcept
+{
+    for (const auto& cd : cooldowns_)
+    {
+        if (cd.trackId == trackId && cd.blocksLeft > 0)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 ReadAheadRenderer::Row* ReadAheadRenderer::findRowByTrackId(const TrackId trackId) noexcept
@@ -495,7 +739,7 @@ int ReadAheadRenderer::workerScanOnce() noexcept
             }
             continue;
         }
-        const bool did = workerRenderOneBlock(row);
+        const bool did = workerRenderOneSegment(row);
         row.busy.store(0, std::memory_order_release);
         if (did)
         {
@@ -505,13 +749,14 @@ int ReadAheadRenderer::workerScanOnce() noexcept
     return rendered;
 }
 
-bool ReadAheadRenderer::workerRenderOneBlock(Row& row) noexcept
+bool ReadAheadRenderer::workerRenderOneSegment(Row& row) noexcept
 {
     if (!row.workerStarted)
     {
-        // Gapless adoption (model doc §4): the first worker block is `boundary`, started only
-        // after the callback's join published that the live stream rendered up to it.
-        if (liveProgress_.load(std::memory_order_acquire) < row.boundary)
+        // Gapless adoption (model doc §1): the worker starts only after the adoption block's
+        // join published its serial — the callback's last touch of that chain. The monotone
+        // serial is wrap-safe (timeline positions are not).
+        if (joinedSerial_.load(std::memory_order_acquire) < row.startAfterSerial)
         {
             return false;
         }
@@ -540,20 +785,33 @@ bool ReadAheadRenderer::workerRenderOneBlock(Row& row) noexcept
         row.workerSelfStopped.store(true, std::memory_order_release);
         return false;
     }
-    const std::int64_t start = row.nextProduceT0;
+    // Loop geometry rides the published context template (the callback's own values; a change
+    // while owned forces a discard reset, so divergence here is bounded and key-checked anyway).
+    const PluginProcessTransportContext contextTemplate
+        = contextTemplates_[contextTemplateIndex_.load(std::memory_order_acquire)];
     const std::int64_t end = snap->getArrangementExtentSamples();
-    if (end - start < (std::int64_t)blockSizeSamples_)
+    const SegStep seg = stepSegment(row.nextProducePos, row.produceFill, blockSizeSamples_,
+                                    contextTemplate.isLooping, contextTemplate.loopStartSample,
+                                    contextTemplate.loopEndSample, end);
+    if (seg.freeze || seg.run <= 0)
     {
-        // Never render the partial end block ahead (the near-end drain releases the row first).
+        // Arrangement end / degenerate geometry ahead: stop producing; the near-end drain (or
+        // the discontinuity reset at the actual freeze) releases the row.
         row.workerSelfStopped.store(true, std::memory_order_release);
         return false;
     }
-    const int run = blockSizeSamples_;
+    const std::int64_t startAudible = seg.start + row.playbackShift;
+    if (startAudible < 0 || seg.destFrame + seg.run > blockSizeSamples_)
+    {
+        row.workerSelfStopped.store(true, std::memory_order_release);
+        return false;
+    }
     Slot& slot = row.slots[(size_t)(t % (std::uint32_t)depth_)];
-    playback_mix_helpers::clearStereoScratch(slot.dataL, slot.dataR, run);
+    playback_mix_helpers::clearStereoScratch(slot.dataL + seg.destFrame, slot.dataR + seg.destFrame,
+                                             seg.run);
 
-    // Fresh per block: session snapshot (above), insert map, solo view, context template —
-    // control changes apply late by <= depth blocks (model doc §6), lifetime is per block.
+    // Fresh per segment: session snapshot (above), insert map, solo view, context template —
+    // control changes apply late by <= depth segments (model doc §6), lifetime is per segment.
     const std::shared_ptr<const PluginAudioThreadMap> map
         = deps_.pluginHost != nullptr ? deps_.pluginHost->audioThread_acquireMapForBlock() : nullptr;
     const PluginAudioThreadMap::Entry* const entry
@@ -568,9 +826,8 @@ bool ReadAheadRenderer::workerRenderOneBlock(Row& row) noexcept
         access.chainScratchCapacity = workerScratchCapacity_;
         access.chainMidiScratch = &workerMidiScratch_;
         access.laneIndex = PluginInsertHost::kReadAheadProcessingLane;
-        PluginProcessTransportContext context
-            = contextTemplates_[contextTemplateIndex_.load(std::memory_order_acquire)];
-        context.timelineSample = start;
+        PluginProcessTransportContext context = contextTemplate;
+        context.timelineSample = startAudible;
         // This chain's OWN playhead — the worker is its only writer while the row is owned
         // (the global setter excludes owned rows).
         PluginInsertHost::audioThread_setEntryTransportContext(*entry, context);
@@ -584,17 +841,20 @@ bool ReadAheadRenderer::workerRenderOneBlock(Row& row) noexcept
         soloView = (soloSnap != nullptr && soloSnap->soloActive) ? soloSnap.get() : nullptr;
     }
 
-    // THE production strip core — identical DSP to the live A1 path. Recording never overlaps
-    // ownership (drain trigger), so there is no omitted clip-playback track.
+    // THE production strip core — identical DSP to the live A1 path. The recording row is
+    // never owned (immediate handover), so there is no omitted clip-playback track.
     playback_mix_helpers::renderAudioTrackPostStripToStereoScratchWithChainAccess(
-        *snap, start, run, 0, slot.dataL, slot.dataR, access, kInvalidTrackId, end,
-        row.trackIndex, deps_.preGainRamp, soloView);
+        *snap, startAudible, seg.run, seg.destFrame, slot.dataL, slot.dataR, access,
+        kInvalidTrackId, end, row.trackIndex, deps_.preGainRamp, soloView);
 
-    slot.start = start;
-    slot.run = run;
+    slot.start = startAudible;
+    slot.run = seg.run;
+    slot.destFrame = seg.destFrame;
+    slot.seq = row.produceSeq++;
     slot.generation = row.generation;
     row.tail.store(t + 1, std::memory_order_release);
-    row.nextProduceT0 = start + run;
+    row.nextProducePos = seg.nextPos;
+    row.produceFill = seg.nextFill;
     cProduced_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -636,12 +896,13 @@ ReadAheadRenderer::Counters ReadAheadRenderer::countersSnapshot() const noexcept
 {
     Counters c;
     c.adopted = cAdopted_.load(std::memory_order_relaxed);
-    c.producedBlocks = cProduced_.load(std::memory_order_relaxed);
-    c.consumedBlocks = cConsumed_.load(std::memory_order_relaxed);
-    c.missedBlocks = cMissed_.load(std::memory_order_relaxed);
+    c.producedSegments = cProduced_.load(std::memory_order_relaxed);
+    c.consumedSegments = cConsumed_.load(std::memory_order_relaxed);
+    c.missedSegments = cMissed_.load(std::memory_order_relaxed);
     c.staleDiscarded = cStale_.load(std::memory_order_relaxed);
     c.drainReleases = cDrainReleases_.load(std::memory_order_relaxed);
     c.discardResets = cDiscardResets_.load(std::memory_order_relaxed);
+    c.missAbandons = cMissAbandons_.load(std::memory_order_relaxed);
     return c;
 }
 

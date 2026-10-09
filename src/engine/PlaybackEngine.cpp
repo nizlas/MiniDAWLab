@@ -56,9 +56,11 @@
 #include <juce_events/juce_events.h>
 
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <thread>
 #include <vector>
 
 namespace
@@ -371,14 +373,49 @@ void PlaybackEngine::enableExperimentalReadAheadForTests(const int depthBlocks)
     readAhead_ = std::make_unique<readahead::ReadAheadRenderer>(deps, depthBlocks, false);
 }
 
-void PlaybackEngine::quiesceReadAheadForExclusiveChainAccess() noexcept
+void PlaybackEngine::pauseReadAheadWorkerAfterChainPublish() noexcept
 {
     if (readAhead_ != nullptr)
     {
+        // The new insert map is already published and the in-flight callback was waited out:
+        // an acknowledged pause proves the worker is outside every chain render that could
+        // still reference the retired instances; after the resume it only ever acquires the
+        // newly published map (fresh per segment). Ownership and queues survive — chain edits
+        // late-apply like every other control (model doc §6/§8).
         readAhead_->pauseWorkerAndWait();
-        readAhead_->requestFullReset();
         readAhead_->resumeWorker();
     }
+}
+
+void PlaybackEngine::beginPluginStateCaptureWindow() noexcept
+{
+    if (readAhead_ == nullptr)
+    {
+        return;
+    }
+    readAhead_->beginStateCaptureHold();
+    // Gapless drain of every owned row — it needs playback consumption, so it is attempted only
+    // while the transport is playing (paused/stopped saves capture with the worker paused and
+    // nobody processing; model doc §9). Bounded message-thread wait, never touches the callback.
+    if (transport_.readPlaybackIntentForUi() == PlaybackIntent::Playing)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (readAhead_->audioThread_anyOwned() && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    readAhead_->pauseWorkerAndWait();
+}
+
+void PlaybackEngine::endPluginStateCaptureWindow() noexcept
+{
+    if (readAhead_ == nullptr)
+    {
+        return;
+    }
+    readAhead_->resumeWorker();
+    readAhead_->endStateCaptureHold();
 }
 
 // Tear order (see the header): Main removes the audio callback before destroying the engine, so
@@ -1564,7 +1601,6 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
     // monitor pass and the global transport-context refresh (docs/READAHEAD_PROTOTYPE.md).
     readAheadExcludedCount_ = 0;
     readAheadSegCount_ = 0;
-    readAheadSegRun_ = 0;
     if (readAhead_ != nullptr)
     {
         readahead::ReadAheadRenderer::BlockBeginInfo rbi;
@@ -1572,10 +1608,23 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
         rbi.numSamples = numSamples;
         rbi.playing = playbackIntent == PlaybackIntent::Playing;
         rbi.cycleActive = cycleOn && validCycle;
-        rbi.recording = recordRunCapturing || (recorder_ != nullptr && recorder_->isRecording());
+        rbi.locLeft = locL;
+        rbi.locRight = locR;
+        // Immediate-handover / pre-emptive-drain rows (model doc §5): the active capture row
+        // and the record-armed row. Both ids are atomics the callback already reads.
+        rbi.recordingTrackId = (recorder_ != nullptr
+                                && (recordRunCapturing || recorder_->isRecording()))
+                                   ? recorder_->getRecordingTrackId()
+                                   : kInvalidTrackId;
+        rbi.armedTrackId = recorder_ != nullptr ? recorder_->getArmedTrackId() : kInvalidTrackId;
         rbi.playbackShift = playbackOffsetSamples_.load(std::memory_order_acquire);
         rbi.arrangementEnd = sessionSnap != nullptr ? sessionSnap->getArrangementExtentSamples() : 0;
-        rbi.planUsable = rp != nullptr && !rp->sourceSteps.empty() && sessionSnap != nullptr;
+        // "Usable" must guarantee a consume-capable render branch: the plan-less and
+        // stage-unprepared fallback branches have no owned-row skip, so ownership is released
+        // (discard) before any block that could reach them renders anything.
+        rbi.planUsable = rp != nullptr && !rp->sourceSteps.empty() && sessionSnap != nullptr
+                         && postStripStagePtrs_[0] != nullptr && postStripStagePtrs_[1] != nullptr
+                         && postStripStageCapacity_ >= numSamples;
         rbi.monitorView = monitorPtr;
         readAhead_->audioThread_beginBlock(rbi);
         if (sessionSnap != nullptr)
@@ -2382,12 +2431,13 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
             }
         }
         // Read-ahead: the join above was the callback's LAST chain touch for any row Scheduled
-        // this block — publishing the live progress is what allows its worker to start
-        // (docs/READAHEAD_PROTOTYPE.md §4; the finalize/monitor context refreshes below exclude
-        // owned rows, and fans/meters only touch buffers).
+        // this block — publishing this block's serial is what allows its worker to start
+        // (docs/READAHEAD_PROTOTYPE.md §1; monotone, so cycle wraps moving the timeline
+        // backwards cannot confuse the gate. The finalize/monitor context refreshes below
+        // exclude owned rows, and fans/meters only touch buffers).
         if (readAhead_ != nullptr && readAheadExcludedCount_ > 0)
         {
-            readAhead_->audioThread_publishLiveProgress(t0 + numSamples);
+            readAhead_->audioThread_publishJoinedBlock();
         }
         // SUM (callback thread only, after the join): fan each AUDIO row's stage to its dry
         // bus + sends in `sourceSteps` order; each segment occupies its own disjoint frame
@@ -2419,26 +2469,37 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 continue;
             }
             const TrackId tid = srcTr.getId();
-            // Owned BEFORE the monitor gate (identical order as the collection): a monitored row
-            // still DRAINING keeps consuming its queue until the gapless release.
+            // Owned BEFORE the monitor gate (identical order as the collection). Consume every
+            // recorded segment of this block in order — a cycle-wrap block has two, each fanned
+            // at its own destination frame; a failed consume already counted the miss and
+            // advanced the row's expected sequence (silence for exactly that segment).
             if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(tid))
             {
-                readahead::ReadAheadRenderer::ConsumeView rcv;
-                if (readAheadSegCount_ == 1 && readAheadSegDestFrame_ == 0 && readAheadSegRun_ > 0
-                    && readAhead_->audioThread_tryConsume(tid, readAheadSegStart_,
-                                                          readAheadSegRun_, rcv))
+                const int segN = juce::jmin(readAheadSegCount_, kReadAheadMaxSegmentsPerBlock);
+                for (int rs = 0; rs < segN; ++rs)
                 {
-                    audioThread_foldTrackMeterIfMetered(tid, rcv.stageL, rcv.stageR,
-                                                        readAheadSegRun_);
-                    playback_mix_helpers::fanPostStripStageToDryAndSends(
-                        rcv.stageL, rcv.stageR, 0, readAheadSegRun_, step.destBusIndex,
-                        step.sends, *rp);
-                    readAhead_->audioThread_releaseConsumed(tid);
+                    if (readAheadSegRun_[rs] <= 0)
+                    {
+                        continue;
+                    }
+                    readahead::ReadAheadRenderer::ConsumeView rcv;
+                    if (readAhead_->audioThread_tryConsume(tid, readAheadSegStart_[rs],
+                                                           readAheadSegRun_[rs],
+                                                           readAheadSegDestFrame_[rs], rcv))
+                    {
+                        audioThread_foldTrackMeterIfMetered(tid,
+                                                            rcv.stageL + readAheadSegDestFrame_[rs],
+                                                            rcv.stageR + readAheadSegDestFrame_[rs],
+                                                            readAheadSegRun_[rs]);
+                        playback_mix_helpers::fanPostStripStageToDryAndSends(
+                            rcv.stageL, rcv.stageR, readAheadSegDestFrame_[rs],
+                            readAheadSegRun_[rs], step.destBusIndex, step.sends, *rp);
+                        readAhead_->audioThread_releaseConsumed(tid);
+                    }
                 }
-                else if (readAheadSegCount_ != 1 || readAheadSegDestFrame_ != 0
-                         || readAheadSegRun_ <= 0)
+                for (int rs = segN; rs < readAheadSegCount_; ++rs)
                 {
-                    readAhead_->audioThread_noteMiss(tid);
+                    readAhead_->audioThread_noteMiss(tid); // defensive: >2 segments can not occur
                 }
                 continue;
             }
@@ -2621,14 +2682,14 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                 = makeInsertProcessContext(timelineStartAudible);
             if (readAhead_ != nullptr && readAheadExcludedCount_ > 0)
             {
-                // Record this segment's consume key ONCE (the values are row-independent). Owned
-                // rows support exactly one zero-offset segment per block; the sum loop counts a
-                // miss for anything else (wrap reached while still owned — model doc §10).
-                if (readAheadSegCount_ == 0)
+                // Record this segment's consume key (row-independent; the engine renders at
+                // most two segments per block — a cycle wrap). The sum loop consumes them in
+                // the same order; the worker predicted identical keys from the same inputs.
+                if (readAheadSegCount_ < kReadAheadMaxSegmentsPerBlock)
                 {
-                    readAheadSegStart_ = timelineStartAudible;
-                    readAheadSegRun_ = audibleRun;
-                    readAheadSegDestFrame_ = destFrame;
+                    readAheadSegStart_[readAheadSegCount_] = timelineStartAudible;
+                    readAheadSegRun_[readAheadSegCount_] = audibleRun;
+                    readAheadSegDestFrame_[readAheadSegCount_] = destFrame;
                 }
                 ++readAheadSegCount_;
             }
@@ -2723,25 +2784,21 @@ void PlaybackEngine::audioDeviceIOCallbackWithContext(const float* const* inputC
                     continue;
                 }
                 // Read-ahead-owned row on a serial-path block (e.g. payload overflow): consume
-                // the ring block inline at the row's position so the accumulation order matches
-                // the live path; a miss leaves the row silent this block (counted). BEFORE the
-                // monitor gate — a monitored row still DRAINING keeps consuming its queue.
+                // the ring segment inline at the row's plan position so the accumulation order
+                // matches the live path; a failed consume already counted the miss for exactly
+                // this segment. BEFORE the monitor gate — identical gate order everywhere.
                 if (readAhead_ != nullptr && readAhead_->audioThread_isOwnedForRender(srcTr.getId()))
                 {
                     readahead::ReadAheadRenderer::ConsumeView rcv;
-                    if (destFrame == 0
-                        && readAhead_->audioThread_tryConsume(srcTr.getId(), timelineStartAudible,
-                                                              audibleRun, rcv))
+                    if (readAhead_->audioThread_tryConsume(srcTr.getId(), timelineStartAudible,
+                                                           audibleRun, destFrame, rcv))
                     {
-                        audioThread_foldTrackMeterIfMetered(srcTr.getId(), rcv.stageL, rcv.stageR,
-                                                            audibleRun);
+                        audioThread_foldTrackMeterIfMetered(srcTr.getId(), rcv.stageL + destFrame,
+                                                            rcv.stageR + destFrame, audibleRun);
                         playback_mix_helpers::fanPostStripStageToDryAndSends(
-                            rcv.stageL, rcv.stageR, 0, audibleRun, step.destBusIndex, step.sends, *rp);
+                            rcv.stageL, rcv.stageR, destFrame, audibleRun, step.destBusIndex,
+                            step.sends, *rp);
                         readAhead_->audioThread_releaseConsumed(srcTr.getId());
-                    }
-                    else if (destFrame != 0)
-                    {
-                        readAhead_->audioThread_noteMiss(srcTr.getId());
                     }
                     continue;
                 }

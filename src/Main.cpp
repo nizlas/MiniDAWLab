@@ -210,8 +210,9 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
         (void)enginePtr->waitForAudioCallbackExit(250.0);
         // Experimental read-ahead: its worker also holds published-map entries while rendering —
         // pause it (bounded) before the retired instances are destroyed; the paused/resumed
-        // worker only ever sees the NEWLY published map (docs/READAHEAD_PROTOTYPE.md §8).
-        enginePtr->quiesceReadAheadForExclusiveChainAccess();
+        // worker only ever sees the NEWLY published map. Ownership and queued segments survive
+        // the edit (chain edits late-apply; docs/READAHEAD_PROTOTYPE.md §6/§8).
+        enginePtr->pauseReadAheadWorkerAfterChainPublish();
     });
 
     // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present
