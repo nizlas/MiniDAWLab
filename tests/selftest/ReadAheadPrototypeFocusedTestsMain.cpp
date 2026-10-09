@@ -22,8 +22,10 @@
 //   * a worker that never starts, or is held off before it enters the chain: the prime is
 //     declined and every block stays on the direct path (audible, no miss, no overlap). A
 //     worker parked inside the first plugin call stays exclusive; rows it has not entered
-//     keep rendering live. Once a row is Ahead, a miss is still counted silence and two
-//     consecutive misses still leave the mode;
+//     keep rendering live. A segment published after the callback already saw an empty ring,
+//     and after the worker has dropped busy, is consumed — the row is not returned to the
+//     direct path for that same interval. Once a row is Ahead, a miss is still counted
+//     silence and two consecutive misses still leave the mode;
 //   * a transient single miss: late results discarded as stale (never played from a wrong
 //     time), ownership retained, recovery without an abandon;
 //   * Monitor enabled mid-run: IMMEDIATE discard handover (same-block monitor semantics, zero
@@ -1010,6 +1012,141 @@ void testDeferredPrimeStaysOnDirectPath()
     expect(peakOfBlockSpan(tail, 0, kBlocks) > 0.01, "playback stayed audible after the worker was released");
     expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0,
            "no concurrent processing after the deferred prime was released");
+}
+
+void appendCallbackOutput(Harness& h, std::vector<float>& out, const int blocks, const int sleepMicros)
+{
+    juce::AudioBuffer<float> blk(2, kBlock);
+    float* ptrs[2] = { blk.getWritePointer(0), blk.getWritePointer(1) };
+    juce::AudioIODeviceCallbackContext ctx;
+    for (int b = 0; b < blocks; ++b)
+    {
+        blk.clear();
+        h.engine.audioDeviceIOCallbackWithContext(nullptr, 0, ptrs, 2, kBlock, ctx);
+        for (int i = 0; i < kBlock; ++i)
+        {
+            out.push_back(ptrs[0][i]);
+            out.push_back(ptrs[1][i]);
+        }
+        if (sleepMicros > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds(sleepMicros));
+        }
+    }
+}
+
+/// One audio row: the session's default track, with a deterministic clip. No extra rows, so the
+/// worker's first segment is this probe.
+TrackId addClipOnActiveTrack(Harness& h)
+{
+    const auto clip = makeNoiseClip(7, kBlock * 64, {});
+    const TrackId tid = h.session.getActiveTrackId();
+    const auto res = h.session.addPlacedClipFromExistingMaterial(clip, 0, 0, clip->getNumSamples(), tid);
+    jassert(res.wasOk());
+    juce::ignoreUnused(res);
+    return tid;
+}
+
+// =============================================================================================
+void testPublishedPrimeIsNotDeclined()
+{
+    std::printf("\n-- prime published after the empty observation is consumed, not declined --\n");
+    // Adoption block, the raced block, then enough further blocks to require production past
+    // the single segment the rendezvous published.
+    constexpr int kTail = kDepth + 4;
+    constexpr int kBlocks = 2 + kTail;
+
+    Harness direct(0);
+    const TrackId directTid = addClipOnActiveTrack(direct);
+    direct.finishSetup();
+    StatefulProbeInsert* const ref = direct.installInsert(directTid, InsertStage::Pre, 0.8f);
+    direct.transport.requestSeek(0);
+    direct.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> directOut;
+    appendCallbackOutput(direct, directOut, kBlocks, 0);
+
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Harness ahead(0);
+    readahead::setConfiguredReadAheadDepth(0);
+    const TrackId tid = addClipOnActiveTrack(ahead);
+    readahead::ReadAheadRenderer* const ra = ahead.engine.experimentalReadAhead();
+    expect(ra != nullptr, "thread-mode renderer constructed");
+    ra->setDeferPrimeForTests(true);
+    ahead.finishSetup();
+    StatefulProbeInsert* const probe = ahead.installInsert(tid, InsertStage::Pre, 0.8f);
+
+    ahead.transport.requestSeek(0);
+    ahead.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    std::vector<float> aheadOut;
+    appendCallbackOutput(ahead, aheadOut, 1, 0);
+    expect(probe->callCount() == 1, "adoption block rendered live once");
+    expect(countCallsAtPosition(probe, 0) == 1, "adoption block processed position 0 once");
+    expect(ra->countersSnapshot().producedSegments == 0,
+           "worker has not published before the callback observes the empty ring");
+
+    // 1. The callback observes the empty ring and parks inside the decline decision.
+    // 2. The helper releases the worker, which publishes the first segment and drops busy,
+    //    then holds the next claim.
+    // 3. The helper lets the decision continue while that segment is published and unclaimed.
+    ra->armDeclineRaceForTests();
+    std::atomic<bool> helperFailed{ false };
+    std::thread helper([&] {
+        const auto cap = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (ra->declineRaceStateForTests() != 2 && std::chrono::steady_clock::now() < cap)
+        {
+            std::this_thread::yield();
+        }
+        if (ra->declineRaceStateForTests() != 2)
+        {
+            helperFailed.store(true);
+            ra->releaseDeclineRaceForTests();
+            return;
+        }
+        ra->setDeferPrimeForTests(false);
+        while (!ra->testRowPublishedAndUnclaimed(tid) && std::chrono::steady_clock::now() < cap)
+        {
+            std::this_thread::yield();
+        }
+        if (!ra->testRowPublishedAndUnclaimed(tid))
+        {
+            helperFailed.store(true);
+            ra->releaseDeclineRaceForTests();
+            return;
+        }
+        ra->letDeclineDecisionContinueForTests();
+    });
+    appendCallbackOutput(ahead, aheadOut, 1, 0);
+    helper.join();
+
+    expect(!helperFailed.load(),
+           "callback had observed an empty ring, then the worker published and dropped busy, "
+           "before the decline decision continued");
+    expect(countCallsAtPosition(probe, (std::int64_t)kBlock) == 1,
+           "the raced interval was processed once — the direct path did not re-enter the instance");
+    expect(gOverlaps.load() == 0, "the worker was outside the plugin when the decision ran");
+
+    appendCallbackOutput(ahead, aheadOut, kTail, 2000);
+    const auto c = ra->countersSnapshot();
+    printCounters(c, "published-prime counters");
+    const int rows = audioRowCount(ahead);
+
+    expect(rows == 1, "the fixture is a single audio row");
+    expect(c.adopted == rows,
+           "the published prime stayed adopted; it was not declined and re-offered");
+    expect(c.consumedSegments == (std::int64_t)(kBlocks - 1),
+           "every block after the live adoption was consumed from the queue");
+    expect(c.producedSegments > (std::int64_t)kDepth,
+           "production continued past the segment that won the race");
+    expect(c.missedSegments == 0 && c.missAbandons == 0 && c.discardResets == 0,
+           "the raced prime was not a miss, an abandon, or a reset");
+    expect(countStreamBreaks(probe) == 0, "probe stream stayed contiguous (no hole, no duplicate)");
+    expect(probeCallsArePrefixOf(ref, probe),
+           "the stateful plugin saw the same positions in the same order as the direct path");
+    expect(maxAbsDiff(aheadOut, directOut) == 0.0,
+           "output matches the direct path — one pass through the stateful plugin, not a second");
+    expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0,
+           "no concurrent processing of the raced instance");
+    expect(ra->audioThread_anyOwned(), "the row stayed owned so production could continue");
 }
 
 // =============================================================================================
@@ -2139,6 +2276,7 @@ int main(int argc, char** argv)
     testCycleGeometryChangeWhileOwned();
     testDelayedWorkerMissAbandon();
     testDeferredPrimeStaysOnDirectPath();
+    testPublishedPrimeIsNotDeclined();
     testTransientSingleMissRecovery();
     testMonitorImmediateHandover();
     testChainRemovalWhileOwned();

@@ -148,6 +148,32 @@ public:
     {
         deferPrimeForTests_.store(defer ? 1 : 0, std::memory_order_release);
     }
+    /// [Test only] Arms a rendezvous at the start of the decline decision, which is after the
+    /// caller has already observed an empty ring. Gate: 1 armed, 2 callback parked in the
+    /// decision, 3 the published segment is idle and the decision may continue (the worker
+    /// stays outside the chain until the decision stores 0). Production never arms this, so
+    /// the callback never waits.
+    void armDeclineRaceForTests() noexcept
+    {
+        declineRace_.store(1, std::memory_order_release);
+    }
+    [[nodiscard]] int declineRaceStateForTests() const noexcept
+    {
+        return declineRace_.load(std::memory_order_acquire);
+    }
+    /// [Test only] Let the parked decline continue. The worker keeps holding the next claim
+    /// until the decision itself clears the gate.
+    void letDeclineDecisionContinueForTests() noexcept
+    {
+        declineRace_.store(3, std::memory_order_release);
+    }
+    void releaseDeclineRaceForTests() noexcept
+    {
+        declineRace_.store(0, std::memory_order_release);
+    }
+    /// [Test only] True when `trackId` has a published segment and holds neither `busy` nor
+    /// `inPlugin`.
+    [[nodiscard]] bool testRowPublishedAndUnclaimed(TrackId trackId) const noexcept;
     /// [Any thread] The next `audioThread_beginBlock` performs a full discard reset (used after
     /// offline-export windows; the callback thread itself performs the transitions).
     void requestFullReset() noexcept;
@@ -348,9 +374,16 @@ private:
     /// will request). False when the ring is empty or the head is a different segment.
     [[nodiscard]] bool audioThread_primingHeadMatches(const Row& row, const BlockBeginInfo& info) const noexcept;
     /// Dekker decline of a prime the worker has not entered. True = row is Live again and this
-    /// block renders it directly (no miss, no discard count). False = the worker committed
-    /// during the check; the caller must keep the row exclusive.
+    /// block renders it directly (no miss, no discard count). False = do not live-render: the
+    /// worker still holds the claim (caller keeps the row exclusive) or a segment was already
+    /// published (the row is Ahead and the existing ring consumes it).
     [[nodiscard]] bool audioThread_tryDeclineUncommittedPrime(Row& row) noexcept;
+    /// [Test only] If the decline-race gate is armed, park until the test has published the
+    /// prime. Returns true when this call parked and must clear the gate before returning.
+    [[nodiscard]] bool audioThread_enterDeclineRaceForTests() noexcept;
+    /// [Test only] After a successful publish, stay out of the next claim while the callback
+    /// is inside the armed decline decision.
+    void workerHoldAfterPublishedPrimeForDeclineRace() noexcept;
     void audioThread_refreshOwnedFlags() noexcept;
     void audioThread_addCooldown(TrackId trackId) noexcept;
     [[nodiscard]] bool audioThread_isCoolingDown(TrackId trackId) const noexcept;
@@ -398,6 +431,7 @@ private:
     std::atomic<std::uint64_t> pauseAckedEpoch_{ 0 };
     std::atomic<int> pauseAckTimeoutMs_{ 2000 };
     std::atomic<int> deferPrimeForTests_{ 0 };
+    std::atomic<int> declineRace_{ 0 };
     bool deviceParkHeld_ = true;  ///< message-thread bookkeeping of the between-devices park depth
 
     /// Depth + epoch acquire; true only on real acknowledgment (balanced release on failure).

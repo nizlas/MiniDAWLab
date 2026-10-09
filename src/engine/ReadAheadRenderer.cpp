@@ -428,8 +428,9 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
             // live-rendering would use a chain that is no longer at this position). An empty
             // ring whose worker has not entered declines back to live: that is the startup
             // case where consumption used to begin before the single worker could deliver,
-            // and it must not become silence. If the worker has entered, stay exclusive —
-            // no live render, no wait in this callback.
+            // and it must not become silence. The empty read here is not the decision — the
+            // decline re-reads the ring after production is stopped and the claim is clear.
+            // If the worker has entered, stay exclusive — no live render, no wait.
             row.primingExclusive = false;
             const bool ringHasSegment = row.head.load(std::memory_order_acquire)
                                         != row.tail.load(std::memory_order_acquire);
@@ -441,8 +442,10 @@ void ReadAheadRenderer::audioThread_beginBlock(const BlockBeginInfo& info) noexc
             {
                 continue;
             }
-            else
+            else if ((RowState)row.state.load(std::memory_order_relaxed) == RowState::Scheduled)
             {
+                // Still Scheduled: the worker holds the claim and the segment is not queued.
+                // A decline that found a published segment has already moved the row to Ahead.
                 row.primingExclusive = true;
             }
         }
@@ -820,13 +823,77 @@ bool ReadAheadRenderer::audioThread_primingHeadMatches(const Row& row, const Blo
     return s.start == audible && s.run == seg.run && s.destFrame == seg.destFrame;
 }
 
+bool ReadAheadRenderer::audioThread_enterDeclineRaceForTests() noexcept
+{
+    if (declineRace_.load(std::memory_order_acquire) != 1)
+    {
+        return false;
+    }
+    // The caller has already observed an empty ring. Park so a test can publish that segment
+    // and drop `busy` before the decision below runs. Production leaves the gate at 0.
+    declineRace_.store(2, std::memory_order_release);
+    const auto cap = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (declineRace_.load(std::memory_order_acquire) == 2
+           && std::chrono::steady_clock::now() < cap)
+    {
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+void ReadAheadRenderer::workerHoldAfterPublishedPrimeForDeclineRace() noexcept
+{
+    const int gate = declineRace_.load(std::memory_order_acquire);
+    if (gate != 2 && gate != 3)
+    {
+        return;
+    }
+    // The first segment is published and `busy` is already clear. Stay out of the next claim
+    // until the callback finishes the decline decision (it stores 0). A timeout only keeps a
+    // failed test from hanging the worker.
+    const auto cap = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < cap)
+    {
+        const int now = declineRace_.load(std::memory_order_acquire);
+        if (now != 2 && now != 3)
+        {
+            return;
+        }
+        std::this_thread::yield();
+    }
+}
+
+bool ReadAheadRenderer::testRowPublishedAndUnclaimed(const TrackId trackId) const noexcept
+{
+    const Row* const row = findRowByTrackId(trackId);
+    if (row == nullptr)
+    {
+        return false;
+    }
+    const bool published = row->head.load(std::memory_order_acquire) != row->tail.load(std::memory_order_acquire);
+    const bool unclaimed = row->busy.load(std::memory_order_seq_cst) == 0
+                           && row->inPlugin.load(std::memory_order_seq_cst) == 0;
+    return published && unclaimed;
+}
+
 bool ReadAheadRenderer::audioThread_tryDeclineUncommittedPrime(Row& row) noexcept
 {
-    // Ring is empty (caller checked). Claim the stop BEFORE re-reading the worker's claim,
-    // matching discardResetRow's Dekker pair. A worker that has not entered observes the stop
-    // and never touches the plugin; this block then renders the row live.
+    // Ring is empty (caller checked). The test rendezvous, when armed, lets the worker publish
+    // that segment and clear `busy` before the loads below — the interleaving this decision
+    // has to get right. Production does not arm it.
+    const bool inRace = audioThread_enterDeclineRaceForTests();
+    const auto leaveRace = [&]() noexcept {
+        if (inRace)
+        {
+            declineRace_.store(0, std::memory_order_release);
+        }
+    };
+
+    // Claim the stop BEFORE re-reading the worker's claim, matching discardResetRow's Dekker
+    // pair. A worker that has not entered observes the stop and never touches the plugin.
     if (row.inPlugin.load(std::memory_order_seq_cst) != 0 || row.busy.load(std::memory_order_seq_cst) != 0)
     {
+        leaveRace();
         return false;
     }
     row.stopProduce.store(true, std::memory_order_seq_cst);
@@ -836,11 +903,32 @@ bool ReadAheadRenderer::audioThread_tryDeclineUncommittedPrime(Row& row) noexcep
         // it is about to publish is the one this block wants to play, and production must
         // continue afterwards. The caller holds the row exclusive instead.
         row.stopProduce.store(false, std::memory_order_seq_cst);
+        leaveRace();
+        return false;
+    }
+    // The worker is outside the chain and further production is stopped. The caller's earlier
+    // empty-ring read is not evidence: the worker stores `tail` (release) before it clears
+    // `busy` (release), and the seq_cst load above observed `busy == 0`, so it synchronizes
+    // with that clear. This acquire therefore sees a segment published in between. A segment
+    // that is still absent cannot appear afterwards — the worker has to claim `busy` (seq_cst)
+    // and only then load `stopProduce` (seq_cst) before it may enter the plugin, and this stop
+    // is already visible to that load. Reading the ring before the stop would miss the same race.
+    if (row.head.load(std::memory_order_acquire) != row.tail.load(std::memory_order_acquire))
+    {
+        // Already fed. Stay on the consume path and withdraw the stop so the next scan is not
+        // permanently barred. `workerActive` stays set. The caller consumes through the ring
+        // when the key matches and does not live-render this instance.
+        row.stopProduce.store(false, std::memory_order_seq_cst);
+        row.workerAckedStop.store(false, std::memory_order_release);
+        row.primingExclusive = false;
+        row.state.store((int)RowState::Ahead, std::memory_order_release);
+        leaveRace();
         return false;
     }
     row.primingExclusive = false;
     row.workerActive.store(false, std::memory_order_release);
     row.state.store((int)RowState::Live, std::memory_order_release);
+    leaveRace();
     return true;
 }
 
@@ -897,17 +985,31 @@ int ReadAheadRenderer::workerScanOnce() noexcept
         if (row.stopProduce.load(std::memory_order_seq_cst))
         {
             row.busy.store(0, std::memory_order_release);
-            if (!row.workerAckedStop.load(std::memory_order_relaxed))
+            // Ack only if the stop is still the one we observed. A decline that found a
+            // published segment withdraws the stop; acking that withdrawn stop would let a
+            // later drain treat the worker as finished while a new render is in the plugin.
+            if (row.stopProduce.load(std::memory_order_seq_cst))
             {
-                row.workerAckedStop.store(true, std::memory_order_release);
+                if (!row.workerAckedStop.load(std::memory_order_relaxed))
+                {
+                    row.workerAckedStop.store(true, std::memory_order_release);
+                }
+            }
+            else
+            {
+                row.workerAckedStop.store(false, std::memory_order_release);
             }
             continue;
         }
+        row.workerAckedStop.store(false, std::memory_order_release);
         const bool did = workerRenderOneSegment(row);
         row.busy.store(0, std::memory_order_release);
         if (did)
         {
             ++rendered;
+            // Test-only. After the release of `busy` above, so a parked decline observes the
+            // published segment with the claim already clear. No-op unless a test armed the gate.
+            workerHoldAfterPublishedPrimeForDeclineRace();
         }
     }
     return rendered;

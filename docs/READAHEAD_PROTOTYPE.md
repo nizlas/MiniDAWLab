@@ -45,7 +45,10 @@ segment is the next block. At the next block begin:
   fed the instance, so live-rendering it would play from the wrong time);
 * if the ring is empty and the worker has not entered the chain, the prime is **declined**:
   this block renders live, nothing is counted as a miss, and the row may be offered again
-  later. Adoption must not invent a gap just because the worker has not delivered yet;
+  later. Adoption must not invent a gap just because the worker has not delivered yet.
+  Emptiness counts only after further production is stopped and the worker's claim has been
+  observed clear. A segment published after an earlier empty read is consumed from the ring,
+  and the stop is withdrawn so production is not left barred;
 * if the worker is already inside the plugin, the callback does not render that instance and
   does not wait. A segment that lands before the strip pass is played and the row becomes
   Ahead. A segment that is still absent is a counted miss — the same miss policy as any

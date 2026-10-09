@@ -213,7 +213,7 @@ No new flag-off control: the flag-off path still constructs no read-ahead object
 | Output | peak 0.757, overs 0, non-finite 0 | peak 0.568, overs 0, non-finite 0 |
 
 `adopted=42` against 16 owned rows is declined-and-reoffered primes, not misses. Both runs
-exited the scenario with RESULT PASS and then hit the known AmpliTube shutdown fault below.
+exited the scenario with RESULT PASS and then wrote a shutdown dump, matched below.
 
 ### The two dumps that had no module/offset
 
@@ -227,8 +227,9 @@ a text report (pids 24656 and 38544):
 `PluginInsertHost::~PluginInsertHost` → `PlaybackEngine` destructor →
 `MiniDAWLabApplication::shutdown` → `WinMain`.
 
-No `ReadAheadRenderer` frame. Last operation on both is `app shutdown begin`. They are the
-known AmpliTube teardown fault, not a read-ahead lifetime bug. The missing `.txt` is the
+No `ReadAheadRenderer` frame. Last operation on both is `app shutdown begin`. Dumparna matchar
+det kända AmpliTube-felets modul, offset och fas. Detta fastställer inte ensamt grundorsaken
+eller utesluter annan tråds påverkan. The missing `.txt` is the
 in-process report writer not finishing the metadata file; the dump already contained the
 exception record. This follow-up's two shutdowns (pids 20524 and 48772) wrote the text report
 as well, same module and offset `0x7675E`, same phase.
