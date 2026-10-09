@@ -305,37 +305,58 @@ work units are independent and the join model already exists.
   cycle-wrap segments, carried as up to 2 segment descriptors in the job), pre-gain, Pre
   chain, fader, Post chain, pan — into a **per-job stage buffer**, and stops there. No job
   touches a shared bus.
-- **Fan-out and summing stay serial on the callback**, in session row order, after the
-  join (`fanPostStripStageToDryAndSends` per row, then bus steps). Summation order is
-  therefore byte-identical to today — same floats, same order ⇒ deterministic output.
-- **Exactly-once, never-concurrent:** chains are per `TrackId` and each track gets at most
-  one job (same duplicate-guard pattern as today's `addJob`); the monitored row is excluded
-  from the clip path already (its chain runs only in the monitor pass), the recording row
-  is excluded via `omitClipPlaybackForTrack`. Rule kept: **a plug-in instance is processed
-  by exactly one thread per block, exactly once.**
+- **Fan-out and summing stay serial on the callback**, after the join, and must reproduce
+  **today's verified accumulation order** — not an assumed "common row order". Verified at
+  `f11c0fb`: a bus scratch sample receives, in order, (1) the count-in click (master bus
+  only, MixPrep), (2) audio-row stage fans in `SourceStep` order — today executed
+  *segment-major* (`renderRun` fans every step for segment 1, then every step for
+  segment 2 on a cycle wrap), (3) monitored rows' stage fans, (4) instrument rows' stage
+  fans in session row order, (5) bus-step forwarding in topological order. Because the two
+  wrap segments occupy **disjoint frame ranges** of every bus buffer (`destFrame` offsets),
+  fanning *step-major after the join* (per step: its segment-1 stage then its segment-2
+  stage) produces, at every individual bus frame, the same contributions added in the same
+  order as today's segment-major loop ⇒ bit-identical sums. Per-segment stage results are
+  therefore kept separate in the job output until the callback fans them; they are never
+  pre-summed across segments. Contributions (3)–(5) keep their existing positions after the
+  audio fans. Any deviation from this order is a semantic change and is out of scope for A1.
+- **Never-concurrent, exactly-covered:** chains are per `TrackId` and each track gets at
+  most one job (same duplicate-guard pattern as today's `addJob`); the monitored row is
+  excluded from the clip path already (its chain runs only in the monitor pass), the
+  recording row is excluded via `omitClipPlaybackForTrack`. The correctness rule is NOT
+  "exactly one `processBlock` call per device block" — that was an oversimplification: a
+  device block that wraps the cycle splits into two timeline segments, and an audio row's
+  insert chain legitimately runs **once per segment** (two `processBlock` calls for that
+  device block) today. The rules that actually hold, before and after A1:
+  **(i)** no plug-in instance is ever processed concurrently from more than one thread;
+  **(ii)** no intended timeline segment / sample interval is processed twice or dropped —
+  the segment set per instance per device block is exactly today's set;
+  **(iii)** the existing segmentation, the call order of the segments, and the per-call
+  transport/playhead context each instance observes are preserved unchanged.
 
 ### 3.2 Shared-state decomposition (the real work)
 
-Three engine-owned singletons currently force serialization and must become per-job/per-
-track, allocated at `prepareForDevice` time (no audio-thread allocation):
+The complete map of **mutable state the parallelized calls touch**, each with its owner,
+its lifetime, and its A1 treatment. Invariant: **no two concurrent jobs may share writable
+scratch or a mutable transport context.** All replacements are allocated at
+`prepareForDevice` / publish time (no audio-thread allocation).
 
-1. **Insert scratch** — replace the single `PluginInsertHost::scratch_` with per-job stereo
-   scratch (pool of `maxJobs` pre-sized buffers, or per-track slots in the published map).
-   The chain-processing entry grows a variant that takes caller-provided buffers.
-2. **Insert playhead** — `InsertProcessPlayHead` is one object installed in every instance.
-   Since every instance belongs to exactly one track's chain, give each track chain its own
-   playhead object (installed at publish time) and set its context from the job (per
-   segment, same values as today's `setInsertProcessContext`). JUCE's `getPosition()` is
-   called synchronously inside `processBlock` on whichever thread runs it — per-chain
-   objects remove the cross-job race.
-3. **Post-strip stage buffer** — per-job stage buffers (the job's output), consumed by the
-   serial fan-out.
+| # | Mutable resource | Owner today | Lifetime today | Why it serializes | A1 treatment |
+|---|---|---|---|---|---|
+| 1 | Insert audio scratch `PluginInsertHost::scratch_` (+ `scratchPtrs_`) | `PluginInsertHost` | device prepare → next prepare | ONE buffer reused by every chain call | Per-**lane** stereo scratch (one lane per thread that can run a job: workers + callback), passed into a new chain-processing variant that takes caller buffers. A job runs entirely on one lane ⇒ exclusive use. |
+| 2 | Insert **MIDI scratch** `PluginInsertHost::midiScratch_` (cleared after every `processBlock`) | `PluginInsertHost` | device prepare → next prepare | ONE `juce::MidiBuffer` handed to every insert `processBlock`; concurrent clear/use races | Per-lane `MidiBuffer`, pre-sized at prepare, cleared after each call exactly as today. |
+| 3 | Insert playhead `InsertProcessPlayHead processPlayHead_` (installed via `setPlayHead` on every instance) | `PluginInsertHost` | host lifetime (outlives instances) | ONE mutable `PositionInfo` read synchronously from inside `processBlock` on whichever thread runs it | Per-**track-chain** playhead object (every instance belongs to exactly one chain), installed at publish/prepare time, co-owned so it outlives every published map that references it; the job sets its context per segment with the same values as today's `setInsertProcessContext`. Serial paths (buses, monitor, offline) keep working: the global context setter updates every chain's playhead. |
+| 4 | Post-strip stage buffer `postStripStagePtrs_` | `PlaybackEngine` | device prepare → next prepare | ONE stereo buffer reused by every strip in steps 7–10 | Per-job stage buffers (the job's output), engine-owned, sized rows × block at prepare; consumed by the serial fan-out. Serial strips (buses, monitor, instrument rows in A1, offline) keep the shared buffer. |
+| 5 | Pre-gain ramp `PreGainRampState` (per-track-index array, engine-owned, reset at device start) | `PlaybackEngine` | device prepare → next prepare | Indexed by track index — each job reads/writes **only its own row's entry**, and each row has at most one job | Kept as-is; safe by disjoint indices. The offline path already passes `nullptr` (no ramp). |
+| 6 | C2B insert diagnostics atomics (`audioThreadInsertTrackId_` / `SlotIndex_` / `Stage_`) | `PluginInsertHost` | host lifetime | Global "where is the audio thread" markers — concurrent jobs would interleave garbage | Per-lane atomic marker slots; the diagnostics formatter reports every lane. Diagnostics only, but cross-job mixing would be *misleading*, so it is decomposed, not waved through. |
+| 7 | Insert level tap accumulators (`insertLevelTapPeak…`, fold reads the **member** `scratch_`) | `PluginInsertHost` | host lifetime | Fold helper hardwired to the shared scratch | Fold parameterized by the caller's scratch pointers; accumulators are already relaxed atomics (CAS-max / fetch_add), safe to fold from any thread. |
+| 8 | Track meters (`audioThread_foldTrackMeterIfMetered`, meter bank) | `PlaybackEngine` | engine lifetime | Single-writer accumulators | Folds stay on the **callback thread**, moved to the serial fan-out phase (the job's stage output is read there); the bank keeps its single-writer model, no cross-job mixing. |
+| 9 | `AudioThreadProfiler` per-block scratch | profiler singleton | process | — | Already multi-thread-ready since 1.1.18 (atomic per-block category scratch, `setInsideGenerationJob` TLS); insert folds from jobs use the same discipline. |
+| 10 | Transport context for inserts (`setInsertProcessContext` values) | callback (per segment) | one segment | Mutable, segment-scoped | Carried **by value in the job's segment descriptors**; the job writes it into its own chain playheads (#3) only. No job reads another job's context. |
 
-Also audited: `PreGainRampState` is a per-track-index array (each job touches only its own
-index — safe); meter folds (`audioThread_foldTrackMeterIfMetered`) move to the serial
-fan-out phase so the meter bank keeps its single-writer model; the C2B insert diagnostics
-atomics (`audioThreadInsertTrackId_` …) and the insert level tap need per-thread-safe
-folding or documented last-writer-wins semantics (diagnostics only).
+Resources NOT touched by the parallelized calls (verified): routing bus scratch (jobs never
+fan — see §3.1), device output buffers, recorder SPSC, transport atomics (jobs receive
+precomputed segment descriptors; only the callback advances the playhead), session/plugin
+snapshots (immutable, acquire-loaded once by the callback and passed as resolved pointers).
 
 ### 3.3 Pool reuse — one dispatch, one join, no second barrier
 
@@ -386,7 +407,21 @@ pointers for their row (no additional map loads on workers).
 
 ---
 
-## 4. Stage B — read-ahead pre-processing (concrete design)
+## 4. Stage B — read-ahead pre-processing (DESIGN DRAFT — unresolved transitions)
+
+> **Status: design draft, not an implementable specification.** The ownership transitions
+> in §4.4 (`Live → Ahead` and `Ahead → Live`) are **not resolved**: a safe ownership
+> handover transfers *who may call the instance*, but it cannot reset the instance's
+> internal time position. At `Ahead → Live` the instance may already have processed
+> several blocks past the audible position — the callback cannot "resume live" at the
+> audible playhead without re-feeding samples the instance has already consumed (which is
+> forbidden), so demotion with an invalidated prefix leaves a gap that the current draft
+> does not close. At `Live → Ahead` the ring starts empty and must fill while the row
+> keeps playing — the draft must not assume a seamless, continuity-preserving handover.
+> Consequently the earlier "control latency = 0 (always demote)" / "parameter changes are
+> as immediate as today" promise is **not substantiated by this design** and is withdrawn
+> until the transitions are solved. These problems are to be resolved before any Stage B
+> implementation; nothing in Stage A depends on them.
 
 The unit of pre-computation is deliberately the **same unit Stage A creates: one source
 row's post-strip stage output for one device block**. Buses, master, summing and all live
@@ -475,10 +510,12 @@ same pattern as the render pool's generation and the C2B stale-plan guards). The
 runs **live in the callback** (today's Stage A path — same code) until the pre-processor
 has re-primed at the new state. Consequences, stated plainly:
 
-- **What the user hears:** parameter changes are as immediate as today, because the edited
-  row drops to live processing at the next block boundary. The cost is a transient callback
-  load spike (that row's chain returns to the deadline path) — bounded, and identical to
-  today's steady state.
+- **What the user hears:** the *intent* is that an edited row drops to live processing at
+  the next block boundary. **Caveat (see the §4 draft status):** because the demoted
+  instance may already be several blocks ahead of the audible position, "drops to live"
+  is not immediate in the current draft — the transition leaves either stale audio (if the
+  prefix is kept) or a gap (if it is invalidated). The immediacy claim is withdrawn until
+  the `Ahead → Live` transition is solved.
 - **Where immediate response structurally requires live processing:** monitored input,
   live MIDI to instruments, audition, count-in — exactly the §4.1 live set.
 - **Transport:** Play from stop can be pre-primed while stopped (playhead known; prime
@@ -498,31 +535,40 @@ machine, advanced only at block boundaries:
   touches the instance.
 - `Live → Ahead` (promotion): at a block fence where the callback has processed through
   block n, ownership transfers; the worker continues from n+1. The instance sees one
-  continuous sample/MIDI stream — no gap, no overlap, no double notes.
+  continuous sample/MIDI stream — no gap, no overlap, no double notes. **Unresolved:** the
+  row's ring is empty at the fence and fills only as fast as the worker renders; the
+  design must not assume continuity across the handover — until the ring has at least one
+  valid block the row would miss (silence) unless promotion is deferred until primed.
+  Which of those (defer vs. accept a priming window) applies is an open decision.
 - `Ahead → Live` (demotion, on invalidation or classification change): the worker finishes
-  (or abandons *before starting*) its current block and releases ownership; **already-
-  rendered blocks that are still valid play out from the ring; then the callback resumes
-  live from the first un-rendered block.** The instance's internal state is exactly "has
-  processed through block m" at all times — never rewound, never re-fed. (Re-processing
-  discarded blocks through the same instance is forbidden: stateful plug-ins would
-  double-count the input. This is why invalidated audio is replaced by *silence or live
-  processing of LATER blocks*, never by re-running the same segment on the same instance —
-  and why the invalidation classes in §4.3 are generous: a stale-but-harmless block, e.g.
-  after a pure fader move, still plays at the OLD value for ≤ depth blocks only if we chose
-  to keep it; the first version instead treats demotion as "drain valid prefix, then
-  live", with the prefix usually empty because the edit invalidated it.)
+  (or abandons *before starting*) its current block and releases ownership. The instance's
+  internal state is exactly "has processed through block m" at all times — the handover
+  transfers *the right to call the instance*, it does **not** rewind the instance's
+  internal time position, and m may be several blocks past the audible playhead.
+  Re-processing discarded blocks through the same instance is forbidden (stateful
+  plug-ins would double-count the input). **Unresolved consequence:** when the prefix
+  (audible position .. m] is still valid it can play out from the ring and the callback
+  resumes at m+1; but when the edit *invalidated* that prefix, the samples in
+  (audible .. m] can be neither replayed from the ring (stale) nor re-processed (double
+  feed) — the current draft leaves a gap (silence) there, which contradicts the
+  "immediate fallback" ambition. This transition must be redesigned (candidates: bound
+  the gap by depth and accept it, demote lazily at m+1 only, or keep stale-but-harmless
+  prefixes per §4.3) before Stage B is implementable.
 - **Separate instances or state checkpoints were considered and rejected** for v1:
   checkpoint restore via `getStateInformation`/`setStateInformation` is not RT-safe, and
   the proxy work proved state blobs are volatile (Groove Agent SE's grow per call) and
   asynchronous to audibility (kit streaming) — a restore mid-playback risks silence or
   wrong sound. Costs and risks are documented so the decision is explicit.
 
-**Project save while Ahead:** `exportChain`/instrument state capture run on the message
-thread against instances that may have processed up to `depth` blocks (≤ ~43 ms) past the
-audible position. Today the same capture during playback is already mid-flight by an
-unbounded in-block amount, so this changes degree, not kind; it is recorded as an accepted,
-bounded deviation. If steering later wants exactness, the save path can demote all rows and
-fence first — deliberately NOT in v1.
+**Project save while Ahead — OPEN semantic decision (not an accepted deviation):**
+`exportChain`/instrument state capture run on the message thread against instances that may
+have processed up to `depth` blocks (≤ ~43 ms) past the audible position. Today the same
+capture during playback is already mid-flight by an in-block amount, so the *degree*
+changes rather than the *kind* — but whether a saved project may legitimately capture
+plug-in state from a position the user has not yet heard is a semantic question steering
+has not decided. Options on the table: accept the bounded skew, or demote-and-fence all
+rows before capture (costing a save-time hiccup). This decision must be made explicitly
+before Stage B lands; this plan does not pre-accept either answer.
 
 ### 4.5 Realtime and failure paths
 
@@ -573,7 +619,10 @@ fence first — deliberately NOT in v1.
    single global generation (any invalidating event demotes ALL pre-processed rows to live
    = today's path, then re-prime); depth 2 blocks; one worker; prime-while-stopped;
    explicit limitations: no per-row invalidation granularity, no instrument read-ahead, no
-   late-applied parameters, control latency = 0 (always demote).
+   late-applied parameters. **Precondition:** the §4 draft-status problems (the
+   `Ahead → Live` gap, promotion priming, save-while-ahead semantics) are resolved first —
+   the previously stated "control latency = 0 (always demote)" property is not
+   substantiated by the current draft.
 5. **B2+ (deferred deliberately):** instrument-row read-ahead (requires fencing transport-
    MIDI scheduling into the worker timeline), per-row generations, pan as a late-applied
    parameter, bus-subtree parallelism, any PDC work, staged project teardown.
@@ -600,7 +649,9 @@ the callback thread until now — instruments already proved multi-thread-tolera
 pool, but each new plug-in class needs the §6 soak); diagnostics singletons (insert tap,
 C2B markers) need per-thread folding; Stage B's new "worker outlives the callback" lifetime
 rule is the first break of the 1.1.18 invariant and carries the retirement-fence burden;
-save-while-ahead state skew (§4.4, bounded, accepted for v1).
+save-while-ahead state skew (§4.4 — an OPEN semantic decision, see the §4 draft status);
+the unresolved `Ahead → Live` / `Live → Ahead` transitions (§4 draft status) block any
+Stage B implementation until redesigned.
 
 **Open questions for steering:** Is a transient one-row silence (counted, logged) an
 acceptable miss behaviour for B1, or must B1 demote so eagerly that misses are effectively
@@ -619,10 +670,14 @@ state (battery/CPU courtesy)? Where should the `--readahead-blocks` developer ov
   read-ahead consume paths. **Third-party plug-ins are explicitly NOT held to bit-identity**
   (AmpliTube/Pro-Q may be internally nondeterministic); for them the checks are structural
   (below) plus listening.
-- **Exactly-once per instance per block:** counter assertions through the existing relaxed
-  activity counters (`processOkBlocks`, insert tap block counts) in focused tests: no block
-  with two processings, none with zero while audible; concurrency assert (debug-only owner
-  stamp per instance) across promotion/demotion fences and cycle wraps.
+- **Never-concurrent, exactly-covered (NOT "once per device block"):** counter assertions
+  through the existing relaxed activity counters (`processOkBlocks`, insert tap block
+  counts) in focused tests, asserting the corrected §3.1 rule: no instance processed
+  concurrently from two threads; the set of timeline segments processed per instance per
+  device block equals today's set (one call per segment — a wrap block legitimately
+  produces two calls), in the same order, with the same per-call playhead context; no
+  intended segment processed twice or dropped. Cycle-wrap blocks are a mandatory fixture,
+  precisely because they falsify the naive "one call per block" assertion.
 - **Routing/summing determinism:** fixed fixture (sources → Groups → sends → Master),
   repeated runs compare full-mix checksums serial vs parallel vs read-ahead-primed.
 - **Transition matrix:** monitor on/off, arm, record start/stop (incl. count-in and cycle
