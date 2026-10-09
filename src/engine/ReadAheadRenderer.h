@@ -5,9 +5,10 @@
 // =============================================================================
 //
 // Model: docs/READAHEAD_PROTOTYPE.md. OFF by default; exists only when the process was started
-// with `--experimental-readahead[=N]` (or a test created it in pump mode). One dedicated
-// low-priority worker thread — separate from the InstrumentRenderPool that must meet the current
-// audio deadline — renders FUTURE blocks of adopted audio rows through the production strip core
+// with `--experimental-readahead[=N]` (or a test created it in pump mode). One dedicated worker
+// thread (default priority — deliberately NOT the pool's pro-audio priority) — separate from the
+// InstrumentRenderPool that must meet the current audio deadline — renders FUTURE blocks of
+// adopted audio rows through the production strip core
 // into per-row SPSC rings. The audio callback consumes ready blocks; a not-ready block is a MISS
 // (silence that block, counted, never a wait).
 //

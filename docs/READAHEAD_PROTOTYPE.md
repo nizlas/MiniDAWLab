@@ -61,9 +61,10 @@ begin, so the set is block-stable):
 | `Draining` | nobody produces; callback consumes the queue | ahead by (queued blocks) |
 | `Abandoning` | worker is finishing its current block, then stops | ahead, results discarded |
 
-* The **worker** is one dedicated low-priority thread, separate from the render pool that
-  must meet the current audio deadline. It never blocks the callback and the callback never
-  waits on it (a not-ready result is a *miss*, §7 — never a wait).
+* The **worker** is one dedicated thread, separate from the render pool that must meet the
+  current audio deadline, and deliberately NOT elevated to the pool's pro-audio priority. It
+  never blocks the callback and the callback never waits on it (a not-ready result is a
+  *miss*, §7 — never a wait).
 * A per-row busy/claim atomic plus a stop-request flag give the Dekker-style guarantee that
   worker and callback never process the same chain concurrently; the publish-before-destroy
   hook (§8) extends the same guarantee across plugin removal.
