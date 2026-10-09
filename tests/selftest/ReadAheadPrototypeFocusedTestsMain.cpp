@@ -19,9 +19,11 @@
 //   * geometry edits (cycle toggle / locator move) while owned: deliberate discontinuity;
 //   * playback offset: queue keys live in the AUDIBLE domain (transport + offset) — bit-identity
 //     with a non-zero persistent offset (v1 keyed these inconsistently and would always miss);
-//   * a deliberately delayed worker: misses are counted silence; after
-//     kConsecutiveMissAbandonThreshold consecutive missed segments the row LEAVES the mode
-//     (live path + cooldown) instead of hiding a continued run of silent blocks;
+//   * a worker that never starts, or is held off before it enters the chain: the prime is
+//     declined and every block stays on the direct path (audible, no miss, no overlap). A
+//     worker parked inside the first plugin call stays exclusive; rows it has not entered
+//     keep rendering live. Once a row is Ahead, a miss is still counted silence and two
+//     consecutive misses still leave the mode;
 //   * a transient single miss: late results discarded as stale (never played from a wrong
 //     time), ownership retained, recovery without an abandon;
 //   * Monitor enabled mid-run: IMMEDIATE discard handover (same-block monitor semantics, zero
@@ -908,33 +910,106 @@ void testCycleGeometryChangeWhileOwned()
 // =============================================================================================
 void testDelayedWorkerMissAbandon()
 {
-    std::printf("\n-- worker never runs: 2 consecutive missed segments ABANDON the row to the live path --\n");
+    std::printf("\n-- worker never runs: uncommitted primes decline, every block stays on the direct path --\n");
     constexpr int kBlocks = 16;
 
     Fixture on(kDepth);
-    // NEVER pump: the worker is infinitely late. Block 0 renders live (Scheduled); blocks 1 and
-    // 2 miss (counted silence); at block 3's begin the rows LEAVE the mode (abandon + cooldown)
-    // and render live again — the system does NOT hide a continued run of silent blocks.
+    // NEVER pump. The old contract promoted every Scheduled row on the next block and then
+    // counted an empty ring as silence. A prime the worker has not entered must instead
+    // decline: this block renders live, no miss, no abandon, no hole in the chain stream.
     const std::vector<float> out = on.h.runPlayingBlocks(kBlocks, 0, [](int) {});
     const auto c = on.h.engine.experimentalReadAhead()->countersSnapshot();
-    printCounters(c, "miss-abandon counters");
+    printCounters(c, "declined-prime counters");
     const int rows = audioRowCount(on.h);
 
-    expect(peakOfBlockSpan(out, 0, 1) > 0.01, "adoption block (rendered live) is audible");
-    expect(peakOfBlockSpan(out, 1, 3) == 0.0,
-           "exactly the 2 tolerated miss blocks are EXACT silence (miss = silence, never a wait)");
-    expect(peakOfBlockSpan(out, 3, kBlocks) > 0.01,
-           "audible again from block 3: the rows abandoned the mode instead of staying silent");
-    expect(c.missAbandons == rows, "every owned row counted exactly one miss abandonment");
-    expect(c.missedSegments == (std::int64_t)rows * 2,
-           "exactly the threshold's worth of misses counted — real underruns, not transition gaps");
-    expect(c.adopted == rows, "cooldown blocked re-adoption for the rest of the run");
-    expect(c.producedSegments == 0 && c.consumedSegments == 0, "nothing produced or consumed (worker never ran)");
-    expect(on.pre->callCount() == kBlocks - 2,
-           "chain processed the adoption block + every live block after the abandon (2 miss blocks lost)");
-    expect(countStreamBreaks(on.pre) == 1, "one break: the 2-block hole the abandon closed");
+    expect(peakOfBlockSpan(out, 0, kBlocks) > 0.01,
+           "every block audible — a prime the worker never starts does not silence the row");
+    expect(c.missedSegments == 0, "declining an uncommitted prime is not a miss");
+    expect(c.missAbandons == 0, "declining an uncommitted prime is not an abandonment");
+    expect(c.discardResets == 0, "a declined prime is not a discontinuity reset");
+    expect(c.producedSegments == 0 && c.consumedSegments == 0,
+           "nothing produced or consumed (worker never ran)");
+    expect(c.adopted == (std::int64_t)rows * kBlocks,
+           "each block re-offered the declined rows; none stayed owned across a block");
+    expect(on.pre->callCount() == kBlocks,
+           "the chain processed every playing block on the direct path");
+    expect(countStreamBreaks(on.pre) == 0, "direct-path stream stayed contiguous (no hole, no duplicate)");
     expect(!on.h.engine.experimentalReadAhead()->audioThread_anyOwned(),
-           "no row still owned — the mode was LEFT when it did not hold");
+           "stop left no row owned");
+}
+
+// =============================================================================================
+void testDeferredPrimeStaysOnDirectPath()
+{
+    std::printf("\n-- worker start held off: a prime that cannot run yet stays on the direct path --\n");
+    constexpr int kBlocks = 12;
+
+    readahead::setConfiguredReadAheadDepth(kDepth);
+    Fixture on(0); // thread-mode renderer; the worker is real but not allowed to claim yet
+    readahead::setConfiguredReadAheadDepth(0);
+    readahead::ReadAheadRenderer* const ra = on.h.engine.experimentalReadAhead();
+    expect(ra != nullptr, "thread-mode renderer constructed");
+    // Hold is on the FIRST audio row, which the worker scans first. It is armed only AFTER
+    // the adoption block's live render, so the callback itself is not the thread that parks.
+    StatefulProbeInsert* const first = on.h.installInsert(on.h.audioTids[0], InsertStage::Pre, 0.5f);
+    ra->setDeferPrimeForTests(true);
+
+    on.h.transport.requestSeek(0);
+    on.h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+    (void)on.h.runCallbackBlocks(1);
+    const auto duringDefer = ra->countersSnapshot();
+    expect(duringDefer.producedSegments == 0, "deferred worker did not render during the adoption block");
+    expect(duringDefer.missedSegments == 0, "adoption block is live, not a miss");
+    expect(first->callCount() == 1, "first row rendered live once before the worker was released");
+    expect(on.pre->callCount() == 1, "sibling row rendered live on the adoption block");
+
+    first->setHoldInProcessBlock(true);
+    ra->setDeferPrimeForTests(false);
+    const auto holdDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!first->isHeldInProcessBlock() && std::chrono::steady_clock::now() < holdDeadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(first->isHeldInProcessBlock(), "worker parked inside the first row's prime, not the callback");
+
+    // While that one prime is inside the plugin, every other row is still uncommitted.
+    // Those rows must keep rendering live. The held instance must not be entered again.
+    const int siblingBefore = on.pre->callCount();
+    const auto missesBefore = ra->countersSnapshot().missedSegments;
+    constexpr int kWhileHeld = 6;
+    (void)on.h.runCallbackBlocks(kWhileHeld, 1000);
+    const auto whileHeld = ra->countersSnapshot();
+    expect(first->isHeldInProcessBlock(), "worker still inside the original prime");
+    expect(gOverlaps.load() == 0, "callback did not process the instance the worker is inside");
+    expect(first->callCount() == 1,
+           "the held row was not live-rendered again (its in-flight call has not even been counted yet)");
+    expect(on.pre->callCount() == siblingBefore + kWhileHeld,
+           "sibling row stayed on the direct path for every block while the prime could not finish");
+    expect(countStreamBreaks(on.pre) == 0, "sibling stream stayed contiguous");
+    // A row the worker already finished one segment for can still miss and leave the mode
+    // while the worker is stuck — that is the steady-state miss policy, not a priming gap.
+    // The in-flight row's own absent blocks must be counted, not replaced with silence that
+    // the counters hide.
+    expect(whileHeld.missedSegments - missesBefore >= kWhileHeld,
+           "absent segments of the in-flight row are counted");
+
+    first->setHoldInProcessBlock(false);
+    const auto releaseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (first->isHeldInProcessBlock() && std::chrono::steady_clock::now() < releaseDeadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(!first->isHeldInProcessBlock(), "worker left the prime when the hold was released");
+
+    // The rest of the run is ordinary playback with the worker free. The adoption block and
+    // the held window above are the contract; this tail only checks the release does not
+    // overlap the chain or mute the mix.
+    const std::vector<float> tail = on.h.runPlayingBlocks(kBlocks, 0, [](int) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    });
+    expect(peakOfBlockSpan(tail, 0, kBlocks) > 0.01, "playback stayed audible after the worker was released");
+    expect(gOverlaps.load() == 0 && gDestroyedWhileProcessing.load() == 0,
+           "no concurrent processing after the deferred prime was released");
 }
 
 // =============================================================================================
@@ -1488,11 +1563,569 @@ void testDeviceStopWaitsForBlockedWorker()
            "lifetime guards clean through stop, blocked teardown and restart");
 }
 
+// =============================================================================================
+// DAL Mono Delay round-trip. Not part of the default suite (real VST3, fresh process per
+// reopen). Run: ReadAheadPrototypeFocusedTests --mono-delay-save
+// Reopen child: --mono-delay-reopen <project> <expected-sidecar>
+// =============================================================================================
+
+struct SavedDelayParam
+{
+    juce::String name;
+    float value = 0.0f;
+    juce::String text;
+};
+
+[[nodiscard]] bool applyKnownDelayParams(juce::AudioPluginInstance& inst, juce::String& why)
+{
+    struct Spec
+    {
+        const char* name;
+        bool asText;
+        float norm;
+        const char* text;
+    };
+    const Spec specs[] = {
+        { "Sync", false, 0.0f, nullptr },
+        { "Delay time", true, 0.0f, "250.0 ms" },
+        { "Feedback", true, 0.0f, "20.0 %" },
+        { "Mix", true, 0.0f, "35.0 %" },
+        { "Low Cut enabled", false, 0.0f, nullptr },
+        { "High Cut enabled", false, 0.0f, nullptr },
+    };
+    for (const Spec& s : specs)
+    {
+        juce::AudioProcessorParameter* found = nullptr;
+        for (auto* p : inst.getParameters())
+        {
+            if (p->getName(64) == s.name)
+            {
+                found = p;
+                break;
+            }
+        }
+        if (found == nullptr)
+        {
+            why = juce::String("parameter not found: ") + s.name;
+            return false;
+        }
+        if (s.asText)
+        {
+            found->setValueNotifyingHost(found->getValueForText(s.text));
+        }
+        else
+        {
+            found->setValueNotifyingHost(s.norm);
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool readDelayParams(juce::AudioPluginInstance& inst, std::vector<SavedDelayParam>& out, juce::String& why)
+{
+    const char* names[] = { "Sync", "Delay time", "Feedback", "Mix", "Low Cut enabled", "High Cut enabled" };
+    out.clear();
+    for (const char* name : names)
+    {
+        juce::AudioProcessorParameter* found = nullptr;
+        for (auto* p : inst.getParameters())
+        {
+            if (p->getName(64) == name)
+            {
+                found = p;
+                break;
+            }
+        }
+        if (found == nullptr)
+        {
+            why = juce::String("parameter not found: ") + name;
+            return false;
+        }
+        SavedDelayParam row;
+        row.name = name;
+        row.value = found->getValue();
+        row.text = found->getText(found->getValue(), 32);
+        out.push_back(row);
+    }
+    return true;
+}
+
+[[nodiscard]] bool writeParamSidecar(const juce::File& file, const std::vector<SavedDelayParam>& rows)
+{
+    juce::String text;
+    for (const auto& r : rows)
+    {
+        text << r.name << "\t" << juce::String(r.value, 8) << "\t" << r.text << "\n";
+    }
+    return file.replaceWithText(text);
+}
+
+[[nodiscard]] bool loadParamSidecar(const juce::File& file, std::vector<SavedDelayParam>& rows)
+{
+    rows.clear();
+    juce::StringArray lines;
+    lines.addLines(file.loadFileAsString());
+    for (const auto& line : lines)
+    {
+        if (line.isEmpty())
+        {
+            continue;
+        }
+        juce::String name, value, text;
+        if (!line.containsChar('\t'))
+        {
+            return false;
+        }
+        name = line.upToFirstOccurrenceOf("\t", false, false);
+        const juce::String rest = line.fromFirstOccurrenceOf("\t", false, false);
+        value = rest.upToFirstOccurrenceOf("\t", false, false);
+        text = rest.fromFirstOccurrenceOf("\t", false, false);
+        SavedDelayParam row;
+        row.name = name;
+        row.value = value.getFloatValue();
+        row.text = text;
+        rows.push_back(row);
+    }
+    return rows.size() == 6;
+}
+
+void pumpMessageLoopMs(const int ms)
+{
+    const auto start = juce::Time::getMillisecondCounter();
+    while ((int)(juce::Time::getMillisecondCounter() - start) < ms)
+    {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+    }
+}
+
+[[nodiscard]] int measureDelayEchoSamples(PluginInsertHost& host, const TrackId tid)
+{
+    const auto process = [&](const bool impulse) {
+        host.audioThread_clearScratch(2, kBlock);
+        float* const* ptrs = host.audioThread_getScratchWritePointers();
+        if (impulse && ptrs != nullptr && ptrs[0] != nullptr && ptrs[1] != nullptr)
+        {
+            ptrs[0][0] = 1.0f;
+            ptrs[1][0] = 1.0f;
+        }
+        host.audioThread_processChainForTrack(tid, InsertStage::Pre, kBlock);
+        return ptrs;
+    };
+    const int warm = (int)(1.0 * kRate / kBlock);
+    for (int i = 0; i < warm; ++i)
+    {
+        (void)process(false);
+    }
+    std::vector<float> rendered;
+    const int cap = (int)(0.40 * kRate / kBlock);
+    for (int i = 0; i < cap; ++i)
+    {
+        float* const* ptrs = process(i == 0);
+        if (ptrs != nullptr && ptrs[0] != nullptr)
+        {
+            rendered.insert(rendered.end(), ptrs[0], ptrs[0] + kBlock);
+        }
+    }
+    int peakAt = -1;
+    float peak = 0.0f;
+    for (int i = 64; i < (int)rendered.size(); ++i)
+    {
+        const float a = std::fabs(rendered[(size_t)i]);
+        if (a > peak)
+        {
+            peak = a;
+            peakAt = i;
+        }
+    }
+    std::printf("[info] echo sample=%d peak=%f\n", peakAt, peak);
+    return (peak > 0.02f) ? peakAt : -1;
+}
+
+[[nodiscard]] bool writeToneWav(const juce::File& wav)
+{
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::FileOutputStream> stream(wav.createOutputStream());
+    if (stream == nullptr)
+    {
+        return false;
+    }
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        format.createWriterFor(stream.get(), kRate, 2, 16, {}, 0));
+    if (writer == nullptr)
+    {
+        return false;
+    }
+    stream.release();
+    juce::AudioBuffer<float> buf(2, kBlock * 8);
+    buf.clear();
+    buf.setSample(0, 0, 0.8f);
+    buf.setSample(1, 0, 0.8f);
+    return writer->writeFromAudioSampleBuffer(buf, 0, buf.getNumSamples());
+}
+
+/// The production bracket shared by Save and autosave: ScopedPluginStateCaptureWindow gates
+/// Session::saveProjectToFile. Autosave (ProjectIoCoordinator::writeAutosaveNow) is that
+/// bracket plus restoring the user's project path afterwards so the autosave does not become
+/// the Save target.
+[[nodiscard]] bool saveThroughCaptureWindow(Harness& h, const juce::File& file, juce::String& why)
+{
+    const ScopedPluginStateCaptureWindow window(h.engine);
+    if (!window.succeeded())
+    {
+        why = "capture window failed";
+        return false;
+    }
+    const juce::Result r = h.session.saveProjectToFile(h.transport, file, kRate, &h.pluginHost);
+    if (!r.wasOk())
+    {
+        why = r.getErrorMessage();
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] int reopenDelayProject(const juce::File& project, const juce::File& sidecar)
+{
+    std::vector<SavedDelayParam> expected;
+    if (!loadParamSidecar(sidecar, expected))
+    {
+        std::printf("[FAIL] sidecar unreadable: %s\n", sidecar.getFullPathName().toRawUTF8());
+        return 1;
+    }
+    Session session;
+    Transport transport;
+    PluginInsertHost host;
+    host.prepareForDevice(kRate, kBlock, 2);
+    juce::StringArray skipped;
+    juce::String note;
+    const juce::Result loaded = session.loadProjectFromFile(transport, project, kRate, skipped, note, &host);
+    if (!loaded.wasOk())
+    {
+        std::printf("[FAIL] load %s: %s\n", project.getFileName().toRawUTF8(),
+                    loaded.getErrorMessage().toRawUTF8());
+        return 1;
+    }
+    pumpMessageLoopMs(500);
+    for (const auto& s : skipped)
+    {
+        std::printf("[info] skipped: %s\n", s.toRawUTF8());
+    }
+    const TrackId tid{ 1 };
+    juce::AudioPluginInstance* const inst = host.liveInstanceAtChainIndexForDiagnostics(tid, 0);
+    if (inst == nullptr)
+    {
+        std::printf("[FAIL] no live DAL Mono Delay after reload of %s\n", project.getFileName().toRawUTF8());
+        return 1;
+    }
+    std::vector<SavedDelayParam> got;
+    juce::String why;
+    if (!readDelayParams(*inst, got, why) || got.size() != expected.size())
+    {
+        std::printf("[FAIL] %s\n", why.toRawUTF8());
+        return 1;
+    }
+    bool paramsOk = true;
+    for (size_t i = 0; i < got.size(); ++i)
+    {
+        const float dv = std::fabs(got[i].value - expected[i].value);
+        const bool textOk = got[i].text == expected[i].text;
+        const bool valueOk = dv < 1.0e-4f;
+        std::printf("[info] %s value=%f (expected %f) text=\"%s\" (expected \"%s\")\n",
+                    got[i].name.toRawUTF8(), got[i].value, expected[i].value,
+                    got[i].text.toRawUTF8(), expected[i].text.toRawUTF8());
+        if (!textOk || !valueOk || got[i].name != expected[i].name)
+        {
+            paramsOk = false;
+        }
+    }
+    const int echo = measureDelayEchoSamples(host, tid);
+    const int expectedEcho = (int)std::lround(0.250 * kRate);
+    const bool echoOk = std::abs(echo - expectedEcho) <= (int)(0.003 * kRate);
+    std::printf("%s parameters %s\n", paramsOk ? "[ ok ]" : "[FAIL]", project.getFileName().toRawUTF8());
+    std::printf("%s echo at %d samples, expected %d (+/- 3 ms) %s\n",
+                echoOk ? "[ ok ]" : "[FAIL]", echo, expectedEcho, project.getFileName().toRawUTF8());
+    return (paramsOk && echoOk) ? 0 : 1;
+}
+
+[[nodiscard]] int runMonoDelaySave(const int argc, char** argv)
+{
+    const juce::String mode(argv[1]);
+    if (mode == "--mono-delay-reopen")
+    {
+        if (argc < 4)
+        {
+            std::printf("usage: --mono-delay-reopen <project> <sidecar>\n");
+            return 2;
+        }
+        juce::ScopedJuceInitialiser_GUI juceInit;
+        return reopenDelayProject(juce::File(argv[2]), juce::File(argv[3]));
+    }
+    if (mode != "--mono-delay-save")
+    {
+        return 2;
+    }
+
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    const juce::File bundle("C:\\Program Files\\Common Files\\VST3\\DALMonoDelay.vst3");
+    if (!bundle.exists())
+    {
+        std::printf("[FAIL] DAL Mono Delay bundle missing: %s\n", bundle.getFullPathName().toRawUTF8());
+        return 1;
+    }
+
+    const juce::File work = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getChildFile("dal-pr7-monodelay-save");
+    (void)work.deleteRecursively();
+    const juce::File audioDir = work.getChildFile("Audio");
+    if (!audioDir.createDirectory())
+    {
+        std::printf("[FAIL] could not create %s\n", audioDir.getFullPathName().toRawUTF8());
+        return 1;
+    }
+    const juce::File wav = audioDir.getChildFile("tone.wav");
+    if (!writeToneWav(wav))
+    {
+        std::printf("[FAIL] could not write %s\n", wav.getFullPathName().toRawUTF8());
+        return 1;
+    }
+    const juce::File sidecar = work.getChildFile("expected-params.txt");
+
+    const auto runMode = [&](const bool readAhead, const juce::String& tag) -> bool {
+        std::printf("\n-- DAL Mono Delay save (%s) --\n", tag.toRawUTF8());
+        if (readAhead)
+        {
+            readahead::setConfiguredReadAheadDepth(kDepth);
+        }
+        Harness h(0);
+        readahead::setConfiguredReadAheadDepth(0);
+        if (readAhead && h.engine.experimentalReadAhead() == nullptr)
+        {
+            std::printf("[FAIL] read-ahead renderer was not constructed\n");
+            return false;
+        }
+        if (!readAhead && h.engine.experimentalReadAhead() != nullptr)
+        {
+            std::printf("[FAIL] direct path constructed a read-ahead renderer\n");
+            return false;
+        }
+        const auto clip = makeNoiseClip(11, kBlock * 400, wav.getFullPathName());
+        const auto placed = h.session.addPlacedClipFromExistingMaterial(clip, 0, 0, clip->getNumSamples(), TrackId{ 1 });
+        if (!placed.wasOk())
+        {
+            std::printf("[FAIL] clip: %s\n", placed.getErrorMessage().toRawUTF8());
+            return false;
+        }
+        h.finishSetup();
+        const juce::Result added = h.pluginHost.addInsertFromVst3File(TrackId{ 1 }, InsertStage::Pre, bundle);
+        if (!added.wasOk())
+        {
+            std::printf("[FAIL] add insert: %s\n", added.getErrorMessage().toRawUTF8());
+            return false;
+        }
+        juce::AudioPluginInstance* const inst = h.pluginHost.liveInstanceAtChainIndexForDiagnostics(TrackId{ 1 }, 0);
+        juce::String why;
+        if (inst == nullptr || !applyKnownDelayParams(*inst, why))
+        {
+            std::printf("[FAIL] set params: %s\n", why.isEmpty() ? "no instance" : why.toRawUTF8());
+            return false;
+        }
+        std::vector<SavedDelayParam> rows;
+        if (!readDelayParams(*inst, rows, why) || !writeParamSidecar(sidecar, rows))
+        {
+            std::printf("[FAIL] record params: %s\n", why.toRawUTF8());
+            return false;
+        }
+        for (const auto& r : rows)
+        {
+            std::printf("[info] set %s = %f \"%s\"\n", r.name.toRawUTF8(), r.value, r.text.toRawUTF8());
+        }
+
+        std::atomic<bool> pumping{ true };
+        h.transport.requestSeek(0);
+        h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+        std::thread pump([&] {
+            while (pumping.load(std::memory_order_acquire))
+            {
+                (void)h.runCallbackBlocks(1, 1500);
+            }
+        });
+        const auto stopPump = [&] {
+            pumping.store(false, std::memory_order_release);
+            if (pump.joinable())
+            {
+                pump.join();
+            }
+        };
+
+        bool adopted = !readAhead;
+        if (readAhead)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                const auto c = h.engine.experimentalReadAhead()->countersSnapshot();
+                if (h.engine.experimentalReadAhead()->audioThread_anyOwned() && c.producedSegments > 0)
+                {
+                    adopted = c.missedSegments == 0 && c.missAbandons == 0;
+                    std::printf("[info] adopted produced=%lld missed=%lld abandons=%lld\n",
+                                (long long)c.producedSegments, (long long)c.missedSegments,
+                                (long long)c.missAbandons);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+        if (!adopted)
+        {
+            std::printf("[FAIL] delay row was not adopted cleanly (or misses appeared at prime)\n");
+            stopPump();
+            h.engine.audioDeviceStopped();
+            return false;
+        }
+
+        const juce::File playing = work.getChildFile(tag + "-playing.dalproj");
+        const juce::File paused = work.getChildFile(tag + "-paused.dalproj");
+        const juce::File autosave = work.getChildFile(tag + "-autosave.dalproj");
+        if (!saveThroughCaptureWindow(h, playing, why))
+        {
+            std::printf("[FAIL] save while playing: %s\n", why.toRawUTF8());
+            stopPump();
+            h.engine.audioDeviceStopped();
+            return false;
+        }
+        std::printf("[ ok ] save while playing -> %s (%lld bytes)\n",
+                    playing.getFileName().toRawUTF8(), (long long)playing.getSize());
+
+        stopPump();
+        h.transport.requestPlaybackIntent(PlaybackIntent::Paused);
+        (void)h.runCallbackBlocks(1);
+        if (!saveThroughCaptureWindow(h, paused, why))
+        {
+            std::printf("[FAIL] save while paused: %s\n", why.toRawUTF8());
+            h.engine.audioDeviceStopped();
+            return false;
+        }
+        std::printf("[ ok ] save while paused -> %s (%lld bytes)\n",
+                    paused.getFileName().toRawUTF8(), (long long)paused.getSize());
+
+        // Autosave's production writer: same capture window, then put the current project
+        // path back so the autosave file does not replace Save's target.
+        pumping.store(true, std::memory_order_release);
+        h.transport.requestPlaybackIntent(PlaybackIntent::Playing);
+        std::thread pump2([&] {
+            while (pumping.load(std::memory_order_acquire))
+            {
+                (void)h.runCallbackBlocks(1, 1500);
+            }
+        });
+        if (readAhead)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            bool again = false;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                if (h.engine.experimentalReadAhead()->audioThread_anyOwned())
+                {
+                    again = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (!again)
+            {
+                std::printf("[FAIL] row was not adopted again before autosave\n");
+                pumping.store(false, std::memory_order_release);
+                pump2.join();
+                h.engine.audioDeviceStopped();
+                return false;
+            }
+        }
+        const juce::File keep = h.session.getCurrentProjectFile();
+        if (!saveThroughCaptureWindow(h, autosave, why))
+        {
+            std::printf("[FAIL] autosave bracket: %s\n", why.toRawUTF8());
+            pumping.store(false, std::memory_order_release);
+            pump2.join();
+            h.engine.audioDeviceStopped();
+            return false;
+        }
+        h.session.setCurrentProjectFile(keep);
+        const bool restoredTarget = h.session.getCurrentProjectFile() == keep;
+        pumping.store(false, std::memory_order_release);
+        pump2.join();
+        if (!restoredTarget)
+        {
+            std::printf("[FAIL] autosave hijacked the Save target\n");
+            h.engine.audioDeviceStopped();
+            return false;
+        }
+        std::printf("[ ok ] autosave bracket -> %s (%lld bytes), Save target unchanged\n",
+                    autosave.getFileName().toRawUTF8(), (long long)autosave.getSize());
+        const auto end = readAhead ? h.engine.experimentalReadAhead()->countersSnapshot()
+                                   : readahead::ReadAheadRenderer::Counters{};
+        if (readAhead)
+        {
+            std::printf("[info] end counters missed=%lld abandons=%lld\n",
+                        (long long)end.missedSegments, (long long)end.missAbandons);
+            if (end.missedSegments != 0 || end.missAbandons != 0)
+            {
+                std::printf("[FAIL] read-ahead misses during the delay save run\n");
+                h.engine.audioDeviceStopped();
+                return false;
+            }
+        }
+        h.engine.audioDeviceStopped();
+        return true;
+    };
+
+    if (!runMode(true, "readahead") || !runMode(false, "direct"))
+    {
+        return 1;
+    }
+
+    const juce::File exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const juce::StringArray projects = {
+        "readahead-playing.dalproj", "readahead-paused.dalproj", "readahead-autosave.dalproj",
+        "direct-playing.dalproj",    "direct-paused.dalproj",    "direct-autosave.dalproj",
+    };
+    int rc = 0;
+    for (const auto& name : projects)
+    {
+        juce::ChildProcess child;
+        juce::StringArray args;
+        args.add(exe.getFullPathName());
+        args.add("--mono-delay-reopen");
+        args.add(work.getChildFile(name).getFullPathName());
+        args.add(sidecar.getFullPathName());
+        if (!child.start(args))
+        {
+            std::printf("[FAIL] could not start reopen process for %s\n", name.toRawUTF8());
+            rc = 1;
+            continue;
+        }
+        const juce::String output = child.readAllProcessOutput();
+        child.waitForProcessToFinish(60000);
+        std::printf("%s", output.toRawUTF8());
+        const int code = child.getExitCode();
+        std::printf("%s fresh process %s exit=%d\n", code == 0 ? "[ ok ]" : "[FAIL]",
+                    name.toRawUTF8(), code);
+        if (code != 0)
+        {
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0); // progress visible even when a hang has to be killed
+    if (argc >= 2 && juce::String(argv[1]).startsWith("--mono-delay"))
+    {
+        return runMonoDelaySave(argc, argv);
+    }
     juce::ScopedJuceInitialiser_GUI juceInit; // MessageManager: prepareForDevice requires the message thread
     std::printf("ReadAheadPrototypeFocusedTests (model: docs/READAHEAD_PROTOTYPE.md, v2)\n");
 
@@ -1505,6 +2138,7 @@ int main()
     testShortLoopLinearEscape();
     testCycleGeometryChangeWhileOwned();
     testDelayedWorkerMissAbandon();
+    testDeferredPrimeStaysOnDirectPath();
     testTransientSingleMissRecovery();
     testMonitorImmediateHandover();
     testChainRemovalWhileOwned();
