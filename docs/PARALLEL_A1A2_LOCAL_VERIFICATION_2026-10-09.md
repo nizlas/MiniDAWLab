@@ -86,3 +86,5 @@ from the scenario, dumps written during shutdown only).
 
 Listening (the user's), Monitor / Record on a row with the candidate, long soak, `--instrument-workers 0`
 bit-identity checks (correctness reference only, per the plan's corrected recipe).
+
+Follow-up at 48 samples with the same binary and project: `PARALLEL_A1A2_48_SAMPLES_2026-10-09.md`.
