@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "app/PluginStateCaptureWindow.h"
 #include "diagnostics/ProjectLoadDiagnosticLog.h"
 #include "diagnostics/StabilityDiagnosticLog.h"
 #include "diagnostics/StabilityInvariants.h"
@@ -80,28 +81,20 @@ namespace
         std::uint64_t loadGeneration_;
     };
 
-    /// Plugin-state capture window around every project write (Save, Save As, autosave): the
-    /// experimental read-ahead worker is quiesced — gapless drain while playing, acknowledged
-    /// pause otherwise — before `exportChain` reads `getStateInformation`, and resumed after
-    /// the file is written (docs/READAHEAD_PROTOTYPE.md §9). A no-op without the CLI flag.
-    class ScopedPluginStateCaptureWindow final
-    {
-    public:
-        explicit ScopedPluginStateCaptureWindow(PlaybackEngine& playbackEngine) noexcept
-            : playbackEngine_(playbackEngine)
-        {
-            playbackEngine_.beginPluginStateCaptureWindow();
-        }
-        ~ScopedPluginStateCaptureWindow() noexcept
-        {
-            playbackEngine_.endPluginStateCaptureWindow();
-        }
-        ScopedPluginStateCaptureWindow(const ScopedPluginStateCaptureWindow&) = delete;
-        ScopedPluginStateCaptureWindow& operator=(const ScopedPluginStateCaptureWindow&) = delete;
+    /// The plugin-state capture window lives in PluginStateCaptureWindow.h (shared with the
+    /// focused tests): `succeeded()` must gate every write — see failedCaptureWindowResult().
 
-    private:
-        PlaybackEngine& playbackEngine_;
-    };
+    /// The uniform failure for a project write whose capture window could not be established:
+    /// nothing was captured and nothing was written, so the previous file (and the dirty flag)
+    /// stay exactly as they were. Explicit Save/Save As surfaces this through the normal save
+    /// error dialog; autosave logs it and retries on its existing tick cadence.
+    [[nodiscard]] juce::Result failedCaptureWindowResult()
+    {
+        return juce::Result::fail(
+            "The project was NOT saved: the experimental read-ahead worker could not be paused "
+            "safely for plugin-state capture. The existing project file was left untouched — "
+            "please try again.");
+    }
 
     // First-time Save As: abort with a non-empty message if we cannot write without clobbering.
     [[nodiscard]] juce::String firstTimeSaveConflictMessage(const juce::File& projectFolder,
@@ -583,19 +576,23 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
                                      + session_.getCurrentProjectFile().getFullPathName());
         juce::Result r = juce::Result::ok();
         {
+            // A failed capture window writes NOTHING: the previous file and the dirty flag stay
+            // untouched, and the normal failure branch below reports the error (no clean mark).
             const ScopedPluginStateCaptureWindow captureWindow(playbackEngine_);
-            r = session_.saveProjectToFile(
-                transport_,
-                session_.getCurrentProjectFile(),
-                sampleRate,
-                &pluginHost_,
-                ctlLookup,
-                snapRoot.enabled,
-                snapRoot.resolutionKey,
-                mainWinBounds,
-                midiEditorWinBounds,
-                midiEditorWorkspace,
-                trackRowHeights);
+            r = captureWindow.succeeded()
+                    ? session_.saveProjectToFile(
+                          transport_,
+                          session_.getCurrentProjectFile(),
+                          sampleRate,
+                          &pluginHost_,
+                          ctlLookup,
+                          snapRoot.enabled,
+                          snapRoot.resolutionKey,
+                          mainWinBounds,
+                          midiEditorWinBounds,
+                          midiEditorWorkspace,
+                          trackRowHeights)
+                    : failedCaptureWindowResult();
         }
         if (!r.wasOk())
         {
@@ -728,19 +725,22 @@ void ProjectIoCoordinator::saveProjectThen(std::function<void(bool)> onDone)
         writeLastOperationBreadcrumb("project save start: " + projectFile.getFullPathName());
         juce::Result r = juce::Result::ok();
         {
+            // Same gate as plain Save: a failed window aborts BEFORE anything is written.
             const ScopedPluginStateCaptureWindow captureWindow(playbackEngine_);
-            r = session_.saveProjectToFile(
-                transport_,
-                projectFile,
-                sampleRate,
-                &pluginHost_,
-                ctlLookup,
-                snapRoot.enabled,
-                snapRoot.resolutionKey,
-                mainWinBounds,
-                midiEditorWinBounds,
-                midiEditorWorkspace,
-                trackRowHeights);
+            r = captureWindow.succeeded()
+                    ? session_.saveProjectToFile(
+                          transport_,
+                          projectFile,
+                          sampleRate,
+                          &pluginHost_,
+                          ctlLookup,
+                          snapRoot.enabled,
+                          snapRoot.resolutionKey,
+                          mainWinBounds,
+                          midiEditorWinBounds,
+                          midiEditorWorkspace,
+                          trackRowHeights)
+                    : failedCaptureWindowResult();
         }
         if (!r.wasOk())
         {
@@ -2094,20 +2094,25 @@ juce::Result ProjectIoCoordinator::writeAutosaveNow(const juce::String& reason)
     juce::Result r = juce::Result::ok();
     {
         // Autosave uses the same bounded capture window as explicit saves: inaudible (gapless
-        // drain while playing), never a callback wait, bounded on the message thread.
+        // drain while playing), never a callback wait, bounded on the message thread. A failed
+        // window DEFERS the autosave: the fail result below leaves the dirty state and any
+        // previous autosave untouched, and the existing tick cadence retries — no tight loop,
+        // no dialog.
         const ScopedPluginStateCaptureWindow captureWindow(playbackEngine_);
-        r = session_.saveProjectToFile(
-            transport_,
-            autosaveFile,
-            sampleRate,
-            &pluginHost_,
-            ctlLookup,
-            snapRoot.enabled,
-            snapRoot.resolutionKey,
-            mainWinBounds,
-            midiEditorWinBounds,
-            midiEditorWorkspace,
-            trackRowHeights);
+        r = captureWindow.succeeded()
+                ? session_.saveProjectToFile(
+                      transport_,
+                      autosaveFile,
+                      sampleRate,
+                      &pluginHost_,
+                      ctlLookup,
+                      snapRoot.enabled,
+                      snapRoot.resolutionKey,
+                      mainWinBounds,
+                      midiEditorWinBounds,
+                      midiEditorWorkspace,
+                      trackRowHeights)
+                : failedCaptureWindowResult();
     }
     session_.setCurrentProjectFile(normalProjectFile);
 
