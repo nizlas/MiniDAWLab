@@ -212,8 +212,11 @@ public:
     // -------------------------------------------------------------------------
     /// Number of distinguishable processing lanes (render-pool workers + the callback thread).
     /// Matches `instrument_render::InstrumentRenderPool::kNumLanes`; the callback uses the last.
-    static constexpr int kMaxProcessingLanes = 16;
-    static constexpr int kCallbackProcessingLane = kMaxProcessingLanes - 1;
+    /// Lanes 0..14 = render-pool workers, 15 = the audio callback, 16 = the experimental
+    /// read-ahead worker (docs/READAHEAD_PROTOTYPE.md — exists only with the CLI flag).
+    static constexpr int kMaxProcessingLanes = 17;
+    static constexpr int kCallbackProcessingLane = 15;
+    static constexpr int kReadAheadProcessingLane = 16;
 
     /// [Audio thread] ONE acquire-load of the published map for this block; jobs receive the
     /// already-resolved entry pointers (no map loads on workers). The returned shared_ptr must be
@@ -269,6 +272,15 @@ public:
     /// segment, including stopped monitoring; this only writes pre-existing scalar storage and
     /// never allocates, locks or touches Session.
     void audioThread_setProcessTransportContext(const PluginProcessTransportContext& context) noexcept;
+
+    /// [Audio thread] Same as above, but SKIPS the chains of `excludedTrackIds` (the experimental
+    /// read-ahead rows, docs/READAHEAD_PROTOTYPE.md §8): while a row is owned, its entry playhead
+    /// has exactly one writer (the worker via `audioThread_setEntryTransportContext`), so the
+    /// serial refresh must not race it. The shared default playhead is still written (owned rows'
+    /// published chains never read it).
+    void audioThread_setProcessTransportContextExcept(const PluginProcessTransportContext& context,
+                                                      const TrackId* excludedTrackIds,
+                                                      int excludedCount) noexcept;
 
     /// [Message thread, device prepared] TEST SEAM (same contract as
     /// `ExperimentalInstrumentHost::installInstrumentInstanceForTests`): append `instance` as a

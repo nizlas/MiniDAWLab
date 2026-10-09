@@ -55,6 +55,7 @@
 #include "engine/TrackMeterBank.h"
 #include "engine/LiveMidiInputBus.h"
 #include "engine/PlaybackMixHelpers.h"
+#include "engine/ReadAheadRenderer.h"
 #include "engine/RoutingPlan.h"
 #include "engine/SoloMuteView.h"
 #include "transport/Transport.h"
@@ -262,6 +263,20 @@ public:
     {
         return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->workerCount() : 0;
     }
+    // -----------------------------------------------------------------------
+    // Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md). OFF by default: `readAhead_` exists
+    // only when the process started with `--experimental-readahead[=N]` (ctor reads the global
+    // config) or a test created it in pump mode. Null = byte-for-byte the A1/A2 paths.
+    // -----------------------------------------------------------------------
+    /// [Message thread, BEFORE the device starts] Create a deterministic PUMP-mode renderer for
+    /// focused tests (no worker thread; the test drives it via `experimentalReadAhead()`).
+    void enableExperimentalReadAheadForTests(int depthBlocks);
+    [[nodiscard]] readahead::ReadAheadRenderer* experimentalReadAhead() noexcept { return readAhead_.get(); }
+    /// [Message thread] Pause the read-ahead worker, request a full ownership reset and resume —
+    /// bracket for windows needing exclusive chain access off the callback (plugin retire
+    /// destroy; wired next to `waitForAudioCallbackExit` in the publish-before-destroy hook).
+    void quiesceReadAheadForExclusiveChainAccess() noexcept;
+
     [[nodiscard]] instrument_render::InstrumentRenderPool::Stats instrumentRenderPoolStats() const noexcept
     {
         return instrumentRenderPool_ != nullptr ? instrumentRenderPool_->statsRelaxed()
@@ -612,6 +627,18 @@ private:
     /// instrument hosts' `audioThread_lastRenderTicksRelaxed`). Written by the job that owns the
     /// row, read by the callback before the next dispatch (ordered by the pool's join).
     std::array<std::int64_t, 1024> audioStripLastRenderTicks_{};
+
+    /// Experimental read-ahead (docs/READAHEAD_PROTOTYPE.md); null unless explicitly enabled.
+    std::unique_ptr<readahead::ReadAheadRenderer> readAhead_;
+    /// [Audio thread, block-stable after the read-ahead block begin] Owned rows excluded from the
+    /// global transport-context refresh, and this block's single linear consume key (owned rows
+    /// are adopted only in the one-segment, zero-offset regime; anything else is a counted miss).
+    std::array<TrackId, readahead::ReadAheadRenderer::kMaxRows> readAheadExcludedIds_{};
+    int readAheadExcludedCount_ = 0;
+    std::int64_t readAheadSegStart_ = 0;
+    int readAheadSegRun_ = 0;
+    int readAheadSegDestFrame_ = 0;
+    int readAheadSegCount_ = 0;
 
     /// [Audio thread] Fold one finished callback into the diagnostic load window (relaxed atomics).
     void audioThread_accumulateCallbackLoad(int numSamples, std::int64_t startTicks) noexcept;

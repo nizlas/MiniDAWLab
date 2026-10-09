@@ -109,6 +109,7 @@ target_sources(MiniDAWLab PRIVATE
     src/engine/SoloMuteView.cpp
     src/engine/RoutingPlanBuilder.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/app/AudioMixdownExporter.cpp
     src/app/AudioMixdownProgressWindow.cpp
@@ -430,6 +431,7 @@ target_sources(ExportLevelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/SoloMuteView.cpp
@@ -489,6 +491,7 @@ target_sources(InstrumentParallelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/SoloMuteView.cpp
@@ -557,6 +560,7 @@ target_sources(AudioStripParallelFocusedTests PRIVATE
     src/domain/AudioClip.cpp
     src/domain/AudioMixdownProjectSettings.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/ReadAheadRenderer.cpp
     src/engine/InstrumentRenderPool.cpp
     src/engine/PlaybackMixHelpers.cpp
     src/engine/SoloMuteView.cpp

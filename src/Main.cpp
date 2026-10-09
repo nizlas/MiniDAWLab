@@ -155,6 +155,25 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // before the engine is constructed; absent = the conservative machine default.
     {
         const juce::StringArray args = getCommandLineParameterArray();
+        // Experimental read-ahead prototype (docs/READAHEAD_PROTOTYPE.md): OFF by default; no
+        // settings panel. `--experimental-readahead` (depth 3) or `--experimental-readahead=N`.
+        for (const juce::String& arg : args)
+        {
+            if (arg == "--experimental-readahead" || arg.startsWith("--experimental-readahead="))
+            {
+                int depth = 3;
+                if (arg.containsChar('='))
+                {
+                    depth = juce::jlimit(readahead::ReadAheadRenderer::kMinDepth,
+                                         readahead::ReadAheadRenderer::kMaxDepth,
+                                         arg.fromFirstOccurrenceOf("=", false, false).getIntValue());
+                }
+                readahead::setConfiguredReadAheadDepth(depth);
+                juce::Logger::writeToLog("[engine] EXPERIMENTAL read-ahead enabled, depth "
+                                         + juce::String(depth) + " blocks");
+                break;
+            }
+        }
         for (int i = 0; i + 1 < args.size(); ++i)
         {
             if (args[i] == "--instrument-workers")
@@ -189,6 +208,10 @@ void MiniDAWLabApplication::initialise(const juce::String& commandLine)
     // are destroyed. Hook is cleared in shutdown() before the engine is torn down.
     pluginInsertHost_->setRealtimeDrainAfterPublish([enginePtr = playbackEngine.get()] {
         (void)enginePtr->waitForAudioCallbackExit(250.0);
+        // Experimental read-ahead: its worker also holds published-map entries while rendering —
+        // pause it (bounded) before the retired instances are destroyed; the paused/resumed
+        // worker only ever sees the NEWLY published map (docs/READAHEAD_PROTOTYPE.md §8).
+        enginePtr->quiesceReadAheadForExclusiveChainAccess();
     });
 
     // JUCE: open audio before we register the engine. Restore saved `audio-device.xml` if present

@@ -1485,6 +1485,40 @@ void PluginInsertHost::audioThread_setProcessTransportContext(
     }
 }
 
+void PluginInsertHost::audioThread_setProcessTransportContextExcept(
+    const PluginProcessTransportContext& context,
+    const TrackId* const excludedTrackIds,
+    const int excludedCount) noexcept
+{
+    processPlayHead_.setContext(context);
+    const std::shared_ptr<const PluginAudioThreadMap> m
+        = std::atomic_load_explicit(&audioThreadMap_, std::memory_order_acquire);
+    if (m == nullptr)
+    {
+        return;
+    }
+    for (const auto& e : m->entries)
+    {
+        if (e.playHead == nullptr)
+        {
+            continue;
+        }
+        bool excluded = false;
+        for (int i = 0; i < excludedCount; ++i)
+        {
+            if (excludedTrackIds[i] == e.trackId)
+            {
+                excluded = true;
+                break;
+            }
+        }
+        if (!excluded)
+        {
+            e.playHead->setContext(context);
+        }
+    }
+}
+
 const PluginAudioThreadMap::Entry* PluginInsertHost::audioThread_findEntry(const PluginAudioThreadMap& map,
                                                                            const TrackId trackId) noexcept
 {
