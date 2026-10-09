@@ -1,12 +1,24 @@
 # Parallel audio processing and read-ahead pre-processing — architecture and implementation plan (2026-10-09)
 
-> **Status: Stage A1 implemented (on branch, not merged); everything else plan only.**
+> **Status: Stages A1 and A2 implemented (on branch, not merged); everything else plan only.**
 > Slice **A1** (§3/§5: per-track insert playhead + per-lane chain scratch decomposition,
 > audio-row strip jobs in one combined batch with instrument generation, serial fan-out in
-> plan order) is implemented on `cursor/parallel-audio-readahead-plan-da54` together with the
-> focused suite `AudioStripParallelFocusedTests`. Local verification on the user's machine
-> (Windows/ASIO Release, AmpliTube project, listening + perf A/B) **remains outstanding**.
-> **A2 and Stage B are NOT implemented** — Stage B (§4) is a design draft with unresolved
+> plan order) is implemented on `cursor/parallel-audio-readahead-plan-da54` — checkpoint
+> `99ff7f5`. Slice **A2** (one combined job per eligible live-instrument row: generation +
+> Pre inserts + fader/mute + Post inserts + pan into the row's own stage buffer, same batch,
+> same single barrier) is implemented on top — implementation `0b9b6eb`, extended focused
+> suite `e5b69c4` (the final A2 revision is this branch's tip including this document).
+> Paths that MOVED into jobs with A2: the live-instrument rows' generation+strip (transport
+> playing, non-proxy, one job per host instance, up to 64 combined payloads). Paths that
+> REMAIN serial by design: Group/Master bus strips, the live-input monitoring pass,
+> proxy-backed instrument rows (a job must never start a Primary render), audition
+> instances and all stopped-transport blocks (today's generation-only dispatch + serial
+> strips — live-MIDI monitoring latency unchanged), additional rows sharing one host
+> instance, combined-payload/job-table overflow rows, offline mixdown, the sessionless
+> fallback. Cloud (Linux Debug) verification covers logic/determinism harnesses only; local
+> verification on the user's machine (Windows/ASIO Release, AmpliTube project, listening +
+> perf A/B) **remains outstanding** for BOTH slices.
+> **Stage B is NOT implemented** — §4 is a design draft with unresolved
 > transitions. This document remains the steering negotiation required by
 > `docs/ARCHITECTURE_PRINCIPLES.md` for the two backlog items in
 > [`docs/PHASE_PLAN.md`](PHASE_PLAN.md):
@@ -404,9 +416,11 @@ pointers for their row (no additional map loads on workers).
 
 ### 3.6 Proposed first scope
 
-- **A1:** per-track insert scratch/playhead decomposition + audio-row strip jobs in the
-  existing dispatch. Instrument row strips stay serial (as today).
-- **A2:** fold instrument generation + strip into one job per instrument row.
+- **A1 (implemented, `99ff7f5`):** per-track insert scratch/playhead decomposition +
+  audio-row strip jobs in the existing dispatch. Instrument row strips stayed serial.
+- **A2 (implemented, `0b9b6eb` + tests `e5b69c4`):** fold instrument generation + strip
+  into one job per instrument row (serial exceptions listed in the status header; the MIX
+  ORDER row loop consumes the finished stage and never runs that strip a second time).
 - Acceptance: bit-identical output serial vs parallel with deterministic content (§6);
   `--instrument-workers 0` remains the identical-code serial path; no new callback phases
   beyond renamed existing ones.
@@ -613,9 +627,10 @@ before Stage B lands; this plan does not pre-accept either answer.
 1. **A1 — decompose shared insert state + parallel audio-row strips** (per-track insert
    scratch and playhead, per-job stage buffers, strip jobs in the existing dispatch, serial
    row-order fan-out). Attacks the measured 4.04 ms directly. Smallest slice that forces
-   the shared-state decomposition every later stage needs.
+   the shared-state decomposition every later stage needs. **Implemented (`99ff7f5`).**
 2. **A2 — instrument generation + strip as one job per row.** Removes the remaining serial
    instrument-insert work (Pro-Q 3 / Mono Delay chains) with no new barrier.
+   **Implemented (`0b9b6eb`, tests `e5b69c4`).**
 3. **Mute/Off processing rule** (existing backlog row, do before B): Stage B's invalidation
    model leans on mute semantics; deciding the ONE rule first (and fixing the
    `PHASE_PLAN.md`/`CURRENT_ARCHITECTURE.md` wording drift documented in §2.7) avoids
@@ -641,6 +656,24 @@ If A1/A2 land and the next Windows measurement shows the callback comfortably un
 for the user's real projects, **B can be re-scoped or postponed** — the plan's own position
 is that A is justified by measurement today, while B's complexity (ownership, invalidation)
 is justified only if post-A measurements still show deadline pressure.
+
+### Local A/B measurement recipe (Windows/ASIO, corrected)
+
+Compare these builds under identical conditions — same worker-thread count, same copy of
+the project, same plug-in settings, same passage, the device's ACTUAL buffer size, Cubase
+closed:
+
+1. **main 1.2.1 (`f11c0fb`)** — parallel instrument generation, serial strips (baseline);
+2. **A1 checkpoint (`99ff7f5`)** — + parallel audio-row strips (*optional* intermediate,
+   only needed to isolate A1's share from A2's);
+3. **A2 final revision (branch tip)** — + instrument generation+strip combined jobs.
+
+**Correction to the earlier recipe:** `--instrument-workers 0` disables the ENTIRE render
+pool — including the instrument generation parallelism that main 1.2.1 already has — so it
+is a **correctness reference** (identical-code serial path, bit-identity checks), NOT an
+isolated performance measurement of A1/A2. Measuring "workers 0 vs workers N" on one build
+conflates all three parallel stages; the build-vs-build comparison above is the valid A/B.
+Use `--stability-perf-profile` for callback mean/max/overruns, then a listening pass.
 
 ## Key design decisions, risks, open questions
 
