@@ -3,6 +3,7 @@
 #include "domain/Track.h"
 #include "engine/RoutingPlan.h"
 #include "engine/SoloMuteView.h"
+#include "plugins/PluginInsertHost.h"
 
 #include <array>
 #include <bit>
@@ -12,7 +13,6 @@
 class AudioClip;
 class ExperimentalInstrumentHost;
 class PlacedClip;
-class PluginInsertHost;
 class SessionSnapshot;
 
 struct ExperimentalInstrumentPlaybackEntry;
@@ -184,8 +184,37 @@ void addPostStripStageToBus(float* stageL,
                             int numSamples,
                             float gain) noexcept;
 
+// ---------------------------------------------------------------------------
+// Stage A1 — audio-row strip core shared by the serial path and the render-pool jobs
+// ---------------------------------------------------------------------------
+/// Resolved insert-chain access for ONE audio row's strip, EXCLUSIVE to the calling thread for
+/// the duration of the call (docs/PARALLEL_AUDIO_AND_READAHEAD_PLAN.md §3.2: no two concurrent
+/// jobs may share writable scratch or a mutable transport context).
+///   * Serial paths build it from the host's shared scratch / MIDI scratch (callback lane).
+///   * Render-pool jobs build it from the engine's per-LANE scratch / MIDI buffers and the
+///     entry resolved once per block from `audioThread_acquireMapForBlock` (the callback
+///     retains that map until the jobs have joined).
+/// `entry == nullptr` means "no insert chain on this row" — the dry path.
+struct AudioStripInsertAccess
+{
+    PluginInsertHost* host = nullptr;
+    const PluginAudioThreadMap::Entry* entry = nullptr;
+    float* const* chainScratch = nullptr; ///< stereo; capacity `chainScratchCapacity` samples
+    int chainScratchCapacity = 0;
+    juce::MidiBuffer* chainMidiScratch = nullptr;
+    int laneIndex = PluginInsertHost::kCallbackProcessingLane;
+
+    [[nodiscard]] bool buffersUsable() const noexcept
+    {
+        return chainScratch != nullptr && chainScratch[0] != nullptr && chainScratch[1] != nullptr
+               && chainMidiScratch != nullptr && chainScratchCapacity > 0;
+    }
+};
+
 /// One audio lane: clips → pre-gain → Pre → fader/mute/off → Post → pan → `stageL`/`stageR`
 /// (accumulated). Pre-gain is ramped via `preGainRamp` when non-null (see `PreGainRampState`).
+/// Serial wrapper around `renderAudioTrackPostStripToStereoScratchWithChainAccess` (resolves the
+/// entry and the host's shared buffers itself).
 void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap,
                                               std::int64_t timelineStartAudible,
                                               int audibleRun,
@@ -198,6 +227,23 @@ void renderAudioTrackPostStripToStereoScratch(const SessionSnapshot& sessionSnap
                                               int trackIndex,
                                               PreGainRampState* preGainRamp = nullptr,
                                               const SoloMuteView* soloView = nullptr) noexcept;
+
+/// The ONE strip-core body (serial path and render-pool jobs run exactly this code). The caller
+/// owns `access` exclusively while the call runs; the chain's transport context must already be
+/// set for this segment (entry playhead — jobs via `audioThread_setEntryTransportContext`, serial
+/// paths via `audioThread_setProcessTransportContext`).
+void renderAudioTrackPostStripToStereoScratchWithChainAccess(const SessionSnapshot& sessionSnap,
+                                                             std::int64_t timelineStartAudible,
+                                                             int audibleRun,
+                                                             int destOutFrame0,
+                                                             float* stageL,
+                                                             float* stageR,
+                                                             const AudioStripInsertAccess& access,
+                                                             TrackId omitClipPlaybackForTrack,
+                                                             std::int64_t timelineEnd,
+                                                             int trackIndex,
+                                                             PreGainRampState* preGainRamp = nullptr,
+                                                             const SoloMuteView* soloView = nullptr) noexcept;
 
 /// One MONITORED audio lane: selected live device input → pre-gain → Pre → fader/mute/off →
 /// Post → pan → `stageL`/`stageR` (accumulated) — the identical strip order as
@@ -224,6 +270,8 @@ void renderLiveInputTrackPostStripToStereoScratch(const Track& track,
 /// generation stage (before inserts/fader/pan) so audition flows through the identical strip. The
 /// CALLER passes nullptr while the transport plays (audition is never layered over transport
 /// playback, PID-008) and during offline mixdown.
+/// Serial wrapper around `renderInstrumentPostStripToStereoScratchWithChainAccess` (resolves the
+/// entry and the host's shared buffers itself, callback lane).
 void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               const Track& track,
                                               float* stageL,
@@ -233,6 +281,26 @@ void renderInstrumentPostStripToStereoScratch(ExperimentalInstrumentHost* host,
                                               PluginInsertHost* pluginHost,
                                               ExperimentalInstrumentHost* auditionHost = nullptr,
                                               const SoloMuteView* soloView = nullptr) noexcept;
+
+/// The ONE instrument-strip core body (Stage A2: serial path and render-pool jobs run exactly
+/// this code). Identical semantics to the serial wrapper: the stage segment is CLEARED first;
+/// an OFF track renders nothing; a MUTED track (or fader at 0) still lets the instrument host
+/// process (MIDI consumed, state follows transport) with the insert chain skipped. The caller
+/// owns `access` exclusively while the call runs; the chain's transport context must already be
+/// set for this block (jobs via `audioThread_setEntryTransportContext`, serial paths via
+/// `audioThread_setProcessTransportContext`). The instrument GENERATION stage must already have
+/// run for this block (`audioThread_renderGenerationStageForBlock`) or the host mix step will
+/// self-render (same contract as today's serial path).
+void renderInstrumentPostStripToStereoScratchWithChainAccess(
+    ExperimentalInstrumentHost* host,
+    const Track& track,
+    float* stageL,
+    float* stageR,
+    int destOutFrame0,
+    int numSamples,
+    const AudioStripInsertAccess& access,
+    ExperimentalInstrumentHost* auditionHost = nullptr,
+    const SoloMuteView* soloView = nullptr) noexcept;
 
 /// Group bus input scratch → post-channel-strip in `stageL`/`stageR` (replaces stage for segment).
 void applyBusPostChannelStripFromInputToStage(const Track& busTrack,

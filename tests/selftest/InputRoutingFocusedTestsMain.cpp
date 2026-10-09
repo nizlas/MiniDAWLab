@@ -749,5 +749,13 @@ void PluginInsertHost::audioThread_clearScratch(int, int) noexcept {}
 float* const* PluginInsertHost::audioThread_getScratchWritePointers() noexcept { return nullptr; }
 void PluginInsertHost::audioThread_processChainForTrack(TrackId, InsertStage, int) noexcept {}
 bool PluginInsertHost::audioThread_hasActivePluginForTrack(TrackId) const noexcept { return false; }
+// Stage A1 strip core (tests here pass null hosts — the entry resolution / chain body never runs).
+const PluginAudioThreadMap::Entry* PluginInsertHost::audioThread_findEntry(const PluginAudioThreadMap&,
+                                                                           TrackId) noexcept
+{
+    return nullptr;
+}
+void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap::Entry&, InsertStage, int,
+                                                     float* const*, int, juce::MidiBuffer&, int) noexcept {}
 void ExperimentalInstrumentHost::audioThread_processBlockAndAddToOutputs(
     float* const*, int, int, float, float) noexcept {}

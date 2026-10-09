@@ -65,6 +65,27 @@ struct PluginProcessTransportContext
     std::int64_t loopEndSample = 0;
 };
 
+/// Non-owning `AudioProcessor::setPlayHead` target. Stage A1: ONE instance per track chain
+/// (created on the message thread, co-owned by every published `PluginAudioThreadMap::Entry`
+/// that references it, so it outlives every instance that may query it). The thread that runs a
+/// chain updates the chain's own playhead immediately before `processBlock`; two concurrently
+/// running chains therefore never share a mutable transport context.
+class InsertProcessPlayHead final : public juce::AudioPlayHead
+{
+public:
+    /// [Processing thread that owns this chain for the current job/segment] Materialize only
+    /// facts DAL knows for this block. JUCE turns the engaged fields into the VST3
+    /// ProcessContext validity flags.
+    void setContext(const PluginProcessTransportContext& context) noexcept;
+
+    /// [Processing thread] JUCE calls this synchronously from hosted `processBlock`. It returns
+    /// a value copy, so processors cannot retain mutable host state.
+    [[nodiscard]] juce::Optional<PositionInfo> getPosition() const override;
+
+private:
+    juce::AudioPlayHead::PositionInfo position_;
+};
+
 // Immutable view exchanged with the audio callback (release-store / acquire-load).
 struct PluginAudioThreadMap
 {
@@ -82,6 +103,9 @@ struct PluginAudioThreadMap
         TrackId trackId = kInvalidTrackId;
         /// Pre slots first, then Post — in order.
         std::vector<SlotProc> slots;
+        /// This chain's transport playhead, installed on every instance of the entry and co-owned
+        /// here so it outlives every published map that references it (Stage A1, see class note).
+        std::shared_ptr<InsertProcessPlayHead> playHead;
     };
     std::vector<Entry> entries;
 };
@@ -178,14 +202,81 @@ public:
 
     [[nodiscard]] float* const* audioThread_getScratchWritePointers() noexcept;
 
-    /// [Audio thread] Runs `layoutOk` slots for one stage in published order (Pre / Post).
+    /// [Audio thread] Runs `layoutOk` slots for one stage in published order (Pre / Post), on the
+    /// host-owned shared scratch + MIDI scratch (the serial paths' entry point; the callback's
+    /// lane). Delegates to `audioThread_processEntryChain`.
     void audioThread_processChainForTrack(TrackId trackId, InsertStage stage, int numSamples) noexcept;
 
-    /// [Audio thread, or offline render while the callback gate is held] Sets the context returned
-    /// by the host-owned JUCE `AudioPlayHead` during the immediately following insert processing.
-    /// The caller must refresh this before every timeline segment, including stopped monitoring;
-    /// this only writes pre-existing scalar storage and never allocates, locks or touches Session.
+    // -------------------------------------------------------------------------
+    // Stage A1 — per-entry chain processing with caller-owned buffers (render-pool jobs)
+    // -------------------------------------------------------------------------
+    /// Number of distinguishable processing lanes (render-pool workers + the callback thread).
+    /// Matches `instrument_render::InstrumentRenderPool::kNumLanes`; the callback uses the last.
+    static constexpr int kMaxProcessingLanes = 16;
+    static constexpr int kCallbackProcessingLane = kMaxProcessingLanes - 1;
+
+    /// [Audio thread] ONE acquire-load of the published map for this block; jobs receive the
+    /// already-resolved entry pointers (no map loads on workers). The returned shared_ptr must be
+    /// retained by the callback until every job of the block has joined.
+    [[nodiscard]] std::shared_ptr<const PluginAudioThreadMap> audioThread_acquireMapForBlock() const noexcept
+    {
+        return std::atomic_load_explicit(&audioThreadMap_, std::memory_order_acquire);
+    }
+    [[nodiscard]] static const PluginAudioThreadMap::Entry*
+        audioThread_findEntry(const PluginAudioThreadMap& map, TrackId trackId) noexcept;
+
+    /// True iff the entry has at least one stereo-ready slot — the entry-resolved equivalent of
+    /// `audioThread_hasActivePluginForTrack` (identical gating semantics).
+    [[nodiscard]] static bool audioThread_entryHasActiveSlot(const PluginAudioThreadMap::Entry& entry) noexcept
+    {
+        for (const auto& sp : entry.slots)
+        {
+            if (sp.processor != nullptr && sp.layoutOk)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// [Audio thread, callback lane only] The serial paths' shared chain buffers, for building a
+    /// chain-access bundle that runs through the same strip core as the render-pool jobs.
+    [[nodiscard]] int audioThread_sharedChainScratchCapacity() const noexcept { return scratch_.getNumSamples(); }
+    [[nodiscard]] juce::MidiBuffer& audioThread_sharedChainMidiScratch() noexcept { return midiScratch_; }
+
+    /// [Job thread that owns `entry` for the current segment] Set the chain's own playhead.
+    /// Writes pre-existing scalar storage only.
+    static void audioThread_setEntryTransportContext(const PluginAudioThreadMap::Entry& entry,
+                                                     const PluginProcessTransportContext& context) noexcept;
+
+    /// [Exactly one thread per entry per block — a render-pool job (its lane) or the callback]
+    /// Runs `layoutOk` slots of one stage in published order on CALLER-owned stereo scratch
+    /// (`scratchChannels[0..1]`, capacity `scratchCapacitySamples`) and a CALLER-owned MIDI
+    /// scratch (cleared after every `processBlock`, exactly like the serial path). `laneIndex`
+    /// selects the per-lane C2B diagnostics marker. No locks, no allocation.
+    void audioThread_processEntryChain(const PluginAudioThreadMap::Entry& entry,
+                                       InsertStage stage,
+                                       int numSamples,
+                                       float* const* scratchChannels,
+                                       int scratchCapacitySamples,
+                                       juce::MidiBuffer& midiScratch,
+                                       int laneIndex) noexcept;
+
+    /// [Audio thread, or offline render while the callback gate is held] Sets the transport
+    /// context observed by EVERY published chain's playhead (the serial paths' refresh; render-
+    /// pool jobs refresh their own entry via `audioThread_setEntryTransportContext` instead and
+    /// never run concurrently with this). The caller must refresh this before every timeline
+    /// segment, including stopped monitoring; this only writes pre-existing scalar storage and
+    /// never allocates, locks or touches Session.
     void audioThread_setProcessTransportContext(const PluginProcessTransportContext& context) noexcept;
+
+    /// [Message thread, device prepared] TEST SEAM (same contract as
+    /// `ExperimentalInstrumentHost::installInstrumentInstanceForTests`): append `instance` as a
+    /// live insert of `stage` on `trackId`, prepare it for the current device format and publish.
+    /// Lets focused tests run REAL chain processing with deterministic processors, no VST3 files.
+    bool installInsertInstanceForTests(TrackId trackId,
+                                       InsertStage stage,
+                                       std::unique_ptr<juce::AudioPluginInstance> instance);
 
     /// [Audio thread] Acquire-loads the published map; true iff any insert on this track is stereo-ready.
     [[nodiscard]] bool audioThread_hasActivePluginForTrack(TrackId trackId) const noexcept;
@@ -257,24 +348,6 @@ public:
 
 private:
     using EditorKey = std::pair<TrackId, InsertSlotId>;
-
-    /// Non-owning `AudioProcessor::setPlayHead` target, owned by this host for longer than every
-    /// live plugin instance. The audio callback and gated offline renderer update it immediately
-    /// before `processBlock`; message-thread lifecycle code never mutates its position state.
-    class InsertProcessPlayHead final : public juce::AudioPlayHead
-    {
-    public:
-        /// [Audio/offline processing thread] Materialize only facts DAL knows for this block.
-        /// JUCE turns the engaged fields into the VST3 ProcessContext validity flags.
-        void setContext(const PluginProcessTransportContext& context) noexcept;
-
-        /// [Audio/offline processing thread] JUCE calls this synchronously from hosted
-        /// `processBlock`. It returns a value copy, so processors cannot retain mutable host state.
-        [[nodiscard]] juce::Optional<PositionInfo> getPosition() const override;
-
-    private:
-        juce::AudioPlayHead::PositionInfo position_;
-    };
 
     struct LiveInsertSlot
     {
@@ -350,19 +423,27 @@ private:
 
     juce::AudioBuffer<float> scratch_;
     std::vector<float*> scratchPtrs_;
-    /// Stable playhead pointer installed in every instance before that instance is published to
-    /// the audio thread. Its lifetime exceeds all `LiveInsertSlot::instance` lifetimes.
+    /// Default playhead installed at instance creation, before the publish re-points the instance
+    /// at its chain's own playhead. Outlives every instance; never queried after publication.
     InsertProcessPlayHead processPlayHead_;
-    /// Reused empty MIDI buffer for `processBlock`; cleared after each call — avoids constructing
-    /// `MidiBuffer` on the audio thread (default construction is cheap; `clear` does not grow).
+    /// Per-chain playheads (Stage A1): created on demand on the message thread, co-owned by every
+    /// published `Entry` that references them, NEVER erased until destruction — so an in-flight
+    /// callback holding an older map keeps a valid pointer across chain removal / track deletion.
+    std::unordered_map<TrackId, std::shared_ptr<InsertProcessPlayHead>> chainPlayHeads_;
+    /// [Message thread] Get-or-create the chain playhead for a track.
+    [[nodiscard]] std::shared_ptr<InsertProcessPlayHead> chainPlayHeadForTrack(TrackId trackId);
+    /// Reused empty MIDI buffer for `processBlock` on the serial paths; cleared after each call —
+    /// avoids constructing `MidiBuffer` on the audio thread (default construction is cheap;
+    /// `clear` does not grow). Render-pool jobs use caller-owned per-lane MIDI buffers instead.
     juce::MidiBuffer midiScratch_;
     /// Set true after the one-shot `callAsync` mismatch warning; cleared in `prepareForDevice`.
     std::atomic<bool> scratchMismatchNotified_{ false };
-    /// Stability C2B diagnostics: set around each `processBlock` call on the audio thread
-    /// (relaxed; -1 = idle). Never used for synchronization.
-    std::atomic<std::int64_t> audioThreadInsertTrackId_{ -1 };
-    std::atomic<int> audioThreadInsertSlotIndex_{ -1 };
-    std::atomic<int> audioThreadInsertStage_{ -1 };
+    /// Stability C2B diagnostics, PER LANE (Stage A1): set around each `processBlock` call on the
+    /// thread running that lane (relaxed; -1 = idle). Never used for synchronization; per-lane
+    /// slots keep concurrent jobs from interleaving misleading markers.
+    std::atomic<std::int64_t> laneInsertTrackId_[kMaxProcessingLanes];
+    std::atomic<int> laneInsertSlotIndex_[kMaxProcessingLanes];
+    std::atomic<int> laneInsertStage_[kMaxProcessingLanes];
     /// At most one stereo-layout warning while re-preparing instances for a device (message thread).
     std::atomic<bool> stereoPrepareFailureOneShot_{ false };
     /// Insert level tap (diagnostics, see `InsertLevelTapSnapshot`): relaxed atomics only; the audio
@@ -377,9 +458,11 @@ private:
     std::atomic<std::uint64_t> insertLevelTapSamplesBefore_{ 0 };
     std::atomic<std::uint64_t> insertLevelTapSamplesAfter_{ 0 };
     std::atomic<double> insertLevelTapSumBefore_[2]{ 0.0, 0.0 };
-    /// [Audio thread] Fold the scratch peak and sum of squares of the first `numSamples` into the
-    /// tap accumulators (relaxed CAS max / fetch_add; no locks, no allocation).
-    void audioThread_foldScratchLevelsInto(std::atomic<float>& peakHold,
+    /// [Any processing thread] Fold the CALLER scratch's peak and sum of squares of the first
+    /// `numSamples` into the tap accumulators (relaxed CAS max / fetch_add; no locks, no
+    /// allocation). Parameterized by scratch so render-pool jobs fold their own lane buffers.
+    void audioThread_foldScratchLevelsInto(const float* const* scratchChannels,
+                                           std::atomic<float>& peakHold,
                                            std::atomic<double>& sumSquares,
                                            std::atomic<std::uint64_t>& sampleCount,
                                            int numSamples) noexcept;

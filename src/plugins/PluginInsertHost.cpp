@@ -155,6 +155,12 @@ juce::PluginDescription PluginInsertHost::pickDescriptionForSavedIdentity(const 
 PluginInsertHost::PluginInsertHost()
 {
     formatManager_.addFormat(new juce::VST3PluginFormat());
+    for (int lane = 0; lane < kMaxProcessingLanes; ++lane)
+    {
+        laneInsertTrackId_[lane].store(-1, std::memory_order_relaxed);
+        laneInsertSlotIndex_[lane].store(-1, std::memory_order_relaxed);
+        laneInsertStage_[lane].store(-1, std::memory_order_relaxed);
+    }
     auto empty = std::make_shared<PluginAudioThreadMap>();
     std::atomic_store_explicit(&audioThreadMap_, empty, std::memory_order_release);
 }
@@ -167,8 +173,7 @@ PluginInsertHost::~PluginInsertHost()
     chains_.clear();
 }
 
-void PluginInsertHost::InsertProcessPlayHead::setContext(
-    const PluginProcessTransportContext& context) noexcept
+void InsertProcessPlayHead::setContext(const PluginProcessTransportContext& context) noexcept
 {
     // This playhead is a synchronous handoff: JUCE asks it for PositionInfo only while the
     // immediately following hosted processBlock is executing. Keep optional fields disengaged
@@ -216,8 +221,7 @@ void PluginInsertHost::InsertProcessPlayHead::setContext(
     position_.setIsLooping(context.isLooping && context.loopEndSample > context.loopStartSample);
 }
 
-juce::Optional<juce::AudioPlayHead::PositionInfo>
-PluginInsertHost::InsertProcessPlayHead::getPosition() const
+juce::Optional<juce::AudioPlayHead::PositionInfo> InsertProcessPlayHead::getPosition() const
 {
     return position_;
 }
@@ -422,9 +426,14 @@ void PluginInsertHost::logStereoLayoutFailure(const TrackId trackId) const
 
 bool PluginInsertHost::tryPrepareStereoInsert(juce::AudioPluginInstance& inst, const double sr, const int bs)
 {
-    // AudioProcessor stores this raw pointer. `processPlayHead_` belongs to PluginInsertHost and
-    // outlives every instance, so the VST3 wrapper can safely query it during processBlock.
-    inst.setPlayHead(&processPlayHead_);
+    // AudioProcessor stores this raw pointer. A fresh instance gets the host-lifetime default
+    // playhead so it is never without one; `rebuildAudioThreadMapAndPublish` re-points every
+    // published instance at its CHAIN's playhead (Stage A1). An already-pointed instance is left
+    // alone — re-preparing must not race a possible concurrent reader with a redundant store.
+    if (inst.getPlayHead() == nullptr)
+    {
+        inst.setPlayHead(&processPlayHead_);
+    }
     inst.releaseResources();
     const double srU = sr > 0.0 ? sr : 48000.0;
     const int bsU = bs > 0 ? bs : 512;
@@ -1117,6 +1126,18 @@ void PluginInsertHost::removePlugin(const TrackId trackId)
     }
 }
 
+std::shared_ptr<InsertProcessPlayHead> PluginInsertHost::chainPlayHeadForTrack(const TrackId trackId)
+{
+    auto it = chainPlayHeads_.find(trackId);
+    if (it != chainPlayHeads_.end())
+    {
+        return it->second;
+    }
+    auto ph = std::make_shared<InsertProcessPlayHead>();
+    chainPlayHeads_.emplace(trackId, ph);
+    return ph;
+}
+
 void PluginInsertHost::rebuildAudioThreadMapAndPublish()
 {
     auto next = std::make_shared<PluginAudioThreadMap>();
@@ -1129,12 +1150,22 @@ void PluginInsertHost::rebuildAudioThreadMapAndPublish()
         }
         PluginAudioThreadMap::Entry e;
         e.trackId = kv.first;
+        // Stage A1: the chain's own transport playhead, co-owned by the entry so an in-flight
+        // callback holding this map keeps a valid pointer across any message-thread change.
+        e.playHead = chainPlayHeadForTrack(kv.first);
         e.slots.reserve(kv.second.size());
         for (const auto& live : kv.second)
         {
             if (live.instance == nullptr)
             {
                 continue;
+            }
+            // Point the instance at its chain's playhead. Only ever a WRITE for an instance that
+            // is not yet published (new instances start on `processPlayHead_`); re-publishing an
+            // unchanged chain is a pointer compare, so the audio thread never races a store.
+            if (live.instance->getPlayHead() != e.playHead.get())
+            {
+                live.instance->setPlayHead(e.playHead.get());
             }
             PluginAudioThreadMap::SlotProc sp;
             sp.processor = live.instance.get();
@@ -1434,7 +1465,50 @@ void PluginInsertHost::audioThread_clearScratch(const int numChannels, const int
 void PluginInsertHost::audioThread_setProcessTransportContext(
     const PluginProcessTransportContext& context) noexcept
 {
+    // Serial-path refresh: every published chain's playhead observes the same segment context
+    // (bus strips, monitoring, instrument strips, offline render — all run on the calling thread
+    // with no render-pool job in flight, so no concurrent per-entry writer exists). The default
+    // playhead is kept in step for not-yet-republished instances.
     processPlayHead_.setContext(context);
+    const std::shared_ptr<const PluginAudioThreadMap> m
+        = std::atomic_load_explicit(&audioThreadMap_, std::memory_order_acquire);
+    if (m == nullptr)
+    {
+        return;
+    }
+    for (const auto& e : m->entries)
+    {
+        if (e.playHead != nullptr)
+        {
+            e.playHead->setContext(context);
+        }
+    }
+}
+
+const PluginAudioThreadMap::Entry* PluginInsertHost::audioThread_findEntry(const PluginAudioThreadMap& map,
+                                                                           const TrackId trackId) noexcept
+{
+    if (trackId == kInvalidTrackId)
+    {
+        return nullptr;
+    }
+    for (const auto& e : map.entries)
+    {
+        if (e.trackId == trackId)
+        {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+void PluginInsertHost::audioThread_setEntryTransportContext(const PluginAudioThreadMap::Entry& entry,
+                                                            const PluginProcessTransportContext& context) noexcept
+{
+    if (entry.playHead != nullptr)
+    {
+        entry.playHead->setContext(context);
+    }
 }
 
 float* const* PluginInsertHost::audioThread_getScratchWritePointers() noexcept
@@ -1476,12 +1550,45 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
                                                        const InsertStage stage,
                                                        const int numSamples) noexcept
 {
+    // Serial-path wrapper: the host-owned shared scratch + MIDI scratch on the callback lane.
+    // Render-pool jobs call `audioThread_processEntryChain` directly with their own lane buffers.
     if (trackId == kInvalidTrackId || numSamples <= 0)
     {
         return;
     }
+    if (kInsertChannels <= 0 || scratchPtrs_.size() < (size_t)kInsertChannels)
+    {
+        return;
+    }
+    const std::shared_ptr<const PluginAudioThreadMap> m
+        = std::atomic_load_explicit(&audioThreadMap_, std::memory_order_acquire);
+    if (m == nullptr)
+    {
+        return;
+    }
+    const PluginAudioThreadMap::Entry* const hit = audioThread_findEntry(*m, trackId);
+    if (hit == nullptr)
+    {
+        return;
+    }
+    audioThread_processEntryChain(*hit, stage, numSamples, scratchPtrs_.data(),
+                                  scratch_.getNumSamples(), midiScratch_, kCallbackProcessingLane);
+}
 
-    if (numSamples > scratch_.getNumSamples())
+void PluginInsertHost::audioThread_processEntryChain(const PluginAudioThreadMap::Entry& entry,
+                                                     const InsertStage stage,
+                                                     const int numSamples,
+                                                     float* const* scratchChannels,
+                                                     const int scratchCapacitySamples,
+                                                     juce::MidiBuffer& midiScratch,
+                                                     const int laneIndex) noexcept
+{
+    if (numSamples <= 0 || entry.slots.empty() || scratchChannels == nullptr
+        || scratchChannels[0] == nullptr || scratchChannels[1] == nullptr)
+    {
+        return;
+    }
+    if (numSamples > scratchCapacitySamples)
     {
         const bool already = scratchMismatchNotified_.exchange(true, std::memory_order_relaxed);
         if (!already && juce::MessageManager::getInstanceWithoutCreating() != nullptr)
@@ -1493,30 +1600,9 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
             });
         }
     }
-
-    const int n = juce::jmin(numSamples, scratch_.getNumSamples());
-    if (kInsertChannels <= 0 || n <= 0 || scratchPtrs_.size() < (size_t)kInsertChannels)
-    {
-        return;
-    }
-
-    std::shared_ptr<const PluginAudioThreadMap> m
-        = std::atomic_load_explicit(&audioThreadMap_, std::memory_order_acquire);
-    if (m == nullptr)
-    {
-        return;
-    }
-
-    const PluginAudioThreadMap::Entry* hit = nullptr;
-    for (const auto& e : m->entries)
-    {
-        if (e.trackId == trackId)
-        {
-            hit = &e;
-            break;
-        }
-    }
-    if (hit == nullptr || hit->slots.empty())
+    const int n = juce::jmin(numSamples, scratchCapacitySamples);
+    const int lane = juce::jlimit(0, kMaxProcessingLanes - 1, laneIndex);
+    if (n <= 0)
     {
         return;
     }
@@ -1524,14 +1610,14 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
     // Diagnostics tap: level entering the chain (Pre stage = right after pre-gain). Relaxed atomics,
     // only for the one tapped track, so untapped tracks pay a single compare per call.
     const bool tapped = insertLevelTapTrackId_.load(std::memory_order_relaxed)
-                        == static_cast<std::int64_t>(trackId);
+                        == static_cast<std::int64_t>(entry.trackId);
     if (tapped && stage == InsertStage::Pre)
     {
-        audioThread_foldScratchLevelsInto(insertLevelTapPeakBefore_, insertLevelTapSumSqBefore_,
-                                          insertLevelTapSamplesBefore_, n);
-        for (int c = 0; c < 2 && c < kInsertChannels && c < scratch_.getNumChannels(); ++c)
+        audioThread_foldScratchLevelsInto(scratchChannels, insertLevelTapPeakBefore_,
+                                          insertLevelTapSumSqBefore_, insertLevelTapSamplesBefore_, n);
+        for (int c = 0; c < 2 && c < kInsertChannels; ++c)
         {
-            const float* const row = scratch_.getReadPointer(c);
+            const float* const row = scratchChannels[c];
             double sum = 0.0;
             for (int i = 0; row != nullptr && i < n; ++i)
             {
@@ -1542,46 +1628,47 @@ void PluginInsertHost::audioThread_processChainForTrack(const TrackId trackId,
         insertLevelTapPreBlocks_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    juce::AudioBuffer<float> view(scratchPtrs_.data(), kInsertChannels, n);
+    juce::AudioBuffer<float> view(scratchChannels, kInsertChannels, n);
     juce::ScopedNoDenormals noDenormals;
     audio_profiler::AudioThreadProfiler& profiler = audio_profiler::AudioThreadProfiler::get();
     const bool prof = profiler.audioThread_enabled();
     int slotIndex = -1;
-    for (const auto& sp : hit->slots)
+    for (const auto& sp : entry.slots)
     {
         ++slotIndex;
         if (sp.processor == nullptr || !sp.layoutOk || sp.stage != stage)
         {
             continue;
         }
-        // Stability C2B diagnostics: mark which insert is being processed so a wedged
+        // Stability C2B diagnostics: mark which insert this LANE is processing so a wedged
         // processBlock can be identified from the message thread (gate-timeout logging).
-        audioThreadInsertTrackId_.store(static_cast<std::int64_t>(trackId),
-                                        std::memory_order_relaxed);
-        audioThreadInsertSlotIndex_.store(slotIndex, std::memory_order_relaxed);
-        audioThreadInsertStage_.store(static_cast<int>(stage), std::memory_order_relaxed);
+        laneInsertTrackId_[lane].store(static_cast<std::int64_t>(entry.trackId),
+                                       std::memory_order_relaxed);
+        laneInsertSlotIndex_[lane].store(slotIndex, std::memory_order_relaxed);
+        laneInsertStage_[lane].store(static_cast<int>(stage), std::memory_order_relaxed);
         const std::int64_t tProf = prof ? audio_profiler::AudioThreadProfiler::ticks() : 0;
-        sp.processor->processBlock(view, midiScratch_);
+        sp.processor->processBlock(view, midiScratch);
         if (prof)
         {
             profiler.audioThread_addInstance(sp.profileSlot, audio_profiler::Category::InsertPlugin, tProf);
         }
-        audioThreadInsertTrackId_.store(-1, std::memory_order_relaxed);
-        audioThreadInsertSlotIndex_.store(-1, std::memory_order_relaxed);
-        audioThreadInsertStage_.store(-1, std::memory_order_relaxed);
-        midiScratch_.clear();
+        laneInsertTrackId_[lane].store(-1, std::memory_order_relaxed);
+        laneInsertSlotIndex_[lane].store(-1, std::memory_order_relaxed);
+        laneInsertStage_[lane].store(-1, std::memory_order_relaxed);
+        midiScratch.clear();
     }
 
     // Diagnostics tap: level leaving the chain (after the last Post insert, before pan).
     if (tapped && stage == InsertStage::Post)
     {
-        audioThread_foldScratchLevelsInto(insertLevelTapPeakAfter_, insertLevelTapSumSqAfter_,
-                                          insertLevelTapSamplesAfter_, n);
+        audioThread_foldScratchLevelsInto(scratchChannels, insertLevelTapPeakAfter_,
+                                          insertLevelTapSumSqAfter_, insertLevelTapSamplesAfter_, n);
         insertLevelTapPostBlocks_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
-void PluginInsertHost::audioThread_foldScratchLevelsInto(std::atomic<float>& peakHold,
+void PluginInsertHost::audioThread_foldScratchLevelsInto(const float* const* scratchChannels,
+                                                         std::atomic<float>& peakHold,
                                                          std::atomic<double>& sumSquares,
                                                          std::atomic<std::uint64_t>& sampleCount,
                                                          const int numSamples) noexcept
@@ -1589,9 +1676,9 @@ void PluginInsertHost::audioThread_foldScratchLevelsInto(std::atomic<float>& pea
     float peak = 0.0f;
     double sumSq = 0.0;
     std::uint64_t counted = 0;
-    for (int c = 0; c < kInsertChannels && c < scratch_.getNumChannels(); ++c)
+    for (int c = 0; c < kInsertChannels; ++c)
     {
-        const float* const row = scratch_.getReadPointer(c);
+        const float* const row = scratchChannels != nullptr ? scratchChannels[c] : nullptr;
         if (row == nullptr || numSamples <= 0)
         {
             continue;
@@ -1703,12 +1790,43 @@ std::vector<std::pair<TrackId, std::vector<const void*>>>
 
 juce::String PluginInsertHost::describeAudioThreadInsertStateForDiagnostics() const noexcept
 {
-    const std::int64_t tid = audioThreadInsertTrackId_.load(std::memory_order_relaxed);
-    if (tid < 0)
+    juce::String out;
+    for (int lane = 0; lane < kMaxProcessingLanes; ++lane)
     {
-        return "insert=idle";
+        const std::int64_t tid = laneInsertTrackId_[lane].load(std::memory_order_relaxed);
+        if (tid < 0)
+        {
+            continue;
+        }
+        if (out.isNotEmpty())
+        {
+            out << " ";
+        }
+        out << "insert=processing lane=" << lane << " trackId=" << juce::String(tid)
+            << " slot=" << juce::String(laneInsertSlotIndex_[lane].load(std::memory_order_relaxed))
+            << " stage=" << juce::String(laneInsertStage_[lane].load(std::memory_order_relaxed));
     }
-    return "insert=processing trackId=" + juce::String(tid)
-           + " slot=" + juce::String(audioThreadInsertSlotIndex_.load(std::memory_order_relaxed))
-           + " stage=" + juce::String(audioThreadInsertStage_.load(std::memory_order_relaxed));
+    return out.isEmpty() ? juce::String("insert=idle") : out;
+}
+
+bool PluginInsertHost::installInsertInstanceForTests(const TrackId trackId,
+                                                     const InsertStage stage,
+                                                     std::unique_ptr<juce::AudioPluginInstance> instance)
+{
+    if (trackId == kInvalidTrackId || instance == nullptr)
+    {
+        return false;
+    }
+    LiveInsertSlot slot;
+    slot.slotId = allocateSlotId();
+    slot.stage = stage;
+    slot.instance = std::move(instance);
+    slot.layoutOk = tryPrepareStereoInsert(*slot.instance, sampleRate_, blockSize_);
+    if (!slot.layoutOk)
+    {
+        return false;
+    }
+    insertLiveSlotSorted(trackId, std::move(slot));
+    rebuildAudioThreadMapAndPublish();
+    return true;
 }

@@ -1,22 +1,33 @@
 #pragma once
 
 // =============================================================================
-// InstrumentRenderPool — fixed realtime worker pool for the live-instrument generation stage
+// InstrumentRenderPool — fixed realtime worker pool for per-row render jobs inside the callback
 // =============================================================================
 //
 // ROLE
-//   The audio callback renders every live instrument's generation stage (MIDI merge + plug-in
-//   `processBlock` into the host's OWN preallocated scratch) as independent jobs across a fixed
-//   set of worker threads, with the callback thread participating. Everything downstream — the
-//   row's inserts, fader / mute / pan, meters, routing and summing — stays on the callback thread
-//   in the existing deterministic row order, so the output is bit-identical to the serial path
-//   for deterministic instruments (`PlaybackEngine::audioDeviceIOCallbackWithContext`, phase
-//   "instrument generation"). Jobs never outlive the callback that dispatched them: the callback
-//   waits for the last job before it continues, so every existing drain / gate
-//   (`isAudioCallbackInProcessingSection`, `waitForAudioCallbackExit`, the offline-render gate)
-//   keeps covering the workers' access to hosts, snapshots and scratch buffers. A missed deadline
-//   therefore means a late block (as before), never a half-rendered buffer being summed and never
-//   a plug-in entering the next block while the previous one is still running.
+//   The audio callback renders independent per-row work as jobs across a fixed set of worker
+//   threads, with the callback thread participating. Two job kinds exist (Stage A1 of
+//   docs/PARALLEL_AUDIO_AND_READAHEAD_PLAN.md):
+//     * the live-instrument GENERATION stage (MIDI merge + plug-in `processBlock` into the host's
+//       OWN preallocated scratch) — the original 1.1.18 job (`Payload::run == nullptr`);
+//     * an AUDIO-ROW STRIP job (`Payload::run != nullptr`): one audio row's clip segments +
+//       pre-gain + Pre inserts + fader/mute + Post inserts + pan into the row's own stage buffer.
+//   Everything downstream — summing/fan-out, buses, meters — stays on the callback thread in the
+//   existing deterministic order, so the output is bit-identical to the serial path for
+//   deterministic content (`PlaybackEngine::audioDeviceIOCallbackWithContext`). Jobs never
+//   outlive the callback that dispatched them: the callback waits for the last job before it
+//   continues, so every existing drain / gate (`isAudioCallbackInProcessingSection`,
+//   `waitForAudioCallbackExit`, the offline-render gate) keeps covering the workers' access to
+//   hosts, chains, snapshots and scratch buffers. A missed deadline therefore means a late block
+//   (as before), never a half-rendered buffer being summed and never a plug-in entering the next
+//   block while the previous one is still running.
+//
+// LANES
+//   Every thread that can run a job has a fixed LANE index: worker i = lane i, the callback
+//   thread = `kCallbackLane`. A job runs entirely on one lane, so per-lane resources (insert
+//   scratch / MIDI scratch / diagnostics markers) are exclusive to the running job without any
+//   locking. The serial path runs every job on `kCallbackLane` through the SAME job function —
+//   `--instrument-workers 0` is the identical-DSP serial mode, not a second implementation.
 //
 // WAKE / COMPLETION MECHANISM
 //   * Dispatch (callback thread): writes the job descriptors into the caller's preallocated array,
@@ -64,13 +75,27 @@ class ExperimentalInstrumentHost;
 
 namespace instrument_render
 {
-/// One live-instrument generation job for the current block. Written by the callback thread
-/// before publication, read by exactly one claimant.
+/// One render job for the current block. Written by the callback thread before publication,
+/// read by exactly one claimant. The mutable job data lives in `Payload` as one struct so the
+/// longest-first ordering can swap payloads without touching the claim flags.
 struct RenderJob
 {
-    ExperimentalInstrumentHost* host = nullptr;
-    int numSamples = 0;
-    std::int64_t lastRenderTicks = 0; ///< ordering key (longest first)
+    /// Runs the job on the claiming thread. `laneIndex` identifies that thread's exclusive
+    /// per-lane resources (worker i = lane i, callback = `kCallbackLane`). Realtime contract:
+    /// no allocation, locks, I/O.
+    using RunFn = void (*)(RenderJob& job, int laneIndex) noexcept;
+
+    struct Payload
+    {
+        /// Default job (run == nullptr): this host's generation stage for `numSamples`.
+        ExperimentalInstrumentHost* host = nullptr;
+        /// Non-null = custom job (Stage A1 audio-row strip): `run(job, lane)` with `context`.
+        RunFn run = nullptr;
+        void* context = nullptr;
+        int numSamples = 0;
+        std::int64_t lastRenderTicks = 0; ///< ordering key (longest first)
+    };
+    Payload p;
     /// 0 = pending (claimable), 1 = claimed / finished. Starts claimed so a stale index is inert.
     std::atomic<int> claimed{ 1 };
 };
@@ -86,6 +111,9 @@ class InstrumentRenderPool
 {
 public:
     static constexpr int kMaxWorkers = 15;
+    /// Lane of the callback thread (workers use lanes [0, kMaxWorkers)); kNumLanes covers both.
+    static constexpr int kCallbackLane = kMaxWorkers;
+    static constexpr int kNumLanes = kMaxWorkers + 1;
     static constexpr int kMaxJobs = 256;
     /// Below this summed last-block render time the block runs serially (dispatch not worth it).
     static constexpr double kMinParallelWorkMicros = 300.0;
@@ -130,8 +158,8 @@ public:
 private:
     void workerLoop(int workerIndex) noexcept;
     /// Claim-and-run loop shared by workers and the callback thread; returns jobs run.
-    int claimAndRunJobs(RenderJob* jobs, int count) noexcept;
-    static void runJob(RenderJob& job) noexcept;
+    int claimAndRunJobs(RenderJob* jobs, int count, int laneIndex) noexcept;
+    static void runJob(RenderJob& job, int laneIndex) noexcept;
     static double ticksToMs(std::int64_t ticks) noexcept;
 
     std::vector<std::thread> workers_;

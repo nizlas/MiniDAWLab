@@ -120,17 +120,26 @@ double InstrumentRenderPool::ticksToMs(const std::int64_t ticks) noexcept
     return perSec > 0.0 ? (double)ticks * 1000.0 / perSec : 0.0;
 }
 
-void InstrumentRenderPool::runJob(RenderJob& job) noexcept
+void InstrumentRenderPool::runJob(RenderJob& job, const int laneIndex) noexcept
 {
-    if (job.host != nullptr && job.numSamples > 0)
+    // The TLS marker makes the profiler attribute the job's folds to the parallel section's
+    // wall time (summed CPU, not callback wall) — for custom jobs exactly as for generation.
+    if (job.p.run != nullptr)
     {
         audio_profiler::AudioThreadProfiler::setInsideGenerationJob(true);
-        job.host->audioThread_renderGenerationStageForBlock(job.numSamples);
+        job.p.run(job, laneIndex);
+        audio_profiler::AudioThreadProfiler::setInsideGenerationJob(false);
+        return;
+    }
+    if (job.p.host != nullptr && job.p.numSamples > 0)
+    {
+        audio_profiler::AudioThreadProfiler::setInsideGenerationJob(true);
+        job.p.host->audioThread_renderGenerationStageForBlock(job.p.numSamples);
         audio_profiler::AudioThreadProfiler::setInsideGenerationJob(false);
     }
 }
 
-int InstrumentRenderPool::claimAndRunJobs(RenderJob* jobs, const int count) noexcept
+int InstrumentRenderPool::claimAndRunJobs(RenderJob* jobs, const int count, const int laneIndex) noexcept
 {
     int ran = 0;
     for (int i = 0; i < count; ++i)
@@ -144,7 +153,7 @@ int InstrumentRenderPool::claimAndRunJobs(RenderJob* jobs, const int count) noex
         {
             continue;
         }
-        runJob(j);
+        runJob(j, laneIndex);
         ++ran;
         if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
@@ -154,7 +163,7 @@ int InstrumentRenderPool::claimAndRunJobs(RenderJob* jobs, const int count) noex
     return ran;
 }
 
-void InstrumentRenderPool::workerLoop(const int /*workerIndex*/) noexcept
+void InstrumentRenderPool::workerLoop(const int workerIndex) noexcept
 {
     elevateWorkerThreadPriority();
     std::uint32_t seen = generation_.load(std::memory_order_acquire);
@@ -172,7 +181,7 @@ void InstrumentRenderPool::workerLoop(const int /*workerIndex*/) noexcept
         {
             continue;
         }
-        const int ran = claimAndRunJobs(jobs, count);
+        const int ran = claimAndRunJobs(jobs, count, workerIndex);
         if (ran > 0)
         {
             statJobsWorkers_.fetch_add((std::uint64_t)ran, std::memory_order_relaxed);
@@ -194,17 +203,18 @@ void InstrumentRenderPool::audioThread_runJobs(RenderJob* jobs, const int count,
     std::int64_t sumTicks = 0;
     for (int i = 0; i < count; ++i)
     {
-        sumTicks += jobs[i].lastRenderTicks;
+        sumTicks += jobs[i].p.lastRenderTicks;
     }
     const double sumMicros = ticksToMs(sumTicks) * 1000.0;
     const bool serial = serialHint || workers_.empty() || count < 2 || sumMicros < kMinParallelWorkMicros;
 
     if (serial)
     {
+        // Identical job code on the callback lane — `--instrument-workers 0` is this path.
         for (int i = 0; i < count; ++i)
         {
             jobs[i].claimed.store(1, std::memory_order_relaxed);
-            runJob(jobs[i]);
+            runJob(jobs[i], kCallbackLane);
         }
         statSerialBlocks_.fetch_add(1, std::memory_order_relaxed);
         statJobsCallback_.fetch_add((std::uint64_t)count, std::memory_order_relaxed);
@@ -212,17 +222,15 @@ void InstrumentRenderPool::audioThread_runJobs(RenderJob* jobs, const int count,
         return;
     }
 
-    // Longest-first order (by the host's previous block): a late-waking worker only finds what is
+    // Longest-first order (by the job's previous block): a late-waking worker only finds what is
     // left, and the heaviest plug-ins start first. Insertion sort on the job DATA (no allocation;
     // the claim flags are published afterwards).
     for (int i = 1; i < count; ++i)
     {
         int k = i;
-        while (k > 0 && jobs[k - 1].lastRenderTicks < jobs[k].lastRenderTicks)
+        while (k > 0 && jobs[k - 1].p.lastRenderTicks < jobs[k].p.lastRenderTicks)
         {
-            std::swap(jobs[k - 1].host, jobs[k].host);
-            std::swap(jobs[k - 1].numSamples, jobs[k].numSamples);
-            std::swap(jobs[k - 1].lastRenderTicks, jobs[k].lastRenderTicks);
+            std::swap(jobs[k - 1].p, jobs[k].p);
             --k;
         }
     }
@@ -237,7 +245,7 @@ void InstrumentRenderPool::audioThread_runJobs(RenderJob* jobs, const int count,
     generation_.fetch_add(1, std::memory_order_acq_rel);
     generation_.notify_all();
 
-    const int own = claimAndRunJobs(jobs, count);
+    const int own = claimAndRunJobs(jobs, count, kCallbackLane);
 
     const std::int64_t tJoin = juce::Time::getHighResolutionTicks();
     bool blocked = false;
